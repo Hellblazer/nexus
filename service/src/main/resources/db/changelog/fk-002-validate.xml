@@ -83,6 +83,19 @@
     FK (chunks_collection_fk) is validated by
     fk-004-chunks-collection-registry.xml's fk-004-2 changeset instead — a
     NEW constraint, not a revival of any of these three.
+
+    STALE-PROSE CORRECTION (nexus-tk070.p4, RDR-194 D9, 2026-08): the
+    changeset fk-002-10 below (comment: "VALIDATE chash_index_collection_fk
+    (FK on physical_collection)") likewise describes a router-era
+    constraint on nexus.chash_index — the ROUTER half of the split-store
+    architecture (RDR-187's own title: "Retire chash_index: ... Drop the
+    Router Remnant of the Split-Store Architecture"), dropped at RDR-187/
+    nexus-piwya.9. The STALE-PROSE CORRECTION directly above
+    (nexus-o8dil.49) already records fk-002-10/11 as dead and permanently
+    MARK_RAN-skipped; this addendum names the specific "router" framing a
+    reader lands on inside fk-002-10's own comment text. This changeset is
+    frozen (already applied, D0.2) and is NOT edited; comment-only, no
+    DDL.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"

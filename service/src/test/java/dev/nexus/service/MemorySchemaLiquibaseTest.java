@@ -53,7 +53,7 @@ class MemorySchemaLiquibaseTest {
     // Expected exact column set in nexus.memory (order-independent).
     private static final Set<String> EXPECTED_COLUMNS = Set.of(
         "id", "tenant_id", "project", "title", "session", "agent",
-        "content", "tags", "timestamp", "ttl", "access_count", "last_accessed",
+        "content", "tags", "timestamp", "ttl_days", "access_count", "last_accessed",
         "fts_vector"
     );
 

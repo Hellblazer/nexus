@@ -758,13 +758,31 @@ class T3Database:
         session_id: str = "",
         source_agent: str = "",
         store_type: str = "knowledge",
-        ttl_days: int = 0,
+        ttl_days: int | None = None,
         catalog_doc_id: str = "",
     ) -> str:
         """Upsert *content* into *collection*. Returns the document ID.
 
-        *ttl_days* = 0 means permanent. Expiry is computed Python-side
-        via :func:`nexus.metadata_schema.is_expired` from
+        *ttl_days* — ``None``/omitted means permanent (RDR-194 D5,
+        nexus-tk070.p6b fix-pass / nexus-24rof): an explicit ``ttl_days``
+        that is ``0`` or negative is REJECTED loudly with :exc:`ValueError`
+        naming the fix, never silently reinterpreted as permanent — this
+        write path now matches the SQL ``nexus.frecency`` /
+        ``nexus.memory.ttl_days`` / ``nexus.plans.ttl_days`` columns'
+        CHECK-enforced contract, and closes the gap the initial P6b pass
+        left open (that pass changed only the READ-path predicate in this
+        class's :meth:`expire`, citing RDR-194 D5's "No other wire field
+        changes" line — a misattributed escape clause: that line is about
+        wire FIELD NAMING, not validation scope, per the substantive-critic
+        finding that reopened this as nexus-24rof). A LEGACY on-disk chunk
+        still carrying ``ttl_days=0`` from before this fix (or written by
+        a caller outside this method — the code/prose/pdf indexer pipeline
+        via :func:`nexus.metadata_schema.make_chunk_metadata` directly has
+        no ``--ttl`` concept and is out of scope here) is still read as
+        permanent by :func:`nexus.metadata_schema.is_expired`, now with an
+        explicit warning logged on that read path — see that function's
+        own docstring. Expiry is computed Python-side via
+        :func:`nexus.metadata_schema.is_expired` from
         ``indexed_at + ttl_days``; no separate ``expires_at`` field.
 
         Note (RDR-108 D1 / nexus-kmb6; width per RDR-180): The document ID
@@ -794,6 +812,18 @@ class T3Database:
         drops the field on the way to T3.
         """
         from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
+
+        # nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): reject an
+        # explicit non-positive ttl_days LOUDLY, before any side effect
+        # (hashing, embedding-model lookup, or the write itself) — never
+        # silently reinterpreted. Mirrors MemoryHandler.requirePositiveOrNullTtl's
+        # message shape (Java engine side), translated to a Python ValueError.
+        if ttl_days is not None and ttl_days <= 0:
+            raise ValueError(
+                f"ttl_days={ttl_days} is invalid: omit the argument or pass "
+                "None for a permanent entry — ttl_days must be a positive "
+                "integer number of days (0 does NOT mean permanent; None does)"
+            )
 
         # MCP-stored docs are single-chunk: chunk_text == content, so the
         # natural ID (the FULL chunk_text_hash, RDR-180 / nexus-jxizy.3)
@@ -1137,17 +1167,29 @@ class T3Database:
         via ``nx store put`` which routes to the knowledge store.
 
         Expiry is computed from ``indexed_at + ttl_days`` Python-side
-        (see :func:`nexus.metadata_schema.is_expired`). ``ttl_days == 0``
-        is the permanent sentinel — never expires regardless of
-        indexed_at.
+        (see :func:`nexus.metadata_schema.is_expired`). ``None``/absent
+        ``ttl_days`` is the permanent sentinel (RDR-194 D5, nexus-tk070.p6b
+        — retired the historical ``ttl_days == 0`` convention this
+        docstring used to state; a legacy on-disk chunk carrying an
+        explicit ``0`` from before that migration is STILL treated as
+        permanent by :func:`is_expired`'s tolerant check, unaffected by
+        this docstring update, because this is unstructured client-side
+        JSON metadata with no population-wide rewrite possible — unlike
+        the SQL ``nexus.frecency`` table, which the migration DOES
+        rewrite). Never expires regardless of indexed_at.
 
         Returns the total number of deleted documents.
         """
         from nexus.metadata_schema import is_expired  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
-        # ChromaDB only supports numeric $lt/$gt, so pre-filter by
-        # ttl_days > 0 (eliminates permanent entries) then check
-        # indexed_at + ttl_days Python-side via is_expired().
+        # Metadata `where` filters only support numeric $lt/$gt, so
+        # pre-filter by ttl_days > 0 (structurally excludes NULL, an
+        # absent key, and 0 alike — jsonb_typeof(...)='number' AND >0,
+        # see HttpVectorClient.expire's docstring for the full server-side
+        # derivation of why this is ALSO correct post-RDR-194-D5, not just
+        # pre-) then check indexed_at + ttl_days Python-side via
+        # is_expired(). Already correct for the None sentinel unchanged —
+        # this predicate needed no edit for the D5 flip, only its comment.
         now_iso = datetime.now(UTC).isoformat()
         ttl_where: dict = {"ttl_days": {"$gt": 0}}
         total = 0

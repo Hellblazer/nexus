@@ -39,6 +39,16 @@ at rdr180-001 instead of converted); 64-char hex TEXT
 check (deliberate: carries 16-byte legacy refs; undocumented at the
 column). Vestigial references to the dropped `chash_index` remain in
 fk-002-collection-registry.xml and fk-002-validate.xml comments.
+
+> **CORRECTION (2026-08-20, P4 implementation, verified not assumed):**
+> `chash_alias` — table and `old_bytes` column both — was DROPPED
+> 2026-08-16 at `legacy-001-drop-chash-alias.xml` changeset `legacy-001-5`
+> (bead `nexus-lgdel.l1`, Hal delete directive), one day after this RDR's
+> P4 text was drafted. Every reference to `chash_alias.old_bytes` below is
+> historical: correct at time of writing, superseded by the deletion. Full
+> correction at § D7 (below); do not re-open the P4 acceptance criterion
+> over this — see that note for the disposition.
+
 #### Gap 2: doc_id means two things
 
 **`doc_id` means two things.** Tumbler with an FK to `catalog_documents`
@@ -724,7 +734,9 @@ alias-chaining contract verbatim.
 **The 32-character rows are 16-byte legacy refs, not short chashes.** A
 32-hex `new_chash` decodes to 16 bytes, which is what
 `chash_alias.old_bytes` deliberately carries; that is why the CHECK was
-widened rather than the column converted. The conversion therefore requires
+widened rather than the column converted. **[Historical as of 2026-08-16 —
+`chash_alias` was DROPPED, see the § Gap 1 / § D7 CORRECTION notes.]** The
+conversion therefore requires
 cloud-count-2 (below), **sharpened**: the recorded query
 (`SELECT length(new_chash), count(*) ... GROUP BY 1`) is necessary but not
 sufficient, because neither the CHECK nor `RemapRepository.java:100-105`
@@ -792,6 +804,22 @@ INDEX that `pg_constraint` cannot see:
   every finished job is unprotected. Nothing FK-references `migration_jobs`,
   so the clean fix is the composite PK `(tenant_id, job_id)`. The partial
   index stays.
+
+  > **CORRECTION (2026-08-20, P5b implementation, stacked-review round, T2
+  > `substantive-critique-tk070-p5b-2026-08-20`):** the tenant-keying remedy
+  > above is SUPERSEDED. `nexus.migration_jobs` has ZERO live producers or
+  > consumers — `MigrationHandler.java` and `MigrationJobRepository.java`
+  > were deleted at commit `7bcf29c67` (2026-07-24), before this Decision
+  > was even researched, and this research missed it. Sam's disposition
+  > (2026-08-20, relayed via the orchestrator): DROP the table outright
+  > rather than widen the PK of a table nothing writes to or reads from.
+  > `migration-002-tenant-pk.xml` was reworked from a PK-widening changeset
+  > to a `DROP TABLE` changeset (same file, same changeset id
+  > `migration-002-1`, `EXPECT_NEW_CHANGESETS=1` unchanged). The "clean fix
+  > is the composite PK" sentence above is the ORIGINAL, now-superseded
+  > analysis — correct as far as it went, wrong about whether the table was
+  > worth fixing at all. See the § P5b phasing bullet below for the matching
+  > correction to what actually shipped.
 - **`topics` is the "surrogate PK that other FKs reference" case.** Its
   `id` is the target of four FK columns, and all four are tenant-blind:
   `topics.parent_id` (`taxonomy-001-baseline.xml:60`),
@@ -810,6 +838,16 @@ named remedy is to quarantine the offending rows, report them, and re-run
 taxonomy assignment for the affected tenants, since assignments are derived
 (D1). No preventive scope is claimed beyond this: no cross-tenant population
 has been observed, and the count is the evidence gate.
+
+> **CORRECTION (2026-08-20, P5a implementation, code-review round, T2
+> [22964]):** "cloud-count-4" two sentences above is a pre-existing typo in
+> this RDR's own text — D4's precondition is **cloud-count-5**, exactly as
+> the Gate-preconditions table below (`cloud-count-5 | ... | P5a repoint`)
+> and every other D4 reference in this file already say. `cloud-count-4` is
+> D1's own precondition (`topic_assignments.doc_id`'s bytea conversion), a
+> different gate on a different table. Not a diff defect in the shipped
+> `taxonomy-014-topics-tenant-unique.xml` — that file's own header names
+> cloud-count-5 correctly throughout — only this one prose sentence drifted.
 
 **`service_tokens` / `session_tokens` stay out of scope.** They are the only
 in-scope tables with `rls_enabled=f`, they are auth-token tables rather than
@@ -963,6 +1001,29 @@ rather than in this file only.
   legacy refs, which is what makes D3's 32-char rows resolvable). This RDR
   adds the column comment the Problem Statement notes is missing. Adding a
   width CHECK would break D3's own remedy.
+
+  > **CORRECTION (2026-08-20, P4 implementation, verified not assumed):**
+  > this bullet is now historical. `nexus.chash_alias` — the table and this
+  > column both — was DROPPED 2026-08-16 at
+  > `legacy-001-drop-chash-alias.xml` changeset `legacy-001-5` (bead
+  > `nexus-lgdel.l1`, epic `nexus-lgdel`, Hal directive: "I'm tired of
+  > carrying these legacy things... Delete it... Ours is empty and we don't
+  > care."), one day after this bullet was drafted (2026-08-15) and
+  > confirmed still present when the bead was last touched (2026-08-17) —
+  > the drop landed in the gap between those two dates. `COMMENT ON COLUMN
+  > nexus.chash_alias.old_bytes` would fail outright: the column no longer
+  > exists. **Disposition (P4, nexus-tk070.p4):** the P4 comment-only
+  > changelog (`fk-005-deliberately-loose-edge-comments.xml`) ships the
+  > OTHER seven D7 targets and omits this one — not a silent scope
+  > reduction, a structural impossibility, documented in that file's own
+  > header, in T2 `nexus/tk070-p4-dev-notes-2026-08-20`, and on the bead.
+  > D3's remedy this bullet references is likewise superseded: L1
+  > simplified `remap_membership` to drop the `chash_alias` LEFT JOIN
+  > entirely (`chash_remap` was empty on cloud at drop time, RDR-194 cc2).
+  > This decision text is NOT rewritten (D0.2's spirit extended to RDR
+  > prose) — it stood correctly at the time it was decided; this note is
+  > the pointer a later reader, or the p7 phase-review-gate, needs to not
+  > mistake the omission for missed scope.
 
 ### D8. Empty-string sentinels: converted only where an FK requires it
 
@@ -1174,7 +1235,11 @@ today: `catalog_links` to `catalog_documents` on both endpoints (D2),
 `topic_assignments` to `chunks` (D1), and tenant-scoped topic references
 (D4). One encoding retired (`topic_assignments.doc_id`), one converted
 (`chash_remap.new_chash`), leaving `bytea` as the single live chash encoding
-apart from the deliberately-untyped `chash_alias.old_bytes`.
+apart from the deliberately-untyped `chash_alias.old_bytes`. **[Historical
+as of 2026-08-16 — `chash_alias` was DROPPED (`legacy-001-5`,
+`nexus-lgdel.l1`); see the § D7 CORRECTION note. `bytea` is now the ONLY
+live chash encoding, full stop — the "apart from" carve-out no longer
+applies.]**
 
 **Retired detections, one-for-one.** `nx doctor --check-dangling-links` at
 D2's VALIDATE; `ChashCensus` leg C1 (`dangling.topic_assignments`) at D1's
@@ -1390,6 +1455,17 @@ DDL beyond `COMMENT ON COLUMN` for `hook_failures.doc_id`,
 `pdf_chunks.chunk_id`, `chash_remap.old_id`, `gc_audit`, and
 `claude_assisted_remediation_consents`. `EXPECT_NEW_CHANGESETS=1`.
 
+> **CORRECTION (2026-08-20, P4 implementation, verified not assumed):**
+> `chash_alias.old_bytes` in the target list above is N/A as shipped — the
+> column (and its table) was DROPPED 2026-08-16, before P4 executed; see
+> the § D7 CORRECTION note for the full disposition. P4 shipped
+> `COMMENT ON COLUMN` for the other SEVEN targets listed here plus the four
+> D8 accepted-sentinel columns (`gc_audit.collection`/`.actor`,
+> `relevance_log.collection`/`.session_id`), still within
+> `EXPECT_NEW_CHANGESETS=1` (one file, one changeset). This is not a scope
+> reduction to flag at close-out — read this note, not the omission, as
+> the disposition.
+
 **P5. Tenant keying (D4), two commits.**
 - **P5a `topics`.** `taxonomy-013-topics-tenant-unique.xml`: add
   `UNIQUE (tenant_id, id)`. Then, as a separate changeset in the same file
@@ -1400,6 +1476,18 @@ DDL beyond `COMMENT ON COLUMN` for `hook_failures.doc_id`,
 - **P5b `migration_jobs`.** `migration-002-tenant-pk.xml`: PK ->
   `(tenant_id, job_id)`, partial index retained, ANALYZE.
   `EXPECT_NEW_CHANGESETS=1`.
+
+  > **CORRECTION (2026-08-20, P5b implementation, stacked-review round, T2
+  > `substantive-critique-tk070-p5b-2026-08-20`):** this bullet describes
+  > what P5b was PLANNED to ship, not what shipped. `nexus.migration_jobs`
+  > was found dead during implementation (zero producers/consumers,
+  > `MigrationHandler.java`/`MigrationJobRepository.java` deleted at
+  > `7bcf29c67`, 2026-07-24) and Sam's disposition (2026-08-20) was to DROP
+  > the table instead. `migration-002-tenant-pk.xml` was reworked to a
+  > single `DROP TABLE nexus.migration_jobs` changeset (pre-drop row-count
+  > NOTICE, shape-agnostic, rollback recreates the baseline shape empty) —
+  > same file, same changeset id, `EXPECT_NEW_CHANGESETS=1` unchanged. See
+  > the § D4 CORRECTION above for the full disposition.
 
 **P6. TTL (D5), two commits.** No longer blocked: the Q5 residual
 (`plans.ttl`'s write and expiry path) is traced in D5.

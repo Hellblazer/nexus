@@ -1932,7 +1932,7 @@ class HttpVectorClient:
         session_id: str = "",
         source_agent: str = "",
         store_type: str = "knowledge",
-        ttl_days: int = 0,
+        ttl_days: int | None = None,
         catalog_doc_id: str = "",
     ) -> str:
         """Upsert *content* into *collection*. Returns the document ID.
@@ -1942,6 +1942,12 @@ class HttpVectorClient:
         RDR-180 / nexus-jxizy.3), and metadata built
         via the SAME :func:`nexus.metadata_schema.make_chunk_metadata` factory
         that T3Database.put uses — parity by construction, not by duplication.
+        ``ttl_days`` validation is likewise byte-identical to
+        ``T3Database.put``'s own (nexus-tk070.p6b fix-pass, nexus-24rof,
+        RDR-194 D5): ``None``/omitted means permanent; an explicit ``0`` or
+        negative value raises :exc:`ValueError` naming the fix, before any
+        HTTP call is made — see ``T3Database.put``'s docstring for the full
+        derivation.
 
         ``store_type`` is accepted for API symmetry but intentionally not
         forwarded: T3Database also ignores it (RDR-101 Phase 5c dropped
@@ -1965,6 +1971,17 @@ class HttpVectorClient:
             index_model_for_collection,
         )
         from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
+
+        # nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): reject an
+        # explicit non-positive ttl_days LOUDLY, before any HTTP call —
+        # never silently reinterpreted. Byte-identical check to
+        # T3Database.put's own (see this method's docstring).
+        if ttl_days is not None and ttl_days <= 0:
+            raise ValueError(
+                f"ttl_days={ttl_days} is invalid: omit the argument or pass "
+                "None for a permanent entry — ttl_days must be a positive "
+                "integer number of days (0 does NOT mean permanent; None does)"
+            )
 
         # RDR-180 (nexus-p78a0 rehearsal catch, run 4): the natural id is the
         # FULL digest — this mirror kept the retired [:32] truncation after
@@ -3090,15 +3107,71 @@ class HttpVectorClient:
         """Delete all expired entries from ``knowledge__*`` collections.
 
         nexus-h8rf6.5: was missing entirely — ``nx store expire`` crashed
-        with ``AttributeError`` in service mode. T3Database parity, with one
-        translation (historical: range operators landed later, nexus-4l80g, but
-        this equivalent rewrite predates them and stays), T3's
-        ``{"ttl_days": {"$gt": 0}}`` pre-filter becomes
-        ``{"ttl_days": {"$ne": 0}}`` — equivalent for its only purpose,
-        excluding the permanent ``ttl_days == 0`` sentinel (TTLs are never
-        negative). The server's ``$ne`` is NULL-inclusive, so rows with
-        absent ``ttl_days`` come back too; ``is_expired`` (the authoritative
-        Python-side check, same as T3) rejects them.
+        with ``AttributeError`` in service mode. T3Database parity: this
+        method's pre-filter is now IDENTICAL to
+        :meth:`nexus.db.t3.T3Database.expire`'s own ``{"ttl_days": {"$gt":
+        0}}`` (nexus-tk070.p6b, RDR-194 D5), not merely equivalent to it —
+        the two implementations used to diverge in SPELLING only
+        (historical: range operators landed later server-side, nexus-4l80g,
+        so this method used ``$ne: 0`` as a numeric-comparison workaround
+        that predated ``$gt`` and simply never got retrofitted once ``$gt``
+        arrived), and this pass retires that divergence.
+
+        WHY ``$ne: 0`` COULD NOT SIMPLY BECOME ``$ne: null`` (the
+        NULL-sentinel's literal spelling) when RDR-194 D5 retired frecency's
+        ``ttl_days == 0`` permanent sentinel in favor of ``ttl_days is
+        None`` — traced empirically against
+        ``PgVectorRepository.appendWherePredicate``: ``$ne`` binds
+        ``String.valueOf(operand)``, and ``String.valueOf(None)`` in the
+        JSON-decoded Java map is the literal Java ``null`` reference, whose
+        ``String.valueOf`` is the four-character STRING ``"null"`` — so
+        ``$ne: null`` would render as ``metadata->>'k' IS DISTINCT FROM
+        'null'`` (a text-literal compare), which is TRUE for every row
+        including genuinely-null ones (``metadata->>'k'`` extracts SQL NULL
+        for a JSON null, and ``NULL IS DISTINCT FROM 'null'`` is true) —
+        vacuously matching everything, not excluding permanent rows at all.
+        ``$gt: 0`` sidesteps this entirely: its numeric-operand path is
+        ``jsonb_typeof(metadata->'k') = 'number' AND
+        (metadata->>'k')::numeric > 0``, which structurally excludes JSON
+        null, an absent key, and any non-numeric value — exactly "give me
+        TTL-bearing candidates, excluding the permanent sentinel," under
+        EITHER the historical (``0``) or current (``None``) sentinel
+        spelling, with no further translation needed for the flip.
+
+        BEFORE/AFTER ROW SET (the subtlest part of this migration — verified,
+        not assumed). Old ``{"ttl_days": {"$ne": 0}}`` was NULL-inclusive
+        (documented in the server's own javadoc): it INCLUDED rows with an
+        absent/null ``ttl_days`` in the fetched candidate set, relying on
+        ``is_expired`` (below) to reject them downstream as not-expired. New
+        ``{"ttl_days": {"$gt": 0}}`` EXCLUDES them at the query layer
+        instead — same end result (nothing with a null/absent/non-positive
+        ``ttl_days`` is ever deleted, whether by the old two-step
+        fetch-then-reject or the new single-step exclusion), fewer rows
+        fetched. For every row shape that exists in this repo's data today
+        (absent key, explicit ``0``, explicit positive) the two predicates
+        select the IDENTICAL fetched set — ``0`` and ``NULL`` both fail
+        ``$gt: 0`` exactly as ``0`` alone failed the old ``$ne: 0`` (a
+        legacy on-disk chunk metadata row still carrying ``ttl_days: 0``
+        from before this migration — a client-side, unstructured JSON
+        field with no CHECK possible, deliberately NOT rewritten by this
+        migration's SQL changeset, which touches only the SQL
+        ``nexus.frecency`` table — is excluded by ``$gt: 0`` exactly as it
+        was excluded by ``$ne: 0``, so no behavior change for legacy rows
+        either). The only row shape where the two predicates would ever
+        diverge — a row explicitly written as JSON null — IS now producible:
+        the p6b fix-pass (nexus-24rof) made ``HttpVectorClient.put`` /
+        ``T3Database.put`` pass ``None`` through for "permanent" (rejecting
+        an explicit ``ttl_days <= 0`` loudly), while ``make_chunk_metadata``
+        keeps its ``0`` factory default for the indexer pipelines that have
+        no --ttl concept. Both null-shaped and 0-shaped permanent rows are
+        excluded from expiry by ``$gt: 0`` identically, so the divergence
+        stays behavior-neutral here.
+
+        ``is_expired`` (the authoritative Python-side check, same as T3)
+        already treats a falsy ``ttl_days`` (``0``, ``None``, or absent)
+        identically as "not expired" — see its own docstring for why this
+        needed no logic change, only documentation, to be forward-compatible
+        with the ``None`` sentinel.
 
         Expired IDs are accumulated per collection BEFORE deleting —
         deleting mid-pagination would shift offsets and skip rows. Server
@@ -3136,7 +3209,11 @@ class HttpVectorClient:
         from nexus.metadata_schema import is_expired  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
         now_iso = datetime.now(UTC).isoformat()
-        ttl_where = {"ttl_days": {"$ne": 0}}
+        # nexus-tk070.p6b (RDR-194 D5): $gt 0, not $ne 0 — see this method's
+        # own docstring for the full derivation (the $ne:null translation
+        # this flip might suggest is vacuous server-side; $gt 0 is the
+        # correct, already-precedented predicate, matching T3Database.expire).
+        ttl_where = {"ttl_days": {"$gt": 0}}
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         total = 0
         for entry in self.list_collections():

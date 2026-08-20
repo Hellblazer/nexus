@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-tk070.p6a (RDR-194 § D5, § P6a) — nexus.memory.ttl -> ttl_days,
+    with CHECK (ttl_days IS NULL OR ttl_days > 0).
+
+    WHY. NULL already means "permanent" for this column, but 0 was also
+    reachable and meant the OPPOSITE: MemoryRepository.expire() (formerly
+    MemoryRepository.java:566-573,584, now the ttl_days-bound copy of the
+    same logic) filters WHERE ttl_days IS NOT NULL and computes
+    effective_ttl = ttl_days * (1 + ln(access_count + 1)), so a stored 0
+    yields effective_ttl = 0 and the row is deleted by the very next sweep
+    — the exact opposite of "permanent". Only NULL=permanent can be defended
+    by a CHECK (D5, A12): under a 0=permanent convention, 0 is both a legal
+    integer TTL and a sentinel, and no CHECK can distinguish "no expiry"
+    from "zero days". The rename to ttl_days (A14) documents the unit that
+    made 0-as-sentinel plausible in the first place; all four sibling TTL
+    columns across the schema are integer days.
+
+    Historically the trap was papered over by exactly ONE caller
+    (src/nexus/mcp/core.py's memory_put MCP tool, `ttl=ttl if ttl > 0 else
+    None`) while the store itself, and every other caller of
+    POST /v1/memory/put, stayed trapped — this is the commit that retires
+    that shim and makes the documented "NULL=permanent" contract true at
+    the store for EVERY caller (see MemoryHandler.java's now-deleted
+    coercePermanentTtl and its replacement boundary validation, same
+    commit / same bead).
+
+    COUNTED DELETE, RAISE NOTICE'd (D0.4 / migration-002-tenant-pk.xml and
+    fk-004-chunks-collection-registry.xml's fk-004-0-reconcile-precount
+    precedent). A ttl=0 row existing at migration time is UNREPRESENTABLE
+    under the new CHECK — it must be deleted, not silently retained with a
+    dropped constraint or silently reinterpreted. Per nexus-tk070.cc6
+    (cloud-count-6, T2-recorded gate precondition for this bead): nexus.memory
+    ttl=0 -> 0 rows in the counted population this migration runs against.
+    The DELETE + RAISE NOTICE ships regardless of that measured zero — the
+    count is evidence of what THIS box holds at migration time, not a
+    structurally-guaranteed zero (identical reasoning to fk-004-0-reconcile-
+    precount's own header).
+
+    RLS TOGGLE on the DELETE. nexus.memory carries FORCE ROW LEVEL SECURITY
+    (memory-001-baseline.xml, changeset 3). Liquibase runs as nexus_admin,
+    the table owner but NOT BYPASSRLS — an untoggled DELETE under FORCE RLS
+    with no nexus.tenant GUC set at migration time would silently delete
+    ZERO rows regardless of actual content (the tenant_isolation policy's
+    USING predicate never matches a NULL GUC), which would make the RAISE
+    NOTICE always report 0 by construction — the exact silent-vacuity trap
+    migration-002-tenant-pk.xml's and fk-004-0-reconcile-precount's headers
+    document for their own reads/deletes. Toggled NO FORCE for the DELETE,
+    restored to FORCE immediately after (minimal window, same shape as
+    fk-004-1-reconcile).
+
+    RENAME COLUMN + ADD CHECK are ordinary DDL — unaffected by RLS,
+    unconditional on any prior schema state (memory-001-baseline.xml always
+    runs before this file in every full walk, so "ttl" always exists here;
+    this is ordinary schema evolution, not a dead-object drop that needs
+    existence guards like migration-002-tenant-pk.xml's DROP TABLE).
+
+    WIRE CONTRACT (D0.8): this rename is INVISIBLE on the wire.
+    POST/GET /v1/memory/* still read/write the JSON key "ttl" — only the
+    Postgres column and the jOOQ-generated Java field/getter (MEMORY.TTL ->
+    MEMORY.TTL_DAYS, MemoryRecord.getTtl() -> .getTtlDays()) move.
+    MemoryHandler's recordToMap keeps `m.put("ttl", r.getTtlDays())`.
+
+    INDEX NAMES UNCHANGED. idx_memory_tenant_ttl_timestamp still carries its
+    original name after the RENAME COLUMN — Postgres tracks index column
+    references by attnum, not name, so the index transparently follows the
+    rename with no ALTER INDEX needed. Renaming the index itself is outside
+    this changeset's scope (column rename only, D0.8).
+
+    D0.6 ROLLBACK: drops the CHECK, renames ttl_days back to ttl. Whatever
+    rows this changeset's DELETE removed are UNRECOVERABLE — stated inline,
+    not silently omitted, matching legacy-001-drop-chash-alias.xml's and
+    migration-002-tenant-pk.xml's identical rollback discipline.
+
+    D0.1 placement: changelog TAIL, immediately after migration-002-tenant-
+    pk.xml (the current tail) and before the grants-nexus-svc.xml runAlways
+    block, matching the established late-append convention. Paired with
+    plans-003-ttl-days.xml (same bead, same shape, sibling table) —
+    EXPECT_NEW_CHANGESETS=2 for this bead's two files together, one
+    changeset each.
+
+    CLIENT PAIRING (fix-pass 2026-08-20, substantive-critic ship-blocker):
+    this migration ships together with the MemoryHandler boundary-400 change
+    and the MCP core.py coercion deletion in the SAME commit (nexus-tk070.p6a)
+    — the engine half (this file + plans-003-ttl-days.xml + MemoryHandler's
+    requirePositiveOrNullTtl) is "inert or wrong against any earlier engine"
+    per RDR-194 D5's own Delivery section, and must ship paired with a client
+    release whose REQUIRED_ENGINE_VERSION carries these CHECKs (the RDR-194
+    P7 paired cut) — docs/wire-contract-pending.md's ## Unshipped section
+    declares this pairing, entry added in the immediately-following commit
+    once THIS commit's own sha is known (a commit's tree cannot contain its
+    own resulting hash — the established two-commit pattern this repo
+    already uses, e.g. 2c95bae17 declaring 3b2901141, 433246839 declaring
+    f1c669b47). Bounded blast radius in the interim (verified, not asserted):
+    an engine that predates this commit still carries MemoryHandler's now-
+    retired coercePermanentTtl, so a client already carrying this commit's
+    core.py talking to an un-paired old engine still gets the PRE-EXISTING
+    silent-coerce-to-NULL behavior — unchanged from before this bead, not a
+    new footgun.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset memory-003-1: counted DELETE, RENAME, ADD CHECK ────────── -->
+    <changeSet id="memory-003-1" author="nexus-tk070.p6a">
+        <comment>
+            nexus.memory.ttl -> ttl_days, CHECK (ttl_days IS NULL OR ttl_days > 0).
+            Counted DELETE of pre-existing ttl=0 rows (RAISE NOTICE'd, RLS
+            toggle-wrapped so FORCE RLS cannot hide rows from the count) —
+            those rows were already effectively dead (MemoryRepository.expire()
+            yields effective_ttl=0 for ttl=0, swept on the next run). NULL
+            remains the sole permanent sentinel; 0 becomes unrepresentable.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.memory NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_deleted_count BIGINT;
+BEGIN
+    DELETE FROM nexus.memory WHERE ttl = 0;
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    RAISE NOTICE 'nexus-tk070.p6a: deleted % nexus.memory row(s) with ttl = 0 — unrepresentable under the new CHECK (ttl_days IS NULL OR ttl_days > 0); these rows were already effectively dead (MemoryRepository.expire() computes effective_ttl = ttl * (1 + ln(access_count + 1)), so ttl=0 yields effective_ttl=0 and the row is swept on the very next expire() run) — deletion is unrecoverable', v_deleted_count;
+END $$;
+
+ALTER TABLE nexus.memory FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE nexus.memory RENAME COLUMN ttl TO ttl_days;
+
+ALTER TABLE nexus.memory
+    ADD CONSTRAINT memory_ttl_days_positive_chk CHECK (ttl_days IS NULL OR ttl_days > 0);
+        </sql>
+        <rollback>
+            <!-- D0.6: restores the baseline shape exactly (drop CHECK, rename
+                 back). Rows this changeset's DELETE removed are UNRECOVERABLE
+                 — this rollback restores the SCHEMA, not the deleted data,
+                 matching migration-002-tenant-pk.xml's / legacy-001-drop-
+                 chash-alias.xml's identical rollback discipline. -->
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.memory DROP CONSTRAINT IF EXISTS memory_ttl_days_positive_chk;
+ALTER TABLE nexus.memory RENAME COLUMN ttl_days TO ttl;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

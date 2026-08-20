@@ -360,7 +360,26 @@ from __future__ import annotations
 #: The client half (byte-aware upsert paging, 422 detail surfaced) rides THIS
 #: release; an engine below this floor answers the oversize case with a
 #: bare 500, which is the defect this release fixes.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 83)
+#: BUMPED TO (0, 1, 84) — conexus 7.13.0, paired release (2026-08-20). The
+#: engine half of RDR-194 (nexus-tk070: the full FK-census arc, 11
+#: changesets — taxonomy-014 tenant-scoped FK repoints + topics UNIQUE,
+#: migration-002 DROP of dead migration_jobs, memory-003/plans-003
+#: ttl -> ttl_days + CHECK + boundary-400, telemetry-006 frecency
+#: 0=permanent retired, fk-005 deliberately-loose-edge comments). Gates on
+#: the tagged tree d385a373c: engine suite 2193/0/0 (tree-identity with the
+#: mvn-green p6b commit), --shakeout CANDIDATE SHAKEOUT PASSED,
+#: --candidate-migration PASSED (floor v0.1.83 populated store, delta=11,
+#: invariants EXACT), published-client-write-gate PASSED (7.12.0 client),
+#: post-publish --acquire PASSED. DEPLOYED and cloud-gated 2026-08-20
+#: BEFORE this release cut (STEP-6 PASS first-run zero advisories; every
+#: migration NOTICE exact-matched the cc5/cc6 measured populations;
+#: cloud-count-3 deploy-window verify ZERO). The client halves (memory_put
+#: ttl contract, frecency $gt:0 predicate + write-path rejection) ride THIS
+#: release per the wire-contract ledger entries f2d979113/6a7ff9915; an
+#: engine below this floor lacks the ttl_days schema those clients bind.
+#: Schema note: v0.1.84's renames are forward-only — a v0.1.83 image cannot
+#: write against the walked schema.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 84)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

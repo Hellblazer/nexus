@@ -29,6 +29,6 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release (pinned: v7.12.0)
+## Awaiting the next release (pinned: v7.13.0)
 
-(nothing pending)
+(empty — pin advanced at v7.13.0; all prior entries went live)

@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-tk070.p6a (RDR-194 § D5, § P6a) — nexus.plans.ttl -> ttl_days,
+    with CHECK (ttl_days IS NULL OR ttl_days > 0).
+
+    WHY (plans is the SHARPEST of the three TTL columns this RDR found,
+    per the RDR's own D5 write-up). NULL means permanent, as in nexus.memory
+    — but 0 has a THIRD, different consequence here: PlanRepository carries
+    a read-time expiry predicate, copy-pasted at three call sites
+    (listActivePlans / searchPlans / listPlans — PlanRepository.java
+    ~251-254, ~303-306, ~349-352), anchored on last_used (COALESCEd to
+    created_at), NOT on any sweep. A plan with ttl=0 is never picked up by
+    ANY delete — it just silently stops surfacing in every read path,
+    forever, the instant it is written. Three TTL columns in this schema
+    (frecency.ttl_days, memory.ttl, plans.ttl), three different runtime
+    consequences for the identical written value 0: 0=permanent
+    (frecency), 0=delete-on-next-sweep (memory), 0=hide-forever-no-delete
+    (plans). This triplication is the single strongest argument the RDR
+    found for the CHECK (D5) — only NULL=permanent can be defended by a
+    constraint; under a 0=permanent convention 0 is both a legal integer
+    TTL and a sentinel, and no CHECK can distinguish them.
+
+    NO CLIENT COERCION EXISTED FOR PLANS (unlike memory_put). plan_save
+    already passes NULL end to end when ttl is omitted — verified across
+    src/nexus/mcp/core.py (plan_save), http_plan_library.py, and
+    PlanHandler.java's own optInt(body,"ttl") (returns null on an absent
+    field) — exactly the contract memory_put should have had and did not.
+    This bead's client-visible changes are therefore scoped to memory_put
+    only (see memory-003-ttl-days.xml's header and MemoryHandler.java); no
+    new engine-side boundary validation was added to PlanHandler.handleSave
+    for the same reason — an explicit POST with ttl=0 to /v1/plans/save
+    now falls straight through to THIS changeset's CHECK constraint and
+    surfaces as a 409 (the shared class-23 typed-DB-error ladder,
+    HttpUtil.sendTypedDbError), not a friendly 400. That asymmetry with
+    memory_put is a deliberate, recorded scope boundary (nexus-tk070.p6a
+    dev notes), not an oversight: the RDR's own D5 client-visible-changes
+    section names only memory_put + frecency as needing a NEW loud 400.
+
+    COUNTED DELETE, RAISE NOTICE'd (D0.4 / migration-002-tenant-pk.xml and
+    fk-004-chunks-collection-registry.xml's fk-004-0-reconcile-precount
+    precedent). Per nexus-tk070.cc6 (cloud-count-6, T2-recorded gate
+    precondition for this bead): nexus.plans ttl=0 -> 2 rows in the tenant
+    "nexus" counted population this migration runs against. The DELETE +
+    RAISE NOTICE ships unconditionally — the count is evidence of what
+    THIS box holds at migration time (fk-004-0-reconcile-precount's own
+    reasoning), and this migration deletes whatever it finds, not a
+    hand-picked count.
+
+    RLS TOGGLE on the DELETE. nexus.plans carries FORCE ROW LEVEL SECURITY
+    (plans-001-baseline.xml, changeset 2). Liquibase runs as nexus_admin,
+    the table owner but NOT BYPASSRLS — an untoggled DELETE under FORCE
+    RLS with no nexus.tenant GUC set at migration time would silently
+    delete ZERO rows across every tenant (the tenant_isolation policy's
+    USING predicate never matches a NULL GUC) — the identical
+    silent-vacuity trap documented in migration-002-tenant-pk.xml's and
+    fk-004-0-reconcile-precount's headers. Toggled NO FORCE for the DELETE,
+    restored to FORCE immediately after.
+
+    RENAME COLUMN + ADD CHECK are ordinary DDL — unaffected by RLS,
+    unconditional on any prior schema state (plans-001-baseline.xml always
+    runs before this file in every full walk).
+
+    WIRE CONTRACT (D0.8): this rename is INVISIBLE on the wire.
+    POST /v1/plans/save and every plans read route still read/write the
+    JSON key "ttl" — only the Postgres column and the jOOQ-generated Java
+    field/getter (PLANS.TTL -> PLANS.TTL_DAYS, PlansRecord.getTtl() ->
+    .getTtlDays()) move. PlanRepository.recordToMap keeps
+    `m.put("ttl", r.getTtlDays())`.
+
+    RESIDUAL, EXPLICITLY NOT SCOPE (RDR-194 § Open Questions Q5): the
+    read-time expiry predicate's triplication across listActivePlans /
+    searchPlans / listPlans is unchanged by this migration — no defect has
+    been observed from the copy-paste itself, and de-duplicating it is a
+    separate bead, not folded into D5's TTL-representation fix.
+
+    D0.6 ROLLBACK: drops the CHECK, renames ttl_days back to ttl. Whatever
+    rows this changeset's DELETE removed are UNRECOVERABLE — stated
+    inline, matching memory-003-ttl-days.xml's identical rollback
+    discipline.
+
+    D0.1 placement: changelog TAIL, immediately after memory-003-ttl-
+    days.xml (this bead's sibling changeset, itself placed right after
+    migration-002-tenant-pk.xml) and before the grants-nexus-svc.xml
+    runAlways block. EXPECT_NEW_CHANGESETS=2 for this bead's two files
+    together, one changeset each.
+
+    CLIENT PAIRING (fix-pass 2026-08-20, substantive-critic ship-blocker):
+    ships in the same commit as memory-003-ttl-days.xml and the
+    MemoryHandler/core.py changes — see memory-003-ttl-days.xml's own header
+    for the full pairing derivation (RDR-194 D5 Delivery section, the
+    docs/wire-contract-pending.md ## Unshipped entry added in the
+    immediately-following commit once this commit's sha is known, and the
+    bounded-blast-radius safety argument). Not restated here to avoid a
+    second copy drifting out of sync.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset plans-003-1: counted DELETE, RENAME, ADD CHECK ─────────── -->
+    <changeSet id="plans-003-1" author="nexus-tk070.p6a">
+        <comment>
+            nexus.plans.ttl -> ttl_days, CHECK (ttl_days IS NULL OR ttl_days > 0).
+            Counted DELETE of pre-existing ttl=0 rows (RAISE NOTICE'd, RLS
+            toggle-wrapped) — those rows were already permanently hidden from
+            every read (PlanRepository's read-time expiry predicate, three
+            call sites, treats ttl=0 as an immediate-expiry threshold nothing
+            can be less-than-or-equal to) yet were never deleted by any
+            sweep. NULL remains the sole permanent sentinel; 0 becomes
+            unrepresentable.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.plans NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_deleted_count BIGINT;
+BEGIN
+    DELETE FROM nexus.plans WHERE ttl = 0;
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    RAISE NOTICE 'nexus-tk070.p6a: deleted % nexus.plans row(s) with ttl = 0 — unrepresentable under the new CHECK (ttl_days IS NULL OR ttl_days > 0); these rows were already permanently hidden from every read path (PlanRepository''s read-time expiry predicate at three call sites treats ttl=0 as an immediate-expiry threshold last_used/created_at can never be less-than-or-equal to, so the row silently never surfaced — yet no sweep ever deleted it either) — deletion is unrecoverable', v_deleted_count;
+END $$;
+
+ALTER TABLE nexus.plans FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE nexus.plans RENAME COLUMN ttl TO ttl_days;
+
+ALTER TABLE nexus.plans
+    ADD CONSTRAINT plans_ttl_days_positive_chk CHECK (ttl_days IS NULL OR ttl_days > 0);
+        </sql>
+        <rollback>
+            <!-- D0.6: restores the baseline shape exactly (drop CHECK, rename
+                 back). Rows this changeset's DELETE removed are UNRECOVERABLE
+                 — this rollback restores the SCHEMA, not the deleted data. -->
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.plans DROP CONSTRAINT IF EXISTS plans_ttl_days_positive_chk;
+ALTER TABLE nexus.plans RENAME COLUMN ttl_days TO ttl;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

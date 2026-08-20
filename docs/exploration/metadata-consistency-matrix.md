@@ -278,7 +278,7 @@ Pinning test in `tests/test_metadata_consistency.py` asserts every chunked path 
   - mcp put: caller-provided
 - **Drop `expires_at`. Store `indexed_at` instead.** Today `indexed_at` is computed by every indexer and silently dropped by `normalize()` because it isn't in the allow-list. `expires_at` carries `indexed_at + ttl_days` precomputed because the T3 expire-guard uses a WHERE filter. Move that filter Python-side (it's a low-volume cron, not a hot path) so:
   - `indexed_at` becomes the canonical write timestamp (added to allow-list)
-  - `ttl_days` stays as the policy (0 = permanent sentinel)
+  - `ttl_days` stays as the policy — **UPDATE (RDR-194 D5, nexus-tk070.p6b, 2026-08-20):** the canonical permanent sentinel is now `None`/absent, matching the SQL `nexus.frecency.ttl_days` column's CHECK-enforced contract this arc unified. This unstructured client-side field's own write default (`T3Database.put` / `HttpVectorClient.put` / `make_chunk_metadata`) still emits `0` unchanged — an explicit, recorded scope decision (no CHECK is possible on JSON metadata, and `is_expired()` already treats `0`/`None`/absent identically) — but `0` is legacy-tolerated, not the target convention, going forward.
   - `expires_at` is derived at read time when needed
   - One field saved net: drop `source_title` + `expires_at`, add `indexed_at`.
 - **`section_title` = hierarchical path everywhere**, matching `SemanticMarkdownChunker`'s `" > ".join(header_path)` convention (e.g., `"3 METHODOLOGY > 3.1 Chunked Attention"`). PDFChunker needs to track the heading chain (it currently emits just the innermost). md_chunker is already there. RDR-md uses the same code path.

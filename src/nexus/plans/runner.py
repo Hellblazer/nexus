@@ -214,6 +214,16 @@ class PlanResult:
 
     steps: list[dict[str, Any]] = field(default_factory=list)
     final: dict[str, Any] | None = None
+    #: nexus-h33x8.6 a4: set (1-indexed) when a caller-supplied ``deadline``
+    #: cut the run short — either the wall-clock check before a segment
+    #: started, or an ``OperatorTimeoutError`` raised while the deadline
+    #: was active. ``None`` (the default) means the run completed or
+    #: failed through the pre-a4 sentinel-and-continue path unchanged.
+    budget_exhausted_at_step: int | None = None
+    #: Total steps in the plan as parsed, regardless of how many actually
+    #: ran. Lets a caller render "step N of M" without re-parsing
+    #: ``match.plan_json`` itself.
+    total_planned_steps: int = 0
 
 
 # ── Embedding-domain mapping ────────────────────────────────────────────────
@@ -359,6 +369,31 @@ def _operator_failed_sentinel(
         "text": "",
         "summary": "",
         "aggregates": [],
+    }
+
+
+def _operator_timeout_sentinel(
+    *, tool: str, step_index: int, exc: "_dispatch_mod.OperatorTimeoutError",
+) -> dict[str, Any]:
+    """Sentinel for an operator step cut off by the a4 wall-clock budget.
+
+    Unlike :func:`_operator_failed_sentinel`, this carries the
+    RECONSTRUCTED partial content off ``OperatorTimeoutError`` (the a3
+    precondition, nexus-h33x8.6 a4) so ``nx_answer`` can build a
+    partial-answer marker instead of discarding whatever the subprocess
+    produced before the budget ran out. Only reached when a ``deadline``
+    is active — see the call sites in :func:`plan_run`.
+    """
+    return {
+        "error": str(exc),
+        "status": "timeout",
+        "tool": tool,
+        "step_index": step_index,
+        "text": exc.partial_text,
+        "summary": "",
+        "aggregates": [],
+        "partial_text": exc.partial_text,
+        "event_count": exc.event_count,
     }
 
 
@@ -1024,6 +1059,7 @@ async def plan_run(
     *,
     dispatcher: ToolDispatcher | None = None,
     bundle_operators: bool = True,
+    deadline: float | None = None,
 ) -> PlanResult:
     """Execute the steps in *match* and return the captured outputs.
 
@@ -1044,6 +1080,22 @@ async def plan_run(
     bundle needs their real host-side outputs as inputs. Pass ``False``
     to recover the per-step dispatch path for debugging or plans that
     need per-step telemetry.
+
+    ``deadline`` (``time.monotonic()`` timestamp, nexus-h33x8.6 a4):
+    ``None`` (the default) reproduces the pre-a4 behavior exactly — an
+    ``OperatorTimeoutError`` is substituted with a failure sentinel and
+    the loop continues, same as any other ``OperatorError``. When set,
+    two things change: (1) the deadline is checked before dispatching
+    each segment, and if already past, the loop stops WITHOUT
+    dispatching that segment; (2) an active operator dispatch (isolated
+    or bundled) receives the REMAINING budget as its own ``timeout``
+    kwarg, and if it raises ``OperatorTimeoutError`` anyway, the
+    reconstructed ``partial_text``/``event_count`` are captured into the
+    terminal sentinel and the loop stops. Either trigger sets
+    :attr:`PlanResult.budget_exhausted_at_step` (1-indexed). Retrieval
+    steps are never budget-cut mid-flight — they don't accept a
+    ``timeout`` kwarg — only the pre-segment deadline check can stop
+    the loop before one starts.
     """
     from nexus.plans.bundle import (  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         BUNDLED_INTERMEDIATE,
@@ -1054,6 +1106,7 @@ async def plan_run(
         OperatorBundleStep,
         compose_bundle_prompt,
         dispatch_bundle,
+        is_operator_tool,
         segment_steps,
     )
 
@@ -1072,6 +1125,9 @@ async def plan_run(
 
     dispatch: ToolDispatcher = dispatcher or _default_dispatcher
     step_outputs: list[dict[str, Any]] = []
+    #: nexus-h33x8.6 a4: set when ``deadline`` cuts the run short. See
+    #: :class:`PlanResult` and the ``deadline`` docstring above.
+    budget_exhausted_at_step: int | None = None
 
     # One authoritative segmentation. When bundling is off or the caller
     # supplied a dispatcher that doesn't opt into bundling, flatten the
@@ -1092,6 +1148,24 @@ async def plan_run(
         segments = flat
 
     for seg in segments:
+        # nexus-h33x8.6 a4: hard budget check BEFORE dispatching this
+        # segment. ``deadline is None`` (the default) skips this
+        # entirely — pre-a4 behavior is unchanged. Retrieval steps
+        # already run get to keep their output; the segment about to
+        # start does not.
+        if deadline is not None and time.monotonic() >= deadline:
+            if isinstance(seg, OperatorBundleSlice):
+                budget_exhausted_at_step = seg.plan_indices[0] + 1
+            else:
+                budget_exhausted_at_step = seg.plan_index + 1
+            _log.info(
+                "nx_answer_budget_exhausted",
+                at_step=budget_exhausted_at_step,
+                total_steps=len(steps),
+                steps_completed=len(step_outputs),
+            )
+            break
+
         # nexus-0qi9: per-step progress visibility. Emit start/complete
         # log events at each segment boundary so the silent claude -p
         # chain becomes audible. Without this, a 4-step plan that takes
@@ -1216,9 +1290,37 @@ async def plan_run(
                 )
                 continue
 
+            # nexus-h33x8.6 a4: an active deadline threads the REMAINING
+            # budget through as the bundle's own timeout, so the
+            # subprocess is actually cut at the deadline rather than
+            # running to the default 300s regardless.
+            _bundle_kwargs: dict[str, Any] = {}
+            if deadline is not None:
+                _bundle_kwargs["timeout"] = max(0.0, deadline - time.monotonic())
             try:
-                bundle_result = await dispatch_bundle(bundle)
+                bundle_result = await dispatch_bundle(bundle, **_bundle_kwargs)
             except Exception as exc:
+                if deadline is not None and isinstance(exc, _dispatch_mod.OperatorTimeoutError):
+                    # a4: capture the reconstructed partial content on
+                    # the terminal slot and STOP — unlike the
+                    # deadline-less path below, we do not keep going
+                    # past a budget-driven timeout.
+                    _log.warning(
+                        "nx_answer_budget_operator_timeout",
+                        kind="bundle",
+                        step_indices=list(seg.plan_indices),
+                        partial_chars=len(exc.partial_text),
+                        event_count=exc.event_count,
+                    )
+                    for _ in range(len(seg.plan_indices) - 1):
+                        step_outputs.append(dict(BUNDLED_INTERMEDIATE))
+                    step_outputs.append(_operator_timeout_sentinel(
+                        tool=_extract_tool(steps[seg.plan_indices[-1]]),
+                        step_index=seg.plan_indices[-1],
+                        exc=exc,
+                    ))
+                    budget_exhausted_at_step = seg.plan_indices[0] + 1
+                    break
                 if not _is_operator_error(exc):
                     raise
                 # nexus-l0yh: bundle dispatch covers every plan_index
@@ -1299,6 +1401,13 @@ async def plan_run(
         # ``threshold`` set by the plan author always wins.
         resolved = _apply_mode_to_args(tool, resolved)
 
+        # nexus-h33x8.6 a4: an active deadline threads the REMAINING
+        # budget into an operator step's own ``timeout`` kwarg (dropped
+        # harmlessly by the dispatcher for non-operator tools that don't
+        # accept it — see ``_default_dispatcher``'s kwargs-filter).
+        if deadline is not None and is_operator_tool(tool):
+            resolved = {**resolved, "timeout": max(0.0, deadline - time.monotonic())}
+
         # Dispatcher may be async (default path, RDR-079 P4) or sync
         # (legacy test fixtures + any caller that prefers the simpler
         # contract). Detect a returned coroutine and await it; treat a
@@ -1310,6 +1419,23 @@ async def plan_run(
             else:
                 result = raw
         except Exception as exc:
+            if deadline is not None and isinstance(exc, _dispatch_mod.OperatorTimeoutError):
+                # a4: capture partial content and STOP — unlike the
+                # deadline-less path below, a budget-driven timeout does
+                # not keep going.
+                _log.warning(
+                    "nx_answer_budget_operator_timeout",
+                    kind="isolated",
+                    step_index=index,
+                    tool=tool,
+                    partial_chars=len(exc.partial_text),
+                    event_count=exc.event_count,
+                )
+                step_outputs.append(_operator_timeout_sentinel(
+                    tool=tool, step_index=index, exc=exc,
+                ))
+                budget_exhausted_at_step = index + 1
+                break
             if not _is_operator_error(exc):
                 raise
             # nexus-l0yh: graceful degrade for the isolated-step path.
@@ -1348,4 +1474,6 @@ async def plan_run(
     return PlanResult(
         steps=step_outputs,
         final=step_outputs[-1] if step_outputs else None,
+        budget_exhausted_at_step=budget_exhausted_at_step,
+        total_planned_steps=len(steps),
     )

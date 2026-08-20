@@ -308,6 +308,23 @@ class PlanRepositoryTest {
             .contains(id);
     }
 
+    // ── nexus-tk070.p6a (RDR-194 D5): CHECK-layer proof, independent of any
+    //    HTTP-boundary validation (plans has none by design -- see the bead's
+    //    dev-notes scope decision) ──────────────────────────────────────────
+
+    @Test
+    @Order(25)
+    void savePlan_ttlZero_violatesCheckConstraintDirectlyAtRepositoryLayer() {
+        // Calls PlanRepository directly, the same path PlanHandler.handleSave
+        // uses -- there is no handler-level ttl<=0 rejection for plans (scope
+        // decision: plan_save never had the memory_put coercion bug in the
+        // first place, so no new boundary validation was added here). This
+        // proves the DB CHECK alone rejects ttl_days=0.
+        assertThatThrownBy(() -> savePlanWithTtl("proj-ttl-check", "ttl zero check", 0))
+            .as("ttl_days=0 must violate plans_ttl_days_positive_chk at the DB layer")
+            .hasMessageContaining("plans_ttl_days_positive_chk");
+    }
+
     @Test
     @Order(5)
     void disable_and_enable_softDisable() {

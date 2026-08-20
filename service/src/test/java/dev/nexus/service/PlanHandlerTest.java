@@ -199,6 +199,32 @@ class PlanHandlerTest {
         assertThat(resp.statusCode()).isEqualTo(200);
     }
 
+    /**
+     * nexus-tk070.p6a fix-pass (substantive-critic MINOR finding, 2026-08-20):
+     * plans has no boundary-level ttl<=0 rejection by design (see
+     * plans-003-ttl-days.xml's own header for that scope decision), so an
+     * explicit ttl=0 save falls through to plans_ttl_days_positive_chk and
+     * surfaces as a 409 via the shared class-23 ladder — but the 409 body
+     * must NAME THE FIX, matching memory_put's 400 in spirit, not just carry
+     * a bare constraint name a caller has to go look up.
+     */
+    @Test
+    void save_ttlZero_returns409WithRemedyNamingTheFix() throws Exception {
+        var resp = post("/v1/plans/save", TENANT,
+            "{\"project\":\"ttl-zero-proj\",\"query\":\"ttl zero query\","
+            + "\"plan_json\":\"{\\\"steps\\\":[]}\",\"ttl\":0}");
+        assertThat(resp.statusCode())
+            .as("ttl=0 must still 409 (the CHECK, not a friendly 400 — plans has no "
+                + "boundary validation by design)")
+            .isEqualTo(409);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        assertThat((String) body.get("constraint")).isEqualTo("plans_ttl_days_positive_chk");
+        assertThat((String) body.get("remedy"))
+            .as("the 409 must name the fix: omit ttl or pass null for permanent")
+            .containsIgnoringCase("null")
+            .containsIgnoringCase("permanent");
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static String enc(String s) {

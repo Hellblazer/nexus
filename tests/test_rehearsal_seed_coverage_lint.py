@@ -306,6 +306,67 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # is independently still zero, topic_assignments_chunk_fk exists and
         # is VALIDATED at HEAD, FORCE restored on both toggled tables).
         ("taxonomy-012-2", "nexus-tk070.p3d"),
+        # nexus-tk070.p5a (RDR-194 Phase P5, Decision D4): taxonomy-014-2/-3/
+        # -4/-5's four FK repoints onto nexus.topics' new UNIQUE (tenant_id,
+        # id), the same NO FORCE/FORCE toggle-wrap shape as taxonomy-012-2
+        # above but FAIL-LOUD on a nonzero cross-tenant anti-join rather than
+        # deleting it (a cross-tenant topic reference is corruption, not a
+        # population to remediate silently). No new seed data needed: the
+        # sole nexus.topics row this hop seeds (taxonomy-010-1's FK parent,
+        # parent_id NULL) and the fact that nexus.topic_assignments/
+        # nexus.topic_links carry zero rows for this hop's tenant by the time
+        # these changesets run (topic_assignments already drained to zero by
+        # taxonomy-010-1's own three DELETE arms; topic_links never seeded at
+        # all) make all four anti-joins structurally zero in this hop, the
+        # same "always zero" reasoning as fk-004-0-reconcile-precount /
+        # taxonomy-011-1 / taxonomy-012-2 above; effect-asserted the same
+        # minimal way (each changeset EXECUTES, its own anti-join population
+        # is independently still zero, its new composite FK exists and is
+        # VALIDATED at HEAD, FORCE restored on every table its own
+        # toggle-wrap covers). taxonomy-014-1 (the UNIQUE add) carries no
+        # DML/toggle of its own and is not derived by this lint's rules --
+        # it is still effect-asserted in the Java leg (existence at HEAD)
+        # but needs no coverage entry here.
+        ("taxonomy-014-2", "nexus-tk070.p5a"),
+        ("taxonomy-014-3", "nexus-tk070.p5a"),
+        ("taxonomy-014-4", "nexus-tk070.p5a"),
+        ("taxonomy-014-5", "nexus-tk070.p5a"),
+        # nexus-tk070.p6a (RDR-194 § D5): memory-003-1 / plans-003-1's
+        # counted DELETE of ttl=0 rows, the same NO FORCE/FORCE toggle-wrap
+        # shape as catalog-013-1b/catalog-014-0/catalog-025-0/catalog-029-1/
+        # catalog-032-1/legacy-001-1/legacy-001-2. Seeded as one ttl=0 row
+        # (DELETE arm) and one NULL-ttl row (KEEP arm, permanent) per table;
+        # effect-asserted (the ttl=0 rows are gone, the NULL-ttl rows
+        # survive, both columns renamed to ttl_days, both CHECK constraints
+        # exist, FORCE restored on both tables).
+        ("memory-003-1", "nexus-tk070.p6a"),
+        ("plans-003-1", "nexus-tk070.p6a"),
+        # nexus-tk070.p6b (RDR-194 § D5): telemetry-006-1's counted UPDATE
+        # (0 -> NULL, the ONLY genuine population rewrite in the arc —
+        # memory-003-1/plans-003-1 above are DELETEs) on nexus.frecency, the
+        # same NO FORCE/FORCE toggle-wrap shape as memory-003-1/plans-003-1/
+        # legacy-001-1/legacy-001-2. Seeded as one ttl_days=0 row (CONVERSION
+        # arm) and one positive-ttl_days row (KEEP arm — a NULL KEEP arm
+        # cannot be seeded pre-hop, since nexus.frecency.ttl_days is still
+        # NOT NULL at OLD_TAG; the permanent-sentinel arm is proven instead
+        # by TelemetryRepositoryTest's own fresh-HEAD-schema test); also
+        # effect-asserts that legacy-001-1's own pre-existing canonical-width
+        # KEEP-arm row (DEFAULT ttl_days=0) is likewise converted, proving
+        # the UPDATE reaches every ttl_days=0 row in the hop, not merely the
+        # dedicated fixture.
+        ("telemetry-006-1", "nexus-tk070.p6b"),
+        # telemetry-006-2 (staging.frecency's mirrored UPDATE) needs NO new
+        # seed data: staging.frecency does not exist at OLD_TAG at all
+        # (staging-001-landing-tables.xml creates it fresh, itself INSIDE
+        # this hop, strictly before telemetry-006-2 runs) and nothing else
+        # in the hop populates it before telemetry-006-2 runs, so its
+        # UPDATE structurally operates over zero rows in this rehearsal —
+        # not merely un-seeded, the same "always zero in this hop, no new
+        # seed needed" reasoning as fk-004-1-reconcile / taxonomy-011-1
+        # above. Effect-asserted the minimal way: the changeset EXECUTES,
+        # and the DROP DEFAULT/DROP NOT NULL shape (with no CHECK, staging
+        # stays typeless) lands at HEAD.
+        ("telemetry-006-2", "nexus-tk070.p6b"),
     }
 )
 

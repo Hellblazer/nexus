@@ -384,7 +384,22 @@ class TestRequiredEngineVersion:
         # The client half (byte-aware upsert paging + 422 detail surfaced)
         # rides 7.12.0; deploy fires at the client tag push (paired-release
         # choreography), post-tag --acquire and the cloud gates follow.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 83)
+        # BUMPED to (0,1,84) 2026-08-20: conexus 7.13.0, a paired bump with
+        # the deploy ALREADY LANDED at cut time (no refusal window at all).
+        # v0.1.84 cut from d385a373c carries the whole RDR-194 FK-census arc
+        # (nexus-tk070 p4-p6b: taxonomy-014 tenant-scoped repoints + UNIQUE,
+        # migration-002 dead-table drop, memory/plans ttl_days CHECKs +
+        # boundary-400, telemetry-006 frecency 0=permanent retired, fk-005
+        # comments; 11 changesets, 322->333). Gated BEFORE this bump:
+        # engine suite 2193/0/0 (tree-identity), --shakeout PASSED,
+        # --candidate-migration PASSED (delta=11, invariants EXACT),
+        # published-client write gate PASSED (7.12.0 x candidate),
+        # --acquire PASSED on published bytes, deployed + STEP-6 first-run
+        # clean with every migration NOTICE exact-matching the measured
+        # cc5/cc6 populations, cloud-count-3 deploy-window verify ZERO.
+        # Client halves (memory_put ttl contract, frecency write-path
+        # rejection + $gt:0) ride 7.13.0 per ledger f2d979113/6a7ff9915.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 84)
 
 
 class TestParseEngineVersion:

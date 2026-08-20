@@ -83,7 +83,12 @@ def put_cmd(
         days = parse_ttl(ttl)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    ttl_days = days if days is not None else 0
+    # nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): pass None through
+    # verbatim rather than coercing to 0 — parse_ttl already rejects "0d"/
+    # "0w" input (ValueError, caught above), so `days` is either None
+    # (permanent) or a positive int here; db.put now rejects an explicit 0
+    # itself as defense-in-depth, but this CLI path can never reach it.
+    ttl_days = days
 
     db = _t3()
     # nexus-hmxi: pass t3 so the resolver grandfathers an existing

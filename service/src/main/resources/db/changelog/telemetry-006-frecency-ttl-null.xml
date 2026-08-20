@@ -1,0 +1,237 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-tk070.p6b (RDR-194 § D5, § P6b) — nexus.frecency.ttl_days /
+    staging.frecency.ttl_days: 0=permanent RETIRED, NULL=permanent adopted.
+    Sibling of memory-003-ttl-days.xml / plans-003-ttl-days.xml (same bead
+    family, RDR-194 D5) — the THIRD and LAST TTL column this Decision
+    touches, and the only one that is a genuine REWRITE of a large
+    population rather than a rename: frecency.ttl_days was already named
+    correctly and already the column the CHECK belongs on; what changes
+    here is the SENTINEL VALUE, not the column identity.
+
+    WHY THIS COLUMN IS DIFFERENT FROM memory/plans. frecency.ttl_days
+    (`INTEGER NOT NULL DEFAULT 0`, telemetry-001-baseline.xml:282) is the
+    column the OTHER two TTL columns' fix intentionally did NOT converge
+    onto (see memory-003-ttl-days.xml's header, "Why NULL and not
+    frecency's 0"): 0=permanent is a legal integer TTL AND a sentinel at
+    the same time, so no CHECK can defend it. `NULL` = permanent, already
+    the contract for memory.ttl_days and plans.ttl_days (RDR-194 D5), is
+    the ONLY semantics a CHECK can enforce — `CHECK (ttl_days IS NULL OR
+    ttl_days > 0)`, identical shape to `memory_ttl_days_positive_chk` /
+    `plans_ttl_days_positive_chk`.
+
+    GATE PRECONDITION (D0.4): nexus-tk070.cc6 (cloud-count-6, T2-recorded,
+    measured 2026-08-20T05:50:29Z) — nexus.frecency 0 zero-rows / 0 total
+    rows; staging.frecency 0 zero-rows / 0 total rows. This migration is a
+    ZERO-ROW no-op on the live store today. It ships fully guarded
+    (counted UPDATE, RAISE NOTICE, RLS toggle, CHECK, ANALYZE) regardless
+    of that measured zero — the count is evidence of what THIS box holds
+    at migration time, never a structurally-guaranteed zero (identical
+    reasoning to fk-004-0-reconcile-precount's / legacy-001's / memory-003's
+    / plans-003's own headers). The TOTAL row count (not just the zero-row
+    count) was gated first specifically because this is "the only large
+    rewrite in the arc" (RDR-194 D5) and prices the mandatory ANALYZE
+    (D0.5) — on this box, both counts are zero, so the ANALYZE is cheap,
+    but the changeset makes no assumption about that.
+
+    COUNTED UPDATE (not DELETE), RAISE NOTICE'd (D0.4 / migration-002-
+    tenant-pk.xml and fk-004-chunks-collection-registry.xml's
+    fk-004-0-reconcile-precount precedent, same counted-mutation shape as
+    memory-003-1/plans-003-1 but UPDATE-not-DELETE since frecency's ttl=0
+    rows are not unrepresentable data to discard — they are exactly the
+    rows this migration RECOVERS by converting to the correct sentinel).
+
+    RLS TOGGLE on the UPDATE. nexus.frecency carries FORCE ROW LEVEL
+    SECURITY (telemetry-001-baseline.xml, changeset telemetry-001-12).
+    Liquibase runs as nexus_admin, the table owner but NOT BYPASSRLS — an
+    untoggled UPDATE under FORCE RLS with no nexus.tenant GUC set at
+    migration time would silently update ZERO rows regardless of actual
+    content (the tenant_isolation policy's USING/WITH CHECK predicate never
+    matches a NULL GUC) — the identical silent-vacuity trap
+    migration-002-tenant-pk.xml's, fk-004-0-reconcile-precount's, and
+    memory-003-ttl-days.xml's headers document for their own reads/
+    mutations. For an UPDATE this is doubly dangerous: not only would the
+    RAISE NOTICE always report 0 by construction, the rows that SHOULD have
+    converted would be silently left at the now-unrepresentable ttl_days=0
+    value one changeset away from a CHECK that forbids it — exactly the
+    kind of migration ordering hazard D0.3 exists to prevent. Toggled NO
+    FORCE for the UPDATE, restored to FORCE immediately after (minimal
+    window, same shape as fk-004-1-reconcile / memory-003-1 / plans-003-1).
+
+    staging.frecency mirrors mechanically (RDR-194 D5: "staging.frecency
+    follows nexus.frecency mechanically, as the staging mirror always
+    does; staging remains otherwise exempt"). staging.frecency
+    (staging-001-landing-tables.xml, changeset staging-3-pointer-stores)
+    carries the IDENTICAL `ttl_days INTEGER NOT NULL DEFAULT 0` shape and
+    the IDENTICAL FORCE ROW LEVEL SECURITY + tenant_isolation policy, so
+    changeset -2 below mirrors -1's DROP DEFAULT / DROP NOT NULL / counted
+    UPDATE / RLS-toggle / ANALYZE exactly. "Staging remains otherwise
+    exempt" means the CHECK: staging is typeless landing by design
+    (StagingPromoteOps' own class javadoc, quoted verbatim in
+    legacy-001-drop-chash-alias.xml's header — "staging stays typeless...
+    a malformed staged value fails LOUD at PROMOTE time, not at land
+    time") — a CHECK there would reject legitimate arbitrary pre-
+    validation ETL input; the promote path (StagingPromoteOps.java,
+    ~1035-1070) is what canonicalizes or rejects. A staged row whose
+    ttl_days violates the new CHECK still fails loud, just at PROMOTE
+    time (the CHECK on nexus.frecency itself), matching legacy-001-3's
+    identical precedent of adding the format CHECK to nexus.* but not to
+    staging.*.
+
+    ADD CHECK on nexus.frecency ONLY — `frecency_ttl_days_positive_chk`,
+    named to match the `%_ttl_days_positive_chk` suffix
+    HttpUtil.ttlDaysCheckRemedy already wildcard-matches (no engine change
+    needed there — the remedy text fires automatically for this
+    constraint the first time it is ever violated).
+
+    ANALYZE, MANDATORY (D0.5 / tests/test_changelog_analyze_lint.py's
+    documented rule, BUG-0148 precedent) — both tables, since both are
+    UPDATE-rewritten by this file, matching legacy-001-7's "ANALYZE
+    nexus.frecency, nexus.relevance_log" precedent of ANALYZE-ing every
+    table a sibling changeset in the SAME file mutated.
+
+    D0.6 ROLLBACK: restores the baseline shape exactly on both tables —
+    drop the CHECK (nexus only), restore NOT NULL DEFAULT 0. Restoring
+    NOT NULL DEFAULT 0 on a column that may hold NULL rows (either from
+    this migration's own conversion, since NOTHING un-NULLs a
+    permanent row on rollback by design, or from a NULL row written
+    after this migration by any client honoring the new contract)
+    requires REWRITING those NULLs back to 0 FIRST — rollback data-
+    fidelity, the nexus-cck6z precedent already established by this
+    arc's rollback-integrity work: a rollback that silently leaves rows
+    NULL under a column it is about to mark NOT NULL does not merely
+    lose data, it makes the ROLLBACK ITSELF fail with a NOT NULL
+    violation the instant it tries to apply the constraint. Both
+    directions are stated inline, not silently omitted.
+
+    D0.1 placement: changelog TAIL, immediately after plans-003-ttl-
+    days.xml (the current tail, this bead's own predecessor nexus-tk070.p6a)
+    and before the grants-nexus-svc.xml runAlways block, matching the
+    established late-append convention. EXPECT_NEW_CHANGESETS=2 for this
+    bead's one file, two changesets (telemetry-006-1 for nexus.frecency,
+    telemetry-006-2 for staging.frecency).
+
+    CLIENT PAIRING: this migration ships with the T3 read-path predicate
+    flip (src/nexus/db/http_vector_client.py's HttpVectorClient.expire(),
+    src/nexus/db/t3.py's docstrings) in the SAME commit — see RDR-194 D5's
+    "Wire contract change, stated per column" section and
+    memory-003-ttl-days.xml's header for the full two-commit
+    docs/wire-contract-pending.md ## Unshipped declaration mechanism this
+    arc already established (the entry is added in the immediately-
+    following commit, once this commit's own sha is known).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset telemetry-006-1: nexus.frecency — DROP DEFAULT/NOT NULL,
+         counted UPDATE 0 -> NULL, ADD CHECK, ANALYZE ─────────────────────── -->
+    <changeSet id="telemetry-006-1" author="nexus-tk070.p6b">
+        <comment>
+            nexus.frecency.ttl_days: 0=permanent RETIRED, NULL=permanent
+            adopted. DROP DEFAULT + DROP NOT NULL, counted UPDATE
+            ttl_days=NULL WHERE ttl_days=0 (RAISE NOTICE'd, RLS
+            toggle-wrapped so FORCE RLS cannot hide rows from the count),
+            ADD CHECK (ttl_days IS NULL OR ttl_days > 0), ANALYZE. Gated on
+            nexus-tk070.cc6: 0 zero-rows / 0 total rows measured on the
+            live store — this changeset is a no-op there today, but ships
+            unconditionally guarded regardless.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.frecency ALTER COLUMN ttl_days DROP DEFAULT;
+ALTER TABLE nexus.frecency ALTER COLUMN ttl_days DROP NOT NULL;
+
+ALTER TABLE nexus.frecency NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_converted_count BIGINT;
+BEGIN
+    UPDATE nexus.frecency SET ttl_days = NULL WHERE ttl_days = 0;
+    GET DIAGNOSTICS v_converted_count = ROW_COUNT;
+    RAISE NOTICE 'nexus-tk070.p6b: converted % nexus.frecency row(s) from ttl_days = 0 to ttl_days = NULL — 0 is retired as the permanent sentinel (RDR-194 D5); NULL is the sole permanent sentinel going forward, enforced by the CHECK this changeset adds', v_converted_count;
+END $$;
+
+ALTER TABLE nexus.frecency FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE nexus.frecency
+    ADD CONSTRAINT frecency_ttl_days_positive_chk CHECK (ttl_days IS NULL OR ttl_days > 0);
+
+ANALYZE nexus.frecency;
+        </sql>
+        <rollback>
+            <!-- D0.6: restores the baseline shape exactly. Rewrites any
+                 NULL ttl_days rows back to 0 FIRST (nexus-cck6z rollback
+                 data-fidelity precedent) — SET NOT NULL below would
+                 otherwise fail outright against a NULL row left by either
+                 this changeset's own conversion or any later NULL write a
+                 client made under the new contract. This is a best-effort
+                 schema restoration, not a claim that the ORIGINAL 0-tagged
+                 identity of a since-converted row is recoverable (D0.6):
+                 a row this changeset converted from 0 and a row some
+                 client later wrote as NULL directly are indistinguishable
+                 by the time rollback runs, so both land back at 0. -->
+            <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.frecency DROP CONSTRAINT IF EXISTS frecency_ttl_days_positive_chk;
+
+ALTER TABLE nexus.frecency NO FORCE ROW LEVEL SECURITY;
+UPDATE nexus.frecency SET ttl_days = 0 WHERE ttl_days IS NULL;
+ALTER TABLE nexus.frecency FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE nexus.frecency ALTER COLUMN ttl_days SET NOT NULL;
+ALTER TABLE nexus.frecency ALTER COLUMN ttl_days SET DEFAULT 0;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset telemetry-006-2: staging.frecency — DROP DEFAULT/NOT
+         NULL, counted UPDATE 0 -> NULL, ANALYZE (NO CHECK — staging stays
+         typeless landing) ─────────────────────────────────────────────── -->
+    <changeSet id="telemetry-006-2" author="nexus-tk070.p6b">
+        <comment>
+            staging.frecency.ttl_days: mirrors telemetry-006-1 mechanically
+            (RDR-194 D5) — DROP DEFAULT + DROP NOT NULL, counted UPDATE
+            0 -> NULL (RAISE NOTICE'd, RLS toggle-wrapped), ANALYZE. NO
+            CHECK constraint here: staging is typeless landing by design
+            (StagingPromoteOps' own class javadoc), so a malformed staged
+            ttl_days still fails loud at PROMOTE time against
+            nexus.frecency's CHECK, not at land time — the identical
+            staging-exemption precedent legacy-001-3 already established
+            for the chunk_id format CHECK.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE staging.frecency ALTER COLUMN ttl_days DROP DEFAULT;
+ALTER TABLE staging.frecency ALTER COLUMN ttl_days DROP NOT NULL;
+
+ALTER TABLE staging.frecency NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_converted_count BIGINT;
+BEGIN
+    UPDATE staging.frecency SET ttl_days = NULL WHERE ttl_days = 0;
+    GET DIAGNOSTICS v_converted_count = ROW_COUNT;
+    RAISE NOTICE 'nexus-tk070.p6b: converted % staging.frecency row(s) from ttl_days = 0 to ttl_days = NULL — mirrors telemetry-006-1, no CHECK added (staging stays typeless landing)', v_converted_count;
+END $$;
+
+ALTER TABLE staging.frecency FORCE ROW LEVEL SECURITY;
+
+ANALYZE staging.frecency;
+        </sql>
+        <rollback>
+            <!-- D0.6, mirrors telemetry-006-1's rollback (no CHECK to drop
+                 here — staging never had one). -->
+            <sql splitStatements="false" stripComments="false">
+ALTER TABLE staging.frecency NO FORCE ROW LEVEL SECURITY;
+UPDATE staging.frecency SET ttl_days = 0 WHERE ttl_days IS NULL;
+ALTER TABLE staging.frecency FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE staging.frecency ALTER COLUMN ttl_days SET NOT NULL;
+ALTER TABLE staging.frecency ALTER COLUMN ttl_days SET DEFAULT 0;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

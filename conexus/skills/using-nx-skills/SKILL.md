@@ -8,6 +8,8 @@ effort: low
 
 **You MUST invoke `Skill` for any plausibly-matching conexus skill before producing any other response.** This is not a hint or a preference — it is a hard rule. Skipping a matching skill is a defect, not an optimization. False positives are cheap; misses cost real time. Skills evolve — read the current version, don't rely on memory.
 
+SessionStart emits only a condensed form of this rule plus its trigger conditions (nexus-h33x8.5) — this file is the full routing menu, MCP tool catalogue, Common Mistakes table, Red Flags table, and RDR lifecycle chain, read in full whenever `Skill` is invoked on `using-nx-skills`.
+
 ## Plan Reuse
 
 Before any multi-agent pipeline:

@@ -6,6 +6,56 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.13.0] - 2026-08-20
+
+Engine identity moves to `engine-service-v0.1.84` (paired release, deploy-first:
+the engine was deployed and cloud-gated BEFORE this cut — zero refusal window,
+zero inert window). Local-mode installs converge to that engine on every path.
+Schema note: v0.1.84's renames are forward-only — a v0.1.83 image cannot write
+against the walked schema.
+
+### Changed
+
+- **RDR-194 FK-census arc (engine + client halves).** Eleven schema changesets
+  walk on first boot: `topics` gains a tenant-scoped UNIQUE and its four
+  referencing FKs are repointed as tenant-scoped composites (cross-tenant topic
+  references are now schema-illegal; guarded by fail-loud corruption checks —
+  the live-store walk found zero, matching the pre-measured counts);
+  `memory.ttl`/`plans.ttl` become `ttl_days` with `CHECK (NULL or > 0)` and the
+  `ttl=0` trap value is retired on every path (counted deletes: 2 plan rows,
+  0 memory rows on the managed store); `frecency`'s `0 = permanent` sentinel is
+  retired for `NULL`; dead `migration_jobs` is dropped (zero producers or
+  consumers since 2026-07-24); every deliberately-loose census edge carries its
+  reason as a `COMMENT ON COLUMN`.
+- **`memory_put` ttl contract (client half, breaking for `ttl=0` callers):**
+  the MCP tool signature is `ttl: int | None = 30`; omit or pass null for
+  permanent. `ttl=0` is rejected with a 400 naming the fix — the silent
+  client-side coercion shim is deleted (a contract enforced by one client is
+  not enforced). Import batches skip legacy `ttl=0` rows with a counted
+  warning instead of aborting.
+- **T3 `ttl_days` write contract (client half):** `nx store put` /
+  `T3Database.put` / `HttpVectorClient.put` and `nx memory promote` reject an
+  explicit `ttl_days <= 0` with a typed error before any wire call; the expiry
+  pre-filter becomes `$gt: 0` (NULL = never expires; the `$ne: null` form is
+  vacuous server-side and was deliberately not used).
+
+### Fixed
+
+- `nx memory promote` of a permanent T2 entry coerced `None` to the retired
+  `0` sentinel en route to T3 — found by the ttl call-site census; promoting
+  permanent entries would have broken under the new validation.
+- Latent NPE in the engine's frecency read path on NULL-ttl rows
+  (`TelemetryRepository.getFrecency` Map.of).
+- SessionStart guidance payload reduced 12,817 → ~4,428 bytes
+  (imperative-first inversion, nexus-h33x8.5) and a per-session capability
+  census now appends to `capability_census.jsonl` at SessionEnd
+  (nexus-h33x8.3); both JSONL logs (capability census, routing log) gained
+  size-gated rotation by atomic rename, serialized by an advisory lock.
+- nx_answer: `budget_seconds` partial-results contract, verbatim-repeat
+  plan-match, stream-json timeout capture (nexus-h33x8.6 a4/a2 follow-ons to
+  7.12.0's a3/a1).
+
+
 ## [7.12.0] - 2026-08-19
 
 Engine identity moves to `engine-service-v0.1.83` (paired release: engine tag

@@ -137,7 +137,7 @@ public final class MemoryHandler implements HttpHandler {
         String tags    = optStringOrEmpty(body, "tags");
         String session = optStringOrNull(body, "session");
         String agent   = optStringOrNull(body, "agent");
-        Integer ttl    = coercePermanentTtl(optInt(body, "ttl"));
+        Integer ttl    = requirePositiveOrNullTtl(optInt(body, "ttl"));
 
         long id = repo.upsert(tenant, project, title, content, tags, session, agent, ttl);
         HttpUtil.send(ex, 200, json(Map.of("id", id)));
@@ -163,7 +163,7 @@ public final class MemoryHandler implements HttpHandler {
         String tags    = optStringOrEmpty(body, "tags");
         String session = optStringOrNull(body, "session");
         String agent   = optStringOrNull(body, "agent");
-        Integer ttl    = coercePermanentTtl(optInt(body, "ttl"));
+        Integer ttl    = requirePositiveOrNullTtl(optInt(body, "ttl"));
         double minSim  = optDouble(body, "min_similarity", 0.5);
 
         long[] result = repo.putOrMerge(tenant, project, title, content, tags, session, agent, ttl, minSim);
@@ -464,9 +464,28 @@ public final class MemoryHandler implements HttpHandler {
      * <p>Body: {@code {"rows": [ {<same fields as /import>}, … ]}}. The whole
      * batch lands in ONE multi-row INSERT under ONE tenant transaction (GUC set
      * once), via {@link MemoryRepository#importBatch}. Per-row parse/validation
-     * is identical to {@code /import}; a malformed row fails the whole batch with
-     * a 400 (the client re-batches ≤ the per-write quota). Response 200:
-     * {@code {"imported": <int>}}.
+     * is identical to {@code /import}; a malformed row (missing field, bad
+     * timestamp shape) fails the whole batch with a 400 BEFORE any row reaches
+     * the repository (the client re-batches ≤ the per-write quota) — that part
+     * is unchanged.
+     *
+     * <p>{@code ttl<=0} rows are handled DIFFERENTLY (nexus-tk070.p6a fix-pass,
+     * substantive-critic SIGNIFICANT finding, 2026-08-20): they are SKIPPED,
+     * loudly and counted, never sent to the repository and never coerced.
+     * Before this fix, a single legacy {@code ttl=0} row deep inside the
+     * batch's one multi-row INSERT tripped {@code memory_ttl_days_positive_chk}
+     * (memory-003-ttl-days.xml) and Postgres rolled back the ENTIRE statement —
+     * every other row in the batch, valid or not, was lost with it. A memory
+     * row with {@code ttl=0} was ALREADY scheduled for deletion by the next
+     * {@code expire()} sweep (see {@link #requirePositiveOrNullTtl}'s javadoc)
+     * — the exact disposition {@code memory-003-ttl-days.xml}'s own counted
+     * DELETE applies at migration time — so skipping it here is CONSISTENT
+     * with what the migration itself does to such rows, not a new policy.
+     * Coercing it to NULL instead would be semantics-CHANGING: NULL means
+     * permanent, {@code ttl=0} meant "already dead"; conflating the two would
+     * resurrect data the source considered expired. Response 200:
+     * {@code {"imported": <int>, "skipped_ttl_zero": <int>}} — {@code imported}
+     * is the count ACTUALLY inserted (post-filter), not merely submitted.
      */
     private void handleImportBatch(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -484,35 +503,88 @@ public final class MemoryHandler implements HttpHandler {
             Map<String, Object> row = (Map<String, Object>) rm;
             rows.add(parseImportRow(row));
         }
-        int imported = repo.importBatch(tenant, rows);
-        HttpUtil.send(ex, 200, json(Map.of("imported", imported)));
+
+        List<MemoryRepository.ImportRow> valid = new ArrayList<>(rows.size());
+        List<String> skipped = new ArrayList<>();
+        for (MemoryRepository.ImportRow r : rows) {
+            Integer ttl = r.ttlDays();
+            if (ttl != null && ttl <= 0) {
+                skipped.add(r.project() + "/" + r.title());
+            } else {
+                valid.add(r);
+            }
+        }
+        if (!skipped.isEmpty()) {
+            log.warn("event=memory_import_batch_skipped_ttl_zero tenant={} count={} rows={}",
+                tenant, skipped.size(), skipped);
+        }
+
+        int imported = repo.importBatch(tenant, valid);
+        HttpUtil.send(ex, 200, json(Map.of(
+            "imported", imported,
+            "skipped_ttl_zero", skipped.size())));
     }
 
     /**
-     * Coerce a caller-supplied {@code ttl} of {@code <= 0} to NULL — permanent
-     * (nexus-cg13x).
+     * Reject a caller-supplied {@code ttl <= 0} with a loud 400 — retired the
+     * silent-coercion-to-NULL behaviour this method replaces (nexus-cg13x's
+     * {@code coercePermanentTtl}, RDR-194 D5 / A13, bead nexus-tk070.p6a).
      *
      * <p>{@code ttl = 0} does NOT mean permanent. {@code MemoryRepository.expire()}
-     * filters on {@code WHERE ttl IS NOT NULL} and computes
-     * {@code effective_ttl = ttl * (1 + log(access_count + 1))}, so a ttl of 0
-     * yields an effective TTL of 0 and the row is deleted by the very next
-     * sweep. Permanent is NULL — the only value that filter excludes.
+     * filters on {@code WHERE ttl_days IS NOT NULL} and computes
+     * {@code effective_ttl = ttl_days * (1 + log(access_count + 1))}, so a ttl
+     * of 0 yields an effective TTL of 0 and the row is deleted by the very next
+     * sweep. Permanent is NULL — the only value that filter excludes. Negative
+     * values are equally nonsensical and rejected the same way; the
+     * {@code nexus.memory.ttl_days} CHECK (ttl_days IS NULL OR ttl_days > 0)
+     * added by {@code memory-003-ttl-days.xml} enforces the identical bound at
+     * the DB layer, independent of this method — the two layers are TESTED
+     * SEPARATELY (see {@code MemoryHandlerTest}'s boundary-400 tests and
+     * {@code MemoryRepositoryTest}'s CHECK-layer test, which calls
+     * {@link dev.nexus.service.db.MemoryRepository#upsert} directly, bypassing
+     * this method entirely, to prove the CHECK holds on its own).
      *
-     * <p>The MCP layer has always coerced this ({@code mcp/core.py}), so MCP
-     * users were safe and the belief "0 means permanent" spread as though it
-     * were the substrate's contract. Anything POSTing here DIRECTLY inherited
-     * the footgun instead — which is what destroyed
-     * {@code nexus/deployed-engine-version} repeatedly, each time surviving an
-     * immediate read-back (a 200 and a row id prove the WRITE, not its
-     * DURABILITY) and only vanishing once a sweep ran. Coercing here makes the
-     * documented semantics true for EVERY caller rather than only MCP's.
+     * <p>{@code coercePermanentTtl} silently rewrote {@code ttl<=0} to NULL —
+     * A13 (RDR-194) rejects keeping that coercion behind the new CHECK: "a
+     * correctness contract enforced by one client is not enforced." Retiring
+     * the MCP-layer shim ({@code src/nexus/mcp/core.py}'s
+     * {@code ttl=ttl if ttl > 0 else None}) is the client half of this same
+     * change (same bead, same commit) — this method is why deleting that shim
+     * is safe: every direct {@code POST /v1/memory/put} (and
+     * {@code /put_or_merge}) caller now gets the SAME loud rejection MCP used
+     * to paper over silently, instead of inheriting the "surprise vanishes on
+     * the next sweep" footgun that repeatedly destroyed
+     * {@code nexus/deployed-engine-version} (each write returning 200 with a
+     * row id, each immediate read-back passing, the row gone once a sweep
+     * ran).
      *
-     * <p>Deliberately NOT applied to {@link #parseImportRow}: the ETL legs
-     * carry source values verbatim, and silently rewriting a migrated row's
-     * TTL would make the migration unfaithful.
+     * <p>Deliberately NOT applied to {@link #parseImportRow} itself: the ETL
+     * legs still carry source values verbatim (unchanged scope from the
+     * coercion this replaces) — {@code parseImportRow} does not reject or
+     * rewrite {@code ttl}. What happens to a {@code ttl<=0} row downstream
+     * differs by endpoint: {@code /import} (single row) sends it straight to
+     * the repository, where it hits the CHECK constraint at INSERT time and
+     * surfaces as a 409 via the shared class-23 typed-DB-error ladder
+     * ({@link HttpUtil#sendTypedDbError}) — scoped to that one row, no
+     * collateral damage. {@code /import_batch} instead SKIPS such rows before
+     * they ever reach the repository (see {@link #handleImportBatch}'s own
+     * javadoc) — a batch's one multi-row INSERT would otherwise roll back
+     * EVERY row, valid or not, on a single CHECK violation (nexus-tk070.p6a
+     * fix-pass, substantive-critic SIGNIFICANT finding). Also NOT applied to
+     * {@code PlanHandler.handleSave}: plans
+     * never had this coercion bug in the first place (verified — omitting
+     * {@code ttl} already passed NULL end to end), so no new boundary
+     * validation was added there; see {@code plans-003-ttl-days.xml}'s header
+     * for that scope decision.
      */
-    private static Integer coercePermanentTtl(Integer ttl) {
-        return (ttl != null && ttl <= 0) ? null : ttl;
+    private static Integer requirePositiveOrNullTtl(Integer ttl) {
+        if (ttl != null && ttl <= 0) {
+            throw new IllegalArgumentException(
+                "ttl=" + ttl + " is invalid: omit the field or pass null for a "
+                + "permanent entry — ttl must be a positive integer number of "
+                + "days (0 does NOT mean permanent; NULL does)");
+        }
+        return ttl;
     }
 
     /** Parse + validate one import row (shared by /import and /import_batch). */
@@ -592,7 +664,9 @@ public final class MemoryHandler implements HttpHandler {
         m.put("timestamp", r.getTimestamp() != null
             ? MemoryRepository.UTC_SECOND.format(r.getTimestamp().withOffsetSameInstant(ZoneOffset.UTC))
             : null);
-        m.put("ttl", r.getTtl());
+        // nexus-tk070.p6a: wire field name stays "ttl" (D0.8, unchanged) even
+        // though the column/jOOQ getter is now ttl_days (RDR-194 D5 rename).
+        m.put("ttl", r.getTtlDays());
         m.put("access_count", r.getAccessCount());
         // last_accessed: empty string when null (SQLite default is '' not NULL)
         m.put("last_accessed", r.getLastAccessed() != null

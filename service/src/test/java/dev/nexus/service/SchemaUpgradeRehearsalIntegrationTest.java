@@ -373,6 +373,14 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   taxonomy-010-1 nexus-tk070.p3b
                 //   taxonomy-011-1 nexus-tk070.p3c
                 //   taxonomy-012-2 nexus-tk070.p3d
+                //   taxonomy-014-2 nexus-tk070.p5a
+                //   taxonomy-014-3 nexus-tk070.p5a
+                //   taxonomy-014-4 nexus-tk070.p5a
+                //   taxonomy-014-5 nexus-tk070.p5a
+                //   memory-003-1 nexus-tk070.p6a
+                //   plans-003-1 nexus-tk070.p6a
+                //   telemetry-006-1 nexus-tk070.p6b
+                //   telemetry-006-2 nexus-tk070.p6b
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -574,6 +582,59 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // fixture proves the full walk now survives that row.
                     seedTopicAssignment(su, "t1", "8".repeat(32), p3bTopicId, "code__x");
 
+                    // memory-003-1 / plans-003-1 (nexus-tk070.p6a, RDR-194 § D5):
+                    // ttl -> ttl_days rename + counted DELETE of ttl=0 rows, the
+                    // SAME NO FORCE/FORCE toggle-wrap shape as catalog-013-1b/
+                    // catalog-014-0/catalog-025-0/catalog-029-1/catalog-032-1/
+                    // legacy-001-1/legacy-001-2. nexus.memory and nexus.plans are
+                    // baseline tables (memory-001-baseline.xml/plans-001-baseline.xml
+                    // both predate OLD_TAG), so both accept rows freely on the old
+                    // leg. DELETE arm: a ttl=0 row per table (memory-003-1/
+                    // plans-003-1's whole reason to exist -- ttl=0 is
+                    // unrepresentable under the new CHECK). KEEP arm: a NULL-ttl
+                    // (permanent) row per table, proving the DELETE is selective on
+                    // ttl=0 specifically, not a blanket wipe.
+                    seedMemoryRow(su, "t1", "p6a-proj", "p6a-zero", 0);
+                    seedMemoryRow(su, "t1", "p6a-proj", "p6a-permanent", null);
+                    seedPlanRow(su, "t1", "p6a-proj", "p6a zero query", 0);
+                    seedPlanRow(su, "t1", "p6a-proj", "p6a permanent query", null);
+
+                    // telemetry-006-1/telemetry-006-2 (nexus-tk070.p6b, RDR-194 § D5):
+                    // frecency.ttl_days 0 -> NULL counted UPDATE (not a DELETE --
+                    // these rows are RECOVERED by converting the sentinel, not
+                    // discarded), the same NO FORCE/FORCE toggle-wrap shape as
+                    // memory-003-1/plans-003-1/legacy-001-1/legacy-001-2. Both
+                    // nexus.frecency and staging.frecency are baseline-shaped
+                    // tables at OLD_TAG: nexus.frecency predates OLD_TAG
+                    // (telemetry-001-baseline.xml, already exercised above by
+                    // legacy-001-1's own seed rows "e"x32/"d"x64); staging.frecency
+                    // does NOT exist at OLD_TAG (staging-001-landing-tables.xml is
+                    // itself part of THIS hop, created before telemetry-006-2 runs)
+                    // -- see telemetry-006-2's own coverage note below for why it
+                    // needs no fresh seed. CONVERSION arm: a ttl_days=0 row. KEEP
+                    // arm: a POSITIVE ttl_days row that must survive UNCHANGED
+                    // (not converted -- proves the UPDATE's WHERE ttl_days = 0
+                    // predicate is selective, not a blanket rewrite). Unlike
+                    // memory-003-1/plans-003-1 (whose KEEP arm is a NULL row), a
+                    // NULL KEEP arm CANNOT be seeded here: at OLD_TAG, nexus.
+                    // frecency.ttl_days is STILL `NOT NULL DEFAULT 0`
+                    // (telemetry-006-1 is the changeset that first permits NULL),
+                    // so nothing in this old-leg seed phase can write NULL into
+                    // it -- the permanent-sentinel arm is proven instead by
+                    // TelemetryRepositoryTest's upsertFrecency_ttlDaysNull_
+                    // isPermanentAndAccepted (a fresh HEAD-schema test), the same
+                    // "arm proven separately, outside this fixture" split
+                    // taxonomy-010-1's own coverage note above already uses for
+                    // its un-seedable positive-resolution arm. Fresh chunk_id
+                    // values ("6"x64/"7"x64), distinct from legacy-001-1's own
+                    // "e"x32 (legacy-width, deleted by legacy-001-1 earlier in
+                    // this same hop) and "d"x64 (canonical, survives with its
+                    // DEFAULT ttl_days=0 -- also converted to NULL by
+                    // telemetry-006-1, effect-asserted below alongside the
+                    // dedicated fixture).
+                    seedFrecencyTtlRow(su, "t1", "6".repeat(64), 0);
+                    seedFrecencyTtlRow(su, "t1", "7".repeat(64), 45);
+
                     assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
                         .as("superuser ground truth after seeding").isEqualTo(5);
                     assertThat(count(su,
@@ -604,8 +665,9 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "non-BYPASSRLS owner — catalog-032-1's own toggle-wrap target")
                         .isEqualTo(0);
                     assertThat(count(admin, "SELECT count(*) FROM nexus.frecency"))
-                        .as("FORCE RLS must hide both seeded frecency rows from the "
-                            + "non-BYPASSRLS owner — legacy-001-1's own toggle-wrap target")
+                        .as("FORCE RLS must hide all four seeded frecency rows from the "
+                            + "non-BYPASSRLS owner — legacy-001-1's own toggle-wrap target "
+                            + "(2 rows) plus telemetry-006-1's own toggle-wrap target (2 more)")
                         .isEqualTo(0);
                     assertThat(count(admin, "SELECT count(*) FROM nexus.relevance_log"))
                         .as("FORCE RLS must hide both seeded relevance_log rows from the "
@@ -614,6 +676,14 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     assertThat(count(admin, "SELECT count(*) FROM nexus.topic_assignments"))
                         .as("FORCE RLS must hide all five seeded topic_assignments rows from "
                             + "the non-BYPASSRLS owner — taxonomy-010-1's own toggle-wrap target")
+                        .isEqualTo(0);
+                    assertThat(count(admin, "SELECT count(*) FROM nexus.memory"))
+                        .as("FORCE RLS must hide both seeded memory rows from the "
+                            + "non-BYPASSRLS owner — memory-003-1's own toggle-wrap target")
+                        .isEqualTo(0);
+                    assertThat(count(admin, "SELECT count(*) FROM nexus.plans"))
+                        .as("FORCE RLS must hide both seeded plans rows from the "
+                            + "non-BYPASSRLS owner — plans-003-1's own toggle-wrap target")
                         .isEqualTo(0);
                 }
 
@@ -1161,6 +1231,252 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-012-2's own "
                             + "toggle-wrap covers")
                         .isEqualTo(2);
+
+                    // taxonomy-014-2/-3/-4/-5 legs (nexus-tk070.p5a, RDR-194 § D4, seed-
+                    // coverage lint follow-up): each repoints one of the four tenant-blind
+                    // FKs onto nexus.topics' new UNIQUE (tenant_id, id) (taxonomy-014-1),
+                    // the SAME catalog-029 three-step shape (DROP old -> ADD new NOT VALID
+                    // -> fail-loud anti-join -> VALIDATE) as taxonomy-012-2 above, but
+                    // FAIL-LOUD on a nonzero cross-tenant population instead of deleting it
+                    // (D4: a cross-tenant topic reference is corruption, not a population to
+                    // remediate silently). No NEW seed data is needed for ANY of the four:
+                    // the only nexus.topics row this hop ever seeds is seedTopic's own
+                    // single tenant-'t1' row (used by taxonomy-010-1 above, parent_id left
+                    // NULL), nexus.topic_assignments for tenant 't1' is already proven empty
+                    // (isEqualTo(0), asserted for the taxonomy-012-2 leg immediately above),
+                    // and nexus.topic_links is never seeded anywhere in this hop -- so all
+                    // four anti-joins are structurally zero by construction, the same
+                    // "always zero in this hop" reasoning as fk-004-0-reconcile-precount /
+                    // taxonomy-011-1 above. Effect-asserted the same minimal way: the
+                    // changeset EXECUTES (a nonzero anti-join would RAISE EXCEPTION and abort
+                    // the whole migration walk before this JDBC connection could run a single
+                    // assertion here), the anti-join population is independently still zero,
+                    // each new composite FK exists and is VALIDATED at HEAD, and FORCE ROW
+                    // LEVEL SECURITY is restored on every table each leg's own toggle-wrap
+                    // covers.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topics t WHERE t.parent_id IS NOT NULL "
+                        + "AND NOT EXISTS (SELECT 1 FROM nexus.topics p WHERE p.id = t.parent_id "
+                        + "AND p.tenant_id = t.tenant_id)"))
+                        .as("taxonomy-014-2's own anti-join population is empty -- the sole "
+                            + "nexus.topics row this hop seeds carries a NULL parent_id, so the "
+                            + "self-referential anti-join by construction finds nothing")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'fk_topics_parent_tenant' AND convalidated"))
+                        .as("fk_topics_parent_tenant must exist and be VALIDATED at HEAD -- only "
+                            + "reachable if taxonomy-014-2's DROP, ADD NOT VALID, anti-join, and "
+                            + "VALIDATE all ran in this same walk")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity "
+                        + "AND oid = 'nexus.topics'::regclass"))
+                        .as("FORCE ROW LEVEL SECURITY restored on nexus.topics after "
+                            + "taxonomy-014-2's own toggle-wrap")
+                        .isEqualTo(1);
+
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_assignments a WHERE NOT EXISTS "
+                        + "(SELECT 1 FROM nexus.topics t WHERE t.id = a.topic_id "
+                        + "AND t.tenant_id = a.tenant_id)"))
+                        .as("taxonomy-014-3's own anti-join population is empty -- "
+                            + "nexus.topic_assignments for tenant t1 was already drained to zero "
+                            + "by taxonomy-010-1's three DELETE arms above")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'fk_topic_assignments_topic_tenant' AND convalidated"))
+                        .as("fk_topic_assignments_topic_tenant must exist and be VALIDATED at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.topic_assignments'::regclass, 'nexus.topics'::regclass)"))
+                        .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-014-3's own "
+                            + "toggle-wrap covers")
+                        .isEqualTo(2);
+
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_links l WHERE NOT EXISTS "
+                        + "(SELECT 1 FROM nexus.topics t WHERE t.id = l.from_topic_id "
+                        + "AND t.tenant_id = l.tenant_id)"))
+                        .as("taxonomy-014-4's own anti-join population is empty -- "
+                            + "nexus.topic_links is never seeded anywhere in this hop")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'fk_topic_links_from_topic_tenant' AND convalidated"))
+                        .as("fk_topic_links_from_topic_tenant must exist and be VALIDATED at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.topic_links'::regclass, 'nexus.topics'::regclass)"))
+                        .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-014-4's own "
+                            + "toggle-wrap covers")
+                        .isEqualTo(2);
+
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.topic_links l WHERE NOT EXISTS "
+                        + "(SELECT 1 FROM nexus.topics t WHERE t.id = l.to_topic_id "
+                        + "AND t.tenant_id = l.tenant_id)"))
+                        .as("taxonomy-014-5's own anti-join population is empty -- "
+                            + "nexus.topic_links is never seeded anywhere in this hop")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'fk_topic_links_to_topic_tenant' AND convalidated"))
+                        .as("fk_topic_links_to_topic_tenant must exist and be VALIDATED at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.topic_links'::regclass, 'nexus.topics'::regclass)"))
+                        .as("FORCE ROW LEVEL SECURITY restored on both tables taxonomy-014-5's own "
+                            + "toggle-wrap covers")
+                        .isEqualTo(2);
+
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint WHERE conname = 'topics_tenant_id_unique'"))
+                        .as("topics_tenant_id_unique must exist at HEAD -- taxonomy-014-1's "
+                            + "unconditional UNIQUE (tenant_id, id), the precondition every "
+                            + "repoint above builds on")
+                        .isEqualTo(1);
+
+                    // memory-003-1 / plans-003-1 legs (nexus-tk070.p6a, RDR-194 § D5,
+                    // seed-coverage lint follow-up): the ttl=0 DELETE arm must actually
+                    // fire under FORCE-RLS (not silently no-op like the v0.1.33 class),
+                    // the NULL-ttl KEEP arm must survive untouched (selective, not a
+                    // blanket wipe), the column must be renamed ttl -> ttl_days, and the
+                    // CHECK must exist at HEAD.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.memory WHERE tenant_id = 't1' "
+                        + "AND project = 'p6a-proj' AND title = 'p6a-zero'"))
+                        .as("memory-003-1's counted DELETE must actually remove the seeded "
+                            + "ttl=0 row -- the DELETE arm")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.memory WHERE tenant_id = 't1' "
+                        + "AND project = 'p6a-proj' AND title = 'p6a-permanent' "
+                        + "AND ttl_days IS NULL"))
+                        .as("the NULL-ttl (permanent) decoy row must survive memory-003-1's "
+                            + "DELETE untouched -- the KEEP arm, proving the DELETE is "
+                            + "selective on ttl=0 and not a blanket wipe")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM information_schema.columns WHERE table_schema = "
+                        + "'nexus' AND table_name = 'memory' AND column_name = 'ttl_days'"))
+                        .as("nexus.memory.ttl must be renamed to ttl_days at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'memory_ttl_days_positive_chk'"))
+                        .as("memory_ttl_days_positive_chk must exist at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity "
+                        + "AND oid = 'nexus.memory'::regclass"))
+                        .as("FORCE ROW LEVEL SECURITY restored on nexus.memory after "
+                            + "memory-003-1's own toggle-wrap")
+                        .isEqualTo(1);
+
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.plans WHERE tenant_id = 't1' "
+                        + "AND project = 'p6a-proj' AND query = 'p6a zero query'"))
+                        .as("plans-003-1's counted DELETE must actually remove the seeded "
+                            + "ttl=0 row -- the DELETE arm")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.plans WHERE tenant_id = 't1' "
+                        + "AND project = 'p6a-proj' AND query = 'p6a permanent query' "
+                        + "AND ttl_days IS NULL"))
+                        .as("the NULL-ttl (permanent) decoy row must survive plans-003-1's "
+                            + "DELETE untouched -- the KEEP arm")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM information_schema.columns WHERE table_schema = "
+                        + "'nexus' AND table_name = 'plans' AND column_name = 'ttl_days'"))
+                        .as("nexus.plans.ttl must be renamed to ttl_days at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'plans_ttl_days_positive_chk'"))
+                        .as("plans_ttl_days_positive_chk must exist at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity "
+                        + "AND oid = 'nexus.plans'::regclass"))
+                        .as("FORCE ROW LEVEL SECURITY restored on nexus.plans after "
+                            + "plans-003-1's own toggle-wrap")
+                        .isEqualTo(1);
+
+                    // telemetry-006-1 leg (nexus-tk070.p6b, RDR-194 § D5, seed-coverage
+                    // lint follow-up): the ttl_days=0 CONVERSION arm must actually fire
+                    // under FORCE-RLS (converted to NULL, not deleted -- this is an
+                    // UPDATE, not a DELETE, unlike memory-003-1/plans-003-1 above), the
+                    // NULL-ttl_days KEEP arm must survive untouched, and the CHECK must
+                    // exist at HEAD. Also covers legacy-001-1's own "d"x64 KEEP-arm row
+                    // (seeded with the table's DEFAULT ttl_days=0, since seedFrecencyRow
+                    // never set it explicitly) -- it too gets converted here, proving
+                    // the UPDATE reaches every ttl_days=0 row in this hop, not merely
+                    // the dedicated fixture.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.frecency WHERE tenant_id = 't1' "
+                        + "AND chunk_id = '" + "6".repeat(64) + "' AND ttl_days IS NULL"))
+                        .as("telemetry-006-1's counted UPDATE must convert the seeded "
+                            + "ttl_days=0 row to NULL -- the CONVERSION arm (not deleted, "
+                            + "unlike memory-003-1/plans-003-1's DELETE arms)")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.frecency WHERE tenant_id = 't1' "
+                        + "AND chunk_id = '" + "7".repeat(64) + "' AND ttl_days = 45"))
+                        .as("the positive-ttl_days decoy row must survive telemetry-006-1's "
+                            + "UPDATE unchanged -- the KEEP arm, proving the UPDATE's "
+                            + "WHERE ttl_days = 0 predicate is selective")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.frecency WHERE tenant_id = 't1' "
+                        + "AND chunk_id = '" + "d".repeat(64) + "' AND ttl_days IS NULL"))
+                        .as("legacy-001-1's own canonical-width KEEP-arm row (DEFAULT "
+                            + "ttl_days=0) must ALSO be converted to NULL by "
+                            + "telemetry-006-1 -- the UPDATE is unconditional across every "
+                            + "row in this hop, not scoped to the dedicated fixture")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'frecency_ttl_days_positive_chk'"))
+                        .as("frecency_ttl_days_positive_chk must exist at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity "
+                        + "AND oid = 'nexus.frecency'::regclass"))
+                        .as("FORCE ROW LEVEL SECURITY restored on nexus.frecency after "
+                            + "telemetry-006-1's own toggle-wrap")
+                        .isEqualTo(1);
+
+                    // telemetry-006-2 leg (nexus-tk070.p6b): staging.frecency has NO
+                    // fresh seed data (see the SEED-COVERAGE contract block's own note
+                    // above) -- staging-001-landing-tables.xml creates the table fresh
+                    // EARLIER in this SAME hop and nothing populates it before
+                    // telemetry-006-2 runs, so its UPDATE structurally operates over
+                    // zero rows in this rehearsal (not merely un-seeded). Effect-
+                    // asserted the same minimal way as fk-004-0-reconcile-precount /
+                    // taxonomy-011-1 above: the changeset EXECUTES (doesNotThrowAny
+                    // Exception already covers this), the table still exists with the
+                    // DROP DEFAULT/DROP NOT NULL shape landed, and -- unlike
+                    // telemetry-006-1 -- carries NO CHECK (staging stays typeless).
+                    assertThat(count(su,
+                        "SELECT count(*) FROM information_schema.columns WHERE "
+                        + "table_schema = 'staging' AND table_name = 'frecency' AND "
+                        + "column_name = 'ttl_days' AND is_nullable = 'YES' AND "
+                        + "column_default IS NULL"))
+                        .as("staging.frecency.ttl_days must be nullable with no default at HEAD")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid "
+                        + "JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = 'staging' "
+                        + "AND t.relname = 'frecency' AND c.contype = 'c'"))
+                        .as("staging.frecency must carry NO CHECK constraint -- typeless "
+                            + "landing by design, matching legacy-001-3's identical exemption")
+                        .isEqualTo(0);
                 }
             }
         } finally {
@@ -1562,6 +1878,31 @@ class SchemaUpgradeRehearsalIntegrationTest {
     }
 
     /**
+     * A {@code nexus.frecency} row with an EXPLICIT {@code ttl_days}
+     * (nexus-tk070.p6b, telemetry-006-1). {@code 0} seeds the CONVERSION
+     * arm (rewritten to {@code NULL}); {@code null} seeds the KEEP arm
+     * (already permanent, must survive untouched). Distinct from {@link
+     * #seedFrecencyRow}, which relies on the column's own DEFAULT
+     * {@code ttl_days=0} — that row (legacy-001-1's canonical-width KEEP
+     * fixture) is ALSO converted by telemetry-006-1, effect-asserted
+     * separately alongside this method's own dedicated fixture.
+     */
+    private static void seedFrecencyTtlRow(Connection c, String tenant, String chunkId, Integer ttlDays)
+            throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.frecency (tenant_id, chunk_id, ttl_days) VALUES (?, ?, ?)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, chunkId);
+            if (ttlDays == null) {
+                ps.setNull(3, java.sql.Types.INTEGER);
+            } else {
+                ps.setInt(3, ttlDays);
+            }
+            ps.executeUpdate();
+        }
+    }
+
+    /**
      * A legacy- or canonical-width {@code nexus.relevance_log} row
      * (nexus-lgdel.l1, legacy-001-2) — same DELETE/KEEP-arm choice as
      * {@link #seedFrecencyRow}.
@@ -1574,6 +1915,49 @@ class SchemaUpgradeRehearsalIntegrationTest {
             ps.setString(1, tenant);
             ps.setString(2, query);
             ps.setString(3, chunkId);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A {@code nexus.memory} row (nexus-tk070.p6a, memory-003-1). {@code ttl}
+     * null seeds the KEEP arm (permanent); {@code 0} seeds the DELETE arm
+     * (unrepresentable under the new {@code ttl_days} CHECK).
+     */
+    private static void seedMemoryRow(Connection c, String tenant, String project,
+                                       String title, Integer ttl) throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.memory (tenant_id, project, title, content, timestamp, ttl) "
+            + "VALUES (?, ?, ?, 'content', now(), ?)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, project);
+            ps.setString(3, title);
+            if (ttl == null) {
+                ps.setNull(4, java.sql.Types.INTEGER);
+            } else {
+                ps.setInt(4, ttl);
+            }
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A {@code nexus.plans} row (nexus-tk070.p6a, plans-003-1) — same
+     * DELETE/KEEP-arm {@code ttl} choice as {@link #seedMemoryRow}.
+     */
+    private static void seedPlanRow(Connection c, String tenant, String project,
+                                     String query, Integer ttl) throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.plans (tenant_id, project, query, plan_json, created_at, ttl) "
+            + "VALUES (?, ?, ?, '{}'::jsonb, now(), ?)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, project);
+            ps.setString(3, query);
+            if (ttl == null) {
+                ps.setNull(4, java.sql.Types.INTEGER);
+            } else {
+                ps.setInt(4, ttl);
+            }
             ps.executeUpdate();
         }
     }

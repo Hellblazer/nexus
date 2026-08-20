@@ -56,7 +56,9 @@ class TestHostSideRoundTrip:
             project=_SENTINEL_PROJECT,
             title="host-to-vm",
             tags="cowork,sentinel",
-            ttl=0,
+            # nexus-tk070.p6a: ttl=0 is now rejected; None is the permanent
+            # sentinel these tests actually want.
+            ttl=None,
         )
         assert put.startswith("Stored:")
 
@@ -70,7 +72,7 @@ class TestHostSideRoundTrip:
             content="payload written from the VM side",
             project=_SENTINEL_PROJECT,
             title="vm-to-host",
-            ttl=0,
+            ttl=None,
             agent="cowork-vm",
         )
         assert put.startswith("Stored:")
@@ -82,10 +84,10 @@ class TestHostSideRoundTrip:
         """A second write to the same (project, title) is seen by the
         next read — no stale-read regression in the shared substrate."""
         core.memory_put(
-            content="v1", project=_SENTINEL_PROJECT, title="shared-key", ttl=0
+            content="v1", project=_SENTINEL_PROJECT, title="shared-key", ttl=None
         )
         core.memory_put(
-            content="v2 updated", project=_SENTINEL_PROJECT, title="shared-key", ttl=0
+            content="v2 updated", project=_SENTINEL_PROJECT, title="shared-key", ttl=None
         )
         got = core.memory_get(project=_SENTINEL_PROJECT, title="shared-key")
         assert "v2 updated" in got

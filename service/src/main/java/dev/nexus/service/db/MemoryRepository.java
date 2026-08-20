@@ -566,9 +566,9 @@ public final class MemoryRepository {
     public List<Long> expire(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
             // Fetch candidates: all rows with a non-null TTL
-            var candidates = ctx.select(MEMORY.ID, MEMORY.ACCESS_COUNT, MEMORY.TTL, MEMORY.TIMESTAMP)
+            var candidates = ctx.select(MEMORY.ID, MEMORY.ACCESS_COUNT, MEMORY.TTL_DAYS, MEMORY.TIMESTAMP)
                                 .from(MEMORY)
-                                .where(MEMORY.TTL.isNotNull())
+                                .where(MEMORY.TTL_DAYS.isNotNull())
                                 .fetch();
 
             OffsetDateTime now = OffsetDateTime.now();
@@ -577,7 +577,7 @@ public final class MemoryRepository {
             for (var row : candidates) {
                 long rowId = row.get(MEMORY.ID);
                 int accessCount = row.get(MEMORY.ACCESS_COUNT);
-                int ttl = row.get(MEMORY.TTL);
+                int ttl = row.get(MEMORY.TTL_DAYS);
                 OffsetDateTime ts = row.get(MEMORY.TIMESTAMP);
                 if (ts == null) continue;
 
@@ -875,7 +875,7 @@ public final class MemoryRepository {
             var insert = ctx.insertInto(MEMORY,
                     MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE, MEMORY.CONTENT,
                     MEMORY.TAGS, MEMORY.SESSION, MEMORY.AGENT, MEMORY.TIMESTAMP,
-                    MEMORY.TTL, MEMORY.ACCESS_COUNT, MEMORY.LAST_ACCESSED);
+                    MEMORY.TTL_DAYS, MEMORY.ACCESS_COUNT, MEMORY.LAST_ACCESSED);
             var step = insert.values(
                     tenant, rows.get(0).project(), rows.get(0).title(), rows.get(0).content(),
                     rows.get(0).tags() != null ? rows.get(0).tags() : "", rows.get(0).session(),
@@ -894,7 +894,7 @@ public final class MemoryRepository {
                 .set(MEMORY.TAGS,          excluded(MEMORY.TAGS))
                 .set(MEMORY.SESSION,       excluded(MEMORY.SESSION))
                 .set(MEMORY.AGENT,         excluded(MEMORY.AGENT))
-                .set(MEMORY.TTL,           excluded(MEMORY.TTL))
+                .set(MEMORY.TTL_DAYS,           excluded(MEMORY.TTL_DAYS))
                 .set(MEMORY.TIMESTAMP,     excluded(MEMORY.TIMESTAMP))
                 .set(MEMORY.ACCESS_COUNT,  excluded(MEMORY.ACCESS_COUNT))
                 .set(MEMORY.LAST_ACCESSED, excluded(MEMORY.LAST_ACCESSED))
@@ -927,7 +927,7 @@ public final class MemoryRepository {
                         .set(MEMORY.SESSION,      session)
                         .set(MEMORY.AGENT,        agent)
                         .set(MEMORY.TIMESTAMP,    timestamp)
-                        .set(MEMORY.TTL,          ttlDays)
+                        .set(MEMORY.TTL_DAYS,          ttlDays)
                         .set(MEMORY.ACCESS_COUNT, accessCount)
                         .set(MEMORY.LAST_ACCESSED, lastAccessed)
                         .onConflict(MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE)
@@ -938,7 +938,7 @@ public final class MemoryRepository {
                         .set(MEMORY.TAGS,          excluded(MEMORY.TAGS))
                         .set(MEMORY.SESSION,       excluded(MEMORY.SESSION))
                         .set(MEMORY.AGENT,         excluded(MEMORY.AGENT))
-                        .set(MEMORY.TTL,           excluded(MEMORY.TTL))
+                        .set(MEMORY.TTL_DAYS,           excluded(MEMORY.TTL_DAYS))
                         // Fidelity fields: copy verbatim from source (not now(), not 0)
                         .set(MEMORY.TIMESTAMP,     excluded(MEMORY.TIMESTAMP))
                         .set(MEMORY.ACCESS_COUNT,  excluded(MEMORY.ACCESS_COUNT))
@@ -980,7 +980,7 @@ public final class MemoryRepository {
                         .set(MEMORY.SESSION,      session)
                         .set(MEMORY.AGENT,        agent)
                         .set(MEMORY.TIMESTAMP,    now)
-                        .set(MEMORY.TTL,          ttlDays)
+                        .set(MEMORY.TTL_DAYS,          ttlDays)
                         .set(MEMORY.ACCESS_COUNT, 0)
                         .onConflict(MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE)
                         .doUpdate()
@@ -989,7 +989,7 @@ public final class MemoryRepository {
                         .set(MEMORY.SESSION,      session)
                         .set(MEMORY.AGENT,        agent)
                         .set(MEMORY.TIMESTAMP,    now)
-                        .set(MEMORY.TTL,          ttlDays)
+                        .set(MEMORY.TTL_DAYS,          ttlDays)
                         .returning(MEMORY.ID)
                         .fetchOne();
 

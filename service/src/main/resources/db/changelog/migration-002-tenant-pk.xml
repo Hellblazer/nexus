@@ -1,0 +1,191 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-tk070.p5b (RDR-194 § D4, § P5b) — REWORKED 2026-08-20: DROP
+    `nexus.migration_jobs`, not widen its PK.
+
+    WHAT CHANGED AND WHY. This file originally shipped a composite-PK
+    widening ((job_id) -> (tenant_id, job_id)) to close the one genuine
+    tenant-keying gap D4 found. Stacked review (substantive-critic,
+    T2 substantive-critique-tk070-p5b-2026-08-20) surfaced a CRITICAL
+    finding the original D4 research missed: `nexus.migration_jobs` has ZERO
+    live producers or consumers. `MigrationHandler.java` and
+    `MigrationJobRepository.java` were DELETED at commit `7bcf29c67`
+    (2026-07-24) — the RDR-178 Gap 5 async-ingest-cloud-job-tracking feature
+    this table backed no longer exists in the service. Sam's disposition
+    (2026-08-20, relayed via the orchestrator): DROP the table outright.
+    Widening the PK of a table nothing writes to or reads from would have
+    been correct-but-pointless; dropping dead schema is the actual fix. This
+    SUPERSEDES the tenant-keying remedy D4 recorded for this table — see the
+    CORRECTION blockquote at the RDR's own D4 section
+    (`docs/rdr/rdr-194-fk-census-structural-schema-warts.md`, ~line 800) for
+    the full disposition trail.
+
+    DEATH EVIDENCE, restated here so this file is self-contained:
+      - `MigrationHandler.java` + `MigrationJobRepository.java`: deleted at
+        `7bcf29c67`.
+      - Zero producers: nothing in `service/src/main/java` inserts, updates,
+        or reads `nexus.migration_jobs` (grep confirms only a stale
+        docstring/comment reference survives, in
+        `CatalogRepository.java:6351` and this same file's own prior prose —
+        no executable code path).
+      - Zero consumers: no `/v1/migration/*` HTTP route registers a handler
+        that touches this table any more.
+      - The ONLY other Python reference is `src/nexus/health.py`'s RLS
+        table-completeness list (removed in this same commit family — see
+        that file's own comment for the chash_index/chash_alias precedent
+        this follows) and the doctor's mirrored test list.
+      - No wire claim is made about this table anywhere after this
+        changeset: the caller-visible `job_id` handle D0.8 protected in the
+        PK-widen version no longer has a live caller to protect, since the
+        API surface that returned it is gone.
+
+    IDX_MIGRATION_JOBS_ACTIVE_DEDUP goes with the table. `DROP TABLE`
+    cascades both indexes (`idx_migration_jobs_tenant_created`,
+    `idx_migration_jobs_active_dedup`) and the `tenant_isolation` RLS
+    policy — nothing survives that needs a separate `DROP INDEX` /
+    `DROP POLICY` statement (same cascade reasoning as
+    `legacy-001-drop-chash-alias.xml`'s changeset 5, the precedent this
+    changeset's shape follows).
+
+    GRANTS SWEEP (checked, nothing to change). `grants-nexus-svc.xml` and
+    `grants-nexus-diag.xml` grant via a `pg_class`-driven loop over
+    `ALL TABLES` in the `nexus`/`t1` schemas (dynamic `EXECUTE 'GRANT ...
+    ON %I.%I ...'`), never a per-table name list — dropping a table simply
+    removes it from the next loop's iteration set, the same way
+    `chash_alias`'s drop needed no grants-file edit. Neither grants file
+    names `migration_jobs` literally (verified by grep across every
+    changelog file); no runAlways grant references it, so no boot-time
+    error risk from this drop.
+
+    PRE-DROP ROW-COUNT NOTICE (the `fk-004-0-reconcile-precount` pattern,
+    `fk-004-chunks-collection-registry.xml`, bead nexus-iq0qr): a drop of a
+    POPULATED table must announce what it deleted, never silently. This
+    changeset counts the row population before dropping, RAISE NOTICEs it,
+    then drops — matching that precedent's shape (a read-only audit step
+    ahead of the mutation, not a gate: the count is evidence, the drop
+    proceeds regardless of its value, same "confirm-zero-or-delete-anyway"
+    discipline `legacy-001-drop-chash-alias.xml`'s header states for its own
+    deletes).
+
+    SHAPE-AGNOSTIC / NEVER-WEDGE (migrations-never-wedge doctrine). The
+    pre-count read and the `DROP TABLE` both tolerate the table already
+    being absent: the count step checks `pg_class` for existence before
+    touching the table (an unconditional `SELECT count(*) FROM
+    nexus.migration_jobs` would error on a box where it is already gone),
+    and the `DROP TABLE IF EXISTS` needs no matching guard at all. Neither
+    statement assumes a particular prior schema state.
+
+    RLS TOGGLE on the pre-count read ONLY. `migration_jobs` carries FORCE
+    ROW LEVEL SECURITY (`migration-001-baseline.xml:102-103`). Liquibase
+    runs as `nexus_admin`, NOT BYPASSRLS — an untoggled `SELECT count(*)`
+    under FORCE RLS with no `nexus.tenant` GUC set would report 0 for every
+    tenant regardless of actual content (the same silent-vacuity risk
+    `catalog-029-1`/`legacy-001-1`/`legacy-001-2` toggle around). The `DROP
+    TABLE` itself needs no toggle — DDL always sees the full physical table
+    regardless of RLS, per this file's own prior header on the (now
+    superseded) PK-widen version and `taxonomy-014`'s identical reasoning —
+    and no FORCE restore is needed afterward since the table stops existing
+    in the same changeset.
+
+    D0.6 ROLLBACK: recreates `nexus.migration_jobs` EMPTY — the exact
+    `migration-001-baseline.xml` shape (table, both indexes, RLS
+    enable+force, `tenant_isolation` policy) — the only honest recreation.
+    Whatever rows existed before this changeset ran are UNRECOVERABLE by
+    construction, not an oversight (D0.6; `legacy-001-drop-chash-alias.xml`'s
+    identical rollback discipline, itself citing the nexus-cck6z
+    data-fidelity lesson: a rollback that cannot restore data must say so
+    inline, never silently omit the gap).
+
+    D0.1 placement UNCHANGED: this file stays at the changelog TAIL,
+    immediately after `taxonomy-014-topics-tenant-unique.xml` and before the
+    `grants-nexus-svc.xml` runAlways block — the rework only replaces this
+    file's OWN content, not its position in `db.changelog-master.xml`.
+
+    EXPECT_NEW_CHANGESETS=1 (unchanged from the PK-widen version — one
+    changeset, same id `migration-002-1`, same author tag). Nothing else in
+    the changelog tree changes shape as a result of this rework.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset migration-002-1: DROP nexus.migration_jobs (dead table) ── -->
+    <changeSet id="migration-002-1" author="nexus-tk070.p5b">
+        <comment>
+            RDR-194 D4 (reworked, Sam disposition 2026-08-20): nexus.migration_jobs
+            is dead -- MigrationHandler.java + MigrationJobRepository.java deleted
+            at 7bcf29c67 (2026-07-24), zero producers/consumers. DROP the table
+            rather than widen its PK. Pre-drop row-count RAISE NOTICE (the
+            fk-004-0-reconcile-precount pattern) so a populated table is never
+            silently discarded. Shape-agnostic: tolerates the table already being
+            absent. idx_migration_jobs_active_dedup and idx_migration_jobs_tenant_created
+            go with the table via DROP TABLE's cascade -- no separate DROP INDEX.
+            Rollback recreates the exact migration-001-baseline.xml shape, EMPTY
+            (D0.6) -- any rows dropped here are unrecoverable.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+DECLARE
+    v_table_exists BOOLEAN;
+    v_row_count BIGINT;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1 FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'nexus' AND c.relname = 'migration_jobs'
+    ) INTO v_table_exists;
+
+    IF v_table_exists THEN
+        EXECUTE 'ALTER TABLE nexus.migration_jobs NO FORCE ROW LEVEL SECURITY';
+        EXECUTE 'SELECT count(*) FROM nexus.migration_jobs' INTO v_row_count;
+        RAISE NOTICE 'nexus-tk070.p5b: dropping nexus.migration_jobs (dead table -- MigrationHandler/MigrationJobRepository deleted 7bcf29c67, zero producers/consumers, RDR-194 D4 disposition 2026-08-20) -- % row(s) discarded, unrecoverable', v_row_count;
+    ELSE
+        RAISE NOTICE 'nexus-tk070.p5b: nexus.migration_jobs already absent -- nothing to drop';
+    END IF;
+END $$;
+
+DROP TABLE IF EXISTS nexus.migration_jobs;
+        </sql>
+        <rollback>
+            <!-- Recreates nexus.migration_jobs EMPTY — the exact
+                 migration-001-baseline.xml shape (table, both indexes, RLS
+                 enable+force, tenant_isolation policy). Whatever rows existed
+                 before this changeset ran are UNRECOVERABLE (D0.6) — this
+                 rollback restores the SCHEMA the dead feature used to have,
+                 not any data, matching legacy-001-drop-chash-alias.xml's
+                 identical rollback discipline. -->
+            <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.migration_jobs (
+    job_id                TEXT         NOT NULL,
+    tenant_id              TEXT         NOT NULL,
+    state                   TEXT         NOT NULL DEFAULT 'queued',
+    collections              JSONB        NOT NULL,
+    collections_key          TEXT         NOT NULL,
+    per_collection_counts    JSONB        NOT NULL DEFAULT '{}'::jsonb,
+    started_at               TIMESTAMPTZ,
+    finished_at              TIMESTAMPTZ,
+    error                   TEXT,
+    created_at               TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT migration_jobs_pk PRIMARY KEY (job_id),
+    CONSTRAINT migration_jobs_state_chk CHECK (state IN ('queued', 'running', 'done', 'failed'))
+);
+
+CREATE INDEX idx_migration_jobs_tenant_created ON nexus.migration_jobs (tenant_id, created_at DESC);
+
+CREATE UNIQUE INDEX idx_migration_jobs_active_dedup
+    ON nexus.migration_jobs (tenant_id, collections_key)
+    WHERE state IN ('queued', 'running');
+
+ALTER TABLE nexus.migration_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.migration_jobs FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation ON nexus.migration_jobs
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

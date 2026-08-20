@@ -89,7 +89,10 @@ _CATALOG_REPOSITORY = (
 #:   * a scalar column holding a collection name WITHOUT "collection" in its name
 #:     (``corpus``, ``store``, ``owner_scope``, a bare ``name`` on a child table);
 #:   * a collection name nested inside JSONB, which is not a column at all — this
-#:     is not theoretical, it is ``migration_jobs`` below;
+#:     was not theoretical: ``migration_jobs`` (dropped 2026-08-20,
+#:     nexus-tk070.p5b, dead code) was the one concrete instance, tracked as
+#:     nexus-rvr1n, which stays open as a class-level gap even with that
+#:     instance gone;
 #:   * a collection referenced indirectly, via an id that resolves to a name.
 #: The first class is the dangerous one, because it looks exactly like the columns
 #: this gate DOES catch. Closing it needs a value-shaped check (does any column hold
@@ -136,23 +139,18 @@ _DOCUMENTED_EXCLUSIONS: dict[tuple[str, str], str] = {
         "historical fact about a completed migration, not a live pointer. See "
         "nexus-4nll0 (ruling) and nexus-lgef3 (the accepted rename-detach consequence)."
     ),
-    ("migration_jobs", "collections"): (
-        "JSONB ARRAY of collection names (a job's whole input set), not a scalar "
-        "denormalized name. COLLECTION_SCOPED_TABLES drives a scalar "
-        "`UPDATE ... SET col = new WHERE col = old`, which cannot express a rewrite "
-        "inside a JSONB document. A rename during an ACTIVE job therefore leaves the "
-        "job pointing at a name that no longer exists — a real gap, but one this "
-        "mechanism cannot close. Tracked as nexus-rvr1n."
-    ),
-    ("migration_jobs", "collections_key"): (
-        "Idempotency key DERIVED from the collections set (at most one active job per "
-        "(tenant, collection-set), nexus-melvx). Derived value, not a reference: "
-        "rewriting it would forge a different job's identity. See nexus-rvr1n."
-    ),
-    ("migration_jobs", "per_collection_counts"): (
-        "JSONB map keyed BY collection name — progress counters, not a reference. "
-        "Same scalar-UPDATE limitation as `collections`. See nexus-rvr1n."
-    ),
+    # ("migration_jobs", "collections"/"collections_key"/"per_collection_counts")
+    # REMOVED (nexus-tk070.p5b, reworked 2026-08-20): the table itself was
+    # DROPPED (migration-002-tenant-pk.xml) — dead code, zero producers/
+    # consumers, Sam disposition 2026-08-20. These three entries used to
+    # document the nexus-rvr1n JSONB-nested-collection-name gap (the
+    # "not theoretical, it is migration_jobs below" example above); that
+    # gap's illustrating table no longer exists, so the entries would fail
+    # test_documented_exclusions_are_live's liveness check (an allowlist
+    # that outlives the table it names silently pre-approves whatever lands
+    # at that name next — exactly the failure mode this file's own header
+    # warns about). nexus-rvr1n itself stays open as a class-level gap;
+    # this was only its one concrete instance.
 }
 
 _ENTRY_RE = re.compile(

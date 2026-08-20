@@ -1056,6 +1056,37 @@ public final class StagingPromoteOps {
             Field<OffsetDateTime> gLh = stagedFrecencyAgg.field("lh", OffsetDateTime.class);
             Field<OffsetDateTime> gEa = stagedFrecencyAgg.field("ea", OffsetDateTime.class);
             Field<Integer> gTd = stagedFrecencyAgg.field("td", Integer.class);
+            // nexus-tk070.p6b fix-pass (code-review IMPORTANT finding,
+            // 2026-08-20; regression test:
+            // StagingPromoteFrecencyTtlCheckRegressionTest): TTL_DAYS's
+            // GREATEST merge is DELIBERATELY the same shape as the other
+            // four columns, but the RDR-194 D5 migration (telemetry-006-1)
+            // changed what an existing NULL means here — worth stating
+            // explicitly rather than leaving implicit.
+            //
+            // Postgres's GREATEST ignores NULL arguments unless ALL are
+            // NULL. Pre-migration (0=permanent, no CHECK): GREATEST(0, 0)
+            // = 0 — an existing permanent row merged against a staged
+            // permanent row silently stayed 0. Post-migration
+            // (NULL=permanent, CHECK-enforced): an EXISTING row can be
+            // NULL (permanent) while a STAGED row can still carry an
+            // explicit 0 (staging has no CHECK — 0 remains representable
+            // there by design, legacy-001-3 precedent) — GREATEST(NULL, 0)
+            // = 0 (NULL is ignored, not treated as "greater"), so this
+            // UPDATE attempts to WRITE 0 into a CHECK-constrained column
+            // and throws (sqlstate 23514,
+            // frecency_ttl_days_positive_chk). This is a genuine behavior
+            // change (silent-success -> fail-loud), not merely a
+            // continuation of the old semantics — but it is the CORRECT
+            // and SAFE direction: StagingHandler's existing
+            // catch(Exception)->HttpUtil.sendTypedDbError turns it into a
+            // 409 with a remedy (the %_ttl_days_positive_chk wildcard
+            // match), never a silent write of the now-retired sentinel.
+            // No merge-logic change was made here — the asymmetry is
+            // accepted, documented, and regression-tested, not "fixed"
+            // (fixing it would mean re-coercing a CHECK-violating value
+            // into place, the exact silent reinterpretation this arc
+            // retires).
             ctx.update(FRECENCY)
                 .set(FRECENCY.FRECENCY_SCORE, DSL.greatest(FRECENCY.FRECENCY_SCORE, gFs))
                 .set(FRECENCY.MISS_COUNT, DSL.greatest(FRECENCY.MISS_COUNT, gMc))

@@ -510,3 +510,44 @@ class TestGuidanceImperativeIntegration:
             output = session_start(claude_session_id="s-h33x8-4-e2e")
         assert "Nexus ready" in output
         assert GUIDANCE_IMPERATIVE in output
+
+
+# ── nexus-h33x8.5 VERIFICATION 1: the `nx hook session-start` emitter's own
+# byte budget, end-to-end through session_start(). Mirrors the mocking
+# pattern from TestStaleMcpHostSessionStartNudge so the stale-process
+# best-effort probe (real filesystem/process introspection otherwise)
+# can't make this flaky.
+
+
+class TestGuidanceByteBudgetIntegration:
+    #: session_start()'s own "Nexus ready (session: ...)." prefix plus the
+    #: (mocked-absent) stale-process NOTE plus the short guidance block.
+    #: 2,000 leaves headroom over the measured 2026-08-20 baseline (~1,182
+    #: bytes for a typical session id) while remaining far below the
+    #: routing-menu-era baseline this replaces (~8,800 bytes) and well
+    #: under this emitter's share of the bead's 6,000-byte SessionStart
+    #: total (the other unconditional emitter, session_start_hook.py, is
+    #: out of this bead's scope — see nexus-h33x8.5 dev notes).
+    _TOTAL_BUDGET_BYTES = 2000
+
+    def test_session_start_output_under_byte_budget_with_imperative_first(
+        self, monkeypatch
+    ) -> None:
+        from unittest.mock import patch as _patch
+
+        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+        with (
+            _patch("nexus.hooks.write_claude_session_id"),
+            _patch(
+                "nexus.upgrade_finish.detect_stale_processes",
+                return_value=_FakeSkewReport(stale=[]),
+            ),
+        ):
+            output = session_start(claude_session_id="s-h33x8-5-budget")
+        n = len(output.encode("utf-8"))
+        assert n < self._TOTAL_BUDGET_BYTES, (
+            f"nx hook session-start emitted {n} bytes, budget is "
+            f"{self._TOTAL_BUDGET_BYTES}"
+        )
+        head = output.encode("utf-8")[:500].decode("utf-8", errors="ignore")
+        assert "You MUST invoke `Skill`" in head

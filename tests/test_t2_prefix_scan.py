@@ -30,9 +30,13 @@ def test_snippet_skips_separator_lines() -> None:
 
 
 def test_snippet_truncates_at_max_chars() -> None:
+    """Explicit ``max_chars`` rather than the function's own tuned default
+    (nexus-h33x8.5 fix-pass: the default was retuned 120->70; hardcoding
+    the pre-tune value here made this test a silent pin on a render-density
+    constant it has no business caring about)."""
     long_line = "x" * 200
-    result = _snippet(long_line)
-    assert result == "x" * 120 + "…"
+    result = _snippet(long_line, max_chars=50)
+    assert result == "x" * 50 + "…"
 
 
 def test_snippet_no_ellipsis_when_short() -> None:
@@ -127,31 +131,39 @@ def test_entries_1_to_5_include_snippet(tmp_path: Path) -> None:
     assert " — Content of entry" in output
 
 
-def test_entries_6_to_8_title_only(tmp_path: Path) -> None:
-    """3 of 8 entries per namespace appear without a snippet (title-only).
+def test_entries_snippet_limit_to_title_limit_are_title_only(tmp_path: Path) -> None:
+    """``_TITLE_LIMIT - _SNIPPET_LIMIT`` entries per namespace appear
+    without a snippet (title-only), out of ``_TITLE_LIMIT`` total.
 
-    With 8 entries: 5 get snippets (_SNIPPET_LIMIT), 3 are title-only.
-    We don't assert *which* entries are title-only because all entries share
-    the same second-level timestamp, making SQLite ordering non-deterministic.
+    Derived from the constants themselves (nexus-h33x8.5 fix-pass: the
+    caps were retuned 5/8->3/5; a version hardcoding "8"/"5"/"3" would
+    have silently pinned the pre-tune values rather than the behavior).
+    We don't assert *which* entries are title-only because all entries
+    share the same second-level timestamp, making SQLite ordering
+    non-deterministic.
     """
     with _make_db(tmp_path) as db:
-        for i in range(1, 9):
+        for i in range(1, _TITLE_LIMIT + 1):
             db.put(project="repo", title=f"entry-{i}.md", content=f"Content of entry {i}")
         output = _run_scan(db, "repo")
     entry_lines = [l for l in output.splitlines() if "entry-" in l]
     with_snippet = [l for l in entry_lines if " — " in l]
     without_snippet = [l for l in entry_lines if " — " not in l]
-    assert len(with_snippet) == _SNIPPET_LIMIT  # 5
-    assert len(without_snippet) == _TITLE_LIMIT - _SNIPPET_LIMIT  # 3
+    assert len(with_snippet) == _SNIPPET_LIMIT
+    assert len(without_snippet) == _TITLE_LIMIT - _SNIPPET_LIMIT
 
 
-def test_entries_beyond_8_appear_as_count(tmp_path: Path) -> None:
-    """Entries beyond 8 per namespace are summarised as '… (N more)'."""
+def test_entries_beyond_title_limit_appear_as_count(tmp_path: Path) -> None:
+    """Entries beyond ``_TITLE_LIMIT`` per namespace are summarised as
+    '… (N more)' -- N derived from the constant (nexus-h33x8.5 fix-pass;
+    was hardcoded "12 entries -> 3 more" against the pre-tune _TITLE_LIMIT=8)."""
+    overflow = 3
+    total_entries = _TITLE_LIMIT + overflow
     with _make_db(tmp_path) as db:
-        for i in range(1, 12):
+        for i in range(1, total_entries + 1):
             db.put(project="repo", title=f"entry-{i}.md", content=f"Content {i}")
         output = _run_scan(db, "repo")
-    assert "… (3 more)" in output
+    assert f"… ({overflow} more)" in output
 
 
 def test_hard_cap_across_namespaces(tmp_path: Path) -> None:

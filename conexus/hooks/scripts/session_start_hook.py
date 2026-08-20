@@ -64,6 +64,73 @@ def run_command(args: list[str], timeout: int, cwd: str | None = None) -> str | 
     return None
 
 
+#: Ready-beads render caps (nexus-h33x8.5 fix-pass, VERIFICATION 1 combined
+#: budget): was 10 lines / 500 chars each, uncapped total. An overflow
+#: count line replaces the lines dropped, so the trim is visible rather
+#: than a silent truncation.
+_READY_BEADS_MAX_LINES = 5
+_READY_BEADS_MAX_CHARS = 160
+
+
+def _render_ready_beads(
+    ready_output: str | None,
+    *,
+    max_lines: int = _READY_BEADS_MAX_LINES,
+    max_chars: int = _READY_BEADS_MAX_CHARS,
+) -> list[str]:
+    """Render the ``## Ready Beads`` block from raw ``bd ready`` stdout.
+
+    Pure function (no subprocess call) so the combined SessionStart byte
+    budget can be tested against a representative fixture string instead
+    of live, daily-varying ``bd ready`` output (nexus-h33x8.5 fix-pass).
+    Returns ``[]`` for empty/None input — caller appends nothing.
+    """
+    if not ready_output:
+        return []
+    all_lines = ready_output.split("\n")
+    shown = all_lines[:max_lines]
+    lines = ["## Ready Beads", "```"]
+    lines.extend(line[:max_chars] for line in shown)
+    overflow = len(all_lines) - len(shown)
+    if overflow > 0:
+        lines.append(f"… ({overflow} more — `bd ready` for full list)")
+    lines.append("```")
+    lines.append("")
+    return lines
+
+
+def _build_capabilities_block() -> list[str]:
+    """Static ``## nx Capabilities`` reference lines.
+
+    Condensed (nexus-h33x8.5 fix-pass, VERIFICATION 1 combined budget)
+    from the original prose-heavy form — every distinct backtick-quoted
+    token (tool name, flag, example) is preserved; only connective prose
+    ("MCP tool", "for metadata filtering", a second redundant prefix
+    example) was cut. Pure/static so it is directly measurable and
+    testable without a subprocess.
+    """
+    return [
+        "## nx Capabilities",
+        "",
+        '`search` MCP tool: `where="KEY>=VALUE"` filter, `cluster_by="semantic"` '
+        'grouping, `topic="Label"` scoping, `where="section_type!=references"` '
+        "noise filter (results carry `chunk_text_hash`)",
+        "`query` MCP tool: document-level, catalog-aware (`author`, `content_type`, "
+        "`subtree`, `follow_links`, `depth`), taxonomy-boosted",
+        "`/conexus:query` skill: multi-step retrieval/analysis",
+        "`plan_save`/`plan_search` MCP tools: T2, project-scoped plan library",
+        "`scratch` MCP tool: session-scoped, shared across agents",
+        "`search`/`links`/`link` MCP tools (nexus-catalog): metadata-first; "
+        "`chash:` spans preferred for link creation",
+        "`nx enrich bib COLLECTION` (Semantic Scholar) | `nx enrich aspects "
+        "COLLECTION` (RDR-089 aspects)",
+        "Pagination: search/store_list/memory_search page; footer shows `offset=N`",
+        "MCP prefix: `mcp__plugin_conexus_nexus__` "
+        "(e.g. `mcp__plugin_conexus_nexus__search`)",
+        "",
+    ]
+
+
 def main() -> None:
     project_dir = Path(os.environ.get('CLAUDE_PROJECT_DIR', os.getcwd())).resolve()
     cwd = str(project_dir)
@@ -94,30 +161,12 @@ def main() -> None:
     # --- bd ready ---
     if which('bd'):
         ready_output = run_command(['bd', 'ready'], timeout=BD_TIMEOUT, cwd=cwd)
-        if ready_output:
-            lines = ready_output.split('\n')[:10]  # cap at 10 lines
-            output_lines.append("## Ready Beads")
-            output_lines.append("```")
-            output_lines.extend(line[:500] for line in lines)
-            output_lines.append("```")
-            output_lines.append("")
+        output_lines.extend(_render_ready_beads(ready_output))
     else:
         debug("bd command not found")
 
     # --- Capabilities summary (AI-optimized, minimal tokens) ---
-    output_lines.append("## nx Capabilities")
-    output_lines.append("")
-    output_lines.append("Search: `search` MCP tool — `where=\"KEY>=VALUE\"` for metadata filtering, `cluster_by=\"semantic\"` for result grouping, `topic=\"Label\"` for topic-scoped search, `where=\"section_type!=references\"` to filter noise (results include `chunk_text_hash` metadata)")
-    output_lines.append("Document search: `query` MCP tool — document-level results with catalog-aware routing (`author`, `content_type`, `subtree`, `follow_links`, `depth`), taxonomy-boosted ranking")
-    output_lines.append("Analytical queries: `/conexus:query` skill — multi-step retrieval and analysis")
-    output_lines.append("Plan library: `plan_save`/`plan_search` MCP tools (T2, project-scoped)")
-    output_lines.append("Scratch: `scratch` MCP tool — session-scoped, shared across agents")
-    output_lines.append("Catalog: `search`/`links`/`link` MCP tools (nexus-catalog server) — metadata-first routing; link creation with `chash:` spans (content-addressed, preferred)")
-    output_lines.append("Enrichment: `nx enrich bib COLLECTION` (Semantic Scholar) | `nx enrich aspects COLLECTION` (RDR-089 structured aspects)")
-    output_lines.append("Pagination: search/store_list/memory_search return paged results. Footer shows `offset=N` for next page.")
-    output_lines.append("")
-    output_lines.append("MCP tool prefix: `mcp__plugin_conexus_nexus__` (e.g. `mcp__plugin_conexus_nexus__search`, `mcp__plugin_conexus_nexus__query`)")
-    output_lines.append("")
+    output_lines.extend(_build_capabilities_block())
 
     # --- L1 Knowledge Map (RDR-072) — per-repo cached topic labels ---
     context_l1_path: str | None = None

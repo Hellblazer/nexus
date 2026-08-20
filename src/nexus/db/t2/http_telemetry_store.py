@@ -835,7 +835,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         *,
         chunk_id: str,
         embedded_at: str | None,
-        ttl_days: int,
+        ttl_days: int | None,
         frecency_score: float,
         miss_count: int,
         last_hit_at: str | None,
@@ -844,6 +844,13 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
         Uses ``POST /v1/telemetry/import`` with ``table=frecency``.
         GREATEST for score/count/last_hit_at; LEAST for embedded_at.
+
+        ``ttl_days`` type widened to ``int | None`` (code-review cosmetic
+        finding, nexus-tk070.p6b fix-pass, 2026-08-20): stale relative to
+        the None-sentinel convention (RDR-194 D5) — this is dead ETL-only
+        code (sole caller already deleted, retirement overdue since
+        7.0.0), so this is a type-hint-only correction, not a behavior
+        change; left for whoever eventually deletes the method.
         """
         payload: dict[str, Any] = {
             "table":          "frecency",

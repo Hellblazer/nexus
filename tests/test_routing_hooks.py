@@ -275,6 +275,217 @@ def test_log_routing_event_swallows_errors(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Telemetry JSONL rotation (Sam-directed fix pass, 2026-08-20)
+#
+# ROTATION, NOT TRIM-IN-PLACE: routing_log.jsonl is appended to by MANY
+# concurrent routing-hook processes (every gated Bash/Agent/git command,
+# across however many Claude Code sessions are live at once) -- a
+# read-modify-write to keep only the newest N lines races those
+# concurrent line-atomic appends and can lose the file outright on a
+# crash mid-rewrite. Rotation by atomic rename never reads the file's
+# content at all.
+# ---------------------------------------------------------------------------
+
+
+def test_rotate_log_if_oversized_leaves_undersize_log_untouched(tmp_path):
+    lib = _load_lib()
+    log_path = tmp_path / "routing_log.jsonl"
+    log_path.write_text('{"rule": "small"}\n')
+
+    lib._rotate_log_if_oversized(log_path)
+
+    assert log_path.read_text() == '{"rule": "small"}\n'
+    assert not log_path.with_name(log_path.name + ".1").exists()
+
+
+def test_rotate_log_if_oversized_rotates_via_atomic_rename(tmp_path, monkeypatch):
+    lib = _load_lib()
+    monkeypatch.setattr(lib, "_ROUTING_LOG_ROTATION_MAX_BYTES", 10)
+    log_path = tmp_path / "routing_log.jsonl"
+    log_path.write_text("x" * 100)
+
+    lib._rotate_log_if_oversized(log_path)
+
+    assert not log_path.exists()
+    rotated = tmp_path / "routing_log.jsonl.1"
+    assert rotated.exists()
+    assert rotated.read_text() == "x" * 100
+
+
+def test_rotate_log_if_oversized_clobbers_prior_generation(tmp_path, monkeypatch):
+    """Exactly one older generation retained -- ``.1`` clobbered, never
+    accumulated into ``.2``."""
+    lib = _load_lib()
+    monkeypatch.setattr(lib, "_ROUTING_LOG_ROTATION_MAX_BYTES", 10)
+    log_path = tmp_path / "routing_log.jsonl"
+    (tmp_path / "routing_log.jsonl.1").write_text("STALE-OLD-GENERATION")
+    log_path.write_text("FRESH" * 5)
+
+    lib._rotate_log_if_oversized(log_path)
+
+    rotated = tmp_path / "routing_log.jsonl.1"
+    assert rotated.read_text() == "FRESH" * 5
+    assert not (tmp_path / "routing_log.jsonl.2").exists()
+
+
+def test_rotate_log_if_oversized_tolerates_concurrent_rotation_race(tmp_path, monkeypatch):
+    """A second process's rename hitting FileNotFoundError is expected and
+    silently fine -- the file is rotated either way."""
+    lib = _load_lib()
+    monkeypatch.setattr(lib, "_ROUTING_LOG_ROTATION_MAX_BYTES", 10)
+    log_path = tmp_path / "routing_log.jsonl"
+    log_path.write_text("x" * 100)
+
+    def _simulated_concurrent_rotation(_src, _dst):
+        raise FileNotFoundError("simulated: another process rotated first")
+
+    monkeypatch.setattr(lib.os, "replace", _simulated_concurrent_rotation)
+
+    lib._rotate_log_if_oversized(log_path)  # must not raise
+
+
+def test_log_routing_event_rotates_before_append(tmp_path, monkeypatch):
+    """Integration: an oversize routing_log.jsonl rotates, and the new
+    event lands in the fresh (post-rotation) file."""
+    log_path = tmp_path / "routing_log.jsonl"
+    monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log_path))
+    lib = _load_lib()
+    monkeypatch.setattr(lib, "_ROUTING_LOG_ROTATION_MAX_BYTES", 10)
+    log_path.write_text("x" * 100)
+
+    lib.log_routing_event(rule="rule_a", outcome="allow")
+
+    rotated = tmp_path / "routing_log.jsonl.1"
+    assert rotated.read_text() == "x" * 100
+    lines = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert lines[0]["rule"] == "rule_a"
+
+
+def test_log_routing_event_rotation_failure_never_breaks_the_append(tmp_path, monkeypatch):
+    """A non-ENOENT rotation failure (e.g. a permission error on the
+    rename) must still let the append proceed."""
+    log_path = tmp_path / "routing_log.jsonl"
+    monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log_path))
+    lib = _load_lib()
+    monkeypatch.setattr(lib, "_ROUTING_LOG_ROTATION_MAX_BYTES", 10)
+    # Trailing newline: real log content is always line-terminated (every
+    # log_routing_event write ends in "\n") -- this keeps the pre-existing
+    # oversize content and the new append parseable as separate JSONL
+    # lines even though rotation is simulated to fail.
+    log_path.write_text("x" * 100 + "\n")
+
+    def _boom(_src, _dst):
+        raise PermissionError("simulated rotation failure")
+
+    monkeypatch.setattr(lib.os, "replace", _boom)
+
+    lib.log_routing_event(rule="rule_b", outcome="allow")  # must not raise
+
+    assert log_path.exists()
+    # The pre-existing "x" * 100 filler line is deliberately not valid
+    # JSON (synthetic oversize content); only the newly appended LAST
+    # line is asserted on, since that is the actual write under test.
+    last_line = log_path.read_text().splitlines()[-1]
+    assert json.loads(last_line)["rule"] == "rule_b"
+
+
+# ---------------------------------------------------------------------------
+# TOCTOU double-rotation clobber (code-review Critical, nexus-g3jw6,
+# fix pass 2026-08-20) -- same fix as nexus._session_end_census's twin
+# bug, ported here since this file rotates routing_log.jsonl the same
+# way. See _session_end_census.py's TestRotationTOCTOUSerialization
+# docstring for the full mechanism explanation.
+# ---------------------------------------------------------------------------
+
+
+def test_stale_oversize_observation_does_not_clobber_a_fresher_rotation(tmp_path, monkeypatch):
+    """Deterministic simulation: fakes ONLY the FIRST ``Path.stat()``
+    call against the log path (P2's cheap, pre-lock decision) as
+    stale-oversize; every subsequent call sees the TRUE current size,
+    exactly as the fix's re-check-under-the-lock would in a real
+    interleaving. Must fail against the pre-fix code."""
+    lib = _load_lib()
+    monkeypatch.setattr(lib, "_ROUTING_LOG_ROTATION_MAX_BYTES", 10)
+    log_path = tmp_path / "routing_log.jsonl"
+    rotated = tmp_path / "routing_log.jsonl.1"
+
+    log_path.write_text("OLD" * 50)  # 150 bytes, genuinely oversize
+
+    # P1: a real, correct rotation.
+    lib._rotate_log_if_oversized(log_path)
+    assert not log_path.exists()
+    assert rotated.read_text() == "OLD" * 50
+
+    # P1 reopens + appends -- the live file is small again.
+    log_path.write_text("x\n")
+    fresh_live_content = log_path.read_text()
+
+    real_stat = pathlib.Path.stat
+    call_count = {"n": 0}
+
+    class _StaleStatResult:
+        st_size = 999
+
+    def _stat_first_call_on_log_path_is_stale(self, *args, **kwargs):
+        if self == log_path:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return _StaleStatResult()
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "stat", _stat_first_call_on_log_path_is_stale)
+
+    lib._rotate_log_if_oversized(log_path)  # P2's rotation attempt
+
+    assert rotated.read_text() == "OLD" * 50, (
+        "P2 clobbered P1's real rotated history with a stale oversize "
+        "observation (the TOCTOU double-rotation bug, nexus-g3jw6)"
+    )
+    assert log_path.exists()
+    assert log_path.read_text() == fresh_live_content
+    assert call_count["n"] >= 2, (
+        "the fix must re-stat AT LEAST once more under the lock"
+    )
+
+
+def test_rotation_skips_entirely_when_lock_is_already_held(tmp_path, monkeypatch):
+    """Non-blocking acquire: a rotator that loses the lock race must
+    skip immediately (no wait, no retry, no raise)."""
+    lib = _load_lib()
+    monkeypatch.setattr(lib, "_ROUTING_LOG_ROTATION_MAX_BYTES", 10)
+    log_path = tmp_path / "routing_log.jsonl"
+    log_path.write_text("x" * 100)
+
+    lock_path = tmp_path / "routing_log.jsonl.rotate.lock"
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    held = os.fdopen(fd, "r+")
+    lib._lock_file(held, blocking=True)  # simulate another process mid-rotation
+    try:
+        lib._rotate_log_if_oversized(log_path)  # must not raise, must not block
+
+        assert log_path.read_text() == "x" * 100
+        assert not (tmp_path / "routing_log.jsonl.1").exists()
+    finally:
+        lib._unlock_file(held)
+        held.close()
+
+
+def test_normal_rotation_still_works_under_the_lock(tmp_path, monkeypatch):
+    """Regression pin: the lock must not itself prevent an ordinary,
+    uncontended rotation from happening."""
+    lib = _load_lib()
+    monkeypatch.setattr(lib, "_ROUTING_LOG_ROTATION_MAX_BYTES", 10)
+    log_path = tmp_path / "routing_log.jsonl"
+    log_path.write_text("x" * 100)
+
+    lib._rotate_log_if_oversized(log_path)
+
+    assert not log_path.exists()
+    assert (tmp_path / "routing_log.jsonl.1").read_text() == "x" * 100
+
+
+# ---------------------------------------------------------------------------
 # parse_stdin helper — defensive against malformed input
 # ---------------------------------------------------------------------------
 

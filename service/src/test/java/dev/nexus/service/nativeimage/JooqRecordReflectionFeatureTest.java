@@ -134,7 +134,15 @@ class JooqRecordReflectionFeatureTest {
     // functions (server-side RRF-fusion search), one generated Record
     // type each (HybridSearch_384Record/HybridSearch_768Record/
     // HybridSearch_1024Record), +3.
-    private static final int EXPECTED_RECORD_TYPES = 65;
+    // 65 -> 64: nexus-tk070.p5b (RDR-194 D4, reworked 2026-08-20,
+    // migration-002-tenant-pk.xml) DROPPED nexus.migration_jobs — dead
+    // table (MigrationHandler.java / MigrationJobRepository.java deleted
+    // at 7bcf29c67, zero producers/consumers, Sam disposition
+    // 2026-08-20). Plain table, one generated Record type (-1) —
+    // MigrationJobsRecord (added at the 50 -> 51 bump above) leaves with
+    // it. Same shape as nexus-lgdel.l1's chash_alias drop (63 -> 62,
+    // above).
+    private static final int EXPECTED_RECORD_TYPES = 64;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

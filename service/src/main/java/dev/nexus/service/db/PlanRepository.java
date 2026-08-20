@@ -248,10 +248,10 @@ public final class PlanRepository {
             // COALESCE, not last_used alone: a plan that has NEVER been used
             // must still age out from creation, or the library would accrete
             // every never-matched experiment forever.
-            Condition expiry = PLANS.TTL.isNull().or(
+            Condition expiry = PLANS.TTL_DAYS.isNull().or(
                 field("extract(epoch from now() - coalesce(last_used, created_at)) / 86400",
                       Double.class)
-                    .le(PLANS.TTL.cast(Double.class)));
+                    .le(PLANS.TTL_DAYS.cast(Double.class)));
             Condition active = PLANS.DISABLED_AT.isNull();
             Condition cond = PLANS.OUTCOME.eq(outcome).and(expiry).and(active);
             if (project != null && !project.isBlank()) {
@@ -300,10 +300,10 @@ public final class PlanRepository {
             // COALESCE, not last_used alone: a plan that has NEVER been used
             // must still age out from creation, or the library would accrete
             // every never-matched experiment forever.
-            Condition expiry = PLANS.TTL.isNull().or(
+            Condition expiry = PLANS.TTL_DAYS.isNull().or(
                 field("extract(epoch from now() - coalesce(last_used, created_at)) / 86400",
                       Double.class)
-                    .le(PLANS.TTL.cast(Double.class)));
+                    .le(PLANS.TTL_DAYS.cast(Double.class)));
             Condition active = PLANS.DISABLED_AT.isNull();
             // OR'd tsquery: prose stemming (english) + exact identifier match (simple)
             Condition fts = condition(
@@ -346,10 +346,10 @@ public final class PlanRepository {
             // COALESCE, not last_used alone: a plan that has NEVER been used
             // must still age out from creation, or the library would accrete
             // every never-matched experiment forever.
-            Condition expiry = PLANS.TTL.isNull().or(
+            Condition expiry = PLANS.TTL_DAYS.isNull().or(
                 field("extract(epoch from now() - coalesce(last_used, created_at)) / 86400",
                       Double.class)
-                    .le(PLANS.TTL.cast(Double.class)));
+                    .le(PLANS.TTL_DAYS.cast(Double.class)));
             Condition cond = expiry;
             if (!includeDisabled) {
                 cond = cond.and(PLANS.DISABLED_AT.isNull());
@@ -549,7 +549,7 @@ public final class PlanRepository {
                 List<ImportRow> batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
                 var insert = ctx.insertInto(PLANS,
                         PLANS.TENANT_ID, PLANS.PROJECT, PLANS.QUERY, PLANS.PLAN_JSON, PLANS.OUTCOME,
-                        PLANS.TAGS, PLANS.CREATED_AT, PLANS.TTL, PLANS.NAME, PLANS.VERB, PLANS.SCOPE,
+                        PLANS.TAGS, PLANS.CREATED_AT, PLANS.TTL_DAYS, PLANS.NAME, PLANS.VERB, PLANS.SCOPE,
                         PLANS.DIMENSIONS, PLANS.DEFAULT_BINDINGS, PLANS.PARENT_DIMS, PLANS.USE_COUNT,
                         PLANS.LAST_USED, PLANS.MATCH_COUNT, PLANS.MATCH_CONF_SUM, PLANS.SUCCESS_COUNT,
                         PLANS.FAILURE_COUNT, PLANS.SCOPE_TAGS, PLANS.MATCH_TEXT, PLANS.DISABLED_AT);
@@ -571,7 +571,7 @@ public final class PlanRepository {
                       .set(PLANS.PLAN_JSON,        excluded(PLANS.PLAN_JSON))
                       .set(PLANS.OUTCOME,          excluded(PLANS.OUTCOME))
                       .set(PLANS.TAGS,             excluded(PLANS.TAGS))
-                      .set(PLANS.TTL,              excluded(PLANS.TTL))
+                      .set(PLANS.TTL_DAYS,              excluded(PLANS.TTL_DAYS))
                       .set(PLANS.NAME,             excluded(PLANS.NAME))
                       .set(PLANS.VERB,             excluded(PLANS.VERB))
                       .set(PLANS.SCOPE,            excluded(PLANS.SCOPE))
@@ -641,7 +641,7 @@ public final class PlanRepository {
                         .set(PLANS.OUTCOME,          normOut)
                         .set(PLANS.TAGS,             normTags)
                         .set(PLANS.CREATED_AT,       createdAt)
-                        .set(PLANS.TTL,              ttlDays)
+                        .set(PLANS.TTL_DAYS,              ttlDays)
                         .set(PLANS.NAME,             name)
                         .set(PLANS.VERB,             verb)
                         .set(PLANS.SCOPE,            scope)
@@ -661,7 +661,7 @@ public final class PlanRepository {
                         .set(PLANS.OUTCOME,          normOut)
                         .set(PLANS.TAGS,             normTags)
                         .set(PLANS.CREATED_AT,       createdAt)
-                        .set(PLANS.TTL,              ttlDays)
+                        .set(PLANS.TTL_DAYS,              ttlDays)
                         .set(PLANS.NAME,             name)
                         .set(PLANS.VERB,             verb)
                         .set(PLANS.SCOPE,            scope)
@@ -718,7 +718,7 @@ public final class PlanRepository {
                         .set(PLANS.OUTCOME,          normOut)
                         .set(PLANS.TAGS,             normTags)
                         .set(PLANS.CREATED_AT,       createdAt)
-                        .set(PLANS.TTL,              ttlDays)
+                        .set(PLANS.TTL_DAYS,              ttlDays)
                         .set(PLANS.NAME,             name)
                         .set(PLANS.VERB,             verb)
                         .set(PLANS.SCOPE,            scope)
@@ -740,7 +740,7 @@ public final class PlanRepository {
                         .set(PLANS.PLAN_JSON,        excluded(PLANS.PLAN_JSON))
                         .set(PLANS.OUTCOME,          excluded(PLANS.OUTCOME))
                         .set(PLANS.TAGS,             excluded(PLANS.TAGS))
-                        .set(PLANS.TTL,              excluded(PLANS.TTL))
+                        .set(PLANS.TTL_DAYS,              excluded(PLANS.TTL_DAYS))
                         .set(PLANS.NAME,             excluded(PLANS.NAME))
                         .set(PLANS.VERB,             excluded(PLANS.VERB))
                         .set(PLANS.SCOPE,            excluded(PLANS.SCOPE))
@@ -800,7 +800,9 @@ public final class PlanRepository {
         m.put("created_at",       r.getCreatedAt() != null
                                    ? UTC_SECOND.format(r.getCreatedAt().withOffsetSameInstant(ZoneOffset.UTC))
                                    : null);
-        m.put("ttl",              r.getTtl());
+        // nexus-tk070.p6a: wire field name stays "ttl" (D0.8, unchanged) even
+        // though the column/jOOQ getter is now ttl_days (RDR-194 D5 rename).
+        m.put("ttl",              r.getTtlDays());
         m.put("name",             r.getName());
         m.put("verb",             r.getVerb());
         m.put("scope",            r.getScope());

@@ -30,9 +30,15 @@ if sys.version_info < (3, 12):
     )
     sys.exit(1)
 
-_HARD_CAP = 15       # max rendered entries across all namespaces combined
-_SNIPPET_LIMIT = 5   # per-namespace: entries up to this rank get a snippet
-_TITLE_LIMIT = 8     # per-namespace: entries up to this rank get title-only
+#: nexus-h33x8.5 fix-pass (VERIFICATION 1, combined SessionStart byte
+#: budget): tightened from 15/5/8/120 to 8/3/5/70. The per-namespace
+#: fetch/budget/freshness machinery below (nexus-9xado/nexus-eg6qe/
+#: nexus-8fvp2) is untouched -- only the RENDER density (how many
+#: entries, how long a snippet) shrank, since that machinery already
+#: fetches everything it needs regardless of these render caps.
+_HARD_CAP = 8         # max rendered entries across all namespaces combined
+_SNIPPET_LIMIT = 3    # per-namespace: entries up to this rank get a snippet
+_TITLE_LIMIT = 5      # per-namespace: entries up to this rank get title-only
 
 #: Cap on distinct namespaces this hook will issue a per-namespace
 #: ``/v1/memory/all`` request for, independent of ``_HARD_CAP`` (which only
@@ -327,7 +333,7 @@ def _http_get_json(
         raise _Unreachable(f"T2 engine returned malformed JSON for {path}: {exc}") from exc
 
 
-def _snippet(content: str, max_chars: int = 120) -> str:
+def _snippet(content: str, max_chars: int = 70) -> str:
     """Return first meaningful line of content, truncated."""
     for line in content.splitlines():
         line = line.strip()

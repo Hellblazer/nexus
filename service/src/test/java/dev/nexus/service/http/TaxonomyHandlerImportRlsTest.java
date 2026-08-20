@@ -40,11 +40,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>WHY THIS BUG EXISTED. The {@code /import/*} verbs preserve CLIENT-SUPPLIED ids
  * verbatim so a fidelity ETL round-trips, and {@code nexus.topics} has a GLOBAL
- * {@code BIGSERIAL} primary key — global because {@code topics_parent_fk} is
- * self-referential, so a composite {@code (tenant_id, id)} key would force every
- * {@code parent_id} to carry a tenant as well. When a second tenant supplies an id the
- * first already holds, the INSERT is refused by the RLS policy, not by the PK, because
- * RLS is evaluated first: the row exists but is invisible to this tenant.
+ * {@code BIGSERIAL} primary key — global because the self-referential parent FK
+ * ({@code fk_topics_parent_tenant} since RDR-194 P5a/taxonomy-014-2, formerly
+ * {@code topics_parent_fk}) means a composite {@code (tenant_id, id)} PRIMARY KEY
+ * would force every {@code parent_id} to carry a tenant as well (RDR-194 D4 instead
+ * added a separate {@code UNIQUE (tenant_id, id)} and repointed the FK onto it,
+ * leaving this PK unchanged). When a second tenant supplies an id the first already
+ * holds, the INSERT is refused by the RLS policy, not by the PK, because RLS is
+ * evaluated first: the row exists but is invisible to this tenant.
  *
  * <p>That refusal is SQLSTATE 42501 (insufficient_privilege), NOT class 23 — so
  * {@link HttpUtil#sqlState23} correctly declined it and it fell through to

@@ -21,9 +21,13 @@ engine substrate's freshly Liquibase-applied schema and asserts:
     - ``nexus.catalog_links.from_tumbler`` (and ``to_tumbler``) carry NO
       FK today (nexus-ysrwi: 277 dangling rows measured 2026-07-25,
       RDR-194 Problem Statement item 5 / Q2).
-    - ``nexus.migration_jobs`` has PK=(job_id) only — no tenant_id in the
-      PK and no tenant-scoped UNIQUE constraint (RLS-only protection;
-      RDR-194 Problem Statement item 3).
+    - ``nexus.migration_jobs`` no longer exists (reworked nexus-tk070.p5b,
+      2026-08-20, Sam disposition: the table was dead — zero producers/
+      consumers — so ``migration-002-tenant-pk.xml`` DROPs it outright
+      rather than closing the tenant-keying gap this ground truth used to
+      pin: PK=(job_id) only, no tenant_id in the PK, no tenant-scoped
+      UNIQUE constraint, RLS-only protection; RDR-194 Problem Statement
+      item 3).
 
 Uses the same ``psql -tAc`` substrate-query helper already established by
 ``tests/db/test_schema_type_hygiene_preflight.py`` (verbatim copy, per
@@ -245,33 +249,140 @@ def test_ground_truth_catalog_links_tumbler_columns_are_fk_enforced(census_state
     )
 
 
-def test_ground_truth_migration_jobs_has_no_tenant_scoped_uniqueness(census_state):
-    """migration_jobs PK=(job_id) with no tenant-scoped UNIQUE — RLS-only
-    protection (Problem Statement item 3, the sharpest tenant-in-PK
-    example)."""
-    pk_sql = """
-    SELECT array_agg(a.attname ORDER BY k.ord)::text
+def test_ground_truth_topics_tenant_scoped_unique_present(census_state):
+    """RDR-194 P5a (bead nexus-tk070.p5a, ``taxonomy-014-1``):
+    ``nexus.topics`` gains ``UNIQUE (tenant_id, id)`` (constraint
+    ``topics_tenant_id_unique``) so the four repointed tenant-scoped FKs
+    below have a composite target to reference. Per the bead p7
+    correction (2026-08-20, p5a critic [22965] S3): the anticipated
+    "pin only the UNIQUE if cc5 held the repoint back" branch did NOT
+    fire — p5a shipped all five changesets (the UNIQUE plus all four
+    repoints) unconditionally on develop, guarded instead by a runtime
+    fail-loud cross-tenant check and the pre-tag
+    ``check_rdr194_cc5_delivery_gate.py`` script. This test pins the
+    UNIQUE alone; the four FK ground truths follow below."""
+    sql = """
+    SELECT con.conname
     FROM pg_constraint con
     JOIN pg_class c ON c.oid = con.conrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
-    JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
-    JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
-    WHERE con.contype = 'p' AND n.nspname = 'nexus' AND c.relname = 'migration_jobs';
+    WHERE con.contype = 'u'
+      AND n.nspname = 'nexus' AND c.relname = 'topics';
     """
-    pk_rows = _psql_csv(census_state, pk_sql)
-    assert pk_rows[0] == "{job_id}", f"expected migration_jobs PK=(job_id) only, got {pk_rows[0]!r}"
+    rows = _psql_csv(census_state, sql)
+    assert rows, "expected nexus.topics to carry a UNIQUE constraint, found none"
+    assert rows[0] == "topics_tenant_id_unique", f"unexpected UNIQUE constraint name: {rows[0]!r}"
 
-    unique_sql = """
-    SELECT count(*)
+    cols_sql = """
+    SELECT a.attname
     FROM pg_constraint con
     JOIN pg_class c ON c.oid = con.conrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
     JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
-    WHERE con.contype = 'u' AND n.nspname = 'nexus' AND c.relname = 'migration_jobs'
-      AND a.attname = 'tenant_id';
+    WHERE con.conname = 'topics_tenant_id_unique'
+    ORDER BY k.ord;
     """
-    unique_rows = _psql_csv(census_state, unique_sql)
-    assert unique_rows[0] == "0", (
-        f"expected migration_jobs to carry NO tenant-scoped UNIQUE, found {unique_rows[0]}"
+    cols = _psql_csv(census_state, cols_sql)
+    assert cols == ["tenant_id", "id"], f"expected topics_tenant_id_unique on (tenant_id, id), got {cols!r}"
+
+
+def _assert_tenant_scoped_fk_validated(census_state, table: str, column: str, expected_conname: str) -> None:
+    """Shared helper for the four RDR-194 P5a (taxonomy-014-2..5) tenant-
+    scoped FK ground truths below: same catalog-029 three-step shape
+    (ADD ... NOT VALID -> fail-loud anti-join -> VALIDATE), all in one
+    changeset per FK, so a freshly-migrated schema always sees each
+    repointed constraint VALIDATED, never NOT VALID."""
+    sql = f"""
+    SELECT con.conname, con.convalidated,
+           string_agg(a.attname, '+' ORDER BY k.ord) AS conkey_columns
+    FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+    JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
+    WHERE con.contype = 'f'
+      AND n.nspname = 'nexus' AND c.relname = '{table}'
+    GROUP BY con.conname, con.convalidated
+    HAVING string_agg(a.attname, '+' ORDER BY k.ord) LIKE '%{column}%';
+    """
+    rows = _psql_csv(census_state, sql)
+    assert rows, f"expected {table}.{column} to carry an FK, found none"
+    conname, convalidated, conkey_columns = rows[0].split(",")
+    assert conname == expected_conname, (
+        f"unexpected FK name on {table}.{column}: {conname!r} (expected {expected_conname!r})"
+    )
+    # code-review [22995] Important: the pin must assert tenant-SCOPING, not
+    # just the constraint's name — a regression that re-created a same-named
+    # single-column FK (dropping tenant_id from conkey) would otherwise pass.
+    assert set(conkey_columns.split("+")) == {"tenant_id", column}, (
+        f"expected {expected_conname} conkey columns exactly {{tenant_id, {column}}}, "
+        f"got {conkey_columns!r} — the tenant scoping is the whole point of the repoint"
+    )
+    assert convalidated == "t", (
+        f"expected {expected_conname} to be VALIDATED on a freshly-migrated schema "
+        f"(catalog-029 three-step shape ships all three steps in one changeset), "
+        f"convalidated={convalidated!r}"
+    )
+
+
+def test_ground_truth_topics_parent_id_repointed_tenant_scoped(census_state):
+    """RDR-194 D4 / P5a (``taxonomy-014-2``): the self-referential
+    ``topics_parent_fk`` (``parent_id`` -> ``topics.id``, no tenant
+    scoping) is DROPPED and replaced by ``fk_topics_parent_tenant``
+    (``tenant_id, parent_id`` -> ``topics (tenant_id, id)``),
+    VALIDATED in the same changeset."""
+    _assert_tenant_scoped_fk_validated(
+        census_state, "topics", "parent_id", "fk_topics_parent_tenant",
+    )
+
+
+def test_ground_truth_topic_assignments_topic_id_repointed_tenant_scoped(census_state):
+    """RDR-194 D4 / P5a (``taxonomy-014-3``): ``topic_assignments_topic_id_fkey``
+    is DROPPED and replaced by ``fk_topic_assignments_topic_tenant``
+    (``tenant_id, topic_id`` -> ``topics (tenant_id, id)``), VALIDATED
+    in the same changeset."""
+    _assert_tenant_scoped_fk_validated(
+        census_state, "topic_assignments", "topic_id", "fk_topic_assignments_topic_tenant",
+    )
+
+
+def test_ground_truth_topic_links_from_and_to_topic_repointed_tenant_scoped(census_state):
+    """RDR-194 D4 / P5a (``taxonomy-014-4``, ``taxonomy-014-5``): both
+    ``topic_links_from_topic_id_fkey`` and ``topic_links_to_topic_id_fkey``
+    are DROPPED and replaced by ``fk_topic_links_from_topic_tenant`` /
+    ``fk_topic_links_to_topic_tenant`` (each ``tenant_id, *_topic_id`` ->
+    ``topics (tenant_id, id)``), VALIDATED in the same changeset --
+    mirrors the two-column ``catalog_links`` sibling test's shape
+    above (one-ground-truth-per-column, both endpoints in one test)."""
+    _assert_tenant_scoped_fk_validated(
+        census_state, "topic_links", "from_topic_id", "fk_topic_links_from_topic_tenant",
+    )
+    _assert_tenant_scoped_fk_validated(
+        census_state, "topic_links", "to_topic_id", "fk_topic_links_to_topic_tenant",
+    )
+
+
+def test_ground_truth_migration_jobs_table_dropped(census_state):
+    """nexus.migration_jobs no longer exists on a freshly-migrated schema.
+
+    SUPERSEDES test_ground_truth_migration_jobs_has_no_tenant_scoped_uniqueness
+    (which pinned the tenant-keying gap this table used to have: PK=(job_id)
+    with no tenant-scoped UNIQUE, RLS-only protection). Reworked
+    nexus-tk070.p5b (2026-08-20, Sam disposition): the table is DEAD —
+    MigrationHandler.java / MigrationJobRepository.java were deleted at
+    7bcf29c67 (2026-07-24), zero producers/consumers — so
+    migration-002-tenant-pk.xml DROPs it outright rather than widening its
+    PK. The tenant-keying gap this test used to document no longer applies
+    to a table that does not exist; this ground truth now pins the
+    retirement itself, so a future changelog that accidentally re-creates
+    the table (or a rollback left mid-applied) is caught here.
+    """
+    exists_sql = """
+    SELECT to_regclass('nexus.migration_jobs') IS NULL;
+    """
+    rows = _psql_csv(census_state, exists_sql)
+    assert rows[0] == "t", (
+        f"expected nexus.migration_jobs to be ABSENT on a freshly-migrated schema "
+        f"(migration-002-tenant-pk.xml drops it), got to_regclass IS NULL = {rows[0]!r}"
     )

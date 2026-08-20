@@ -260,6 +260,27 @@ is >= the version its own header names as the fix — an ack held past its
 expiry is exactly the drift this gate exists to catch. See the script's own
 header for the full contract; do not re-derive it here.
 
+### 3d. PRE-TAG gate: RDR-194 D4 cloud-count-5 delivery precondition (nexus-tk070.p5a)
+
+```bash
+uv run python scripts/check_rdr194_cc5_delivery_gate.py --ref HEAD
+```
+
+Only relevant when this cut's `service/` delta carries
+`taxonomy-014-topics-tenant-unique.xml` (RDR-194 P5a) — the gate exits 0
+immediately, without ever consulting T2, when that file is absent from
+`--ref`. When it IS present, the gate blocks (exit 1) unless a T2 record at
+`(nexus, cloud-count-5-measured)` carries an explicit MEASURED-zero reading
+for all three cross-tenant sub-populations (`topic_assignments`,
+`topic_links`, `topics.parent_id` — see the script's own header for the
+exact record contract). `nx` unreachable is exit 2, UNVERIFIABLE — never a
+silent pass, same fail-closed doctrine as `check_engine_release_floor.py`
+(mold this gate copies). Mirrors that gate's shape: a mechanical pre-tag
+check replaces what would otherwise be a P7 human-checklist item alone —
+see nexus-i5c2u for why an eyeball-only version of this class of check has
+already burned this project once (9+ days of cloud engine drift that
+nothing caught).
+
 ### 4. Push the tag (human, or AI when explicitly authorized)
 
 Releaser is **human** by default (AI preps + validates); the human pushes the

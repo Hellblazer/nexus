@@ -309,8 +309,14 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
                 except Exception:  # noqa: BLE001 — best-effort probe-handle cleanup; close failure must not abort promote
                     pass
 
-        # Translate TTL: T2 ttl=None (permanent) -> T3 ttl_days=0; T2 ttl=N -> T3 ttl_days=N
-        ttl_days: int = entry["ttl"] if entry["ttl"] is not None else 0  # type: ignore[assignment]
+        # Translate TTL: T2 ttl=None (permanent) -> T3 ttl_days=None; T2
+        # ttl=N -> T3 ttl_days=N. nexus-tk070.p6b fix-pass (nexus-24rof,
+        # RDR-194 D5): the permanent branch used to coerce to 0 — T3Database
+        # .put/HttpVectorClient.put now REJECT an explicit 0 loudly, so
+        # every permanent promote would have raised ValueError had this
+        # coercion survived. None is the correct translation, matching T2's
+        # own permanent sentinel one-to-one.
+        ttl_days: int | None = entry["ttl"]
         merged_tags = tags if tags else (entry.get("tags") or "")
 
         # Honour the REMAINING TTL rather than resetting it at promote
@@ -320,8 +326,10 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # ``expires_at=`` pass-through was a TypeError against BOTH
         # ``T3Database.put`` and ``HttpVectorClient.put``, mock-shielded
         # until the nexus-v4paa fold's integration tests. The remaining
-        # window is expressed by shrinking ttl_days instead.
-        if ttl_days > 0:
+        # window is expressed by shrinking ttl_days instead. Guarded on
+        # ``is not None`` first (short-circuit) — ``None > 0`` raises
+        # TypeError in Python, unlike the old always-int shape.
+        if ttl_days is not None and ttl_days > 0:
             import math  # noqa: PLC0415 — deliberate function-local import: only needed on promote path
 
             base_ts = datetime.fromisoformat(entry["timestamp"])

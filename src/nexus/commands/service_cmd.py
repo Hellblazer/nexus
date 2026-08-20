@@ -149,16 +149,21 @@ def record_deploy(tag: str, commit: str, gate: str, url: str | None) -> None:
             content=content,
             tags="engine,deploy,tracker,rdr-179",
             # PERMANENT IS None, NOT 0 (nexus-6igii recurrence, 2026-07-26).
-            # This called handle.memory.put DIRECTLY — store level, below the
-            # MCP layer that coerces ``ttl if ttl > 0 else None`` — so 0 was
-            # written verbatim. Both expire() implementations then read it as
-            # effective_ttl = 0 * (1 + log(access_count + 1)) = 0, and delete
-            # any row older than an instant on the next sweep.
-            #
-            # That is why the tracker kept vanishing after a successful,
-            # read-back-verified write: 0 does not mean "never expires", it
-            # means "expire immediately". NULL (None) is what "never" is —
-            # both expire() paths filter on ``WHERE ttl IS NOT NULL``.
+            # This calls handle.memory.put DIRECTLY — store level, below the
+            # MCP tool layer. At the time of the nexus-6igii incident the MCP
+            # layer silently coerced ``ttl if ttl > 0 else None`` while this
+            # call site (and every other direct caller) did not, so a 0 here
+            # was written verbatim; MemoryRepository.expire() then read it as
+            # effective_ttl = 0 * (1 + log(access_count + 1)) = 0, and deleted
+            # the row on the next sweep. That coercion is RETIRED as of
+            # nexus-tk070.p6a (RDR-194 D5) — the engine itself now REJECTS
+            # ttl=0 with a loud 400 for every caller, so this comment's
+            # original footgun can no longer reach the store silently through
+            # ANY path — but the explicit ``ttl=None`` below still matters:
+            # it is the only value that means "never expires"
+            # (MemoryRepository.expire() filters ``WHERE ttl_days IS NOT
+            # NULL``), and it is required here regardless of caller-layer
+            # coercion history.
             ttl=None,
         )
 

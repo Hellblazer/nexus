@@ -2364,7 +2364,14 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.hook_failures",
     "nexus.ladder_completions",
     "nexus.memory",
-    "nexus.migration_jobs",
+    # "nexus.migration_jobs" REMOVED (nexus-tk070.p5b, reworked
+    # 2026-08-20, migration-002-tenant-pk.xml): dead table dropped —
+    # MigrationHandler.java / MigrationJobRepository.java deleted at
+    # 7bcf29c67, zero producers/consumers, Sam disposition 2026-08-20.
+    # Same chash_index/chash_alias precedent above: a listed-but-dropped
+    # table is a PERMANENT false FATAL, so it must not stay listed. The
+    # completeness guard's dropped-tables exemption in
+    # tests/test_health_service_checks.py carries the matching entry.
     "nexus.nx_answer_runs",
     "nexus.pdf_chunks",
     "nexus.pdf_pages",

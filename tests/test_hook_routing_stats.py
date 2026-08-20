@@ -92,6 +92,76 @@ def test_aggregate_ignores_records_without_rule(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Rotated-generation reading (Sam-directed fix pass, 2026-08-20)
+#
+# log_routing_event (conexus/hooks/scripts/routing/_lib.py) rotates
+# routing_log.jsonl to routing_log.jsonl.1 via atomic rename once it
+# exceeds its byte cap. A reader that only looked at the live file would
+# silently HALVE its longitudinal window at every rotation -- these tests
+# pin that aggregate()/escape_events() read the rotated ".1" generation
+# (oldest-first) THEN the live file, so both windows are visible.
+# ---------------------------------------------------------------------------
+
+
+def test_aggregate_reads_rotated_generation_and_live_file(tmp_path):
+    """Records split across ``log.jsonl.1`` (older, pre-rotation) and
+    ``log.jsonl`` (live, post-rotation) must BOTH be counted -- a reader
+    that only sees the live file would silently drop the rotated half."""
+    path = tmp_path / "log.jsonl"
+    rotated = tmp_path / "log.jsonl.1"
+    _write_log(rotated, [
+        {"ts": "t1", "rule": "rule_a", "outcome": "allow"},
+        {"ts": "t2", "rule": "rule_a", "outcome": "deny"},
+    ])
+    _write_log(path, [
+        {"ts": "t3", "rule": "rule_a", "outcome": "allow"},
+        {"ts": "t4", "rule": "rule_b", "outcome": "deny"},
+    ])
+
+    stats = aggregate(path)
+
+    assert set(stats.keys()) == {"rule_a", "rule_b"}
+    a = stats["rule_a"]
+    assert a.total == 3, "must count 2 rotated + 1 live rule_a events, not just the live one"
+    assert a.allow == 2
+    assert a.deny == 1
+    assert stats["rule_b"].total == 1
+
+
+def test_aggregate_tolerates_absent_rotated_generation(tmp_path):
+    """No ``.1`` file (nothing has rotated yet) is normal, not an error --
+    aggregate() must still read the live file alone."""
+    path = tmp_path / "log.jsonl"
+    assert not (tmp_path / "log.jsonl.1").exists()
+    _write_log(path, [{"ts": "t1", "rule": "rule_a", "outcome": "allow"}])
+
+    stats = aggregate(path)
+
+    assert stats["rule_a"].total == 1
+
+
+def test_escape_events_reads_rotated_generation_oldest_first(tmp_path):
+    """Same rotated-generation contract for escape_events(): the rotated
+    (older) escape events must appear BEFORE the live (newer) ones,
+    preserving the function's own oldest-first ordering guarantee across
+    the rotation boundary."""
+    from nexus.routing_stats import escape_events
+
+    path = tmp_path / "log.jsonl"
+    rotated = tmp_path / "log.jsonl.1"
+    _write_log(rotated, [
+        {"ts": "t1", "rule": "r1", "outcome": "escape", "escape_reason": "older reason"},
+    ])
+    _write_log(path, [
+        {"ts": "t2", "rule": "r2", "outcome": "escape", "escape_reason": "newer reason"},
+    ])
+
+    events = escape_events(path)
+
+    assert [e["reason"] for e in events] == ["older reason", "newer reason"]
+
+
+# ---------------------------------------------------------------------------
 # RuleStats dataclass behavior
 # ---------------------------------------------------------------------------
 
