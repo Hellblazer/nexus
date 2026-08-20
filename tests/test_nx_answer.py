@@ -2545,26 +2545,162 @@ class TestNxAnswerBudgetSeconds:
         )
 
     @pytest.mark.asyncio
+    async def test_planner_phase_exhausts_budget_returns_marker_not_plan_run(
+        self, tmp_path,
+    ):
+        """nexus-nyry9.2 (RDR-196 .r2), RED-FIRST: a plan-match MISS that
+        forces the inline planner must have that planner phase charged
+        against budget_seconds. A budget smaller than the planner's own
+        elapsed time must return the exhaustion marker WITHOUT ever
+        calling plan_run — not silently run the (now-late) plan anyway.
+        Pre-fix this goes red: plan_run() IS called and a plain answer
+        with no marker comes back, because deadline was never consulted
+        between the plan-match gate/inline planner and plan execution.
+        """
+        import asyncio
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+
+        match = _make_match(confidence=0.75)  # 2-step: search + summarize (needs_operators)
+
+        async def _slow_plan_miss(question, scope="", max_steps=6, **kwargs):
+            await asyncio.sleep(0.05)
+            return match
+
+        plan_run_mock = AsyncMock()
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[]),  # forced miss
+            patch("nexus.mcp.core._nx_answer_plan_miss",
+                  AsyncMock(side_effect=_slow_plan_miss)),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", plan_run_mock),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q", budget_seconds=0.01)
+
+        # code-review-nexus-nyry9.2-2026-08-20 (optional nit): this
+        # assertion runs BEFORE the sentinel import below so the
+        # pre-fix red is the actual behavioral failure (plan_run WAS
+        # called) rather than an ImportError on a constant that
+        # doesn't exist yet.
+        plan_run_mock.assert_not_called()
+        from nexus.mcp.core import _NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN
+        assert isinstance(result, str)
+        assert (
+            f"[budget exhausted after step {_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN} "
+            "of 2 — partial answer]"
+        ) in result
+
+    @pytest.mark.asyncio
+    async def test_planner_phase_exhaustion_structured_envelope_carries_pre_plan_sentinel(
+        self, tmp_path,
+    ):
+        """Both marker shapes must agree: structured=True must ALSO
+        carry the pre-Step-2 sentinel as the top-level
+        ``budget_exhausted_at_step`` field. Asserting only the text-mode
+        leading line (the test above) would miss a silent-truncation
+        class where the structured envelope's field disagrees with, or
+        omits, what the text says — the exact class RDR-196 calls out.
+        """
+        import asyncio
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+
+        match = _make_match(confidence=0.75)
+
+        async def _slow_plan_miss(question, scope="", max_steps=6, **kwargs):
+            await asyncio.sleep(0.05)
+            return match
+
+        plan_run_mock = AsyncMock()
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[]),
+            patch("nexus.mcp.core._nx_answer_plan_miss",
+                  AsyncMock(side_effect=_slow_plan_miss)),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", plan_run_mock),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q", budget_seconds=0.01, structured=True)
+
+        # See the sibling text-mode test above for why this import is
+        # deferred past the behavioral assertion.
+        plan_run_mock.assert_not_called()
+        from nexus.mcp.core import _NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN
+        assert isinstance(result, dict)
+        assert result["budget_exhausted_at_step"] == _NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN
+        assert (
+            f"[budget exhausted after step {_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN} "
+            "of 2"
+        ) in result["final_text"]
+
+    @pytest.mark.asyncio
+    async def test_pre_plan_check_survives_malformed_plan_json(self, tmp_path):
+        """code-review Important (T2 nyry9.2-code-review-2026-08-20): a
+        corrupted plan_json row reaching the pre-Step-2 budget check
+        with an already-exhausted budget must still return the
+        exhaustion marker, not raise out of the MCP tool -- mirrors
+        ``_nx_answer_classify_plan``'s own JSONDecodeError/TypeError
+        guard on the same field.
+        """
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.mcp.core import _NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN
+
+        malformed_match = _make_match(confidence=0.75, plan_json="{not valid json")
+        plan_run_mock = AsyncMock()
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[malformed_match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", plan_run_mock),
+        ):
+            from nexus.mcp.core import nx_answer
+            # budget_seconds=0.0 (not None -- deadline = start + 0.0 =
+            # start) guarantees the pre-Step-2 check's own
+            # ``time.monotonic() >= deadline`` is already true by the
+            # time it runs, without a real sleep.
+            result = await nx_answer("q", budget_seconds=0.0)
+
+        plan_run_mock.assert_not_called()
+        assert isinstance(result, str)
+        assert (
+            f"[budget exhausted after step {_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN} "
+            "of 0 — partial answer]"
+        ) in result
+
+    @pytest.mark.asyncio
     async def test_budget_seconds_silently_bypassed_by_miss_plus_retrieval_only_combo(
         self, tmp_path,
     ):
         """PIN TEST (substantive-critic SIGNIFICANT #1, T2 substantive-
-        critique-nexus-h33x8.6-a4-a2-2026-08-19): budget_seconds does
-        NOT bound the plan-miss inline-planner phase (deliberately --
-        it has its own up-to-300s timeout, unrelated to this budget),
-        and a retrieval_only-classified plan is exempt from the a4
-        deadline even after a miss (deliberately -- no operator floor
-        to protect). Combined, a caller can supply budget_seconds and
-        get a run that is END-TO-END UNBOUNDED by it -- no marker, no
-        exception, plain success text -- because NEITHER boundary
-        individually looks like a bug.
-
-        This is DOCUMENTED, ACCEPTED behavior (see nx_answer's
-        budget_seconds docstring), not something this test fixes. Its
-        job is to go RED if a future half-fix changes just ONE side of
-        the combo (e.g. threading a deadline into the miss path while
-        leaving the retrieval_only exemption in place, or vice versa)
-        without addressing the combination honestly.
+        critique-nexus-h33x8.6-a4-a2-2026-08-19). UPDATED by
+        nexus-nyry9.2 (RDR-196 .r2): the plan-miss inline-planner phase
+        is now charged against budget_seconds in general (see
+        ``test_planner_phase_exhausts_budget_returns_marker_not_plan_run``
+        above) -- but a retrieval_only-classified plan remains exempt
+        from the deadline even after a miss (still deliberate -- no
+        operator floor to protect; boundary #2 on the docstring,
+        unchanged and out of THIS bead's scope). This test's mocked
+        planner returns instantly (no sleep), so it does not itself
+        exercise the now-fixed general case -- its job is narrower: it
+        pins that the retrieval_only exemption ALONE is still enough to
+        make a miss-plus-retrieval_only combo run unbounded by
+        budget_seconds -- no marker, no exception, plain success text --
+        even though the general miss-phase gap it used to compound with
+        is closed. Goes RED if the retrieval_only exemption itself is
+        ever silently dropped.
         """
         import nexus.mcp_infra as _infra
         import nexus.plans.runner as _runner

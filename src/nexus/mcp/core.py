@@ -6254,6 +6254,23 @@ def _load_ad_hoc_ttl() -> int:
 #: caller that doesn't pass ``budget_seconds`` gets exactly this value.
 _NX_ANSWER_DEFAULT_BUDGET_SECONDS: float | None = None
 
+#: nexus-nyry9.2 (RDR-196 .r2): sentinel for ``budget_exhausted_at_step``
+#: when the budget is exhausted BEFORE any plan step executes -- i.e.
+#: during Step 1 (the plan-match gate and, on a miss, the inline
+#: LLM planner's own claude -p round trip). Prior to this fix that
+#: phase ran wholly outside ``budget_seconds`` (deadline was computed
+#: at call entry but never consulted until ``plan_run``), so a slow
+#: planner could burn the caller's entire budget and nx_answer would
+#: still go on to execute the now-late plan. Deliberately 0 rather
+#: than a re-purposed ``-1`` or ``plan_run``'s own 1-indexed step
+#: numbering (:mod:`nexus.plans.runner`, always >= 1): 0 can never
+#: collide with a real step index, so a marker reading "step 0 of M"
+#: is unambiguous evidence that zero plan steps ran. (Deliberately not
+#: reproduced here as a single-line bracketed literal — the exhaustion
+#: marker text has exactly ONE emitter in this module, and a second
+#: copy of its exact shape here would defeat the grep that proves it.)
+_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN: int = 0
+
 
 @mcp.tool(
     title="Multi-Step Knowledge Answer",
@@ -6336,19 +6353,27 @@ async def nx_answer(
             mode; converges with RDR-196 §Approach's marker convention
             for the later USD-budget work).
 
-            TWO explicit, INTENTIONAL boundaries where this budget does
-            NOT apply (substantive-critic SIGNIFICANT #1, T2
-            substantive-critique-nexus-h33x8.6-a4-a2-2026-08-19) —
-            named here because combined they can make the budget
-            silently ignored end-to-end with no marker and no
-            exception:
+            ONE remaining explicit, INTENTIONAL boundary where this
+            budget does NOT apply (substantive-critic SIGNIFICANT #1, T2
+            substantive-critique-nexus-h33x8.6-a4-a2-2026-08-19; the
+            sibling boundary below was FIXED by nexus-nyry9.2 / RDR-196
+            .r2 — see the CORRECTED note):
 
-            1. **The plan-MISS inline-planner phase** (``_nx_answer_plan_miss``,
-               its own claude -p round trip, up to 300s) is dispatched
-               BEFORE ``deadline`` is threaded to ``plan_run`` and is
-               never bounded by ``budget_seconds`` — it has its own,
-               unrelated timeout. A miss pays its planner cost in
-               full regardless of what budget was supplied.
+            1. **CORRECTED (nexus-nyry9.2, RDR-196 .r2):** the plan-MISS
+               inline-planner phase (``_nx_answer_plan_miss``, its own
+               claude -p round trip, up to 300s) used to be dispatched
+               BEFORE ``deadline`` was ever consulted and paid its cost
+               in full regardless of budget. It is now checked
+               immediately after Step 1 (the plan-match gate, and on a
+               miss, the inline planner) — a budget already exhausted at
+               that point returns the exhaustion marker with
+               :data:`_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN` (step 0,
+               meaning zero plan steps ran) instead of proceeding to
+               Step 2 or Step 4. This also closes a second, previously
+               undocumented gap: the single-step fast path (Step 2) had
+               no deadline check of its own before this fix. The
+               retrieval_only exemption immediately below still applies
+               to this new check, unchanged.
             2. **Retrieval-only matched plans** (no operator steps —
                see ``_nx_answer_classify_plan``) are exempt from the
                deadline even after a successful match/grow: they have
@@ -6416,6 +6441,7 @@ async def nx_answer(
     """
     import time  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
     import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+    from types import SimpleNamespace  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site (nexus-nyry9.2 pre-Step-2 budget stand-in)
 
     from nexus.mcp_infra import get_t1_plan_cache  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
     from nexus.plans.matcher import plan_match as _plan_match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -6466,6 +6492,133 @@ async def nx_answer(
             # rely on the key rather than checking membership.
             "budget_exhausted_at_step": budget_exhausted_at_step,
         }
+
+    # nexus-h33x8.6 a4 / nexus-nyry9.2 (RDR-196 .r2): single shared
+    # emitter for the budget-exhausted marker. Called from TWO sites —
+    # Step 4's post-``plan_run`` check (a real ``PlanResult``) and the
+    # pre-Step-2 check below (a synthetic stand-in used when Step 1 —
+    # the plan-match gate, and on a miss, the inline planner — already
+    # spent the whole budget before any plan step ran). Kept as ONE
+    # function so there is exactly one place that builds the marker
+    # text, per the "one emitter, both shapes" constraint. Returns
+    # ``None`` when ``result`` carries no budget-exhausted marker, in
+    # which case the caller falls through to its own next step.
+    def _budget_exhausted_response(result: Any) -> "str | dict | None":
+        # Defensive isinstance check (not a bare truthy/None check): a bare
+        # MagicMock's unconfigured ``.budget_exhausted_at_step`` attribute is
+        # itself a (truthy, non-None) MagicMock, which would misfire here
+        # for any test double that doesn't set the attribute explicitly.
+        _budget_step = getattr(result, "budget_exhausted_at_step", None)
+        if not isinstance(_budget_step, int):
+            return None
+        # code-review Important (T2 code-review-nexus-h33x8.6-a4-a2-
+        # 2026-08-19): use PlanResult.total_planned_steps -- the field
+        # a4 added to runner.py specifically so callers don't re-parse
+        # match.plan_json -- rather than re-parsing it here. Falls back
+        # to a re-parse only for a test double / older PlanResult (or
+        # the pre-Step-2 stand-in) that doesn't carry the field
+        # (defaults to 0, falsy).
+        # nexus-nyry9.2 review (code-review-nexus-nyry9.2-2026-08-20):
+        # guard the re-parse fallback the same way
+        # ``_nx_answer_classify_plan`` guards its own ``json.loads`` of
+        # ``match.plan_json`` (:5724-5727) — a corrupted library-matched
+        # plan row reaching this fallback (e.g. via the pre-Step-2
+        # stand-in below, whose own guarded parse already defaulted to
+        # 0) must still produce the marker, not raise out of the tool.
+        try:
+            total_planned = (
+                getattr(result, "total_planned_steps", 0)
+                or len(json.loads(best.plan_json).get("steps") or [])
+            )
+        except (json.JSONDecodeError, TypeError):
+            total_planned = 0
+        marker = (
+            f"[budget exhausted after step {_budget_step} of "
+            f"{total_planned} — partial answer]"
+        )
+        # Harvest retrieved chunks the same way Step 5's structured path
+        # does, so a partial answer still surfaces what was found. The
+        # pre-Step-2 stand-in has no steps at all, so this is [].
+        partial_chunks: list[dict] = []
+        for step_out in result.steps:
+            if not isinstance(step_out, dict):
+                continue
+            ids = step_out.get("ids")
+            if not isinstance(ids, list) or not ids:
+                continue
+            hashes = step_out.get("chunk_text_hash", []) or []
+            per_chunk_colls = step_out.get("chunk_collections") or []
+            dedup_colls = step_out.get("collections", []) or []
+            dists = step_out.get("distances", []) or []
+            default_coll = dedup_colls[0] if dedup_colls else ""
+            for i, cid in enumerate(ids):
+                coll = per_chunk_colls[i] if i < len(per_chunk_colls) else default_coll
+                partial_chunks.append({
+                    "id": cid,
+                    "chash": hashes[i] if i < len(hashes) else "",
+                    "collection": coll,
+                    "distance": dists[i] if i < len(dists) else None,
+                })
+        # The terminal step is where plan_run puts the OperatorTimeoutError
+        # sentinel (isolated path) or the bundle's terminal slot (bundle
+        # path) — both carry partial_text when a3's stream-json capture
+        # produced anything. Absent for the pre-Step-2 stand-in (no
+        # steps), leaving this "".
+        last_step = result.steps[-1] if result.steps else {}
+        partial_operator_text = (
+            str(last_step.get("partial_text") or "")
+            if isinstance(last_step, dict) else ""
+        )
+
+        lines = [marker]
+        if partial_chunks:
+            lines.append(
+                f"Retrieved {len(partial_chunks)} chunk"
+                f"{'s' if len(partial_chunks) != 1 else ''} before the "
+                "budget ran out:"
+            )
+            for ch in partial_chunks[:10]:
+                lines.append(f"  - {ch['id']} in {ch['collection']}")
+            if len(partial_chunks) > 10:
+                lines.append(f"  ... and {len(partial_chunks) - 10} more")
+        else:
+            lines.append("No retrieval results were captured before the budget ran out.")
+        if partial_operator_text:
+            lines.append("")
+            lines.append(
+                "Partial synthesis (incomplete, reconstructed from the "
+                "interrupted operator call):"
+            )
+            lines.append(partial_operator_text)
+        budget_final_text = "\n".join(lines)
+
+        _log.info(
+            "nx_answer_budget_partial_result",
+            plan_id=best.plan_id,
+            budget_exhausted_at_step=_budget_step,
+            total_planned_steps=total_planned,
+            chunk_count=len(partial_chunks),
+            has_partial_operator_text=bool(partial_operator_text),
+        )
+        try:
+            with _t2_ctx() as db:
+                _nx_answer_record_run(
+                    db.telemetry, question=question, plan_id=best.plan_id,
+                    matched_confidence=best.confidence, step_count=len(result.steps),
+                    final_text=budget_final_text[:2000], cost_usd=0.0,
+                    duration_ms=int((time.monotonic() - start) * 1000), trace=trace,
+                )
+        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
+            pass
+        # nexus-yg49g doctrine: a budget-exhausted run did not complete —
+        # counts as a failure so a chronically-timing-out plan does not
+        # accrue a false success rate.
+        _nx_answer_record_outcome(best.plan_id, success=False)
+        return _result(
+            budget_final_text, plan_id=best.plan_id, step_count=len(result.steps),
+            chunks=partial_chunks if structured else None,
+            budget_exhausted_at_step=_budget_step,
+        )
 
     # ── Step 1: plan-match gate ──────────────────────────────────────────
     # RDR-092 Phase 2 Option A: effective floor is the caller's override
@@ -6572,9 +6725,55 @@ async def nx_answer(
                 plan_id=best.plan_id, exc_info=True,
             )
 
-    # ── Step 2: single-step guard ────────────────────────────────────────
+    # nexus-nyry9.2 (RDR-196 .r2): classified once here and reused by
+    # Step 2 below (previously computed twice) so the pre-Step-2 budget
+    # check and the single-step guard agree on the same classification.
     plan_class = _nx_answer_classify_plan(best)
 
+    # ── Pre-Step-2 budget check (nexus-nyry9.2, RDR-196 .r2) ──────────────
+    # Step 1 above — the plan-match gate, and on a miss, the inline LLM
+    # planner's own claude -p round trip — is dispatched entirely BEFORE
+    # this point. Before this fix that phase ran wholly outside
+    # ``budget_seconds``: ``deadline`` was computed at call entry but
+    # the first place it was ever consulted was inside ``plan_run``
+    # (Step 4) — so a slow planner could burn the caller's whole budget
+    # and nx_answer would still go on to execute the (now-late) plan.
+    # Checked ONCE here, covering both the single-step fast path
+    # (Step 2) and plan execution (Step 4), neither of which had a
+    # deadline check of its own before this fix.
+    #
+    # retrieval_only plans keep the SEPARATE, still-intentional boundary
+    # #2 exemption documented on ``budget_seconds`` above and pinned by
+    # ``test_budget_seconds_silently_bypassed_by_miss_plus_retrieval_only_combo``
+    # — no operator floor to protect, deliberately never deadline-bound,
+    # even here.
+    if (
+        deadline is not None
+        and plan_class != "retrieval_only"
+        and time.monotonic() >= deadline
+    ):
+        # code-review Important (T2 nyry9.2-code-review-2026-08-20):
+        # guard this the same way ``_nx_answer_classify_plan`` guards
+        # its own parse of ``match.plan_json`` (:5724-5727) — a
+        # corrupted library-matched plan row combined with an already-
+        # exhausted budget must still flow to the marker, not raise
+        # out of the MCP tool. Defaults to 0 (unknown step count) on a
+        # malformed row; ``_budget_exhausted_response``'s own fallback
+        # re-parse is guarded the same way for the same reason.
+        try:
+            total_planned = len(json.loads(best.plan_json).get("steps") or [])
+        except (json.JSONDecodeError, TypeError):
+            total_planned = 0
+        _pre_plan_stub = SimpleNamespace(
+            budget_exhausted_at_step=_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN,
+            steps=[],
+            total_planned_steps=total_planned,
+        )
+        _budget_response = _budget_exhausted_response(_pre_plan_stub)
+        if _budget_response is not None:
+            return _budget_response
+
+    # ── Step 2: single-step guard ────────────────────────────────────────
     if plan_class == "single_query":
         _log.info("nx_answer_single_step_guard", plan_id=best.plan_id, confidence=conf_str)
         try:
@@ -6790,111 +6989,15 @@ async def nx_answer(
     # branches that DO know, further down.
 
     # ── nexus-h33x8.6 a4: budget-exhausted partial-result path ────────────
-    # Defensive isinstance check (not a bare truthy/None check): a bare
-    # MagicMock's unconfigured ``.budget_exhausted_at_step`` attribute is
-    # itself a (truthy, non-None) MagicMock, which would misfire here
-    # for any test double that doesn't set the attribute explicitly.
     # Runs BEFORE Step 5's normal extraction — a budget cutoff bypasses
     # the usual final-step-text logic and the empty-retrieval guard
     # entirely; both would either mis-extract the timeout sentinel or
-    # wrongly report "no evidence" when evidence WAS retrieved.
-    _budget_step = getattr(result, "budget_exhausted_at_step", None)
-    if isinstance(_budget_step, int):
-        # code-review Important (T2 code-review-nexus-h33x8.6-a4-a2-
-        # 2026-08-19): use PlanResult.total_planned_steps -- the field
-        # a4 added to runner.py specifically so callers don't re-parse
-        # match.plan_json -- rather than re-parsing it here. Falls back
-        # to a re-parse only for a test double / older PlanResult that
-        # doesn't carry the field (defaults to 0, falsy).
-        total_planned = (
-            getattr(result, "total_planned_steps", 0)
-            or len(json.loads(best.plan_json).get("steps") or [])
-        )
-        marker = (
-            f"[budget exhausted after step {_budget_step} of "
-            f"{total_planned} — partial answer]"
-        )
-        # Harvest retrieved chunks the same way Step 5's structured path
-        # does, so a partial answer still surfaces what was found.
-        partial_chunks: list[dict] = []
-        for step_out in result.steps:
-            if not isinstance(step_out, dict):
-                continue
-            ids = step_out.get("ids")
-            if not isinstance(ids, list) or not ids:
-                continue
-            hashes = step_out.get("chunk_text_hash", []) or []
-            per_chunk_colls = step_out.get("chunk_collections") or []
-            dedup_colls = step_out.get("collections", []) or []
-            dists = step_out.get("distances", []) or []
-            default_coll = dedup_colls[0] if dedup_colls else ""
-            for i, cid in enumerate(ids):
-                coll = per_chunk_colls[i] if i < len(per_chunk_colls) else default_coll
-                partial_chunks.append({
-                    "id": cid,
-                    "chash": hashes[i] if i < len(hashes) else "",
-                    "collection": coll,
-                    "distance": dists[i] if i < len(dists) else None,
-                })
-        # The terminal step is where plan_run puts the OperatorTimeoutError
-        # sentinel (isolated path) or the bundle's terminal slot (bundle
-        # path) — both carry partial_text when a3's stream-json capture
-        # produced anything.
-        last_step = result.steps[-1] if result.steps else {}
-        partial_operator_text = (
-            str(last_step.get("partial_text") or "")
-            if isinstance(last_step, dict) else ""
-        )
-
-        lines = [marker]
-        if partial_chunks:
-            lines.append(
-                f"Retrieved {len(partial_chunks)} chunk"
-                f"{'s' if len(partial_chunks) != 1 else ''} before the "
-                "budget ran out:"
-            )
-            for ch in partial_chunks[:10]:
-                lines.append(f"  - {ch['id']} in {ch['collection']}")
-            if len(partial_chunks) > 10:
-                lines.append(f"  ... and {len(partial_chunks) - 10} more")
-        else:
-            lines.append("No retrieval results were captured before the budget ran out.")
-        if partial_operator_text:
-            lines.append("")
-            lines.append(
-                "Partial synthesis (incomplete, reconstructed from the "
-                "interrupted operator call):"
-            )
-            lines.append(partial_operator_text)
-        budget_final_text = "\n".join(lines)
-
-        _log.info(
-            "nx_answer_budget_partial_result",
-            plan_id=best.plan_id,
-            budget_exhausted_at_step=_budget_step,
-            total_planned_steps=total_planned,
-            chunk_count=len(partial_chunks),
-            has_partial_operator_text=bool(partial_operator_text),
-        )
-        try:
-            with _t2_ctx() as db:
-                _nx_answer_record_run(
-                    db.telemetry, question=question, plan_id=best.plan_id,
-                    matched_confidence=best.confidence, step_count=len(result.steps),
-                    final_text=budget_final_text[:2000], cost_usd=0.0,
-                    duration_ms=int((time.monotonic() - start) * 1000), trace=trace,
-                )
-        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-            pass
-        # nexus-yg49g doctrine: a budget-exhausted run did not complete —
-        # counts as a failure so a chronically-timing-out plan does not
-        # accrue a false success rate.
-        _nx_answer_record_outcome(best.plan_id, success=False)
-        return _result(
-            budget_final_text, plan_id=best.plan_id, step_count=len(result.steps),
-            chunks=partial_chunks if structured else None,
-            budget_exhausted_at_step=_budget_step,
-        )
+    # wrongly report "no evidence" when evidence WAS retrieved. Shared
+    # emitter — see ``_budget_exhausted_response`` above (nexus-nyry9.2,
+    # RDR-196 .r2: this is the SAME function the pre-Step-2 check calls).
+    _budget_response = _budget_exhausted_response(result)
+    if _budget_response is not None:
+        return _budget_response
 
     # ── Step 5: extract final answer ─────────────────────────────────────
     elapsed_ms = int((time.monotonic() - start) * 1000)
