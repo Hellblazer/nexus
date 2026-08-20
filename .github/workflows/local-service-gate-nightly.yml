@@ -198,13 +198,17 @@ jobs:
           # (tests/scripts/test_check_release_ci_evidence.py::_live_github_token).
           # Without a token all four skipped and the session-level
           # non-vacuity guard reddened every nightly since the pins landed.
-          # Job token, read-only permissions above. KNOWN RESIDUAL: the
-          # branch-protection pin needs an admin-scoped token, which a job
-          # token cannot carry — watch that single pin's outcome in the
-          # -rs report and size NX_MANDATORY_PIN_SKIP_BUDGET to exactly it if
-          # (and only if) it proves unreachable with the job token.
+          # Job token, read-only permissions above. MEASURED by dispatch
+          # (run 32401440865, 2026-08-20): 3/4 pins now run; the ONE residual
+          # is test_required_check_contexts_matches_live_branch_protection,
+          # which skips with `gh: Resource not accessible by integration
+          # (HTTP 403)` — reading branch protection needs push/admin access a
+          # job token cannot carry. Budget sized to EXACTLY that pin; any
+          # second skip still reds the run. Lifting it needs a PAT secret
+          # (Sam-provisioned), not a permissions line.
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
+          NX_MANDATORY_PIN_SKIP_BUDGET: "1"
         run: |
           set -euo pipefail
           if [ -z "$VOYAGE_API_KEY" ]; then
