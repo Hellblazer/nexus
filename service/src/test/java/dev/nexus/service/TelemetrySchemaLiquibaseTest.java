@@ -51,11 +51,15 @@ class TelemetrySchemaLiquibaseTest {
     private static final Set<String> FRECENCY_COLS = Set.of(
         "tenant_id", "chunk_id", "embedded_at", "ttl_days", "frecency_score",
         "miss_count", "last_hit_at");
+    // RDR-196 .p1c (nexus-nyry9.9): per-step cost/quality telemetry, child of nx_answer_runs.
+    private static final Set<String> NX_ANSWER_STEPS_COLS = Set.of(
+        "run_id", "tenant_id", "step_index", "operator", "source", "model",
+        "input_tokens", "output_tokens", "cost_usd", "elapsed_ms", "ok", "bundled_steps");
 
     // Tables that should NOT have a tsvector column (telemetry is never FTS-searched)
     private static final List<String> ALL_TEL_TABLES = List.of(
         "relevance_log", "search_telemetry", "tier_writes",
-        "nx_answer_runs", "hook_failures", "frecency");
+        "nx_answer_runs", "hook_failures", "frecency", "nx_answer_steps");
 
     PostgreSQLContainer<?> pg;
 
@@ -118,6 +122,66 @@ class TelemetrySchemaLiquibaseTest {
     @Test
     void frecency_hasExactColumnSet() throws Exception {
         assertColumns("frecency", FRECENCY_COLS);
+    }
+
+    @Test
+    void nxAnswerSteps_hasExactColumnSet() throws Exception {
+        assertColumns("nx_answer_steps", NX_ANSWER_STEPS_COLS);
+    }
+
+    // ── nx_answer_steps: PK, FK, source CHECK (RDR-196 .p1c, nexus-nyry9.9) ──
+
+    @Test
+    void nxAnswerSteps_primaryKeyIsRunIdStepIndex() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs = su.getMetaData().getPrimaryKeys(null, "nexus", "nx_answer_steps");
+            Set<String> pkCols = new HashSet<>();
+            while (rs.next()) {
+                pkCols.add(rs.getString("COLUMN_NAME").toLowerCase());
+            }
+            assertThat(pkCols)
+                .as("nx_answer_steps primary key must be exactly (run_id, step_index)")
+                .isEqualTo(Set.of("run_id", "step_index"));
+        }
+    }
+
+    @Test
+    void nxAnswerSteps_runIdForeignKeyCascadesOnDelete() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT confdeltype FROM pg_constraint c " +
+                "JOIN pg_class t ON t.oid = c.conrelid " +
+                "JOIN pg_namespace n ON n.oid = t.relnamespace " +
+                "WHERE n.nspname = 'nexus' AND t.relname = 'nx_answer_steps' AND c.contype = 'f'");
+            assertThat(rs.next()).as("nx_answer_steps must have a foreign key").isTrue();
+            // 'c' = ON DELETE CASCADE (pg_constraint.confdeltype)
+            assertThat(rs.getString("confdeltype")).isEqualTo("c");
+        }
+    }
+
+    @Test
+    void nxAnswerSteps_sourceCheckRejectsUnknownValue() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("SET nexus.tenant = 'schema-check-tenant'");
+            su.createStatement().execute(
+                "INSERT INTO nexus.nx_answer_runs (tenant_id, question, created_at) " +
+                "VALUES ('schema-check-tenant', 'check q', now())");
+            long runId;
+            try (var rs = su.createStatement().executeQuery(
+                    "SELECT id FROM nexus.nx_answer_runs WHERE tenant_id='schema-check-tenant' " +
+                    "AND question='check q' ORDER BY id DESC LIMIT 1")) {
+                assertThat(rs.next()).isTrue();
+                runId = rs.getLong("id");
+            }
+            org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                su.createStatement().execute(
+                    "INSERT INTO nexus.nx_answer_steps " +
+                    "(run_id, tenant_id, step_index, operator, source, elapsed_ms, ok) " +
+                    "VALUES (" + runId + ", 'schema-check-tenant', 0, 'op', 'not_a_real_source', 0, true)")
+            ).isInstanceOf(java.sql.SQLException.class)
+             .hasMessageContaining("nx_answer_steps_source_chk");
+        }
     }
 
     // ── Test 2: RLS on every telemetry table ─────────────────────────────────

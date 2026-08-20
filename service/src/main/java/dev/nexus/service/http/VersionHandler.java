@@ -27,6 +27,7 @@ import java.util.Properties;
  * <pre>{"app_version":"1.0-SNAPSHOT",
  *  "release_version":"0.1.6",
  *  "build_ref":"a1b2c3d+1690000000-4242",
+ *  "nx_answer_steps_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -234,6 +235,22 @@ public final class VersionHandler implements HttpHandler {
         }
     }
 
+    /**
+     * RDR-196 .p1c (nexus-nyry9.9) capability advertisement: does this engine
+     * accept the OPTIONAL {@code steps} array on
+     * {@code POST /v1/telemetry/nx_answer_runs/record}? Unlike
+     * {@code build_ref} (a nullable value, OMITTED when unset),
+     * {@code nx_answer_steps_supported} is a compile-time constant on any
+     * engine build carrying this handler — always present, always
+     * {@code true} — so the {@code .p1d} client-side capability probe reads
+     * it as "field present and true" -> steps accepted, "field absent"
+     * (pre-nexus-nyry9.9 engine) -> steps not accepted, kill the client-side
+     * {@code cost_usd=0.0} literals only once this reads true.
+     */
+    static void appendNxAnswerStepsCapabilityField(StringBuilder body) {
+        body.append(",\"nx_answer_steps_supported\":true");
+    }
+
     /** Immutable-for-the-process schema identity (nexus-hubc0). */
     private record SchemaIdentity(String latestId, long count, String error) {}
 
@@ -308,6 +325,8 @@ public final class VersionHandler implements HttpHandler {
             .append(releaseVersion == null ? "null" : HttpUtil.jsonString(releaseVersion));
         // nexus-308ph: OMITTED (not null/empty) when unset — see appendBuildRefField.
         appendBuildRefField(body, buildRef);
+        // nexus-nyry9.9: always present, always true on any engine carrying this handler.
+        appendNxAnswerStepsCapabilityField(body);
         if (embedderRouter != null) {
             body.append(",\"embedding_mode\":")
                 .append(HttpUtil.jsonString(embedderRouter.modeName()))

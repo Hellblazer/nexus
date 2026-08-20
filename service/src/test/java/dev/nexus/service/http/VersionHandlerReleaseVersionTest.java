@@ -107,4 +107,17 @@ class VersionHandlerReleaseVersionTest {
         // nexus-308ph /version shape byte-identical.
         assertThat(VersionHandler.resolveBuildRef()).isNull();
     }
+
+    // ── nexus-nyry9.9 (RDR-196 .p1c): nx_answer_steps capability advertisement ──
+
+    @Test
+    void appendNxAnswerStepsCapabilityFieldAlwaysEmitsTrue() {
+        // Unlike build_ref (nullable, omitted when unset), this is a
+        // compile-time constant on any engine build carrying this handler —
+        // always present, always true. The .p1d client-side capability probe
+        // reads "field present and true" as "this engine accepts steps[]".
+        var body = new StringBuilder();
+        VersionHandler.appendNxAnswerStepsCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"nx_answer_steps_supported\":true");
+    }
 }

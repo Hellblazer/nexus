@@ -142,7 +142,12 @@ class JooqRecordReflectionFeatureTest {
     // MigrationJobsRecord (added at the 50 -> 51 bump above) leaves with
     // it. Same shape as nexus-lgdel.l1's chash_alias drop (63 -> 62,
     // above).
-    private static final int EXPECTED_RECORD_TYPES = 64;
+    // 64 -> 65: nexus-nyry9.9 (RDR-196 .p1c, telemetry-007-nx-answer-steps.xml)
+    // added nexus.nx_answer_steps — a plain table (per-step cost/quality
+    // telemetry, child of nx_answer_runs), one generated Record type (+1),
+    // NxAnswerStepsRecord. This is the deliberate bump the assertion message
+    // demands.
+    private static final int EXPECTED_RECORD_TYPES = 65;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

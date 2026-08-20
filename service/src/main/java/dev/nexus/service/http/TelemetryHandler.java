@@ -337,8 +337,75 @@ public final class TelemetryHandler implements HttpHandler {
         double costUsd   = cost != null ? cost : 0.0;
         long durationMsV = durationMs != null ? durationMs : 0L;
         String createdAt = optStr(body, "created_at");
-        repo.recordNxAnswerRun(tenant, question, planId, conf, stepCount, finalText, costUsd, durationMsV, createdAt);
+        // RDR-196 .p1c (nexus-nyry9.9): OPTIONAL steps[] — absent/empty writes only
+        // the parent, exactly as before this bead (the .p1d degradation contract).
+        List<TelemetryRepository.StepInput> steps = parseNxAnswerSteps(body.get("steps"));
+        repo.recordNxAnswerRun(tenant, question, planId, conf, stepCount, finalText, costUsd,
+            durationMsV, createdAt, steps);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * Parse the optional {@code steps} array on
+     * {@code POST /v1/telemetry/nx_answer_runs/record} (RDR-196 .p1c,
+     * nexus-nyry9.9) into {@link TelemetryRepository.StepInput} rows.
+     * {@code null}/absent yields an empty list — never a synthesized default
+     * step. Each element must carry {@code operator}, {@code source}, and
+     * {@code ok} (no silent default for a boolean telemetry field — the same
+     * "no silent fallback for correctness" reasoning {@code requireBool}
+     * already applies to consent records); {@code source}'s own closed-set
+     * validity is enforced by the {@code nx_answer_steps_source_chk} CHECK at
+     * the DB layer, surfaced as a typed 409 by
+     * {@code HttpUtil.sendTypedDbError} rather than re-validated here.
+     */
+    @SuppressWarnings("unchecked")
+    private List<TelemetryRepository.StepInput> parseNxAnswerSteps(Object raw) {
+        if (raw == null) return List.of();
+        if (!(raw instanceof List<?> rawList)) {
+            throw new IllegalArgumentException("field 'steps' must be a JSON array");
+        }
+        List<TelemetryRepository.StepInput> steps = new ArrayList<>(rawList.size());
+        for (Object o : rawList) {
+            if (!(o instanceof Map<?, ?> rawStep)) {
+                throw new IllegalArgumentException("each element of 'steps' must be a JSON object");
+            }
+            Map<String, Object> step = (Map<String, Object>) rawStep;
+            // step_index feeds the (run_id, step_index) composite PK — a silent
+            // default (the old optInt(step,"step_index",0)) let two omitted-
+            // step_index rows in the same request collide on PK (run_id,0)
+            // instead of 400ing the actual mistake (code-review finding,
+            // 2026-08-20). No-silent-fallback-for-correctness, same reasoning
+            // as 'ok' below.
+            int stepIndex          = requireInt(step, "step_index");
+            String operator       = requireString(step, "operator");
+            String source         = requireString(step, "source");
+            String model          = optStrNull(step, "model");
+            Integer inputTokens   = optInt(step, "input_tokens");
+            Integer outputTokens  = optInt(step, "output_tokens");
+            Double stepCostUsd    = optDoubleNull(step, "cost_usd");
+            int elapsedMs         = optInt(step, "elapsed_ms", 0);
+            boolean ok            = requireBool(step, "ok");
+            List<Integer> bundledSteps = parseBundledSteps(step.get("bundled_steps"));
+            steps.add(new TelemetryRepository.StepInput(stepIndex, operator, source, model,
+                inputTokens, outputTokens, stepCostUsd, elapsedMs, ok, bundledSteps));
+        }
+        return steps;
+    }
+
+    /** {@code bundled_steps}: a JSON array of integer plan indices, or absent (empty). */
+    private List<Integer> parseBundledSteps(Object raw) {
+        if (raw == null) return List.of();
+        if (!(raw instanceof List<?> rawList)) {
+            throw new IllegalArgumentException("field 'bundled_steps' must be a JSON array");
+        }
+        List<Integer> out = new ArrayList<>(rawList.size());
+        for (Object o : rawList) {
+            if (!(o instanceof Number n)) {
+                throw new IllegalArgumentException("each element of 'bundled_steps' must be an integer");
+            }
+            out.add(n.intValue());
+        }
+        return out;
     }
 
     /**
@@ -681,6 +748,24 @@ public final class TelemetryHandler implements HttpHandler {
             throw new IllegalArgumentException("Missing required field: " + key);
         }
         return v.toString();
+    }
+
+    /**
+     * Like {@link #requireString} but for an int field — used where a
+     * numeric wire field feeds identity/PK material and a silent default
+     * (as {@link #optInt(Map, String, int)} would produce) would corrupt
+     * that identity rather than surface the caller's actual mistake
+     * (RDR-196 .p1c step_index, code-review 2026-08-20). Reuses {@link
+     * #optInt(Map, String)}'s number-or-numeric-string coercion and its
+     * IllegalArgumentException for a genuinely malformed value; only the
+     * "absent" case gets a distinct, field-naming message here.
+     */
+    private int requireInt(Map<String, Object> body, String key) {
+        Integer v = optInt(body, key);
+        if (v == null) {
+            throw new IllegalArgumentException("Missing required field: " + key);
+        }
+        return v;
     }
 
     private Object requireObj(Map<String, Object> body, String key) {

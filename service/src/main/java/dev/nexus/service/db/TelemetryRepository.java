@@ -6,6 +6,7 @@ import org.jooq.DSLContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -845,10 +846,32 @@ public final class TelemetryRepository {
         });
     }
 
-    // ── nx_answer_runs ─────────────────────────────────────────────────────────
+    // ── nx_answer_runs / nx_answer_steps ─────────────────────────────────────────
 
     /**
-     * Append one nx_answer run record (live write path).
+     * One parsed {@code nx_answer_steps} child row, as handed to
+     * {@link #recordNxAnswerRun(String, String, Long, Double, int, String, double, long, String, List)}
+     * by {@code TelemetryHandler.parseSteps} (RDR-196 .p1c, nexus-nyry9.9).
+     * Field-for-field mirror of the Python-side {@code StepRecord}
+     * (src/nexus/plans/runner.py:242) — see telemetry-007-nx-answer-steps.xml's
+     * header for the column-by-column rationale.
+     */
+    public record StepInput(int stepIndex,
+                             String operator,
+                             String source,
+                             String model,
+                             Integer inputTokens,
+                             Integer outputTokens,
+                             Double costUsd,
+                             int elapsedMs,
+                             boolean ok,
+                             List<Integer> bundledSteps) {}
+
+    /**
+     * Append one nx_answer run record (live write path), no step children.
+     * Delegates to the steps-carrying overload with an empty list — every
+     * existing caller (ETL-adjacent live-write sites, every pre-nexus-nyry9.9
+     * test) keeps its exact prior behavior unchanged.
      */
     public void recordNxAnswerRun(String tenant,
                                   String question,
@@ -859,8 +882,55 @@ public final class TelemetryRepository {
                                   double costUsd,
                                   long durationMs,
                                   String createdAtIso) {
+        recordNxAnswerRun(tenant, question, planId, matchedConfidence, stepCount, finalText,
+            costUsd, durationMs, createdAtIso, List.of());
+    }
+
+    /**
+     * Append one nx_answer run record plus its (optional) per-step children,
+     * in ONE transaction (RDR-196 .p1c, nexus-nyry9.9 — the {@code steps}
+     * wire field on {@code POST /v1/telemetry/nx_answer_runs/record} is
+     * OPTIONAL, the {@code .p1d} degradation contract: an empty/absent
+     * {@code steps} list writes the parent exactly as before and nothing
+     * else).
+     *
+     * <p>Atomicity: both the parent insert and every child insert run inside
+     * the SAME {@link TenantScope#withTenant} lambda, which is one PG
+     * transaction (autoCommit=false, commit on lambda return, rollback on any
+     * thrown exception — see {@code TenantScope.stampAndRun}). A child-row
+     * failure (e.g. the {@code source} CHECK, a NOT NULL violation) throws a
+     * jOOQ {@code DataAccessException} (a {@code RuntimeException}), which
+     * propagates out of this lambda and rolls back the parent insert too —
+     * partial telemetry is worse than none (this bead's own DO instruction).
+     *
+     * <p>Dedup interaction: the parent insert keeps its
+     * {@code onConflictDoNothing()} (the existing {@code nx_answer_runs} ETL
+     * dedup key, unchanged). {@code RETURNING id} on that insert yields
+     * {@code null} when the conflict-skip fires — in that case children are
+     * NOT written (there is no new row to attach them to, and this call
+     * cannot safely infer which pre-existing run row is the "same" one
+     * without a broader dedup redesign that is out of this bead's scope).
+     * This is the same rare-collision edge case the parent's own dedup
+     * already accepted; it is not new in kind, only extended to also skip
+     * children on that already-existing skip path.
+     *
+     * <p>Does NOT delegate from {@code importNxAnswerRunRow} (the ETL path)
+     * — that method has no steps concept in this bead's scope and stays
+     * exactly as it was, per this bead's own DO instruction to leave that
+     * split intact.
+     */
+    public void recordNxAnswerRun(String tenant,
+                                  String question,
+                                  Long planId,
+                                  Double matchedConfidence,
+                                  int stepCount,
+                                  String finalText,
+                                  double costUsd,
+                                  long durationMs,
+                                  String createdAtIso,
+                                  List<StepInput> steps) {
         tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(NX_ANSWER_RUNS)
+            Long runId = ctx.insertInto(NX_ANSWER_RUNS)
                 .set(NX_ANSWER_RUNS.TENANT_ID, tenant)
                 .set(NX_ANSWER_RUNS.QUESTION, question)
                 .set(NX_ANSWER_RUNS.PLAN_ID, planId)
@@ -872,7 +942,31 @@ public final class TelemetryRepository {
                 .set(NX_ANSWER_RUNS.CREATED_AT,
                     createdAtIso != null ? parseTs(createdAtIso) : OffsetDateTime.now(ZoneOffset.UTC))
                 .onConflictDoNothing()
-                .execute();
+                .returning(NX_ANSWER_RUNS.ID)
+                .fetchOne(NX_ANSWER_RUNS.ID);
+
+            if (runId != null && steps != null) {
+                for (StepInput s : steps) {
+                    Integer[] bundled = s.bundledSteps() == null
+                        ? new Integer[0]
+                        : s.bundledSteps().toArray(new Integer[0]);
+                    ctx.insertInto(NX_ANSWER_STEPS)
+                        .set(NX_ANSWER_STEPS.RUN_ID, runId)
+                        .set(NX_ANSWER_STEPS.TENANT_ID, tenant)
+                        .set(NX_ANSWER_STEPS.STEP_INDEX, s.stepIndex())
+                        .set(NX_ANSWER_STEPS.OPERATOR, s.operator())
+                        .set(NX_ANSWER_STEPS.SOURCE, s.source())
+                        .set(NX_ANSWER_STEPS.MODEL, s.model())
+                        .set(NX_ANSWER_STEPS.INPUT_TOKENS, s.inputTokens())
+                        .set(NX_ANSWER_STEPS.OUTPUT_TOKENS, s.outputTokens())
+                        .set(NX_ANSWER_STEPS.COST_USD,
+                            s.costUsd() != null ? BigDecimal.valueOf(s.costUsd()) : null)
+                        .set(NX_ANSWER_STEPS.ELAPSED_MS, s.elapsedMs())
+                        .set(NX_ANSWER_STEPS.OK, s.ok())
+                        .set(NX_ANSWER_STEPS.BUNDLED_STEPS, bundled)
+                        .execute();
+                }
+            }
             return null;
         });
     }
