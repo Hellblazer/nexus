@@ -540,7 +540,12 @@ else
   echo "[1-2/3] --no-build: reusing existing wheel + native binary"
 fi
 
-if [ "$COLD" = 0 ] && [ "$HOLE_PUNCH" = 0 ] && [ "$PACKAGE_UPGRADE" = 0 ] && [ "$ERA_HOP" = 0 ] && [ "$STRANDED" = 0 ]; then
+# nexus-nyry9.13 (2026-08-21): --acquire is a cold-acquire leg too — it stages
+# NO local native binary (see the ACQUIRE staging branch below), so it must be
+# excluded here exactly like the other runtime-acquire legs. Without this, the
+# published-artifact gate demanded service/target/nexus-service on any box that
+# had not happened to leave a stale one behind, and failed before testing anything.
+if [ "$COLD" = 0 ] && [ "$HOLE_PUNCH" = 0 ] && [ "$PACKAGE_UPGRADE" = 0 ] && [ "$ERA_HOP" = 0 ] && [ "$STRANDED" = 0 ] && [ "$ACQUIRE" = 0 ]; then
   ls dist/conexus-*.whl >/dev/null 2>&1 || { echo "no wheel in dist/ — drop --no-build" >&2; exit 1; }
   [ -x service/target/nexus-service ] || { echo "no native binary at service/target/nexus-service — drop --no-build" >&2; exit 1; }
 fi
