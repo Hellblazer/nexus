@@ -31,4 +31,12 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release (pinned: v7.13.0)
 
-(empty — pin advanced at v7.13.0; all prior entries went live)
+- `conexus/hooks/scripts/routing/_lib.py` and `sn/hooks/scripts/routing/_lib.py`
+  — nexus-pfuns, commit `02ef7ee63`: the fallback routing-log path
+  (`_DEFAULT_LOG_PATH`) is now resolved by a call-time `_default_log_path()`
+  instead of a module-level constant frozen at import, so the routing-log
+  destination a hook subprocess writes to honours `NX_ROUTING_LOG_PATH` and
+  `HOME` as they are at the moment the hook actually runs, not as they were
+  when the interpreter first imported `_lib`. Until the next release tag
+  ships, subagents on the currently-installed plugin still resolve the
+  fallback path at import time.
