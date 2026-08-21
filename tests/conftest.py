@@ -467,7 +467,18 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
 
 
 def _is_allowlisted_config_dir_path(rel_path: str) -> bool:
-    return rel_path.startswith(_REAL_CONFIG_DIR_ALLOWLIST_PREFIXES)
+    if rel_path.startswith(_REAL_CONFIG_DIR_ALLOWLIST_PREFIXES):
+        return True
+    # The repo index cache ``<basename>-<hash>.cache`` at the config root
+    # (src/nexus/indexer.py:4036) is rewritten by the same post-commit-hook
+    # ``nx index repo`` run as ``index.log`` / ``logs/index-*`` / ``locks/``
+    # above; its name carries a per-checkout hash, so a prefix cannot name
+    # it. Observed 2026-08-21 as ``MODIFIED nexus-571b8edd.cache`` during the
+    # .p1f battery's lint stage, coinciding with an orchestrator commit. Root
+    # level only -- a ``*.cache`` anywhere deeper is still reported -- and a
+    # TEST leaking a repo cache here is the class the fixture-cache-leak
+    # guard (nexus-nifd) polices separately.
+    return "/" not in rel_path and rel_path.endswith(".cache")
 
 
 def _diff_config_dir_snapshots(
