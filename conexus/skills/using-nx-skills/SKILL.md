@@ -75,7 +75,7 @@ Do NOT use it for: file:line answers (Serena/Grep), anything already in a local 
 
 ## Essential MCP Tools (always available)
 
-**Sequential Thinking** (`mcp__plugin_conexus_sequential-thinking__sequentialthinking`) — call it BEFORE every decision, not only "non-trivial" ones (that qualifier measured to zero top-level calls in a full session, 2026-08-19): what to dispatch, which fix, how to read a reviewer's verdict or a measurement, whether to push. The orchestrator holds itself to the same rule it writes into briefs. Workflow: hypothesis → evidence → evaluate → branch or proceed. `needsMoreThoughts: true` to continue, `isRevision: true` to correct, `branchFromThought: N` + `branchId` to explore alternatives.
+**Sequential Thinking** (`mcp__plugin_conexus_sequential-thinking__sequentialthinking`) — call it BEFORE every decision, not only "non-trivial" ones (that qualifier measured to zero top-level calls in a full session, 2026-08-19): what to dispatch, which fix, how to read a reviewer's verdict or a measurement, whether to push. The orchestrator holds itself to the same rule it writes into briefs. Workflow: hypothesis → evidence → evaluate → branch or proceed. `needsMoreThoughts: true` to continue, `isRevision: true` to correct, `branchFromThought: N` + `branchId` to explore alternatives. **The thought is the record**: it is what reviewers, siblings, and the census can see; internal reasoning is not.
 
 **Conexus Storage Tiers — check before any work, write your findings back.** Read widest → narrowest:
 - **T3** `nx search`: permanent knowledge across all sessions and projects — **check before researching from scratch**. (Tier checks use `search`; `nx_answer` is for synthesis, not for looking whether something exists.)

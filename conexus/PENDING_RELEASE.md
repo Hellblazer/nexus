@@ -38,3 +38,14 @@ mechanize, it matters enough to ship.
   unset until a sufficient post-flip derivation is recorded), enforcement
   landing in .p3c. Docs-only drift: an installed plugin at v7.14.0 shows
   a default the 7.15.0 tool no longer has.
+
+- `conexus/skills/using-nx-skills/SKILL.md` —
+  Consolidation of a duplicated directive (Sam, 2026-08-21). The
+  sequential-thinking rule lived in BOTH this skill and the user-level
+  CLAUDE.md in near-verbatim form, including the same 2026-08-19 evidence
+  date. Per CLAUDE.md's own precedence rule the plugin owns workflow
+  routing, so the skill is the single source; the one sentence the skill
+  lacked — "the thought is the record: it is what reviewers, siblings and
+  the census can see; internal reasoning is not" — moves here, and
+  CLAUDE.md reduces to a pointer. Docs-only drift: a session on the
+  pinned v7.14.0 plugin still reads the skill without that sentence.
