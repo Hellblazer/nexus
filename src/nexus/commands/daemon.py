@@ -32,7 +32,7 @@ from xml.sax.saxutils import escape as _xml_escape
 import click
 import structlog
 
-from nexus.config import nexus_config_dir
+from nexus import config as _config
 
 _log = structlog.get_logger(__name__)
 
@@ -739,7 +739,7 @@ def service_start_cmd(
         run_storage_supervisor,
     )
 
-    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()
 
     if foreground:
         try:
@@ -881,7 +881,7 @@ def service_install_binary_cmd(
     except PackageNotFoundError:
         _nx_version = "unknown"
 
-    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()
     installed_by = f"conexus {_nx_version}"
 
     # nexus-pnwu0 / GH #1414 upgrade gate: refuse to install a new engine onto a
@@ -970,7 +970,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
         stop_storage_service,
     )
 
-    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()
     outcome = stop_storage_service(config_dir=config_dir)
     pid = outcome.pids[0] if outcome.pids else None
     pids_str = ", ".join(str(p) for p in outcome.pids)
@@ -1258,7 +1258,7 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     import os as _os  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
-    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
     scope = str(_os.getuid())
     record = registry.discover(scope)
@@ -1426,7 +1426,7 @@ def aspect_worker_start_cmd(
     """
     from nexus.daemon.aspect_worker_daemon import run_aspect_worker_daemon  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
-    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()
     click.echo(
         f"Aspect-worker daemon starting (config_dir={config_dir}, tenant={tenant})..."
     )
@@ -1493,7 +1493,7 @@ def restart_stale_cmd(dry_run: bool) -> None:
     except Exception as exc:  # noqa: BLE001 — one leg's failure must not block the others
         click.echo(f"process-skew detection failed ({exc}) — skipping this leg.", err=True)
 
-    config_dir = nexus_config_dir()
+    config_dir = _config.nexus_config_dir()
 
     # nexus-cfgo9 code-review HIGH: converge_engine documents a "never
     # raises" contract, but that contract lives in one function's docstring

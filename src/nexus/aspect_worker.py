@@ -69,7 +69,7 @@ from nexus.aspect_extractor import (
     extract_aspects as _extract_aspects,
     extract_aspects_batch as _extract_aspects_batch,
 )
-from nexus.config import nexus_config_dir
+from nexus import config as _config
 
 _log = structlog.get_logger(__name__)
 
@@ -655,7 +655,7 @@ def _worker_lock_path(locks_dir: Path | None = None) -> Path:
     import os  # noqa: PLC0415 — stdlib os deferred to function scope
 
     base = locks_dir if locks_dir is not None else (
-        nexus_config_dir() / "locks"
+        _config.nexus_config_dir() / "locks"
     )
     return base / f"aspect_worker.{os.getpid()}"
 
@@ -1208,7 +1208,7 @@ def _ensure_aspect_worker() -> None:
     try:
         from nexus.daemon.aspect_worker_daemon import ensure_aspect_worker_daemon  # noqa: PLC0415 — deferred; daemon module is CLI/service-side
 
-        ensure_aspect_worker_daemon(config_dir=nexus_config_dir(), tenant=_ENQUEUE_TENANT)
+        ensure_aspect_worker_daemon(config_dir=_config.nexus_config_dir(), tenant=_ENQUEUE_TENANT)
     except Exception as exc:  # noqa: BLE001 — best-effort spawn; the row is enqueued, do not fail the store
         # RDR-173 P5 observability (nexus-xv5fl): make the store-time failure
         # LOUD with diagnostic context (tenant + how many rows are now stranded

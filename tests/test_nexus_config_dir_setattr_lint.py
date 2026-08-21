@@ -27,31 +27,38 @@ test_false_clean_diagnostics_service_mode.py:395-407`` (v7.11.0, PR
 gc_purge_marker.py`` (fixed 2026-08-20).
 
 THE FIX, applied to 48 test sites in the nexus-78blw sweep (45
-``monkeypatch.setattr`` + 3 ``unittest.mock.patch`` sites): replace the
-``setattr``/``patch`` with ``monkeypatch.setenv("NEXUS_CONFIG_DIR",
-str(X))`` (or, for a bare context-manager ``patch(...)`` with no
-``monkeypatch`` fixture in scope, ``patch.dict(os.environ,
-{"NEXUS_CONFIG_DIR": str(X)})``, the equivalent for that idiom).
-``nexus_config_dir()`` reads the env var fresh on every call regardless
-of which module's namespace holds the reference, so env-based patching
-is immune to the by-value-capture class entirely -- there is no
-"module.copy" to poison. The 7 sites that remain as ``setattr``/
-``patch`` on ``nexus_config_dir`` are exempted for two distinct reasons
--- see ``_SETATTR_EXEMPT`` below for the per-entry detail:
+``monkeypatch.setattr`` + 3 ``unittest.mock.patch`` sites) plus 5 more in
+the nexus-grg79 follow-up (1 ``monkeypatch.setattr`` + 4
+``unittest.mock.patch`` sites, once their consumers' own src/ module-level
+imports were converted -- see below): replace the ``setattr``/``patch``
+with ``monkeypatch.setenv("NEXUS_CONFIG_DIR", str(X))`` (or, for a bare
+context-manager ``patch(...)`` with no ``monkeypatch`` fixture in scope,
+``patch.dict(os.environ, {"NEXUS_CONFIG_DIR": str(X)})``, the equivalent
+for that idiom). ``nexus_config_dir()`` reads the env var fresh on every
+call regardless of which module's namespace holds the reference, so
+env-based patching is immune to the by-value-capture class entirely --
+there is no "module.copy" to poison. The sites that remain as
+``setattr``/``patch`` on ``nexus_config_dir`` are exempted for one
+reason -- see ``_SETATTR_EXEMPT`` below for the per-entry detail: each is
+a deliberate regression pin for the leak mechanism ITSELF (proving a
+consumer resolves through ``nexus.config`` at call time, not a frozen
+import). Converting these to ``setenv`` would make them incapable of
+ever catching the bug they exist to catch, since ``setenv`` cannot
+distinguish a correctly-resolving consumer from one whose module-level
+import already captured the REAL (unpoisoned) function -- this is also
+why nexus-grg79's own 4 new regression pins (one src/ module apiece) had
+to add exactly ONE new exempted site: every genuine reproduction of this
+defect class necessarily patches ``nexus.config.nexus_config_dir`` at
+least once, so the 4 pins share ONE physical ``monkeypatch.setattr`` call
+site (a context-manager helper) rather than exempting four.
 
-- 3 are deliberate regression pins for the leak mechanism ITSELF
-  (proving a consumer resolves through ``nexus.config`` at call time,
-  not a frozen import). Converting these to ``setenv`` would make them
-  incapable of ever catching the bug they exist to catch, since
-  ``setenv`` cannot distinguish a correctly-resolving consumer from one
-  whose module-level import already captured the REAL (unpoisoned)
-  function.
-- 4 target a CONSUMER module's own already-captured attribute directly
-  (``nexus.commands.daemon.nexus_config_dir`` /
-  ``aw.nexus_config_dir``) because that consumer itself still has an
-  unfixed MODULE-LEVEL by-value import (see Sweep 2 below) -- the only
-  seam that reliably reaches it until the consumer is converted to the
-  module-attribute pattern.
+nexus-grg79 (T2 ``nexus/78blw-dev-notes-2026-08-21``) converted the 4
+formerly-exempted CONSUMER-side sites (``nexus.commands.daemon.
+nexus_config_dir`` x4 / ``aw.nexus_config_dir`` x1) to ``setenv``/
+``patch.dict`` now that Sweep 2's 4 module-level by-value imports are
+fixed (module-attribute access via ``_config.nexus_config_dir()``) --
+env-based patching now reaches every consumer regardless of import
+order, so the consumer-attribute seam is no longer needed.
 
 TWO SEPARATE SWEEPS in this file:
 
@@ -74,12 +81,14 @@ TWO SEPARATE SWEEPS in this file:
    CURRENT ``nexus.config.nexus_config_dir``, on every call -- this repo
    marks these ``# noqa: PLC0415`` throughout, and the census confirms
    they are not the same defect). Both counts are tracked ratchets so a
-   NEW module-level by-value import cannot land silently; the 4 already
-   in the tree are allowlisted with reasons (fix pattern: ``from nexus
-   import config as _config`` + ``_config.nexus_config_dir()``, the
-   pattern ``gc_purge_marker.py`` / ``commands/t3.py`` /
-   ``commands/_helpers.py`` already use) -- converting them is OUT OF
-   SCOPE for the dispatch that authored this lint (fenced to test files
+   NEW module-level by-value import cannot land silently. The 4 that
+   were in the tree when this lint was authored (fix pattern: ``from
+   nexus import config as _config`` + ``_config.nexus_config_dir()``,
+   the pattern ``gc_purge_marker.py`` / ``commands/t3.py`` /
+   ``commands/_helpers.py`` already use) were converted by the
+   nexus-grg79 follow-up -- the allowlist is now EMPTY (ceiling 0);
+   converting them had been OUT OF SCOPE for the dispatch that authored
+   this lint only (fenced to test files
    + this new lint file only; see nexus-78blw comment thread) and is
    left for a follow-up bead.
 """
@@ -116,8 +125,8 @@ def _iter_py_files(root: Path) -> list[Path]:
 
 
 def _setattr_hits(path: Path) -> list[tuple[int, str]]:
-    """Return ``(1-based lineno, source snippet)`` for every call in *path*
-    that patches ``nexus_config_dir``, in either recognized shape:
+    """Return ``(1-based lineno, source snippet)`` for every site in *path*
+    that patches ``nexus_config_dir``, in any recognized shape:
 
     - dotted-string target: ``monkeypatch.setattr("nexus.config.
       nexus_config_dir", ...)`` / ``mock.patch("...nexus_config_dir", ...)``
@@ -128,8 +137,25 @@ def _setattr_hits(path: Path) -> list[tuple[int, str]]:
       alias ``nexus.config`` (``init_mod._config``) and by sites that
       patch a CONSUMER module's own by-value-captured copy directly
       (``aw.nexus_config_dir``) -- both are in scope for this sweep; the
-      3 legitimate uses are individually allowlisted below, not exempted
+      legitimate uses are individually allowlisted below, not exempted
       by shape.
+    - direct attribute ASSIGNMENT: ``nexus.config.nexus_config_dir = ...``
+      (nexus-grg79 comment thread) -- the non-context-manager form of the
+      same by-value-capture hazard; ``monkeypatch``/``mock.patch`` at
+      least restore the original attribute on teardown, a bare assignment
+      restores nothing at all, so this shape is strictly worse and must
+      not become a silent escape hatch from Sweep 1.
+    - ``mock.patch.multiple(TARGET, nexus_config_dir=...)`` kwarg form
+      (nexus-grg79 comment thread) -- the multi-attribute cousin of
+      ``patch.object``; a ``nexus_config_dir=`` keyword here is the exact
+      same hazard as the two-arg ``patch.object`` form above, just spread
+      across ``patch.multiple``'s kwargs instead of positional args.
+
+    Neither of the last two shapes existed anywhere in the tree as of
+    nexus-grg79 -- detection is proven via the synthetic-input
+    falsification tests below (``test_setattr_detector_catches_direct_
+    assignment`` / ``test_setattr_detector_catches_patch_multiple_kwarg``),
+    not via any real hit in this repo.
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -138,12 +164,24 @@ def _setattr_hits(path: Path) -> list[tuple[int, str]]:
         return []
     hits: list[tuple[int, str]] = []
     for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Attribute) and target.attr == _TARGET:
+                    snippet = (ast.get_source_segment(text, node) or "").splitlines()[0]
+                    hits.append((node.lineno, snippet.strip()))
+                    break
+            continue
         if not isinstance(node, ast.Call):
             continue
         func = node.func
         call_name = func.attr if isinstance(func, ast.Attribute) else (
             func.id if isinstance(func, ast.Name) else None
         )
+        if call_name == "multiple":
+            if any(kw.arg == _TARGET for kw in node.keywords):
+                snippet = (ast.get_source_segment(text, node) or "").splitlines()[0]
+                hits.append((node.lineno, snippet.strip()))
+            continue
         if call_name not in ("setattr", "patch", "object"):
             continue
         args = node.args
@@ -180,10 +218,11 @@ def _all_setattr_hits() -> dict[str, list[tuple[int, str]]]:
 # `monkeypatch.setenv("NEXUS_CONFIG_DIR", ...)`) or grow with a new,
 # individually-documented entry AND a conscious ceiling bump in the same
 # diff. Every entry below is a REAL, confirmed instance deliberately NOT
-# converted in the nexus-78blw sweep because it deliberately tests the
-# by-value-capture mechanism itself, or because the consumer it targets
-# still has an unfixed module-level by-value import out of that sweep's
-# touch-fence.
+# converted, because it deliberately tests the by-value-capture mechanism
+# itself -- nexus-grg79 converted the OTHER reason this set used to carry
+# entries for (a consumer's own unfixed module-level by-value import,
+# see `_MODULE_LEVEL_BY_VALUE_IMPORT_EXEMPT` below, now empty), so every
+# remaining entry here is a genuine mechanism regression pin.
 _SETATTR_EXEMPT: frozenset[str] = frozenset({
     # test_marker_path_resolves_config_dir_at_call_time: the regression pin
     # for the ORIGINAL gc_purge_marker.py incident. It deliberately patches
@@ -204,34 +243,20 @@ _SETATTR_EXEMPT: frozenset[str] = frozenset({
     # import nexus_config_dir` binding captured once at t3.py's own import
     # time -- same reasoning as the entry above.
     "tests/commands/test_t3_backfill_state_path.py:55",
-    # test_enqueue_hook_service_mode_reaches_daemon_spawn: targets
-    # nexus.aspect_worker's OWN attribute (`aw.nexus_config_dir`), not
-    # nexus.config's. src/nexus/aspect_worker.py:72 still carries an
-    # unfixed MODULE-LEVEL `from nexus.config import nexus_config_dir`
-    # by-value import (see `_MODULE_LEVEL_BY_VALUE_IMPORT_EXEMPT` below) --
-    # setattr(aw, "nexus_config_dir", ...) is the only seam that reliably
-    # reaches THIS consumer's already-captured reference regardless of
-    # import order; a plain NEXUS_CONFIG_DIR env var would only work if
-    # aspect_worker.py itself were converted to the module-attribute
-    # pattern first (out of the nexus-78blw dispatch's touch-fence --
-    # follow-up bead needed).
-    "tests/daemon/test_aspect_worker_spawn.py:179",
-    # tests/daemon/test_restart_stale_engine_convergence.py (4 sites, all
-    # `patch("nexus.commands.daemon.nexus_config_dir", return_value=...)`):
-    # same class as the aspect_worker entry above. src/nexus/commands/
-    # daemon.py:35 has `from nexus.config import
-    # nexus_config_dir` at MODULE LEVEL (see `_MODULE_LEVEL_BY_VALUE_
-    # IMPORT_EXEMPT` below) -- patching the string path
-    # "nexus.commands.daemon.nexus_config_dir" reaches THAT captured
-    # attribute directly, which `monkeypatch.setenv("NEXUS_CONFIG_DIR",
-    # ...)` cannot do until commands/daemon.py is converted to the
-    # module-attribute pattern (out of touch-fence, follow-up bead).
-    "tests/daemon/test_restart_stale_engine_convergence.py:32",
-    "tests/daemon/test_restart_stale_engine_convergence.py:130",
-    "tests/daemon/test_restart_stale_engine_convergence.py:163",
-    "tests/daemon/test_restart_stale_engine_convergence.py:279",
+    # tests/test_nexus_config_dir_call_time_resolution.py's
+    # `_poisoned_then_reloaded` helper (nexus-grg79): the SAME regression-
+    # pin mechanism as the two entries above, applied to the 4 consumers
+    # nexus-78blw's census found with an unfixed MODULE-LEVEL by-value
+    # import (aspect_worker.py, commands/daemon.py, migration/state.py,
+    # console/routes/health.py). Deliberately factored to ONE shared
+    # context-manager call site instead of one per consumer -- every
+    # genuine reproduction of this defect class necessarily patches
+    # nexus.config.nexus_config_dir at least once, so sharing the helper
+    # keeps this ratchet's growth to +1 for 4 new regression pins instead
+    # of +4.
+    "tests/test_nexus_config_dir_call_time_resolution.py:66",
 })
-_SETATTR_EXEMPT_CEILING = 7
+_SETATTR_EXEMPT_CEILING = 3
 
 
 def test_no_new_nexus_config_dir_setattr() -> None:
@@ -294,12 +319,54 @@ def test_setattr_exempt_entries_are_live() -> None:
 
 def _classify_import_sites(path: Path) -> tuple[list[int], list[int]]:
     """Return ``(module_level_linenos, function_scoped_linenos)`` for every
-    ``from nexus.config import ... nexus_config_dir ...`` in *path*.
+    site in *path* that captures ``nexus_config_dir`` BY VALUE, in either
+    of two shapes:
+
+    1. ``from nexus.config import ... nexus_config_dir ...`` -- the
+       ORIGINAL nexus-78blw shape.
+    2. A module-attribute ALIAS ASSIGNMENT -- ``X = <alias>.nexus_config_dir``
+       where ``<alias>`` is a local name bound, at MODULE level, to the
+       ``nexus.config`` module object itself (``from nexus import config
+       [as <alias>]`` / ``import nexus.config as <alias>``). Found by the
+       nexus-grg79 critic (T2 ``nexus/grg79-critique-2026-08-21``): that
+       bead's OWN diff made ``from nexus import config as _config`` the
+       canonical fix pattern across four MORE files, which is exactly the
+       context that invites someone to later write ``X = _config.
+       nexus_config_dir`` as a convenience alias -- binding the FUNCTION
+       OBJECT once, at whatever it resolved to at assignment time, and
+       reintroducing the identical by-value-capture hazard wearing the
+       new convention's clothes. Only the ``_config.nexus_config_dir()``
+       CALL form -- module-attribute access AT THE CALL SITE, never bound
+       to a name first -- is actually safe.
+
+       Scope: covers the ``_config``-alias and plain ``from nexus import
+       config`` spellings the critic demonstrated, plus ``import
+       nexus.config as X`` for free (identical single-hop attribute shape
+       once the alias set is collected). Does NOT cover the bare ``import
+       nexus.config`` two-hop chain (``nexus.config.nexus_config_dir``,
+       no ``as``) -- that needs a second attribute-chain shape and
+       resolving whether ``nexus`` itself is bound, which is a
+       restructuring rather than an added case; nothing in the tree uses
+       that form today. Also does not follow imports nested inside a
+       module-level ``if``/``try`` block (matches this file's existing
+       simplicity level; nothing in the tree does that either), and does
+       not chase a SECOND-ORDER alias (``_real = _config`` followed by
+       ``_CACHED = _real.nexus_config_dir``) -- the alias set is collected
+       from import statements only, not from name-to-name rebinding, so
+       that chain evades detection. Confirmed empirically during the
+       nexus-grg79 round-2 review; same complexity-vs-value tradeoff as
+       the two-hop gap above, and likewise unused in the tree. Shadowing
+       in the other direction (rebinding the alias to something else
+       before the grab) still FLAGS, which is the safe failure direction.
 
     A single depth-first pass tracking whether the current node is nested
     inside any ``FunctionDef``/``AsyncFunctionDef`` -- deliberately NOT
     ``ast.walk`` per function (which double-counts an import nested inside
-    TWO enclosing functions once per enclosing level).
+    TWO enclosing functions once per enclosing level). A function-scoped
+    alias assignment is SAFE for the same reason a function-scoped
+    by-value import is: the attribute access re-executes, and therefore
+    re-resolves the CURRENT ``nexus.config.nexus_config_dir``, every time
+    that line runs.
     """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -308,16 +375,40 @@ def _classify_import_sites(path: Path) -> tuple[list[int], list[int]]:
     module_level: list[int] = []
     function_scoped: list[int] = []
 
-    def _is_target(node: ast.AST) -> bool:
+    # Local names bound, at MODULE level ONLY, to the `nexus.config` module
+    # object -- shape 2's prerequisite. Only top-level statements count.
+    config_aliases: set[str] = set()
+    for stmt in tree.body:
+        if isinstance(stmt, ast.ImportFrom) and stmt.module == "nexus":
+            for alias in stmt.names:
+                if alias.name == "config":
+                    config_aliases.add(alias.asname or alias.name)
+        elif isinstance(stmt, ast.Import):
+            for alias in stmt.names:
+                if alias.name == "nexus.config" and alias.asname:
+                    config_aliases.add(alias.asname)
+
+    def _is_import_target(node: ast.AST) -> bool:
         return (
             isinstance(node, ast.ImportFrom)
             and node.module == "nexus.config"
             and any(alias.name == _TARGET for alias in node.names)
         )
 
+    def _is_alias_assign_target(node: ast.AST) -> bool:
+        if not isinstance(node, ast.Assign):
+            return False
+        value = node.value
+        return (
+            isinstance(value, ast.Attribute)
+            and value.attr == _TARGET
+            and isinstance(value.value, ast.Name)
+            and value.value.id in config_aliases
+        )
+
     def _visit(node: ast.AST, in_function: bool) -> None:
         for child in ast.iter_child_nodes(node):
-            if _is_target(child):
+            if _is_import_target(child) or _is_alias_assign_target(child):
                 (function_scoped if in_function else module_level).append(
                     child.lineno
                 )
@@ -352,19 +443,15 @@ def _all_import_sites() -> tuple[dict[str, list[int]], dict[str, list[int]]]:
 # src/nexus/commands/t3.py, src/nexus/commands/_helpers.py): `from nexus
 # import config as _config` + call `_config.nexus_config_dir()` at each
 # use site, so a patch applied AFTER this module is imported still takes
-# effect. Not converted in the nexus-78blw sweep that authored this lint
-# -- that dispatch was fenced to test files + this new lint file only
-# (concurrent sibling work owned other src/ surfaces); left for a
-# follow-up bead. This set may only shrink (a site gets converted) or
-# grow with a documented per-entry rationale plus a conscious ceiling
-# bump in the same diff.
-_MODULE_LEVEL_BY_VALUE_IMPORT_EXEMPT: frozenset[str] = frozenset({
-    "src/nexus/aspect_worker.py:72",
-    "src/nexus/commands/daemon.py:35",
-    "src/nexus/migration/state.py:41",
-    "src/nexus/console/routes/health.py:17",
-})
-_MODULE_LEVEL_BY_VALUE_IMPORT_CEILING = 4
+# effect. The 4 sites that were in the tree when the nexus-78blw sweep
+# authored this lint (fenced to test files + this new lint file only;
+# converting src/ was left for a follow-up bead) were ALL converted by
+# the nexus-grg79 follow-up -- this set is now EMPTY. It may only shrink
+# further (there is nothing left to shrink) or grow with a documented
+# per-entry rationale plus a conscious ceiling bump in the same diff, if
+# a new module-level by-value import lands.
+_MODULE_LEVEL_BY_VALUE_IMPORT_EXEMPT: frozenset[str] = frozenset()
+_MODULE_LEVEL_BY_VALUE_IMPORT_CEILING = 0
 
 # Informational ratchet on the TOTAL by-value-import count (module-level +
 # function-scoped/deferred). The function-scoped majority is SAFE (Python
@@ -374,8 +461,13 @@ _MODULE_LEVEL_BY_VALUE_IMPORT_CEILING = 4
 # not a "must fix" gate the way the module-level one is. It exists so a
 # NEW site (of either shape) is a conscious, reviewed addition rather than
 # a silent one -- growth is expected and fine as the codebase grows;
-# bump the ceiling in the same diff.
-_TOTAL_BY_VALUE_IMPORT_CEILING = 81
+# bump the ceiling in the same diff. Dropped from 81 to 77 by nexus-grg79:
+# the 4 module-level sites it converted no longer match this census at
+# all (`from nexus import config as _config` is a different import shape
+# than `from nexus.config import nexus_config_dir`), so the total shrank
+# by exactly the 4 it fixed rather than shifting into the function-scoped
+# bucket.
+_TOTAL_BY_VALUE_IMPORT_CEILING = 77
 
 
 def test_module_level_by_value_import_ratchet() -> None:
@@ -481,6 +573,78 @@ def test_setattr_detector_catches_mock_patch_object(tmp_path: Path) -> None:
     assert [h[0] for h in hits] == [3]
 
 
+# ── nexus-grg79 comment thread: two new patterns, PROVEN via synthetic
+# input since neither exists anywhere in the tree today (a real hit would
+# be the ratchet's own job to catch; these prove the DETECTOR itself
+# works, which a ceiling of zero real hits cannot demonstrate on its own).
+
+
+def test_setattr_detector_catches_direct_attribute_assignment(
+    tmp_path: Path,
+) -> None:
+    """``nexus.config.nexus_config_dir = ...`` -- a bare assignment, never
+    restored on teardown, is strictly worse than the context-manager forms
+    above and must not be a silent escape hatch from this ratchet."""
+    bad = tmp_path / "test_bad_direct_assign.py"
+    bad.write_text(
+        'import nexus.config\n'
+        'def test_x():\n'
+        '    nexus.config.nexus_config_dir = lambda: "/poisoned"\n'
+    )
+    hits = _setattr_hits(bad)
+    assert [h[0] for h in hits] == [3]
+
+
+def test_setattr_detector_catches_patch_multiple_kwarg(tmp_path: Path) -> None:
+    """``mock.patch.multiple(TARGET, nexus_config_dir=...)`` -- the
+    multi-attribute cousin of ``patch.object``; a ``nexus_config_dir=``
+    keyword here is the same hazard spread across ``patch.multiple``'s
+    kwargs instead of a positional two-arg form."""
+    bad = tmp_path / "test_bad_patch_multiple.py"
+    bad.write_text(
+        'from unittest import mock\n'
+        'def test_x():\n'
+        '    with mock.patch.multiple(\n'
+        '        some_mod, nexus_config_dir=lambda: "/poisoned",\n'
+        '    ):\n'
+        '        pass\n'
+    )
+    hits = _setattr_hits(bad)
+    assert [h[0] for h in hits] == [3]
+
+
+def test_setattr_detector_ignores_unrelated_attribute_assignment(
+    tmp_path: Path,
+) -> None:
+    """An assignment to some OTHER attribute must not be flagged -- proves
+    the direct-assignment detector matches on the target attribute name,
+    not on every module-level ``Attribute = ...`` statement."""
+    benign = tmp_path / "test_benign_assign.py"
+    benign.write_text(
+        'import nexus.config\n'
+        'def test_x():\n'
+        '    nexus.config.is_local_mode = lambda: True\n'
+        '    some_mod.other_attr = 1\n'
+    )
+    assert _setattr_hits(benign) == []
+
+
+def test_setattr_detector_ignores_unrelated_patch_multiple_kwarg(
+    tmp_path: Path,
+) -> None:
+    """A ``patch.multiple(...)`` call with unrelated kwargs must not be
+    flagged -- proves the detector matches on the ``nexus_config_dir=``
+    keyword specifically, not on every ``patch.multiple`` call."""
+    benign = tmp_path / "test_benign_patch_multiple.py"
+    benign.write_text(
+        'from unittest import mock\n'
+        'def test_x():\n'
+        '    with mock.patch.multiple(some_mod, is_local_mode=lambda: True):\n'
+        '        pass\n'
+    )
+    assert _setattr_hits(benign) == []
+
+
 def test_setattr_detector_ignores_unrelated_setattr(tmp_path: Path) -> None:
     benign = tmp_path / "test_benign.py"
     benign.write_text(
@@ -546,3 +710,116 @@ def test_import_classifier_handles_nested_function_once(tmp_path: Path) -> None:
     module_level, function_scoped = _classify_import_sites(nested)
     assert module_level == []
     assert function_scoped == [3]
+
+
+# ── nexus-grg79 critique: module-attribute ALIAS ASSIGNMENT, shape 2 above.
+# Neither spelling below exists anywhere in the tree today (confirmed via
+# the live census, same as the Sweep 1 additions) -- proven via synthetic
+# input, matching the falsification pattern used throughout this file.
+
+
+def test_import_classifier_catches_alias_assignment_via_config_alias(
+    tmp_path: Path,
+) -> None:
+    """``X = _config.nexus_config_dir`` after ``from nexus import config as
+    _config`` -- the exact shape nexus-grg79's own diff made canonical
+    across four more src/ files, and the exact shape the critic
+    demonstrated was invisible to the pre-extension detector."""
+    bad = tmp_path / "bad_config_alias.py"
+    bad.write_text(
+        "from nexus import config as _config\n"
+        "\n"
+        "_CACHED = _config.nexus_config_dir\n"
+    )
+    module_level, function_scoped = _classify_import_sites(bad)
+    assert module_level == [3]
+    assert function_scoped == []
+
+
+def test_import_classifier_catches_alias_assignment_via_plain_config_binding(
+    tmp_path: Path,
+) -> None:
+    """``X = config.nexus_config_dir`` after a plain ``from nexus import
+    config`` (no ``as``) -- the second spelling the critic named."""
+    bad = tmp_path / "bad_plain_config.py"
+    bad.write_text(
+        "from nexus import config\n"
+        "\n"
+        "_CACHED = config.nexus_config_dir\n"
+    )
+    module_level, function_scoped = _classify_import_sites(bad)
+    assert module_level == [3]
+    assert function_scoped == []
+
+
+def test_import_classifier_catches_alias_assignment_via_import_as(
+    tmp_path: Path,
+) -> None:
+    """``X = ncfg.nexus_config_dir`` after ``import nexus.config as ncfg``
+    -- the same single-hop-attribute shape as the ``_config`` alias case,
+    reached through the other Python import statement that can produce it."""
+    bad = tmp_path / "bad_import_as.py"
+    bad.write_text(
+        "import nexus.config as ncfg\n"
+        "\n"
+        "_CACHED = ncfg.nexus_config_dir\n"
+    )
+    module_level, function_scoped = _classify_import_sites(bad)
+    assert module_level == [3]
+    assert function_scoped == []
+
+
+def test_import_classifier_ignores_unrelated_alias_assignment(
+    tmp_path: Path,
+) -> None:
+    """An alias assignment to some OTHER config attribute must not be
+    flagged -- proves the detector matches on the target attribute name,
+    not on every assignment sourced from a ``nexus.config`` alias."""
+    benign = tmp_path / "benign_alias.py"
+    benign.write_text(
+        "from nexus import config as _config\n"
+        "\n"
+        "_CACHED = _config.is_local_mode\n"
+    )
+    module_level, function_scoped = _classify_import_sites(benign)
+    assert module_level == []
+    assert function_scoped == []
+
+
+def test_import_classifier_ignores_alias_assignment_from_unrelated_module(
+    tmp_path: Path,
+) -> None:
+    """``X = some_other_module.nexus_config_dir`` where
+    ``some_other_module`` was never bound to ``nexus.config`` must not be
+    flagged -- proves the detector requires the alias to actually resolve
+    to the config module, not just a matching attribute name anywhere."""
+    benign = tmp_path / "benign_unrelated_module.py"
+    benign.write_text(
+        "import other_module\n"
+        "\n"
+        "_CACHED = other_module.nexus_config_dir\n"
+    )
+    module_level, function_scoped = _classify_import_sites(benign)
+    assert module_level == []
+    assert function_scoped == []
+
+
+def test_import_classifier_treats_function_scoped_alias_assignment_as_safe(
+    tmp_path: Path,
+) -> None:
+    """A module-level ``_config`` alias combined with a FUNCTION-scoped
+    assignment of ``_config.nexus_config_dir`` to a local name is SAFE --
+    the assignment re-executes, and therefore re-resolves the CURRENT
+    ``nexus.config.nexus_config_dir``, every time the function runs. Must
+    land in ``function_scoped``, not ``module_level``."""
+    safe = tmp_path / "safe_alias.py"
+    safe.write_text(
+        "from nexus import config as _config\n"
+        "\n"
+        "def helper():\n"
+        "    cached = _config.nexus_config_dir\n"
+        "    return cached()\n"
+    )
+    module_level, function_scoped = _classify_import_sites(safe)
+    assert module_level == []
+    assert function_scoped == [4]

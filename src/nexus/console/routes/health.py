@@ -14,7 +14,7 @@ from nexus.console.watchers import scan_sessions_sync
 
 router = APIRouter(tags=["health"])
 
-from nexus.config import nexus_config_dir as _nexus_config_dir
+from nexus import config as _config
 
 
 def _collect_health_data() -> dict[str, Any]:
@@ -53,7 +53,7 @@ def _collect_health_data() -> dict[str, Any]:
             "fresh": s.fresh,
             "expires_in_seconds": max(0, int(s.expires_at - now)),
         }
-        for s in scan_sessions_sync(_nexus_config_dir())
+        for s in scan_sessions_sync(_config.nexus_config_dir())
     ]
     data["active_sessions"] = sum(1 for s in data["sessions"] if s["fresh"])
 
