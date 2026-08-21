@@ -3047,7 +3047,7 @@ In service mode the counts are read from the engine via `GET /v1/telemetry/tier_
 ## nx answer-runs
 
 ```
-nx answer-runs [--since ISO8601] [--limit N] [--steps] [--include-failed] [--json]
+nx answer-runs [--since ISO8601] [--limit N] [--steps] [--include-failed] [--derive-budget] [--json]
 ```
 
 Reads the `nx_answer_runs` telemetry table: every `nx_answer` MCP call
@@ -3196,6 +3196,27 @@ predicted `usd`/`ms`/`basis`, and which one was chosen are written to
 `plan_choice` field (`{candidates, candidate_count, chosen_plan_id,
 predicted_cost_usd, basis}`; `None` on any path that never reaches Step
 1's hit branch — force_dynamic, a plan-miss, or an error before Step 1).
+
+### `--derive-budget` (RDR-196 .p3a, nexus-nyry9.19)
+
+Derives the default `budget_usd` from recorded **post-flip** history and
+prints, instead of the report: rows scanned, executed-ok count, the three
+exclusion counts (no step records = pre-7.14.0 client; pre-flip = a
+filter/groupby/extract/rank step recorded a non-cheap canonical model;
+unknown cost), the qualifying run count `n`, and for p50/p75/p90/p95 the
+per-run cost value plus the fraction of qualifying runs each would have
+refused. Below the non-vacuity floor (`MIN_DERIVATION_RUNS`, 30) it names
+NO value. `--since` bounds the scanned window; `--limit` is raised to at
+least 300 (the telemetry page cap; the derivation needs every row it can
+see, not a display page); `--steps` is implied and `--include-failed` is
+ignored (failed runs never enter a budget derivation). The post-flip predicate is a per-step **model** filter (the
+cheap tier's alias family against `StepRecord.model`), not a timestamp,
+so it survives a later re-flip; `--steps`' `by_operator` aggregate keys on
+operator only and pools both populations, and must never be used for this
+derivation. `nx_answer(budget_usd=None)` now means "use
+`nexus.plans.budget_default.DERIVED_BUDGET_USD`", which stays `None` (no
+cap; enforcement OFF) until a sufficient derivation is recorded there with
+its provenance.
 
 **In this table**: `--steps`' `by_plan` entries carry `predicted_cost_usd`
 and `predicted_basis` alongside the recorded `median_cost_usd` —

@@ -2110,14 +2110,17 @@ class TestNxAnswerCostAccounting:
             assert seen["cost_usd"] is None
 
     def test_budget_usd_parameter_accepted_without_error(self, tmp_path):
-        """budget_usd is a no-op parameter — accepted but not enforced (P5 stub)."""
+        """budget_usd is accepted but not yet enforced. RDR-196 .p3a
+        (nexus-nyry9.19): the unmeasured 0.25 literal is gone; the default
+        is None = "resolve to budget_default.DERIVED_BUDGET_USD"."""
         import inspect
         from nexus.mcp.core import nx_answer
+        from nexus.plans.budget_default import BUDGET_ENFORCEMENT_ENABLED
 
         sig = inspect.signature(nx_answer)
         assert "budget_usd" in sig.parameters, "budget_usd must remain in signature"
-        # Default must be present (contract stability)
-        assert sig.parameters["budget_usd"].default == 0.25
+        assert sig.parameters["budget_usd"].default is None
+        assert BUDGET_ENFORCEMENT_ENABLED is False
 
 
 class TestNxAnswerLatencyProxy:

@@ -6440,7 +6440,7 @@ async def nx_answer(
     scope: str = "",
     context: str = "",
     max_steps: int = 6,
-    budget_usd: float = 0.25,
+    budget_usd: float | None = None,
     budget_seconds: float | None = _NX_ANSWER_DEFAULT_BUDGET_SECONDS,
     trace: bool = True,
     dimensions: dict[str, Any] | None = None,
@@ -6512,7 +6512,15 @@ async def nx_answer(
         scope: Catalog subtree or corpus filter (e.g. ``"1.2"`` or ``"knowledge"``).
         context: Supplementary caller-supplied context for the plan matcher.
         max_steps: Cap on plan DAG size (passed to inline planner on miss).
-        budget_usd: Per-invocation cost cap (reserved for future enforcement).
+        budget_usd: Per-invocation cost cap in USD. ``None`` (the default)
+            means "use the derived default",
+            :data:`nexus.plans.budget_default.DERIVED_BUDGET_USD` -- itself
+            ``None`` until RDR-196 .p3a derives it from post-flip history
+            (``nx answer-runs --derive-budget``), so today no cap applies.
+            The former ``0.25`` literal predated any measurement and is
+            gone (RDR-196 § Risks). Enforcement (pre-flight refusal +
+            step-boundary stop) lands in .p3c and stays OFF until then
+            (:data:`nexus.plans.budget_default.BUDGET_ENFORCEMENT_ENABLED`).
         budget_seconds: nexus-h33x8.6 a4 — an OPTIONAL hard wall-clock
             budget for the plan-EXECUTION phase ONLY (Step 4 below,
             the ``plan_run`` call), measured from this call's own

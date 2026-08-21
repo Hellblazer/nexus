@@ -341,6 +341,17 @@ class TestNotConsultedRepoWide:
         "mcp/core.py",
     })
 
+    #: RDR-196 .p3a (nexus-nyry9.19): READ-ONLY consumers of the tier
+    #: table. ``plans/budget_default.py`` reads ``FLIPPED_OPERATORS`` and
+    #: the cheap alias family to CLASSIFY recorded history (pre-flip vs
+    #: post-flip rows, the R3 pooling prevention) -- it never dispatches.
+    #: Exempt from the import/resolver-call scans above, but held to its
+    #: own guard, ``test_readonly_tier_consumers_never_dispatch``: no
+    #: ``model=`` keyword on any call, no import of the dispatch module.
+    _TIER_READONLY_CONSUMER_FILES = frozenset({
+        "plans/budget_default.py",
+    })
+
     @staticmethod
     def _p2c_relpath(path) -> str:
         import pathlib
@@ -356,7 +367,9 @@ class TestNotConsultedRepoWide:
         for path in src_root.rglob("*.py"):
             if path.name == "model_tiers.py":
                 continue
-            if self._p2c_relpath(path) in self._P2C_MEASUREMENT_ONLY_OPT_IN_FILES:
+            if self._p2c_relpath(path) in (
+                self._P2C_MEASUREMENT_ONLY_OPT_IN_FILES | self._TIER_READONLY_CONSUMER_FILES
+            ):
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
             if _model_tiers_import_lines(text, filename=str(path)):
@@ -410,7 +423,9 @@ class TestNotConsultedRepoWide:
         for path in src_root.rglob("*.py"):
             if path.name == "model_tiers.py":
                 continue
-            if self._p2c_relpath(path) in self._P2C_MEASUREMENT_ONLY_OPT_IN_FILES:
+            if self._p2c_relpath(path) in (
+                self._P2C_MEASUREMENT_ONLY_OPT_IN_FILES | self._TIER_READONLY_CONSUMER_FILES
+            ):
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
             if _resolve_model_call_lines(text, filename=str(path)):
@@ -421,6 +436,35 @@ class TestNotConsultedRepoWide:
             f"only opt-in) until .p2d's deliberate default-tier flip: "
             f"{offenders}"
         )
+
+    def test_readonly_tier_consumers_never_dispatch(self) -> None:
+        """A file exempted as a READ-ONLY tier consumer must stay one:
+        no call anywhere in it passes a ``model=`` keyword, and it never
+        imports ``nexus.operators.dispatch`` / ``claude_dispatch``. Also
+        asserts every listed file exists (a stale allowlist entry is a
+        silent hole)."""
+        import ast
+        import pathlib
+
+        src_root = pathlib.Path(__file__).resolve().parent.parent / "src" / "nexus"
+        assert self._TIER_READONLY_CONSUMER_FILES, "allowlist must not be empty-vacuous"
+        for rel in sorted(self._TIER_READONLY_CONSUMER_FILES):
+            path = src_root / rel
+            assert path.exists(), f"stale read-only tier consumer allowlist entry: {rel}"
+            text = path.read_text(encoding="utf-8")
+            assert "nexus.operators.dispatch" not in text and "claude_dispatch" not in text, (
+                f"{rel} reaches the dispatch module; it is no longer read-only"
+            )
+            tree = ast.parse(text, filename=str(path))
+            offenders = [
+                node.lineno for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and any(kw.arg == "model" for kw in node.keywords)
+            ]
+            assert offenders == [], (
+                f"{rel} passes model= on a call at lines {offenders}; a read-only "
+                f"tier consumer must never route a dispatch"
+            )
 
     def test_p2c_opt_in_call_sites_are_env_gated(self) -> None:
         """The two allowlisted files' calls to the resolver must be

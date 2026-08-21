@@ -31,4 +31,10 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release (pinned: v7.14.0)
 
-(empty — pin advanced at v7.14.0; all prior entries went live)
+- `conexus/skills/nexus/reference.md` —
+  nexus-nyry9.19 (RDR-196 .p3a): the `nx_answer` parameter table's
+  `budget_usd` row no longer documents the unmeasured `0.25` default; it
+  now reads `None` = "use `budget_default.DERIVED_BUDGET_USD`" (itself
+  unset until a sufficient post-flip derivation is recorded), enforcement
+  landing in .p3c. Docs-only drift: an installed plugin at v7.14.0 shows
+  a default the 7.15.0 tool no longer has.
