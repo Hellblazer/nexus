@@ -195,9 +195,11 @@ Adjacent nexus work this RDR must not duplicate:
 - **Documented** — bundling already changes topology (fusion) without recording the decision.
 - **Documented (paper)** — 96% of Pareto-optimal plans in the paper's 10-agent pipeline mix
   models; cheap-first + escalate dominated the best fixed-topology plan at equal quality.
-- **Assumed** — the paper's result transfers to nexus operators: extract/filter/groupby/rank are
-  cheap-model-tolerant, generate/verify/check are not. This is the Phase 2 measurement, not a
-  premise.
+- **Assumed → resolved per operator by Phase 2 (2026-08-21, see the Phase 2 OUTCOME block)** —
+  the paper's result transfers to nexus operators: VERIFIED on the fixture for
+  extract/filter/groupby/rank (both frozen criteria passed, n=3, ceiling effect noted);
+  NOT TESTED for check/verify (no tiering delta) and for aggregate/summarize/compare/generate
+  (no quality proxy); UNMEASURED for the inline planner. Originally a premise; now a measurement.
 
 ### Critical Assumptions
 
@@ -556,6 +558,15 @@ decisions as validated against the OPERATOR quality proxy only, not as
 a broader nx_answer end-to-end quality claim.
 
 ### Phase 3: Cost-Ranked Choice + Budget
+
+> **Sequencing note (2026-08-21, .rg2 finding):** Phase 3 Step 1 (`.p3b`,
+> nexus-nyry9.20, commit 078c15976) shipped BEFORE the Phase 2 boundary gate
+> ran — 2 min before `.p2c`'s commit and 35 min before `.p2d`'s flip. That was
+> deliberate: Sam's option (a) re-scope (predicted cost from step shape) decoupled
+> `.p3b` from the recorded-history premise Phases 1/2 were to produce, and its
+> price table keys on `(operator, canonical model)`, so the flip cannot pool
+> tiers into its medians. Recorded here so the out-of-order landing is visible to
+> `.rg3`, not laundered by the later gate pass.
 
 #### Step 0: derive the default `budget_usd` from Phase 1 history (named percentile of observed per-plan cost); enforcement stays off until the derived value exists
 #### Step 1: candidate set with history from `plan_match`; min-cost-within-band selection
