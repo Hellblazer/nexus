@@ -49,7 +49,7 @@ jobs:
       # already passed the true/false case check, not the raw dorny output.
       service: ${{ steps.decide.outputs.service }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           # Full history so dorny/paths-filter resolves the merge-base without
           # --deepen, whose shallow-fetch loop races ("fatal: shallow file has
@@ -62,7 +62,7 @@ jobs:
       # while the check still reported green. Pin copied from ci.yml so the two
       # workflows cannot drift onto different versions of the same decider.
       - id: filter
-        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
         with:
           filters: |
             service:
@@ -127,7 +127,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           # SchemaUpgradeRehearsalIntegrationTest (nexus-4m6i0.6) needs an old
           # engine-service tag's changelog tree via `git archive <tag>`. Default
@@ -137,7 +137,7 @@ jobs:
           fetch-tags: true
 
       - name: Set up GraalVM JDK 25
-        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
         with:
           java-version: '25'
           distribution: 'graalvm'
@@ -149,7 +149,7 @@ jobs:
         # all-MiniLM-L6-v2 model from ~/.cache/chroma. Mirror the SAME
         # cache key as ci.yml (the Python suite) so this Java-only runner
         # restores the model the Python workflow already downloaded.
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ~/.cache/chroma
           key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
