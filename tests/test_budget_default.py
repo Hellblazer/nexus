@@ -253,7 +253,7 @@ class TestAnswerRunsDeriveBudgetFlag:
         monkeypatch.setattr(hts, "HttpTelemetryStore", _FakeStore)
         res = CliRunner().invoke(answer_runs_cmd, ["--derive-budget", "--json"])
         assert res.exit_code == 0, res.output
-        out = json.loads(res.output)
+        out = json.loads(res.stdout)
         assert out["n_runs"] == 40 and out["n_excluded_pre_flip"] == 10
         assert out["sufficient"] is True
         assert out["percentiles"]["90"] == pytest.approx(3.6)
