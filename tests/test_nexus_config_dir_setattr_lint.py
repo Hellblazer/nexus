@@ -375,7 +375,7 @@ _MODULE_LEVEL_BY_VALUE_IMPORT_CEILING = 4
 # NEW site (of either shape) is a conscious, reviewed addition rather than
 # a silent one -- growth is expected and fine as the codebase grows;
 # bump the ceiling in the same diff.
-_TOTAL_BY_VALUE_IMPORT_CEILING = 80
+_TOTAL_BY_VALUE_IMPORT_CEILING = 81
 
 
 def test_module_level_by_value_import_ratchet() -> None:

@@ -122,6 +122,55 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
     return f"Error: {text}"
 
 
+#: Generous backstop for an assembled MCP text result (nexus-2xjge audit).
+#: Claude Code 2.1.91's harness-side ``_meta.maxResultSizeChars`` truncates
+#: SILENTLY (no marker, house doctrine forbids that — see the bead), so this
+#: module caps explicitly instead, with a visible trailing marker.
+#:
+#: Basis: none of this module's paginated text tools clamp the caller-
+#: supplied ``limit`` (or, for ``store_list(docs=True)``/``memory_search``/
+#: ``plan_search``, some fetch the FULL matching set before any pagination
+#: at all) — and the audit found the backing pgvector engine does not
+#: either: ``PgVectorRepository#searchWithTokens``'s own javadoc states "No
+#: upper bound is applied to nResults by design: the result-size caps the
+#: Chroma path enforces ... fall away with pgvector." So ``MAX_QUERY_
+#: RESULTS`` (300) — the value CLAUDE.md and this module's own comments
+#: elsewhere document as the paging ceiling — is a ChromaDB-era quota that
+#: no longer reaches the live query path; a caller-supplied ``limit`` can
+#: scale a response arbitrarily. Value: a 300-row conceptual page x ~500
+#: chars/row (the largest observed per-row shape, ``query()``'s bib-
+#: enriched document block) ~= 150_000 chars; rounded up with real headroom
+#: to 250_000 so no realistic paged response is ever touched.
+_TEXT_RESULT_CAP_CHARS = 250_000
+
+
+def _cap_text_result(text: str, tool: str, cap: "int | None" = None) -> str:
+    """Truncate an assembled MCP text result WITH a visible trailing marker.
+
+    House doctrine forbids silent truncation (nexus-2xjge): never returns
+    something that merely LOOKS complete. The marker is unconditionally the
+    last thing in the returned string — never prepended — so it can never
+    be mistaken for part of the result and never collides with a leading-
+    marker contract elsewhere (e.g. ``nx_answer``'s budget-exhaustion
+    prefix, which callers key on via ``str.startswith``).
+
+    ``cap`` defaults to ``None`` and is resolved against the *module*
+    global ``_TEXT_RESULT_CAP_CHARS`` INSIDE the function body (not as a
+    bound default parameter) so a test can ``monkeypatch.setattr(core,
+    "_TEXT_RESULT_CAP_CHARS", N)`` and have it take effect immediately.
+    """
+    if cap is None:
+        cap = _TEXT_RESULT_CAP_CHARS
+    if len(text) <= cap:
+        return text
+    dropped = len(text) - cap
+    return (
+        f"{text[:cap]}"
+        f"\n\n[{tool}: result capped at {cap} chars; {dropped} chars "
+        f"dropped — narrow the query, lower limit, or page with offset=...]"
+    )
+
+
 #: Process-local HookRegistry constructed at MCP-server startup.
 #: The MCP server is a long-running entry point — the registry's
 #: lifecycle matches the server process. ``install_default_hooks``
@@ -1899,7 +1948,7 @@ def search(
         else:
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
 
-        return "\n\n".join(lines)
+        return _cap_text_result("\n\n".join(lines), "search")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("search", e)
 
@@ -2252,11 +2301,11 @@ def search_metadata_scoped(
             }
         if not rows:
             return "No documents found."
-        return "\n\n".join(
+        return _cap_text_result("\n\n".join(
             f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
             f"\n{r.get('content', '')}"
             for r in rows
-        )
+        ), "search_metadata_scoped")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("search_metadata_scoped", e)
 
@@ -2322,11 +2371,11 @@ def search_topic_scoped(
             }
         if not merged:
             return f"No chunks found for topic {topic!r}."
-        return "\n\n".join(
+        return _cap_text_result("\n\n".join(
             f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
             f"\n{r.get('content', '')}"
             for r in merged
-        )
+        ), "search_topic_scoped")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("search_topic_scoped", e)
 
@@ -2454,11 +2503,11 @@ def search_graph_hop(
             }
         if not rows:
             return "No documents found."
-        return "\n\n".join(
+        return _cap_text_result("\n\n".join(
             f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
             f"\n{r.get('content', '')}"
             for r in rows
-        )
+        ), "search_graph_hop")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("search_graph_hop", e)
 
@@ -2886,7 +2935,7 @@ def query(
                     f"\n--- showing 1-{len(rows)} of {len(deduped_svc)} documents. "
                     f"Results are capped at limit={limit}."
                 )
-            return "\n".join(lines_svc)
+            return _cap_text_result("\n".join(lines_svc), "query")
 
         # routing_note stays "" — RDR-156 P4.2c (nexus-2bqpn) deleted the
         # only branch that ever set it (the catalog_collections-driven
@@ -3148,7 +3197,7 @@ def query(
         if total > limit:
             lines.append(f"\n--- showing 1-{len(sorted_docs)} of {total} documents. Results are capped at limit={limit}.")
 
-        return "\n".join(lines)
+        return _cap_text_result("\n".join(lines), "query")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("query", e)
 
@@ -3782,7 +3831,7 @@ def store_list(
             lines.append(f"--- showing {offset + 1}-{shown_end} of {total}. next: offset={shown_end}")
         else:
             lines.append(f"--- showing {offset + 1}-{shown_end} of {total} (end)")
-        return "\n".join(lines)
+        return _cap_text_result("\n".join(lines), "store_list")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("store_list", e)
 
@@ -3828,7 +3877,7 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
         chunks = chunks_by_hash.get(h, "?")
         indexed = (d.get("indexed_at") or "")[:10]
         lines.append(f"  {i:3d}. {doc_id}  {title:<50}  {chunks:>4} chunks  {indexed}")
-    return "\n".join(lines)
+    return _cap_text_result("\n".join(lines), "store_list")
 
 
 @mcp.tool(
@@ -4035,7 +4084,7 @@ def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total}. next: offset={shown_end}")
         else:
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
-        return "\n\n".join(lines)
+        return _cap_text_result("\n\n".join(lines), "memory_search")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("memory_search", e)
 
@@ -4203,7 +4252,7 @@ def scratch(
                 lines.append(f"{prefix}[{r['id'][:8]}] {snippet}")
             if len(results) >= limit:
                 lines.append(f"\n--- showing {len(results)} results (limit={limit}). Increase limit to see more.")
-            return "\n".join(lines)
+            return _cap_text_result("\n".join(lines), "scratch")
 
         elif action == "list":
             entries = t1.list_entries()
@@ -4218,7 +4267,7 @@ def scratch(
                 lines.append(f"{prefix}[{e['id'][:8]}] {snippet}{tags_str}")
             if total > limit:
                 lines.append(f"\n--- showing {limit} of {total} entries. Increase limit to see all.")
-            return "\n".join(lines)
+            return _cap_text_result("\n".join(lines), "scratch")
 
         elif action == "get":
             if not entry_id:
@@ -4462,7 +4511,7 @@ def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) 
         shown_end = offset + len(results)
         if has_more:
             lines.append(f"\n--- showing {offset + 1}-{shown_end}. may have more: offset={shown_end}")
-        return "\n\n".join(lines)
+        return _cap_text_result("\n\n".join(lines), "plan_search")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("plan_search", e)
 
@@ -6711,6 +6760,10 @@ async def nx_answer(
             without a second fetch. The single-step guard path produces
             the same envelope shape — the guard logic itself is unchanged.
             On pure-generate plans or retrieval misses, ``chunks`` is ``[]``.
+            ``truncated_chars`` (nexus-2xjge): ``None`` unless ``final_text``
+            was capped (a trailing ``[nx_answer: result capped at ...]``
+            marker is appended in text mode too), in which case it is the
+            count of characters dropped.
         min_confidence: Per-call plan-match floor override (RDR-092 Phase
             2 Option A). ``None`` (default) uses the global
             :data:`_PLAN_MATCH_MIN_CONFIDENCE` (0.40, per RDR-079 P5).
@@ -6885,6 +6938,25 @@ async def nx_answer(
         # instead of being refused). Prepend in the normal case
         # (unchanged from round 2); append after the marker when one is
         # present, so the marker's prefix contract always holds.
+        # nexus-2xjge: final_text is the last plan step's raw output —
+        # unbounded when that step is e.g. operator_generate (an LLM call
+        # with no code-level output cap) or a custom-grown plan whose
+        # final tool is not one of the ones _cap_text_result already
+        # guards. Cap here too, defense in depth. The cap is applied to
+        # the RAW text BEFORE warning composition (critique finding,
+        # review-2g8y7-2xjge-critique [23267]): capping the composed
+        # string could slice an end-appended warning off in the
+        # exhausted+warned+oversized co-occurrence, silently dropping it
+        # for a structured=False caller — the exact contract round 3
+        # exists to keep. The composed result may therefore exceed the
+        # cap by the warning text's length; warnings are line-sized and
+        # the never-dropped contract outranks the cap's exactness.
+        _pre_cap_chars = len(text)
+        text = _cap_text_result(text, "nx_answer")
+        truncated_chars = (
+            _pre_cap_chars - _TEXT_RESULT_CAP_CHARS
+            if _pre_cap_chars > _TEXT_RESULT_CAP_CHARS else None
+        )
         if not _budget_warning_text:
             _text = text
         elif text.startswith(NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX):
@@ -6919,6 +6991,11 @@ async def nx_answer(
             "budget_exhausted_at_step": budget_exhausted_at_step,
             "steps": [_step_record_to_wire(s) for s in _steps],
             "cost_usd": cost_usd,
+            # nexus-2xjge: always present (None when final_text was not
+            # capped), same "always present" convention as
+            # budget_exhausted_at_step above — a caller relies on the key,
+            # never membership-checks it.
+            "truncated_chars": truncated_chars,
             # RDR-196 .p3c round 3 (critic Significant, T2 p3c-critique
             # round 3) / round 4 (a THIRD shape carrying the same
             # information — the joined-prose `budget_estimate_warning`

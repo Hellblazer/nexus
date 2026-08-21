@@ -3672,6 +3672,62 @@ class TestNxAnswerBudgetUsdEnforcement:
             "exhaustion marker must never break it"
         )
 
+    @pytest.mark.asyncio
+    async def test_exhausted_warned_and_oversized_keeps_warning_and_marker(
+        self, tmp_path, monkeypatch,
+    ):
+        """nexus-2xjge fold-in (critique [23267] Significant 2): with the
+        result-size cap in play, the triple co-occurrence (exhaustion
+        marker + warning + oversized final text) must keep BOTH signals:
+        the cap is applied to the raw text BEFORE warning composition,
+        so the end-appended warning can never be sliced off. The marker
+        still leads; the cap marker sits inside, before the warning."""
+        import nexus.mcp.core as _core
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult, StepRecord
+
+        monkeypatch.setattr(_core, "_TEXT_RESULT_CAP_CHARS", 2_000)
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(
+            steps=[{"ids": ["a"], "tumblers": [], "distances": [0.1],
+                    "collections": ["knowledge"]},
+                   {"partial_text": "x" * 10_000}],
+            budget_exhausted_at_step=2,
+            budget_exhausted_kind="cost",
+            total_planned_steps=2,
+            step_records=[
+                StepRecord(step_index=0, operator="search", source="sql",
+                           cost_usd=0.0, ok=True),
+                StepRecord(step_index=1, operator="summarize", source="llm",
+                           cost_usd=None, ok=False),
+            ],
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX, nx_answer
+            result = await nx_answer("q")
+
+        assert isinstance(result, str)
+        assert result.startswith(NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX)
+        warning_idx = result.find("[budget warning (unknown-cost)")
+        assert warning_idx != -1, (
+            f"warning sliced off by the result-size cap: ...{result[-200:]!r}"
+        )
+        cap_idx = result.find("result capped at")
+        assert cap_idx != -1, f"cap marker missing: ...{result[-200:]!r}"
+        assert cap_idx < warning_idx, (
+            "cap must be applied to the raw text BEFORE the warning is "
+            "composed, so the warning survives capping"
+        )
+
 
 class TestNxAnswerClassifyPlanPrefixedOperatorNames:
     """nexus-h33x8.6 a4 fold-in (found in passing, dev notes
