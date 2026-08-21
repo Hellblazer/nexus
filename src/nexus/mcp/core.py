@@ -4654,13 +4654,20 @@ def collection_verify(name: str) -> str:
     title="Extract Structured Fields",
     annotations={"readOnlyHint": True},
 )
-async def operator_extract(inputs: str, fields: str, timeout: float = 300.0) -> dict:
+async def operator_extract(
+    inputs: str, fields: str, timeout: float = 300.0, model: str | None = None,
+) -> dict:
     """Extract structured fields from each input item using claude -p.
 
     Args:
         inputs: Items to extract from (plain text or JSON array string).
         fields: Comma-separated field names to extract.
         timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
+        model: Opt-in ``--model`` override (RDR-196 .p2c, nexus-nyry9.16),
+            pass-through to ``claude_dispatch``. ``None`` (default) is a
+            no-op — argv unchanged. Threaded in by ``plan_run``'s
+            ``NX_OPERATOR_MODEL_TIERING`` opt-in only; not consulted by
+            any default path.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -4678,20 +4685,25 @@ async def operator_extract(inputs: str, fields: str, timeout: float = 300.0) -> 
             }
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
 
 
 @mcp.tool(
     title="Rank Items by Criterion",
     annotations={"readOnlyHint": True},
 )
-async def operator_rank(items: str, criterion: str, timeout: float = 300.0) -> dict:
+async def operator_rank(
+    items: str, criterion: str, timeout: float = 300.0, model: str | None = None,
+) -> dict:
     """Rank items by a criterion using claude -p.
 
     Args:
         items: Items to rank (plain text or JSON array string).
         criterion: Natural-language ranking criterion.
         timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
+        model: Opt-in ``--model`` override (RDR-196 .p2c, nexus-nyry9.16).
+            ``None`` (default) is a no-op. See ``operator_extract``'s
+            ``model`` docstring for the full contract.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -4707,7 +4719,7 @@ async def operator_rank(items: str, criterion: str, timeout: float = 300.0) -> d
             "ranked": {"type": "array", "items": {"type": "string"}},
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
 
 
 @mcp.tool(
@@ -4894,6 +4906,7 @@ async def operator_filter(
     timeout: float = 300.0,
     source: str = "auto",
     aspect_field: str = "",
+    model: str | None = None,
 ) -> dict:
     """Filter items by a criterion, returning a subset with rationale.
 
@@ -4939,6 +4952,10 @@ async def operator_filter(
             caller knows which field to filter on (e.g.
             ``"experimental_datasets"``, ``"extras.venue"``). Disables
             heuristic inference for this call.
+        model: Opt-in ``--model`` override (RDR-196 .p2c, nexus-nyry9.16),
+            LLM path only — the SQL fast path never dispatches. ``None``
+            (default) is a no-op. See ``operator_extract``'s ``model``
+            docstring for the full contract.
     """
     from nexus.operators.aspect_sql import try_filter  # noqa: PLC0415 — rare/branch-local path; SQL fast-path import deferred to call time
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
@@ -4987,7 +5004,7 @@ async def operator_filter(
             },
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
 
 
 @mcp.tool(
@@ -5112,6 +5129,7 @@ async def operator_groupby(
     timeout: float = 300.0,
     source: str = "auto",
     aspect_field: str = "",
+    model: str | None = None,
 ) -> dict:
     """Partition items by a natural-language key.
 
@@ -5167,6 +5185,10 @@ async def operator_groupby(
         timeout: Seconds before the subprocess is killed. Default 300s.
         source: ``"auto"`` (default) | ``"aspects"`` | ``"llm"``.
         aspect_field: explicit ``document_aspects`` column override.
+        model: Opt-in ``--model`` override (RDR-196 .p2c, nexus-nyry9.16),
+            LLM path only — the SQL fast path never dispatches. ``None``
+            (default) is a no-op. See ``operator_extract``'s ``model``
+            docstring for the full contract.
     """
     from nexus.operators.aspect_sql import try_groupby  # noqa: PLC0415 — rare/branch-local path; SQL fast-path import deferred to call time
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
@@ -5219,7 +5241,7 @@ async def operator_groupby(
             },
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
 
 
 @mcp.tool(
@@ -6216,6 +6238,19 @@ async def _nx_answer_plan_miss(
     # are not transient. Halved timeout on retry so a single hang doesn't
     # double total wall time.
     from nexus.operators.dispatch import OperatorOutputError as _OpOutputError  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
+    # RDR-196 .p2c (nexus-nyry9.16): opt-in ``model=`` override for the
+    # inline planner's own dispatch, gated on the SAME
+    # ``NX_OPERATOR_MODEL_TIERING`` env var that gates
+    # ``plans/runner.py``'s per-operator tiering — the two are exercised
+    # together by the .p2c A/B (baseline: env unset, no override, argv
+    # unchanged; candidate: env set, planner dispatches at the "cheap"
+    # tier alias). Unset (default) is a complete no-op — ``model=None``
+    # appends no ``--model`` flag, byte-identical to every pre-.p2c call.
+    _planner_model: str | None = None
+    if _os.environ.get("NX_OPERATOR_MODEL_TIERING") == "1":
+        from nexus.operators.model_tiers import resolve_model_for_tier  # noqa: PLC0415 — rare/branch-local path; measurement-only opt-in
+
+        _planner_model = resolve_model_for_tier("cheap")
     payload = None
     last_output_error: _OpOutputError | None = None
     for attempt in range(2):
@@ -6223,6 +6258,7 @@ async def _nx_answer_plan_miss(
         try:
             payload = await claude_dispatch(
                 prompt, _PLANNER_SCHEMA, timeout=attempt_timeout,
+                model=_planner_model,
             )
             break
         except _OpOutputError as exc:

@@ -35,22 +35,34 @@ _TIER_ALIASES: Final[dict[str, str]] = {
 }
 
 #: Operator name -> cost tier. RDR-196 §Approach's proposed split
-#: (lines 239-240): cheap for the mechanical/structural operators, strong
-#: for the operators that synthesize or judge. NOT consulted anywhere by
-#: default in this bead — exists so later beads (.p2c measurement, .p2d
-#: default flip) have one place to read from. Deliberately scoped to the
-#: 10 ``@mcp.tool``-registered operators in ``nexus.mcp.core``
-#: (``operator_extract`` .. ``operator_aggregate``) — the RDR's mention
-#: of "the inline planner" alongside this split names a distinct
-#: dispatch site (``_nx_answer_plan_miss``), not one of these operators,
-#: and is out of scope for this table.
+#: (lines 239-240) named cheap for the mechanical/structural operators,
+#: strong for the operators that synthesize or judge — but "cheap" here
+#: means "flip-ELIGIBLE", not "flip-decided": a "cheap" entry is only
+#: honest once a quality proxy exists to measure the tier delta against
+#: (RDR-196 .p2a/.p2c). ``operator_aggregate`` and ``operator_summarize``
+#: are pinned to "strong" despite the RDR's original proposal (review
+#: fix, nexus-nyry9.16 round-2, T2 [23144] Significant #6) — no quality
+#: proxy exists for them (196-R4; ``scripts/bench/operator_proxy_metrics
+#: .THRESHOLDS`` has no entry for either), so a pre-set "cheap" here
+#: would let a future WHOLE-TABLE activation (.p2d) silently flip two
+#: unvalidated operators to a cheaper model with nothing checking
+#: whether their output quality survived the switch. See
+#: ``TestOperatorModelTierTable::test_every_cheap_entry_has_a_registered_proxy_metric``.
+#: NOT consulted anywhere by default in this bead — exists so later
+#: beads (.p2c measurement, .p2d default flip) have one place to read
+#: from. Deliberately scoped to the 10 ``@mcp.tool``-registered
+#: operators in ``nexus.mcp.core`` (``operator_extract`` ..
+#: ``operator_aggregate``) — the RDR's mention of "the inline planner"
+#: alongside this split names a distinct dispatch site
+#: (``_nx_answer_plan_miss``), not one of these operators, and is out
+#: of scope for this table.
 OPERATOR_MODEL_TIER: Final[dict[str, Tier]] = {
     "operator_extract": "cheap",
     "operator_filter": "cheap",
     "operator_groupby": "cheap",
-    "operator_aggregate": "cheap",
+    "operator_aggregate": "strong",  # no proxy (196-R4); not flip-eligible until one exists
     "operator_rank": "cheap",
-    "operator_summarize": "cheap",
+    "operator_summarize": "strong",  # no proxy (196-R4); not flip-eligible until one exists
     "operator_generate": "strong",
     "operator_check": "strong",
     "operator_verify": "strong",

@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os as _os
 import re
 import time
 from dataclasses import dataclass, field
@@ -1143,6 +1144,32 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
 
     # Auto-hydration + arg normalization: shared with the bundle path.
     resolved_tool, args = _hydrate_operator_args(tool, args)
+
+    # RDR-196 .p2c (nexus-nyry9.16): MEASUREMENT-ONLY opt-in for the .p2c
+    # A/B — NOT the .p2d default-tier flip (which is a later, deliberate
+    # bead). Gated on ``NX_OPERATOR_MODEL_TIERING=1``; unset (the default
+    # for every non-.p2c caller) is a complete no-op, leaving ``args``
+    # byte-identical to pre-.p2c behavior. When set, an isolated-step
+    # operator dispatch resolved to a tool this bead's tier table names
+    # gets ``args["model"]`` set to that tier's ``--model`` alias — the
+    # ONE call site the repo-wide "not consulted" guard
+    # (``tests/test_operator_model_tiers.py::TestNotConsultedRepoWide``)
+    # allows, and only reached behind this env check. Applied for every
+    # ``OPERATOR_MODEL_TIER`` entry, not just the 4 operators .p2c's own
+    # quality proxy covers (filter/groupby/rank/extract) — an operator
+    # whose MCP-tool signature doesn't accept ``model`` (check/verify/
+    # generate/compare/aggregate/summarize, as of this bead) simply has
+    # the kwarg silently dropped + logged by the existing kwargs-drop
+    # pass below, same as any other tool-incompatible arg. A caller that
+    # already resolved its own ``model`` wins — never overridden here.
+    if "model" not in args and _os.environ.get("NX_OPERATOR_MODEL_TIERING") == "1":
+        from nexus.operators.model_tiers import (  # noqa: PLC0415 — measurement-only opt-in, not a default-path import
+            OPERATOR_MODEL_TIER,
+            resolve_model_for_operator,
+        )
+
+        if resolved_tool in OPERATOR_MODEL_TIER:
+            args = {**args, "model": resolve_model_for_operator(resolved_tool)}
 
     # RDR-093 S-1: pop runner-attached truncation metadata before the
     # kwargs-drop pass so the operator never sees the marker (it's not

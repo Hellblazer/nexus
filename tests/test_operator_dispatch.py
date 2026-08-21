@@ -1980,7 +1980,7 @@ class TestSimpleOperatorReturnShapeAndPromptContent:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured.append(prompt)
             return fake_return
 
@@ -2003,7 +2003,7 @@ class TestOperatorCompare:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout):
+        async def fake(prompt, schema, timeout, model=None):
             captured["prompt"] = prompt
             return {"comparison": "ok"}
 
@@ -2024,7 +2024,7 @@ class TestOperatorCompare:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout):
+        async def fake(prompt, schema, timeout, model=None):
             captured["prompt"] = prompt
             return {"comparison": "cross"}
 
@@ -2053,7 +2053,7 @@ class TestOperatorCompare:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout):
+        async def fake(prompt, schema, timeout, model=None):
             captured["prompt"] = prompt
             return {"comparison": "ok"}
 
@@ -2078,7 +2078,7 @@ class TestOperatorCompare:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout):
+        async def fake(prompt, schema, timeout, model=None):
             captured["prompt"] = prompt
             return {"comparison": ""}
 
@@ -2097,7 +2097,7 @@ class TestOperatorCompare:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout):
+        async def fake(prompt, schema, timeout, model=None):
             captured["prompt"] = prompt
             return {"comparison": "ok"}
 
@@ -2144,7 +2144,7 @@ class TestOperatorFilter:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured.append(prompt)
             return {"items": [], "rationale": []}
 
@@ -2166,7 +2166,7 @@ class TestOperatorFilter:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured.append(prompt)
             return {"items": [], "rationale": []}
 
@@ -2188,7 +2188,7 @@ class TestOperatorFilter:
 
         captured_schemas: list[dict] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured_schemas.append(schema)
             return {"items": [], "rationale": []}
 
@@ -2219,7 +2219,7 @@ class TestOperatorFilter:
 
         inputs = [{"id": f"item-{i}", "title": f"Item {i}"} for i in range(10)]
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             kept = inputs[:4]
             rationale = [
                 {"id": it["id"], "reason": "keeps criterion"} for it in kept
@@ -2270,7 +2270,7 @@ class TestOperatorFilter:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_filter
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             return {"items": [], "rationale": []}
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
@@ -2311,7 +2311,7 @@ class TestOperatorCheck:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured.append(prompt)
             return {"ok": True, "evidence": []}
 
@@ -2335,7 +2335,7 @@ class TestOperatorCheck:
 
         captured_schemas: list[dict] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured_schemas.append(schema)
             return {"ok": True, "evidence": []}
 
@@ -2359,7 +2359,7 @@ class TestOperatorCheck:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_check
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             return {
                 "ok": True,
                 "evidence": [
@@ -2391,7 +2391,7 @@ class TestOperatorCheck:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_check
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             return {
                 "ok": False,
                 "evidence": [
@@ -2450,7 +2450,7 @@ class TestOperatorVerify:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured.append(prompt)
             return {"verified": False, "reason": "", "citations": []}
 
@@ -2471,7 +2471,7 @@ class TestOperatorVerify:
 
         captured_schemas: list[dict] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured_schemas.append(schema)
             return {"verified": False, "reason": "", "citations": []}
 
@@ -2494,7 +2494,7 @@ class TestOperatorVerify:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_verify
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             return {
                 "verified": True,
                 "reason": "quote-at-p3-matches-claim",
@@ -2549,7 +2549,7 @@ class TestOperatorGroupby:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured.append(prompt)
             return {"groups": []}
 
@@ -2573,7 +2573,7 @@ class TestOperatorGroupby:
 
         captured_schemas: list[dict] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured_schemas.append(schema)
             return {"groups": []}
 
@@ -2604,7 +2604,7 @@ class TestOperatorGroupby:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_groupby
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             return {
                 "groups": [
                     {"key_value": "2018",
@@ -2729,7 +2729,7 @@ class TestOperatorAggregate:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured.append(prompt)
             return {"aggregates": []}
 
@@ -2755,7 +2755,7 @@ class TestOperatorAggregate:
 
         captured_schemas: list[dict] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured_schemas.append(schema)
             return {"aggregates": []}
 
@@ -2784,7 +2784,7 @@ class TestOperatorAggregate:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured.append(prompt)
             return {"aggregates": []}
 
@@ -2813,7 +2813,7 @@ class TestOperatorAggregate:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_aggregate
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             return {
                 "aggregates": [
                     {"key_value": "alpha", "summary": "alpha-wins-method"},
