@@ -399,7 +399,7 @@ class TestRequiredEngineVersion:
         # cc5/cc6 populations, cloud-count-3 deploy-window verify ZERO.
         # Client halves (memory_put ttl contract, frecency write-path
         # rejection + $gt:0) ride 7.13.0 per ledger f2d979113/6a7ff9915.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 84)
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 85)
 
 
 class TestParseEngineVersion:
