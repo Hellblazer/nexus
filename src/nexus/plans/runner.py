@@ -28,6 +28,9 @@ Errors:
 * :class:`PlanRunStepRefError` — a ``$stepN.<field>`` reference points
   at a step that has not run yet, or at a field absent from the
   prior step's output dict.
+* :class:`PlanRunUnresolvedVarError` — a ``$var`` reference has no
+  default and no caller-supplied value. Checked for every step, before
+  any step dispatches (nexus-pucte) — no silent literal-token fallback.
 * :class:`PlanRunEmbeddingDomainError` — a step's
   ``scope.taxonomy_domain`` mismatches the embedding model of the
   collection it dispatches against.
@@ -64,6 +67,7 @@ __all__ = [
     "PlanRunOperatorUnavailableError",
     "PlanRunStepRefError",
     "PlanRunToolNotFoundError",
+    "PlanRunUnresolvedVarError",
     "StepRecord",
     "ToolDispatcher",
     "merge_bindings",
@@ -219,6 +223,34 @@ class PlanRunEmbeddingDomainError(ValueError):
                 f"collection {collection!r} (embedding model "
                 f"{actual_model!r}); cross-embedding boundary violation"
             )
+
+
+class PlanRunUnresolvedVarError(ValueError):
+    """Raised when a step's args reference a ``$var`` binding that the
+    merged bindings (``{**default_bindings, **caller}``) cannot resolve —
+    checked at validation time, BEFORE any step dispatches (nexus-pucte).
+
+    Previously :func:`_resolve_value` resolved ``$var`` via
+    ``bindings.get(var_name, value)``, so a binding with no default and
+    no caller-supplied value silently reached the dispatched tool as the
+    literal string ``'$var'`` — the same silent-literal class
+    nexus-nyry9.5 fixed for ``nx_answer``'s ``single_query`` fast path
+    (it was querying the literal string ``'$question'``).
+    ``$stepN.<field>`` references already raise
+    :class:`PlanRunStepRefError` on an unresolved reference; this closes
+    the gap for the other reference kind so both fail loud alike — no
+    silent fallback for either.
+    """
+
+    def __init__(self, *, step_index: int, var_name: str) -> None:
+        self.step_index = step_index
+        self.var_name = var_name
+        super().__init__(
+            f"plan_run: steps[{step_index}] references unresolved "
+            f"binding '${var_name}' — not present in default_bindings "
+            "or caller-supplied bindings. Malformed plan or missing "
+            "binding; rejected before any step dispatched."
+        )
 
 
 # ── Tool dispatcher protocol ────────────────────────────────────────────────
@@ -732,8 +764,22 @@ def resolve_step_bindings(
     step's args outside of a full ``plan_run`` invocation should call
     instead — currently ``nexus.mcp.core``'s ``nx_answer`` single-query
     fast path (nexus-nyry9.5, RDR-196 .r5 review-fix).
+
+    Raises :class:`PlanRunUnresolvedVarError` on any ``$var`` in
+    ``raw_args`` the merged bindings can't resolve (nexus-pucte). The
+    single-query fast path bypasses :func:`plan_run` — and therefore
+    its :func:`_validate_var_refs` pre-dispatch check — entirely by
+    design, so without a guard HERE the exact same silent-literal-token
+    bug the fast path was already fixed for once (nexus-nyry9.5,
+    querying the literal string ``'$question'``) stays fully
+    reproducible for any OTHER var a future single-query template might
+    reference. Treats ``raw_args`` as a synthetic one-step plan
+    (``step_index`` is always ``0`` in the raised error) — there is no
+    ``scope`` at this call site, so the ``scope.topic`` half of
+    ``_validate_var_refs`` never fires here.
     """
     merged = merge_bindings(default_bindings, caller_bindings)
+    _validate_var_refs([{"args": raw_args}], merged)
     return _resolve_args(
         raw_args, bindings=merged, step_outputs=step_outputs or [],
         deferred_step_indices=deferred_step_indices,
@@ -938,6 +984,101 @@ def _validate_bindings(match: Match, bindings: dict[str, Any]) -> None:
     ]
     if missing:
         raise PlanRunBindingError(missing=missing)
+
+
+def _scan_var_refs(value: Any, found: set[str]) -> None:
+    """Collect every ``$var`` token name referenced by *value* into
+    *found*, IN PLACE.
+
+    Mirrors :func:`_resolve_value`'s own traversal exactly — list
+    elements are recursed into, a string is checked only when it is
+    EXACTLY a ``$var`` token (no inline interpolation), and dict values
+    are NOT recursed into. This keeps "what counts as a $var reference"
+    identical between validation and resolution — anything this scan
+    would miss is, by construction, also something the runtime never
+    resolves (nexus-pucte scope: the two reference kinds this bug
+    concerns are exactly the shapes ``_resolve_value`` substitutes).
+    """
+    if isinstance(value, list):
+        for item in value:
+            _scan_var_refs(item, found)
+        return
+    if isinstance(value, str):
+        m = _VAR_RE.match(value)
+        if m is not None:
+            found.add(m.group(1))
+
+
+def _validate_var_refs(
+    steps: list[dict[str, Any]], bindings: dict[str, Any],
+) -> None:
+    """Fail loud on any ``$var`` token a step's args reference that
+    *bindings* (the merged ``{**default_bindings, **caller}`` map)
+    cannot resolve — BEFORE any step dispatches (nexus-pucte).
+
+    Closes the gap between the two reference kinds: ``$stepN.<field>``
+    already raises :class:`PlanRunStepRefError` on an unresolved
+    reference at DISPATCH time; an unresolved ``$var`` previously had no
+    equivalent check at all and silently reached the tool as the literal
+    token string. ``_validate_bindings`` above only checks
+    ``match.required_bindings`` NAMES — it never looks at what a step's
+    args actually reference, so an optional (or simply undeclared) var
+    with no default and no caller value sailed through unnoticed. This
+    walks every step once, mirroring the existing malformed-step
+    validation loop in :func:`plan_run` (nexus-nyry9.4) that already
+    runs a single pass over every step before the first dispatch — and
+    reuses that loop's own :class:`PlanRunToolNotFoundError` for
+    shape problems (non-dict ``args``) for the same reason: this file
+    already treats that class as the general "malformed plan step,
+    rejected before any dispatch" error, not a tool-lookup-specific one
+    (see the ``_step is not a mapping`` check just above, in
+    :func:`plan_run` itself).
+
+    Also covers ``step.scope.topic`` (e.g. ``scope: {topic: $area}`` —
+    a real pattern in the ``analyze-default``, ``document-default``, and
+    ``research-default`` builtin templates). It is resolved through the
+    SAME :func:`_resolve_value` ``$var`` branch as ``args``, via
+    :func:`_apply_scope_to_args`, and forwarded into the dispatched
+    call's ``args["topic"]`` — an unresolved var there is the identical
+    silent-literal risk. ``scope.taxonomy_domain`` is never
+    ``$var``-substituted (read as a literal domain name), so it is not
+    scanned.
+
+    ``_apply_scope_to_args`` only resolves ``scope.topic`` when the
+    step's own ``args`` has NOT already set ``"topic"`` — a caller-set
+    ``args["topic"]`` wins outright and ``scope.topic`` is never touched
+    by :func:`_resolve_value` at all. This scan mirrors that exact
+    precedence: it skips ``scope.topic`` whenever ``"topic"`` is already
+    a key in ``args`` (checked on the RAW, pre-resolution args — key
+    presence never changes across resolution, only values do, so this is
+    equivalent to checking the resolved dict without needing one).
+    Without this guard, a step shaped
+    ``{"args": {"topic": "explicit"}, "scope": {"topic": "$unset"}}`` is
+    a perfectly valid plan (``scope.topic`` is dead) that this validator
+    would otherwise reject with a spurious hard failure.
+    """
+    for step_index, step in enumerate(steps):
+        args = step.get("args") or {}
+        if not isinstance(args, dict):
+            raise PlanRunToolNotFoundError(
+                tool="",
+                reason=(
+                    f"plan_json.steps[{step_index}] has non-dict args "
+                    f"{args!r} ({type(args).__name__}) — malformed plan, "
+                    "rejected before any step dispatched"
+                ),
+            )
+        found: set[str] = set()
+        for val in args.values():
+            _scan_var_refs(val, found)
+        if "topic" not in args:
+            scope = step.get("scope") or {}
+            _scan_var_refs(scope.get("topic"), found)
+        unresolved = found - bindings.keys()
+        if unresolved:
+            raise PlanRunUnresolvedVarError(
+                step_index=step_index, var_name=sorted(unresolved)[0],
+            )
 
 
 # ── Default dispatcher (lazy MCP-tool wiring) ───────────────────────────────
@@ -1443,6 +1584,22 @@ async def plan_run(
     :attr:`PlanResult.budget_exhausted_kind` (``"cost"``) are set exactly
     like the ``deadline`` trigger, sharing the same marker convention on
     the ``nx_answer`` side.
+
+    **Validation is WHOLE-PLAN and PRE-DISPATCH (nexus-pucte), which
+    runs BEFORE either budget check above ever executes.** Required
+    bindings, malformed-step shape, and unresolved ``$var`` references
+    are all checked once, up front, across every step in the plan —
+    not just the step about to dispatch. This is a deliberate contract,
+    not an oversight: previously, a ``deadline``/``budget_usd_remaining``
+    cut that stopped the run before a LATE, malformed step was ever
+    reached meant that step's problems were harmless — dead code the run
+    never got to. Since this validation pass now runs first, a plan with
+    an unresolvable ``$var`` in step 5 fails the ENTIRE call with
+    :class:`PlanRunUnresolvedVarError` even when a tight ``deadline``
+    would have stopped the run at step 1 and never reached step 5 at
+    all. The runner refuses malformed input outright, rather than let it
+    slip through opportunistically depending on how far execution
+    happens to get before a budget cuts it off.
     """
     from nexus.plans.bundle import (  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         BUNDLED_INTERMEDIATE,
@@ -1535,6 +1692,11 @@ async def plan_run(
                     "rejected before any step dispatched"
                 ),
             )
+    # nexus-pucte: same "validate everything before the first dispatch"
+    # discipline as the tool-name loop just above — every step is
+    # confirmed to be a dict with a resolvable tool name by this point,
+    # so ``step.get("args")`` below is safe.
+    _validate_var_refs(steps, merged)
     dispatch: ToolDispatcher = dispatcher or _default_dispatcher
     step_outputs: list[dict[str, Any]] = []
     #: nexus-h33x8.6 a4: set when ``deadline`` cuts the run short. See

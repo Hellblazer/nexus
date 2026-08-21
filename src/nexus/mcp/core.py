@@ -7561,7 +7561,10 @@ async def nx_answer(
         _log.info("nx_answer_single_step_guard", plan_id=best.plan_id, confidence=conf_str)
         try:
             from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred; matches this module's convention
-            from nexus.plans.runner import resolve_step_bindings  # noqa: PLC0415 — deferred; matches this module's convention
+            from nexus.plans.runner import (  # noqa: PLC0415 — deferred; matches this module's convention
+                PlanRunUnresolvedVarError,
+                resolve_step_bindings,
+            )
 
             plan = json.loads(best.plan_json)
             raw_args = plan["steps"][0].get("args", {})
@@ -7625,11 +7628,38 @@ async def nx_answer(
             # (nexus-nyry9.5 review-fix, code-review SIGNIFICANT) so this
             # formula lives in exactly one place instead of two
             # independently-maintained copies.
-            step_args = resolve_step_bindings(
-                raw_args,
-                default_bindings=best.default_bindings or {},
-                caller_bindings=step_bindings,
-            )
+            try:
+                step_args = resolve_step_bindings(
+                    raw_args,
+                    default_bindings=best.default_bindings or {},
+                    caller_bindings=step_bindings,
+                )
+            except PlanRunUnresolvedVarError as exc:
+                # nexus-pucte: this fast path bypasses plan_run (and its
+                # pre-dispatch _validate_var_refs check) entirely by
+                # design; resolve_step_bindings now runs the same check
+                # itself. Mirrors the PlanBindingUnsatisfiableError
+                # handling immediately above — refuse loudly rather than
+                # let a $var with no default and no caller value reach
+                # query() as a literal token string.
+                elapsed_ms = int((time.monotonic() - start) * 1000)
+                _log.warning(
+                    "nx_answer_single_query_unresolved_var",
+                    plan_id=best.plan_id, plan_name=best.name,
+                    var_name=exc.var_name, confidence=best.confidence,
+                )
+                try:
+                    with _t2_ctx() as db:
+                        _nx_answer_record_run(
+                            db.telemetry, question=question, plan_id=best.plan_id,
+                            matched_confidence=best.confidence, step_count=0,
+                            final_text=f"Error: {exc}", step_records=[],
+                            duration_ms=elapsed_ms, trace=trace,
+                        )
+                except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
+                    pass
+                _nx_answer_record_outcome(best.plan_id, success=False)
+                return _result(str(exc), plan_id=best.plan_id, step_count=0)
             q = step_args.get("question", question)
             corpus = step_args.get("corpus", "knowledge")
             try:

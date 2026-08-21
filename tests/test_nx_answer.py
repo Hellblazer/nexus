@@ -408,6 +408,85 @@ class TestSingleQueryPlanBindingUnsatisfiable:
         )
 
 
+# ── Single-query unresolved $var (nexus-pucte, undefended-sibling-path fix) ─────
+
+
+class TestSingleQueryUnresolvedVar:
+    """nexus-pucte review-fix (critic Significant #3): the single_query
+    fast path bypasses plan_run (and its pre-dispatch _validate_var_refs
+    check) entirely by design -- resolve_step_bindings now runs the
+    identical check itself, so a $var with no default and no
+    caller-supplied value (and NOT covered by _autoalias_bindings, which
+    only fills names in required_bindings) is refused loudly instead of
+    reaching query() as the literal token string -- exactly the
+    nexus-nyry9.5 bug class, on its second entry point.
+
+    Uses ``question`` (review round 2, critic cosmetic item): the fast
+    path's ``query()`` call only ever consumes ``question``/``corpus``/
+    ``limit`` from ``step_args`` (core.py's Step 2 body) -- ``question``
+    is the field a real exploit of this bug would ride, matching the
+    ORIGINAL nexus-nyry9.5 failure mode exactly (a literal ``$question``
+    reaching ``query()`` as a garbage filter value, returning "No
+    results." with nothing surfaced). An earlier draft of this test used
+    an arbitrary ``topic`` field the fast path never reads at all, which
+    proved the validation MECHANISM fires but not a concretely reachable
+    scenario for this tool."""
+
+    @pytest.mark.asyncio
+    async def test_unaliased_question_refused_not_queried_as_literal(self, tmp_path):
+        import nexus.mcp_infra as _infra
+        from nexus.plans.match import Match
+
+        match = Match(
+            plan_id=1,
+            name="test-plan-unaliased-question",
+            description="test",
+            confidence=0.75,
+            dimensions={},
+            tags="",
+            plan_json=json.dumps({
+                "steps": [{
+                    "tool": "query",
+                    # "question" is neither in required_bindings (so
+                    # _autoalias_bindings never touches it) nor in
+                    # default_bindings -- nothing supplies it.
+                    "args": {"question": "$question", "corpus": "knowledge"},
+                }],
+            }),
+            required_bindings=[],
+            optional_bindings=[],
+            default_bindings={},
+            parent_dims=None,
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch("nexus.mcp.core.query") as query_spy,
+            patch("nexus.mcp.core._nx_answer_record_run") as record_run_spy,
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q")
+
+        assert "question" in result, (
+            f"expected the unresolved-var refusal naming the var, got: {result!r}"
+        )
+        assert not query_spy.called, (
+            "query() must never be called with the unresolved var reaching "
+            "it as the literal token '$question' -- the whole point of the "
+            "fix (and the exact nexus-nyry9.5 failure mode this closes on "
+            "the fast path's second entry point)"
+        )
+        assert record_run_spy.called, "the refusal must still be recorded"
+        assert record_run_spy.call_args.kwargs.get("step_count") == 0, (
+            "zero steps ran -- matches the sibling "
+            "PlanBindingUnsatisfiableError handling's step_count=0 convention"
+        )
+
+
 # ── Single-query limit clamp (review-fix) ───────────────────────────────────────
 
 
