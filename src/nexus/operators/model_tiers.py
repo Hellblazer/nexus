@@ -127,6 +127,22 @@ FLIPPED_OPERATORS: Final[frozenset[str]] = frozenset({
 })
 
 
+#: nexus-ek8tr (Sam directive 2026-08-21, "pin fable explicitly"): the
+#: EXPLICIT model alias for every non-flipped operator, every bundle, and
+#: the inline planner on the DEFAULT path. Before this pin, HOLD meant
+#: "pass no --model" — the box CLI default by inheritance (fable only
+#: because the default moved off opus), so an account switch or CLI
+#: re-default would silently rebase every synthesis cost and quality
+#: number. fable-on-synthesis is a MEASURED choice (T2 nexus_rdr/
+#: 196-synthesis-tier-study: preferred over sonnet and haiku in every
+#: completed judgment); re-point HERE, nowhere else, if a future study
+#: (e.g. the opus arm) changes the verdict. Alias probe-verified
+#: 2026-08-21: claude -p --model fable resolves canonical claude-fable-5.
+#: DISTINCT from _TIER_ALIASES["strong"] ("sonnet"), which only the
+#: NX_OPERATOR_MODEL_TIERING=1 measurement override consults.
+STRONG_DEFAULT_ALIAS: Final[str] = "fable"
+
+
 class UnknownTierError(ValueError):
     """Raised when a tier or operator name isn't in the resolver's known
     set. Always names the unrecognized value."""
@@ -185,3 +201,16 @@ def resolve_model_for_flipped_operator(operator: str) -> str | None:
     diagnose — it degrades to "no override", the safe HOLD side.
     """
     return resolve_model_for_tier("cheap") if operator in FLIPPED_OPERATORS else None
+
+
+def resolve_model_for_default_path(operator: str) -> str:
+    """The DEFAULT (env-unset) path's model for *operator* — nexus-ek8tr:
+    every known operator now gets an EXPLICIT model. Flipped operators
+    resolve to the cheap alias; everything else resolves to
+    :data:`STRONG_DEFAULT_ALIAS` (never bare). Callers guard membership
+    in :data:`OPERATOR_MODEL_TIER` themselves — an unknown tool name is
+    not this table's business and gets no injection.
+    """
+    if operator in FLIPPED_OPERATORS:
+        return resolve_model_for_tier("cheap")
+    return STRONG_DEFAULT_ALIAS

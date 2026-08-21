@@ -1022,3 +1022,48 @@ class TestPlanRunBundleIntegration:
         assert result.steps[1]["_bundled_intermediate"] is True
         assert result.steps[2]["_bundled_intermediate"] is True
         assert result.steps[3] == {"summary": "final"}
+
+
+class TestBundleModelPin:
+    """nexus-ek8tr (critic Significant #1): the bundle pin must be proven
+    BEHAVIORALLY — the model kwarg reaches dispatch_bundle — and the
+    documented asymmetry pinned: bundles get STRONG_DEFAULT_ALIAS on every
+    env state except the =0 kill switch (they never consult per-operator
+    tiers, so =1 does NOT switch them to the sonnet measurement alias)."""
+
+    _PLAN = json.dumps({"steps": [
+        {"tool": "search", "args": {"query": "x", "corpus": "knowledge"}},
+        {"tool": "extract", "args": {"fields": "title", "inputs": "[]"}},
+        {"tool": "summarize", "args": {"cited": False, "content": "x"}},
+    ]})
+
+    async def _run(self):
+        from nexus.mcp import core as mcp_core
+        from nexus.plans.runner import plan_run
+
+        fake_bundle = AsyncMock(return_value={"summary": "s"})
+
+        async def stub_search(**kwargs):
+            return {"ids": ["a"], "tumblers": ["1.1"], "distances": [0.1],
+                    "collections": ["kn"]}
+
+        with patch("nexus.plans.bundle.dispatch_bundle", fake_bundle), \
+             patch.object(mcp_core, "search", stub_search):
+            await plan_run(_make_match_from_plan(self._PLAN))
+        assert fake_bundle.call_count == 1
+        return fake_bundle.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_default_path_pins_bundle_to_strong_alias(self, monkeypatch):
+        monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
+        assert (await self._run())["model"] == "fable"
+
+    @pytest.mark.asyncio
+    async def test_measurement_override_keeps_bundle_on_strong_pin(self, monkeypatch):
+        monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "1")
+        assert (await self._run())["model"] == "fable"
+
+    @pytest.mark.asyncio
+    async def test_kill_switch_leaves_bundle_bare(self, monkeypatch):
+        monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "0")
+        assert "model" not in (await self._run())

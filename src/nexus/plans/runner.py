@@ -1153,22 +1153,18 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     #
     #   == "1"  measurement override (.p2c, UNCHANGED): consult the WHOLE
     #           ``OPERATOR_MODEL_TIER`` table, including "strong" entries
-    #           — for A/B re-verification, not production traffic. An
-    #           operator whose MCP-tool signature doesn't accept ``model``
-    #           (generate/compare/aggregate/summarize; check/verify
-    #           accept it since nexus-3mea3) has
-    #           the kwarg silently dropped + logged by the kwargs-drop
-    #           pass below, same as any other tool-incompatible arg.
-    #   != "0"  (unset, or any other value) DEFAULT PATH (.p2d): only the
-    #           :data:`~nexus.operators.model_tiers.FLIPPED_OPERATORS`
-    #           (filter/groupby/extract/rank, + check/verify since
-    #           nexus-3mea3 2026-08-21) get the cheap-tier alias —
-    #           every other operator (HOLD/UNDECIDED per .p2d's decision
-    #           table) gets no ``model`` kwarg at all, same as pre-.p2c.
+    #           — for A/B re-verification, not production traffic. Every
+    #           table operator's MCP signature accepts ``model`` since
+    #           nexus-3mea3 + nexus-ek8tr (guarded by
+    #           test_every_tier_table_operator_mcp_signature_accepts_model).
+    #   != "0"  (unset, or any other value) DEFAULT PATH (.p2d as
+    #           extended by nexus-ek8tr 2026-08-21): EVERY table operator
+    #           gets an explicit model — FLIPPED_OPERATORS the cheap
+    #           alias, everything else STRONG_DEFAULT_ALIAS. Nothing on
+    #           this path inherits the box CLI default any more.
     #   == "0"  kill switch: neither branch fires, ``args`` stays
-    #           untouched — every operator dispatches at whatever the
-    #           untiered (pre-.p2d, strong) default has always been.
-    #           Rollback without a code change.
+    #           untouched — bare dispatch, the true pre-tiering rollback
+    #           (the model is then whatever the box CLI defaults to).
     #
     # Each branch's env check is inlined (not hoisted to a local) so the
     # AST structural guard (``TestNotConsultedRepoWide::
@@ -1186,11 +1182,17 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
             if resolved_tool in OPERATOR_MODEL_TIER:
                 args = {**args, "model": resolve_model_for_operator(resolved_tool)}
         elif _os.environ.get("NX_OPERATOR_MODEL_TIERING") != "0":
-            from nexus.operators.model_tiers import resolve_model_for_flipped_operator  # noqa: PLC0415 — default-path resolver, kept adjacent to its measurement-override sibling above
+            from nexus.operators.model_tiers import (  # noqa: PLC0415 — default-path resolver, kept adjacent to its measurement-override sibling above
+                OPERATOR_MODEL_TIER as _OMT,
+                resolve_model_for_default_path,
+            )
 
-            _default_model = resolve_model_for_flipped_operator(resolved_tool)
-            if _default_model is not None:
-                args = {**args, "model": _default_model}
+            # nexus-ek8tr: EVERY known operator gets an explicit model on
+            # the default path — flipped -> cheap alias, everything else
+            # -> STRONG_DEFAULT_ALIAS. Bare dispatch survives only via
+            # the kill switch or an unknown tool name.
+            if resolved_tool in _OMT:
+                args = {**args, "model": resolve_model_for_default_path(resolved_tool)}
 
     # RDR-093 S-1: pop runner-attached truncation metadata before the
     # kwargs-drop pass so the operator never sees the marker (it's not
@@ -1776,6 +1778,14 @@ async def plan_run(
                 # appended whenever a result envelope parsed, even on some
                 # subsequent raises (.p1a contract) — read back below.
                 _bundle_usage: list[Any] = []
+                # nexus-ek8tr: bundles are strong by construction (they fuse
+                # synthesis operators) — pin them to STRONG_DEFAULT_ALIAS
+                # explicitly on every path except the kill switch, instead
+                # of inheriting the box CLI default bare.
+                if _os.environ.get("NX_OPERATOR_MODEL_TIERING") != "0":
+                    from nexus.operators.model_tiers import STRONG_DEFAULT_ALIAS as _SDA  # noqa: PLC0415 — default-path pin (nexus-ek8tr)
+
+                    _bundle_kwargs["model"] = _SDA
                 try:
                     bundle_result = await dispatch_bundle(
                         bundle, usage_sink=_bundle_usage, **_bundle_kwargs,

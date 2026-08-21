@@ -773,6 +773,33 @@ def _close_dispatch_session(session_id: str | None, session_token: str | None) -
         )
 
 
+def model_family_matches(requested: str | None, canonical: str | None) -> bool:
+    """nexus-ek8tr drift tripwire: does the RECORDED canonical id belong to
+    the REQUESTED model's family? ``requested`` may be an alias ("fable",
+    "haiku") or a full id ("claude-haiku-4-5"); the check is that some
+    alphabetic token of the request appears in the canonical id. Vacuously
+    true when either side is unknown (no basis to warn)."""
+    if not requested or not canonical:
+        return True
+    tokens = [t for t in requested.lower().replace("claude-", "").split("-") if t.isalpha()]
+    canon = canonical.lower()
+    return any(t in canon for t in tokens) if tokens else True
+
+
+def _warn_on_family_drift(requested: str | None, usage: "DispatchUsage | None",
+                          operator: str | None) -> None:
+    """Emit the nexus-ek8tr drift warning when the recorded canonical id
+    falls outside the requested model's family. Never raises."""
+    canonical = usage.model if usage is not None else None
+    if not model_family_matches(requested, canonical):
+        _log.warning(
+            "model_family_drift",
+            requested_model=requested,
+            canonical_model=canonical,
+            operator=operator,
+        )
+
+
 async def claude_dispatch(
     prompt: str,
     json_schema: dict[str, Any],
@@ -1215,6 +1242,17 @@ async def claude_dispatch(
         # real stream-json (the format this repo's own test doubles use).
         final_result, _partial_text, event_count = _parse_stream_json_output(raw)
         _ambient_sink = _ambient_usage_sink.get()
+        # nexus-ek8tr drift tripwire — OUTSIDE the sink guard (review fix,
+        # T2 [23232] Important #2): the planner's own dispatch runs with
+        # no sink at all, and a pinned dispatch must be drift-checked on
+        # EVERY path, not only telemetry-wrapped ones. Only fires when a
+        # result parsed (final_result present); a failed dispatch has no
+        # canonical id to check.
+        _drift_usage = (
+            _parse_dispatch_usage(final_result) if final_result is not None else None
+        )
+        if model is not None and _drift_usage is not None:
+            _warn_on_family_drift(model, _drift_usage, operator)
         if usage_sink is not None or _ambient_sink is not None:
             # RDR-196 .p1a (nexus-nyry9.7) + .p1b Gap-1 addendum
             # (nexus-nyry9.8, 2026-08-20): capture cost/usage telemetry
@@ -1232,7 +1270,11 @@ async def claude_dispatch(
             # then_raises) both stay true unchanged. Parsed ONCE; the
             # SAME DispatchUsage instance is appended to both sinks when
             # both are active, never two independently-parsed copies.
-            _usage = _parse_dispatch_usage(final_result)
+            # Reuse the drift-check parse when it ran (review r2 suggestion:
+            # a second _parse_dispatch_usage here could double any parse
+            # warning); the fallback covers final_result None, where the
+            # parse itself emits the all-None-usage warning path.
+            _usage = _drift_usage if _drift_usage is not None else _parse_dispatch_usage(final_result)
             if usage_sink is not None:
                 usage_sink.append(_usage)
             if _ambient_sink is not None:

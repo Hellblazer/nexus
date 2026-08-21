@@ -865,7 +865,7 @@ class TestPlanMissPlanner:
             ],
         }
 
-        async def fake_dispatch(prompt, schema, timeout=60.0, model=None):
+        async def fake_dispatch(prompt, schema, timeout=60.0, model=None, **kw):
             return fake_plan
 
         with patch.object(_dispatch_mod, "claude_dispatch", fake_dispatch):
@@ -882,7 +882,7 @@ class TestPlanMissPlanner:
         from nexus.mcp.core import _nx_answer_plan_miss
         import nexus.operators.dispatch as _dispatch_mod
 
-        async def fake_dispatch(prompt, schema, timeout=60.0, model=None):
+        async def fake_dispatch(prompt, schema, timeout=60.0, model=None, **kw):
             return {"steps": []}
 
         with patch.object(_dispatch_mod, "claude_dispatch", fake_dispatch):
@@ -895,7 +895,7 @@ class TestPlanMissPlanner:
         from nexus.mcp.core import _nx_answer_plan_miss
         import nexus.operators.dispatch as _dispatch_mod
 
-        async def fake_dispatch(prompt, schema, timeout=60.0, model=None):
+        async def fake_dispatch(prompt, schema, timeout=60.0, model=None, **kw):
             return {"steps": [
                 {"tool": "mcp__plugin_sn_serena__jet_brains_find_symbol", "args": {}},
             ]}
@@ -913,7 +913,7 @@ class TestPlanMissPlanner:
         from nexus.mcp.core import _nx_answer_plan_miss
         import nexus.operators.dispatch as _dispatch_mod
 
-        async def fake_dispatch(prompt, schema, timeout=60.0, model=None):
+        async def fake_dispatch(prompt, schema, timeout=60.0, model=None, **kw):
             return {"steps": [
                 {"tool": "Grep", "args": {}},
                 {"tool": "Read", "args": {}},
@@ -932,7 +932,7 @@ class TestPlanMissPlanner:
         from nexus.mcp.core import _nx_answer_plan_miss
         import nexus.operators.dispatch as _dispatch_mod
 
-        async def fake_dispatch(prompt, schema, timeout=60.0, model=None):
+        async def fake_dispatch(prompt, schema, timeout=60.0, model=None, **kw):
             return {"steps": [
                 {"tool": "mcp__plugin_conexus_nexus__search", "args": {"query": "$intent"}},
                 {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
@@ -950,7 +950,7 @@ class TestPlanMissPlanner:
         from nexus.mcp.core import _nx_answer_plan_miss
         import nexus.operators.dispatch as _dispatch_mod
 
-        async def fake_dispatch(prompt, schema, timeout=60.0, model=None):
+        async def fake_dispatch(prompt, schema, timeout=60.0, model=None, **kw):
             return {"steps": [
                 {"tool": "search", "args": {"query": "$intent"}},
                 {"tool": "totally_unknown_tool", "args": {}},
@@ -976,7 +976,7 @@ class TestPlanMissPlanner:
 
         dispatch_calls = []
 
-        async def fake_dispatch(prompt, schema, timeout=60.0, model=None):
+        async def fake_dispatch(prompt, schema, timeout=60.0, model=None, **kw):
             dispatch_calls.append(prompt)
             return {"steps": [{"tool": "search", "args": {"query": "$intent"}}]}
 
@@ -1235,7 +1235,7 @@ class TestNxTidy:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import nx_tidy
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             return {"summary": "Consolidated.", "actions": []}
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
@@ -1250,7 +1250,7 @@ class TestNxTidy:
 
         captured = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured.append(prompt)
             return {"summary": "ok", "actions": []}
 
@@ -1266,7 +1266,7 @@ class TestNxTidy:
 
         dispatch_calls = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             dispatch_calls.append(prompt)
             return {"summary": "ok", "actions": []}
 
@@ -1286,7 +1286,7 @@ class TestNxTidy:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured["timeout"] = timeout
             return {"summary": "ok", "actions": []}
 
@@ -1607,7 +1607,7 @@ class TestOperatorTimeoutDefaults:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured["timeout"] = timeout
             return {"summary": "ok"}
 
@@ -1622,7 +1622,7 @@ class TestOperatorTimeoutDefaults:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured["timeout"] = timeout
             return {"extractions": []}
 
@@ -1637,7 +1637,7 @@ class TestOperatorTimeoutDefaults:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured["timeout"] = timeout
             return {"ranked": []}
 
@@ -1652,7 +1652,7 @@ class TestOperatorTimeoutDefaults:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured["timeout"] = timeout
             return {"comparison": "ok"}
 
@@ -1667,7 +1667,7 @@ class TestOperatorTimeoutDefaults:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured["timeout"] = timeout
             return {"output": "ok"}
 

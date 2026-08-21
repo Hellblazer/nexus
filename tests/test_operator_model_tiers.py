@@ -216,6 +216,26 @@ class TestFlippedOperators:
 
 
 class TestFlippedOperatorSignaturesAcceptModel:
+    def test_every_tier_table_operator_mcp_signature_accepts_model(self) -> None:
+        """nexus-ek8tr extends nexus-3mea3's guard to the WHOLE table:
+        the default path now injects model= for EVERY known operator
+        (flipped -> cheap, others -> STRONG_DEFAULT_ALIAS), so every
+        entry's real signature must accept it or the pin is a silent
+        no-op for that operator."""
+        import inspect
+
+        from nexus.mcp import core as mcp_core
+        from nexus.operators.model_tiers import OPERATOR_MODEL_TIER
+
+        missing = [
+            op for op in sorted(OPERATOR_MODEL_TIER)
+            if "model" not in inspect.signature(getattr(mcp_core, op)).parameters
+        ]
+        assert missing == [], (
+            f"tier-table operators whose MCP signature lacks model= (the "
+            f"runner would silently drop the injected kwarg): {missing}"
+        )
+
     def test_every_flipped_operator_mcp_signature_accepts_model(self) -> None:
         """nexus-3mea3: the runner injects ``model=`` for a flipped
         operator, and its kwargs-drop pass SILENTLY discards the kwarg
@@ -593,11 +613,10 @@ class TestP2COptInDispatcherBehavior:
     measurement-override path, which is unchanged by .p2d."""
 
     @pytest.mark.asyncio
-    async def test_env_unset_injects_no_model_kwarg(self, monkeypatch) -> None:
-        """A HOLD operator (not in FLIPPED_OPERATORS) gets no ``model``
-        kwarg with the env unset -- the measurement-override path never
-        fires without ``== "1"``, and the default-flip path only ever
-        sets a model for a FLIPPED operator."""
+    async def test_env_unset_injects_strong_default_pin(self, monkeypatch) -> None:
+        """nexus-ek8tr: a HOLD operator now gets the EXPLICIT
+        STRONG_DEFAULT_ALIAS on the default path — bare dispatch survives
+        only via the kill switch or an unknown tool name."""
         monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
         from nexus.plans.runner import _default_dispatcher
         from nexus.mcp import core as mcp_core
@@ -611,7 +630,7 @@ class TestP2COptInDispatcherBehavior:
 
         monkeypatch.setattr(mcp_core, "operator_compare", fake_operator_compare)
         await _default_dispatcher("compare", {"items": "[]", "focus": "x"})
-        assert captured["model"] is None
+        assert captured["model"] == "fable"
 
     @pytest.mark.asyncio
     async def test_env_set_injects_tier_alias(self, monkeypatch) -> None:
@@ -787,7 +806,8 @@ class TestP2DDefaultFlipDispatcherBehavior:
         assert captured["model"] == "haiku"
 
     @pytest.mark.asyncio
-    async def test_default_hold_aggregate_gets_no_model(self, monkeypatch) -> None:
+    async def test_default_aggregate_gets_strong_pin(self, monkeypatch) -> None:
+        """nexus-ek8tr: HOLD operators are pinned, not bare."""
         monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
         from nexus.plans.runner import _default_dispatcher
         from nexus.mcp import core as mcp_core
@@ -801,10 +821,11 @@ class TestP2DDefaultFlipDispatcherBehavior:
 
         monkeypatch.setattr(mcp_core, "operator_aggregate", fake)
         await _default_dispatcher("aggregate", {"groups": "[]", "reducer": "x"})
-        assert captured["model"] is None
+        assert captured["model"] == "fable"
 
     @pytest.mark.asyncio
-    async def test_default_hold_summarize_gets_no_model(self, monkeypatch) -> None:
+    async def test_default_summarize_gets_strong_pin(self, monkeypatch) -> None:
+        """nexus-ek8tr: HOLD operators are pinned, not bare."""
         monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
         from nexus.plans.runner import _default_dispatcher
         from nexus.mcp import core as mcp_core
@@ -817,10 +838,11 @@ class TestP2DDefaultFlipDispatcherBehavior:
 
         monkeypatch.setattr(mcp_core, "operator_summarize", fake)
         await _default_dispatcher("summarize", {"content": "x"})
-        assert captured["model"] is None
+        assert captured["model"] == "fable"
 
     @pytest.mark.asyncio
-    async def test_default_hold_compare_gets_no_model(self, monkeypatch) -> None:
+    async def test_default_compare_gets_strong_pin(self, monkeypatch) -> None:
+        """nexus-ek8tr: HOLD operators are pinned, not bare."""
         monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
         from nexus.plans.runner import _default_dispatcher
         from nexus.mcp import core as mcp_core
@@ -834,10 +856,11 @@ class TestP2DDefaultFlipDispatcherBehavior:
 
         monkeypatch.setattr(mcp_core, "operator_compare", fake)
         await _default_dispatcher("compare", {"items": "[]"})
-        assert captured["model"] is None
+        assert captured["model"] == "fable"
 
     @pytest.mark.asyncio
-    async def test_default_hold_generate_gets_no_model(self, monkeypatch) -> None:
+    async def test_default_generate_gets_strong_pin(self, monkeypatch) -> None:
+        """nexus-ek8tr: HOLD operators are pinned, not bare."""
         monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
         from nexus.plans.runner import _default_dispatcher
         from nexus.mcp import core as mcp_core
@@ -850,7 +873,7 @@ class TestP2DDefaultFlipDispatcherBehavior:
 
         monkeypatch.setattr(mcp_core, "operator_generate", fake)
         await _default_dispatcher("generate", {"template": "x", "context": "y"})
-        assert captured["model"] is None
+        assert captured["model"] == "fable"
 
     @pytest.mark.asyncio
     async def test_kill_switch_forces_none_for_flipped_operator(self, monkeypatch) -> None:
@@ -921,20 +944,23 @@ class TestP2COptInPlannerBehavior:
     DO-7 comment)."""
 
     @pytest.mark.asyncio
-    async def test_env_unset_planner_dispatches_with_no_model(self, monkeypatch) -> None:
+    async def test_env_unset_planner_dispatches_with_strong_pin(self, monkeypatch) -> None:
+        """nexus-ek8tr: the planner's default dispatch pins
+        STRONG_DEFAULT_ALIAS explicitly (same model as the old bare
+        inheritance in practice; no longer an accident)."""
         monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
         import nexus.operators.dispatch as _dispatch_mod
         from nexus.mcp.core import _nx_answer_plan_miss
 
         captured: dict = {}
 
-        async def fake_dispatch(prompt, schema, timeout=300.0, model=None):
+        async def fake_dispatch(prompt, schema, timeout=300.0, model=None, **kw):
             captured["model"] = model
             return {"steps": [{"tool": "search", "args": {"query": "$intent"}}]}
 
         monkeypatch.setattr(_dispatch_mod, "claude_dispatch", fake_dispatch)
         await _nx_answer_plan_miss("how does X work")
-        assert captured["model"] is None
+        assert captured["model"] == "fable"
 
     @pytest.mark.asyncio
     async def test_env_set_planner_dispatches_at_cheap_tier(self, monkeypatch) -> None:
@@ -944,10 +970,181 @@ class TestP2COptInPlannerBehavior:
 
         captured: dict = {}
 
-        async def fake_dispatch(prompt, schema, timeout=300.0, model=None):
+        async def fake_dispatch(prompt, schema, timeout=300.0, model=None, **kw):
             captured["model"] = model
             return {"steps": [{"tool": "search", "args": {"query": "$intent"}}]}
 
         monkeypatch.setattr(_dispatch_mod, "claude_dispatch", fake_dispatch)
         await _nx_answer_plan_miss("how does X work")
         assert captured["model"] == "haiku"
+
+
+class TestStrongDefaultPin:
+    """nexus-ek8tr: the explicit strong pin and its resolver."""
+
+    def test_resolver_returns_cheap_for_flipped_and_pin_for_hold(self) -> None:
+        from nexus.operators.model_tiers import (
+            FLIPPED_OPERATORS,
+            OPERATOR_MODEL_TIER,
+            STRONG_DEFAULT_ALIAS,
+            resolve_model_for_default_path,
+        )
+
+        assert STRONG_DEFAULT_ALIAS == "fable"
+        for op in OPERATOR_MODEL_TIER:
+            expected = "haiku" if op in FLIPPED_OPERATORS else "fable"
+            assert resolve_model_for_default_path(op) == expected
+
+    @pytest.mark.asyncio
+    async def test_kill_switch_keeps_hold_operator_bare(self, monkeypatch) -> None:
+        """=0 is the TRUE pre-tiering rollback: no injection at all."""
+        monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "0")
+        from nexus.plans.runner import _default_dispatcher
+        from nexus.mcp import core as mcp_core
+
+        captured: dict = {}
+
+        async def fake(items="", focus="", timeout=300.0, model=None, **kw):
+            captured["model"] = model
+            return {"comparison": "c"}
+
+        monkeypatch.setattr(mcp_core, "operator_compare", fake)
+        await _default_dispatcher("compare", {"items": "[]", "focus": "x"})
+        assert captured["model"] is None
+
+    def test_bundle_dispatch_accepts_model(self) -> None:
+        import inspect
+
+        from nexus.plans.bundle import dispatch_bundle
+
+        assert "model" in inspect.signature(dispatch_bundle).parameters
+
+
+class TestModelFamilyDriftTripwire:
+    def test_family_match_rules(self) -> None:
+        from nexus.operators.dispatch import model_family_matches
+
+        assert model_family_matches("fable", "claude-fable-5")
+        assert model_family_matches("haiku", "claude-haiku-4-5")
+        assert model_family_matches("claude-haiku-4-5", "claude-haiku-4-5")
+        assert not model_family_matches("fable", "claude-sonnet-5")
+        assert not model_family_matches("haiku", "claude-fable-5")
+        # unknown sides: vacuously true, no basis to warn
+        assert model_family_matches(None, "claude-fable-5")
+        assert model_family_matches("fable", None)
+        assert model_family_matches("", "")
+
+
+class TestDriftWarningEmission:
+    """The tripwire's actual log emission (review fix, T2 [23232]): the
+    pure predicate alone cannot prove a warning ever fires."""
+
+    def test_warns_on_family_mismatch_and_not_on_match(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as dispatch_mod
+        from nexus.operators.dispatch import DispatchUsage, _warn_on_family_drift
+
+        events: list = []
+        monkeypatch.setattr(
+            dispatch_mod, "_log",
+            type("L", (), {"warning": staticmethod(lambda ev, **kw: events.append((ev, kw)))})(),
+        )
+        usage = DispatchUsage(
+            model="claude-sonnet-5", cost_usd=0.1, input_tokens=1, output_tokens=1,
+            cache_creation_input_tokens=None, cache_read_input_tokens=None,
+            duration_ms=1, duration_api_ms=1, num_turns=1, model_usage={},
+        )
+        _warn_on_family_drift("fable", usage, "planner")
+        assert events and events[0][0] == "model_family_drift"
+        assert events[0][1]["requested_model"] == "fable"
+        assert events[0][1]["canonical_model"] == "claude-sonnet-5"
+        assert events[0][1]["operator"] == "planner"
+
+        events.clear()
+        good = DispatchUsage(
+            model="claude-fable-5", cost_usd=0.1, input_tokens=1, output_tokens=1,
+            cache_creation_input_tokens=None, cache_read_input_tokens=None,
+            duration_ms=1, duration_api_ms=1, num_turns=1, model_usage={},
+        )
+        _warn_on_family_drift("fable", good, "planner")
+        _warn_on_family_drift("fable", None, "planner")
+        assert events == []
+
+
+class TestPlannerKillSwitch:
+    @pytest.mark.asyncio
+    async def test_kill_switch_leaves_planner_bare(self, monkeypatch) -> None:
+        monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "0")
+        import nexus.operators.dispatch as _dispatch_mod
+        from nexus.mcp.core import _nx_answer_plan_miss
+
+        captured: dict = {}
+
+        async def fake_dispatch(prompt, schema, timeout=300.0, model=None, **kw):
+            captured["model"] = model
+            return {"steps": [], "reasoning": "r"}
+
+        monkeypatch.setattr(_dispatch_mod, "claude_dispatch", fake_dispatch)
+        try:
+            await _nx_answer_plan_miss("q", scope="", context="", max_steps=3)
+        except Exception:
+            pass  # downstream shape handling is not under test
+        assert captured.get("model") is None
+
+
+class TestDirectCallPin:
+    """nexus-ek8tr (critic Critical): direct tool calls (no runner) also
+    pin — and the =1 end-to-end path for a former HOLD operator reaches
+    the real signature (critic Significant #2)."""
+
+    @pytest.mark.asyncio
+    async def test_direct_operator_call_pins_strong_default(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
+        import nexus.operators.dispatch as dmod
+        from nexus.mcp import core as mcp_core
+
+        captured: dict = {}
+
+        async def fake(prompt, schema, timeout=300.0, model=None, **kw):
+            captured["model"] = model
+            return {"summary": "s"}
+
+        monkeypatch.setattr(dmod, "claude_dispatch", fake)
+        await mcp_core.operator_summarize("text")
+        assert captured["model"] == "fable"
+
+    @pytest.mark.asyncio
+    async def test_direct_call_kill_switch_stays_bare_and_caller_wins(self, monkeypatch) -> None:
+        import nexus.operators.dispatch as dmod
+        from nexus.mcp import core as mcp_core
+
+        captured: dict = {}
+
+        async def fake(prompt, schema, timeout=300.0, model=None, **kw):
+            captured["model"] = model
+            return {"summary": "s"}
+
+        monkeypatch.setattr(dmod, "claude_dispatch", fake)
+        monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "0")
+        await mcp_core.operator_summarize("text")
+        assert captured["model"] is None
+        monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
+        await mcp_core.operator_summarize("text", model="opus")
+        assert captured["model"] == "opus"
+
+    @pytest.mark.asyncio
+    async def test_measurement_override_summarize_end_to_end_sonnet(self, monkeypatch) -> None:
+        """=1 through the REAL _default_dispatcher and the real operator
+        signature: the formerly dead measurement override is now live."""
+        monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "1")
+        import nexus.operators.dispatch as dmod
+        from nexus.plans.runner import _default_dispatcher
+
+        captured: dict = {}
+
+        async def fake(prompt, schema, timeout=300.0, model=None, **kw):
+            captured["model"] = model
+            return {"summary": "s"}
+
+        monkeypatch.setattr(dmod, "claude_dispatch", fake)
+        await _default_dispatcher("summarize", {"content": "x"})
+        assert captured["model"] == "sonnet"

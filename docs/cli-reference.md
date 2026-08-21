@@ -3263,17 +3263,19 @@ isolated-step path, `mcp/core.py`'s inline planner):
 
 | value | meaning |
 |---|---|
-| unset (default) | the default flip above — only the FLIPPED_OPERATORS set routes cheap |
+| unset (default) | flipped operators route cheap; EVERY other known operator, every bundle, and the inline planner dispatch with the explicit `--model fable` pin (`model_tiers.STRONG_DEFAULT_ALIAS`, nexus-ek8tr). Direct MCP operator calls and `nx_tidy`/`nx_plan_audit`/`nx_enrich_beads` pin the same way at their own entry points (`_pin_default_model`), so no dispatch on this path inherits the box CLI default; only the `0` kill switch restores bare dispatch |
 | `1` | measurement override: consult the WHOLE tier table (`nexus.operators.model_tiers.OPERATOR_MODEL_TIER`), including "strong" entries — for A/B re-verification, not production traffic |
-| `0` | kill switch: forces every operator back to strong (pre-.p2d behaviour), without a code change — rollback lever |
+| `0` | kill switch: no model injection anywhere (true pre-tiering bare dispatch — operators, bundles, and the planner inherit the box CLI default), without a code change — rollback lever |
 
 A plan step (or MCP tool call) that already supplies its own `model=`
 argument always wins over any of the above — the tiering machinery only
 ever fills a gap the caller left unset. Bundled operator dispatches
-(`nexus.plans.bundle.dispatch_bundle`) are never affected by any of the
-three states — bundling never consults model tiers, so a bundle
-containing a flipped operator still dispatches at the default (strong)
-model.
+(`nexus.plans.bundle.dispatch_bundle`) never consult per-operator tiers —
+a bundle containing a flipped operator still dispatches strong — but
+since nexus-ek8tr they carry the explicit `--model fable` pin on every
+path except the `0` kill switch, and the recorded canonical id is
+checked against the requested family on every dispatch (a mismatch logs
+a loud `model_family_drift` warning).
 
 ---
 

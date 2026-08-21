@@ -4650,6 +4650,26 @@ def collection_verify(name: str) -> str:
 # ── Operator tools ───────────────────────────────────────────────────────────
 
 
+def _pin_default_model(model: "str | None") -> "str | None":
+    """nexus-ek8tr (critic Critical, T2 [23233]): a DIRECT tool call with
+    no ``model=`` — an MCP client invoking an operator, or the nx_tidy /
+    nx_plan_audit / nx_enrich_beads heavy tools — must still dispatch at
+    the EXPLICIT strong pin, never inherit the box CLI default bare.
+    Caller-supplied models always win; the ``=0`` kill switch restores
+    bare dispatch everywhere. Plan-routed dispatches arrive with an
+    explicit model from the runner, so this never fires on that path.
+    Note the direct-call contract is unchanged in tier terms: direct
+    operator calls were always "strong by default" — this makes the
+    strong identity explicit instead of inherited."""
+    import os as _os  # noqa: PLC0415 — trivial stdlib; keeps helper self-contained
+
+    if model is not None or _os.environ.get("NX_OPERATOR_MODEL_TIERING") == "0":
+        return model
+    from nexus.operators.model_tiers import STRONG_DEFAULT_ALIAS  # noqa: PLC0415 — default-path pin (nexus-ek8tr)
+
+    return STRONG_DEFAULT_ALIAS
+
+
 @mcp.tool(
     title="Extract Structured Fields",
     annotations={"readOnlyHint": True},
@@ -4685,7 +4705,10 @@ async def operator_extract(
             }
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_extract",
+    )
 
 
 @mcp.tool(
@@ -4719,7 +4742,10 @@ async def operator_rank(
             "ranked": {"type": "array", "items": {"type": "string"}},
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_rank",
+    )
 
 
 @mcp.tool(
@@ -4735,6 +4761,7 @@ async def operator_compare(
     items_b: str = "",
     label_a: str = "A",
     label_b: str = "B",
+    model: str | None = None,
 ) -> dict:
     """Compare items and return a structured comparison using claude -p.
 
@@ -4808,7 +4835,10 @@ async def operator_compare(
             "comparison": {"type": "string"},
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_compare",
+    )
 
 
 @mcp.tool(
@@ -4819,6 +4849,7 @@ async def operator_summarize(
     content: str,
     cited: bool = False,
     timeout: float = 300.0,
+    model: str | None = None,
 ) -> dict:
     """Summarize content using claude -p, optionally with citations.
 
@@ -4839,7 +4870,10 @@ async def operator_summarize(
             "citations": {"type": "array", "items": {"type": "string"}},
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_summarize",
+    )
 
 
 @mcp.tool(
@@ -4851,6 +4885,7 @@ async def operator_generate(
     context: str,
     cited: bool = False,
     timeout: float = 300.0,
+    model: str | None = None,
 ) -> dict:
     """Generate output from a template and context using claude -p.
 
@@ -4875,7 +4910,10 @@ async def operator_generate(
             "citations": {"type": "array", "items": {"type": "string"}},
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_generate",
+    )
 
 
 #: Shared evidence-item schema for ``operator_check`` (RDR-088 Phase 2).
@@ -5004,7 +5042,10 @@ async def operator_filter(
             },
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_filter",
+    )
 
 
 @mcp.tool(
@@ -5067,7 +5108,10 @@ async def operator_check(
             },
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_check",
+    )
 
 
 @mcp.tool(
@@ -5126,7 +5170,10 @@ async def operator_verify(
             },
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_verify",
+    )
 
 
 @mcp.tool(
@@ -5251,7 +5298,10 @@ async def operator_groupby(
             },
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_groupby",
+    )
 
 
 @mcp.tool(
@@ -5264,6 +5314,7 @@ async def operator_aggregate(
     timeout: float = 300.0,
     source: str = "auto",
     aspect_field: str = "",
+    model: str | None = None,
 ) -> dict:
     """Reduce each group of items to a per-group summary.
 
@@ -5354,7 +5405,10 @@ async def operator_aggregate(
             },
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_aggregate",
+    )
 
 
 # ── traverse (RDR-078 P3) ─────────────────────────────────────────────────────
@@ -6258,20 +6312,29 @@ async def _nx_answer_plan_miss(
     # appends no ``--model`` flag, byte-identical to every pre-.p2c call.
     #
     # RDR-196 .p2d (nexus-nyry9.17): the planner is UNMEASURED, not HOLD-
-    # by-decision — the .p2c candidate arm never ran (budget exhausted
-    # before the 4th dispatch, see T2 nexus_rdr/196-phase2-ab-measurement).
-    # NO code change here: the planner does NOT join .p2d's default-on
-    # flip (``model_tiers.FLIPPED_OPERATORS`` is operator-tool-only) —
-    # it stays gated on ``== "1"`` exactly as .p2c left it, so the
-    # default path (env unset) and the kill switch (``== "0"``) both
-    # leave ``_planner_model`` at ``None``, unchanged. A future bead can
-    # spend a small dedicated top-up (~3 cheap-tier planner dispatches,
-    # per .p2d's dev notes) to resolve UNMEASURED into a real verdict.
+    # by-decision — the .p2c candidate arm never ran. It does NOT join the
+    # cheap flip. UPDATED by nexus-ek8tr (2026-08-21, superseding the
+    # "default path leaves _planner_model at None" wording that used to
+    # sit here): the default path now pins STRONG_DEFAULT_ALIAS
+    # explicitly (see the branch below); only the ``== "0"`` kill switch
+    # leaves the dispatch bare. The TIER question stays open
+    # (nexus-i8to5) — the pin names the incumbent, it does not choose a
+    # tier.
+    # nexus-ek8tr (2026-08-21): the default path now pins the planner to
+    # STRONG_DEFAULT_ALIAS explicitly instead of inheriting the box CLI
+    # default bare — same dispatch, same model in practice, no longer an
+    # accident. Kill switch "0" restores the bare pre-tiering dispatch.
+    # The planner's TIER remains UNMEASURED (Sam decision, nexus-i8to5);
+    # this pins the incumbent, it does not change it.
     _planner_model: str | None = None
     if _os.environ.get("NX_OPERATOR_MODEL_TIERING") == "1":
         from nexus.operators.model_tiers import resolve_model_for_tier  # noqa: PLC0415 — rare/branch-local path; measurement-only opt-in
 
         _planner_model = resolve_model_for_tier("cheap")
+    elif _os.environ.get("NX_OPERATOR_MODEL_TIERING") != "0":
+        from nexus.operators.model_tiers import STRONG_DEFAULT_ALIAS  # noqa: PLC0415 — rare/branch-local path; default-path pin (nexus-ek8tr)
+
+        _planner_model = STRONG_DEFAULT_ALIAS
     payload = None
     last_output_error: _OpOutputError | None = None
     for attempt in range(2):
@@ -6279,7 +6342,7 @@ async def _nx_answer_plan_miss(
         try:
             payload = await claude_dispatch(
                 prompt, _PLANNER_SCHEMA, timeout=attempt_timeout,
-                model=_planner_model,
+                model=_planner_model, operator="planner",
             )
             break
         except _OpOutputError as exc:
@@ -7689,7 +7752,7 @@ async def nx_tidy(
         f"'{collection}'."
         f"{entries_section}"
     )
-    payload = await claude_dispatch(prompt, schema, timeout=timeout)
+    payload = await claude_dispatch(prompt, schema, timeout=timeout, model=_pin_default_model(None))
 
     summary = payload.get("summary", "") if isinstance(payload, dict) else str(payload)
     actions = payload.get("actions", []) if isinstance(payload, dict) else []
@@ -7764,6 +7827,7 @@ async def nx_enrich_beads(
     payload = await claude_dispatch(
         prompt, schema, timeout=timeout,
         mcp_servers=mcp_servers, allowed_tools=allowed_tools,
+        model=_pin_default_model(None),
     )
     return (
         payload.get("enriched_description", "")
@@ -7829,6 +7893,7 @@ async def nx_plan_audit(
     payload = await claude_dispatch(
         prompt, schema, timeout=timeout,
         mcp_servers=mcp_servers, allowed_tools=allowed_tools,
+        model=_pin_default_model(None),
     )
     if isinstance(payload, dict):
         verdict = payload.get("verdict", "unknown")
