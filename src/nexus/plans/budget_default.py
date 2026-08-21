@@ -49,7 +49,11 @@ from typing import Any, Final
 
 import structlog
 
-from nexus.operators.model_tiers import FLIPPED_OPERATORS, resolve_model_for_tier
+from nexus.operators.model_tiers import (
+    FLIPPED_OPERATORS,
+    STRONG_DEFAULT_ALIAS,
+    resolve_model_for_tier,
+)
 from nexus.plans.cost_estimate import _resolved
 
 __all__ = [
@@ -68,24 +72,30 @@ _log = structlog.get_logger(__name__)
 
 # ── The derived default ──────────────────────────────────────────────────────
 #
-# PROVENANCE: UNDERIVED as of 2026-08-21. ``nx answer-runs --derive-budget``
-# against the live store scanned 182 rows (143 executed-ok) and found n=0
-# qualifying runs: per-step cost recording (cc61d4c31, .p1f) first shipped
-# in conexus 7.14.0 / engine-service-v0.1.85 on 2026-08-21, and the newest
-# recorded run (2026-08-19) came from a 7.13.0 client, so no row carries a
-# ``steps`` list at all. Tier configuration in force for the eventual
-# derivation: FLIPPED_OPERATORS = {filter, groupby, extract, rank, check,
-# verify} at the cheap alias ``haiku`` (check/verify added by nexus-3mea3
-# 2026-08-21; any run recorded between the 7.14.0 flip and that date with
-# a strong-model check/verify step correctly classifies PRE-flip under
-# is_post_flip_run's live read of the set); everything else HOLD.
+# DERIVED 2026-08-21 via `nx answer-runs --derive-budget` against the live
+# store, under the v2 CONFIG-CONFORMANCE predicate (critique [23254]:
+# every billable step must record the current config's model family, so
+# the morning's pre-repin fable-bundle run is EXCLUDED rather than mixed
+# in — its inclusion had moved p90 by ~25%). p90 of per-run cost over
+# n=30 qualifying runs (213 rows scanned, 174 executed-ok, 143 excluded
+# as pre-.p1f no-step-records, 1 pre-flip, 0 unknown-cost). Chosen
+# percentile: p90 = 1.0530 USD, which would have refused 10.0% of the
+# observed runs (p50 0.701/50.0%, p75 0.800/23.3%, p95 1.359/3.3% —
+# choice reasoning on bead nexus-nyry9.19). Tier configuration in force:
+# flipped={check,extract,filter,groupby,rank,verify}@haiku; every other
+# operator, bundles, and the planner pinned to STRONG_DEFAULT_ALIAS
+# ("opus", nexus-ek8tr + repin). Population caveats (bead comments): ALL
+# 30 rows are the nexus-nyry9.19 seeding session (4 questions, verbatim
+# repeats partially cache-priced — deflates p50; the p90 tail is cold
+# rows); no qualifying row exercised a STANDALONE cheap-tier flipped
+# dispatch (flipped ops rode bundles in these plan shapes).
 #
-# When a derivation run reports ``sufficient`` (n >= MIN_DERIVATION_RUNS),
-# set this to the chosen percentile's value and REPLACE this comment with:
-# the date, n, the percentile, the would-have-refused fraction, and the
-# tier configuration string the run printed. A number with no n is not
-# allowed here (bead VERIFICATION).
-DERIVED_BUDGET_USD: Final[float | None] = None
+# RE-DERIVE (replace this comment wholesale; a number with no n fails
+# the provenance guard) when ANY of: the tier config re-points; new
+# operators land; or ORGANIC post-repin rows outnumber these 30 seeds —
+# a default measured mostly on its own seeding must yield to real
+# traffic at the first opportunity.
+DERIVED_BUDGET_USD: Final[float | None] = 1.0530
 
 #: ``.p3c`` flips this; this bead leaves enforcement OFF by construction.
 BUDGET_ENFORCEMENT_ENABLED: Final[bool] = False
@@ -170,28 +180,43 @@ class BudgetDerivation:
 def describe_tier_config() -> str:
     """The tier configuration a derivation ran under, for provenance."""
     flipped = ",".join(sorted(op.removeprefix("operator_") for op in FLIPPED_OPERATORS))
-    return f"flipped={{{flipped}}}@{resolve_model_for_tier('cheap')}; others=HOLD"
+    return (f"flipped={{{flipped}}}@{resolve_model_for_tier('cheap')}; "
+            f"others+bundles+planner@{STRONG_DEFAULT_ALIAS}")
 
 
 def is_post_flip_run(steps: list[dict[str, Any]]) -> bool:
-    """True when every flipped-operator LLM step in *steps* recorded a
-    cheap-tier canonical model.
+    """True when every BILLABLE step in *steps* ran on a model the
+    CURRENT tier configuration would dispatch — config-conformance, not
+    merely "flipped steps are cheap".
 
-    Steps of HOLD operators, ``sql`` steps, and ``bundle`` steps (bundles
-    never consult tiers) are tier-invariant and do not vote. A flipped
-    step whose model is unknown (``None``) is NOT proven post-flip and
-    taints the run. An empty list is vacuously post-flip.
+    v2 (p3a-derive critique [23254] Critical): the v1 predicate treated
+    HOLD and bundle steps as tier-invariant, which let a pre-repin
+    fable-priced bundle run (1.87 USD) qualify alongside post-repin opus
+    runs and move the derived p90 by ~25%. Since nexus-ek8tr every
+    default-path dispatch names its model explicitly, conformance is
+    checkable per step: a flipped operator's LLM step must record the
+    cheap alias family; every OTHER billable step (HOLD operators and
+    bundles) must record the :data:`~nexus.operators.model_tiers.
+    STRONG_DEFAULT_ALIAS` family. Reads both live, so the predicate
+    tracks re-points (fable -> opus included) automatically. ``sql``
+    steps cost nothing and do not vote; a billable step with an unknown
+    model is NOT proven conformant and taints the run. An empty list is
+    vacuously conformant.
     """
     cheap_family = resolve_model_for_tier("cheap").lower()
+    strong_family = STRONG_DEFAULT_ALIAS.lower()
     for step in steps:
-        if step.get("source") != "llm":
-            continue
-        operator = step.get("operator")
-        if not operator or _resolved(str(operator)) not in FLIPPED_OPERATORS:
+        if step.get("source") not in _BILLABLE_SOURCES:
             continue
         model = str(step.get("model") or "").lower()
-        if cheap_family not in model:
-            return False
+        operator = step.get("operator") or ""
+        if (step.get("source") == "llm"
+                and operator and _resolved(str(operator)) in FLIPPED_OPERATORS):
+            if cheap_family not in model:
+                return False
+        else:
+            if strong_family not in model:
+                return False
     return True
 
 

@@ -29,8 +29,11 @@ from nexus.plans.budget_default import (
     is_post_flip_run,
 )
 
-STRONG = "claude-fable-5"
+# The CURRENT strong pin's canonical family (STRONG_DEFAULT_ALIAS="opus");
+# PRE_PIN is the former default's id, used as the non-conforming example.
+STRONG = "claude-opus-5"
 CHEAP = "claude-haiku-4-5"
+PRE_PIN = "claude-fable-5"
 
 
 def _step(operator: str, model: str | None, cost: float | None, source: str = "llm",
@@ -62,11 +65,17 @@ class TestPostFlipPredicate:
         assert not is_post_flip_run([_step("operator_filter", STRONG, 0.8)])
         assert not is_post_flip_run([_step("rank", None, 0.8)])  # unknown model: not proven
 
-    def test_hold_operators_and_non_llm_steps_are_tier_invariant(self) -> None:
+    def test_hold_and_bundle_steps_must_match_the_strong_pin(self) -> None:
+        """v2 (critique [23254]): HOLD/bundle steps are no longer
+        tier-invariant — they must record the STRONG_DEFAULT family."""
         assert is_post_flip_run([_step("operator_generate", STRONG, 0.9)])
         assert is_post_flip_run([_step("operator_filter", None, None, source="sql")])
         assert is_post_flip_run([_step("operator_filter", STRONG, 0.9, source="bundle")])
         assert is_post_flip_run([])
+        # a pre-repin fable bundle/HOLD step now DISQUALIFIES the run
+        assert not is_post_flip_run([_step("operator_generate", PRE_PIN, 1.87, source="bundle")])
+        assert not is_post_flip_run([_step("operator_generate", PRE_PIN, 0.9)])
+        assert not is_post_flip_run([_step("operator_generate", None, 0.9)])  # unknown taints
 
     def test_cheap_alias_family_is_a_substring_of_the_recorded_canonical_id(self) -> None:
         """The predicate couples the tier ALIAS (model_tiers) to the
@@ -154,6 +163,7 @@ class TestDerivation:
         for op in ("filter", "groupby", "extract", "rank", "check", "verify"):
             assert op in d.tier_config
         assert "haiku" in d.tier_config
+        assert "opus" in d.tier_config  # the strong pin is part of the provenance
 
     def test_as_dict_round_trips_to_json(self) -> None:
         post = [_run([_step("operator_filter", CHEAP, 0.1 * i)]) for i in range(1, 31)]
@@ -165,8 +175,10 @@ class TestDerivation:
 
 
 class TestEnforcementStillOff:
-    def test_no_derived_value_and_enforcement_off(self) -> None:
-        assert DERIVED_BUDGET_USD is None
+    def test_derived_value_set_and_enforcement_still_off(self) -> None:
+        """.p3a produced the number (p90, n=31, 2026-08-21); enforcement
+        stays OFF until .p3c."""
+        assert DERIVED_BUDGET_USD == pytest.approx(1.0530)
         assert BUDGET_ENFORCEMENT_ENABLED is False
         assert MIN_DERIVATION_RUNS >= 30
 
@@ -219,10 +231,13 @@ class TestEnforcementStillOff:
         self._check_provenance(DERIVED_BUDGET_USD, self._provenance_block())
 
     def test_provenance_guard_is_falsifiable(self) -> None:
-        """A real value left under the CURRENT (UNDERIVED) comment trips
-        the guard; a proper record passes; a record missing n= fails."""
+        """A value under a stale UNDERIVED comment trips the guard; a
+        proper record passes; a record missing n= fails; the CURRENT
+        block satisfies the CURRENT (derived) value's requirements."""
+        stale = "# PROVENANCE: UNDERIVED as of 2026-08-21. no rows yet."
         with pytest.raises(AssertionError, match="stale UNDERIVED"):
-            self._check_provenance(0.42, self._provenance_block())
+            self._check_provenance(0.42, stale)
+        self._check_provenance(DERIVED_BUDGET_USD, self._provenance_block())
         good = ("# derived 2026-09-01 from n=41 post-flip runs, p90, would refuse 9.8%,\n"
                 "# flipped={extract,filter,groupby,rank}@haiku; others=HOLD")
         self._check_provenance(0.42, good)
@@ -262,4 +277,4 @@ class TestAnswerRunsDeriveBudgetFlag:
         assert res2.exit_code == 0, res2.output
         assert "post-flip" in res2.output and "p90" in res2.output
         assert "would refuse" in res2.output
-        assert "claude-fable-5 (10)" in res2.output and "claude-haiku-4-5 (40)" in res2.output
+        assert "claude-opus-5 (10)" in res2.output and "claude-haiku-4-5 (40)" in res2.output

@@ -6587,12 +6587,13 @@ async def nx_answer(
         max_steps: Cap on plan DAG size (passed to inline planner on miss).
         budget_usd: Per-invocation cost cap in USD. ``None`` (the default)
             means "use the derived default",
-            :data:`nexus.plans.budget_default.DERIVED_BUDGET_USD` -- itself
-            ``None`` until RDR-196 .p3a derives it from post-flip history
-            (``nx answer-runs --derive-budget``), so today no cap applies.
-            The former ``0.25`` literal predated any measurement and is
-            gone (RDR-196 § Risks). Enforcement (pre-flight refusal +
-            step-boundary stop) lands in .p3c and stays OFF until then
+            :data:`nexus.plans.budget_default.DERIVED_BUDGET_USD` --
+            1.0530 since 2026-08-21 (RDR-196 .p3a: p90 of n=30 config-conformant
+            runs, ``nx answer-runs --derive-budget``; provenance on the
+            constant). The former ``0.25`` literal predated any
+            measurement and is gone (RDR-196 § Risks). NOT YET ENFORCED:
+            enforcement (pre-flight refusal + step-boundary stop) lands
+            in .p3c and stays OFF until then
             (:data:`nexus.plans.budget_default.BUDGET_ENFORCEMENT_ENABLED`).
         budget_seconds: nexus-h33x8.6 a4 — an OPTIONAL hard wall-clock
             budget for the plan-EXECUTION phase ONLY (Step 4 below,
