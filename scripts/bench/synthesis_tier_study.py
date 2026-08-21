@@ -45,7 +45,7 @@ _REPO_ROOT = _Path(__file__).resolve().parent.parent.parent
 DEFAULT_OUT: Final[_Path] = _REPO_ROOT / "bench" / "out" / "synthesis_tier_study.json"
 DEFAULT_INPUTS: Final[_Path] = _REPO_ROOT / "bench" / "out" / "synthesis_inputs.json"
 
-BUDGET_CEILING_USD: Final[float] = 80.0  # v2 registration: pilot priced judging at 0.57 (sonnet) / 1.3-1.7 (fable) per call
+BUDGET_CEILING_USD: Final[float] = 100.0  # v4: raised 80 -> 100 for the opus arm (prior run holds 61.45 in the same state file)
 OPERATORS: Final[tuple[str, ...]] = ("summarize", "generate", "compare", "aggregate")
 #: v2 registration (pilot): primary judge is sonnet, NOT the incumbent
 #: (removes fable self-preference from the decision rule, 3x cheaper);
@@ -74,6 +74,9 @@ ARMS: Final[tuple[Arm, ...]] = (
     Arm("fable", None, "fable"),
     Arm("sonnet", "sonnet", "sonnet"),
     Arm("haiku", "haiku", "haiku"),
+    # v4 (2026-08-21): claude-opus-5, the PREVIOUS box-default incumbent —
+    # never an arm in any prior RDR-196 study; alias probe-verified.
+    Arm("opus", "opus", "opus"),
 )
 
 

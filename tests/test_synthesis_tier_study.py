@@ -28,10 +28,11 @@ TAGS = ["src:aaaaaaaa", "src:bbbbbbbb", "src:cccccccc"]
 
 class TestDesignConstants:
     def test_arms_and_operators(self) -> None:
-        assert [a.name for a in ARMS] == ["fable", "sonnet", "haiku"]
+        assert [a.name for a in ARMS] == ["fable", "sonnet", "haiku", "opus"]
         assert ARMS[0].model is None
+        assert ARMS[3].model == "opus"  # v4: the previous box-default incumbent
         assert OPERATORS == ("summarize", "generate", "compare", "aggregate")
-        assert BUDGET_CEILING_USD == 80.0
+        assert BUDGET_CEILING_USD == 100.0
 
 
 class TestGrounding:
@@ -62,6 +63,7 @@ class TestJudgePairs:
     def test_incumbent_pairs_both_positions_only(self) -> None:
         pairs = judge_pairs(["fable", "sonnet", "haiku"])
         assert len(pairs) == 4
+        assert len(judge_pairs(["fable", "sonnet", "haiku", "opus"])) == 6
         assert ("fable", "sonnet") in pairs and ("sonnet", "fable") in pairs
         assert ("sonnet", "haiku") not in pairs and ("haiku", "sonnet") not in pairs
 
@@ -157,12 +159,15 @@ class TestResume:
         monkeypatch.setattr(sts, "_run_operator", fake_gen)
         monkeypatch.setattr(sts, "_judge", fake_judge)
         await sts.run(["summarize"], ["delos"], out_path=out, inputs_path=inputs_path, timeout=1)
-        # fable/sonnet generations complete on file; the FAILED haiku one is retried.
-        assert gen_calls == [("summarize", "haiku")]
-        # fable-involving pairs: (f,s),(s,f),(f,h),(h,f); (f,s) done -> 3 dispatched,
-        # including the RETRY of the failed (s,f).
+        # fable/sonnet generations complete on file; the FAILED haiku one is
+        # retried; the v4 opus cell is new and dispatched.
+        assert gen_calls == [("summarize", "haiku"), ("summarize", "opus")]
+        # fable-involving pairs: (f,s),(s,f),(f,h),(h,f),(f,o),(o,f); (f,s)
+        # done -> 5 dispatched, including the RETRY of the failed (s,f).
         assert sorted(judge_calls) == [
-            ("fable", "haiku", "sonnet"), ("haiku", "fable", "sonnet"), ("sonnet", "fable", "sonnet"),
+            ("fable", "haiku", "sonnet"), ("fable", "opus", "sonnet"),
+            ("haiku", "fable", "sonnet"), ("opus", "fable", "sonnet"),
+            ("sonnet", "fable", "sonnet"),
         ]
 
 

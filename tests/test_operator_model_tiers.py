@@ -630,7 +630,7 @@ class TestP2COptInDispatcherBehavior:
 
         monkeypatch.setattr(mcp_core, "operator_compare", fake_operator_compare)
         await _default_dispatcher("compare", {"items": "[]", "focus": "x"})
-        assert captured["model"] == "fable"
+        assert captured["model"] == "opus"
 
     @pytest.mark.asyncio
     async def test_env_set_injects_tier_alias(self, monkeypatch) -> None:
@@ -821,7 +821,7 @@ class TestP2DDefaultFlipDispatcherBehavior:
 
         monkeypatch.setattr(mcp_core, "operator_aggregate", fake)
         await _default_dispatcher("aggregate", {"groups": "[]", "reducer": "x"})
-        assert captured["model"] == "fable"
+        assert captured["model"] == "opus"
 
     @pytest.mark.asyncio
     async def test_default_summarize_gets_strong_pin(self, monkeypatch) -> None:
@@ -838,7 +838,7 @@ class TestP2DDefaultFlipDispatcherBehavior:
 
         monkeypatch.setattr(mcp_core, "operator_summarize", fake)
         await _default_dispatcher("summarize", {"content": "x"})
-        assert captured["model"] == "fable"
+        assert captured["model"] == "opus"
 
     @pytest.mark.asyncio
     async def test_default_compare_gets_strong_pin(self, monkeypatch) -> None:
@@ -856,7 +856,7 @@ class TestP2DDefaultFlipDispatcherBehavior:
 
         monkeypatch.setattr(mcp_core, "operator_compare", fake)
         await _default_dispatcher("compare", {"items": "[]"})
-        assert captured["model"] == "fable"
+        assert captured["model"] == "opus"
 
     @pytest.mark.asyncio
     async def test_default_generate_gets_strong_pin(self, monkeypatch) -> None:
@@ -873,7 +873,7 @@ class TestP2DDefaultFlipDispatcherBehavior:
 
         monkeypatch.setattr(mcp_core, "operator_generate", fake)
         await _default_dispatcher("generate", {"template": "x", "context": "y"})
-        assert captured["model"] == "fable"
+        assert captured["model"] == "opus"
 
     @pytest.mark.asyncio
     async def test_kill_switch_forces_none_for_flipped_operator(self, monkeypatch) -> None:
@@ -960,7 +960,7 @@ class TestP2COptInPlannerBehavior:
 
         monkeypatch.setattr(_dispatch_mod, "claude_dispatch", fake_dispatch)
         await _nx_answer_plan_miss("how does X work")
-        assert captured["model"] == "fable"
+        assert captured["model"] == "opus"
 
     @pytest.mark.asyncio
     async def test_env_set_planner_dispatches_at_cheap_tier(self, monkeypatch) -> None:
@@ -990,9 +990,9 @@ class TestStrongDefaultPin:
             resolve_model_for_default_path,
         )
 
-        assert STRONG_DEFAULT_ALIAS == "fable"
+        assert STRONG_DEFAULT_ALIAS == "opus"
         for op in OPERATOR_MODEL_TIER:
-            expected = "haiku" if op in FLIPPED_OPERATORS else "fable"
+            expected = "haiku" if op in FLIPPED_OPERATORS else "opus"
             assert resolve_model_for_default_path(op) == expected
 
     @pytest.mark.asyncio
@@ -1110,7 +1110,7 @@ class TestDirectCallPin:
 
         monkeypatch.setattr(dmod, "claude_dispatch", fake)
         await mcp_core.operator_summarize("text")
-        assert captured["model"] == "fable"
+        assert captured["model"] == "opus"
 
     @pytest.mark.asyncio
     async def test_direct_call_kill_switch_stays_bare_and_caller_wins(self, monkeypatch) -> None:

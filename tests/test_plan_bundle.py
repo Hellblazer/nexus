@@ -1056,12 +1056,12 @@ class TestBundleModelPin:
     @pytest.mark.asyncio
     async def test_default_path_pins_bundle_to_strong_alias(self, monkeypatch):
         monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
-        assert (await self._run())["model"] == "fable"
+        assert (await self._run())["model"] == "opus"
 
     @pytest.mark.asyncio
     async def test_measurement_override_keeps_bundle_on_strong_pin(self, monkeypatch):
         monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "1")
-        assert (await self._run())["model"] == "fable"
+        assert (await self._run())["model"] == "opus"
 
     @pytest.mark.asyncio
     async def test_kill_switch_leaves_bundle_bare(self, monkeypatch):

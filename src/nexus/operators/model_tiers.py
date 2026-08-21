@@ -140,7 +140,24 @@ FLIPPED_OPERATORS: Final[frozenset[str]] = frozenset({
 #: 2026-08-21: claude -p --model fable resolves canonical claude-fable-5.
 #: DISTINCT from _TIER_ALIASES["strong"] ("sonnet"), which only the
 #: NX_OPERATOR_MODEL_TIERING=1 measurement override consults.
-STRONG_DEFAULT_ALIAS: Final[str] = "fable"
+#:
+#: RE-POINTED fable -> opus 2026-08-21 (Sam decision, same day the pin
+#: landed): the v4 opus arm of the synthesis study (T2 nexus_rdr/
+#: 196-synthesis-tier-study, registration [23229]) measured
+#: claude-opus-5 at ~0.5-0.6x fable's dispatch cost with the sonnet
+#: judge preferring opus in 17 of 24 completed pairs (fable 6, tie 1;
+#: recount verified against the raw records). summarize/compare/
+#: aggregate NOT_REFUTED — summarize itself JUDGE_UNSTABLE (position-
+#: swap disagreement 0.67: fable and opus not stably separable there,
+#: "at least as good" is the defensible read). generate's judged pairs
+#: went 4/6 to opus (fable 2/6) — its cell verdict carried a single
+#: 240s plumbing timeout on the mismatched-corpus input, retried to
+#: completion. TRADE ON RECORD: opus is SLOWER per dispatch on every
+#: operator (generate mean 94s vs fable 48s), so published nx_answer
+#: latency figures measured under the fable pin are stale until
+#: re-measured. Alias probe-verified: --model opus resolves
+#: claude-opus-5.
+STRONG_DEFAULT_ALIAS: Final[str] = "opus"
 
 
 class UnknownTierError(ValueError):
