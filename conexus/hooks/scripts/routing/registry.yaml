@@ -123,9 +123,13 @@ rules:
       the shared tree — hand-back is diffs+paths and the orchestrator commits
       pathspec-limited (RDR-184 Gap-4, nexus-s88vq; verb set widened by
       nexus-ays2l from {commit,add} to also cover checkout/restore/stash/
-      clean/reset/rm, which delete uncommitted work outright). Read-only
-      spellings (git stash list/show, status, diff, log, show) stay allowed;
-      linked-worktree agents are exempt.
+      clean/reset/rm; nexus-3c92m round 4 replaced structural parsing with a
+      structure-agnostic proximity scan as the deciding rule, after three
+      review rounds each found a new bypass in the structural approach — see
+      the hook's own module docstring). Read-only git (status/diff/log/show/
+      blame/rev-parse/ls-files) stays allowed as long as the command text
+      doesn't also contain a write-verb word near `git`; linked-worktree
+      agents are exempt when the worktree is positively proven.
     escape_token: "# routing-allow:"
     # Hook-level: a crash in the guard must not brick every agent's Bash.
     # NOTE the split INSIDE the hook (nexus-ays2l item 3, Hal 2026-07-25):
