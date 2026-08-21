@@ -593,7 +593,10 @@ smoke_verify_count "$SMOKE_PASSED" "$SMOKE_EXPECTED" || exit 1
 # 2026-08-21: 39 -> 41 for nexus-nyry9.11's two RDR-196 Phase 1 MVV tests
 # (tests/integration/test_nx_answer_step_telemetry_mvv.py, module-marked
 # lived_in: isolated and bundled step-telemetry round trips).
-LIVED_IN_EXPECTED=41
+# 2026-08-21: 41 -> 42 for nexus-nyry9.16's RDR-196 .p2c A/B harness
+# (tests/integration/test_rdr_196_p2c_ab_measurement.py, module-marked
+# lived_in: dispatches real claude -p, spends real money).
+LIVED_IN_EXPECTED=42
 LIVED_IN_COUNT="$(uv run pytest -m "integration and lived_in" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
 if [ "$LIVED_IN_COUNT" -ne "$LIVED_IN_EXPECTED" ]; then
   echo "[gate] VACUITY GUARD TRIPPED: lived_in carve-out is $LIVED_IN_COUNT tests, expected exactly $LIVED_IN_EXPECTED" >&2
