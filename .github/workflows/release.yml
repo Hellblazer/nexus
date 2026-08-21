@@ -50,7 +50,7 @@ jobs:
       checks: read      # nexus-jvhsw: read the tagged commit's check-run evidence
 
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           # On workflow_dispatch, check out the tag the operator named; on a
           # tag push this is empty and checkout uses the triggering ref.
@@ -125,12 +125,12 @@ jobs:
         with:
           python-version: "3.12"
           # nexus-2ivn: see ci.yml. Bundled enable-cache caches metadata
-          # only; explicit actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5 step below targets the
+          # only; explicit actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5 step below targets the
           # wheel-cache directory setup-uv actually uses.
           enable-cache: false
 
       - name: Cache uv wheel cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ${{ runner.temp }}/setup-uv-cache
           key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
@@ -322,7 +322,7 @@ jobs:
         # release sub-step failed and was created manually. Pinning to a
         # full-length SHA prevents silent action upgrades from re-introducing
         # the issue. Bump deliberately when validating a newer v2.x.
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b  # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3.0.2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           body_path: /tmp/release_notes.md

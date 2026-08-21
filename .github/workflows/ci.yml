@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
@@ -131,7 +131,7 @@ jobs:
     timeout-minutes: 5
     if: github.event_name == 'pull_request' && github.base_ref == 'main'
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
@@ -139,7 +139,7 @@ jobs:
           enable-cache: false
 
       - name: Cache uv wheel cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ${{ runner.temp }}/setup-uv-cache
           key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
@@ -215,7 +215,7 @@ jobs:
     outputs:
       code: ${{ steps.gate.outputs.code }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           fetch-depth: 0  # full history needed to resolve the base/before commit below
 
@@ -369,11 +369,11 @@ jobs:
     needs: changes
     if: success() && needs.changes.outputs.code == 'true'
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
       - name: Cache service jar
         id: jar-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: service/target/nexus-service-1.0-SNAPSHOT.jar
           # Keyed on the EXACT inputs the jar is a function of. No restore-keys:
@@ -384,7 +384,7 @@ jobs:
 
       - name: Set up GraalVM 25.0.3
         if: steps.jar-cache.outputs.cache-hit != 'true'
-        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
@@ -396,7 +396,7 @@ jobs:
         run: ./mvnw -q -DskipTests package
 
       - name: Upload jar for the pytest matrix
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: service-jar
           path: service/target/nexus-service-1.0-SNAPSHOT.jar
@@ -505,7 +505,7 @@ jobs:
         python-version: ${{ (github.event_name == 'pull_request' && github.base_ref == 'main') && fromJSON('["3.12", "3.13"]') || fromJSON('["3.12"]') }}
 
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         # NO fetch-tags/fetch-depth here, deliberately (nexus-dhs30). The
         # engine-tag reader is exercised HERMETICALLY by
         # test_newest_published_engine_parses_the_tag_namespace, which builds its
@@ -524,12 +524,12 @@ jobs:
           # missing and torch (~847 MB) re-downloaded on every run.
           # Disable the bundled cache and target the directory setup-uv
           # actually uses (UV_CACHE_DIR = ${{ runner.temp }}/setup-uv-
-          # cache, not ~/.cache/uv) with an explicit actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+          # cache, not ~/.cache/uv) with an explicit actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
           # step below.
           enable-cache: false
 
       - name: Cache uv wheel cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ${{ runner.temp }}/setup-uv-cache
           # Key on uv.lock so a dep change rebuilds; restore-keys
@@ -541,7 +541,7 @@ jobs:
             uv-${{ runner.os }}-${{ matrix.python-version }}-
 
       - name: Cache MiniLM ONNX model
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ~/.cache/chroma
           # RDR-155 P4b P3: the ~/.cache/chroma PATH survives chromadb's removal
@@ -561,7 +561,7 @@ jobs:
             chromadb-onnx-${{ runner.os }}-
 
       - name: Cache HuggingFace models (cross-encoder, MinerU)
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           # DOCLING NO LONGER USES THIS. Its layout/TableFormer/CodeFormula
           # models come from our OWN hosted mirror (release asset
@@ -582,7 +582,7 @@ jobs:
             huggingface-models-${{ runner.os }}-
 
       - name: Fetch the service jar
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: service-jar
           path: service/target
@@ -605,13 +605,13 @@ jobs:
         run: touch service/target/nexus-service-1.0-SNAPSHOT.jar
 
       - name: Set up Java (to launch the service jar)
-        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
 
       - name: Cache the pinned PG bundle
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           # tests/db/_service_fixture.py::_self_provision_pg_bundle downloads
           # OUR pinned, sigstore-verified PG bundle into this per-tag dir. Cache
@@ -765,7 +765,7 @@ jobs:
       # `t2_service_env`, bypassing the jar check entirely.
       NX_TEST_T2_SUBSTRATE: "none"
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           # The wire-contract pairing lint (tests/test_wire_contract_pairing_lint.py)
           # walks real release tags and historical commits (git log vX.Y.Z..HEAD,
@@ -785,7 +785,7 @@ jobs:
           enable-cache: false
 
       - name: Cache uv wheel cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ${{ runner.temp }}/setup-uv-cache
           key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
@@ -897,7 +897,7 @@ jobs:
       # in tests/test_mode_declarations_are_explicit.py).
       NX_TEST_T2_SUBSTRATE: "none"
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
@@ -907,7 +907,7 @@ jobs:
           enable-cache: false
 
       - name: Cache uv wheel cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ${{ runner.temp }}/setup-uv-cache
           key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
@@ -1133,7 +1133,7 @@ jobs:
       MANYLINUX_IMAGE: ${{ matrix.target.image }}
 
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           # Full history so dorny/paths-filter resolves the main...develop
           # merge-base without --deepen, whose shallow-fetch loop races
@@ -1180,7 +1180,7 @@ jobs:
       # test scores zero on them. nexus-4k91k was filed on exactly that
       # misreading. The direct signal is scripts/assert_ca3_ran.py's
       # "CA-3 PASS: N passed" line, which exists so nobody has to infer it.
-      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
         id: changes
         with:
           filters: |
@@ -1239,7 +1239,7 @@ jobs:
 
       - name: Cache uv wheel cache
         if: steps.gate.outputs.run == 'true'
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ${{ runner.temp }}/setup-uv-cache
           key: uv-${{ runner.os }}-${{ matrix.target.arch }}-3.12-${{ hashFiles('uv.lock') }}
@@ -1265,7 +1265,7 @@ jobs:
         # relocation step below still proves extract-to-a-different-dir works.
         if: steps.gate.outputs.run == 'true'
         id: pg-bundle-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: bundle
           key: pg-bundle-${{ matrix.target.arch }}-${{ matrix.target.runner }}-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ matrix.target.image || 'native' }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}
@@ -1353,7 +1353,7 @@ jobs:
 
       - name: Upload bundle artifact (P3.1, consumed by P3.2/P3.4)
         if: steps.gate.outputs.run == 'true'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: nexus-pg-${{ matrix.target.arch }}
           path: ${{ runner.temp }}/nexus-pg-${{ matrix.target.arch }}.txz
@@ -1405,7 +1405,7 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
 
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
 
@@ -1424,7 +1424,7 @@ jobs:
       # re-proves a PR whose CA-3 was gated off. This job is the macOS arch,
       # so it is also the ~74s of premium runner that pinning `base:` would
       # save and the reason the trade looks tempting (nexus-4k91k).
-      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
         id: changes
         with:
           filters: |
@@ -1485,7 +1485,7 @@ jobs:
         # Mirror the linux CA-3 jobs so a gated mac run reuses wheels instead of
         # re-downloading from scratch (code-review L1).
         if: steps.gate.outputs.run == 'true'
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ${{ runner.temp }}/setup-uv-cache
           key: uv-${{ runner.os }}-mac-arm64-3.12-${{ hashFiles('uv.lock') }}
@@ -1504,7 +1504,7 @@ jobs:
         # from-source PG build here is the single biggest per-hit saving.
         if: steps.gate.outputs.run == 'true'
         id: pg-bundle-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: bundle
           key: pg-bundle-mac-arm64-macos-14-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-native-${{ hashFiles('scripts/build_pg_bundle.sh') }}
@@ -1568,7 +1568,7 @@ jobs:
 
       - name: Upload bundle artifact (P3.1, consumed by P3.2/P3.4)
         if: steps.gate.outputs.run == 'true'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: nexus-pg-mac-arm64
           path: ${{ runner.temp }}/nexus-pg-mac-arm64.txz
@@ -1596,11 +1596,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
 
-      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
         id: changes
         with:
           filters: |
@@ -1632,7 +1632,7 @@ jobs:
 
       - name: Set up GraalVM 25.0.3
         if: steps.changes.outputs.svc == 'true'
-        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
@@ -1697,7 +1697,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
 
@@ -1706,7 +1706,7 @@ jobs:
       # always emit seam='false' would skip the JAR build + test while the job
       # still reports green — the exact vacuous gate this gate exists to prevent.
       # fbd0ab8 == v4.0.1 (same SHA used by the CA-3 jobs above).
-      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
         id: changes
         with:
           filters: |
@@ -1770,7 +1770,7 @@ jobs:
 
       - name: Set up Java 25 (GraalVM)
         if: steps.changes.outputs.seam == 'true'
-        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
@@ -1784,7 +1784,7 @@ jobs:
 
       - name: Cache uv wheel cache
         if: steps.changes.outputs.seam == 'true'
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/setup-uv-cache
           key: uv-${{ runner.os }}-write-seam-3.12-${{ hashFiles('uv.lock') }}
@@ -1793,7 +1793,7 @@ jobs:
 
       - name: Cache MiniLM ONNX model
         if: steps.changes.outputs.seam == 'true'
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/chroma
           key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
