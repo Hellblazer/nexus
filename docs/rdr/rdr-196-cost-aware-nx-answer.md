@@ -2,7 +2,8 @@
 title: "Cost-Aware nx_answer: Per-Step Cost/Quality Telemetry, Per-Operator Model Routing, and Cost-Ranked Plan Choice — Closing the NOMA §5.1–5.3 Gap"
 id: RDR-196
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-08-21
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
