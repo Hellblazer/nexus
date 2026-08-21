@@ -1020,11 +1020,32 @@ case "$MODE" in
         # the flag pytest exits 5 ("no tests collected") and the
         # shakedown reads it as FAIL even though the regression
         # guard never ran.
-        if (cd "$REPO_ROOT" && uv run pytest -x -q --no-header -m integration \
+        # nexus-nyry9.13 (2026-08-21): capture the FULL pytest output to a
+        # file and print only its tail on success -- the prior `| tail -5`
+        # swallowed the session-level failure reason. The 7.14.0 shakedown
+        # printed "1 passed" in those five lines while pytest still exited
+        # non-zero (a pytest_sessionfinish guard sets session.exitstatus=1
+        # AFTER the summary line), so the [FAIL] branch fired with no
+        # visible cause. On failure print the whole log.
+        # The sandbox's own daemons (aspect-worker, mineru-api, the local
+        # service) write logs/locks under $SANDBOX/.config/nexus for the
+        # whole shakedown, and with HOME=$SANDBOX that IS the directory the
+        # nexus-pfuns real-config-dir guard (tests/conftest.py) scans -- so
+        # the guard fails this otherwise-green session on the sandbox's own
+        # ambient writes. Point it at an empty scratch dir for this one
+        # pytest invocation (the documented busy-box seam); the real guard
+        # still runs in the unit-suite stage of the battery.
+        _gf_guard_dir="$(mktemp -d "${TMPDIR:-/tmp}/nx-greenfield-guard-XXXXXX")"
+        _gf_log="$(mktemp "${TMPDIR:-/tmp}/nx-greenfield-XXXXXX.log")"
+        if (cd "$REPO_ROOT" && NX_REAL_CONFIG_DIR_FOR_GUARD_TEST="$_gf_guard_dir" \
+                uv run pytest -x -q --no-header -m integration \
                 tests/test_indexer_e2e.py::test_greenfield_index_writes_no_deprecated_keys \
-                2>&1) | tail -5 | sed 's/^/  /'; then
+                >"$_gf_log" 2>&1); then
+            tail -5 "$_gf_log" | sed 's/^/  /'
             echo "  [pass] greenfield index produced 0 chunks with deprecated keys"
         else
+            echo "  --- full pytest output ($_gf_log) ---"
+            sed 's/^/  /' "$_gf_log"
             # gap-8 D3 (T2 [22511]): report the OBSERVATION (the pytest
             # regression test exited non-zero / assertion failed), and name
             # the nexus-e5uw class as a HYPOTHESIS the test's own name and

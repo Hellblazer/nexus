@@ -167,6 +167,40 @@ def test_run_claude_isolated_arms_pdeathsig_preexec(monkeypatch) -> None:
         assert captured.get("preexec_fn") is None
 
 
+def test_default_argv_carries_strict_mcp_config(monkeypatch) -> None:
+    """RDR-196 .p0b audit fold F1 consequence 2 (nexus-nyry9.6): aspect
+    extraction is a second, un-modernized ``claude -p`` call site that
+    never got the RDR-196 Gap 4 fix (``--strict-mcp-config`` landed on
+    ``claude_dispatch`` at f1ae257d0, NOT here). Without it, every
+    ``nx enrich aspects`` dispatch loads the user's entire ambient MCP
+    server set for no reason (this call is tool-free by construction --
+    it never passes ``--allowedTools``), paying the ~2x context/cost
+    overhead 196-R2 measured. Pinned at the DEFAULT-argv path (``_argv``
+    not supplied) -- the ``_argv`` override used by other isolation
+    tests intentionally bypasses the real argv to swap in a test
+    double, so it must NOT be asserted against here.
+    """
+    captured_argv: list[list[str]] = []
+
+    class _Reaped:
+        args = ["claude"]
+        returncode = 0
+
+        def communicate(self, *a, **k):
+            return ('{"result": "{}"}', "")
+
+    def _spy_popen(argv, **kw):
+        captured_argv.append(argv)
+        return _Reaped()
+
+    monkeypatch.setattr(ax.subprocess, "Popen", _spy_popen)
+    ax._run_claude_isolated("x", timeout=1)  # no _argv -- exercises the real default
+    assert len(captured_argv) == 1
+    assert "--strict-mcp-config" in captured_argv[0], (
+        f"default argv missing --strict-mcp-config: {captured_argv[0]!r}"
+    )
+
+
 def test_invoke_once_uses_isolated_runner(monkeypatch) -> None:
     """The single-paper extract path must route through _run_claude_isolated
     (not bare subprocess.run) so the hardening actually applies in production."""

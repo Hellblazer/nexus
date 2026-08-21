@@ -880,6 +880,16 @@
          grants-nexus-svc.xml runAlways block (D0.1). -->
     <include file="db/changelog/telemetry-006-frecency-ttl-null.xml"/>
 
+    <!-- nexus-nyry9.9 (RDR-196 Phase 1 Step 3, ENGINE HALF) — nx_answer_steps:
+         per-step cost/quality telemetry, child of nx_answer_runs (FK ON
+         DELETE CASCADE), PK (run_id, step_index). See the file's own header
+         for the frozen column list, the source CHECK, the deliberate
+         cost_usd NUMERIC-vs-parent-DOUBLE-PRECISION divergence, and why no
+         ETL dedup index is added in this bead's scope. Placed after
+         telemetry-006-frecency-ttl-null.xml (current tail) and before the
+         grants-nexus-svc.xml runAlways block (D0.1). -->
+    <include file="db/changelog/telemetry-007-nx-answer-steps.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

@@ -6,6 +6,102 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.14.0] - 2026-08-21
+
+Engine identity moves to `engine-service-v0.1.85` (paired release, deploy-first:
+the engine is deployed and cloud-gated BEFORE this cut — zero refusal window,
+zero inert window). Local-mode installs converge to that engine on every path.
+Carries `nexus.nx_answer_steps` (per-step telemetry) and a nullable
+`nx_answer_runs.cost_usd`.
+
+### Added
+
+- **`nx answer-runs --steps`: per-operator, per-source, and per-plan cost and
+  latency breakdown** (RDR-196 Phase 1, beads nexus-nyry9.7/.8/.9/.10/.11,
+  nexus-lme1s). `nx_answer` now records one `StepRecord` per executed step
+  (operator, source `llm`\|`sql`\|`bundle`, canonical model id, input/output
+  tokens, `cost_usd`, `elapsed_ms`, `ok`) sourced from the real `claude -p`
+  stream-json result envelope, instead of writing `cost_usd=0.0` for every
+  run. Runs are split three ways — executed-ok, executed-failed, and
+  degenerate — because a prior read path treated all three as one population
+  and understated typical latency by roughly 45x. `nx answer-runs --steps`
+  reports sums and medians of cost and elapsed time per operator, per source,
+  and per plan; `--include-failed` folds executed-failed runs into the
+  breakdown; a cost-consistency check flags runs whose own `cost_usd`
+  disagrees with the sum of its steps. `nx_answer(structured=True)` now
+  returns `steps[]`, and `cost_usd` is `None` (never `0.0`) when unknown.
+- **Operator quality-proxy bench harness** (`scripts/bench/`, RDR-196 Phase 2
+  gate, bead nexus-nyry9.14; documented in `docs/benchmarking.md`).
+  Pre-registered per-operator agreement metrics and thresholds with
+  positive/negative controls (strong-vs-strong agreement, synthetic
+  degraders) — the evidence gate the per-operator default flip below had to
+  clear. The RDR-196 .p2c A/B harness (`tests/integration/
+  test_rdr_196_p2c_ab_measurement.py`, real `claude -p` spend, integration-
+  marked) and a self-provisioned retrieval-bench non-regression check ride
+  alongside it (bead nexus-nyry9.16).
+- **`claude_dispatch(model=..., operator=...)`** (RDR-196 Phase 2 mechanism,
+  bead nexus-nyry9.15). Internal dispatch mechanism plus an
+  `OPERATOR_MODEL_TIER` table mapping operators to cheap/strong tiers; a
+  repo-wide test pins the only two call sites allowed to consult it.
+- **Per-operator model-tier default flip (RDR-196 .p2d, bead
+  nexus-nyry9.17) — behaviour change for plan-mediated dispatch.**
+  `operator_filter`, `operator_groupby`, `operator_extract`, and
+  `operator_rank` now dispatch at the cheap tier (`claude-haiku-4-5`) by
+  default when invoked through `nx_answer` / `plan_run`; each cleared both
+  pre-registered A/B refutation criteria (cost 5-7% of strong, agreement at
+  or above its quality-proxy threshold on every pair, n=3, same box/day).
+  `check`/`verify`/`aggregate`/`summarize`/`compare`/`generate` and the
+  inline planner stay strong. Direct MCP calls to the operator tools (not
+  via a plan) are unchanged — strong unless `model=` is passed. Bundled
+  dispatches never consult tiers. `NX_OPERATOR_MODEL_TIERING=0` is the kill
+  switch (all strong); `=1` consults the whole table (measurement only).
+  Every `StepRecord.model` carries the canonical dispatched id, so a
+  regression is attributable per step.
+- **Predicted-cost plan choice in `nx_answer`** (RDR-196 .p3b, bead
+  nexus-nyry9.20). When several plans clear the match floor, `nx_answer`
+  now picks the cheapest within a contiguous prefix of matcher order whose
+  confidence stays within `PLAN_CHOICE_CONFIDENCE_BAND` (0.05, both
+  directions) of the top hit, priced from each plan's step shape with the
+  per-operator medians recorded by the Phase 1 telemetry (static strong-tier
+  fallback when history is thin; an unpriceable candidate never wins).
+  Matching semantics (RDR-100) are untouched. `nx answer-runs --steps`
+  gains read-time `predicted_cost_usd` / `predicted_basis` per plan and the
+  structured envelope gains `plan_choice`.
+
+### Changed
+
+- `nx_answer`'s `budget_seconds` clock now charges the plan-match gate and
+  the inline-planner phase, not only plan execution (bead nexus-nyry9.2). On
+  a measured run, the planner phase alone was 29.8s of a 74.3s budget,
+  previously uncharged.
+- The `retrieval_only` plan-classification bucket is removed (bead
+  nexus-nyry9.5): no shipped plan ever classified into it, and every
+  `plan_run` call now receives the budget deadline unconditionally. The
+  `single_query` fast path's binding resolution is fixed — it was reading
+  the raw `$question`/`$corpus` placeholders off the plan instead of
+  resolving them, so the fast path never actually executed a real query.
+- Aspect extraction (`nx enrich aspects`) now runs its `claude -p` dispatch
+  with `--strict-mcp-config` (bead nexus-nyry9.6), closing the last open
+  call site from the strict-MCP-config rollout. `_PER_PAPER_COST_USD` is
+  corrected from an assumed `0.01` to a measured `1.18` (claude-fable-5, no
+  `--model`).
+
+### Fixed
+
+- `tests/e2e/migration-rehearsal/run.sh --acquire` no longer demands a local
+  native binary it never uses (bead nexus-nyry9.13): the published-artifact
+  gate failed before testing anything on any box without a stale
+  `service/target/nexus-service`.
+
+- Unit tests no longer write into a developer's real `~/.config/nexus`
+  (bead nexus-pfuns): the routing-log fallback path, the lockstep log, the
+  T3 backfill-state file, and the deferred-labeling log now resolve their
+  path at call time instead of import time, so they honor
+  `NEXUS_CONFIG_DIR`/`HOME` as set when the code actually runs, not as they
+  were when the interpreter first imported the module. A session-level
+  guard now fails the test session outright if anything outside a named
+  allowlist touches the real config directory.
+
 ## [7.13.0] - 2026-08-20
 
 Engine identity moves to `engine-service-v0.1.84` (paired release, deploy-first:

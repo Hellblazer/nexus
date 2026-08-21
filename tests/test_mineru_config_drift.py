@@ -32,7 +32,7 @@ from nexus.config import _read_live_mineru_port as _live_port
 
 
 def test_live_port_returns_port_when_pid_alive(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     pid_path = tmp_path / "mineru.pid"
     pid_path.write_text(json.dumps({
         "pid": os.getpid(),  # this test process is alive
@@ -43,7 +43,7 @@ def test_live_port_returns_port_when_pid_alive(tmp_path: Path, monkeypatch) -> N
 
 
 def test_live_port_returns_none_when_pid_dead(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     pid_path = tmp_path / "mineru.pid"
     # PID 1 is init on macOS/Linux; safe to use a clearly-not-our-pid
     # value that we then patch _is_process_alive to claim is dead.
@@ -56,13 +56,13 @@ def test_live_port_returns_none_when_pid_dead(tmp_path: Path, monkeypatch) -> No
 
 
 def test_live_port_returns_none_when_no_pid_file(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     from nexus.config import _read_live_mineru_port
     assert _read_live_mineru_port() is None
 
 
 def test_live_port_returns_none_when_malformed_json(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "mineru.pid").write_text("{not-json}")
     from nexus.config import _read_live_mineru_port
     assert _read_live_mineru_port() is None
@@ -78,7 +78,7 @@ def test_url_explicit_nondefault_config_wins_over_live_pid(
     over a live local pid file. The operator manages the server
     out-of-band (remote host / fixed URL); a live pid must not hijack
     that intent (CA-2 precedence inversion fix)."""
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     # PID file says a live local server is up...
     pid_path = tmp_path / "mineru.pid"
     pid_path.write_text(json.dumps({
@@ -101,7 +101,7 @@ def test_url_prefers_live_pid_when_config_is_default(
 ) -> None:
     """When config is left at the built-in default, a live pid file
     (ephemeral port from ``nx mineru start``) wins."""
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     pid_path = tmp_path / "mineru.pid"
     pid_path.write_text(json.dumps({
         "pid": os.getpid(),
@@ -118,7 +118,7 @@ def test_url_prefers_live_pid_when_config_is_default(
 
 
 def test_url_falls_back_to_config_when_no_live_pid(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     with patch(
         "nexus.config.get_pdf_config",
         return_value=type("X", (), {
@@ -131,7 +131,7 @@ def test_url_falls_back_to_config_when_no_live_pid(tmp_path: Path, monkeypatch) 
 
 def test_url_falls_back_to_config_when_pid_stale(tmp_path: Path, monkeypatch) -> None:
     """Stale PID file (server died without cleanup) — fall back to config."""
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     pid_path = tmp_path / "mineru.pid"
     pid_path.write_text(json.dumps({"pid": 999999, "port": 49353}))
     with patch(
@@ -291,7 +291,7 @@ def test_mineru_start_binds_configured_port_not_random_free_port(monkeypatch) ->
 
 
 def _pidfile(tmp_path: Path, monkeypatch, **extra) -> None:
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "mineru.pid").write_text(json.dumps({
         "pid": os.getpid(), "port": 49353, **extra,
     }))

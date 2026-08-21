@@ -2373,6 +2373,11 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     # completeness guard's dropped-tables exemption in
     # tests/test_health_service_checks.py carries the matching entry.
     "nexus.nx_answer_runs",
+    # nexus.nx_answer_steps: RDR-196 .p1c (nexus-nyry9.9,
+    # telemetry-007-nx-answer-steps.xml) — per-step cost/quality
+    # telemetry, child of nx_answer_runs (FK ON DELETE CASCADE), same
+    # RLS shape as the parent (ENABLE + FORCE + tenant_isolation).
+    "nexus.nx_answer_steps",
     "nexus.pdf_chunks",
     "nexus.pdf_pages",
     "nexus.pdf_pipeline",

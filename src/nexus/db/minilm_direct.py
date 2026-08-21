@@ -38,11 +38,29 @@ _log = structlog.get_logger(__name__)
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 
-#: Chroma-compatible cache layout (see module docstring — load-bearing
-#: for artifact reuse and engine parity; do not "clean up" to a
-#: nexus-named directory).
-DOWNLOAD_PATH: Path = Path.home() / ".cache" / "chroma" / "onnx_models" / MODEL_NAME
-ARTIFACT_DIR: Path = DOWNLOAD_PATH / "onnx"
+def download_path() -> Path:
+    """Chroma-compatible cache root (see module docstring — load-bearing
+    for artifact reuse and engine parity; do not "clean up" to a
+    nexus-named directory), resolved at CALL time.
+
+    nexus-pfuns: was a module-level ``Path.home()`` constant, frozen at
+    import — the same import-time-default class already fixed for the
+    3 writers that bead named (``gc_purge_marker.py`` / ``t3.py`` /
+    ``routing/_lib.py``). No test currently redirects this path (it is
+    deliberately the same real, shared, chroma-compatible location for
+    every install/test — re-downloading a large model artifact per test
+    run would be its own cost problem), so this is a defensive fix, not
+    a live-leak fix: a module-level constant would silently resist any
+    future test that DOES need to redirect it (e.g. via a patched
+    ``Path.home()``), same as the bug already found and fixed elsewhere.
+    """
+    return Path.home() / ".cache" / "chroma" / "onnx_models" / MODEL_NAME
+
+
+def artifact_dir() -> Path:
+    """``onnx/`` subdirectory of :func:`download_path`, resolved at CALL
+    time (same rationale)."""
+    return download_path() / "onnx"
 
 _ARCHIVE_FILENAME = "onnx.tar.gz"
 _MODEL_DOWNLOAD_URL = (
@@ -57,17 +75,19 @@ def ensure_artifact() -> Path:
     """Download + extract the MiniLM ONNX artifact if absent (idempotent).
 
     Fail-loud on sha256 mismatch — never runs an unverified model.
-    Returns :data:`ARTIFACT_DIR`.
+    Returns :func:`artifact_dir`.
     """
-    if (ARTIFACT_DIR / "model.onnx").is_file() and (
-        ARTIFACT_DIR / "tokenizer.json"
+    artifact = artifact_dir()
+    if (artifact / "model.onnx").is_file() and (
+        artifact / "tokenizer.json"
     ).is_file():
-        return ARTIFACT_DIR
+        return artifact
 
     import httpx  # noqa: PLC0415 — download path only, keep import cheap
 
-    DOWNLOAD_PATH.mkdir(parents=True, exist_ok=True)
-    archive = DOWNLOAD_PATH / _ARCHIVE_FILENAME
+    download = download_path()
+    download.mkdir(parents=True, exist_ok=True)
+    archive = download / _ARCHIVE_FILENAME
     _log.info("minilm_artifact_download_start", url=_MODEL_DOWNLOAD_URL)
     digest = hashlib.sha256()
     with httpx.stream("GET", _MODEL_DOWNLOAD_URL, follow_redirects=True) as resp:
@@ -83,9 +103,9 @@ def ensure_artifact() -> Path:
             f"expected {_MODEL_SHA256} — refusing to extract."
         )
     with tarfile.open(archive, "r:gz") as tar:
-        tar.extractall(DOWNLOAD_PATH, filter="data")
-    _log.info("minilm_artifact_ready", path=str(ARTIFACT_DIR))
-    return ARTIFACT_DIR
+        tar.extractall(download, filter="data")
+    _log.info("minilm_artifact_ready", path=str(artifact))
+    return artifact
 
 
 class MiniLMDirectEmbeddingFunction:

@@ -28,7 +28,7 @@ def test_check_credential_persistence_env_only_warns(monkeypatch, tmp_path):
     keys died with the chroma credential map — voyage is the one
     remaining cloud credential in scope.)"""
     monkeypatch.setenv("VOYAGE_API_KEY", "pa-test")
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
     from nexus.health import _check_credential_persistence
 
@@ -50,7 +50,7 @@ def test_check_credential_persistence_persisted_silent(monkeypatch, tmp_path):
     monkeypatch.setenv("VOYAGE_API_KEY", "pa-test")
     monkeypatch.setenv("CHROMA_TENANT", "tenant-uuid")
     monkeypatch.setenv("CHROMA_DATABASE", "test-db")
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
     config_yml = tmp_path / "config.yml"
     config_yml.write_text(
@@ -78,7 +78,7 @@ def test_check_credential_persistence_no_credentials_anywhere_silent(monkeypatch
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("CHROMA_TENANT", raising=False)
     monkeypatch.delenv("CHROMA_DATABASE", raising=False)
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
     from nexus.health import _check_credential_persistence
 
@@ -93,7 +93,7 @@ def test_check_credential_persistence_partial_warns(monkeypatch, tmp_path):
     missing key."""
     monkeypatch.setenv("CHROMA_API_KEY", "ck-test")
     monkeypatch.setenv("VOYAGE_API_KEY", "pa-test")
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
     config_yml = tmp_path / "config.yml"
     config_yml.write_text(

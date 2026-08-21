@@ -50,7 +50,23 @@ from typing import Any, Callable
 ESCAPE_TOKEN = "# routing-allow:"
 ESCAPE_REASON_MIN_LENGTH = 8
 
-_DEFAULT_LOG_PATH = pathlib.Path.home() / ".config" / "nexus" / "routing_log.jsonl"
+def _default_log_path() -> pathlib.Path:
+    """Fallback routing-log path, resolved at CALL time.
+
+    nexus-pfuns: this used to be a module-level constant
+    (``pathlib.Path.home()`` evaluated once at import). A bare-interpreter
+    subprocess (this script has no dependency on the ``nexus`` package)
+    imports fresh per invocation, so the import-time freeze never actually
+    diverged from a plain call-time read within a single process lifetime
+    -- but freezing it made a direct in-process test (``_load_lib()``
+    re-exec'ing the module, ``tests/test_routing_hooks.py``) unable to
+    prove the fallback tracks a patched ``Path.home()`` at all, and it is
+    the same import-time-default class already fixed once in
+    ``gc_purge_marker.py`` (T2 nexus/gc-purge-marker-xdist-leak-2026-08-20)
+    for exactly that reason -- a module-level default resists any patch
+    applied after the module's own import.
+    """
+    return pathlib.Path.home() / ".config" / "nexus" / "routing_log.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +258,7 @@ def degraded_token_variants(segment: str) -> list[list[str]]:
 
 def _log_path() -> pathlib.Path:
     override = os.environ.get("NX_ROUTING_LOG_PATH")
-    return pathlib.Path(override) if override else _DEFAULT_LOG_PATH
+    return pathlib.Path(override) if override else _default_log_path()
 
 
 #: Byte cap that triggers rotation (~1 MiB) -- same design and constant

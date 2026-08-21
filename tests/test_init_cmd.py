@@ -683,7 +683,7 @@ def test_provision_step_aborts_loud_on_broken_bundle(tmp_path, monkeypatch) -> N
 
     monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
     monkeypatch.setenv(pg_bundle.BUNDLE_ENV, str(tmp_path / "does-not-exist.txz"))
-    monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: tmp_path / "cfg")
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
 
     called = {"provision": False}
 
@@ -715,7 +715,7 @@ def test_provision_step_idempotent_on_rerun(tmp_path, monkeypatch, make_pg_bundl
     monkeypatch.setenv(pg_bundle.BUNDLE_ENV, str(archive))
     config_dir = tmp_path / "cfg"
     config_dir.mkdir()
-    monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: config_dir)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
 
     extractions = {"n": 0}
     real_extract = pg_bundle.extract_bundle

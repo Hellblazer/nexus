@@ -4654,13 +4654,20 @@ def collection_verify(name: str) -> str:
     title="Extract Structured Fields",
     annotations={"readOnlyHint": True},
 )
-async def operator_extract(inputs: str, fields: str, timeout: float = 300.0) -> dict:
+async def operator_extract(
+    inputs: str, fields: str, timeout: float = 300.0, model: str | None = None,
+) -> dict:
     """Extract structured fields from each input item using claude -p.
 
     Args:
         inputs: Items to extract from (plain text or JSON array string).
         fields: Comma-separated field names to extract.
         timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
+        model: Opt-in ``--model`` override (RDR-196 .p2c, nexus-nyry9.16),
+            pass-through to ``claude_dispatch``. ``None`` (default) is a
+            no-op — argv unchanged. Threaded in by ``plan_run``'s
+            ``NX_OPERATOR_MODEL_TIERING`` opt-in only; not consulted by
+            any default path.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -4678,20 +4685,25 @@ async def operator_extract(inputs: str, fields: str, timeout: float = 300.0) -> 
             }
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
 
 
 @mcp.tool(
     title="Rank Items by Criterion",
     annotations={"readOnlyHint": True},
 )
-async def operator_rank(items: str, criterion: str, timeout: float = 300.0) -> dict:
+async def operator_rank(
+    items: str, criterion: str, timeout: float = 300.0, model: str | None = None,
+) -> dict:
     """Rank items by a criterion using claude -p.
 
     Args:
         items: Items to rank (plain text or JSON array string).
         criterion: Natural-language ranking criterion.
         timeout: Seconds before the subprocess is killed. Default 300s (5 min) — the claude -p substrate handles multi-step analytical workloads; 120s was hitting false timeouts on real input.
+        model: Opt-in ``--model`` override (RDR-196 .p2c, nexus-nyry9.16).
+            ``None`` (default) is a no-op. See ``operator_extract``'s
+            ``model`` docstring for the full contract.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -4707,7 +4719,7 @@ async def operator_rank(items: str, criterion: str, timeout: float = 300.0) -> d
             "ranked": {"type": "array", "items": {"type": "string"}},
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
 
 
 @mcp.tool(
@@ -4894,6 +4906,7 @@ async def operator_filter(
     timeout: float = 300.0,
     source: str = "auto",
     aspect_field: str = "",
+    model: str | None = None,
 ) -> dict:
     """Filter items by a criterion, returning a subset with rationale.
 
@@ -4939,6 +4952,10 @@ async def operator_filter(
             caller knows which field to filter on (e.g.
             ``"experimental_datasets"``, ``"extras.venue"``). Disables
             heuristic inference for this call.
+        model: Opt-in ``--model`` override (RDR-196 .p2c, nexus-nyry9.16),
+            LLM path only — the SQL fast path never dispatches. ``None``
+            (default) is a no-op. See ``operator_extract``'s ``model``
+            docstring for the full contract.
     """
     from nexus.operators.aspect_sql import try_filter  # noqa: PLC0415 — rare/branch-local path; SQL fast-path import deferred to call time
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
@@ -4947,7 +4964,15 @@ async def operator_filter(
         items, criterion, source=source, aspect_field=aspect_field,
     )
     if sql_result is not None:
-        return sql_result
+        # RDR-196 .p1b (Gap 5, nexus-nyry9.8): minimal marker so plan_run
+        # can record source="sql" for this step instead of the default
+        # is_operator_tool()-inferred "llm" -- popped off the dict by
+        # plan_run before the result reaches step_outputs, so it never
+        # leaks into a $stepN.field reference. The LLM-fallback branch
+        # below needs no matching marker: plan_run's default inference
+        # already says "llm" for any operator-tool dispatch absent this
+        # override.
+        return {**sql_result, "_dispatch_source": "sql"}
 
     prompt = (
         f"Filter the following items by this criterion: {criterion}\n"
@@ -4979,7 +5004,7 @@ async def operator_filter(
             },
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
 
 
 @mcp.tool(
@@ -5104,6 +5129,7 @@ async def operator_groupby(
     timeout: float = 300.0,
     source: str = "auto",
     aspect_field: str = "",
+    model: str | None = None,
 ) -> dict:
     """Partition items by a natural-language key.
 
@@ -5159,6 +5185,10 @@ async def operator_groupby(
         timeout: Seconds before the subprocess is killed. Default 300s.
         source: ``"auto"`` (default) | ``"aspects"`` | ``"llm"``.
         aspect_field: explicit ``document_aspects`` column override.
+        model: Opt-in ``--model`` override (RDR-196 .p2c, nexus-nyry9.16),
+            LLM path only — the SQL fast path never dispatches. ``None``
+            (default) is a no-op. See ``operator_extract``'s ``model``
+            docstring for the full contract.
     """
     from nexus.operators.aspect_sql import try_groupby  # noqa: PLC0415 — rare/branch-local path; SQL fast-path import deferred to call time
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
@@ -5167,7 +5197,15 @@ async def operator_groupby(
         items, key, source=source, aspect_field=aspect_field,
     )
     if sql_result is not None:
-        return sql_result
+        # RDR-196 .p1b (Gap 5, nexus-nyry9.8): minimal marker so plan_run
+        # can record source="sql" for this step instead of the default
+        # is_operator_tool()-inferred "llm" -- popped off the dict by
+        # plan_run before the result reaches step_outputs, so it never
+        # leaks into a $stepN.field reference. The LLM-fallback branch
+        # below needs no matching marker: plan_run's default inference
+        # already says "llm" for any operator-tool dispatch absent this
+        # override.
+        return {**sql_result, "_dispatch_source": "sql"}
 
     prompt = (
         f"Partition the following items by this key: {key}\n"
@@ -5203,7 +5241,7 @@ async def operator_groupby(
             },
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
 
 
 @mcp.tool(
@@ -5268,7 +5306,15 @@ async def operator_aggregate(
         groups, reducer, source=source, aspect_field=aspect_field,
     )
     if sql_result is not None:
-        return sql_result
+        # RDR-196 .p1b (Gap 5, nexus-nyry9.8): minimal marker so plan_run
+        # can record source="sql" for this step instead of the default
+        # is_operator_tool()-inferred "llm" -- popped off the dict by
+        # plan_run before the result reaches step_outputs, so it never
+        # leaks into a $stepN.field reference. The LLM-fallback branch
+        # below needs no matching marker: plan_run's default inference
+        # already says "llm" for any operator-tool dispatch absent this
+        # override.
+        return {**sql_result, "_dispatch_source": "sql"}
 
     prompt = (
         f"Reduce each group of items into a per-group summary using "
@@ -5706,21 +5752,35 @@ def _infer_grown_plan_name(
 
 
 def _nx_answer_classify_plan(match: Any) -> str:
-    """Classify a matched plan: ``"single_query"`` | ``"retrieval_only"`` | ``"needs_operators"``.
+    """Classify a matched plan: ``"single_query"`` | ``"needs_operators"``.
 
-    nexus-h33x8.6 a4 fold-in: the operator-detection set used to be
-    ``_OPERATOR_TOOL_MAP``'s bare names only (``extract``, ``rank``,
-    ...), narrower than the authoritative
-    :func:`nexus.plans.bundle.is_operator_tool` — which
-    ``plan_run``/``segment_steps`` actually dispatch against, and which
-    accepts BOTH bare and ``operator_``-prefixed forms ("plan YAMLs use
-    either", per that module's own docstring). A plan step written as
-    ``operator_summarize`` was silently misclassified as
-    ``retrieval_only`` under the old set even though it genuinely needs
-    a claude -p dispatch. Using the same authoritative set here closes
-    that gap.
+    nexus-nyry9.5 (RDR-196 .r5 review-fix, critic CRITICAL, T2
+    review-nexus-nyry9.5): the prior three-way split additionally
+    returned a third, retrieval-only literal for a multi-step plan
+    with no operator tool call, and that bucket was exempt from
+    ``nx_answer``'s ``budget_seconds`` deadline. A census of all 17
+    real shipped builtin plans (``conexus/plans/builtin/*.yml``) found
+    ZERO that classify that way — 2 are ``single_query``, 15 end in an
+    operator — and the bucket's only "proof" of liveness was a
+    hand-built ``plan_json`` fed directly to this function, never
+    routed through a real ``plan_match()``. Per this bead's own
+    no-live-test-from-a-real-match-means-dead rule, the bucket is
+    deleted: everything that is not the single-step ``query()`` fast
+    path now classifies as ``needs_operators`` and is budget-bound like
+    any other ``plan_run`` execution, regardless of whether it actually
+    contains an operator tool call. The name is a mild misnomer for a
+    would-be-retrieval-only plan under this binary split — it now means
+    "goes through Step 4 plan_run", not literally "contains an operator
+    step" — kept as the surviving literal because callers/tests already
+    key on it.
+
+    nexus-h33x8.6 a4 fold-in (history, no longer load-bearing for
+    classification since the two non-single_query cases collapsed):
+    this used to distinguish plans by
+    :func:`nexus.plans.bundle.is_operator_tool` — the authoritative
+    operator-detection set ``plan_run``/``segment_steps`` actually
+    dispatch against, broader than ``_OPERATOR_TOOL_MAP``'s bare names.
     """
-    from nexus.plans.bundle import is_operator_tool  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     try:
         plan = json.loads(match.plan_json)
     except (json.JSONDecodeError, TypeError):
@@ -5728,9 +5788,7 @@ def _nx_answer_classify_plan(match: Any) -> str:
     steps = plan.get("steps") or []
     if len(steps) == 1 and steps[0].get("tool") == "query":
         return "single_query"
-    if any(is_operator_tool(step.get("tool", "")) for step in steps):
-        return "needs_operators"
-    return "retrieval_only"
+    return "needs_operators"
 
 
 def _nx_answer_is_single_query(match: Any) -> bool:
@@ -5738,7 +5796,27 @@ def _nx_answer_is_single_query(match: Any) -> bool:
 
 
 def _nx_answer_needs_operators(match: Any) -> bool:
-    return _nx_answer_classify_plan(match) == "needs_operators"
+    """Does this plan contain a genuine operator (``claude -p``) step?
+
+    nexus-nyry9.5 (RDR-196 .r5 review-fix): DECOUPLED from
+    ``_nx_answer_classify_plan`` — that function's return value now
+    drives ONLY the single_query-fast-path-vs-everything-else split
+    (its own docstring explains why classification stopped being
+    operator-aware: the deadline exemption the distinction used to
+    carry was deleted, and with it the reason to make the classifier
+    itself operator-aware). This predicate is not consulted anywhere in
+    ``nx_answer``'s own control flow — it exists purely so callers
+    (tests) can ask "does this plan actually dispatch claude -p",
+    independent of the fast-path/budget question, the same way it
+    always could before the collapse.
+    """
+    from nexus.plans.bundle import is_operator_tool  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+    try:
+        plan = json.loads(match.plan_json)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    steps = plan.get("steps") or []
+    return any(is_operator_tool(step.get("tool", "")) for step in steps)
 
 
 def _maybe_unwrap_output_envelope(text: str, *, max_depth: int = 3) -> str:
@@ -5782,6 +5860,29 @@ def _maybe_unwrap_output_envelope(text: str, *, max_depth: int = 3) -> str:
     return current
 
 
+def _step_record_to_wire(step: Any) -> dict[str, Any]:
+    """One :class:`~nexus.plans.runner.StepRecord` -> the wire shape
+    ``POST /v1/telemetry/nx_answer_runs/record``'s optional ``steps[]``
+    element expects (RDR-196 .p1c/.p1d; field names mirror
+    ``TelemetryHandler.parseNxAnswerSteps`` verbatim). ``run_id`` is
+    deliberately dropped — the engine assigns it server-side from the
+    parent row inserted in the SAME transaction (``StepRecord``'s own
+    docstring, runner.py).
+    """
+    return {
+        "step_index":    step.step_index,
+        "operator":      step.operator,
+        "source":        step.source,
+        "model":         step.model,
+        "input_tokens":  step.input_tokens,
+        "output_tokens": step.output_tokens,
+        "cost_usd":      step.cost_usd,
+        "elapsed_ms":    step.elapsed_ms,
+        "ok":            step.ok,
+        "bundled_steps": list(step.bundled_steps),
+    }
+
+
 def _nx_answer_record_run(
     telemetry: Any,
     *,
@@ -5790,24 +5891,43 @@ def _nx_answer_record_run(
     matched_confidence: float | None,
     step_count: int,
     final_text: str,
-    cost_usd: float,
+    step_records: list[Any] | None,
     duration_ms: int,
     trace: bool,
 ) -> None:
-    """Persist one ``nx_answer_runs`` row via the telemetry store. Redacts when
-    ``trace=False``.
+    """Persist one ``nx_answer_runs`` row (+ its ``step_records``, when any)
+    via the telemetry store. Redacts when ``trace=False``.
 
-    nexus-pyzk7: routes through ``telemetry.record_nx_answer_run`` (SQLite raw OR
-    the service's POST /v1/telemetry/nx_answer_runs/record), so it persists in
-    BOTH backends instead of reaching for a raw ``.conn`` the service lacks.
+    nexus-pyzk7: routes through ``telemetry.record_nx_answer_run`` (the
+    service's POST /v1/telemetry/nx_answer_runs/record), not a raw
+    ``.conn`` the service lacks.
+
+    ``cost_usd`` (RDR-196 .p1d, nexus-nyry9.10 — replaces 9 former
+    hardcoded-zero-cost literals, one per call site): the SUM of every step's
+    ``cost_usd`` that is not ``None``, or ``None`` when no step reports a
+    known cost — an empty *step_records* trivially falls into the latter
+    (sum of nothing is "unknown", never a fabricated zero). This is
+    deliberately a BLANKET rule, not case-by-case: a call site with
+    genuinely zero steps (e.g. the single-step fast path, which bypasses
+    ``plan_run`` and therefore never produces a ``StepRecord`` at all,
+    even though it IS a real, free T3-only call) still gets ``None`` here
+    rather than an invented ``0.0`` — see this bead's dev-notes writeback
+    for the documented trade-off (a real but unmeasured cost reads
+    identically to "we don't know", which is honest, if not maximally
+    informative; a follow-up teaching the fast path to emit its own
+    ``sql``-source StepRecord is future work, not fabricated here).
     """
     q = question if trace else "[redacted]"
     text = final_text if trace else "[redacted]"
+    steps = step_records or []
+    _known_costs = [s.cost_usd for s in steps if s.cost_usd is not None]
+    cost_usd = sum(_known_costs) if _known_costs else None
+    wire_steps = [_step_record_to_wire(s) for s in steps] or None
     try:
         telemetry.record_nx_answer_run(
             question=q, plan_id=plan_id, matched_confidence=matched_confidence,
             step_count=step_count, final_text=text, cost_usd=cost_usd,
-            duration_ms=duration_ms,
+            duration_ms=duration_ms, steps=wire_steps,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller (warned once via _warn_telemetry_drop)
         # Best-effort, but warn once so a service-mode drop is visible (the call
@@ -6118,6 +6238,30 @@ async def _nx_answer_plan_miss(
     # are not transient. Halved timeout on retry so a single hang doesn't
     # double total wall time.
     from nexus.operators.dispatch import OperatorOutputError as _OpOutputError  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
+    # RDR-196 .p2c (nexus-nyry9.16): opt-in ``model=`` override for the
+    # inline planner's own dispatch, gated on the SAME
+    # ``NX_OPERATOR_MODEL_TIERING`` env var that gates
+    # ``plans/runner.py``'s per-operator tiering — the two are exercised
+    # together by the .p2c A/B (baseline: env unset, no override, argv
+    # unchanged; candidate: env set, planner dispatches at the "cheap"
+    # tier alias). Unset (default) is a complete no-op — ``model=None``
+    # appends no ``--model`` flag, byte-identical to every pre-.p2c call.
+    #
+    # RDR-196 .p2d (nexus-nyry9.17): the planner is UNMEASURED, not HOLD-
+    # by-decision — the .p2c candidate arm never ran (budget exhausted
+    # before the 4th dispatch, see T2 nexus_rdr/196-phase2-ab-measurement).
+    # NO code change here: the planner does NOT join .p2d's default-on
+    # flip (``model_tiers.FLIPPED_OPERATORS`` is operator-tool-only) —
+    # it stays gated on ``== "1"`` exactly as .p2c left it, so the
+    # default path (env unset) and the kill switch (``== "0"``) both
+    # leave ``_planner_model`` at ``None``, unchanged. A future bead can
+    # spend a small dedicated top-up (~3 cheap-tier planner dispatches,
+    # per .p2d's dev notes) to resolve UNMEASURED into a real verdict.
+    _planner_model: str | None = None
+    if _os.environ.get("NX_OPERATOR_MODEL_TIERING") == "1":
+        from nexus.operators.model_tiers import resolve_model_for_tier  # noqa: PLC0415 — rare/branch-local path; measurement-only opt-in
+
+        _planner_model = resolve_model_for_tier("cheap")
     payload = None
     last_output_error: _OpOutputError | None = None
     for attempt in range(2):
@@ -6125,6 +6269,7 @@ async def _nx_answer_plan_miss(
         try:
             payload = await claude_dispatch(
                 prompt, _PLANNER_SCHEMA, timeout=attempt_timeout,
+                model=_planner_model,
             )
             break
         except _OpOutputError as exc:
@@ -6254,6 +6399,36 @@ def _load_ad_hoc_ttl() -> int:
 #: caller that doesn't pass ``budget_seconds`` gets exactly this value.
 _NX_ANSWER_DEFAULT_BUDGET_SECONDS: float | None = None
 
+#: nexus-nyry9.2 (RDR-196 .r2): sentinel for ``budget_exhausted_at_step``
+#: when the budget is exhausted BEFORE any plan step executes -- i.e.
+#: during Step 1 (the plan-match gate and, on a miss, the inline
+#: LLM planner's own claude -p round trip). Prior to this fix that
+#: phase ran wholly outside ``budget_seconds`` (deadline was computed
+#: at call entry but never consulted until ``plan_run``), so a slow
+#: planner could burn the caller's entire budget and nx_answer would
+#: still go on to execute the now-late plan. Deliberately 0 rather
+#: than a re-purposed ``-1`` or ``plan_run``'s own 1-indexed step
+#: numbering (:mod:`nexus.plans.runner`, always >= 1): 0 can never
+#: collide with a real step index, so a marker reading "step 0 of M"
+#: is unambiguous evidence that zero plan steps ran.
+_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN: int = 0
+
+#: RDR-196 .p1e review-fix round 2 (code-review-expert T2 [23115]):
+#: the STABLE PREFIX of the budget-exhausted partial-answer marker text
+#: -- the single emitter below (``_budget_exhausted_response``) builds
+#: the full marker as
+#: ``f"{NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX} after step {N} of
+#: {M} — partial answer]"``; only this prefix is a stable, shared
+#: contract (N/M vary per run, so the full string is never itself a
+#: constant). ``commands/answer_runs.py``'s ``_row_is_failed`` imports
+#: THIS constant to recognize a budget-exhausted row's ``final_text``
+#: rather than retyping the literal -- a second hand-typed copy would
+#: silently drift the moment either side's wording changed (exactly the
+#: duplication this module's docstring notes elsewhere have avoided by
+#: keeping the marker to one emitter; the read side needs the prefix
+#: too, so it is exported as a named constant instead of inlined here).
+NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX: str = "[budget exhausted"
+
 
 @mcp.tool(
     title="Multi-Step Knowledge Answer",
@@ -6286,6 +6461,25 @@ async def nx_answer(
        step, reroute to ``query()`` directly.
     3. **Execute plan**: run via ``plan_run``.
     4. **Record**: write run metrics to T2 ``nx_answer_runs``.
+
+    **Plan choice (RDR-196 Phase 3 Step 1, nexus-nyry9.20).** On EVERY
+    plan-match hit (not only when more than one candidate is returned —
+    ``candidate_count == 1`` is the common case today, per nexus-nyry9.3's
+    census), the top-confidence match is no longer picked unconditionally:
+    among the CONTIGUOUS PREFIX of ``matches`` (matcher order) within
+    ``PLAN_CHOICE_CONFIDENCE_BAND`` (``nexus.plans.cost_estimate``, a
+    named constant) of the best raw confidence — the prefix stops
+    permanently at the first out-of-band candidate, so cost can never
+    reach past a relevance demotion the matcher's own RDR-091 scope-fit
+    re-ranking already made — the one with the lowest PREDICTED cost from
+    its step shape (not a recorded per-plan median) is chosen; ties break
+    by earlier matcher position. Outside the prefix, confidence wins
+    regardless of cost. Logged on every hit as a ``nx_answer_plan_choice``
+    structlog event (candidate count, candidates, estimates, the choice)
+    and in the ``structured=True`` envelope's ``plan_choice`` field. See
+    docs/cli-reference.md's ``nx answer-runs`` § "Predicted vs actual
+    cost" for the read-time estimate-vs-actual column and what is and is
+    not yet persisted.
 
     **Latency.** This is NOT a sub-second call in the general case, and
     the figures below correct an earlier docstring version that
@@ -6336,37 +6530,33 @@ async def nx_answer(
             mode; converges with RDR-196 §Approach's marker convention
             for the later USD-budget work).
 
-            TWO explicit, INTENTIONAL boundaries where this budget does
-            NOT apply (substantive-critic SIGNIFICANT #1, T2
-            substantive-critique-nexus-h33x8.6-a4-a2-2026-08-19) —
-            named here because combined they can make the budget
-            silently ignored end-to-end with no marker and no
-            exception:
+            **CORRECTED (nexus-nyry9.2, RDR-196 .r2):** the plan-MISS
+            inline-planner phase (``_nx_answer_plan_miss``, its own
+            claude -p round trip, up to 300s) used to be dispatched
+            BEFORE ``deadline`` was ever consulted and paid its cost in
+            full regardless of budget. It is now checked immediately
+            after Step 1 (the plan-match gate, and on a miss, the
+            inline planner) — a budget already exhausted at that point
+            returns the exhaustion marker with
+            :data:`_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN` (step 0,
+            meaning zero plan steps ran) instead of proceeding to
+            Step 2 or Step 4. This also closes a second, previously
+            undocumented gap: the single-step fast path (Step 2) had no
+            deadline check of its own before this fix.
 
-            1. **The plan-MISS inline-planner phase** (``_nx_answer_plan_miss``,
-               its own claude -p round trip, up to 300s) is dispatched
-               BEFORE ``deadline`` is threaded to ``plan_run`` and is
-               never bounded by ``budget_seconds`` — it has its own,
-               unrelated timeout. A miss pays its planner cost in
-               full regardless of what budget was supplied.
-            2. **Retrieval-only matched plans** (no operator steps —
-               see ``_nx_answer_classify_plan``) are exempt from the
-               deadline even after a successful match/grow: they have
-               no operator floor to protect against, and applying a
-               budget meant for synthesis timeouts to a legitimately
-               slower multi-search plan (steps measured 17-47s) would
-               truncate it for no synthesis benefit.
-
-            A question that BOTH misses the plan-match gate AND grows
-            or matches a retrieval-only plan therefore runs completely
-            unbounded by ``budget_seconds`` — pinned as documented,
-            accepted behavior by
-            ``test_budget_seconds_silently_bypassed_by_miss_plus_retrieval_only_combo``
-            in tests/test_nx_answer.py. Retrieval steps finish early
-            (16-29% of run time, mean 8.5s/step per the measured
-            basis) — a 20-30s budget can usually still return real
-            chunks on the paths it DOES cover, even when synthesis
-            alone would have blown past it.
+            **DELETED (nexus-nyry9.5, RDR-196 .r5 review-fix, T2
+            review-nexus-nyry9.5):** a prior version of this docstring
+            named a second, INTENTIONAL boundary — a "retrieval-only"
+            matched plan (no operator steps) was exempt from the
+            deadline entirely. That bucket was never demonstrated to
+            route any real matched plan (a census of all 17 shipped
+            builtin plans found zero; see
+            ``_nx_answer_classify_plan``'s own docstring) and has been
+            deleted along with the exemption. There is no longer any
+            boundary where ``budget_seconds`` fails to apply to plan
+            execution once Step 1 has produced a match — every
+            non-``single_query`` plan is budget-bound at Step 4 like
+            any other.
         trace: When False, redacts question and final_text in the run log.
         dimensions: Dimensional filter for the plan-match gate.  Pass
             ``{"verb": "research"}`` (etc.) so verb skills narrow the
@@ -6416,18 +6606,35 @@ async def nx_answer(
     """
     import time  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
     import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+    from types import SimpleNamespace  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site (nexus-nyry9.2 pre-Step-2 budget stand-in)
 
     from nexus.mcp_infra import get_t1_plan_cache  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
+    from nexus.plans.cost_estimate import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        PLAN_CHOICE_CONFIDENCE_BAND,
+        choose_within_band,
+        get_cached_price_table,
+    )
     from nexus.plans.matcher import plan_match as _plan_match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.plans.runner import plan_run as _plan_run  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
     _log = _slog.get_logger()
     start = time.monotonic()
+    # RDR-196 Phase 3 Step 1 (nexus-nyry9.20, code-review round 1
+    # dormancy item, T2 nyry9.20-code-review-2026-08-21): captured by
+    # Step 1 below when it resolves a plan-match hit, read by `_result`'s
+    # closure to populate the structured envelope's `plan_choice` field.
+    # Declared here (bound to None) so every `_result(...)` call site --
+    # including ones on paths that never reach Step 1's hit branch, e.g.
+    # the inline-planner-miss error path -- has a defined value to read;
+    # a closure that only got assigned inside one conditional branch
+    # would raise on any call from an earlier-returning path.
+    _plan_choice_info: "dict | None" = None
     # nexus-h33x8.6 a4: anchored at call entry (not at plan_run's own
     # start) so "budget_seconds" reads as "answer me within N seconds
     # total", matching caller intuition. Threaded through to plan_run
-    # at Step 4 below (except for retrieval_only-classified plans —
-    # see the plan_class check there).
+    # unconditionally at Step 4 below (nexus-nyry9.5, RDR-196 .r5: the
+    # deadline exemption a prior classify_plan bucket used to carry was
+    # deleted — see that function's own docstring).
     deadline = start + budget_seconds if budget_seconds is not None else None
 
     # RDR-137 followup (nexus-n1908): normalize a malformed comma-list
@@ -6453,9 +6660,25 @@ async def nx_answer(
     # directly; structured mode wraps it into the documented envelope.
     def _result(text: str, *, plan_id: int = 0, step_count: int = 0,
                 chunks: "list | None" = None,
-                budget_exhausted_at_step: "int | None" = None) -> "str | dict":
+                budget_exhausted_at_step: "int | None" = None,
+                step_records: "list | None" = None) -> "str | dict":
         if not structured:
             return text
+        # RDR-196 .p1e (nexus-nyry9.11): per-step breakdown in the
+        # structured envelope, same field names as the wire (reuses
+        # _step_record_to_wire — the exact dict TelemetryHandler's
+        # nx_answer_steps route expects, so a caller sees one shape
+        # whether it reads the envelope or `nx answer-runs --json`).
+        # ``[]`` when no plan_run steps executed (single-step fast path,
+        # or any error/miss path before plan_run ever ran).
+        # ``cost_usd`` mirrors _nx_answer_record_run's own blanket rule:
+        # the sum of every step's non-None cost, or None when no step
+        # reports a known cost — never a fabricated 0.0.
+        _steps = step_records or []
+        _known_costs = [
+            s.cost_usd for s in _steps if getattr(s, "cost_usd", None) is not None
+        ]
+        cost_usd = sum(_known_costs) if _known_costs else None
         return {
             "final_text": text,
             "chunks": chunks if chunks is not None else [],
@@ -6465,7 +6688,160 @@ async def nx_answer(
             # (None on every non-budget-exhausted path) so callers can
             # rely on the key rather than checking membership.
             "budget_exhausted_at_step": budget_exhausted_at_step,
+            "steps": [_step_record_to_wire(s) for s in _steps],
+            "cost_usd": cost_usd,
+            # RDR-196 Phase 3 Step 1 (nexus-nyry9.20): the Step 1 plan-
+            # choice decision, when it ran (None on force_dynamic, a
+            # plan-miss, or any error path before Step 1's hit branch —
+            # a closure read of `_plan_choice_info`, always defined, see
+            # its declaration near the top of this function). Shape when
+            # present: {candidates, candidate_count, chosen_plan_id,
+            # predicted_cost_usd, basis} — the SAME per-candidate dicts
+            # the nx_answer_plan_choice structlog event carries, so a
+            # caller reading the envelope and one tailing the log see one
+            # shape.
+            "plan_choice": _plan_choice_info,
         }
+
+    # nexus-h33x8.6 a4 / nexus-nyry9.2 (RDR-196 .r2): single shared
+    # emitter for the budget-exhausted marker. Called from TWO sites —
+    # Step 4's post-``plan_run`` check (a real ``PlanResult``) and the
+    # pre-Step-2 check below (a synthetic stand-in used when Step 1 —
+    # the plan-match gate, and on a miss, the inline planner — already
+    # spent the whole budget before any plan step ran). Kept as ONE
+    # function so there is exactly one place that builds the marker
+    # text, per the "one emitter, both shapes" constraint. Returns
+    # ``None`` when ``result`` carries no budget-exhausted marker, in
+    # which case the caller falls through to its own next step.
+    def _budget_exhausted_response(result: Any) -> "str | dict | None":
+        # Defensive isinstance check (not a bare truthy/None check): a bare
+        # MagicMock's unconfigured ``.budget_exhausted_at_step`` attribute is
+        # itself a (truthy, non-None) MagicMock, which would misfire here
+        # for any test double that doesn't set the attribute explicitly.
+        _budget_step = getattr(result, "budget_exhausted_at_step", None)
+        if not isinstance(_budget_step, int):
+            return None
+        # code-review Important (T2 code-review-nexus-h33x8.6-a4-a2-
+        # 2026-08-19): use PlanResult.total_planned_steps -- the field
+        # a4 added to runner.py specifically so callers don't re-parse
+        # match.plan_json -- rather than re-parsing it here. Falls back
+        # to a re-parse only for a test double / older PlanResult (or
+        # the pre-Step-2 stand-in) that doesn't carry the field
+        # (defaults to 0, falsy).
+        # nexus-nyry9.2 review (code-review-nexus-nyry9.2-2026-08-20):
+        # guard the re-parse fallback the same way
+        # ``_nx_answer_classify_plan`` guards its own ``json.loads`` of
+        # ``match.plan_json`` (:5724-5727) — a corrupted library-matched
+        # plan row reaching this fallback (e.g. via the pre-Step-2
+        # stand-in below, whose own guarded parse already defaulted to
+        # 0) must still produce the marker, not raise out of the tool.
+        try:
+            total_planned = (
+                getattr(result, "total_planned_steps", 0)
+                or len(json.loads(best.plan_json).get("steps") or [])
+            )
+        except (json.JSONDecodeError, TypeError):
+            total_planned = 0
+        marker = (
+            f"{NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX} after step "
+            f"{_budget_step} of {total_planned} — partial answer]"
+        )
+        # Harvest retrieved chunks the same way Step 5's structured path
+        # does, so a partial answer still surfaces what was found. The
+        # pre-Step-2 stand-in has no steps at all, so this is [].
+        partial_chunks: list[dict] = []
+        for step_out in result.steps:
+            if not isinstance(step_out, dict):
+                continue
+            ids = step_out.get("ids")
+            if not isinstance(ids, list) or not ids:
+                continue
+            hashes = step_out.get("chunk_text_hash", []) or []
+            per_chunk_colls = step_out.get("chunk_collections") or []
+            dedup_colls = step_out.get("collections", []) or []
+            dists = step_out.get("distances", []) or []
+            default_coll = dedup_colls[0] if dedup_colls else ""
+            for i, cid in enumerate(ids):
+                coll = per_chunk_colls[i] if i < len(per_chunk_colls) else default_coll
+                partial_chunks.append({
+                    "id": cid,
+                    "chash": hashes[i] if i < len(hashes) else "",
+                    "collection": coll,
+                    "distance": dists[i] if i < len(dists) else None,
+                })
+        # The terminal step is where plan_run puts the OperatorTimeoutError
+        # sentinel (isolated path) or the bundle's terminal slot (bundle
+        # path) — both carry partial_text when a3's stream-json capture
+        # produced anything. Absent for the pre-Step-2 stand-in (no
+        # steps), leaving this "".
+        last_step = result.steps[-1] if result.steps else {}
+        partial_operator_text = (
+            str(last_step.get("partial_text") or "")
+            if isinstance(last_step, dict) else ""
+        )
+
+        lines = [marker]
+        if partial_chunks:
+            lines.append(
+                f"Retrieved {len(partial_chunks)} chunk"
+                f"{'s' if len(partial_chunks) != 1 else ''} before the "
+                "budget ran out:"
+            )
+            for ch in partial_chunks[:10]:
+                lines.append(f"  - {ch['id']} in {ch['collection']}")
+            if len(partial_chunks) > 10:
+                lines.append(f"  ... and {len(partial_chunks) - 10} more")
+        else:
+            lines.append("No retrieval results were captured before the budget ran out.")
+        if partial_operator_text:
+            lines.append("")
+            lines.append(
+                "Partial synthesis (incomplete, reconstructed from the "
+                "interrupted operator call):"
+            )
+            lines.append(partial_operator_text)
+        budget_final_text = "\n".join(lines)
+
+        _log.info(
+            "nx_answer_budget_partial_result",
+            plan_id=best.plan_id,
+            budget_exhausted_at_step=_budget_step,
+            total_planned_steps=total_planned,
+            chunk_count=len(partial_chunks),
+            has_partial_operator_text=bool(partial_operator_text),
+        )
+        # nexus-nyry9.10 (RDR-196 .p1d): ``result`` here is EITHER a real
+        # ``PlanResult`` (Step 4's post-plan_run check — real
+        # ``step_records``) OR the pre-Step-2 ``SimpleNamespace`` stand-in,
+        # which carries no ``step_records`` attribute at all. Defensive
+        # isinstance check (not a bare ``getattr(..., [])`` — a MagicMock
+        # test double's unconfigured ``.step_records`` is itself a
+        # (truthy, non-list) MagicMock, same landmine
+        # ``_budget_exhausted_response``'s own ``_budget_step`` guard
+        # above already documents for this exact function).
+        _step_records = getattr(result, "step_records", None)
+        if not isinstance(_step_records, list):
+            _step_records = []
+        try:
+            with _t2_ctx() as db:
+                _nx_answer_record_run(
+                    db.telemetry, question=question, plan_id=best.plan_id,
+                    matched_confidence=best.confidence, step_count=len(result.steps),
+                    final_text=budget_final_text[:2000], step_records=_step_records,
+                    duration_ms=int((time.monotonic() - start) * 1000), trace=trace,
+                )
+        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
+            pass
+        # nexus-yg49g doctrine: a budget-exhausted run did not complete —
+        # counts as a failure so a chronically-timing-out plan does not
+        # accrue a false success rate.
+        _nx_answer_record_outcome(best.plan_id, success=False)
+        return _result(
+            budget_final_text, plan_id=best.plan_id, step_count=len(result.steps),
+            chunks=partial_chunks if structured else None,
+            budget_exhausted_at_step=_budget_step,
+            step_records=_step_records,
+        )
 
     # ── Step 1: plan-match gate ──────────────────────────────────────────
     # RDR-092 Phase 2 Option A: effective floor is the caller's override
@@ -6535,7 +6911,7 @@ async def nx_answer(
                         db.telemetry, question=question, plan_id=None,
                         matched_confidence=matches[0].confidence if matches else None,
                         step_count=0, final_text=f"Planner error: {exc}",
-                        cost_usd=0.0, duration_ms=elapsed_ms, trace=trace,
+                        step_records=[], duration_ms=elapsed_ms, trace=trace,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -6549,6 +6925,56 @@ async def nx_answer(
             )
     else:
         best = matches[0]
+        # RDR-196 Phase 3 Step 1 (nexus-nyry9.20; Sam's 2026-08-21 OPTION
+        # (a) decision, superseding the RDR's original recorded-median
+        # design after nexus-nyry9.3's .r3 census found zero plans with a
+        # rankable recorded-history population): among above-floor
+        # candidates within PLAN_CHOICE_CONFIDENCE_BAND of the best raw
+        # confidence, prefer the cheapest PREDICTED cost (from step
+        # shape, priced against Phase 1 telemetry with a static
+        # fallback) instead of unconditionally taking matches[0].
+        # RDR-100 fence: `matches` and every Match.confidence value are
+        # untouched inputs from the plan-match gate above — this only
+        # picks which already-computed candidate the runner executes.
+        # Degrades to the pre-existing top-confidence choice (best stays
+        # matches[0]) on any failure — cost ranking must never be able to
+        # crash or block an otherwise-successful nx_answer call.
+        #
+        # UNCONDITIONAL (code-review round 1 dormancy item, T2
+        # nyry9.20-code-review-2026-08-21): previously gated on
+        # `len(matches) > 1`, which — per nexus-nyry9.3's .r3/.r1 census
+        # — is almost never true on today's library (matches is usually
+        # length 1), making the feature's activity rate unmeasurable.
+        # choose_within_band handles a single-candidate list trivially
+        # (one cheap estimate_plan_cost call, returns it unchanged), so
+        # there is no meaningful cost to always computing + logging this.
+        try:
+            with _t2_ctx() as _cost_db:
+                _price_table = get_cached_price_table(_cost_db.telemetry)
+            _chosen, _decision_log = choose_within_band(
+                matches, _price_table, band=PLAN_CHOICE_CONFIDENCE_BAND,
+            )
+            _chosen_row = next(
+                (r for r in _decision_log if r["plan_id"] == _chosen.plan_id), None,
+            )
+            _plan_choice_info = {
+                "candidates": _decision_log,
+                "candidate_count": len(matches),
+                "chosen_plan_id": _chosen.plan_id,
+                "predicted_cost_usd": _chosen_row["predicted_cost_usd"] if _chosen_row else None,
+                "basis": _chosen_row["basis"] if _chosen_row else None,
+            }
+            _log.info(
+                "nx_answer_plan_choice",
+                candidate_count=len(matches),
+                candidates=_decision_log,
+                chosen_plan_id=_chosen.plan_id,
+                top_confidence_plan_id=matches[0].plan_id,
+                band=PLAN_CHOICE_CONFIDENCE_BAND,
+            )
+            best = _chosen
+        except Exception:  # noqa: BLE001 — boundary catch; degrade to top-confidence match, must not crash caller
+            _log.warning("nx_answer_plan_cost_ranking_failed", exc_info=True)
 
     if best.plan_id == 0:
         conf_str = "ad-hoc"
@@ -6572,23 +6998,145 @@ async def nx_answer(
                 plan_id=best.plan_id, exc_info=True,
             )
 
-    # ── Step 2: single-step guard ────────────────────────────────────────
+    # nexus-nyry9.2 (RDR-196 .r2): classified once here and reused by
+    # Step 2 below (previously computed twice) so the pre-Step-2 budget
+    # check and the single-step guard agree on the same classification.
     plan_class = _nx_answer_classify_plan(best)
 
+    # ── Pre-Step-2 budget check (nexus-nyry9.2, RDR-196 .r2) ──────────────
+    # Step 1 above — the plan-match gate, and on a miss, the inline LLM
+    # planner's own claude -p round trip — is dispatched entirely BEFORE
+    # this point. Before this fix that phase ran wholly outside
+    # ``budget_seconds``: ``deadline`` was computed at call entry but
+    # the first place it was ever consulted was inside ``plan_run``
+    # (Step 4) — so a slow planner could burn the caller's whole budget
+    # and nx_answer would still go on to execute the (now-late) plan.
+    # Checked ONCE here, covering both the single-step fast path
+    # (Step 2) and plan execution (Step 4), neither of which had a
+    # deadline check of its own before this fix.
+    #
+    # nexus-nyry9.5 (RDR-196 .r5 review-fix): a deadline exemption for
+    # a third classify_plan bucket used to apply here — DELETED along
+    # with that bucket (see ``_nx_answer_classify_plan``) since it was
+    # never demonstrated to route a real matched plan. Every
+    # non-single_query plan is now budget-bound at this check like any
+    # other.
+    if deadline is not None and time.monotonic() >= deadline:
+        # code-review Important (T2 nyry9.2-code-review-2026-08-20):
+        # guard this the same way ``_nx_answer_classify_plan`` guards
+        # its own parse of ``match.plan_json`` (:5724-5727) — a
+        # corrupted library-matched plan row combined with an already-
+        # exhausted budget must still flow to the marker, not raise
+        # out of the MCP tool. Defaults to 0 (unknown step count) on a
+        # malformed row; ``_budget_exhausted_response``'s own fallback
+        # re-parse is guarded the same way for the same reason.
+        try:
+            total_planned = len(json.loads(best.plan_json).get("steps") or [])
+        except (json.JSONDecodeError, TypeError):
+            total_planned = 0
+        _pre_plan_stub = SimpleNamespace(
+            budget_exhausted_at_step=_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN,
+            steps=[],
+            total_planned_steps=total_planned,
+        )
+        _budget_response = _budget_exhausted_response(_pre_plan_stub)
+        if _budget_response is not None:
+            return _budget_response
+
+    # ── Step 2: single-step guard ────────────────────────────────────────
     if plan_class == "single_query":
         _log.info("nx_answer_single_step_guard", plan_id=best.plan_id, confidence=conf_str)
         try:
+            from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred; matches this module's convention
+            from nexus.plans.runner import resolve_step_bindings  # noqa: PLC0415 — deferred; matches this module's convention
+
             plan = json.loads(best.plan_json)
-            step_args = plan["steps"][0].get("args", {})
+            raw_args = plan["steps"][0].get("args", {})
+            # nexus-nyry9.5 (RDR-196 .r5): raw_args holds UNRESOLVED
+            # ``$var`` placeholders for any template-authored plan --
+            # every builtin plan, including the two single-query seeds
+            # (conexus/plans/builtin/document-discovery.yml,
+            # corpus-coverage-check.yml), declares
+            # ``args: {question: $question, corpus: $corpus, limit:
+            # $limit}``. The pre-fix code read this dict with plain
+            # ``.get("question", question)`` -- since the KEY "question"
+            # IS present, the fallback never fired, so the fast path
+            # silently queried for the literal string "$question"
+            # against corpus "$corpus" instead of the caller's real
+            # text.
+            #
+            # nexus-nyry9.5 review-fix (code-review SIGNIFICANT, T2
+            # review-nexus-nyry9.5): a required binding this plan
+            # declares as TYPED (e.g. ``content_type``, ``author`` --
+            # see ``TYPED_FILTER_BINDINGS``) that the caller did not
+            # supply is refused rather than guessed -- explicit handling
+            # here mirrors Step 4's dedicated
+            # ``except PlanBindingUnsatisfiableError`` below (step_count=0,
+            # logged) instead of falling through to the generic
+            # ``except Exception`` further down (which used to record
+            # step_count=1 and no telemetry event for this case, wrongly
+            # implying one step actually ran).
+            try:
+                step_bindings = _autoalias_bindings(
+                    required=best.required_bindings,
+                    run_bindings=dict(_caller_run),
+                    defaults=best.default_bindings or {},
+                    question=question,
+                    plan_id=best.plan_id,
+                    plan_name=best.name or "",
+                )
+            except PlanBindingUnsatisfiableError as exc:
+                elapsed_ms = int((time.monotonic() - start) * 1000)
+                _log.warning(
+                    "nx_answer_plan_binding_unsatisfiable",
+                    plan_id=best.plan_id, plan_name=best.name,
+                    binding=exc.binding, confidence=best.confidence,
+                )
+                try:
+                    with _t2_ctx() as db:
+                        _nx_answer_record_run(
+                            db.telemetry, question=question, plan_id=best.plan_id,
+                            matched_confidence=best.confidence, step_count=0,
+                            final_text=f"Error: {exc}", step_records=[],
+                            duration_ms=elapsed_ms, trace=trace,
+                        )
+                except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
+                    pass
+                _nx_answer_record_outcome(best.plan_id, success=False)
+                return _result(str(exc), plan_id=best.plan_id, step_count=0)
+
+            # Resolve the same way plan_run (Step 4 below) would: caller
+            # bindings autoaliased from the question, merged over the
+            # plan's own default_bindings with defaults first and caller
+            # winning. Shared with plan_run via ``resolve_step_bindings``
+            # (nexus-nyry9.5 review-fix, code-review SIGNIFICANT) so this
+            # formula lives in exactly one place instead of two
+            # independently-maintained copies.
+            step_args = resolve_step_bindings(
+                raw_args,
+                default_bindings=best.default_bindings or {},
+                caller_bindings=step_bindings,
+            )
             q = step_args.get("question", question)
             corpus = step_args.get("corpus", "knowledge")
+            try:
+                limit = int(step_args.get("limit", 10))
+            except (TypeError, ValueError):
+                limit = 10
+            # nexus-nyry9.5 review-fix (code-review IMPORTANT, T2
+            # review-nexus-nyry9.5): clamp to the same ceiling every
+            # other paging/query-result path in this codebase honours
+            # (AGENTS.md § External service limits) -- a plan-supplied
+            # or caller-influenced ``limit`` must not bypass it just
+            # because this path skips ``plan_run``.
+            limit = max(1, min(limit, MAX_QUERY_RESULTS))
             # RDR-086 review #4: exactly one ``query()`` call — the
             # previous structured path re-ran non-structured for
             # ``result_text`` (doubling the T3 round-trip) even though
             # the structured envelope already contains enough to
             # synthesize a result summary.
             if structured:
-                q_struct = query(question=q, corpus=corpus, structured=True)
+                q_struct = query(question=q, corpus=corpus, limit=limit, structured=True)
                 chunks: list[dict] = []
                 if isinstance(q_struct, dict):
                     ids = q_struct.get("ids", [])
@@ -6632,7 +7180,7 @@ async def nx_answer(
                 else:
                     result_text = "No results."
             else:
-                result_text = query(question=q, corpus=corpus)
+                result_text = query(question=q, corpus=corpus, limit=limit)
                 chunks = []
 
             elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -6641,7 +7189,7 @@ async def nx_answer(
                     _nx_answer_record_run(
                         db.telemetry, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
-                        final_text=str(result_text)[:2000], cost_usd=0.0,
+                        final_text=str(result_text)[:2000], step_records=[],
                         duration_ms=elapsed_ms, trace=trace,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -6667,7 +7215,7 @@ async def nx_answer(
                     _nx_answer_record_run(
                         db.telemetry, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
-                        final_text=f"Error: {exc}", cost_usd=0.0,
+                        final_text=f"Error: {exc}", step_records=[],
                         duration_ms=elapsed_ms, trace=trace,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -6735,7 +7283,7 @@ async def nx_answer(
                 _nx_answer_record_run(
                     db.telemetry, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence, step_count=0,
-                    final_text=f"Error: {exc}", cost_usd=0.0,
+                    final_text=f"Error: {exc}", step_records=[],
                     duration_ms=elapsed_ms, trace=trace,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
@@ -6745,14 +7293,13 @@ async def nx_answer(
         _nx_answer_record_outcome(best.plan_id, success=False)
         return _result(str(exc), plan_id=best.plan_id, step_count=0)
 
-    # nexus-h33x8.6 a4 fold-in: a retrieval_only-classified plan has no
-    # operator steps — no claude -p floor for the budget to protect
-    # against — so it is exempt from the deadline even when the caller
-    # supplied budget_seconds. Applying it anyway would risk truncating
-    # a legitimately slower multi-search plan (some search steps
-    # measured 17-47s) for zero synthesis-timeout benefit.
-    _deadline_for_run = None if plan_class == "retrieval_only" else deadline
-
+    # nexus-nyry9.5 (RDR-196 .r5 review-fix): the retrieval-only
+    # deadline exemption that used to apply here was DELETED along with
+    # the bucket itself (see ``_nx_answer_classify_plan``) — no real
+    # matched plan was ever shown to land in it, so every plan execution
+    # is now budget-bound the same way, whether or not it actually
+    # contains an operator step.
+    #
     # Only pass ``deadline=`` when it's actually set. Several existing
     # tests (and possibly external callers) patch ``plan_run`` with a
     # fixed ``(match, bindings)`` signature; forwarding an unconditional
@@ -6760,20 +7307,35 @@ async def nx_answer(
     # degrade to "Error during plan execution" — exactly the "changed
     # default behavior" this parameter must not cause.
     _plan_run_kwargs: dict[str, Any] = {}
-    if _deadline_for_run is not None:
-        _plan_run_kwargs["deadline"] = _deadline_for_run
+    if deadline is not None:
+        _plan_run_kwargs["deadline"] = deadline
 
     try:
         result = await _plan_run(best, run_bindings, **_plan_run_kwargs)
     except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
         elapsed_ms = int((time.monotonic() - start) * 1000)
         _log.error("nx_answer_plan_run_error", plan_id=best.plan_id, error=str(exc))
+        # RDR-196 .p1d critique fold (T2 [23092], nexus-nyry9.11): plan_run
+        # now attaches the step_records completed BEFORE the raise to the
+        # exception instance itself (runner.py's outer try/except) —
+        # extract them here instead of the old hardcoded ``[]`` so a
+        # FAILED run still records real per-step telemetry. Defensive
+        # isinstance check, not a bare getattr default: an exception this
+        # module raises directly (never touched runner.py's attach point)
+        # correctly has no such attribute, and a MagicMock test double's
+        # unconfigured attribute access is itself a truthy non-list
+        # MagicMock — same landmine already documented on
+        # ``_result_step_records`` above.
+        _exc_step_records = getattr(exc, "step_records", None)
+        if not isinstance(_exc_step_records, list):
+            _exc_step_records = []
         try:
             with _t2_ctx() as db:
                 _nx_answer_record_run(
                     db.telemetry, question=question, plan_id=best.plan_id,
-                    matched_confidence=best.confidence, step_count=0,
-                    final_text=f"Error: {exc}", cost_usd=0.0,
+                    matched_confidence=best.confidence,
+                    step_count=len(_exc_step_records),
+                    final_text=f"Error: {exc}", step_records=_exc_step_records,
                     duration_ms=elapsed_ms, trace=trace,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -6782,6 +7344,8 @@ async def nx_answer(
         return _result(
             f"Error during plan execution: {exc}",
             plan_id=best.plan_id,
+            step_count=len(_exc_step_records),
+            step_records=_exc_step_records,
         )
     # nexus-yg49g: the success record USED to be here — before final_text is
     # even extracted (below) and ~60 lines before the empty-retrieval guard that
@@ -6790,111 +7354,27 @@ async def nx_answer(
     # branches that DO know, further down.
 
     # ── nexus-h33x8.6 a4: budget-exhausted partial-result path ────────────
-    # Defensive isinstance check (not a bare truthy/None check): a bare
-    # MagicMock's unconfigured ``.budget_exhausted_at_step`` attribute is
-    # itself a (truthy, non-None) MagicMock, which would misfire here
-    # for any test double that doesn't set the attribute explicitly.
     # Runs BEFORE Step 5's normal extraction — a budget cutoff bypasses
     # the usual final-step-text logic and the empty-retrieval guard
     # entirely; both would either mis-extract the timeout sentinel or
-    # wrongly report "no evidence" when evidence WAS retrieved.
-    _budget_step = getattr(result, "budget_exhausted_at_step", None)
-    if isinstance(_budget_step, int):
-        # code-review Important (T2 code-review-nexus-h33x8.6-a4-a2-
-        # 2026-08-19): use PlanResult.total_planned_steps -- the field
-        # a4 added to runner.py specifically so callers don't re-parse
-        # match.plan_json -- rather than re-parsing it here. Falls back
-        # to a re-parse only for a test double / older PlanResult that
-        # doesn't carry the field (defaults to 0, falsy).
-        total_planned = (
-            getattr(result, "total_planned_steps", 0)
-            or len(json.loads(best.plan_json).get("steps") or [])
-        )
-        marker = (
-            f"[budget exhausted after step {_budget_step} of "
-            f"{total_planned} — partial answer]"
-        )
-        # Harvest retrieved chunks the same way Step 5's structured path
-        # does, so a partial answer still surfaces what was found.
-        partial_chunks: list[dict] = []
-        for step_out in result.steps:
-            if not isinstance(step_out, dict):
-                continue
-            ids = step_out.get("ids")
-            if not isinstance(ids, list) or not ids:
-                continue
-            hashes = step_out.get("chunk_text_hash", []) or []
-            per_chunk_colls = step_out.get("chunk_collections") or []
-            dedup_colls = step_out.get("collections", []) or []
-            dists = step_out.get("distances", []) or []
-            default_coll = dedup_colls[0] if dedup_colls else ""
-            for i, cid in enumerate(ids):
-                coll = per_chunk_colls[i] if i < len(per_chunk_colls) else default_coll
-                partial_chunks.append({
-                    "id": cid,
-                    "chash": hashes[i] if i < len(hashes) else "",
-                    "collection": coll,
-                    "distance": dists[i] if i < len(dists) else None,
-                })
-        # The terminal step is where plan_run puts the OperatorTimeoutError
-        # sentinel (isolated path) or the bundle's terminal slot (bundle
-        # path) — both carry partial_text when a3's stream-json capture
-        # produced anything.
-        last_step = result.steps[-1] if result.steps else {}
-        partial_operator_text = (
-            str(last_step.get("partial_text") or "")
-            if isinstance(last_step, dict) else ""
-        )
+    # wrongly report "no evidence" when evidence WAS retrieved. Shared
+    # emitter — see ``_budget_exhausted_response`` above (nexus-nyry9.2,
+    # RDR-196 .r2: this is the SAME function the pre-Step-2 check calls).
+    _budget_response = _budget_exhausted_response(result)
+    if _budget_response is not None:
+        return _budget_response
 
-        lines = [marker]
-        if partial_chunks:
-            lines.append(
-                f"Retrieved {len(partial_chunks)} chunk"
-                f"{'s' if len(partial_chunks) != 1 else ''} before the "
-                "budget ran out:"
-            )
-            for ch in partial_chunks[:10]:
-                lines.append(f"  - {ch['id']} in {ch['collection']}")
-            if len(partial_chunks) > 10:
-                lines.append(f"  ... and {len(partial_chunks) - 10} more")
-        else:
-            lines.append("No retrieval results were captured before the budget ran out.")
-        if partial_operator_text:
-            lines.append("")
-            lines.append(
-                "Partial synthesis (incomplete, reconstructed from the "
-                "interrupted operator call):"
-            )
-            lines.append(partial_operator_text)
-        budget_final_text = "\n".join(lines)
-
-        _log.info(
-            "nx_answer_budget_partial_result",
-            plan_id=best.plan_id,
-            budget_exhausted_at_step=_budget_step,
-            total_planned_steps=total_planned,
-            chunk_count=len(partial_chunks),
-            has_partial_operator_text=bool(partial_operator_text),
-        )
-        try:
-            with _t2_ctx() as db:
-                _nx_answer_record_run(
-                    db.telemetry, question=question, plan_id=best.plan_id,
-                    matched_confidence=best.confidence, step_count=len(result.steps),
-                    final_text=budget_final_text[:2000], cost_usd=0.0,
-                    duration_ms=int((time.monotonic() - start) * 1000), trace=trace,
-                )
-        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-            pass
-        # nexus-yg49g doctrine: a budget-exhausted run did not complete —
-        # counts as a failure so a chronically-timing-out plan does not
-        # accrue a false success rate.
-        _nx_answer_record_outcome(best.plan_id, success=False)
-        return _result(
-            budget_final_text, plan_id=best.plan_id, step_count=len(result.steps),
-            chunks=partial_chunks if structured else None,
-            budget_exhausted_at_step=_budget_step,
-        )
+    # nexus-nyry9.10 (RDR-196 .p1d): computed once here for both Step 5's
+    # empty-retrieval-guard record and Step 6's success record below.
+    # Defensive isinstance check, not a bare ``getattr(result,
+    # "step_records", [])`` — several existing tests patch ``plan_run``
+    # with a bare ``MagicMock()`` carrying only ``.steps`` (never
+    # ``.step_records``), and a MagicMock's unconfigured attribute access
+    # auto-creates a truthy, non-list MagicMock rather than raising, which
+    # would defeat a plain ``getattr`` default.
+    _result_step_records = getattr(result, "step_records", None)
+    if not isinstance(_result_step_records, list):
+        _result_step_records = []
 
     # ── Step 5: extract final answer ─────────────────────────────────────
     elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -6992,7 +7472,7 @@ async def nx_answer(
                     db.telemetry, question=question, plan_id=best.plan_id,
                     matched_confidence=best.confidence,
                     step_count=len(result.steps),
-                    final_text=no_match[:2000], cost_usd=0.0,
+                    final_text=no_match[:2000], step_records=_result_step_records,
                     duration_ms=elapsed_ms, trace=trace,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -7000,6 +7480,7 @@ async def nx_answer(
         return _result(
             no_match, plan_id=best.plan_id,
             step_count=len(result.steps), chunks=[],
+            step_records=_result_step_records,
         )
 
     # nexus-yg49g: SUCCESS is recorded HERE — past the empty-retrieval guard,
@@ -7096,7 +7577,7 @@ async def nx_answer(
             _nx_answer_record_run(
                 db.telemetry, question=question, plan_id=best.plan_id,
                 matched_confidence=best.confidence, step_count=len(result.steps),
-                final_text=final_text[:2000], cost_usd=0.0,
+                final_text=final_text[:2000], step_records=_result_step_records,
                 duration_ms=elapsed_ms, trace=trace,
             )
     except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -7107,6 +7588,7 @@ async def nx_answer(
         plan_id=best.plan_id,
         step_count=len(result.steps),
         chunks=envelope_chunks if structured else None,
+        step_records=_result_step_records,
     )
 
 

@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-nyry9.9 (RDR-196 Phase 1 Step 3, ENGINE HALF) — nx_answer_steps:
+    per-step cost/quality telemetry, one row per EXECUTED dispatch segment
+    (nexus-nyry9.8's StepRecord, src/nexus/plans/runner.py:242). Child of
+    nx_answer_runs (telemetry-001-baseline.xml, changesets telemetry-001-7/8)
+    — NOT an edit of that shipped changeset (a checksum break); this is a
+    NEW file at the changelog TAIL, matching the established late-append
+    convention (D0.1; see telemetry-004's / telemetry-006's own <include>
+    comments for the identical reasoning).
+
+    Column list is the FROZEN shape from nexus-nyry9.8's critique (T2
+    nexus/review-nexus-nyry9.8 [23057]), matching StepRecord field-for-field:
+    run_id, step_index, operator, source, model, input_tokens, output_tokens,
+    cost_usd, elapsed_ms, ok, bundled_steps — plus tenant_id + RLS, exactly
+    like the parent.
+
+    PRIMARY KEY (run_id, step_index): a fused bundle (StepRecord's own
+    docstring, runner.py:246-252) is ONE dispatch segment that may cover
+    several plan-step indices, but it still produces exactly ONE step
+    record, filed at its first fused index — so (run_id, step_index) stays
+    a true 1:1 key against the rows this table ever receives; the full set
+    of covered indices lives in bundled_steps, not in extra PK-conflicting
+    rows. No surrogate id column: unlike nx_answer_runs (an independently
+    queried top-level event log with its own ETL dedup key), a step row is
+    only ever reached through its run, so the composite PK is both the
+    natural key AND the access path (a leading-run_id btree scan), with no
+    second identity to carry.
+
+    FK run_id -> nexus.nx_answer_runs(id) ON DELETE CASCADE: a step row has
+    no independent existence once its run is gone (deleting a run's event
+    record should not orphan its children), and RDR-080's own retention
+    story is run-level, never per-step.
+
+    source CHECK ('llm','sql','bundle'): the closed three-value set
+    StepRecord.source's own docstring (runner.py:274-282) already commits
+    to — no fourth value invented, enforced here rather than left to
+    convention alone.
+
+    cost_usd NUMERIC (not DOUBLE PRECISION): chosen correctly from this
+    column's first day, per the column-type-discipline note on this bead
+    (nexus-cefa1 arc precedent — money is not a float). This is a
+    DELIBERATE divergence from the parent nx_answer_runs.cost_usd, which
+    stays DOUBLE PRECISION (telemetry-001-baseline.xml:194) in this
+    changeset. Retyping the parent to numeric was evaluated and explicitly
+    NOT done here: NX_ANSWER_RUNS.COST_USD is a jOOQ-generated field read
+    and written at import/live-write/aggregate/row-mapper call sites
+    throughout TelemetryRepository.java and TelemetryHandler.java (e.g.
+    the avg(NX_ANSWER_RUNS.COST_USD) aggregate, the row mapper, the ETL
+    import path) — retyping it flips the generated Java type from Double
+    to BigDecimal at every one of those existing, unrelated call sites and
+    risks a wire-shape change in already-shipped JSON responses (BigDecimal
+    serializes differently than Double). That is real, separable work in
+    the shape of telemetry-004-type-hygiene.xml's own dedicated retype
+    pass, not a rider on a new-table bead whose own column gets the right
+    type from birth. Recorded here per this bead's own instruction: "if you
+    find a reason not to (readers that depend on float), document the
+    divergence in the changeset comment and the handback instead."
+
+    bundled_steps INTEGER[] NOT NULL DEFAULT '{}': the full set of 0-based
+    plan indices a source='bundle' record fused; empty for every other
+    source (StepRecord.bundled_steps docstring, runner.py:275-278).
+
+    input_tokens / output_tokens / cost_usd all NULLABLE: mirrors
+    StepRecord's own `| None` widening (runner.py:283-300) — a "sql" step
+    is a true, known zero (never written as NULL by the client; the
+    column itself still permits NULL because nothing at the schema layer
+    can distinguish "this bead's Python caller always fills 0" from a
+    future caller that has a genuine unknown-cost case, and the RDR's own
+    risk register treats "absent fields record None, never 0.0" as
+    binding). model NULLABLE for the same "None is the only absent
+    spelling" reason (StepRecord.model docstring, runner.py:263-272).
+
+    No updated_at / no UpdatedAtTrigger: matches the parent nx_answer_runs
+    exactly — this is an append-only event-log record engine-side (a step
+    is recorded once, at run-completion time, and never mutated in place),
+    the same shape as every other telemetry-001 event-log table.
+
+    No ETL dedup unique index: unlike the top-level event logs
+    (relevance_log, tier_writes, nx_answer_runs, hook_failures), a step
+    row has no independent ETL import path in this bead's scope — the
+    live-write POST /v1/telemetry/nx_answer_runs/record path is the only
+    writer (see TelemetryHandler.java's handleNxAnswerRunRecord), and it
+    is idempotent via the PARENT's own onConflictDoNothing() (a skipped
+    parent insert also skips its children — see recordNxAnswerRun's own
+    javadoc). A dedicated importNxAnswerStepRow ETL path is out of this
+    bead's scope (not requested by nexus-nyry9.9's DO list) and would earn
+    its own dedup index if it is ever added.
+
+    Grants: no explicit GRANT statement in this file. grants-nexus-svc.xml
+    (included immediately after this file, D0.1 tail placement) is a
+    runAlways block that walks every table currently in the nexus schema
+    and grants SELECT/INSERT/UPDATE/DELETE to nexus_svc dynamically (plus
+    ALTER DEFAULT PRIVILEGES for future tables) — this table is picked up
+    by that sweep automatically, the same way every telemetry-00N table
+    since telemetry-001 has been.
+
+    Placement: changelog TAIL, immediately after telemetry-006-frecency-
+    ttl-null.xml (the current tail, nexus-tk070.p6b) and before the
+    grants-nexus-svc.xml runAlways block — the established late-append
+    convention (D0.1) every new changeset since RDR-156 follows.
+
+    ── telemetry-007-3 (RDR-196 .p1c-b, nexus-lme1s) ─────────────────────
+
+    nx_answer_runs.cost_usd DROP NOT NULL + DROP DEFAULT: appended to this
+    SAME file rather than a new tail file — telemetry-007 has not shipped
+    in any engine-service tag yet (verified via a git tag containment
+    check against its landing commit before this changeset was authored),
+    so appending is the D0.1-compliant move, not a checksum-breaking edit
+    of a shipped changeset.
+
+    Risk 1 (RDR-196, "zeros are not free"): the client (nexus-nyry9.10,
+    src/nexus/mcp/core.py) now sends a JSON `cost_usd: null` on the parent
+    run row when NO usage was observed at all (as opposed to a genuine
+    known-zero, e.g. a pure-T3 fast-path call) — see that bead's dev notes
+    for the full "ENGINE LIMITATION FOUND" writeup: prior to this
+    changeset, `NOT NULL DEFAULT 0.0` forced that null into a stored 0.0,
+    indistinguishable from "this call was free." NUMERIC/DOUBLE PRECISION
+    stays DOUBLE PRECISION here — the type-hygiene divergence from the
+    child `nx_answer_steps.cost_usd` (NUMERIC) is unchanged and was already
+    decided + documented at telemetry-007-1 above; this changeset only
+    lifts the NOT NULL/DEFAULT constraint, it does not retype the column.
+
+    Readers updated in lockstep (same commit as this changeset, not a
+    follow-up): `TelemetryRepository.queryNxAnswerRuns`'s
+    `avg(NX_ANSWER_RUNS.COST_USD)` aggregate already ignores NULLs per
+    standard SQL AVG semantics (asserted by a new repository test, not
+    just assumed); the row mapper emits the raw (possibly-null) value,
+    which Jackson serializes as JSON `null`, never a fabricated `0`; the
+    live-write path (`recordNxAnswerRun`) and the fidelity-preserving ETL
+    import path (`importNxAnswerRunRow`) both now accept a `Double`
+    (boxed, nullable) `costUsd` parameter instead of a primitive `double`
+    that could never carry "absent" as anything but 0.0.
+
+    Rollback: COALESCEs any existing NULLs to 0.0 before restoring
+    `NOT NULL DEFAULT 0.0` — a rollback must never fail on data this
+    changeset itself could have legitimately written (the "legacy-cleanup
+    migrations never wedge a user upgrade" doctrine, applied here to a
+    forward-then-back cycle rather than a legacy cleanup, because the
+    failure shape is identical: a NOT NULL restore over live NULLs must
+    not abort).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset telemetry-007-1: nx_answer_steps ──────────────────────── -->
+    <changeSet id="telemetry-007-1" author="nexus-nyry9.9">
+        <comment>Create nx_answer_steps table (event log; RDR-196 per-step cost/quality telemetry)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.nx_answer_steps (
+    run_id        BIGINT       NOT NULL REFERENCES nexus.nx_answer_runs(id) ON DELETE CASCADE,
+    tenant_id     TEXT         NOT NULL,
+    step_index    INTEGER      NOT NULL,
+    operator      TEXT         NOT NULL,
+    source        TEXT         NOT NULL,
+    model         TEXT,
+    input_tokens  INTEGER,
+    output_tokens INTEGER,
+    cost_usd      NUMERIC,
+    elapsed_ms    INTEGER      NOT NULL,
+    ok            BOOLEAN      NOT NULL,
+    bundled_steps INTEGER[]    NOT NULL DEFAULT '{}',
+    CONSTRAINT nx_answer_steps_pk PRIMARY KEY (run_id, step_index),
+    CONSTRAINT nx_answer_steps_source_chk CHECK (source IN ('llm', 'sql', 'bundle'))
+);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.nx_answer_steps CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset telemetry-007-2: nx_answer_steps RLS ──────────────────── -->
+    <changeSet id="telemetry-007-2" author="nexus-nyry9.9">
+        <comment>RLS: ENABLE + FORCE + tenant_isolation policy on nx_answer_steps</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.nx_answer_steps ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.nx_answer_steps FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.nx_answer_steps
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.nx_answer_steps;
+            ALTER TABLE nexus.nx_answer_steps NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.nx_answer_steps DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset telemetry-007-3: nx_answer_runs.cost_usd nullable ─────── -->
+    <changeSet id="telemetry-007-3" author="nexus-lme1s">
+        <comment>nx_answer_runs.cost_usd: DROP NOT NULL + DROP DEFAULT — a client "no usage observed" null must not land as a stored 0.0 (RDR-196 risk 1)</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.nx_answer_runs ALTER COLUMN cost_usd DROP NOT NULL;
+ALTER TABLE nexus.nx_answer_runs ALTER COLUMN cost_usd DROP DEFAULT;
+        </sql>
+        <rollback>
+UPDATE nexus.nx_answer_runs SET cost_usd = 0.0 WHERE cost_usd IS NULL;
+ALTER TABLE nexus.nx_answer_runs ALTER COLUMN cost_usd SET DEFAULT 0.0;
+ALTER TABLE nexus.nx_answer_runs ALTER COLUMN cost_usd SET NOT NULL;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

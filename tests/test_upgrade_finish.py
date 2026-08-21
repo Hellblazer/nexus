@@ -2636,21 +2636,21 @@ class TestBackfillDiagRoleBestEffort:
     def test_no_creds_file_returns_false(self, tmp_path, monkeypatch):
         from nexus.db import pg_provision as pp
 
-        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         assert pp.backfill_diag_role_best_effort() is False
 
     def test_no_port_returns_false(self, tmp_path, monkeypatch):
         from nexus.db import pg_provision as pp
 
         (tmp_path / "pg_credentials").write_text("NX_DB_ADMIN_USER=x\n")
-        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         assert pp.backfill_diag_role_best_effort() is False
 
     def test_happy_path_calls_backfill_and_returns_true(self, tmp_path, monkeypatch):
         from nexus.db import pg_provision as pp
 
         (tmp_path / "pg_credentials").write_text("PG_PORT=54321\n")
-        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr(pp, "discover_pg_binaries", lambda: "BINS")
         monkeypatch.setattr(pp, "bootstrap_superuser", lambda: "os_user")
         seen: dict = {}
@@ -2667,7 +2667,7 @@ class TestBackfillDiagRoleBestEffort:
         from nexus.db import pg_provision as pp
 
         (tmp_path / "pg_credentials").write_text("PG_PORT=54321\n")
-        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr(
             pp, "discover_pg_binaries",
             lambda: (_ for _ in ()).throw(RuntimeError("no bins")),

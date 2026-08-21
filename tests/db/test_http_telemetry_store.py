@@ -49,6 +49,15 @@ _ID_SEQ: dict[str, int] = defaultdict(int)
 
 IMPORT_LOG: list[dict[str, Any]] = []  # captures /import payloads for assertion
 
+#: RDR-196 .p1d (nexus-nyry9.10): the fake ``GET /version`` body, toggled per
+#: test to drive :meth:`HttpTelemetryStore._supports_nx_answer_steps`.
+#: Defaults to a fresh-jar engine (matches this session's real substrate,
+#: which carries the .p1c capability field unconditionally true).
+_VERSION_RESPONSE: dict[str, Any] = {"nx_answer_steps_supported": True}
+#: Counts ``GET /version`` hits — proves the per-instance probe cache
+#: actually avoids a re-probe on a second call against the SAME client.
+_VERSION_REQUEST_COUNT: dict[str, int] = {"n": 0}
+
 
 def _clear_all() -> None:
     with _STORE_LOCK:
@@ -62,6 +71,9 @@ def _clear_all() -> None:
         _frecency.clear()
         _ID_SEQ.clear()
         IMPORT_LOG.clear()
+        _VERSION_RESPONSE.clear()
+        _VERSION_RESPONSE.update({"nx_answer_steps_supported": True})
+        _VERSION_REQUEST_COUNT["n"] = 0
 
 
 class _FakeTelemetryHandler(FakeT2HandlerBase):
@@ -196,6 +208,18 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
         elif pp == "/v1/telemetry/nx_answer_runs/record":
             with _STORE_LOCK:
                 _ID_SEQ["nar"] += 1
+                # cost_usd: mirrors the REAL engine POST telemetry-007-3
+                # (RDR-196 .p1c-b, nexus-lme1s) — nx_answer_runs.cost_usd
+                # DROPped its NOT NULL DEFAULT 0.0, and
+                # TelemetryHandler.handleNxAnswerRunRecord now passes the
+                # client's cost straight through (optDoubleNull, no more
+                # `cost != null ? cost : 0.0` coercion). Absent key AND an
+                # explicit JSON null both mean "no usage observed" and both
+                # must be preserved as None, never fabricated to 0.0 (the
+                # superseded .p1d "known-limitation" note this comment used
+                # to cite no longer applies to the PARENT row).
+                _raw_cost = body.get("cost_usd")
+                cost_usd = float(_raw_cost) if _raw_cost is not None else None
                 _nx_answer_runs.append({
                     "id":                 _ID_SEQ["nar"],
                     "question":           body.get("question", ""),
@@ -203,9 +227,13 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                     "matched_confidence": body.get("matched_confidence"),
                     "step_count":         int(body.get("step_count", 0) or 0),
                     "final_text":         body.get("final_text", ""),
-                    "cost_usd":           float(body.get("cost_usd", 0.0) or 0.0),
+                    "cost_usd":           cost_usd,
                     "duration_ms":        int(body.get("duration_ms", 0) or 0),
                     "created_at":         body.get("created_at") or datetime.now(UTC).isoformat(),
+                    # RDR-196 .p1d (nexus-nyry9.10): captured verbatim (or
+                    # absent) so tests can assert whether the client sent
+                    # per-step telemetry — never re-derived/defaulted here.
+                    "steps":              body.get("steps"),
                 })
             self._send(200, {"ok": True})
 
@@ -324,9 +352,18 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
             self._send(404, {"error": "not found"})
 
     def do_GET(self):
+        pp = urlparse(self.path).path
+        # RDR-196 .p1d (nexus-nyry9.10): mirrors the real ``VersionHandler``
+        # contract — ``/version`` is unauthenticated (checked BEFORE
+        # ``_check_auth()``, unlike every other route below).
+        if pp == "/version":
+            with _STORE_LOCK:
+                _VERSION_REQUEST_COUNT["n"] += 1
+                body = dict(_VERSION_RESPONSE)
+            self._send(200, body)
+            return
         if not self._check_auth():
             return
-        pp = urlparse(self.path).path
         qs = self._qs()
 
         if pp == "/v1/telemetry/relevance/query":
@@ -475,6 +512,11 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
             # the WHOLE since-filtered set, page capped by limit.
             since = qs.get("since", "")
             limit = int(qs.get("limit", "20"))
+            # RDR-196 .p1c-b (nexus-lme1s): optional include_steps=true —
+            # mirrors TelemetryRepository.queryNxAnswerRuns's includeSteps
+            # overload. Absent/false is byte-for-byte the pre-existing
+            # response shape (no "steps" key at all).
+            include_steps = qs.get("include_steps", "").lower() == "true"
             with _STORE_LOCK:
                 rows = list(_nx_answer_runs)
             if since:
@@ -494,7 +536,10 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
             )
             fallback_count = total - hit_count
             durations = [r["duration_ms"] for r in rows]
-            costs = [r["cost_usd"] for r in rows]
+            # None-filtered — mirrors SQL AVG()'s ignore-null semantics (now
+            # reachable here since cost_usd can be None, RDR-196 .p1c-b):
+            # a null-cost row must not crash sum() nor silently avg in as 0.
+            costs = [r["cost_usd"] for r in rows if r["cost_usd"] is not None]
             avg_duration_ms = sum(durations) / len(durations) if durations else None
             avg_cost_usd = sum(costs) / len(costs) if costs else None
 
@@ -526,6 +571,7 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                         "cost_usd": r.get("cost_usd", 0.0),
                         "duration_ms": r.get("duration_ms", 0),
                         "created_at": r["created_at"],
+                        **({"steps": r.get("steps") or []} if include_steps else {}),
                     }
                     for r in page
                 ],
@@ -917,6 +963,97 @@ class TestListTierWrites:
         assert sig.parameters["limit"].default == 100
 
 
+class TestNxAnswerStepsCapabilityProbe:
+    """RDR-196 .p1d (nexus-nyry9.10): the ``GET /version`` capability probe
+    gating ``steps[]`` on ``POST /v1/telemetry/nx_answer_runs/record``."""
+
+    def test_probe_true_when_engine_advertises_support(self, client):
+        _VERSION_RESPONSE.clear()
+        _VERSION_RESPONSE.update({"nx_answer_steps_supported": True})
+        assert client._supports_nx_answer_steps() is True
+
+    def test_probe_false_when_field_absent(self, client):
+        """An engine predating .p1c simply omits the field — never a KeyError,
+        never a crash, just 'unsupported'."""
+        _VERSION_RESPONSE.clear()
+        _VERSION_RESPONSE.update({"app_version": "1.0-SNAPSHOT"})
+        assert client._supports_nx_answer_steps() is False
+
+    def test_probe_false_and_no_raise_on_explicit_false(self, client):
+        _VERSION_RESPONSE.clear()
+        _VERSION_RESPONSE.update({"nx_answer_steps_supported": False})
+        assert client._supports_nx_answer_steps() is False
+
+    def test_probe_cached_per_instance(self, client):
+        """Two calls on the SAME store instance hit /version exactly once —
+        'cache per store instance' per the bead's design note."""
+        before = _VERSION_REQUEST_COUNT["n"]
+        assert client._supports_nx_answer_steps() is True
+        assert client._supports_nx_answer_steps() is True
+        assert _VERSION_REQUEST_COUNT["n"] == before + 1
+
+    def test_probe_false_on_transport_failure_never_raises(self):
+        """nexus-moht0 vacuous-gate doctrine: FORCE the degradation branch —
+        point at a port nothing listens on (not the fake server at all), so
+        the probe hits a real connection failure, not a stubbed 404."""
+        store = HttpTelemetryStore(
+            base_url="http://127.0.0.1:1", tenant=DEFAULT_TENANT, _token=TOKEN,
+        )
+        try:
+            assert store._supports_nx_answer_steps() is False
+        finally:
+            store.close()
+
+    def test_record_includes_steps_when_supported(self, client):
+        _VERSION_RESPONSE.clear()
+        _VERSION_RESPONSE.update({"nx_answer_steps_supported": True})
+        step = {
+            "step_index": 0, "operator": "operator_generate", "source": "llm",
+            "model": "claude-sonnet-5", "input_tokens": 100, "output_tokens": 50,
+            "cost_usd": 0.02, "elapsed_ms": 1200, "ok": True, "bundled_steps": [],
+        }
+        client.record_nx_answer_run(
+            question="q", plan_id=1, matched_confidence=0.8, step_count=1,
+            final_text="answer", cost_usd=0.02, duration_ms=1200, steps=[step],
+        )
+        with _STORE_LOCK:
+            row = _nx_answer_runs[-1]
+        assert row["steps"] == [step]
+
+    def test_record_omits_steps_and_warns_when_unsupported(self, client, caplog):
+        """RDR-196 .p1d DO: 'probe says unsupported -> run-row-only payload
+        + logged warning, never a 400'. FORCE the branch (nexus-moht0) by
+        stubbing the engine to omit the capability field — not waiting for
+        an ambient old-engine condition that never occurs in this suite."""
+        import structlog
+
+        _VERSION_RESPONSE.clear()
+        _VERSION_RESPONSE.update({"app_version": "1.0-SNAPSHOT"})
+        step = {
+            "step_index": 0, "operator": "operator_generate", "source": "llm",
+            "model": None, "input_tokens": None, "output_tokens": None,
+            "cost_usd": None, "elapsed_ms": 500, "ok": True, "bundled_steps": [],
+        }
+        with structlog.testing.capture_logs() as captured:
+            # No exception -> proves "never a 400": an old-engine fake that
+            # does not recognize "steps" would 400 on an unexpected field
+            # the same way the real engine's strict body parser would if
+            # this method sent it anyway.
+            client.record_nx_answer_run(
+                question="q", plan_id=1, matched_confidence=0.8, step_count=1,
+                final_text="answer", cost_usd=None, duration_ms=500, steps=[step],
+            )
+        with _STORE_LOCK:
+            row = _nx_answer_runs[-1]
+        assert row["steps"] is None, "run-row-only: 'steps' must not reach the wire"
+        warnings = [
+            e for e in captured
+            if e.get("event") == "nx_answer_steps_unsupported_by_engine"
+        ]
+        assert warnings, f"expected a degradation warning, got: {captured}"
+        assert warnings[0]["step_count"] == 1
+
+
 class TestQueryNxAnswerRuns:
     """nexus-eho3u: the read half of nx_answer_runs —
     GET /v1/telemetry/nx_answer_runs/query."""
@@ -1036,6 +1173,131 @@ class TestQueryNxAnswerRuns:
             "2min_to_5min": 1, "over_5min": 1,
         }
         assert sum(buckets.values()) == result["total"]
+
+    # ── RDR-196 .p1c-b (nexus-lme1s): include_steps ──────────────────────────
+
+    def test_include_steps_true_returns_steps_per_row(self, client):
+        step = {
+            "step_index": 0, "operator": "operator_filter", "source": "sql",
+            "model": None, "input_tokens": None, "output_tokens": None,
+            "cost_usd": 0.0, "elapsed_ms": 12, "ok": True, "bundled_steps": [],
+        }
+        client.record_nx_answer_run(
+            question="with steps", plan_id=1, matched_confidence=0.9,
+            step_count=1, final_text="answer", cost_usd=0.0, duration_ms=1_000,
+            steps=[step],
+        )
+
+        result = client.query_nx_answer_runs(include_steps=True)
+
+        assert len(result["rows"]) == 1
+        assert result["rows"][0]["steps"] == [step], (
+            "steps must use the SAME field names the write side accepts "
+            "(parseNxAnswerSteps), passed through verbatim"
+        )
+
+    def test_include_steps_false_omits_steps_key(self, client):
+        """Default (False, and the plain 3-arg query_nx_answer_runs()) must be
+        byte-for-byte the pre-existing wire shape — no 'steps' key at all,
+        not even an empty one."""
+        client.record_nx_answer_run(
+            question="no steps requested", plan_id=None, matched_confidence=None,
+            step_count=0, final_text="", cost_usd=0.0, duration_ms=1_000,
+        )
+
+        result = client.query_nx_answer_runs()
+
+        assert len(result["rows"]) == 1
+        assert "steps" not in result["rows"][0]
+
+    def test_include_steps_true_run_with_no_steps_gets_empty_list(self, client):
+        """A run recorded WITHOUT steps must still get 'steps': [] under
+        include_steps=True, never an absent key or None — non-vacuity for
+        the per-row shape, matching TelemetryRepository's
+        getOrDefault(..., List.of()) fallback."""
+        client.record_nx_answer_run(
+            question="no steps written", plan_id=None, matched_confidence=None,
+            step_count=0, final_text="", cost_usd=0.0, duration_ms=1_000,
+        )
+
+        result = client.query_nx_answer_runs(include_steps=True)
+
+        assert len(result["rows"]) == 1
+        assert result["rows"][0]["steps"] == []
+
+    # ── RDR-196 .p1e (nexus-nyry9.11): read-side capability signal ────────
+
+    def test_include_steps_true_carries_steps_supported_true(self, client):
+        """.p1c critique fold (T2 [23099], recorded on .11): reuse the
+        SAME capability probe the write side already gates on so a
+        caller can tell 'the engine ignored include_steps' apart from
+        'these rows genuinely have no steps'."""
+        _VERSION_RESPONSE.clear()
+        _VERSION_RESPONSE.update({"nx_answer_steps_supported": True})
+        client.record_nx_answer_run(
+            question="q", plan_id=None, matched_confidence=None,
+            step_count=0, final_text="", cost_usd=0.0, duration_ms=1_000,
+        )
+
+        result = client.query_nx_answer_runs(include_steps=True)
+
+        assert result["steps_supported"] is True
+
+    def test_include_steps_true_carries_steps_supported_false_for_older_engine(
+        self, client,
+    ):
+        _VERSION_RESPONSE.clear()
+        _VERSION_RESPONSE.update({"app_version": "1.0-SNAPSHOT"})  # pre-.p1c: no field
+        client.record_nx_answer_run(
+            question="q", plan_id=None, matched_confidence=None,
+            step_count=0, final_text="", cost_usd=0.0, duration_ms=1_000,
+        )
+
+        result = client.query_nx_answer_runs(include_steps=True)
+
+        assert result["steps_supported"] is False
+
+    def test_include_steps_false_omits_steps_supported_key(self, client):
+        """The capability signal only makes sense when steps were
+        actually requested -- must not appear (not even as None) on the
+        default no-steps call, matching the existing 'no steps key at
+        all' contract for the rows themselves."""
+        client.record_nx_answer_run(
+            question="q", plan_id=None, matched_confidence=None,
+            step_count=0, final_text="", cost_usd=0.0, duration_ms=1_000,
+        )
+
+        result = client.query_nx_answer_runs()
+
+        assert "steps_supported" not in result
+
+    def test_null_cost_usd_reads_back_as_none_not_zero(self, client):
+        """RDR-196 .p1c-b (nexus-lme1s) review fix: the fake server used to
+        hardcode cost_usd null -> 0.0 on the write path, citing a
+        known-limitation note that telemetry-007-3 (the real engine's
+        cost_usd DROP NOT NULL) superseded. A run recorded with
+        cost_usd=None must now read back as None through query, both on
+        the row itself and in avg_cost_usd — never a fabricated 0.0
+        indistinguishable from a genuine free call."""
+        client.record_nx_answer_run(
+            question="null cost run", plan_id=None, matched_confidence=None,
+            step_count=0, final_text="", cost_usd=None, duration_ms=1_000,
+        )
+        client.record_nx_answer_run(
+            question="known cost run", plan_id=1, matched_confidence=0.9,
+            step_count=1, final_text="answer", cost_usd=0.02, duration_ms=1_000,
+        )
+
+        result = client.query_nx_answer_runs()
+
+        null_row = next(r for r in result["rows"] if r["question"] == "null cost run")
+        known_row = next(r for r in result["rows"] if r["question"] == "known cost run")
+        assert null_row["cost_usd"] is None
+        assert known_row["cost_usd"] == 0.02
+        assert result["avg_cost_usd"] == 0.02, (
+            "avg_cost_usd must ignore the null row (0.02 averaged over the "
+            "1 non-null row, not 0.01 over both)"
+        )
 
 
 class TestConsentAudit:

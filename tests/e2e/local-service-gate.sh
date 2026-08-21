@@ -357,10 +357,13 @@ print(jar_freshness_skip_reason() or "")
       -e "s/^build_ref=.*/build_ref=${GATE_BUILD_REF}/" \
       "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp" \
     && mv "$RELEASE_PROPS.tmp" "$RELEASE_PROPS"
-  if ! (cd service && ./mvnw -q package -DskipTests); then
+  # nexus-c00dw: mvnw-leased.sh takes the single-builder lease around this
+  # ./mvnw call itself (cds into service/ internally) — never call the bare
+  # ./mvnw here, or this gate can collide with a concurrent build.
+  if ! "$REPO_ROOT/scripts/mvnw-leased.sh" -q package -DskipTests; then
     _restore_props
     echo "[gate] ERROR: service jar rebuild failed — fix the Maven build and re-run:" >&2
-    echo "         cd service && ./mvnw package -DskipTests" >&2
+    echo "         scripts/mvnw-leased.sh package -DskipTests" >&2
     exit 2
   fi
   _restore_props
@@ -377,7 +380,7 @@ elif [ -f "$JAR" ]; then
   START_ENV+=("NEXUS_SERVICE_JAR=$JAR")
 else
   echo "[gate] ERROR: no launch artifact — build the dev jar first:" >&2
-  echo "         cd service && ./mvnw -q package -DskipTests" >&2
+  echo "         scripts/mvnw-leased.sh -q package -DskipTests" >&2
   echo "       or export NEXUS_SERVICE_BIN=<native binary>" >&2
   exit 2
 fi
@@ -587,7 +590,13 @@ smoke_verify_count "$SMOKE_PASSED" "$SMOKE_EXPECTED" || exit 1
 # passed/skipped guard below never sees — so tagging tests lived_in (to
 # dodge a red test, or via careless merge) would silently shrink coverage.
 # Exact count, not <=: growing the carve-out must be a conscious edit here.
-LIVED_IN_EXPECTED=39
+# 2026-08-21: 39 -> 41 for nexus-nyry9.11's two RDR-196 Phase 1 MVV tests
+# (tests/integration/test_nx_answer_step_telemetry_mvv.py, module-marked
+# lived_in: isolated and bundled step-telemetry round trips).
+# 2026-08-21: 41 -> 42 for nexus-nyry9.16's RDR-196 .p2c A/B harness
+# (tests/integration/test_rdr_196_p2c_ab_measurement.py, module-marked
+# lived_in: dispatches real claude -p, spends real money).
+LIVED_IN_EXPECTED=42
 LIVED_IN_COUNT="$(uv run pytest -m "integration and lived_in" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
 if [ "$LIVED_IN_COUNT" -ne "$LIVED_IN_EXPECTED" ]; then
   echo "[gate] VACUITY GUARD TRIPPED: lived_in carve-out is $LIVED_IN_COUNT tests, expected exactly $LIVED_IN_EXPECTED" >&2

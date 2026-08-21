@@ -120,7 +120,7 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # suite when it drifts. Following the old wording blocked the 7.6.0 release
 # battery (2026-08-10). A prose comment that contradicts a mechanical test
 # loses to the test.
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.84}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.85}"
 # nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
 # published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
 # resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
@@ -406,6 +406,15 @@ source "$SCRIPT_DIR/../lib/lock.sh"
 LOCKDIR="/tmp/nexus-e2e-locks/migration-rehearsal.lock"
 mkdir -p "$(dirname "$LOCKDIR")"
 lock_acquire "$LOCKDIR" || exit 1
+# nexus-c00dw: the native-build docker step further down writes
+# service/target on the HOST (bind mount) — same resource
+# scripts/build-gate-jar.sh / mvnw-leased.sh guard. Sourced here (same
+# "safe to reference in a trap" point as LOCKDIR above — see the CRITICAL
+# fix note this replaces) so every trap reassignment from here on can
+# chain build_lease_release in as a failure-path backstop; the acquire
+# itself happens locally around the docker invocation, not here.
+# shellcheck source=../../../scripts/lib/build-lease.sh disable=SC1091
+source "$SCRIPT_DIR/../../../scripts/lib/build-lease.sh"
 # Code-review CRITICAL fix: the trap installed at the top of the script
 # (before LOCKDIR existed) referenced $LOCKDIR unconditionally — any of the
 # 12 argument-conflict guards ABOVE this point firing `exit 2` would invoke
@@ -413,7 +422,7 @@ lock_acquire "$LOCKDIR" || exit 1
 # evaluation instead of the documented exit 2. LOCKDIR cannot be referenced
 # by a trap before this line, where it is first assigned — reassign the
 # trap to the lock-aware form only now that it is safe to do so.
-trap '_guided_restore; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+trap '_guided_restore; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
 echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
 # Test seam (RDR-184 P0.2, nexus-ccs9v.2): tests/e2e/lib/harness_lock_test.sh
 # sets this to prove a concurrent invocation gets PAST the lock without ever
@@ -506,6 +515,11 @@ elif [ "$DO_BUILD" = 1 ]; then
     NATIVE_MAXHEAP="$(( vm_mib * 70 / 100 ))m"
     [ "$(( vm_mib * 70 / 100 ))" -lt 5632 ] && NATIVE_MAXHEAP=5632m
     echo "      (builder heap ${NATIVE_MAXHEAP} — 70% of the ${vm_mib}MiB Docker VM)"
+    # nexus-c00dw: ./mvnw runs INSIDE the container, but /src is a bind
+    # mount of this host checkout, so service/target is the same
+    # single-writer resource the host-side lease guards — acquire on the
+    # host, around the docker invocation.
+    build_lease_acquire service docker-native-build migration-rehearsal
     docker run --rm --entrypoint bash \
       --add-host=host.docker.internal:host-gateway \
       -v "$PWD":/src -w /src/service \
@@ -514,6 +528,7 @@ elif [ "$DO_BUILD" = 1 ]; then
       -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
       "$GRAAL_IMAGE" \
       -c "./mvnw -B -Pnative -DskipTests -Dnative.image.opt=-Ob -Dnative.image.maxheap=${NATIVE_MAXHEAP} package"
+    build_lease_release service
   else
     # nexus-ndve9: when we DO reuse, say how old the artifact is — the failing
     # shakeout's log recorded only "candidate native binary present", which
@@ -525,7 +540,12 @@ else
   echo "[1-2/3] --no-build: reusing existing wheel + native binary"
 fi
 
-if [ "$COLD" = 0 ] && [ "$HOLE_PUNCH" = 0 ] && [ "$PACKAGE_UPGRADE" = 0 ] && [ "$ERA_HOP" = 0 ] && [ "$STRANDED" = 0 ]; then
+# nexus-nyry9.13 (2026-08-21): --acquire is a cold-acquire leg too — it stages
+# NO local native binary (see the ACQUIRE staging branch below), so it must be
+# excluded here exactly like the other runtime-acquire legs. Without this, the
+# published-artifact gate demanded service/target/nexus-service on any box that
+# had not happened to leave a stale one behind, and failed before testing anything.
+if [ "$COLD" = 0 ] && [ "$HOLE_PUNCH" = 0 ] && [ "$PACKAGE_UPGRADE" = 0 ] && [ "$ERA_HOP" = 0 ] && [ "$STRANDED" = 0 ] && [ "$ACQUIRE" = 0 ]; then
   ls dist/conexus-*.whl >/dev/null 2>&1 || { echo "no wheel in dist/ — drop --no-build" >&2; exit 1; }
   [ -x service/target/nexus-service ] || { echo "no native binary at service/target/nexus-service — drop --no-build" >&2; exit 1; }
 fi
@@ -565,7 +585,7 @@ echo "[stage] Staging a minimal build context + building image (COLD=$COLD HOLE_
 # repo .dockerignore excludes dist/, and the inputs live in three different
 # trees — staging sidesteps both without touching the shared .dockerignore.
 STAGE="$(mktemp -d)"
-trap '_guided_restore; rm -rf "$STAGE"; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+trap '_guided_restore; rm -rf "$STAGE"; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
 cp "$(ls -t dist/conexus-*.whl | head -1)"            "$STAGE/"   # keep real PEP 427 name
 # Lock-derived dependency manifest for the split install layer (Dockerfile /
 # .cold / .fullstack): the wheel's bytes churn every build (embedded mtimes),
@@ -754,7 +774,7 @@ DCFG="$HOME/.docker/config.json"
 if [ -f "$DCFG" ] && grep -q '"credsStore"' "$DCFG"; then
   cp "$DCFG" "$STAGE/.docker-config.bak"
   python3 -c "import json,os;p=os.path.expanduser('~/.docker/config.json');d=json.load(open(p));d.pop('credsStore',None);json.dump(d,open(p,'w'),indent=2)"
-  trap '_guided_restore; cp "$STAGE/.docker-config.bak" "$DCFG"; rm -rf "$STAGE"; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+  trap '_guided_restore; cp "$STAGE/.docker-config.bak" "$DCFG"; rm -rf "$STAGE"; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
   echo "      (temporarily stripped credsStore from ~/.docker/config.json — restored on exit)"
 fi
 

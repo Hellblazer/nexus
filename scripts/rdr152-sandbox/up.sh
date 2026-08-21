@@ -82,7 +82,10 @@ echo "[up] Postgres ready: PG_PORT=${PG_PORT} PG_DATA=${PG_DATA}"
 JAR="${REPO_ROOT}/service/target/nexus-service-1.0-SNAPSHOT.jar"
 if [[ ! -f "${JAR}" ]]; then
     echo "[up] Building Java service jar (may take ~60s)..."
-    (cd "${REPO_ROOT}/service" && mvn -q package -DskipTests)
+    # nexus-c00dw: route through the single-builder lease — this sandbox
+    # still builds the SAME service/target in this checkout (REPO_ROOT is
+    # not an isolated copy), so it shares the collision surface.
+    "${REPO_ROOT}/scripts/mvnw-leased.sh" -q package -DskipTests
     echo "[up] Jar built: ${JAR}"
 else
     echo "[up] Using existing jar: ${JAR}"

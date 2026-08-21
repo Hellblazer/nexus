@@ -18,7 +18,7 @@ from nexus.health import _check_index_log
 
 @pytest.fixture
 def config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "logs").mkdir()
     return tmp_path
 

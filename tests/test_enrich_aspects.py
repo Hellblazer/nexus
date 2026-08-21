@@ -25,7 +25,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.aspect_extractor import AspectRecord
-from nexus.commands.enrich import enrich
+from nexus.commands.enrich import _PER_PAPER_COST_USD, enrich
 from tests._catalog_fixture_ops import ActiveCatalog
 
 # nexus-aqbrk: the dies-roster that used to cover 18 tests here was
@@ -199,7 +199,7 @@ class TestDryRun:
         assert result.exit_code == 0, result.output
         assert "5 document(s)" in result.output
         assert "knowledge__delos" in result.output
-        assert "$0.05" in result.output  # 5 × $0.01
+        assert f"${5 * _PER_PAPER_COST_USD:.2f}" in result.output
         assert "--dry-run: skipping extraction" in result.output
         # Prediction step gracefully skipped when T3 is unavailable.
         assert "read-side prediction skipped" in result.output
@@ -283,7 +283,7 @@ class TestDryRun:
         assert "empty=1" in result.output
         assert "unreachable=2" in result.output
         # Predicted cost reflects the 2 readable entries.
-        assert "$0.02" in result.output
+        assert f"${2 * _PER_PAPER_COST_USD:.2f}" in result.output
 
 
 # ── nexus-ow9f: cost estimate distinguishes deterministic extractor ─────────
@@ -291,7 +291,7 @@ class TestDryRun:
 
 class TestDeterministicCostEstimate:
     """The ``rdr-frontmatter-v1`` extractor is a pure-Python parser
-    (``parser_fn`` set, ``prompt_template`` empty). Reporting a Haiku
+    (``parser_fn`` set, ``prompt_template`` empty). Reporting an LLM-dispatch
     cost estimate for it is misleading — the user runs the command
     expecting LLM cost and instead gets ~free deterministic parsing.
     Deterministic extractors must report ``$0.00`` / "no API cost".
@@ -325,17 +325,17 @@ class TestDeterministicCostEstimate:
         )
         assert result.exit_code == 0, result.output
         assert "5 document(s)" in result.output
-        # Reports the no-API-cost branch instead of ``~$0.05 at Haiku``.
+        # Reports the no-API-cost branch, not the measured-estimate branch.
         assert "deterministic parser" in result.output
         assert "$0" in result.output
-        assert "Haiku" not in result.output
+        assert "single-sample measured estimate" not in result.output
 
-    def test_dry_run_knowledge_collection_still_reports_haiku_cost(
+    def test_dry_run_knowledge_collection_still_reports_measured_cost(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Regression guard: the new branch must not swallow the cost
         estimate for LLM-backed extractors. ``knowledge__*`` keeps the
-        Haiku-rate output."""
+        measured-estimate output."""
         _, _, cat = env
         _register_entries(cat, [f"/papers/p{i}.pdf" for i in range(3)])
 
@@ -348,8 +348,8 @@ class TestDeterministicCostEstimate:
             enrich, ["aspects", "knowledge__delos", "--dry-run"],
         )
         assert result.exit_code == 0, result.output
-        assert "Haiku" in result.output
-        assert "$0.03" in result.output
+        assert "single-sample measured estimate" in result.output
+        assert f"${3 * _PER_PAPER_COST_USD:.2f}" in result.output
 
 
 # ── nexus-ow9f: source_uri visibility in dry-run skips ──────────────────────

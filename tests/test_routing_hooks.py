@@ -247,6 +247,25 @@ def test_escape_token_rejected_when_no_colon_payload():
 # ---------------------------------------------------------------------------
 
 
+def test_log_path_fallback_resolves_home_at_call_time_not_import_time(tmp_path, monkeypatch):
+    """nexus-pfuns / T2 nexus/gc-purge-marker-xdist-leak-2026-08-20: the
+    fallback used to be a module-level constant (``_DEFAULT_LOG_PATH =
+    pathlib.Path.home() / ...``) frozen at import. A patch to
+    ``pathlib.Path.home`` applied AFTER the module is already loaded (as
+    ``_load_lib()`` does, re-exec'ing fresh each call -- but a patch
+    applied to THIS already-loaded instance, mirroring how a real
+    long-lived process would behave) could never take effect. Same
+    import-time-default class already fixed once for
+    ``gc_purge_marker.py``."""
+    monkeypatch.delenv("NX_ROUTING_LOG_PATH", raising=False)
+    lib = _load_lib()
+    new_home = tmp_path / "new-home"
+    new_home.mkdir()
+    monkeypatch.setattr(pathlib.Path, "home", lambda: new_home)
+    resolved = lib._log_path()
+    assert resolved == new_home / ".config" / "nexus" / "routing_log.jsonl"
+
+
 def test_log_routing_event_appends_jsonl(tmp_path, monkeypatch):
     log_path = tmp_path / "routing_log.jsonl"
     monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log_path))

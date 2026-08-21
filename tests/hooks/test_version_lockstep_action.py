@@ -21,6 +21,7 @@ hook. It owns the editable gate and the marker write. Contract:
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,16 @@ def mod():
 def marker(tmp_path: Path, monkeypatch) -> Path:
     m = tmp_path / "nexus" / "cli_lockstep_marker"
     monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(m))
+    # nexus-pfuns: `mod.main()` calls `log_event()` (-> NX_LOCKSTEP_LOG,
+    # real fallback `~/.config/nexus/lockstep.log`) on every code path past
+    # the no-op fast path -- not just the two failure branches the
+    # standalone `log` fixture below was originally written for. Every
+    # test in this module that requests only `marker` and then calls
+    # `mod.main(...)` (TestTwoCommandOrdering, TestMarkerOnConfirmedSuccess,
+    # TestFailureLeavesMarkerStale, ...) leaked into the real path before
+    # this. Isolating it here too -- the identical path `log` computes, so
+    # a test requesting BOTH fixtures just re-sets it to the same value.
+    monkeypatch.setenv("NX_LOCKSTEP_LOG", str(tmp_path / "nexus" / "lockstep.log"))
     return m
 
 
@@ -56,6 +67,45 @@ def log(tmp_path: Path, monkeypatch) -> Path:
     p = tmp_path / "nexus" / "lockstep.log"
     monkeypatch.setenv("NX_LOCKSTEP_LOG", str(p))
     return p
+
+
+class TestMarkerFixtureIsolatesLockstepLogToo:
+    def test_marker_only_still_isolates_log_env(self, mod, marker, monkeypatch) -> None:
+        """nexus-pfuns regression pin: a test requesting only `marker` (no
+        explicit `log`) must still get an isolated NX_LOCKSTEP_LOG, since
+        `mod.main()` writes it on every path past the no-op fast path.
+        Before the `marker` fixture set this env var, NX_LOCKSTEP_LOG was
+        simply absent here and `log_path()`'s fallback resolved to the
+        real `~/.config/nexus/lockstep.log`."""
+        real_log = Path.home() / ".config" / "nexus" / "lockstep.log"
+        isolated = os.environ.get("NX_LOCKSTEP_LOG", "")
+        assert isolated, "marker fixture must set NX_LOCKSTEP_LOG"
+        assert Path(isolated) != real_log
+        assert Path(isolated).parent == marker.parent
+
+    def test_marker_only_main_call_writes_under_tmp_not_real_home(
+        self, mod, marker, monkeypatch
+    ) -> None:
+        """End-to-end: drive `mod.main()` down a path that logs (past the
+        no-op fast path) using only the `marker` fixture, and assert the
+        write landed under the isolated NX_LOCKSTEP_LOG, never the real
+        home. Reproduces the exact leak shape evidenced in T2 nexus/
+        gc-purge-marker-xdist-leak-2026-08-20 (installed=1.0.0/1.0.1 rows
+        in Sam's real lockstep.log)."""
+        real_log = Path.home() / ".config" / "nexus" / "lockstep.log"
+        real_mtime_before = real_log.stat().st_mtime if real_log.exists() else None
+        _wire(
+            mod, monkeypatch, receipt=True,
+            installed_versions=["1.0.0", "1.0.1"], run_results={},
+        )
+        mod.main(["action", "9.9.9"])
+        isolated_log = Path(os.environ["NX_LOCKSTEP_LOG"])
+        assert isolated_log.exists(), "log_event must have written somewhere"
+        assert "installed=1.0.1" in isolated_log.read_text()
+        real_mtime_after = real_log.stat().st_mtime if real_log.exists() else None
+        assert real_mtime_after == real_mtime_before, (
+            "must never touch the real ~/.config/nexus/lockstep.log"
+        )
 
 
 def _wire(mod, monkeypatch, *, receipt: bool, installed_versions, run_results):

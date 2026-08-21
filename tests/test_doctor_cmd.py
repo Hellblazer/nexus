@@ -30,7 +30,19 @@ def _isolate_cloud_credentials_from_host_env(monkeypatch, tmp_path):
     """
     for env_var in ("CHROMA_API_KEY", "VOYAGE_API_KEY", "CHROMA_TENANT", "CHROMA_DATABASE"):
         monkeypatch.delenv(env_var, raising=False)
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    # Redirect via env, NOT monkeypatch.setattr("nexus.config.
+    # nexus_config_dir", ...): nexus_config_dir() reads NEXUS_CONFIG_DIR at
+    # call time (config.py), so setenv reaches every consumer and leaves no
+    # lambda behind. The setattr form leaked out of this file — the doctor
+    # runs below FIRST-import nexus.gc_purge_marker (deferred import in
+    # health._check_gc_audit_non_empty_after_purge) inside the patched
+    # window, and a module capturing nexus_config_dir by value keeps the
+    # lambda after teardown, pinning that consumer to this fixture's dead
+    # tmp dir for the rest of the worker process (2026-08-20: broke three
+    # TestGcPurgeMarker tests in tests/test_health_service_checks.py under
+    # -n auto; identical to the v7.11.0 / PR #1467 incident recorded in
+    # tests/test_false_clean_diagnostics_service_mode.py).
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
 
 @pytest.fixture()

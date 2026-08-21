@@ -30,7 +30,7 @@ Confirm the full Java suite + native build passed on the exact `service/` tree:
 # fast path: if service/ at HEAD is byte-identical to a green service-ci commit, that CI covers it
 git diff --stat <green-service-ci-sha> HEAD -- service/    # empty = covered
 # else run locally (needs Docker for Testcontainers pgvector + the bge ONNX model):
-cd service && ./mvnw -q test
+scripts/mvnw-leased.sh -q test
 ```
 
 The Java CI (`service-ci.yml`) is **advisory** — it does not block auto-merge — so verify it actually passed on this tree rather than assuming.
@@ -168,7 +168,7 @@ finding, not a harness formality: its maiden runs caught two production bugs
 the unit suites missed (nexus-h8rf6).
 
 Notes:
-- The host JVM suite (`cd service && ./mvnw -q test`, Step 2) validates the Java
+- The host JVM suite (`scripts/mvnw-leased.sh -q test`, Step 2) validates the Java
   on the JVM; `--shakeout` adds the native-image build + serve + drive.
 - **Do NOT use `release-sandbox.sh`** — it swaps the uv tool venv and can break
   the live install. The container rehearsal is the safe, isolated one.
@@ -280,6 +280,27 @@ check replaces what would otherwise be a P7 human-checklist item alone —
 see nexus-i5c2u for why an eyeball-only version of this class of check has
 already burned this project once (9+ days of cloud engine drift that
 nothing caught).
+
+### 3e. PRE-TAG check: new `/version` fields need a PAIRED conexus edge-allowlist change (nexus-04sff)
+
+The public edge (`api.conexus-nexus.com`) does NOT pass the engine's
+`/version` body through verbatim — it trims it to a deliberate, reviewed
+ALLOWLIST (conexus-24c4: `schema_*` fields fingerprint the DB journal and
+`schema_error` can carry raw exception text, so verbatim pass-through was
+rejected by design and stays rejected). Any NEW field the engine adds to
+`/version` is therefore dead at the edge until conexus adds it to that
+allowlist — exactly how `nx_answer_steps_supported` (engine-service-v0.1.85)
+shipped engine-green through every gate above and then read as absent to
+every cloud client (cloud-client-path-gate leg A FAILED 2026-08-21,
+nexus-04sff / conexus-f6w7; same class as nexus-bwulw).
+
+Before pushing the tag: `git diff <last-engine-tag>..HEAD --
+service/src/main/java/dev/nexus/service/http/VersionHandler.java`. For every
+field ADDED, surface a REQUEST relay to conexus naming the field and the
+engine tag ("add `<field>` to the edge /version allowlist, mirror-don't-invent:
+absent on older engines stays absent") and record the conexus bead id on the
+nexus bead before the tag — the edge half must be live before Step 6.1 can
+pass, and Step 6.1 is what gates the paired client release.
 
 ### 4. Push the tag (human, or AI when explicitly authorized)
 

@@ -37,6 +37,12 @@ on:
 
 permissions:
   contents: read
+  # nexus-f6qzj: the three CI-evidence `mandatory_regression_pin` tests
+  # (tests/scripts/test_check_release_ci_evidence.py) read check-runs and
+  # PR association through `gh api` with the job token — read scopes only.
+  checks: read
+  pull-requests: read
+  actions: read
 
 concurrency:
   group: local-service-gate-nightly
@@ -63,6 +69,13 @@ jobs:
           # also gets develop; dispatch from a feature ref if you need a
           # different tree.
           ref: develop
+          # nexus-f6qzj: the gate's `mandatory_regression_pin` tests need the
+          # REAL tag history (v7.6.1 / engine-service-v0.1.71 for the
+          # release-floor source-ancestry pin) — a shallow clone makes them
+          # skip, and tests/conftest.py's non-vacuity guard (budget 0) then
+          # correctly reds the whole run. Full depth + tags, same as ci.yml.
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up uv
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
@@ -179,6 +192,23 @@ jobs:
           # additions bump it consciously says removals do too.
           NX_GATE_FLOOR: "452"
           NX_GATE_BUDGET: "25"
+          # nexus-f6qzj (Sam, 2026-08-20: "grant it the read token"): the
+          # gate's `-m integration` run collects the `mandatory_regression_pin`
+          # tests, which authenticate via GITHUB_TOKEN / `gh auth token`
+          # (tests/scripts/test_check_release_ci_evidence.py::_live_github_token).
+          # Without a token all four skipped and the session-level
+          # non-vacuity guard reddened every nightly since the pins landed.
+          # Job token, read-only permissions above. MEASURED by dispatch
+          # (run 32401440865, 2026-08-20): 3/4 pins now run; the ONE residual
+          # is test_required_check_contexts_matches_live_branch_protection,
+          # which skips with `gh: Resource not accessible by integration
+          # (HTTP 403)` — reading branch protection needs push/admin access a
+          # job token cannot carry. Budget sized to EXACTLY that pin; any
+          # second skip still reds the run. Lifting it needs a PAT secret
+          # (Sam-provisioned), not a permissions line.
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          NX_MANDATORY_PIN_SKIP_BUDGET: "1"
         run: |
           set -euo pipefail
           if [ -z "$VOYAGE_API_KEY" ]; then

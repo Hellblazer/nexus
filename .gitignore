@@ -51,4 +51,10 @@ notes/
 docs/workflow-engine-with-ext-apps.md
 scripts/spikes/s04-build/target/
 service/target/
+service/.build-lease/
 tests/containers/out/
+
+# scripts/bench/operator_proxy_variance.py's raw per-dispatch report
+# (transcripts + DispatchUsage from real, costed claude -p calls) --
+# reproducible on demand, not a source-of-truth artifact to diff in git.
+bench/out/

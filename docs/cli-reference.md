@@ -3047,7 +3047,7 @@ In service mode the counts are read from the engine via `GET /v1/telemetry/tier_
 ## nx answer-runs
 
 ```
-nx answer-runs [--since ISO8601] [--limit N] [--json]
+nx answer-runs [--since ISO8601] [--limit N] [--steps] [--include-failed] [--json]
 ```
 
 Reads the `nx_answer_runs` telemetry table: every `nx_answer` MCP call
@@ -3057,26 +3057,31 @@ read one back — the ETL `import_nx_answer_run` path doesn't count, it only
 writes in the other direction. Service-mode only; the table has no
 session_id column, so unlike `nx tier-status` there is no per-session
 default — `--since` bounds the window, `--limit` caps the listed page
-(default 20, does not affect the aggregates), `--json` emits structured
-output.
+(default 20, does not affect the whole-set aggregates below), `--json`
+emits structured output.
 
-Reports, computed over the whole `--since`-filtered set independent of
-`--limit`: total run count, oldest run timestamp, plan-match hit count vs.
-inline-planner fallback count, average `duration_ms`/`cost_usd`, and a
-fixed-edge latency histogram (`<5s`, `5s-30s`, `30s-2min`, `2min-5min`,
-`>5min` — the same buckets as the production distribution `nx_answer`'s own
-docstring cites, and the shape the shakedown playbook's §4.5 telemetry
-baseline snapshot captures every run). Against an engine that predates the
-route (or an unreachable service) the command degrades to an honest
-"service-backed; read unavailable" message — a 404 is diagnosed as version
-skew, any other HTTP status points at a live engine error, never a silent
-"total: 0".
+Reports, computed by the ENGINE over the WHOLE `--since`-filtered set
+independent of `--limit`, **including degenerate and failed rows**: total
+run count, oldest run timestamp, plan-match hit count vs. inline-planner
+fallback count, average `duration_ms`/`cost_usd`, and a fixed-edge latency
+histogram (`<5s`, `5s-30s`, `30s-2min`, `2min-5min`, `>5min` — the same
+buckets as the production distribution `nx_answer`'s own docstring cites,
+and the shape the shakedown playbook's §4.5 telemetry baseline snapshot
+captures every run). The human output labels this block explicitly
+(`engine aggregate: ALL rows incl. degenerate + failed, whole
+--since-filtered set`) — see § Three-way row split below for the
+executed-ok-only counterpart, printed alongside it. Against an engine that
+predates the route (or an unreachable service) the command degrades to an
+honest "service-backed; read unavailable" message — a 404 is diagnosed as
+version skew, any other HTTP status points at a live engine error, never a
+silent "total: 0".
 
 A "hit" is a row with a REAL matched plan (`plan_id` set and non-zero).
 `plan_id = 0` is the synthetic ad-hoc `Match` sentinel every SUCCESSFUL
 inline-planner run carries internally — not a matched plan — so it counts
 toward `fallback`, and the per-row listing renders it `fallback` rather
-than the misleading `plan=0`.
+than the misleading `plan=0`. (This per-row display convention is separate
+from the `--steps` by-plan grouping key — see below.)
 
 `created_at` is stamped by the ENGINE's clock, not this machine's. A run
 recorded moments ago may not appear for a sub-second-precision `--since`
@@ -3092,6 +3097,155 @@ successive §4.5 baseline snapshots can see the window and page size that
 produced each one. `captured_at` is this process's own wall clock at
 render time (display metadata only, never compared against a server
 timestamp).
+
+### Three-way row split: executed-ok / executed-failed / degenerate (RDR-196 .p1e)
+
+Of the `--limit` rows actually listed (a PAGE-scoped diagnostic, DIFFERENT
+from the whole-set engine block above — never mistake one for the other),
+every row is split three ways:
+
+- **executed-ok** (`step_count > 0` and the run succeeded) — the default
+  population for every `--steps` aggregate below and for the page-scoped
+  `executed_ok_*` latency fields.
+- **executed-failed** (`step_count > 0` but the run FAILED: `final_text`
+  starts with `"Error:"`, or — only detectable with `--steps` — the last
+  recorded step's `ok` is `false`). A run that completed real, billable
+  steps and then failed is a genuinely different population from a
+  success; conflating the two reproduces the exact 45x-wrong-latency
+  mistake this arc exists to end (a prior cut of this command did exactly
+  that — see the code-review finding on nexus-nyry9.11).
+- **degenerate** (`step_count == 0`) — further named by a read-time
+  heuristic over `question`/`final_text`, never treated as a homogeneous
+  "broken" bucket, since the nx-answer-degenerate-row-taxonomy census
+  found 62% of a real degenerate population was the *benign* `redacted`
+  class, not an error:
+  - `redacted` — `trace=False` privacy opt-out (`final_text`/`question`
+    == `"[redacted]"`).
+  - `planner_error` — the inline-planner phase failed before any plan
+    step ran.
+  - `error` — a plan-execution or binding error before/without any
+    completed step.
+  - `other` — anything else (harness probes, unclassified rows).
+
+`--json` carries `executed_ok_count`, `executed_failed_count`,
+`degenerate_count`, `degenerate_breakdown: {class: count}`, plus a
+page-scoped, executed-ok-only latency view: `executed_ok_avg_duration_ms`
+and `executed_ok_latency_buckets` (same fixed edges as the whole-set
+`latency_buckets` above, computed client-side from just the executed-ok
+rows shown).
+
+`--include-failed` folds executed-failed rows into the `--steps`
+breakdown population alongside executed-ok rows (default: executed-ok
+only) — the default answers "what does a working run cost", the flag
+answers "what did failures cost too". Degenerate rows are never eligible
+either way — they carry no steps to aggregate.
+
+### Per-step breakdown (`--steps`)
+
+Also fetches each listed row's `steps` (`GET
+.../nx_answer_runs/query?include_steps=true`, nexus-lme1s / RDR-196
+.p1c-b) and renders, from the executed-ok rows by default (executed-ok +
+executed-failed with `--include-failed`; see above):
+
+- **by operator** and **by source** (`llm` | `sql` | `bundle`), stable
+  `--json` keys per entry (consumed directly by RDR-196 .p2a/.p2c):
+  `count`, `known_cost_count`, `unknown_cost_count`, `total_cost_usd`,
+  `median_cost_usd`, `total_elapsed_ms`, `median_elapsed_ms`.
+- **by plan** (keyed by `plan_id` as a string, or `"fallback"` for a
+  genuine planner-error miss with no `plan_id` at all — `plan_id=0`, the
+  ad-hoc inline-planner sentinel, gets its OWN `"0"` key, distinct from
+  `"fallback"`): `run_count`, `median_cost_usd`, `median_elapsed_ms`.
+- **cost-consistency violations**: rows where a row's own `cost_usd`
+  disagrees with `sum(steps.cost_usd)` beyond a relative epsilon (0.5%,
+  sub-cent absolute floor — a literal to-the-cent tolerance is too loose
+  for typical $0.0001-$0.05 per-call costs). Both unknown (`None`) agrees
+  trivially; exactly one unknown never agrees.
+
+A step's `cost_usd` of `None` ("unknown", not a measured cost — see
+`StepRecord`'s own docstring, `plans/runner.py`) is excluded from every
+sum/median but its count is always shown, never silently folded into a
+zero.
+
+Against an engine that predates the `nx_answer_steps` read route, `--steps`
+degrades honestly: the human output states "does not support
+include_steps"; `--json`'s `step_breakdown` is exactly
+`{"steps_supported": false}` — never an empty breakdown indistinguishable
+from "no steps were ever recorded".
+
+### Predicted vs actual cost (RDR-196 Phase 3 Step 1)
+
+When `plan_match` returns more than one above-floor candidate, `nx_answer`
+picks among the CONTIGUOUS PREFIX of candidates (matcher order, starting
+from the top match) within `PLAN_CHOICE_CONFIDENCE_BAND` (a named
+constant, `nexus.plans.cost_estimate`) of the best raw confidence by the
+**lowest PREDICTED cost** — an estimate from the candidate's step shape
+(`nexus.plans.cost_estimate.estimate_plan_cost`), not a recorded per-plan
+median (nexus-nyry9.3's `.r3` census found zero plans with a rankable
+recorded-run population — see the RDR for detail). The prefix stops
+permanently at the first candidate outside the band even if a later one
+would individually qualify, so cost-ranking can never reach past a
+relevance demotion the matcher's own scope-fit re-ranking (RDR-091)
+already made; ties within the prefix break by earlier matcher position,
+never by confidence. Outside the prefix, confidence wins regardless of
+predicted cost. This decision runs on EVERY plan-match hit, not only when
+more than one candidate is returned (candidate_count=1 is the common
+case today per nexus-nyry9.3's census) — every candidate considered, its
+predicted `usd`/`ms`/`basis`, and which one was chosen are written to
+`structlog` as a `nx_answer_plan_choice` event on every hit (tail
+`~/.config/nexus/logs/mcp.log`), and to the `structured=True` envelope's
+`plan_choice` field (`{candidates, candidate_count, chosen_plan_id,
+predicted_cost_usd, basis}`; `None` on any path that never reaches Step
+1's hit branch — force_dynamic, a plan-miss, or an error before Step 1).
+
+**In this table**: `--steps`' `by_plan` entries carry `predicted_cost_usd`
+and `predicted_basis` alongside the recorded `median_cost_usd` —
+estimate vs actual, side by side. This is computed READ-TIME on every
+`nx answer-runs --steps` call (fetches each plan's stored `plan_json`
+from the plan library, prices it via `estimate_plan_cost` against a price
+table built from the SAME telemetry query), never persisted — there is
+still no `predicted_cost_usd` COLUMN on `nx_answer_runs`/`nx_answer_steps`
+(the engine-side wire is unchanged; folding a persisted column in is
+deferred to a later RDR-196 Phase 3 step). The `"fallback"` bucket (a
+genuine planner-error miss with no `plan_id`, hence no stored plan JSON)
+always reports `predicted_basis: "ad-hoc-no-plan-json"`; a plan library
+lookup failure or a deleted plan degrades that row's predicted fields to
+`None` with a named `predicted_basis` (`"unavailable"` /
+`"plan-not-found"` / `"plan-json-missing"`), never a crash and never a
+silent `0`.
+
+### Per-operator model tiering (RDR-196 Phase 2 Step 3)
+
+`nexus.operators.model_tiers.FLIPPED_OPERATORS` — `operator_filter`,
+`operator_groupby`, `operator_extract`, `operator_rank` — dispatch at the
+cheap model tier **by default**, no opt-in required, since the .p2c A/B
+measurement (nexus-nyry9.16/.17) cleared both pre-registered refutation
+criteria for all four (14-20x cheaper, agreement at/above the .p2a
+quality-proxy threshold on every measured pair). Every other operator
+(`check`/`verify`/`aggregate`/`summarize`/`compare`/`generate`) is
+unaffected by default — still dispatches at the untiered default model,
+either because no tiering delta was ever proposed for it (check/verify)
+or because no quality proxy exists to validate a cheap-tier switch
+(aggregate/summarize/compare/generate). See
+`docs/rdr/rdr-196-cost-aware-nx-answer.md`'s Phase 2 OUTCOME block for
+the full per-operator decision table.
+
+`NX_OPERATOR_MODEL_TIERING` is a 3-state override, consulted by the two
+production call sites that route operator dispatches (`plans/runner.py`'s
+isolated-step path, `mcp/core.py`'s inline planner):
+
+| value | meaning |
+|---|---|
+| unset (default) | the .p2d default flip above — only the 4 flipped operators route cheap |
+| `1` | measurement override: consult the WHOLE tier table (`nexus.operators.model_tiers.OPERATOR_MODEL_TIER`), including "strong" entries — for A/B re-verification, not production traffic |
+| `0` | kill switch: forces every operator back to strong (pre-.p2d behaviour), without a code change — rollback lever |
+
+A plan step (or MCP tool call) that already supplies its own `model=`
+argument always wins over any of the above — the tiering machinery only
+ever fills a gap the caller left unset. Bundled operator dispatches
+(`nexus.plans.bundle.dispatch_bundle`) are never affected by any of the
+three states — bundling never consults model tiers, so a bundle
+containing a flipped operator still dispatches at the default (strong)
+model.
 
 ---
 

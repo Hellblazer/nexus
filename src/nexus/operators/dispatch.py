@@ -15,6 +15,7 @@ import contextvars
 import json
 import os
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
@@ -51,6 +52,53 @@ def rolled_up_dispatch_failures() -> Iterator[None]:
     finally:
         _ROLLED_UP.reset(token)
 
+
+#: RDR-196 .p1b Gap 1 (nexus-nyry9.8 coordinator addendum, 2026-08-20): an
+#: AMBIENT usage sink, parallel to ``_ROLLED_UP`` above. The explicit
+#: ``usage_sink`` kwarg on ``claude_dispatch`` only helps a caller that
+#: invokes ``claude_dispatch`` directly (``plans/bundle.py``'s
+#: ``dispatch_bundle`` is the only one inside this package) — it does
+#: NOT reach a caller further up the stack, such as ``plans/runner.py``'s
+#: isolated-step dispatch, which goes through the ``ToolDispatcher``
+#: protocol into one of 10 separate ``operator_*`` MCP-tool functions in
+#: ``mcp/core.py`` (extract/rank/compare/summarize/generate/filter/
+#: check/verify/groupby/aggregate), each of which owns ITS OWN internal
+#: ``claude_dispatch`` call. Threading an explicit ``usage_sink`` kwarg
+#: through all 10 signatures would be a much larger, separately-scoped
+#: change; the ambient sink closes that gap without touching any of
+#: them. ``None`` (the default) is a complete no-op — byte-identical to
+#: every dispatch before this addendum. asyncio Tasks copy the current
+#: ``contextvars.Context`` at creation time, so a sink set here survives
+#: any ``asyncio.create_task`` an operator issues internally (proven by
+#: ``test_ambient_usage_sink_survives_child_task`` in
+#: tests/test_operator_dispatch.py) — no special handling needed.
+_ambient_usage_sink: contextvars.ContextVar[list[DispatchUsage] | None] = (
+    contextvars.ContextVar("dispatch_ambient_usage_sink", default=None)
+)
+
+
+@contextmanager
+def ambient_usage_sink(sink: list[DispatchUsage]) -> Iterator[None]:
+    """Scope *sink* as the ambient usage-capture target for every
+    ``claude_dispatch`` call made within this context — IN ADDITION to
+    whatever explicit ``usage_sink`` (if any) an individual call also
+    passes; both receive the SAME ``DispatchUsage`` instance (parsed
+    once), never two independently-parsed copies.
+
+    ``plans/runner.py`` wraps each isolated / bundle-fallback step
+    dispatch in this context manager so a ``StepRecord`` can be built
+    from real usage even though the dispatch reaches ``claude_dispatch``
+    through an ``operator_*`` MCP-tool function this module never calls
+    directly. Nested/overlapping scopes are NOT a supported use case —
+    the inner scope's ``reset`` restores exactly the value the token
+    captured, same discipline as ``rolled_up_dispatch_failures`` above.
+    """
+    token = _ambient_usage_sink.set(sink)
+    try:
+        yield
+    finally:
+        _ambient_usage_sink.reset(token)
+
 #: Per-stream cap on what the failure log records, in characters.
 #: Sized against the handler's real budget, not picked for feel: the log
 #: rotates at 10 MB x 5 backups (:mod:`nexus.logging_setup`), so a 16 KB
@@ -70,6 +118,7 @@ _TRUNCATION_MARKER: str = "...[truncated]"
 
 __all__ = [
     "claude_dispatch",
+    "ambient_usage_sink",
     "rolled_up_dispatch_failures",
     "OperatorError",
     "OperatorOutputError",
@@ -438,6 +487,162 @@ def _parse_stream_json_output(raw: str) -> tuple[dict[str, Any] | None, str, int
     return final_result, "".join(partial_text_parts), event_count
 
 
+@dataclass(frozen=True)
+class ModelUsage:
+    """Per-model usage/cost breakdown from a stream-json result event's
+    ``modelUsage`` map (RDR-196 196-R1). The wire payload's field names
+    are camelCase (``inputTokens``, ``costUSD``, ``canonicalModel``, ...);
+    attributes here are the snake_case translation.
+    """
+
+    canonical_model: str
+    input_tokens: int | None
+    output_tokens: int | None
+    cache_read_input_tokens: int | None
+    cache_creation_input_tokens: int | None
+    cost_usd: float | None
+
+
+@dataclass(frozen=True)
+class DispatchUsage:
+    """Cost/usage telemetry parsed from a ``claude -p --output-format
+    stream-json`` terminal result event (RDR-196 Gap 1 / 196-R1,
+    nexus-nyry9.7).
+
+    Field names are FIXTURE-VERIFIED against
+    ``tests/fixtures/claude_dispatch_stream_json_sample.ndjson`` -- not
+    the RDR-196 Technical Design section's illustrative sketch, which
+    used ``elapsed_ms`` for what the wire payload actually calls
+    ``duration_ms``. Correction recorded in
+    ``docs/rdr/rdr-196-cost-aware-nx-answer.md``'s Technical Design section
+    (2026-08-20, nexus-nyry9.7). A field is
+    ``None`` -- never ``0.0`` -- when the result event does not carry it:
+    ``0.0`` reads as "this call was free", which is exactly the
+    measurement bug RDR-196 exists to fix (see ``_parse_dispatch_usage``).
+    """
+
+    model: str | None
+    """Canonical model id (196-R3), taken from the single ``modelUsage``
+    entry's ``canonicalModel`` field. ``None`` when ``modelUsage`` is
+    absent/empty, or when it carries more than one model (ambiguous for
+    this single-value convenience field -- callers needing per-model
+    detail read ``model_usage`` directly)."""
+
+    cost_usd: float | None  # total_cost_usd
+    input_tokens: int | None  # usage.input_tokens
+    output_tokens: int | None  # usage.output_tokens
+    cache_creation_input_tokens: int | None  # usage.cache_creation_input_tokens
+    cache_read_input_tokens: int | None  # usage.cache_read_input_tokens
+    duration_ms: int | None
+    duration_api_ms: int | None
+    num_turns: int | None
+    model_usage: dict[str, ModelUsage] = field(default_factory=dict)
+    """Keyed by the ``modelUsage`` map's own key(s) -- usually the
+    canonical model id, but the key itself is not assumed canonical
+    (``ModelUsage.canonical_model`` is the verified field)."""
+
+    # ``frozen=True`` with the default ``eq=True`` would otherwise
+    # auto-generate a ``__hash__`` that raises ``TypeError: unhashable
+    # type: 'dict'`` lazily, only when something actually calls
+    # ``hash()`` on an instance (``model_usage`` is a dict). No current
+    # caller hashes a DispatchUsage, but leaving that landmine armed is
+    # worse than declaring the type honestly unhashable up front.
+    __hash__ = None  # type: ignore[assignment]
+
+
+def _parse_dispatch_usage(final_result: dict[str, Any] | None) -> DispatchUsage:
+    """Parse cost/usage telemetry from *final_result* -- the terminal
+    ``{"type": "result", ...}`` stream-json event from
+    ``_parse_stream_json_output``, or ``None`` when no such event was
+    found (subprocess killed before emitting one, or a legacy bare-JSON
+    test double that never spoke stream-json).
+
+    Every affected field is ``None`` -- never ``0.0`` -- when the source
+    payload doesn't carry it, with a ``dispatch_usage_fields_missing``
+    (or, for a wholly absent result event, ``dispatch_usage_no_result_
+    event``) structlog warning naming what was missing. This is a pure
+    function over the parsed envelope; it does not raise on a malformed
+    or partial payload -- a telemetry gap must never fail a dispatch that
+    otherwise succeeded.
+    """
+    if final_result is None:
+        _log.warning("dispatch_usage_no_result_event")
+        return DispatchUsage(
+            model=None,
+            cost_usd=None,
+            input_tokens=None,
+            output_tokens=None,
+            cache_creation_input_tokens=None,
+            cache_read_input_tokens=None,
+            duration_ms=None,
+            duration_api_ms=None,
+            num_turns=None,
+            model_usage={},
+        )
+
+    missing: list[str] = []
+
+    cost_usd = final_result.get("total_cost_usd")
+    if cost_usd is None:
+        missing.append("total_cost_usd")
+
+    usage = final_result.get("usage")
+    if isinstance(usage, dict):
+        input_tokens = usage.get("input_tokens")
+        output_tokens = usage.get("output_tokens")
+        cache_creation_input_tokens = usage.get("cache_creation_input_tokens")
+        cache_read_input_tokens = usage.get("cache_read_input_tokens")
+    else:
+        missing.append("usage")
+        input_tokens = output_tokens = None
+        cache_creation_input_tokens = cache_read_input_tokens = None
+
+    duration_ms = final_result.get("duration_ms")
+    duration_api_ms = final_result.get("duration_api_ms")
+    num_turns = final_result.get("num_turns")
+
+    model_usage_raw = final_result.get("modelUsage")
+    model_usage: dict[str, ModelUsage] = {}
+    model: str | None = None
+    if isinstance(model_usage_raw, dict) and model_usage_raw:
+        for key, entry in model_usage_raw.items():
+            if not isinstance(entry, dict):
+                continue
+            canonical = entry.get("canonicalModel") or key
+            model_usage[key] = ModelUsage(
+                canonical_model=canonical,
+                input_tokens=entry.get("inputTokens"),
+                output_tokens=entry.get("outputTokens"),
+                cache_read_input_tokens=entry.get("cacheReadInputTokens"),
+                cache_creation_input_tokens=entry.get("cacheCreationInputTokens"),
+                cost_usd=entry.get("costUSD"),
+            )
+        if len(model_usage) == 1:
+            model = next(iter(model_usage.values())).canonical_model
+        # len(model_usage) > 1: leave `model` None -- ambiguous for this
+        # single-value convenience field. Per-model attribution across a
+        # bundled multi-model dispatch is what `model_usage` is for
+        # (consumed by .p1b's bundle StepRecords).
+    else:
+        missing.append("modelUsage")
+
+    if missing:
+        _log.warning("dispatch_usage_fields_missing", missing=missing)
+
+    return DispatchUsage(
+        model=model,
+        cost_usd=cost_usd,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+        duration_ms=duration_ms,
+        duration_api_ms=duration_api_ms,
+        num_turns=num_turns,
+        model_usage=model_usage,
+    )
+
+
 async def _feed_stdin(proc: "asyncio.subprocess.Process", prompt: str) -> None:
     """Write *prompt* to stdin and close it.
 
@@ -575,6 +780,9 @@ async def claude_dispatch(
     *,
     allowed_tools: list[str] | None = None,
     mcp_servers: dict[str, Any] | None = None,
+    usage_sink: list[DispatchUsage] | None = None,
+    model: str | None = None,
+    operator: str | None = None,
 ) -> dict[str, Any]:
     """Dispatch a single operator call to claude -p, fully async.
 
@@ -607,6 +815,59 @@ async def claude_dispatch(
             with ``allowed_tools`` containing ``mcp__<server_key>`` (or a
             specific ``mcp__<server_key>__<tool>``) to actually permit the
             calls. ``None`` (default) injects no MCP servers.
+        usage_sink: Opt-in out-param (RDR-196 .p1a, nexus-nyry9.7). When
+            not ``None``, a ``DispatchUsage`` -- parsed from the terminal
+            stream-json result event -- is appended to it for every
+            dispatch that reaches the post-empty-stdout parse step,
+            **including several that then go on to raise**. The append
+            happens once ``_parse_stream_json_output`` has run on *raw*
+            stdout, which is BEFORE three of the six possible raises
+            below -- those three still carry a parsed envelope (often
+            real, non-zero spend) at the point they fire, so the append
+            deliberately runs first: a caller catching one of these can
+            still read what the failed turn cost.
+
+            Appended, then STILL RAISES:
+              * ``OperatorOutputError`` -- "not valid JSON" (no stream-json
+                result event found, and the raw blob also failed
+                ``json.loads``). Appends the all-``None`` DispatchUsage
+                (+ warning) produced when no result event was found.
+              * ``OperatorError`` -- the parsed result's ``is_error`` was
+                true.
+              * ``OperatorOutputError`` -- the parsed result's
+                ``structured_output`` was null.
+
+            NEVER reaches the append (raises before any parse of stdout):
+              * ``OperatorTimeoutError`` -- subprocess killed mid-turn.
+              * ``OperatorError`` -- subprocess exited non-zero.
+              * ``OperatorOutputError`` -- "empty stdout".
+
+            ``None`` (default) is a complete no-op: this preserves
+            ``claude_dispatch``'s existing return contract (a bare dict)
+            for all current call sites, none of which unpack a tuple.
+            Independent of, and additive with, :func:`ambient_usage_sink`
+            (RDR-196 .p1b Gap-1 addendum, nexus-nyry9.8): when an ambient
+            sink is ALSO active, both receive the same parsed
+            ``DispatchUsage`` instance for this call.
+        model: Opt-in ``--model`` override (RDR-196 .p2b, nexus-nyry9.15).
+            ``None`` (default) appends NO ``--model`` flag -- argv is
+            byte-identical to every pre-.p2b call site. When set, the
+            value is passed to the CLI verbatim (a tier alias such as
+            ``"haiku"``/``"sonnet"`` -- see
+            ``nexus.operators.model_tiers.resolve_model_for_tier`` --
+            or a pinned model id); ``claude_dispatch`` itself never
+            consults the tier table, so resolving a tier to a model
+            string is entirely the caller's decision. Whatever the CLI
+            actually resolves the alias to is recorded separately, in
+            ``DispatchUsage.model`` (sourced from the stream-json
+            envelope's own ``canonicalModel``, not this argument), so a
+            future alias re-point stays observable in telemetry.
+        operator: Opt-in diagnostic label (RDR-196 .p2b) identifying which
+            operator/caller this dispatch is for (e.g. ``"operator_rank"``).
+            Purely cosmetic -- carried into the dispatch-harness-failure
+            error message (only when *model* is also set) so a rejected
+            ``--model`` value names both what was rejected and who asked
+            for it. Never affects argv or control flow.
 
     Returns:
         Parsed JSON dict from stdout.
@@ -617,6 +878,17 @@ async def claude_dispatch(
         OperatorOutputError: stdout was not valid JSON.
     """
     schema_json = json.dumps(json_schema)
+    # RDR-196 .p2b review fix (nexus-nyry9.15, code-review-expert [23032]
+    # Important #2): normalize model="" / whitespace-only to None ONCE
+    # here, so the argv-append (`if model:`) and the error-clause gate
+    # (`if model is not None:`) below can never disagree about whether a
+    # model was "set" -- a lingering empty string previously would skip
+    # --model in argv but still append a `[model='' ...]` clause to a
+    # harness-failure error, falsely implying an override reached the
+    # CLI when none did.
+    if model is not None and not model.strip():
+        _log.warning("claude_dispatch_empty_model_normalized", operator=operator)
+        model = None
     # Search review I-6: start in a new process group so we can reach
     # any child processes ``claude -p`` spawns (nested claude calls, tool
     # subprocesses). Same killpg idiom as T1 chroma + MinerU cleanup
@@ -698,6 +970,15 @@ async def claude_dispatch(
         # servers; with an opt-in --mcp-config below it loads ONLY those.
         "--strict-mcp-config",
     ]
+    # RDR-196 .p2b (nexus-nyry9.15): ability only -- appended ONLY when the
+    # caller passes an explicit model. Tier resolution to this string (if
+    # any) happens in the CALLER, e.g. via
+    # ``nexus.operators.model_tiers.resolve_model_for_tier`` -- claude_dispatch
+    # never imports or consults the tier table itself. ``model=None`` (the
+    # default, and every one of the 18 pre-.p2b call sites) leaves argv
+    # byte-identical to before this bead.
+    if model:
+        argv += ["--model", model]
     if mcp_servers:
         argv += ["--mcp-config", json.dumps({"mcpServers": mcp_servers})]
     if allowed_tools:
@@ -882,6 +1163,14 @@ async def claude_dispatch(
                 returncode=proc.returncode,
                 stdout=_capped_text(stdout_text),
                 stderr=_capped(stderr),
+                # RDR-196 .p2b review fix (nexus-nyry9.15, code-review-expert
+                # [23032] Important #1): the DURABLE record must carry the
+                # same model/operator label the transient exception text
+                # gets a few lines below -- the exception is visible for
+                # exactly one turn; this structlog emit is what a later
+                # investigation actually greps.
+                model=model,
+                operator=operator,
             )
             # nexus-ri56e: (a) origin unambiguity — a populated message now
             # reads like an ordinary application error, but this is the
@@ -899,9 +1188,18 @@ async def claude_dispatch(
                 else "no log file attached (plain CLI mode) — this message is "
                      "the only record"
             )
+            # RDR-196 .p2b DO 4: a rejected --model must name both the
+            # model and the operator that asked for it -- only when
+            # *model* was actually set, so the default (model=None)
+            # error text is untouched.
+            model_operator_clause = (
+                f" [model={model!r} operator={operator!r}]"
+                if model is not None else ""
+            )
             raise OperatorError(
                 f"claude -p exited {proc.returncode} (dispatch-harness "
                 f"failure, not a model answer): {detail} [{where}]"
+                f"{model_operator_clause}"
             )
 
         raw = stdout.decode(errors="replace").strip()
@@ -915,15 +1213,60 @@ async def claude_dispatch(
         # a single JSON object when no such line is found -- covers a
         # subprocess/test double that emits a bare JSON blob rather than
         # real stream-json (the format this repo's own test doubles use).
-        final_result, _partial_text, _event_count = _parse_stream_json_output(raw)
+        final_result, _partial_text, event_count = _parse_stream_json_output(raw)
+        _ambient_sink = _ambient_usage_sink.get()
+        if usage_sink is not None or _ambient_sink is not None:
+            # RDR-196 .p1a (nexus-nyry9.7) + .p1b Gap-1 addendum
+            # (nexus-nyry9.8, 2026-08-20): capture cost/usage telemetry
+            # for a dispatch that reached a parsed result -- the raw JSON
+            # fallback below (final_result is None) still parses to an
+            # all-None DispatchUsage + warning via _parse_dispatch_usage,
+            # never a silently-omitted record. This append is BEFORE the
+            # fallback's own possible raise (see the docstring's "Appended,
+            # then STILL RAISES" list) -- the diagnostic enrichment below
+            # (nexus-nyry9.4 review-fix, taxonomy id=99) only changes the
+            # exception's MESSAGE, never this ordering or the exception
+            # type, so that contract and its test
+            # (TestUsageSinkAppendsBeforeSubsequentRaises::
+            # test_invalid_json_fallback_still_appends_all_none_usage_
+            # then_raises) both stay true unchanged. Parsed ONCE; the
+            # SAME DispatchUsage instance is appended to both sinks when
+            # both are active, never two independently-parsed copies.
+            _usage = _parse_dispatch_usage(final_result)
+            if usage_sink is not None:
+                usage_sink.append(_usage)
+            if _ambient_sink is not None:
+                _ambient_sink.append(_usage)
         if final_result is not None:
             parsed = final_result
         else:
             try:
                 parsed = json.loads(raw)
             except json.JSONDecodeError as exc:
+                # nexus-nyry9.4 review-fix (RDR-196 .r4 residual, taxonomy
+                # id=99): the old ``raw[:200]`` preview showed only the
+                # OPENING bytes of the whole blob, which for a real
+                # multi-line NDJSON stream is rarely where the parse
+                # actually failed -- useless when the interesting content
+                # is past byte 200. Locate the specific line ``json.loads``
+                # choked on via the exception's own ``lineno`` and preview
+                # THAT, plus how many lines parsed as objects at all (0
+                # means the child never spoke NDJSON; >0 means a real
+                # stream was seen but never reached a terminal "result"
+                # event) -- "no terminal 'result' event seen" is always
+                # true in this branch (we are here BECAUSE final_result is
+                # None) but stated explicitly rather than left implicit.
+                _raw_lines = raw.splitlines()
+                _offending_line = (
+                    _raw_lines[exc.lineno - 1]
+                    if 0 < exc.lineno <= len(_raw_lines)
+                    else raw
+                )
                 raise OperatorOutputError(
-                    f"claude -p output is not valid JSON: {exc} — got: {raw[:200]}"
+                    f"claude -p output is not valid JSON: {exc} — "
+                    f"{event_count} NDJSON line(s) parsed as objects, "
+                    f"no terminal 'result' event seen — "
+                    f"offending line (first 200 chars): {_offending_line[:200]!r}"
                 ) from exc
 
         # `claude -p --output-format json` returns a wrapper:

@@ -164,7 +164,7 @@ def test_provision_step_always_acquires_bundle(
 ):
     """Fresh machine, pinned tag → the bundle is downloaded + selected BEFORE
     provision() runs, with NO host-PostgreSQL probing (discovery is a boom)."""
-    monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("NEXUS_SERVICE_TAG", "engine-service-v0.1.32")
 
     def _must_not_probe():
@@ -204,7 +204,7 @@ def test_provision_step_skips_download_when_cluster_exists(tmp_path, monkeypatch
     """An existing cluster data directory (even STOPPED — no port listening)
     keeps whatever PostgreSQL created it — re-running nx init must not
     download a bundle over it. Real marker file, no predicate mocking."""
-    monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("NEXUS_SERVICE_TAG", "engine-service-v0.1.32")
 
     pgdata = tmp_path / "postgres"
@@ -224,7 +224,7 @@ def test_provision_step_never_downloads_over_explicit_override(
     tmp_path, monkeypatch
 ):
     """NEXUS_PG_BIN set (even broken) → surfaced, never auto-downloaded over."""
-    monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("NEXUS_SERVICE_TAG", "engine-service-v0.1.32")
     monkeypatch.setenv("NEXUS_PG_BIN", str(tmp_path / "custom-pg" / "bin"))
 
@@ -244,7 +244,7 @@ def test_provision_step_reuses_bundle_already_on_disk(
 ):
     """A bundle archive already at <config>/service/ is extracted + selected
     with no re-download (idempotent re-run)."""
-    monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("NEXUS_SERVICE_TAG", "engine-service-v0.1.32")
 
     dest = binary_install.pg_bundle_dest(tmp_path)
@@ -264,7 +264,7 @@ def test_provision_step_reuses_bundle_already_on_disk(
 def test_provision_step_no_pin_fails_loud(tmp_path, monkeypatch, capsys):
     """No pinned/env tag and nothing on disk → SystemExit with the explicit
     remedies; host PostgreSQL is not probed."""
-    monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
     def _must_not_probe():
         raise AssertionError("host PostgreSQL must never be probed")

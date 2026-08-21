@@ -180,6 +180,19 @@ pytestmark = pytest.mark.usefixtures("cloud_mode")
 
 The `cloud_mode` fixture lives in `tests/conftest.py`. It sets `CHROMA_API_KEY`, `VOYAGE_API_KEY`, `CHROMA_TENANT`, `CHROMA_DATABASE` to test sentinels and monkeypatches `nexus.config.is_local_mode` to return `False`.
 
+## Redirecting the config dir in a test: setenv, never setattr
+
+Use `monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))` (or
+`patch.dict(os.environ, ...)`). Never `monkeypatch.setattr("nexus.config.
+nexus_config_dir", ...)` or `mock.patch` it: any module FIRST-imported while
+that patch is live captures the lambda by value (`from nexus.config import
+nexus_config_dir`), keeps it after teardown, and poisons every later test in
+that xdist worker (PR #1467; the TestGcPurgeMarker ordering failure,
+2026-08-20). `tests/test_nexus_config_dir_setattr_lint.py` (`-m lint`)
+ratchets the remaining sites (nexus-78blw; src-side by-value imports are
+nexus-grg79). Production modules resolve the dir at call time via
+`from nexus import config as _config` + `_config.nexus_config_dir()`.
+
 ## Lint guard
 
 `tests/test_mode_declarations_are_explicit.py` enforces the convention. For every collected test whose source contains the regex `voyage-(context|code)-3`, it requires one of:

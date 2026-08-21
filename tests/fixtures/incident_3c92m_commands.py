@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Verbatim incident commands for nexus-3c92m (2026-08-20).
+
+Three Bash tool invocations from the real transcript (T2
+nexus/lessons-coordination-2026-08-20) that a code-review-expert subagent
+ran against the shared checkout during a nexus-pfuns review, each ending in
+a `git checkout -- <path>` that silently reverted a production fix -- the
+incident that filed this bead. Recovered verbatim (not reconstructed from
+prose) and pinned here byte-for-byte per the substantive-critic's
+recommendation (T2 nexus/review-nexus-3c92m): quoting/delimiter subtleties
+are this guard's repeat failure class (nexus-2e874 unbalanced quotes,
+nexus-3c92m's own newline/heredoc gap), so the regression tests for THIS
+bead should exercise the literal bytes that broke it, not a paraphrase.
+
+Each command must be DENIED by
+conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py
+when run as a subagent in the shared tree.
+"""
+from __future__ import annotations
+
+INCIDENT_CMD_1 = 'cd /Users/hal.hildebrand/git/nexus\necho "=== Falsify #1: t3.py backfill_state_path — revert to old frozen constant ==="\npython3 - <<\'EOF\'\nimport re\npath = "src/nexus/commands/t3.py"\nsrc = open(path).read()\nold_func = \'\'\'def _backfill_state_path() -> Path:\n    """Return the path to the backfill state file.\n\n    Respects ``NEXUS_BACKFILL_STATE_FILE`` env override so tests can\n    redirect the file to a tmp directory without touching the real config.\n    Absent that, falls back to ``nexus_config_dir()/backfill_state.json``\n    -- NOT a hardcoded ``~/.config/nexus`` (nexus-pfuns: the old fallback\n    was a module-level ``os.path.expanduser(...)`` constant, frozen at\n    import and blind to ``NEXUS_CONFIG_DIR`` entirely, same import-time-\n    default class already fixed once in ``gc_purge_marker.py`` -- T2\n    nexus/gc-purge-marker-xdist-leak-2026-08-20). ``_config.nexus_config_dir``\n    is read via module-attribute access (not a by-value ``from nexus.config\n    import nexus_config_dir``) so a patch applied after this module is\n    already imported still takes effect, and the function itself re-reads\n    ``os.environ`` on every call -- both resolved at CALL time, never\n    frozen.\n    """\n    override = os.environ.get(_BACKFILL_STATE_FILE_ENV)\n    if override:\n        return Path(override)\n    return _config.nexus_config_dir() / "backfill_state.json"\'\'\'\nnew_func = \'\'\'_BACKFILL_STATE_DEFAULT = os.path.expanduser("~/.config/nexus/backfill_state.json")\n\n\ndef _backfill_state_path() -> Path:\n    return Path(os.environ.get(_BACKFILL_STATE_FILE_ENV, _BACKFILL_STATE_DEFAULT))\'\'\'\nassert old_func in src, "pattern not found"\nsrc2 = src.replace(old_func, new_func)\nopen(path, "w").write(src2)\nprint("reverted")\nEOF\nuv run pytest tests/commands/test_t3_backfill_state_path.py -q 2>&1 | tail -30\necho "=== restore ==="\ngit checkout -- src/nexus/commands/t3.py'
+
+INCIDENT_CMD_2 = 'cd /Users/hal.hildebrand/git/nexus\npython3 - <<\'EOF\'\npath = "conexus/hooks/scripts/routing/_lib.py"\nsrc = open(path).read()\nold = \'\'\'def _default_log_path() -> pathlib.Path:\n    """Fallback routing-log path, resolved at CALL time.\n\n    nexus-pfuns: this used to be a module-level constant\n    (``pathlib.Path.home()`` evaluated once at import). A bare-interpreter\n    subprocess (this script has no dependency on the ``nexus`` package)\n    imports fresh per invocation, so the import-time freeze never actually\n    diverged from a plain call-time read within a single process lifetime\n    -- but freezing it made a direct in-process test (``_load_lib()``\n    re-exec\'ing the module, ``tests/test_routing_hooks.py``) unable to\n    prove the fallback tracks a patched ``Path.home()`` at all, and it is\n    the same import-time-default class already fixed once in\n    ``gc_purge_marker.py`` (T2 nexus/gc-purge-marker-xdist-leak-2026-08-20)\n    for exactly that reason -- a module-level default resists any patch\n    applied after the module\'s own import.\n    """\n    return pathlib.Path.home() / ".config" / "nexus" / "routing_log.jsonl"\'\'\'\nnew = \'_DEFAULT_LOG_PATH = pathlib.Path.home() / ".config" / "nexus" / "routing_log.jsonl"\'\nassert old in src\nsrc2 = src.replace(old, new).replace("_default_log_path()", "_DEFAULT_LOG_PATH")\nopen(path, "w").write(src2)\nprint("reverted")\nEOF\nuv run pytest tests/test_routing_hooks.py::test_log_path_fallback_resolves_home_at_call_time_not_import_time -q 2>&1 | tail -20\necho "=== restore ==="\ngit checkout -- conexus/hooks/scripts/routing/_lib.py'
+
+INCIDENT_CMD_3 = 'cd /Users/hal.hildebrand/git/nexus\npython3 - <<\'EOF\'\npath = "src/nexus/gc_purge_marker.py"\nsrc = open(path).read()\nsrc2 = src.replace(\n    "from nexus import config as _config",\n    "from nexus.config import nexus_config_dir",\n).replace(\n    "return _config.nexus_config_dir() / _MARKER_FILENAME",\n    "return nexus_config_dir() / _MARKER_FILENAME",\n)\nassert src2 != src\nopen(path, "w").write(src2)\nprint("reverted")\nEOF\nuv run pytest "tests/test_health_service_checks.py::TestGcPurgeMarker::test_marker_path_resolves_config_dir_at_call_time" -q 2>&1 | tail -15\necho "=== restore ==="\ngit checkout -- src/nexus/gc_purge_marker.py'
+

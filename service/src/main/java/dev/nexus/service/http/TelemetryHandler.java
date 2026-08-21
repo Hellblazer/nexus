@@ -73,6 +73,20 @@ public final class TelemetryHandler implements HttpHandler {
     /** RDR-178 wave-2 (nexus-s3dd4.3): max candidate keys per /ids/probe request. */
     private static final int MAX_PROBE_KEYS = 300;
 
+    /**
+     * RDR-196 .p1c-b review fix (nexus-lme1s): max {@code limit} for
+     * {@code GET /nx_answer_runs/query}, matching the project's
+     * {@code MAX_QUERY_RESULTS} paging convention (src/nexus/db/limits.py).
+     * Without this, {@code ?include_steps=true} lets a caller request an
+     * unbounded page of runs, each pulling an unbounded number of steps —
+     * N runs x M steps with no ceiling on either N or M. Clamped
+     * server-side (never a 400) so an over-large request degrades to the
+     * capped page rather than failing; a client that actually wanted more
+     * than {@value} rows was always going to need pagination (``since``)
+     * regardless of this cap.
+     */
+    private static final int MAX_QUERY_RUNS_LIMIT = 300;
+
     private final TelemetryRepository repo;
 
     public TelemetryHandler(TelemetryRepository repo) {
@@ -332,13 +346,82 @@ public final class TelemetryHandler implements HttpHandler {
         Double conf      = optDoubleNull(body, "matched_confidence");
         int stepCount    = optInt(body, "step_count", 0);
         String finalText = optStr(body, "final_text");
+        // RDR-196 .p1c-b (nexus-lme1s): cost_usd stays nullable end to end — a client
+        // "no usage observed" null must land as SQL NULL, never a fabricated 0.0
+        // indistinguishable from a genuine free call (RDR-196 risk 1). No coercion here.
         Double cost      = optDoubleNull(body, "cost_usd");
         Long durationMs  = optLongNull(body, "duration_ms");
-        double costUsd   = cost != null ? cost : 0.0;
         long durationMsV = durationMs != null ? durationMs : 0L;
         String createdAt = optStr(body, "created_at");
-        repo.recordNxAnswerRun(tenant, question, planId, conf, stepCount, finalText, costUsd, durationMsV, createdAt);
+        // RDR-196 .p1c (nexus-nyry9.9): OPTIONAL steps[] — absent/empty writes only
+        // the parent, exactly as before this bead (the .p1d degradation contract).
+        List<TelemetryRepository.StepInput> steps = parseNxAnswerSteps(body.get("steps"));
+        repo.recordNxAnswerRun(tenant, question, planId, conf, stepCount, finalText, cost,
+            durationMsV, createdAt, steps);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * Parse the optional {@code steps} array on
+     * {@code POST /v1/telemetry/nx_answer_runs/record} (RDR-196 .p1c,
+     * nexus-nyry9.9) into {@link TelemetryRepository.StepInput} rows.
+     * {@code null}/absent yields an empty list — never a synthesized default
+     * step. Each element must carry {@code operator}, {@code source}, and
+     * {@code ok} (no silent default for a boolean telemetry field — the same
+     * "no silent fallback for correctness" reasoning {@code requireBool}
+     * already applies to consent records); {@code source}'s own closed-set
+     * validity is enforced by the {@code nx_answer_steps_source_chk} CHECK at
+     * the DB layer, surfaced as a typed 409 by
+     * {@code HttpUtil.sendTypedDbError} rather than re-validated here.
+     */
+    @SuppressWarnings("unchecked")
+    private List<TelemetryRepository.StepInput> parseNxAnswerSteps(Object raw) {
+        if (raw == null) return List.of();
+        if (!(raw instanceof List<?> rawList)) {
+            throw new IllegalArgumentException("field 'steps' must be a JSON array");
+        }
+        List<TelemetryRepository.StepInput> steps = new ArrayList<>(rawList.size());
+        for (Object o : rawList) {
+            if (!(o instanceof Map<?, ?> rawStep)) {
+                throw new IllegalArgumentException("each element of 'steps' must be a JSON object");
+            }
+            Map<String, Object> step = (Map<String, Object>) rawStep;
+            // step_index feeds the (run_id, step_index) composite PK — a silent
+            // default (the old optInt(step,"step_index",0)) let two omitted-
+            // step_index rows in the same request collide on PK (run_id,0)
+            // instead of 400ing the actual mistake (code-review finding,
+            // 2026-08-20). No-silent-fallback-for-correctness, same reasoning
+            // as 'ok' below.
+            int stepIndex          = requireInt(step, "step_index");
+            String operator       = requireString(step, "operator");
+            String source         = requireString(step, "source");
+            String model          = optStrNull(step, "model");
+            Integer inputTokens   = optInt(step, "input_tokens");
+            Integer outputTokens  = optInt(step, "output_tokens");
+            Double stepCostUsd    = optDoubleNull(step, "cost_usd");
+            int elapsedMs         = optInt(step, "elapsed_ms", 0);
+            boolean ok            = requireBool(step, "ok");
+            List<Integer> bundledSteps = parseBundledSteps(step.get("bundled_steps"));
+            steps.add(new TelemetryRepository.StepInput(stepIndex, operator, source, model,
+                inputTokens, outputTokens, stepCostUsd, elapsedMs, ok, bundledSteps));
+        }
+        return steps;
+    }
+
+    /** {@code bundled_steps}: a JSON array of integer plan indices, or absent (empty). */
+    private List<Integer> parseBundledSteps(Object raw) {
+        if (raw == null) return List.of();
+        if (!(raw instanceof List<?> rawList)) {
+            throw new IllegalArgumentException("field 'bundled_steps' must be a JSON array");
+        }
+        List<Integer> out = new ArrayList<>(rawList.size());
+        for (Object o : rawList) {
+            if (!(o instanceof Number n)) {
+                throw new IllegalArgumentException("each element of 'bundled_steps' must be an integer");
+            }
+            out.add(n.intValue());
+        }
+        return out;
     }
 
     /**
@@ -349,13 +432,25 @@ public final class TelemetryHandler implements HttpHandler {
      * page (default 20). Aggregates (total, hit/fallback split, latency
      * buckets, averages) are computed over the WHOLE filtered set, not the
      * page — see {@link TelemetryRepository#queryNxAnswerRuns}.
+     *
+     * <p>{@code ?include_steps=true} (RDR-196 .p1c-b, nexus-lme1s) — OPTIONAL,
+     * defaults to {@code false} so the wire shape is unchanged when absent
+     * (matches the write side's {@code steps[]} degradation contract). When
+     * true, each row in the response gains a {@code steps} array using the
+     * SAME field names {@code parseNxAnswerSteps} accepts on the write side,
+     * RLS-scoped through the same tenant-stamped connection as the parent
+     * query — a tenant can never see another tenant's steps.
      */
     private void handleNxAnswerRunsQuery(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "GET");
         var params = queryParams(ex);
         String since = params.getOrDefault("since", "");
-        int limit = parseIntParam(params, "limit", 20);
-        HttpUtil.send(ex, 200, json(repo.queryNxAnswerRuns(tenant, since, limit)));
+        // Clamped to MAX_QUERY_RUNS_LIMIT (never rejected with a 400) — see
+        // that constant's javadoc: unbounded here compounds with
+        // include_steps into an unbounded N runs x M steps page.
+        int limit = Math.min(parseIntParam(params, "limit", 20), MAX_QUERY_RUNS_LIMIT);
+        boolean includeSteps = "true".equalsIgnoreCase(params.get("include_steps"));
+        HttpUtil.send(ex, 200, json(repo.queryNxAnswerRuns(tenant, since, limit, includeSteps)));
     }
 
     // ── hook_failures ──────────────────────────────────────────────────────────
@@ -521,6 +616,9 @@ public final class TelemetryHandler implements HttpHandler {
                 // optLongNull / optDoubleNull accept either a number or a numeric string.
                 Long planId = optLongNull(body, "plan_id");
                 Double conf = optDoubleNull(body, "matched_confidence");
+                // cost_usd: fidelity-preserving import must not coerce an absent/null
+                // source value to 0.0 (RDR-196 .p1c-b, nexus-lme1s, risk 1) — pass the
+                // nullable Double straight through.
                 Double cost = optDoubleNull(body, "cost_usd");
                 Long durationMs = optLongNull(body, "duration_ms");
                 repo.importNxAnswerRunRow(tenant,
@@ -528,7 +626,7 @@ public final class TelemetryHandler implements HttpHandler {
                     planId, conf,
                     optInt(body, "step_count", 0),
                     optStr(body, "final_text"),
-                    cost != null ? cost : 0.0,
+                    cost,
                     durationMs != null ? durationMs : 0L,
                     requireString(body, "created_at"));
             }
@@ -681,6 +779,24 @@ public final class TelemetryHandler implements HttpHandler {
             throw new IllegalArgumentException("Missing required field: " + key);
         }
         return v.toString();
+    }
+
+    /**
+     * Like {@link #requireString} but for an int field — used where a
+     * numeric wire field feeds identity/PK material and a silent default
+     * (as {@link #optInt(Map, String, int)} would produce) would corrupt
+     * that identity rather than surface the caller's actual mistake
+     * (RDR-196 .p1c step_index, code-review 2026-08-20). Reuses {@link
+     * #optInt(Map, String)}'s number-or-numeric-string coercion and its
+     * IllegalArgumentException for a genuinely malformed value; only the
+     * "absent" case gets a distinct, field-naming message here.
+     */
+    private int requireInt(Map<String, Object> body, String key) {
+        Integer v = optInt(body, key);
+        if (v == null) {
+            throw new IllegalArgumentException("Missing required field: " + key);
+        }
+        return v;
     }
 
     private Object requireObj(Map<String, Object> body, String key) {

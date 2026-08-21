@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os as _os
 import re
 import time
 from dataclasses import dataclass, field
@@ -57,13 +58,17 @@ __all__ = [
     "PlanResult",
     "PlanRunBindingError",
     "PlanRunEmbeddingDomainError",
+    "PlanRunOperatorArgMissingError",
     "PlanRunOperatorOutputError",
     "PlanRunOperatorSchemaVersionError",
     "PlanRunOperatorUnavailableError",
     "PlanRunStepRefError",
     "PlanRunToolNotFoundError",
+    "StepRecord",
     "ToolDispatcher",
+    "merge_bindings",
     "plan_run",
+    "resolve_step_bindings",
 ]
 
 
@@ -96,6 +101,32 @@ class PlanRunToolNotFoundError(ValueError):
         self.tool = tool
         self.reason = reason
         super().__init__(f"plan_run: unknown tool {tool!r}: {reason}")
+
+
+class PlanRunOperatorArgMissingError(ValueError):
+    """Raised when an operator step has no way to supply its required
+    positional content argument (nexus-nyry9.4 review-fix, T2 [23036]).
+
+    Not present as the operator's own arg key, not present as ``ids``
+    (which ``_hydrate_operator_args`` would hydrate FROM), and not
+    present as an ``inputs`` alias (nexus-yis0) — no hydration or
+    substitution path can ever satisfy the call, so this is a plan-
+    authoring bug, not a runtime condition. The unfixed shape reaches
+    ``fn(**args)`` in ``_default_dispatcher`` and raises a bare
+    ``TypeError`` instead (nx_answer_runs id=4: "operator_summarize()
+    missing 1 required positional argument: 'content'").
+    """
+
+    def __init__(self, *, step_index: int, tool: str, missing_arg: str) -> None:
+        self.step_index = step_index
+        self.tool = tool
+        self.missing_arg = missing_arg
+        super().__init__(
+            f"plan_run: steps[{step_index}] ({tool!r}) has no "
+            f"{missing_arg!r} — not present in args, not hydratable via "
+            "'ids', no 'inputs' alias present. Malformed plan, rejected "
+            "before any step dispatched."
+        )
 
 
 class PlanRunOperatorOutputError(ValueError):
@@ -209,6 +240,97 @@ class ToolDispatcher(Protocol):
 
 
 @dataclass(frozen=True)
+class StepRecord:
+    """One cost/quality telemetry record for one EXECUTED dispatch segment
+    (RDR-196 .p1b, nexus-nyry9.8).
+
+    "One executed step" here means one dispatch *segment* as
+    :func:`plan_run` actually ran it, not one entry in ``plan_json``'s
+    ``steps`` array: a fused bundle of N plan-steps (see
+    :mod:`nexus.plans.bundle`) is ONE claude -p subprocess call and
+    therefore produces exactly ONE record, never N — inventing N
+    per-step costs by dividing the bundle's real cost would fabricate
+    data (the same principle the RDR states for bundle attribution).
+
+    ``step_index`` vs the run-level ``PlanResult.budget_exhausted_at_step``
+    (CROSS-REF, .r2 critique 2026-08-20): this field is 0-BASED (0 = the
+    first executed step), matching every existing 0-based ``plan_index``/
+    ``bi`` usage throughout this module. ``budget_exhausted_at_step`` is
+    1-INDEXED with ``0`` reserved as "no plan step ran at all" (core.py's
+    ``_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN`` sentinel). Same underlying
+    value space, OPPOSITE meaning at 0 and an off-by-one everywhere else —
+    never join or compare these two columns by raw value.
+
+    ``model`` derivation rule (196-R3 / audit fold, binding): always taken
+    VERBATIM from the underlying ``DispatchUsage.model`` — which is
+    itself already "the single modelUsage entry's canonical id, or
+    ``None`` when zero or ≥2 entries make a single value ambiguous" by
+    construction in ``dispatch._parse_dispatch_usage``. This field is
+    NEVER re-derived from ``model_usage`` keys here, NEVER defaulted to
+    a requested/alias model string, and NEVER coerced to ``""`` when
+    absent — ``None`` is the only "absent" spelling, matching RDR-196
+    risk #1 (a silently-zero/empty telemetry field reads as "this was
+    free", which is the exact measurement bug this arc exists to fix).
+
+    ``source`` is one of three values, kept to the RDR's own sketch
+    (no fourth value invented): ``"bundle"`` for a real fused
+    ``dispatch_bundle`` call; ``"llm"`` for an isolated (or
+    bundle-fallback) ``claude -p`` dispatch; ``"sql"`` for BOTH Gap 5's
+    ``operator_filter``/``groupby``/``aggregate`` SQL fast path AND any
+    non-operator (retrieval/traversal) tool dispatch — on this substrate
+    every retrieval call already runs a real SQL/pgvector query
+    server-side, so labelling it "sql" is accurate, not a stretch, and
+    it reuses the RDR's own framing of the llm/sql split as "NOMA's
+    deterministic-vs-stochastic engine choice" rather than adding an
+    unspecified fourth bucket.
+
+    ``input_tokens`` / ``output_tokens`` / ``cost_usd`` are ``| None``
+    — a DELIBERATE widening of the RDR's illustrative non-Optional
+    sketch, required by the RDR's OWN risk register (risk 1: "absent
+    fields record None, never 0.0"). Two distinct zero-vs-unknown
+    populations exist: a ``"sql"`` step is a TRUE, known zero (no
+    claude -p call happened at all) — ``0``/``0``/``0.0``. An ``"llm"``
+    step whose dispatch reached a parsed result envelope carries the
+    real figures: the ``"bundle"`` path threads an explicit ``usage_sink``
+    into ``dispatch_bundle`` -> ``claude_dispatch``, and the isolated /
+    bundle-fallback path (dispatched through the :class:`ToolDispatcher`
+    abstraction into an ``operator_*`` MCP tool that owns its own
+    ``claude_dispatch`` call) is captured by the ambient ContextVar sink
+    (``dispatch.ambient_usage_sink``) the runner sets around each step.
+    Only a dispatch that produced no envelope at all (timeout, non-zero
+    exit, empty stdout) records ``None`` — unknown, not a fabricated ``0``.
+
+    ``run_id`` defaults to ``""`` — :func:`plan_run` has no concept of
+    a persisted run id (the PG primary key ``.p1c``/``.p1d`` will add
+    doesn't exist until AFTER this function returns and its caller
+    persists the run row). The caller re-stamps the real id via
+    ``dataclasses.replace(record, run_id=...)`` once known; this keeps
+    ``plan_run``'s signature unchanged for that future wiring, per this
+    bead's own DO instruction.
+    """
+
+    run_id: str = ""
+    step_index: int = 0
+    operator: str = ""
+    source: str = "llm"
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cost_usd: float | None = None
+    elapsed_ms: int = 0
+    ok: bool = True
+    #: Populated ONLY on a ``source="bundle"`` record — the full set of
+    #: 0-based plan indices this one dispatch fused. Empty for every
+    #: other source.
+    bundled_steps: list[int] = field(default_factory=list)
+
+    # Same landmine as DispatchUsage (dispatch.py): frozen=True + a
+    # mutable list field would auto-generate a __hash__ that raises
+    # lazily on the first hash() call. Declare it honestly unhashable.
+    __hash__ = None  # type: ignore[assignment]
+
+
+@dataclass(frozen=True)
 class PlanResult:
     """Captured output of a :func:`plan_run` execution."""
 
@@ -224,6 +346,11 @@ class PlanResult:
     #: ran. Lets a caller render "step N of M" without re-parsing
     #: ``match.plan_json`` itself.
     total_planned_steps: int = 0
+    #: RDR-196 .p1b (nexus-nyry9.8): one :class:`StepRecord` per executed
+    #: dispatch segment — see that class's docstring for the bundle/sql/
+    #: llm attribution rules. In-process only; the engine-side
+    #: ``nx_answer_steps`` write is `.p1c`/`.p1d`, not this bead.
+    step_records: list[StepRecord] = field(default_factory=list)
 
 
 # ── Embedding-domain mapping ────────────────────────────────────────────────
@@ -397,6 +524,56 @@ def _operator_timeout_sentinel(
     }
 
 
+def _rollup_step_usage(entries: list) -> Any:
+    """Reduce the ``DispatchUsage`` list captured via
+    :func:`nexus.operators.dispatch.ambient_usage_sink` for ONE isolated
+    or bundle-fallback step into a single usage record (RDR-196 .p1b
+    Gap-1 addendum, nexus-nyry9.8).
+
+    Zero entries: ``None`` — no claude -p call happened inside this step
+    (or the operator's own SQL fast path served it). One entry: returned
+    AS-IS. More than one entry (an operator that internally issues >1
+    claude_dispatch call — none do today, but the mechanism must not
+    silently drop or mis-divide a future one): the entries are SUMMED,
+    never divided — unlike a fused bundle's ONE real dispatch, these are
+    N SEPARATELY MEASURED real dispatches, so summing their real costs is
+    honest, not fabricated. ``model`` follows the same ambiguous-population
+    rule ``DispatchUsage.model`` already applies within a single call: the
+    shared canonical id if every entry agrees, else ``None``. Any field
+    that is ``None`` on ANY entry makes the summed field ``None`` too
+    (never silently treat "unknown" as "zero" mid-sum). The per-model
+    breakdown across entries is NOT preserved at StepRecord granularity —
+    the flat schema matches ``.p1c``'s ``nx_answer_steps`` sketch (no
+    ``model_usage`` column); this is a deliberate, stated roll-up, not a
+    silent drop.
+    """
+    if not entries:
+        return None
+    if len(entries) == 1:
+        return entries[0]
+    models = {e.model for e in entries if e.model is not None}
+    model = next(iter(models)) if len(models) == 1 else None
+
+    def _sum(attr: str) -> Any:
+        vals = [getattr(e, attr) for e in entries]
+        if any(v is None for v in vals):
+            return None
+        return sum(vals)
+
+    return _dispatch_mod.DispatchUsage(
+        model=model,
+        cost_usd=_sum("cost_usd"),
+        input_tokens=_sum("input_tokens"),
+        output_tokens=_sum("output_tokens"),
+        cache_creation_input_tokens=_sum("cache_creation_input_tokens"),
+        cache_read_input_tokens=_sum("cache_read_input_tokens"),
+        duration_ms=_sum("duration_ms"),
+        duration_api_ms=_sum("duration_api_ms"),
+        num_turns=_sum("num_turns"),
+        model_usage={},
+    )
+
+
 def _resolve_value(
     value: Any,
     *,
@@ -505,6 +682,54 @@ def _resolve_args(
         )
         for key, val in args.items()
     }
+
+
+def merge_bindings(
+    default_bindings: dict[str, Any] | None,
+    caller_bindings: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The plan-execution binding-precedence formula: caller wins over
+    plan defaults.
+
+    Extracted (nexus-nyry9.5, RDR-196 .r5 review-fix, code-review
+    SIGNIFICANT, T2 review-nexus-nyry9.5) so this precedence lives in
+    exactly ONE place. ``plan_run`` below computes its ``merged``
+    binding dict via this function; ``nexus.mcp.core``'s ``nx_answer``
+    single-query fast path (Step 2, which bypasses ``plan_run``
+    entirely by design) used to hand-replicate
+    ``{**default_bindings, **caller}`` as an independently-maintained
+    second copy with no test cross-checking the two stayed in sync — a
+    future edit to this precedence here would have silently NOT
+    propagated to that copy. It now calls :func:`resolve_step_bindings`
+    below, which calls this.
+    """
+    return {**(default_bindings or {}), **(caller_bindings or {})}
+
+
+def resolve_step_bindings(
+    raw_args: dict[str, Any],
+    *,
+    default_bindings: dict[str, Any] | None,
+    caller_bindings: dict[str, Any] | None,
+    step_outputs: list[dict[str, Any]] | None = None,
+    deferred_step_indices: set[int] | None = None,
+) -> dict[str, Any]:
+    """Merge bindings (:func:`merge_bindings`) then resolve ONE step's
+    raw ``args`` dict against them (:func:`_resolve_args`).
+
+    ``plan_run`` itself doesn't need this exact shape — it merges once
+    via :func:`merge_bindings` and resolves MANY steps against the same
+    merged dict across the run, calling :func:`_resolve_args` directly
+    at each call site. This is what a caller resolving exactly ONE
+    step's args outside of a full ``plan_run`` invocation should call
+    instead — currently ``nexus.mcp.core``'s ``nx_answer`` single-query
+    fast path (nexus-nyry9.5, RDR-196 .r5 review-fix).
+    """
+    merged = merge_bindings(default_bindings, caller_bindings)
+    return _resolve_args(
+        raw_args, bindings=merged, step_outputs=step_outputs or [],
+        deferred_step_indices=deferred_step_indices,
+    )
 
 
 # ── Cross-embedding guard ───────────────────────────────────────────────────
@@ -920,6 +1145,51 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # Auto-hydration + arg normalization: shared with the bundle path.
     resolved_tool, args = _hydrate_operator_args(tool, args)
 
+    # RDR-196 .p2d (nexus-nyry9.17): DEFAULT-ON per-operator tiering, plus
+    # the .p2c measurement override and a kill switch — a 3-way branch on
+    # ``NX_OPERATOR_MODEL_TIERING``, all gated behind "model" not already
+    # supplied by the caller (an explicit step-author override always
+    # wins, never touched here):
+    #
+    #   == "1"  measurement override (.p2c, UNCHANGED): consult the WHOLE
+    #           ``OPERATOR_MODEL_TIER`` table, including "strong" entries
+    #           — for A/B re-verification, not production traffic. An
+    #           operator whose MCP-tool signature doesn't accept ``model``
+    #           (check/verify/generate/compare/aggregate/summarize) has
+    #           the kwarg silently dropped + logged by the kwargs-drop
+    #           pass below, same as any other tool-incompatible arg.
+    #   != "0"  (unset, or any other value) DEFAULT PATH (.p2d): only the
+    #           4 :data:`~nexus.operators.model_tiers.FLIPPED_OPERATORS`
+    #           (filter/groupby/extract/rank) get the cheap-tier alias —
+    #           every other operator (HOLD/UNDECIDED per .p2d's decision
+    #           table) gets no ``model`` kwarg at all, same as pre-.p2c.
+    #   == "0"  kill switch: neither branch fires, ``args`` stays
+    #           untouched — every operator dispatches at whatever the
+    #           untiered (pre-.p2d, strong) default has always been.
+    #           Rollback without a code change.
+    #
+    # Each branch's env check is inlined (not hoisted to a local) so the
+    # AST structural guard (``TestNotConsultedRepoWide::
+    # test_p2c_opt_in_call_sites_are_env_gated``) — which requires the
+    # resolver call be lexically nested inside an if/while whose test
+    # source names ``NX_OPERATOR_MODEL_TIERING`` — inspects the real
+    # branch condition, not a variable read.
+    if "model" not in args:
+        if _os.environ.get("NX_OPERATOR_MODEL_TIERING") == "1":
+            from nexus.operators.model_tiers import (  # noqa: PLC0415 — measurement-only opt-in, not a default-path import
+                OPERATOR_MODEL_TIER,
+                resolve_model_for_operator,
+            )
+
+            if resolved_tool in OPERATOR_MODEL_TIER:
+                args = {**args, "model": resolve_model_for_operator(resolved_tool)}
+        elif _os.environ.get("NX_OPERATOR_MODEL_TIERING") != "0":
+            from nexus.operators.model_tiers import resolve_model_for_flipped_operator  # noqa: PLC0415 — default-path resolver, kept adjacent to its measurement-override sibling above
+
+            _default_model = resolve_model_for_flipped_operator(resolved_tool)
+            if _default_model is not None:
+                args = {**args, "model": _default_model}
+
     # RDR-093 S-1: pop runner-attached truncation metadata before the
     # kwargs-drop pass so the operator never sees the marker (it's not
     # part of any operator's signature) and the warn-on-drop log doesn't
@@ -957,8 +1227,16 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # call succeeds, AND log the drop at warning level so misspelled
     # or unwired kwargs stay observable. ``**kwargs``-accepting tools
     # keep every kwarg.
+    _sig: inspect.Signature | None
     try:
-        sig = inspect.signature(fn)
+        _sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        # Builtins / C-level callables can't always be inspected; leave
+        # args untouched and let the call site surface any TypeError.
+        _sig = None
+
+    if _sig is not None:
+        sig = _sig
         accepts_any_kwarg = any(
             p.kind is inspect.Parameter.VAR_KEYWORD
             for p in sig.parameters.values()
@@ -974,10 +1252,42 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
                     known_sample=sorted(known)[:12],
                 )
             args = {k: v for k, v in args.items() if k in known}
-    except (TypeError, ValueError):
-        # Builtins / C-level callables can't always be inspected; leave
-        # args untouched and let the call site surface any TypeError.
-        pass
+
+        # nexus-nyry9.4 review-fix (critic finding #3, T2 [23036]): a
+        # step whose resolved args have no path to a required parameter
+        # (not hydrated via ``ids``, not present directly, no ``inputs``
+        # alias — see ``_hydrate_operator_args`` above, which already
+        # ran) reaches this call and raises a bare ``TypeError`` today
+        # (nx_answer_runs id=4: "operator_summarize() missing 1 required
+        # positional argument: 'content'"). Fail loud with a named error
+        # instead — a plan-authoring bug, not a runtime condition; a
+        # silent default would mask it (no-silent-fallbacks-for-
+        # correctness). Deliberately placed HERE, after hydration and
+        # AFTER the kwargs-drop pass, and gated on the REAL callable's
+        # own signature — not a blanket pre-dispatch check — so a
+        # caller-injected fake/test dispatcher (which never reaches this
+        # function) is never affected; only a step that will actually be
+        # dispatched against the real MCP tool registry is checked.
+        # ``step_index=-1`` is a placeholder: this function is not given
+        # the step index (the ``ToolDispatcher`` protocol is deliberately
+        # ``(tool, args) -> result``), so the two ``plan_run`` call sites
+        # that invoke a real dispatcher patch in the correct index before
+        # re-raising.
+        _missing_required = [
+            name for name, p in sig.parameters.items()
+            if p.default is inspect.Parameter.empty
+            and p.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+            and name not in args
+        ]
+        if _missing_required:
+            raise PlanRunOperatorArgMissingError(
+                step_index=-1,
+                tool=resolved_tool,
+                missing_arg=_missing_required[0],
+            )
 
     # RDR-079 P4: await async tools directly, call sync tools inline.
     # No thread bridge — the loop continuity matters for the pool's
@@ -1112,22 +1422,140 @@ async def plan_run(
 
     def _extract_tool(step: dict[str, Any]) -> str:
         t = step.get("tool") or step.get("op") or step.get("operation") or ""
+        # nexus-nyry9.4 review-fix (code-review-expert + substantive-critic,
+        # T2 [23035]/[23036]): a truthy non-string tool value (e.g.
+        # ``{"tool": 5}``) previously reached ``t.startswith(...)`` and
+        # raised a bare ``AttributeError`` instead of the intended
+        # ``PlanRunToolNotFoundError`` — exactly the kind of unhandled
+        # crash the validation loop below exists to prevent. Treat a
+        # non-string value the same as "no tool resolved" so the loop's
+        # own checks (which DO name the step index and the offending
+        # value/type) are what the caller sees.
+        if not isinstance(t, str):
+            return ""
         if t.startswith("mcp__"):
             t = t.rsplit("__", 1)[-1]
         return t
 
     caller = bindings or {}
-    merged: dict[str, Any] = {**match.default_bindings, **caller}
+    # nexus-nyry9.5 (RDR-196 .r5 review-fix): this precedence formula is
+    # now expressed in exactly one place — see merge_bindings's own
+    # docstring for why.
+    merged: dict[str, Any] = merge_bindings(match.default_bindings, caller)
     _validate_bindings(match, merged)
 
     plan = json.loads(match.plan_json)
     steps = plan.get("steps", []) or []
 
+    # nexus-nyry9.4 (RDR-196 residual): fail loud at VALIDATION, not
+    # dispatch. Historically an empty/missing tool name reached
+    # ``_default_dispatcher`` and raised ``PlanRunToolNotFoundError``
+    # only after earlier steps in the same plan had already dispatched
+    # (nx_answer_runs ids 177/183/184/369 — the plan-138 "unknown tool
+    # ''" crash class; the offending stored plans no longer exist in
+    # the library, purged by a later reseed, but the runner itself
+    # never validated this and would still fail the same way against
+    # any malformed plan reaching it today). A caller-supplied fake
+    # dispatcher (as in tests) may not replicate the real dispatcher's
+    # own unknown-tool check at all, so this cannot be left to the
+    # dispatcher layer — it must be checked here, once, for every step,
+    # before the first dispatch of the whole plan.
+    for _step_index, _step in enumerate(steps):
+        if not isinstance(_step, dict):
+            raise PlanRunToolNotFoundError(
+                tool="",
+                reason=(
+                    f"plan_json.steps[{_step_index}] is not a mapping "
+                    f"(got {type(_step).__name__}) — malformed plan, "
+                    "rejected before any step dispatched"
+                ),
+            )
+        if not _extract_tool(_step):
+            # nexus-nyry9.4 review-fix: distinguish "missing entirely"
+            # from "present but not a string" so the error names the
+            # offending value/type, not just a generic absence.
+            _raw_tool = (
+                _step.get("tool")
+                if _step.get("tool") is not None
+                else _step.get("op") if _step.get("op") is not None
+                else _step.get("operation")
+            )
+            if _raw_tool is not None and not isinstance(_raw_tool, str):
+                raise PlanRunToolNotFoundError(
+                    tool="",
+                    reason=(
+                        f"plan_json.steps[{_step_index}] has a non-string "
+                        f"'tool'/'op'/'operation' value {_raw_tool!r} "
+                        f"({type(_raw_tool).__name__}) — malformed plan, "
+                        "rejected before any step dispatched"
+                    ),
+                )
+            raise PlanRunToolNotFoundError(
+                tool="",
+                reason=(
+                    f"plan_json.steps[{_step_index}] has no resolvable "
+                    "'tool'/'op'/'operation' name — malformed plan, "
+                    "rejected before any step dispatched"
+                ),
+            )
     dispatch: ToolDispatcher = dispatcher or _default_dispatcher
     step_outputs: list[dict[str, Any]] = []
     #: nexus-h33x8.6 a4: set when ``deadline`` cuts the run short. See
     #: :class:`PlanResult` and the ``deadline`` docstring above.
     budget_exhausted_at_step: int | None = None
+    #: RDR-196 .p1b (nexus-nyry9.8): one StepRecord per executed dispatch
+    #: segment. See StepRecord's own docstring for the source/model/cost
+    #: attribution rules.
+    step_records: list[StepRecord] = []
+
+    def _step_source(tool: str, result: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        """Classify an isolated/bundle-fallback dispatch's ``source`` and
+        strip the runner-internal ``_dispatch_source`` marker (Gap 5 —
+        core.py's operator_filter/groupby/aggregate SQL fast path) off
+        *result* so it never leaks onto ``step_outputs`` / ``$stepN.field``.
+
+        Default: any operator tool (:func:`is_operator_tool`) is "llm";
+        any non-operator (retrieval/traversal) tool is "sql" — see
+        :class:`StepRecord`'s docstring for why that's accurate on this
+        substrate, not a stretch. The marker overrides the default to
+        "sql" only when an operator's own SQL fast path actually served
+        the request.
+        """
+        explicit = result.pop("_dispatch_source", None)
+        source = explicit or ("llm" if is_operator_tool(tool) else "sql")
+        return source, result
+
+    def _record_step(
+        *, step_index: int, operator: str, source: str, elapsed_ms: int,
+        ok: bool, usage: Any = None,
+        bundled_steps: list[int] | None = None,
+    ) -> None:
+        """Append one :class:`StepRecord`. *usage* is a
+        ``nexus.operators.dispatch.DispatchUsage`` or ``None``.
+
+        Priority: real ``usage`` always wins when present (the "bundle"
+        path via its explicit sink, the isolated / bundle-fallback path
+        via the ambient ContextVar sink). Absent real usage: a "sql" step
+        is a TRUE, known zero (no claude -p call happened at all) —
+        ``0``/``0``/``0.0``. Any "llm"/"bundle" step whose dispatch never
+        produced a result envelope (timeout, non-zero exit, empty stdout)
+        is genuinely UNKNOWN — ``None``, never a fabricated ``0``.
+        """
+        if usage is not None:
+            model = usage.model
+            in_tok, out_tok, cost = (
+                usage.input_tokens, usage.output_tokens, usage.cost_usd,
+            )
+        elif source == "sql":
+            model, in_tok, out_tok, cost = None, 0, 0, 0.0
+        else:
+            model, in_tok, out_tok, cost = None, None, None, None
+        step_records.append(StepRecord(
+            step_index=step_index, operator=operator, source=source,
+            model=model, input_tokens=in_tok, output_tokens=out_tok,
+            cost_usd=cost, elapsed_ms=elapsed_ms, ok=ok,
+            bundled_steps=list(bundled_steps) if bundled_steps else [],
+        ))
 
     # One authoritative segmentation. When bundling is off or the caller
     # supplied a dispatcher that doesn't opt into bundling, flatten the
@@ -1147,333 +1575,482 @@ async def plan_run(
                 flat.append(seg)
         segments = flat
 
-    for seg in segments:
-        # nexus-h33x8.6 a4: hard budget check BEFORE dispatching this
-        # segment. ``deadline is None`` (the default) skips this
-        # entirely — pre-a4 behavior is unchanged. Retrieval steps
-        # already run get to keep their output; the segment about to
-        # start does not.
-        if deadline is not None and time.monotonic() >= deadline:
+    try:
+        for seg in segments:
+            # nexus-h33x8.6 a4: hard budget check BEFORE dispatching this
+            # segment. ``deadline is None`` (the default) skips this
+            # entirely — pre-a4 behavior is unchanged. Retrieval steps
+            # already run get to keep their output; the segment about to
+            # start does not.
+            if deadline is not None and time.monotonic() >= deadline:
+                if isinstance(seg, OperatorBundleSlice):
+                    budget_exhausted_at_step = seg.plan_indices[0] + 1
+                else:
+                    budget_exhausted_at_step = seg.plan_index + 1
+                _log.info(
+                    "nx_answer_budget_exhausted",
+                    at_step=budget_exhausted_at_step,
+                    total_steps=len(steps),
+                    steps_completed=len(step_outputs),
+                )
+                break
+
+            # nexus-0qi9: per-step progress visibility. Emit start/complete
+            # log events at each segment boundary so the silent claude -p
+            # chain becomes audible. Without this, a 4-step plan that takes
+            # 10+ minutes is indistinguishable from a hang from the caller's
+            # seat. Events flow to structlog which the MCP server's logger
+            # routes to ~/.config/nexus/logs/mcp.log; downstream ``nx
+            # tier-status``-style commands can join on the same session_id.
+            _seg_started_at = time.monotonic()
             if isinstance(seg, OperatorBundleSlice):
-                budget_exhausted_at_step = seg.plan_indices[0] + 1
+                _seg_kind = "bundle"
+                _seg_indices = list(seg.plan_indices)
+                _seg_tools = [_extract_tool(steps[bi]) for bi in seg.plan_indices]
             else:
-                budget_exhausted_at_step = seg.plan_index + 1
+                _seg_kind = "isolated"
+                _seg_indices = [seg.plan_index]
+                _seg_tools = [_extract_tool(seg.step)]
             _log.info(
-                "nx_answer_budget_exhausted",
-                at_step=budget_exhausted_at_step,
+                "nx_answer_step_start",
+                kind=_seg_kind,
+                step_indices=_seg_indices,
+                tools=_seg_tools,
                 total_steps=len(steps),
-                steps_completed=len(step_outputs),
             )
-            break
 
-        # nexus-0qi9: per-step progress visibility. Emit start/complete
-        # log events at each segment boundary so the silent claude -p
-        # chain becomes audible. Without this, a 4-step plan that takes
-        # 10+ minutes is indistinguishable from a hang from the caller's
-        # seat. Events flow to structlog which the MCP server's logger
-        # routes to ~/.config/nexus/logs/mcp.log; downstream ``nx
-        # tier-status``-style commands can join on the same session_id.
-        _seg_started_at = time.monotonic()
-        if isinstance(seg, OperatorBundleSlice):
-            _seg_kind = "bundle"
-            _seg_indices = list(seg.plan_indices)
-            _seg_tools = [_extract_tool(steps[bi]) for bi in seg.plan_indices]
-        else:
-            _seg_kind = "isolated"
-            _seg_indices = [seg.plan_index]
-            _seg_tools = [_extract_tool(seg.step)]
-        _log.info(
-            "nx_answer_step_start",
-            kind=_seg_kind,
-            step_indices=_seg_indices,
-            tools=_seg_tools,
-            total_steps=len(steps),
-        )
-
-        if isinstance(seg, OperatorBundleSlice):
-            # ── Bundle path: ≥2 contiguous operator steps → single dispatch ──
-            deferred_indices = set(seg.plan_indices)
-            bundle_steps: list[OperatorBundleStep] = []
-            for bi in seg.plan_indices:
-                bstep = steps[bi]
-                btool = _extract_tool(bstep)
-                b_raw_args = bstep.get("args", {}) or {}
-                b_resolved = _resolve_args(
-                    b_raw_args, bindings=merged, step_outputs=step_outputs,
-                    deferred_step_indices=deferred_indices,
-                )
-                # Capture source collection(s) BEFORE hydration strips
-                # them from args, so the composer can attach a "source:"
-                # line to the prompt for parallel-branch attribution.
-                source_collections = (
-                    b_resolved.get("collections") if "ids" in b_resolved else None
-                )
-                # Operators skip _check_embedding_domain / scope / caller-
-                # scope injection — those are retrieval-tool concerns.
-                _, b_prepared = _hydrate_operator_args(btool, b_resolved)
-                # RDR-093 S-1: strip the runner-internal truncation
-                # marker so it never leaks into the bundled prompt.
-                # Surface-on-bundle is out of scope for this RDR
-                # (nexus-3j6b tracks cross-operator generalisation
-                # including bundle-aware metadata propagation); the
-                # structlog warning still fires from _hydrate.
-                b_prepared.pop("_truncation_metadata", None)
-                bundle_steps.append(OperatorBundleStep(
-                    plan_index=bi, tool=btool, args=b_prepared,
-                    source_collections=source_collections,
-                ))
-            bundle = OperatorBundle(steps=tuple(bundle_steps))
-
-            # Pre-dispatch size guard. If the composite prompt would
-            # blow past the bundle budget, fall back to per-step
-            # dispatch for this segment so we don't overflow the
-            # claude -p context or produce truncated output. The
-            # fallback re-resolves each step's args WITHOUT deferred
-            # indices so intra-bundle $stepN refs resolve against real
-            # accumulated step_outputs. (substantive-critic Obs B)
-            prompt, _schema = compose_bundle_prompt(bundle)
-            if len(prompt) > MAX_BUNDLE_PROMPT_CHARS:
-                _log.warning(
-                    "bundle_oversized_fallback_to_per_step",
-                    prompt_chars=len(prompt),
-                    max_chars=MAX_BUNDLE_PROMPT_CHARS,
-                    bundle_plan_indices=list(seg.plan_indices),
-                )
+            if isinstance(seg, OperatorBundleSlice):
+                # ── Bundle path: ≥2 contiguous operator steps → single dispatch ──
+                deferred_indices = set(seg.plan_indices)
+                bundle_steps: list[OperatorBundleStep] = []
                 for bi in seg.plan_indices:
                     bstep = steps[bi]
                     btool = _extract_tool(bstep)
                     b_raw_args = bstep.get("args", {}) or {}
                     b_resolved = _resolve_args(
-                        b_raw_args, bindings=merged,
-                        step_outputs=step_outputs,
+                        b_raw_args, bindings=merged, step_outputs=step_outputs,
+                        deferred_step_indices=deferred_indices,
                     )
-                    try:
-                        raw = dispatch(btool, b_resolved)
-                        if inspect.iscoroutine(raw):
-                            result = await raw
-                        else:
-                            result = raw
-                    except Exception as exc:
-                        if not _is_operator_error(exc):
-                            raise
-                        # nexus-l0yh: graceful degrade — substitute
-                        # sentinel, log, continue. Bundle fallback
-                        # path: each step gets its own sentinel so the
-                        # plan can still surface partial results.
+                    # Capture source collection(s) BEFORE hydration strips
+                    # them from args, so the composer can attach a "source:"
+                    # line to the prompt for parallel-branch attribution.
+                    source_collections = (
+                        b_resolved.get("collections") if "ids" in b_resolved else None
+                    )
+                    # Operators skip _check_embedding_domain / scope / caller-
+                    # scope injection — those are retrieval-tool concerns.
+                    _, b_prepared = _hydrate_operator_args(btool, b_resolved)
+                    # RDR-093 S-1: strip the runner-internal truncation
+                    # marker so it never leaks into the bundled prompt.
+                    # Surface-on-bundle is out of scope for this RDR
+                    # (nexus-3j6b tracks cross-operator generalisation
+                    # including bundle-aware metadata propagation); the
+                    # structlog warning still fires from _hydrate.
+                    b_prepared.pop("_truncation_metadata", None)
+                    bundle_steps.append(OperatorBundleStep(
+                        plan_index=bi, tool=btool, args=b_prepared,
+                        source_collections=source_collections,
+                    ))
+                bundle = OperatorBundle(steps=tuple(bundle_steps))
+
+                # Pre-dispatch size guard. If the composite prompt would
+                # blow past the bundle budget, fall back to per-step
+                # dispatch for this segment so we don't overflow the
+                # claude -p context or produce truncated output. The
+                # fallback re-resolves each step's args WITHOUT deferred
+                # indices so intra-bundle $stepN refs resolve against real
+                # accumulated step_outputs. (substantive-critic Obs B)
+                prompt, _schema = compose_bundle_prompt(bundle)
+                if len(prompt) > MAX_BUNDLE_PROMPT_CHARS:
+                    _log.warning(
+                        "bundle_oversized_fallback_to_per_step",
+                        prompt_chars=len(prompt),
+                        max_chars=MAX_BUNDLE_PROMPT_CHARS,
+                        bundle_plan_indices=list(seg.plan_indices),
+                    )
+                    for bi in seg.plan_indices:
+                        bstep = steps[bi]
+                        btool = _extract_tool(bstep)
+                        b_raw_args = bstep.get("args", {}) or {}
+                        b_resolved = _resolve_args(
+                            b_raw_args, bindings=merged,
+                            step_outputs=step_outputs,
+                        )
+                        # RDR-196 .p1b: per-bi timing, NOT the segment-aggregate
+                        # timer below — this loop dispatches N separate
+                        # ToolDispatcher calls (the oversized-bundle fallback),
+                        # so each gets its own real elapsed_ms rather than a
+                        # divided share of the aggregate (same no-fabrication
+                        # principle the bead states for cost).
+                        _bi_started_at = time.monotonic()
+                        # RDR-196 .p1b Gap-1 addendum: same ambient-sink scope
+                        # as the isolated path — this loop dispatches through
+                        # the identical ToolDispatcher abstraction.
+                        _bi_usage: list[Any] = []
+                        try:
+                            with _dispatch_mod.ambient_usage_sink(_bi_usage):
+                                raw = dispatch(btool, b_resolved)
+                                if inspect.iscoroutine(raw):
+                                    result = await raw
+                                else:
+                                    result = raw
+                        except Exception as exc:
+                            # nexus-nyry9.4 review-fix: _default_dispatcher
+                            # doesn't know the step index (see its docstring
+                            # note); patch in the real one here, where ``bi``
+                            # is in scope, before this propagates further.
+                            if (
+                                isinstance(exc, PlanRunOperatorArgMissingError)
+                                and exc.step_index < 0
+                            ):
+                                raise PlanRunOperatorArgMissingError(
+                                    step_index=bi,
+                                    tool=exc.tool,
+                                    missing_arg=exc.missing_arg,
+                                ) from exc
+                            if not _is_operator_error(exc):
+                                raise
+                            # nexus-l0yh: graceful degrade — substitute
+                            # sentinel, log, continue. Bundle fallback
+                            # path: each step gets its own sentinel so the
+                            # plan can still surface partial results.
+                            _log.warning(
+                                "operator_step_failed",
+                                kind="bundle_fallback",
+                                step_index=bi,
+                                tool=btool,
+                                error=str(exc),
+                            )
+                            step_outputs.append(_operator_failed_sentinel(
+                                tool=btool, step_index=bi, message=str(exc),
+                            ))
+                            # RDR-196 .p1b: a step that errors still produces
+                            # a record — ok=False, real usage when a raise
+                            # site still appended it (.p1a contract), read
+                            # back via the ambient sink.
+                            _record_step(
+                                step_index=bi, operator=btool,
+                                source="llm" if is_operator_tool(btool) else "sql",
+                                elapsed_ms=int((time.monotonic() - _bi_started_at) * 1000),
+                                ok=False, usage=_rollup_step_usage(_bi_usage),
+                            )
+                            continue
+                        if not isinstance(result, dict):
+                            raise PlanRunStepRefError(
+                                ref=f"step{bi + 1}",
+                                reason=(
+                                    f"tool {btool!r} returned "
+                                    f"{type(result).__name__}; expected dict "
+                                    "(bundle fallback path)"
+                                ),
+                            )
+                        b_source, result = _step_source(btool, result)
+                        step_outputs.append(result)
+                        _record_step(
+                            step_index=bi, operator=btool, source=b_source,
+                            elapsed_ms=int((time.monotonic() - _bi_started_at) * 1000),
+                            ok=True, usage=_rollup_step_usage(_bi_usage),
+                        )
+                    _log.info(
+                        "nx_answer_step_complete",
+                        kind="bundle_fallback",
+                        step_indices=_seg_indices,
+                        tools=_seg_tools,
+                        elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                    )
+                    continue
+
+                # nexus-h33x8.6 a4: an active deadline threads the REMAINING
+                # budget through as the bundle's own timeout, so the
+                # subprocess is actually cut at the deadline rather than
+                # running to the default 300s regardless.
+                _bundle_kwargs: dict[str, Any] = {}
+                if deadline is not None:
+                    _bundle_kwargs["timeout"] = max(0.0, deadline - time.monotonic())
+                # RDR-196 .p1b: the ONE genuine claude_dispatch call site this
+                # module owns directly (every operator_* MCP tool owns its
+                # own internal call, out of reach from here — see StepRecord's
+                # docstring). A fresh list per bundle segment; DispatchUsage is
+                # appended whenever a result envelope parsed, even on some
+                # subsequent raises (.p1a contract) — read back below.
+                _bundle_usage: list[Any] = []
+                try:
+                    bundle_result = await dispatch_bundle(
+                        bundle, usage_sink=_bundle_usage, **_bundle_kwargs,
+                    )
+                except Exception as exc:
+                    if deadline is not None and isinstance(exc, _dispatch_mod.OperatorTimeoutError):
+                        # a4: capture the reconstructed partial content on
+                        # the terminal slot and STOP — unlike the
+                        # deadline-less path below, we do not keep going
+                        # past a budget-driven timeout.
                         _log.warning(
-                            "operator_step_failed",
-                            kind="bundle_fallback",
-                            step_index=bi,
-                            tool=btool,
-                            error=str(exc),
+                            "nx_answer_budget_operator_timeout",
+                            kind="bundle",
+                            step_indices=list(seg.plan_indices),
+                            partial_chars=len(exc.partial_text),
+                            event_count=exc.event_count,
                         )
-                        step_outputs.append(_operator_failed_sentinel(
-                            tool=btool, step_index=bi, message=str(exc),
+                        for _ in range(len(seg.plan_indices) - 1):
+                            step_outputs.append(dict(BUNDLED_INTERMEDIATE))
+                        step_outputs.append(_operator_timeout_sentinel(
+                            tool=_extract_tool(steps[seg.plan_indices[-1]]),
+                            step_index=seg.plan_indices[-1],
+                            exc=exc,
                         ))
-                        continue
-                    if not isinstance(result, dict):
-                        raise PlanRunStepRefError(
-                            ref=f"step{bi + 1}",
-                            reason=(
-                                f"tool {btool!r} returned "
-                                f"{type(result).__name__}; expected dict "
-                                "(bundle fallback path)"
-                            ),
+                        budget_exhausted_at_step = seg.plan_indices[0] + 1
+                        # A timeout NEVER reaches claude_dispatch's usage_sink
+                        # append (.p1a contract) — usage is genuinely None,
+                        # never fabricated. Still one record: one dispatch
+                        # was attempted regardless of outcome.
+                        _record_step(
+                            step_index=seg.plan_indices[0],
+                            operator="+".join(_seg_tools), source="bundle",
+                            elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                            ok=False, bundled_steps=list(seg.plan_indices),
                         )
-                    step_outputs.append(result)
+                        break
+                    if not _is_operator_error(exc):
+                        raise
+                    # nexus-l0yh: bundle dispatch covers every plan_index
+                    # in the segment, so on failure push one sentinel per
+                    # index. Downstream refs to the terminal slot now
+                    # resolve to the failed-sentinel; the planner sees
+                    # ``status: failed`` if it inspects step output, or
+                    # falls through to empty fields for $stepN.<field>.
+                    _log.warning(
+                        "operator_step_failed",
+                        kind="bundle",
+                        step_indices=list(seg.plan_indices),
+                        error=str(exc),
+                    )
+                    for bi in seg.plan_indices:
+                        step_outputs.append(_operator_failed_sentinel(
+                            tool=_extract_tool(steps[bi]),
+                            step_index=bi,
+                            message=str(exc),
+                        ))
+                    # RDR-196 .p1b: ONE record for the whole segment (one
+                    # dispatch_bundle call failed), not N — mirrors the
+                    # success-path "never divide/duplicate a fused dispatch's
+                    # telemetry" rule. Several raise sites still append real
+                    # usage before raising (.p1a contract); read it back when
+                    # present rather than assuming None.
+                    _record_step(
+                        step_index=seg.plan_indices[0],
+                        operator="+".join(_seg_tools), source="bundle",
+                        elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                        ok=False, bundled_steps=list(seg.plan_indices),
+                        usage=_bundle_usage[-1] if _bundle_usage else None,
+                    )
+                    continue
+                # Intermediate slots: sentinel. Terminal slot: the real
+                # output. Downstream $stepN.<field> refs to an intermediate
+                # raise a specific "inside a bundle" error via
+                # _resolve_value's sentinel-aware check.
+                for _ in range(len(seg.plan_indices) - 1):
+                    step_outputs.append(dict(BUNDLED_INTERMEDIATE))
+                if not isinstance(bundle_result, dict):
+                    raise PlanRunStepRefError(
+                        ref=f"step{seg.end_index + 1}",
+                        reason=(
+                            f"operator bundle returned {type(bundle_result).__name__}; "
+                            "expected dict"
+                        ),
+                    )
+                step_outputs.append(bundle_result)
                 _log.info(
                     "nx_answer_step_complete",
-                    kind="bundle_fallback",
+                    kind="bundle",
                     step_indices=_seg_indices,
                     tools=_seg_tools,
                     elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
                 )
+                # RDR-196 .p1b: exactly ONE record for the whole fused
+                # dispatch — never one per bundled_steps index, and never a
+                # per-step cost fabricated by dividing the bundle's real cost.
+                _record_step(
+                    step_index=seg.plan_indices[0],
+                    operator="+".join(_seg_tools), source="bundle",
+                    elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                    ok=True, bundled_steps=list(seg.plan_indices),
+                    usage=_bundle_usage[-1] if _bundle_usage else None,
+                )
                 continue
 
+            # ── Isolated path: IsolatedStep → one dispatcher call ──
+            assert isinstance(seg, IsolatedStep)
+            index = seg.plan_index
+            step = seg.step
+            tool = _extract_tool(step)
+            raw_args = step.get("args", {}) or {}
+            scope = step.get("scope")
+
+            resolved = _resolve_args(
+                raw_args, bindings=merged, step_outputs=step_outputs,
+            )
+            _check_embedding_domain(index, tool, scope, resolved)
+            # SC-3: forward scope.taxonomy_domain → corpus and scope.topic
+            # → topic into the dispatched call. Runs after the cross-
+            # embedding guard so guard-violating scopes still raise even
+            # when the scope-driven corpus injection would have masked
+            # the inconsistency.
+            resolved = _apply_scope_to_args(
+                tool, scope, resolved,
+                bindings=merged, step_outputs=step_outputs,
+            )
+            # nexus-zs1d Phase 1: caller-supplied scope (from nx_answer's
+            # ``scope`` argument, propagated via the ``_nx_scope`` binding)
+            # fills in the corpus when the plan step is agnostic. Runs after
+            # _apply_scope_to_args so plan-declared corpus / taxonomy_domain
+            # always wins.
+            resolved = _apply_caller_scope_to_args(
+                tool, resolved, bindings=merged,
+            )
+            # nexus-h3e2: ``mode: broad`` is an authoring affordance for
+            # abstract / community-summary plans whose per-corpus default
+            # threshold drops 100% of candidates. Runs last so an explicit
+            # ``threshold`` set by the plan author always wins.
+            resolved = _apply_mode_to_args(tool, resolved)
+
             # nexus-h33x8.6 a4: an active deadline threads the REMAINING
-            # budget through as the bundle's own timeout, so the
-            # subprocess is actually cut at the deadline rather than
-            # running to the default 300s regardless.
-            _bundle_kwargs: dict[str, Any] = {}
-            if deadline is not None:
-                _bundle_kwargs["timeout"] = max(0.0, deadline - time.monotonic())
+            # budget into an operator step's own ``timeout`` kwarg (dropped
+            # harmlessly by the dispatcher for non-operator tools that don't
+            # accept it — see ``_default_dispatcher``'s kwargs-filter).
+            if deadline is not None and is_operator_tool(tool):
+                resolved = {**resolved, "timeout": max(0.0, deadline - time.monotonic())}
+
+            # Dispatcher may be async (default path, RDR-079 P4) or sync
+            # (legacy test fixtures + any caller that prefers the simpler
+            # contract). Detect a returned coroutine and await it; treat a
+            # returned dict/mapping as the direct result.
+            # RDR-196 .p1b Gap-1 addendum (nexus-nyry9.8, 2026-08-20): scope an
+            # ambient usage sink around the dispatch so real DispatchUsage is
+            # captured even though ``dispatch`` goes through the
+            # ToolDispatcher abstraction into an operator_* MCP tool whose
+            # OWN internal claude_dispatch call this module never touches
+            # directly. See ``_rollup_step_usage`` for the >1-entry rule.
+            _step_usage: list[Any] = []
             try:
-                bundle_result = await dispatch_bundle(bundle, **_bundle_kwargs)
+                with _dispatch_mod.ambient_usage_sink(_step_usage):
+                    raw = dispatch(tool, resolved)
+                    if inspect.iscoroutine(raw):
+                        result = await raw
+                    else:
+                        result = raw
             except Exception as exc:
+                # nexus-nyry9.4 review-fix: _default_dispatcher doesn't know
+                # the step index (see its docstring note); patch in the real
+                # one here, where ``index`` is in scope, before this
+                # propagates further.
+                if (
+                    isinstance(exc, PlanRunOperatorArgMissingError)
+                    and exc.step_index < 0
+                ):
+                    raise PlanRunOperatorArgMissingError(
+                        step_index=index,
+                        tool=exc.tool,
+                        missing_arg=exc.missing_arg,
+                    ) from exc
                 if deadline is not None and isinstance(exc, _dispatch_mod.OperatorTimeoutError):
-                    # a4: capture the reconstructed partial content on
-                    # the terminal slot and STOP — unlike the
-                    # deadline-less path below, we do not keep going
-                    # past a budget-driven timeout.
+                    # a4: capture partial content and STOP — unlike the
+                    # deadline-less path below, a budget-driven timeout does
+                    # not keep going.
                     _log.warning(
                         "nx_answer_budget_operator_timeout",
-                        kind="bundle",
-                        step_indices=list(seg.plan_indices),
+                        kind="isolated",
+                        step_index=index,
+                        tool=tool,
                         partial_chars=len(exc.partial_text),
                         event_count=exc.event_count,
                     )
-                    for _ in range(len(seg.plan_indices) - 1):
-                        step_outputs.append(dict(BUNDLED_INTERMEDIATE))
                     step_outputs.append(_operator_timeout_sentinel(
-                        tool=_extract_tool(steps[seg.plan_indices[-1]]),
-                        step_index=seg.plan_indices[-1],
-                        exc=exc,
+                        tool=tool, step_index=index, exc=exc,
                     ))
-                    budget_exhausted_at_step = seg.plan_indices[0] + 1
+                    budget_exhausted_at_step = index + 1
+                    # RDR-196 .p1b: a timeout never reaches usage_sink's
+                    # append (.p1a contract) — usage genuinely None (the
+                    # ambient sink is symmetric: it appends at the same site
+                    # usage_sink does, so it is equally empty here). Still
+                    # one record: a dispatch was attempted.
+                    _record_step(
+                        step_index=index, operator=tool,
+                        source="llm" if is_operator_tool(tool) else "sql",
+                        elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                        ok=False, usage=_rollup_step_usage(_step_usage),
+                    )
                     break
                 if not _is_operator_error(exc):
                     raise
-                # nexus-l0yh: bundle dispatch covers every plan_index
-                # in the segment, so on failure push one sentinel per
-                # index. Downstream refs to the terminal slot now
-                # resolve to the failed-sentinel; the planner sees
-                # ``status: failed`` if it inspects step output, or
-                # falls through to empty fields for $stepN.<field>.
+                # nexus-l0yh: graceful degrade for the isolated-step path.
+                # Substitute sentinel, log, continue with the next step.
                 _log.warning(
                     "operator_step_failed",
-                    kind="bundle",
-                    step_indices=list(seg.plan_indices),
+                    kind="isolated",
+                    step_index=index,
+                    tool=tool,
                     error=str(exc),
                 )
-                for bi in seg.plan_indices:
-                    step_outputs.append(_operator_failed_sentinel(
-                        tool=_extract_tool(steps[bi]),
-                        step_index=bi,
-                        message=str(exc),
-                    ))
+                step_outputs.append(_operator_failed_sentinel(
+                    tool=tool, step_index=index, message=str(exc),
+                ))
+                # RDR-196 .p1b: a step that errors still produces a record
+                # (ok=False) — a telemetry layer that only records successes
+                # measures the wrong population. Several raise sites still
+                # append real usage before raising (.p1a contract) — read it
+                # back via the ambient sink rather than assuming None.
+                _record_step(
+                    step_index=index, operator=tool,
+                    source="llm" if is_operator_tool(tool) else "sql",
+                    elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                    ok=False, usage=_rollup_step_usage(_step_usage),
+                )
                 continue
-            # Intermediate slots: sentinel. Terminal slot: the real
-            # output. Downstream $stepN.<field> refs to an intermediate
-            # raise a specific "inside a bundle" error via
-            # _resolve_value's sentinel-aware check.
-            for _ in range(len(seg.plan_indices) - 1):
-                step_outputs.append(dict(BUNDLED_INTERMEDIATE))
-            if not isinstance(bundle_result, dict):
+            if not isinstance(result, dict):
+                # Tool authors must follow the documented output contract;
+                # surface non-dict returns explicitly rather than letting
+                # downstream $stepN.field substitution silently fail.
                 raise PlanRunStepRefError(
-                    ref=f"step{seg.end_index + 1}",
+                    ref=f"step{index + 1}",
                     reason=(
-                        f"operator bundle returned {type(bundle_result).__name__}; "
-                        "expected dict"
+                        f"tool {tool!r} returned {type(result).__name__}; "
+                        f"expected dict per RDR-078 §Phase 1"
                     ),
                 )
-            step_outputs.append(bundle_result)
+            source, result = _step_source(tool, result)
+            step_outputs.append(result)
             _log.info(
                 "nx_answer_step_complete",
-                kind="bundle",
+                kind="isolated",
                 step_indices=_seg_indices,
                 tools=_seg_tools,
                 elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
             )
-            continue
-
-        # ── Isolated path: IsolatedStep → one dispatcher call ──
-        assert isinstance(seg, IsolatedStep)
-        index = seg.plan_index
-        step = seg.step
-        tool = _extract_tool(step)
-        raw_args = step.get("args", {}) or {}
-        scope = step.get("scope")
-
-        resolved = _resolve_args(
-            raw_args, bindings=merged, step_outputs=step_outputs,
-        )
-        _check_embedding_domain(index, tool, scope, resolved)
-        # SC-3: forward scope.taxonomy_domain → corpus and scope.topic
-        # → topic into the dispatched call. Runs after the cross-
-        # embedding guard so guard-violating scopes still raise even
-        # when the scope-driven corpus injection would have masked
-        # the inconsistency.
-        resolved = _apply_scope_to_args(
-            tool, scope, resolved,
-            bindings=merged, step_outputs=step_outputs,
-        )
-        # nexus-zs1d Phase 1: caller-supplied scope (from nx_answer's
-        # ``scope`` argument, propagated via the ``_nx_scope`` binding)
-        # fills in the corpus when the plan step is agnostic. Runs after
-        # _apply_scope_to_args so plan-declared corpus / taxonomy_domain
-        # always wins.
-        resolved = _apply_caller_scope_to_args(
-            tool, resolved, bindings=merged,
-        )
-        # nexus-h3e2: ``mode: broad`` is an authoring affordance for
-        # abstract / community-summary plans whose per-corpus default
-        # threshold drops 100% of candidates. Runs last so an explicit
-        # ``threshold`` set by the plan author always wins.
-        resolved = _apply_mode_to_args(tool, resolved)
-
-        # nexus-h33x8.6 a4: an active deadline threads the REMAINING
-        # budget into an operator step's own ``timeout`` kwarg (dropped
-        # harmlessly by the dispatcher for non-operator tools that don't
-        # accept it — see ``_default_dispatcher``'s kwargs-filter).
-        if deadline is not None and is_operator_tool(tool):
-            resolved = {**resolved, "timeout": max(0.0, deadline - time.monotonic())}
-
-        # Dispatcher may be async (default path, RDR-079 P4) or sync
-        # (legacy test fixtures + any caller that prefers the simpler
-        # contract). Detect a returned coroutine and await it; treat a
-        # returned dict/mapping as the direct result.
-        try:
-            raw = dispatch(tool, resolved)
-            if inspect.iscoroutine(raw):
-                result = await raw
-            else:
-                result = raw
-        except Exception as exc:
-            if deadline is not None and isinstance(exc, _dispatch_mod.OperatorTimeoutError):
-                # a4: capture partial content and STOP — unlike the
-                # deadline-less path below, a budget-driven timeout does
-                # not keep going.
-                _log.warning(
-                    "nx_answer_budget_operator_timeout",
-                    kind="isolated",
-                    step_index=index,
-                    tool=tool,
-                    partial_chars=len(exc.partial_text),
-                    event_count=exc.event_count,
-                )
-                step_outputs.append(_operator_timeout_sentinel(
-                    tool=tool, step_index=index, exc=exc,
-                ))
-                budget_exhausted_at_step = index + 1
-                break
-            if not _is_operator_error(exc):
-                raise
-            # nexus-l0yh: graceful degrade for the isolated-step path.
-            # Substitute sentinel, log, continue with the next step.
-            _log.warning(
-                "operator_step_failed",
-                kind="isolated",
-                step_index=index,
-                tool=tool,
-                error=str(exc),
+            _record_step(
+                step_index=index, operator=tool, source=source,
+                elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                ok=True, usage=_rollup_step_usage(_step_usage),
             )
-            step_outputs.append(_operator_failed_sentinel(
-                tool=tool, step_index=index, message=str(exc),
-            ))
-            continue
-        if not isinstance(result, dict):
-            # Tool authors must follow the documented output contract;
-            # surface non-dict returns explicitly rather than letting
-            # downstream $stepN.field substitution silently fail.
-            raise PlanRunStepRefError(
-                ref=f"step{index + 1}",
-                reason=(
-                    f"tool {tool!r} returned {type(result).__name__}; "
-                    f"expected dict per RDR-078 §Phase 1"
-                ),
-            )
-        step_outputs.append(result)
-        _log.info(
-            "nx_answer_step_complete",
-            kind="isolated",
-            step_indices=_seg_indices,
-            tools=_seg_tools,
-            elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
-        )
+
+    except Exception as exc:  # noqa: BLE001 — boundary re-raise; attach-and-propagate, see below
+        # RDR-196 .p1d critique fold (T2 [23092], nexus-nyry9.11 DO): a
+        # mid-loop exception must not discard completed steps' telemetry --
+        # failed runs are exactly the population that produced the
+        # 45x-wrong latency docstring (nexus-h33x8.6). Attach the
+        # step_records completed so far directly to the exception INSTANCE
+        # (no new carrier type -- every raise site inside the loop above,
+        # present or future, is covered by this single boundary, whether it
+        # raises a fresh exception or re-raises a caught one) so core.py's
+        # except-handler can record real per-step data instead of a
+        # hardcoded []. step_records is empty when the FIRST segment fails
+        # before any _record_step call -- that is accurate, not a bug.
+        exc.step_records = list(step_records)
+        raise
 
     return PlanResult(
         steps=step_outputs,
         final=step_outputs[-1] if step_outputs else None,
         budget_exhausted_at_step=budget_exhausted_at_step,
         total_planned_steps=len(steps),
+        step_records=step_records,
     )

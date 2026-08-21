@@ -126,13 +126,27 @@ if not (isinstance(models, list) and models):
         "guided-upgrade voyage-capability check falsely fail-closes, "
         "blocking managed migrations targeting this service"
     )
+# RDR-196 .p1c (nexus-nyry9.9): nx_answer_steps_supported is a compile-time-
+# constant true on any engine build carrying the handler, unconditionally
+# emitted (unlike the nullable build_ref field) — the same edge-stubbing
+# risk class embedding_mode/embedding_models above guards against
+# (nexus-bwulw: the public edge once stubbed /version fields the engine
+# itself always emitted, silently disabling client-side capability gating).
+steps_supported = body.get("nx_answer_steps_supported")
+if steps_supported is not True:
+    errs.append(
+        f"nx_answer_steps_supported missing/false through the edge "
+        f"(got {steps_supported!r}) — the .p1d per-step cost/quality "
+        "telemetry capability probe is inert for every cloud client"
+    )
 if errs:
     print("  /version body:", json.dumps(body), file=sys.stderr)
     for e in errs:
         print("  VIOLATION:", e, file=sys.stderr)
     sys.exit(1)
 print(f"  ok: release_version={body['release_version']} "
-      f"embedding_mode={mode} models={models}")
+      f"embedding_mode={mode} models={models} "
+      f"nx_answer_steps_supported={steps_supported}")
 PY
 
 # ── Leg B: /health edge contract, AUTHENTICATED (guided_upgrade's managed-

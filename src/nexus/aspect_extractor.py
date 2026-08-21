@@ -40,11 +40,14 @@ keyed on ``rdr__*``). Other prefixes (``docs__``, ``code__``, etc.)
 return ``None`` from ``extract_aspects``; the calling hook should
 no-op on ``None``.
 
-Invocation: ``subprocess.run(["claude", "-p", PROMPT,
-"--output-format", "json"], timeout=180, capture_output=True,
-text=True)``. The Claude CLI is expected to be on PATH; if it is
-not, ``subprocess.run`` raises ``FileNotFoundError`` which propagates
-(configuration error, not a runtime extraction failure).
+Invocation: ``["claude", "-p", "--output-format", "json",
+"--strict-mcp-config"]`` (default argv, see ``_run_claude_isolated``),
+prompt fed via stdin, ``timeout=180``. ``--strict-mcp-config`` (RDR-196
+Gap 4, nexus-nyry9.6) keeps this tool-free dispatch from loading the
+user's ambient MCP server set. The Claude CLI is expected to be on
+PATH; if it is not, subprocess creation raises ``FileNotFoundError``
+which propagates (configuration error, not a runtime extraction
+failure).
 
 The ``--output-format json`` flag returns a wrapper of the form
 ``{"result": "<model-response-text>", "session_id": ..., "usage":
@@ -1556,7 +1559,16 @@ def _run_claude_isolated(
     Behavioral parity with the old ``subprocess.run`` (stdin-fed prompt,
     captured text output, raises ``subprocess.TimeoutExpired``).
     """
-    argv = _argv or ["claude", "-p", "--output-format", "json"]
+    argv = _argv or [
+        "claude", "-p", "--output-format", "json",
+        # RDR-196 Gap 4 / audit fold F1 consequence 2 (nexus-nyry9.6): this
+        # call is tool-free by construction (no --allowedTools passed), so
+        # loading the user's ambient MCP server set buys nothing but ~2x
+        # the context/cost (196-R2 measurement). claude_dispatch got this
+        # fix at f1ae257d0; this second, un-modernized "claude -p" call
+        # site did not, until now.
+        "--strict-mcp-config",
+    ]
     proc = subprocess.Popen(
         argv,
         stdin=subprocess.PIPE,

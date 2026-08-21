@@ -941,6 +941,10 @@ _ALL_TENANT_TABLES = [
     # 2026-08-20: dead table dropped (migration-002-tenant-pk.xml),
     # mirrors health._RLS_TENANT_TABLES)
     "nexus.nx_answer_runs",
+    # RDR-196 .p1c (nexus-nyry9.9, telemetry-007-1/-2): per-step child of
+    # nx_answer_runs, RLS enabled+forced like its parent (mirrors
+    # health._RLS_TENANT_TABLES)
+    "nexus.nx_answer_steps",
     "nexus.pdf_chunks",
     "nexus.pdf_pages",
     "nexus.pdf_pipeline",
@@ -2622,6 +2626,42 @@ class TestGcPurgeMarker:
         path = tmp_path / "gc_purge_markers.jsonl"
         path.write_text("not json at all\n")
         assert m.read_recent_purge_markers(within_days=7) == []
+
+    def test_marker_path_resolves_config_dir_at_call_time(self, tmp_path, monkeypatch) -> None:
+        """The module must NOT capture ``nexus_config_dir`` by value at import.
+
+        Regression, 2026-08-20: three tests in this class failed in a full
+        ``-n auto`` run, each reading back the round-trip test's marker
+        despite pointing ``NEXUS_CONFIG_DIR`` at its own tmp_path. Cause:
+        ``tests/test_doctor_cmd.py``'s autouse fixture patched
+        ``nexus.config.nexus_config_dir`` with a lambda, and the doctor run
+        under that patch FIRST-imported this module (deferred import at
+        ``health.py`` ``_check_gc_audit_non_empty_after_purge``). A
+        module-level ``from nexus.config import nexus_config_dir`` captured
+        the lambda; monkeypatch teardown restored ``nexus.config`` but not
+        this module's copy, pinning every later marker read/write in that
+        worker process to one dead test's tmp dir. Identical class to the
+        one recorded at ``tests/test_false_clean_diagnostics_service_mode``
+        (v7.11.0, PR #1467) — that site was fixed, this consumer was not
+        hardened, so the next leaking fixture re-broke it.
+
+        This pins the consumer side: resolve through the module so a
+        first-import inside ANY patched window cannot outlive the patch.
+        """
+        import importlib
+
+        import nexus.gc_purge_marker as m
+
+        poisoned = tmp_path / "poisoned"
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("nexus.config.nexus_config_dir", lambda: poisoned)
+            importlib.reload(m)  # first-import inside the patched window
+        # Patch is undone here — the module must follow the env again.
+        try:
+            monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "live"))
+            assert m._marker_path() == tmp_path / "live" / "gc_purge_markers.jsonl"
+        finally:
+            importlib.reload(m)
 
     def test_record_failure_is_swallowed_not_raised(self, tmp_path, monkeypatch) -> None:
         """Best-effort: a marker-write failure must never break the purge

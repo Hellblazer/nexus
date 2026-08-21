@@ -51,6 +51,30 @@ def _unique_coll(prefix: str = "code") -> str:
     return f"{prefix}__mtest-{uuid.uuid4().hex[:8]}__bge-base-en-v15-768__v1"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_backfill_state_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """nexus-pfuns: every ``t3 backfill-manifest --no-dry-run`` invocation
+    in this module reads/writes the resumable state file via
+    ``nexus.commands.t3._backfill_state_path()``. Before this fixture, only
+    5 of 19 invocations wrapped ``NEXUS_BACKFILL_STATE_FILE`` in a
+    ``patch.dict`` context manager (the other 14 predated it and forgot
+    the override) -- silently overwriting Sam's real
+    ``~/.config/nexus/backfill_state.json`` with mtest- tenant state on
+    every full-suite run (T2 nexus/gc-purge-marker-xdist-leak-2026-08-20).
+    ``_backfill_state_path()`` was ALSO independently fixed to fall back to
+    ``nexus_config_dir()`` (which the suite-wide autouse
+    ``_isolate_config_dir`` in tests/conftest.py already redirects for
+    every test) rather than a hardcoded real path -- this fixture is a
+    second, explicit line of defense specific to this module's own state
+    file, not a substitute for that production fix. The 5 existing
+    ``patch.dict`` blocks compute the identical ``tmp_path /
+    "backfill_state.json"`` path and simply re-set it to the same value
+    for their `with` block's duration; harmless, left as-is."""
+    state_file = tmp_path / "backfill_state.json"
+    monkeypatch.setenv("NEXUS_BACKFILL_STATE_FILE", str(state_file))
+    return state_file
+
+
 @pytest.fixture()
 def t3_db():
     return T3Database(

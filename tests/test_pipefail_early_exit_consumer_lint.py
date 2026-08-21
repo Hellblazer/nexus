@@ -914,11 +914,20 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # leaving 5, and shifted every remaining site upward by the deleted
         # lines. Numbers regenerated from the detector itself
         # (_early_exit_consumer_hits), not arithmetic.
-        "tests/e2e/migration-rehearsal/run.sh:538",
-        "tests/e2e/migration-rehearsal/run.sh:569",
-        "tests/e2e/migration-rehearsal/run.sh:624",
-        "tests/e2e/migration-rehearsal/run.sh:641",
-        "tests/e2e/migration-rehearsal/run.sh:689",
+        # run.sh: two `VAR="$(... | head -1)"` version extractions (self
+        # version from pyproject, REQUIRED_ENGINE_VERSION from the source)
+        # and five `cp "$(ls -t dist/conexus-*.whl | head -1)"` wheel picks
+        # -- `ls -t` has finished writing by the time `head` exits. Lines
+        # retargeted 2026-08-21 after nexus-c00dw's lease wiring shifted the
+        # file (+46 below the source point); the two version extractions had
+        # been live hits before that edit and were never listed.
+        "tests/e2e/migration-rehearsal/run.sh:164",
+        "tests/e2e/migration-rehearsal/run.sh:177",
+        "tests/e2e/migration-rehearsal/run.sh:589",
+        "tests/e2e/migration-rehearsal/run.sh:620",
+        "tests/e2e/migration-rehearsal/run.sh:675",
+        "tests/e2e/migration-rehearsal/run.sh:692",
+        "tests/e2e/migration-rehearsal/run.sh:740",
         # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.
@@ -1037,7 +1046,7 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
 # `head -1` site, deleted with the leg) removed entries wholesale:
 # 169 - 21 - 15 - 1 = 132. The remaining 5 run.sh sites were retargeted in
 # place, not counted as a change.
-_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 132
+_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 134
 
 
 def test_pipefail_early_exit_exempt_ratchet() -> None:
@@ -1157,9 +1166,9 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         # or a dedicated gate elsewhere, never from these truncated
         # echoes. Retargeted (gap-8/gap-15, T2 [22511]) after this pass's
         # edits shifted the file; same 3 sites, same rationale.
-        "tests/e2e/release-sandbox.sh:1082",
-        "tests/e2e/release-sandbox.sh:1086",
-        "tests/e2e/release-sandbox.sh:1134",
+        "tests/e2e/release-sandbox.sh:1103",
+        "tests/e2e/release-sandbox.sh:1107",
+        "tests/e2e/release-sandbox.sh:1155",
     }
 )
 _PIPEFAIL_OR_TRUE_SITES_CEILING = 9

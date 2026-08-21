@@ -46,7 +46,14 @@ source "$SCRIPT_DIR/../lib/lock.sh"
 LOCKDIR="/tmp/nexus-e2e-locks/gc-ab.lock"
 mkdir -p "$(dirname "$LOCKDIR")"
 lock_acquire "$LOCKDIR" || exit 1
-trap 'lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+# nexus-c00dw: the docker-run native build below writes service/target on
+# the HOST (bind mount), same resource scripts/build-gate-jar.sh /
+# mvnw-leased.sh guard — take that lease too, chained into this trap so a
+# mid-build abort still releases it (this file's own LOCKDIR guard above is
+# a different, harness-wide concurrency guard; the two are complementary).
+# shellcheck source=../../../scripts/lib/build-lease.sh disable=SC1091
+source "$SCRIPT_DIR/../../../scripts/lib/build-lease.sh"
+trap 'build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
 echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
 # Test seam (RDR-184 P0.2, nexus-ccs9v.2): tests/e2e/lib/harness_lock_test.sh
 # sets this to prove a concurrent invocation gets PAST the lock without ever
@@ -60,6 +67,11 @@ build_variant() { # gc-name
   local gc="$1"
   echo "[build] --gc=${gc} (-Ob, linux, GraalVM container)…"
   rm -f service/target/nexus-service
+  # nexus-c00dw: the ./mvnw call happens INSIDE the container, but /src is a
+  # bind mount of this host checkout, so service/target is the same
+  # single-writer resource the host-side lease guards — acquire it here on
+  # the host, around the docker invocation, not inside the container.
+  build_lease_acquire service docker-native-build "--gc=${gc}"
   docker run --rm --entrypoint bash \
     --add-host=host.docker.internal:host-gateway \
     -v "$PWD":/src -w /src/service \
@@ -69,6 +81,7 @@ build_variant() { # gc-name
     "$GRAAL_IMAGE" \
     -c "./mvnw -q -B -Pnative -DskipTests -Dnative.image.opt=-Ob -Dnative.image.gc=${gc} package" \
     > "$OUT/build-${gc}.log" 2>&1
+  build_lease_release service
   mkdir -p "$OUT/$gc"
   cp service/target/nexus-service "$OUT/$gc/"
   # native-image dlopen's its .so siblings from the executable's own dir.

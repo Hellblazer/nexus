@@ -526,6 +526,106 @@ class TestTimestampPreservationPerTable:
         )
 
 
+class TestNxAnswerStepsRoundTrip:
+    """RDR-196 .p1d (nexus-nyry9.10): direct-store-read proof that
+    ``HttpTelemetryStore.record_nx_answer_run(..., steps=[...])`` actually
+    persists ``nexus.nx_answer_steps`` child rows against the REAL Java
+    service + real Postgres — not a mock, and not merely "the POST
+    returned 200" (which the unit-level fake-server tests already cover).
+    Direct psql, bypassing RLS via the OS superuser, was originally the
+    ONLY read path available for this table (there was no HTTP read
+    route — confirmed by inspection of
+    ``TelemetryRepository``/``TelemetryHandler`` at the time). RDR-196
+    .p1c-b (nexus-lme1s) closed that gap:
+    ``GET /nx_answer_runs/query?include_steps=true`` now returns steps
+    too — see ``test_write_then_query_with_include_steps_round_trip``
+    below, which asserts field equality through the client's OWN read
+    path instead of psql. The psql-based test above/below this docstring
+    stays as an independent verification of what actually landed in
+    Postgres (a different assertion axis, not redundant with the new
+    HTTP-round-trip test — the psql test also proves the PARENT row's
+    ``cost_usd`` sum, which ``include_steps`` does not touch).
+    """
+
+    def test_steps_persist_and_cost_sums_to_the_parent_row(self, tel_store, pg_service):
+        question = "nx-ans-steps-roundtrip-int"
+        steps = [
+            {
+                "step_index": 0, "operator": "query", "source": "sql",
+                "model": None, "input_tokens": None, "output_tokens": None,
+                "cost_usd": None, "elapsed_ms": 300, "ok": True, "bundled_steps": [],
+            },
+            {
+                "step_index": 1, "operator": "operator_generate", "source": "llm",
+                "model": "claude-sonnet-5", "input_tokens": 200, "output_tokens": 80,
+                "cost_usd": 0.021, "elapsed_ms": 4100, "ok": True, "bundled_steps": [],
+            },
+        ]
+        tel_store.record_nx_answer_run(
+            question=question, plan_id=3, matched_confidence=0.77,
+            step_count=2, final_text="answer", cost_usd=0.021,
+            duration_ms=4400, steps=steps,
+        )
+
+        pgport, _tmpdir, dbname, pg_user = pg_service
+        rows = _psql_query(
+            pgport, dbname, pg_user,
+            "SELECT s.step_index, s.operator, s.source, s.model, "
+            "s.cost_usd, s.elapsed_ms, s.ok::text "
+            "FROM nexus.nx_answer_steps s "
+            "JOIN nexus.nx_answer_runs r ON r.id = s.run_id "
+            f"WHERE r.question = '{question}' ORDER BY s.step_index;",
+        )
+        assert rows == [
+            ["0", "query", "sql", "", "", "300", "true"],
+            ["1", "operator_generate", "llm", "claude-sonnet-5", "0.021", "4100", "true"],
+        ], f"nx_answer_steps rows did not round-trip as sent; got {rows}"
+
+        # The parent row's own cost_usd was computed by THIS test (mirroring
+        # what core.py's _nx_answer_record_run does: sum of non-None step
+        # costs) and sent explicitly — confirm it landed too.
+        parent = _psql_query(
+            pgport, dbname, pg_user,
+            f"SELECT cost_usd FROM nexus.nx_answer_runs WHERE question = '{question}';",
+        )
+        assert parent == [["0.021"]]
+
+    def test_write_then_query_with_include_steps_round_trip(self, tel_store):
+        """RDR-196 .p1c-b (nexus-lme1s): the read half of nx_answer_steps —
+        GET /v1/telemetry/nx_answer_runs/query?include_steps=true — proven
+        against the REAL Java service, through the client's OWN
+        ``query_nx_answer_runs(include_steps=True)`` method, asserting
+        field equality against what was sent. This is the round trip .p1d
+        had to fall back to a direct psql read for (see the class
+        docstring); it now goes through HTTP end to end."""
+        question = "nx-ans-steps-query-roundtrip-int"
+        steps = [
+            {
+                "step_index": 0, "operator": "query", "source": "sql",
+                "model": None, "input_tokens": None, "output_tokens": None,
+                "cost_usd": None, "elapsed_ms": 300, "ok": True, "bundled_steps": [],
+            },
+            {
+                "step_index": 1, "operator": "operator_generate", "source": "llm",
+                "model": "claude-sonnet-5", "input_tokens": 200, "output_tokens": 80,
+                "cost_usd": 0.021, "elapsed_ms": 4100, "ok": True, "bundled_steps": [],
+            },
+        ]
+        tel_store.record_nx_answer_run(
+            question=question, plan_id=3, matched_confidence=0.77,
+            step_count=2, final_text="answer", cost_usd=0.021,
+            duration_ms=4400, steps=steps,
+        )
+
+        result = tel_store.query_nx_answer_runs(limit=100, include_steps=True)
+        row = next(r for r in result["rows"] if r["question"] == question)
+
+        assert row["steps"] == steps, (
+            "steps must round-trip through the include_steps=true HTTP read "
+            "path with the exact field values sent on write"
+        )
+
+
 class TestDoNothingIdempotency:
     """Event log tables must silently ignore duplicate imports."""
 

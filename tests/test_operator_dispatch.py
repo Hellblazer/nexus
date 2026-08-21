@@ -564,6 +564,45 @@ class TestSubprocessContract:
         )
 
     @pytest.mark.asyncio
+    async def test_stdin_written_even_when_stdout_never_drains(self) -> None:
+        """nexus-h33x8.6 a3 (dca12e1e3): ``_feed_stdin`` and
+        ``_drain_stream`` run CONCURRENTLY via ``asyncio.gather`` -- stdin
+        must be fed regardless of how slow/stuck the read side is, never
+        waiting on stdout/stderr draining first. The old
+        ``proc.communicate()``-based mechanism this replaced is where the
+        historical 'no stdin data received in 3s' class originated
+        (taxonomy class 4, nx_answer_runs id=100). Makes stdout/stderr
+        hang forever and asserts stdin still gets written."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        async def _hang_forever(n: int = -1) -> bytes:
+            await asyncio.Future()
+            return b""  # pragma: no cover — unreachable, Future never resolves
+
+        proc = _make_proc()
+        proc.stdout.read = _hang_forever
+        proc.stderr.read = _hang_forever
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            task = asyncio.create_task(claude_dispatch("prompt", _SIMPLE_SCHEMA))
+            try:
+                for _ in range(200):
+                    if proc.stdin.write.called:
+                        break
+                    await asyncio.sleep(0.005)
+                assert proc.stdin.write.called, (
+                    "stdin.write must fire even though stdout/stderr never "
+                    "drain -- sequential feed-then-drain would leave this "
+                    "unset"
+                )
+            finally:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    @pytest.mark.asyncio
     async def test_returns_parsed_json(self) -> None:
         """Return value must be the parsed JSON dict from stdout."""
         from nexus.operators.dispatch import claude_dispatch
@@ -575,6 +614,307 @@ class TestSubprocessContract:
             result = await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert result == payload
+
+
+class TestModelAndOperatorKwargs:
+    """RDR-196 .p2b (nexus-nyry9.15): ``model``/``operator`` are ability-only
+    keyword-only additions to ``claude_dispatch``. The load-bearing
+    assertion is the DEFAULT-argv-unchanged test below -- everything else
+    is new, additive behavior gated behind an explicit opt-in."""
+
+    @pytest.mark.asyncio
+    async def test_model_none_default_produces_no_model_flag_in_argv(self) -> None:
+        """The protected assertion: model=None (every one of the 18
+        pre-.p2b call sites) must leave argv byte-identical -- no
+        --model flag anywhere in it."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert "--model" not in captured[0], (
+            f"--model must not appear in argv when model is not passed: {captured[0]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_model_set_appends_model_flag_to_argv(self) -> None:
+        """An explicit model= reaches argv as an adjacent --model <value>
+        pair."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA, model="haiku")
+
+        argv = captured[0]
+        assert "--model" in argv, f"--model missing from argv: {argv}"
+        idx = argv.index("--model")
+        assert argv[idx + 1] == "haiku", (
+            f"expected 'haiku' immediately after --model, got {argv[idx + 1]!r} in {argv}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_default_path_never_consults_the_tier_table(self) -> None:
+        """DO 3: the tier table/resolver is not consulted on the default
+        path. Structural, not intent-based: claude_dispatch has zero
+        IMPORT of nexus.operators.model_tiers, so a default dispatch can
+        be run with that module never imported and still succeed --
+        proving the default path cannot possibly have consulted it.
+        (Prose *mentions* of the module name in comments/docstrings are
+        fine and expected -- only an actual import statement would let
+        claude_dispatch reach the table, so that's what this checks.)"""
+        import re
+
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        # The real assertion: dispatch.py's own source has no IMPORT
+        # STATEMENT reaching model_tiers -- grep for the import form,
+        # not for the bare substring (which would also flag legitimate
+        # doc-comment mentions of the module by name).
+        import inspect
+
+        import nexus.operators.dispatch as dispatch_mod
+
+        source = inspect.getsource(dispatch_mod)
+        import_pattern = re.compile(
+            r"^\s*(import\s+nexus\.operators\.model_tiers"
+            r"|from\s+nexus\.operators(\.model_tiers)?\s+import\s+"
+            r"(model_tiers|\w+.*model_tiers))",
+            re.MULTILINE,
+        )
+        assert not import_pattern.search(source), (
+            "claude_dispatch must not IMPORT nexus.operators.model_tiers "
+            "-- tier resolution is entirely the caller's responsibility "
+            "in this bead"
+        )
+
+    @pytest.mark.asyncio
+    async def test_bogus_model_error_names_both_model_and_operator(self) -> None:
+        """DO 4: a --model rejected by the CLI (non-zero exit) must
+        produce an OperatorError naming BOTH the rejected model id and
+        the operator that requested it."""
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(
+            stdout=b"",
+            stderr=b"Error: model 'bogus-model-xyz' not found",
+            returncode=1,
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError) as exc_info:
+                await claude_dispatch(
+                    "prompt", _SIMPLE_SCHEMA,
+                    model="bogus-model-xyz", operator="operator_rank",
+                )
+
+        message = str(exc_info.value)
+        assert "bogus-model-xyz" in message, (
+            f"error must name the rejected model: {message}"
+        )
+        assert "operator_rank" in message, (
+            f"error must name the requesting operator: {message}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_default_error_text_unchanged_when_model_not_set(self) -> None:
+        """A non-zero-exit failure with model=None (the default) must not
+        gain a stray '[model=None operator=None]' clause -- the default
+        error text is untouched by this bead."""
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(
+            stdout=b"", stderr=b"some unrelated failure", returncode=1,
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError) as exc_info:
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert "model=" not in str(exc_info.value)
+        assert "operator=" not in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_alias_model_reaches_argv_but_usage_sink_records_canonical(self) -> None:
+        """RDR-196 R3 (relay decision): the tier resolves to a CLI ALIAS
+        ("haiku"), which is what reaches argv -- but DispatchUsage.model
+        (already wired by .p1a from the envelope's canonicalModel) must
+        record whichever concrete model the alias actually resolved to,
+        never the alias string itself. This is what makes an alias
+        re-point observable in telemetry instead of silently confounding
+        every measurement keyed on the tier table."""
+        from nexus.operators.dispatch import claude_dispatch, DispatchUsage
+        from nexus.operators.model_tiers import resolve_model_for_tier
+
+        alias = resolve_model_for_tier("cheap")
+        assert alias == "haiku"
+
+        canonical_id = "claude-haiku-4-5-20260101"
+        ndjson = (
+            json.dumps({
+                "type": "result",
+                "is_error": False,
+                "result": "ok",
+                "structured_output": {"result": "ok"},
+                "total_cost_usd": 0.02,
+                "duration_ms": 500,
+                "duration_api_ms": 400,
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+                "modelUsage": {
+                    alias: {
+                        "canonicalModel": canonical_id,
+                        "inputTokens": 10,
+                        "outputTokens": 5,
+                        "costUSD": 0.02,
+                    },
+                },
+            }) + "\n"
+        )
+        proc = _make_proc(stdout=ndjson.encode(), returncode=0, stderr=b"")
+        sink: list[DispatchUsage] = []
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch(
+                "prompt", _SIMPLE_SCHEMA, model=alias, usage_sink=sink,
+            )
+
+        argv = captured[0]
+        idx = argv.index("--model")
+        assert argv[idx + 1] == alias, "argv must carry the alias, not the canonical id"
+
+        assert len(sink) == 1
+        assert sink[0].model == canonical_id, (
+            f"DispatchUsage.model must record the canonical id "
+            f"({canonical_id!r}), not the alias ({alias!r}); got {sink[0].model!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_durable_log_emit_carries_model_and_operator(self) -> None:
+        """Review fix (nexus-nyry9.15, code-review-expert [23032]
+        Important #1): the DURABLE structlog ``operator_dispatch_failed``
+        emit -- not just the transient exception text -- must carry
+        ``model=``/``operator=``, since the function's own comments say
+        this emit is the only thing a later investigation can grep."""
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(
+            stdout=b"", stderr=b"Error: model 'bogus-model-xyz' not found",
+            returncode=1,
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                with pytest.raises(OperatorError):
+                    await claude_dispatch(
+                        "prompt", _SIMPLE_SCHEMA,
+                        model="bogus-model-xyz", operator="operator_rank",
+                    )
+
+        assert mock_log.warning.called, "expected the WARNING-level emit (outside rolled-up scope)"
+        _, kwargs = mock_log.warning.call_args
+        assert kwargs.get("model") == "bogus-model-xyz", (
+            f"durable log record must carry model=; got kwargs={kwargs}"
+        )
+        assert kwargs.get("operator") == "operator_rank", (
+            f"durable log record must carry operator=; got kwargs={kwargs}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_durable_log_emit_carries_none_when_model_not_set(self) -> None:
+        """The default path (model=None) still passes model=/operator=
+        to the emit -- as None -- rather than omitting the keys, so the
+        log record shape is uniform across both cases."""
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(stdout=b"", stderr=b"some unrelated failure", returncode=1)
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                with pytest.raises(OperatorError):
+                    await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        _, kwargs = mock_log.warning.call_args
+        # Deliberately "key present with value None", not "key absent" --
+        # `.get() is None` would pass either way, so check membership too.
+        assert "model" in kwargs and kwargs["model"] is None
+        assert "operator" in kwargs and kwargs["operator"] is None
+
+    @pytest.mark.asyncio
+    async def test_empty_string_model_normalized_to_none_with_warning(self) -> None:
+        """Review fix (nexus-nyry9.15, code-review-expert [23032]
+        Important #2): model="" (and whitespace-only) is normalized to
+        None ONCE at function entry -- picked over rejecting with
+        ValueError -- so the argv-append (`if model:`) and the error-
+        clause gate (`if model is not None:`) can never disagree about
+        whether a model was "set". A structlog warning names the
+        operator so a caller that accidentally passes "" is diagnosable."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                await claude_dispatch(
+                    "prompt", _SIMPLE_SCHEMA, model="   ", operator="operator_extract",
+                )
+
+        assert "--model" not in captured[0], (
+            f"an empty/whitespace model must never reach argv: {captured[0]}"
+        )
+        assert mock_log.warning.called
+        _, kwargs = mock_log.warning.call_args
+        assert kwargs.get("operator") == "operator_extract"
+
+    @pytest.mark.asyncio
+    async def test_empty_string_model_error_clause_matches_argv_absence(self) -> None:
+        """The inconsistency the review flagged directly: model="" must
+        produce NEITHER a --model flag in argv NOR a
+        '[model=... operator=...]' clause on a harness-failure error --
+        the two must agree, in both directions, not just the argv half."""
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(stdout=b"", stderr=b"some unrelated failure", returncode=1)
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError) as exc_info:
+                await claude_dispatch(
+                    "prompt", _SIMPLE_SCHEMA, model="", operator="operator_rank",
+                )
+
+        message = str(exc_info.value)
+        assert "model=" not in message, (
+            f"empty-string model must not produce a model= clause: {message}"
+        )
+        assert "operator=" not in message, (
+            f"empty-string model must not produce an operator= clause either: {message}"
+        )
 
 
 # ── nexus-5daww: _build_dispatch_env must not forward a live T1 session ─────
@@ -1254,6 +1594,52 @@ class TestErrorHandling:
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
     @pytest.mark.asyncio
+    async def test_malformed_json_error_names_event_count_and_offending_line(self) -> None:
+        """nexus-nyry9.4 review-fix (RDR-196 .r4 residual, taxonomy
+        id=99, 2026-05-06): the generic 'not valid JSON' message gave no
+        way to tell 'the child never spoke stream-json at all' apart
+        from 'a real stream got cut mid-line' -- both produced identical
+        text, and the old ``raw[:200]`` preview showed only the START of
+        the WHOLE blob, which for a real multi-line NDJSON stream is
+        rarely where the parse actually failed. Enrich with: how many
+        NDJSON lines parsed as objects, that no terminal 'result' event
+        was seen, and the OFFENDING line's own content (located via the
+        JSONDecodeError's line number), not just the blob's opening
+        bytes.
+
+        Two lines, each individually valid JSON (so both count as
+        parsed events) -- line 1 padded past 200 chars so the old
+        ``raw[:200]`` preview never reaches line 2's content; their
+        CONCATENATION is not one valid JSON value, so whole-blob
+        ``json.loads`` fails with 'Extra data' pointing at line 2.
+        """
+        from nexus.operators.dispatch import claude_dispatch, OperatorOutputError
+
+        padding = "x" * 300
+        line1 = (
+            '{"type":"system","subtype":"init","cwd":"/' + padding + '","session_id":"s1"}'
+        )
+        line2 = '{"type":"weird_unexpected_event","note":"THE-OFFENDING-CONTENT-MARKER"}'
+        proc = _make_proc(stdout=(line1 + "\n" + line2).encode())
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorOutputError) as exc_info:
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        msg = str(exc_info.value)
+        assert "not valid JSON" in msg
+        assert "2 NDJSON line(s) parsed as objects" in msg, (
+            f"event count missing from: {msg}"
+        )
+        assert "no terminal 'result' event seen" in msg, (
+            f"result-event status missing from: {msg}"
+        )
+        assert "THE-OFFENDING-CONTENT-MARKER" in msg, (
+            "the offending line's own content must be surfaced -- "
+            f"raw[:200] of the whole (padded) blob never reaches it: {msg}"
+        )
+
+    @pytest.mark.asyncio
     async def test_empty_stdout_raises_operator_output_error(self) -> None:
         """Empty stdout raises OperatorOutputError, not JSONDecodeError."""
         from nexus.operators.dispatch import claude_dispatch, OperatorOutputError
@@ -1594,7 +1980,7 @@ class TestSimpleOperatorReturnShapeAndPromptContent:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured.append(prompt)
             return fake_return
 
@@ -1617,7 +2003,7 @@ class TestOperatorCompare:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout):
+        async def fake(prompt, schema, timeout, model=None):
             captured["prompt"] = prompt
             return {"comparison": "ok"}
 
@@ -1638,7 +2024,7 @@ class TestOperatorCompare:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout):
+        async def fake(prompt, schema, timeout, model=None):
             captured["prompt"] = prompt
             return {"comparison": "cross"}
 
@@ -1667,7 +2053,7 @@ class TestOperatorCompare:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout):
+        async def fake(prompt, schema, timeout, model=None):
             captured["prompt"] = prompt
             return {"comparison": "ok"}
 
@@ -1692,7 +2078,7 @@ class TestOperatorCompare:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout):
+        async def fake(prompt, schema, timeout, model=None):
             captured["prompt"] = prompt
             return {"comparison": ""}
 
@@ -1711,7 +2097,7 @@ class TestOperatorCompare:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout):
+        async def fake(prompt, schema, timeout, model=None):
             captured["prompt"] = prompt
             return {"comparison": "ok"}
 
@@ -1758,7 +2144,7 @@ class TestOperatorFilter:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured.append(prompt)
             return {"items": [], "rationale": []}
 
@@ -1780,7 +2166,7 @@ class TestOperatorFilter:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured.append(prompt)
             return {"items": [], "rationale": []}
 
@@ -1802,7 +2188,7 @@ class TestOperatorFilter:
 
         captured_schemas: list[dict] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured_schemas.append(schema)
             return {"items": [], "rationale": []}
 
@@ -1833,7 +2219,7 @@ class TestOperatorFilter:
 
         inputs = [{"id": f"item-{i}", "title": f"Item {i}"} for i in range(10)]
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             kept = inputs[:4]
             rationale = [
                 {"id": it["id"], "reason": "keeps criterion"} for it in kept
@@ -1854,6 +2240,42 @@ class TestOperatorFilter:
             f"operator_filter must return subset of input ids; "
             f"got extras {output_ids - input_ids}"
         )
+
+    @pytest.mark.asyncio
+    async def test_sql_hit_stamps_dispatch_source_marker(self, monkeypatch) -> None:
+        """RDR-196 .p1b Gap 5 (nexus-nyry9.8): when the SQL fast path
+        actually serves the request, the returned dict carries the
+        ``_dispatch_source: "sql"`` marker plan_run reads to record
+        source="sql" instead of the default "llm" inference. Empty
+        items is a pure-SQL hit with no document_aspects dependency —
+        monkeypatch claude_dispatch to raise so a wrongly-taken LLM
+        fallback fails loudly instead of hanging on a real subprocess.
+        """
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_filter
+
+        async def must_not_be_called(*a, **kw):
+            raise AssertionError("SQL fast path should have short-circuited")
+
+        monkeypatch.setattr(_mod, "claude_dispatch", must_not_be_called)
+        result = await operator_filter(items="[]", criterion="x")
+        assert result.get("_dispatch_source") == "sql"
+
+    @pytest.mark.asyncio
+    async def test_llm_fallback_has_no_dispatch_source_marker(self, monkeypatch) -> None:
+        """The LLM-dispatched branch must NOT stamp a marker — plan_run's
+        default is_operator_tool()-based inference ("llm") already
+        covers it; a marker here would be redundant, not wrong, but its
+        absence is the actual contract this test pins."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_filter
+
+        async def fake(prompt, schema, timeout=60.0, model=None):
+            return {"items": [], "rationale": []}
+
+        monkeypatch.setattr(_mod, "claude_dispatch", fake)
+        result = await operator_filter(items="[]", criterion="x", source="llm")
+        assert "_dispatch_source" not in result
 
 
 class TestOperatorCheck:
@@ -1889,7 +2311,7 @@ class TestOperatorCheck:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured.append(prompt)
             return {"ok": True, "evidence": []}
 
@@ -1913,7 +2335,7 @@ class TestOperatorCheck:
 
         captured_schemas: list[dict] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured_schemas.append(schema)
             return {"ok": True, "evidence": []}
 
@@ -1937,7 +2359,7 @@ class TestOperatorCheck:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_check
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             return {
                 "ok": True,
                 "evidence": [
@@ -1969,7 +2391,7 @@ class TestOperatorCheck:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_check
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             return {
                 "ok": False,
                 "evidence": [
@@ -2028,7 +2450,7 @@ class TestOperatorVerify:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured.append(prompt)
             return {"verified": False, "reason": "", "citations": []}
 
@@ -2049,7 +2471,7 @@ class TestOperatorVerify:
 
         captured_schemas: list[dict] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured_schemas.append(schema)
             return {"verified": False, "reason": "", "citations": []}
 
@@ -2072,7 +2494,7 @@ class TestOperatorVerify:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_verify
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             return {
                 "verified": True,
                 "reason": "quote-at-p3-matches-claim",
@@ -2127,7 +2549,7 @@ class TestOperatorGroupby:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured.append(prompt)
             return {"groups": []}
 
@@ -2151,7 +2573,7 @@ class TestOperatorGroupby:
 
         captured_schemas: list[dict] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured_schemas.append(schema)
             return {"groups": []}
 
@@ -2182,7 +2604,7 @@ class TestOperatorGroupby:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_groupby
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             return {
                 "groups": [
                     {"key_value": "2018",
@@ -2239,6 +2661,20 @@ class TestOperatorGroupby:
                 )
                 assert "id" in it
 
+    @pytest.mark.asyncio
+    async def test_sql_hit_stamps_dispatch_source_marker(self, monkeypatch) -> None:
+        """RDR-196 .p1b Gap 5: empty items is a pure-SQL hit
+        (``{"groups": []}``), no document_aspects dependency."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_groupby
+
+        async def must_not_be_called(*a, **kw):
+            raise AssertionError("SQL fast path should have short-circuited")
+
+        monkeypatch.setattr(_mod, "claude_dispatch", must_not_be_called)
+        result = await operator_groupby(items="[]", key="x")
+        assert result.get("_dispatch_source") == "sql"
+
 
 class TestOperatorAggregate:
     """RDR-093 Phase 2: operator_aggregate reduces each group of items
@@ -2293,7 +2729,7 @@ class TestOperatorAggregate:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured.append(prompt)
             return {"aggregates": []}
 
@@ -2319,7 +2755,7 @@ class TestOperatorAggregate:
 
         captured_schemas: list[dict] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured_schemas.append(schema)
             return {"aggregates": []}
 
@@ -2348,7 +2784,7 @@ class TestOperatorAggregate:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             captured.append(prompt)
             return {"aggregates": []}
 
@@ -2377,7 +2813,7 @@ class TestOperatorAggregate:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_aggregate
 
-        async def fake(prompt, schema, timeout=60.0):
+        async def fake(prompt, schema, timeout=60.0, model=None):
             return {
                 "aggregates": [
                     {"key_value": "alpha", "summary": "alpha-wins-method"},
@@ -2399,6 +2835,21 @@ class TestOperatorAggregate:
         assert len(result["aggregates"]) == 3
         keys = {a["key_value"] for a in result["aggregates"]}
         assert keys == {"alpha", "beta", "gamma"}
+
+    @pytest.mark.asyncio
+    async def test_sql_hit_stamps_dispatch_source_marker(self, monkeypatch) -> None:
+        """RDR-196 .p1b Gap 5: an empty ``groups`` array with the
+        recognised ``count`` reducer is a pure-SQL hit
+        (``{"aggregates": []}``), no document_aspects dependency."""
+        import nexus.operators.dispatch as _mod
+        from nexus.mcp.core import operator_aggregate
+
+        async def must_not_be_called(*a, **kw):
+            raise AssertionError("SQL fast path should have short-circuited")
+
+        monkeypatch.setattr(_mod, "claude_dispatch", must_not_be_called)
+        result = await operator_aggregate(groups="[]", reducer="count")
+        assert result.get("_dispatch_source") == "sql"
 
 
 class TestFailureRecordAddressability:
@@ -2508,3 +2959,867 @@ class TestRolledUpFailureDemotion:
         with rolled_up_dispatch_failures():
             assert _ROLLED_UP.get() is True
         assert _ROLLED_UP.get() is False
+
+
+# ── DispatchUsage / cost-usage capture (RDR-196 .p1a, nexus-nyry9.7) ────────
+#
+# ``claude -p --output-format stream-json``'s terminal result event carries
+# ``total_cost_usd`` / ``usage.*`` / ``modelUsage`` -- dispatch.py parses it
+# (``_parse_stream_json_output``) and, before this bead, discarded every
+# cost/usage field. Field names below are FIXTURE-VERIFIED against
+# ``tests/fixtures/claude_dispatch_stream_json_sample.ndjson`` line 12 (the
+# terminal ``result`` event), not the RDR-196 Technical Design section's
+# illustrative sketch, which used ``elapsed_ms`` for what the wire payload
+# actually calls ``duration_ms`` -- see the correction block in
+# docs/rdr/rdr-196-cost-aware-nx-answer.md's Technical Design section.
+#
+# ``claude_dispatch``'s existing return contract (a bare dict -- the parsed
+# ``structured_output`` or the raw wrapper) is UNCHANGED: all ~17 non-
+# aspect_extractor.py call sites (mcp/core.py, plans/bundle.py,
+# commands/taxonomy_cmd.py) do ``return await claude_dispatch(...)`` with no
+# tuple-unpacking, so returning a tuple would break every one of them
+# despite the RDR sketch's "existing callers are unaffected" claim. Usage is
+# instead reachable via an opt-in ``usage_sink: list[DispatchUsage] | None``
+# out-param: ``None`` (default) is a complete no-op, byte-identical to the
+# pre-change behaviour for all existing callers; a caller that wants usage
+# passes its own list and reads ``sink[0]`` after the ``await`` returns.
+
+_RESULT_EVENT_LINE = 12  # 1-indexed line in the fixture; the terminal "result" event
+
+
+def _fixture_result_event() -> dict:
+    lines = _load_fixture_lines("claude_dispatch_stream_json_sample.ndjson")
+    obj = json.loads(lines[_RESULT_EVENT_LINE - 1])
+    assert obj.get("type") == "result", "fixture line 12 must be the terminal result event"
+    return obj
+
+
+class TestParseDispatchUsage:
+    """Unit tests for ``_parse_dispatch_usage`` against the real captured
+    fixture's terminal result event."""
+
+    def test_parses_exact_values_from_fixture(self) -> None:
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        usage = _parse_dispatch_usage(_fixture_result_event())
+
+        assert usage.cost_usd == 0.5414490000000001
+        assert usage.input_tokens == 2
+        assert usage.output_tokens == 52
+        assert usage.cache_creation_input_tokens == 25989
+        assert usage.cache_read_input_tokens == 19049
+        assert usage.duration_ms == 3220
+        assert usage.duration_api_ms == 3135
+        assert usage.num_turns == 2
+        assert usage.model == "claude-fable-5"
+        assert set(usage.model_usage.keys()) == {"claude-fable-5"}
+        mu = usage.model_usage["claude-fable-5"]
+        assert mu.canonical_model == "claude-fable-5"
+        assert mu.input_tokens == 2
+        assert mu.output_tokens == 52
+        assert mu.cache_read_input_tokens == 19049
+        assert mu.cache_creation_input_tokens == 25989
+        assert mu.cost_usd == 0.5414490000000001
+
+    def test_no_result_event_yields_all_none_and_warns(self) -> None:
+        """A legacy bare-JSON test double (no stream-json result event at
+        all) must yield an all-``None`` DispatchUsage, never 0.0 -- 0.0
+        reads as "this call was free", not "we don't know"."""
+        from structlog.testing import capture_logs
+
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        with capture_logs() as cap:
+            usage = _parse_dispatch_usage(None)
+
+        assert usage.cost_usd is None
+        assert usage.input_tokens is None
+        assert usage.output_tokens is None
+        assert usage.model is None
+        assert usage.model_usage == {}
+        assert any(e.get("event") == "dispatch_usage_no_result_event" for e in cap)
+
+    def test_absent_fields_record_none_not_zero_and_warn(self) -> None:
+        """Doctored copy of the fixture's result event with total_cost_usd,
+        usage, and modelUsage stripped -- the absent-field path per the
+        RDR's risk register. Every affected field must be None, never 0.0,
+        and a warning must name what was missing."""
+        from structlog.testing import capture_logs
+
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        doctored = dict(_fixture_result_event())
+        del doctored["total_cost_usd"]
+        del doctored["usage"]
+        del doctored["modelUsage"]
+
+        with capture_logs() as cap:
+            usage = _parse_dispatch_usage(doctored)
+
+        assert usage.cost_usd is None
+        assert usage.input_tokens is None
+        assert usage.output_tokens is None
+        assert usage.cache_creation_input_tokens is None
+        assert usage.cache_read_input_tokens is None
+        assert usage.model is None
+        assert usage.model_usage == {}
+        # duration_ms/duration_api_ms/num_turns are untouched by the
+        # doctoring and must still parse normally.
+        assert usage.duration_ms == 3220
+        assert usage.duration_api_ms == 3135
+        assert usage.num_turns == 2
+
+        warnings = [e for e in cap if e.get("event") == "dispatch_usage_fields_missing"]
+        assert warnings, f"expected a dispatch_usage_fields_missing warning: {cap}"
+        missing = warnings[0].get("missing", [])
+        assert "total_cost_usd" in missing
+        assert "usage" in missing
+        assert "modelUsage" in missing
+
+    def test_fixture_result_event_contains_cost_and_usage_fields(self) -> None:
+        """Non-vacuity guard (bead item 3): if a future fixture
+        regeneration drops the cost/usage fields, THIS must fail loudly --
+        otherwise every DispatchUsage test above would keep passing on an
+        empty result event and the whole telemetry arc silently measures
+        nothing. See the handback for a demonstration that this assertion
+        actually fails on a stripped copy."""
+        result = _fixture_result_event()
+        assert "total_cost_usd" in result
+        assert "usage" in result
+        assert "modelUsage" in result
+        assert isinstance(result["usage"], dict) and result["usage"], (
+            "usage must be a populated dict, not empty/absent"
+        )
+        assert isinstance(result["modelUsage"], dict) and result["modelUsage"], (
+            "modelUsage must be a populated dict, not empty/absent"
+        )
+
+    def test_single_model_alias_key_records_canonical_not_key(self) -> None:
+        """review finding (substantive-critic Significant #2): the real
+        fixture's single modelUsage key happens to equal its
+        canonicalModel ("claude-fable-5" both ways), so
+        test_parses_exact_values_from_fixture cannot distinguish reading
+        ``canonicalModel`` from falling back to the dict key -- exactly
+        what 196-R3 ("record the canonical id, never the requested
+        alias") needs distinguished. Doctor the map key to a requested
+        alias distinct from its canonicalModel and assert the id that
+        actually gets recorded is the canonical one."""
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        doctored = dict(_fixture_result_event())
+        doctored["modelUsage"] = {
+            "sonnet": {  # the requested alias -- must NOT be what's recorded
+                "inputTokens": 2,
+                "outputTokens": 52,
+                "cacheReadInputTokens": 19049,
+                "cacheCreationInputTokens": 25989,
+                "costUSD": 0.5414490000000001,
+                "canonicalModel": "claude-sonnet-5-20260101",
+            },
+        }
+
+        usage = _parse_dispatch_usage(doctored)
+
+        assert usage.model == "claude-sonnet-5-20260101", (
+            f"expected the canonical id, not the requested alias 'sonnet': got {usage.model!r}"
+        )
+        assert set(usage.model_usage.keys()) == {"sonnet"}, (
+            "the map is still keyed by the alias -- only the recorded model id must be canonical"
+        )
+        assert usage.model_usage["sonnet"].canonical_model == "claude-sonnet-5-20260101"
+
+    def test_two_models_no_cross_wiring_between_top_level_and_per_model_usage(self) -> None:
+        """review finding (substantive-critic Significant #2): the real
+        fixture is single-turn/single-model, so top-level ``usage.*`` is
+        numerically IDENTICAL to the one ``modelUsage`` entry's numbers --
+        a mis-sourced field (reading from the wrong dict) would still pass
+        every exact-value assertion. Doctor two modelUsage entries, both
+        with a distinct alias/canonical pair, and top-level usage/cost
+        numbers that match NEITHER entry, then assert (a) each entry's
+        canonical_model is read from canonicalModel, not its key, (b) the
+        top-level DispatchUsage fields come from the top-level ``usage``/
+        ``total_cost_usd``, not either modelUsage entry, and (c) the
+        single-value ``model`` convenience field stays None -- genuinely
+        ambiguous with two distinct canonical models, not a silent pick."""
+        from nexus.operators.dispatch import _parse_dispatch_usage
+
+        doctored = dict(_fixture_result_event())
+        doctored["total_cost_usd"] = 9.0  # distinct from both entries below
+        doctored["usage"] = {
+            "input_tokens": 900,
+            "output_tokens": 901,
+            "cache_creation_input_tokens": 902,
+            "cache_read_input_tokens": 903,
+        }
+        doctored["modelUsage"] = {
+            "sonnet": {
+                "inputTokens": 100, "outputTokens": 101,
+                "cacheReadInputTokens": 102, "cacheCreationInputTokens": 103,
+                "costUSD": 1.0,
+                "canonicalModel": "claude-sonnet-5-20260101",
+            },
+            "haiku": {
+                "inputTokens": 200, "outputTokens": 201,
+                "cacheReadInputTokens": 202, "cacheCreationInputTokens": 203,
+                "costUSD": 2.0,
+                "canonicalModel": "claude-haiku-5-20260101",
+            },
+        }
+
+        usage = _parse_dispatch_usage(doctored)
+
+        assert usage.model_usage["sonnet"].canonical_model == "claude-sonnet-5-20260101"
+        assert usage.model_usage["haiku"].canonical_model == "claude-haiku-5-20260101"
+        assert usage.model is None, (
+            "two distinct canonical models is genuinely ambiguous for the "
+            "single-value convenience field -- must not silently pick one"
+        )
+        # The load-bearing anti-cross-wiring assertions: these values exist
+        # ONLY at the top level (900/901/9.0), never in either modelUsage
+        # entry (100/101/1.0 or 200/201/2.0) -- a mis-sourced field would
+        # fail these even though it might pass a single-model fixture.
+        assert usage.cost_usd == 9.0
+        assert usage.input_tokens == 900
+        assert usage.output_tokens == 901
+        assert usage.cache_creation_input_tokens == 902
+        assert usage.cache_read_input_tokens == 903
+
+
+class TestClaudeDispatchUsageSink:
+    """``usage_sink`` is a no-op by default (existing ~17 call sites pass
+    nothing); opting in gets exactly one DispatchUsage per successful
+    dispatch, without altering the returned dict."""
+
+    @pytest.mark.asyncio
+    async def test_default_none_is_unaffected(self) -> None:
+        """No usage_sink passed -- byte-identical to pre-change behaviour."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc(stdout=b'{"ok": true}')
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            result = await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert result == {"ok": True}
+
+    @pytest.mark.asyncio
+    async def test_usage_sink_populated_from_real_fixture_stream(self) -> None:
+        """Feed the FULL real stream-json fixture (every event, terminal
+        result included) as stdout and confirm usage_sink receives a
+        DispatchUsage matching the fixture's result event, while the
+        returned structured-output dict is unaffected."""
+        from nexus.operators.dispatch import claude_dispatch, DispatchUsage
+
+        lines = _load_fixture_lines("claude_dispatch_stream_json_sample.ndjson")
+        raw = ("\n".join(lines) + "\n").encode()
+        proc = _make_proc(stdout=raw)
+
+        sink: list[DispatchUsage] = []
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            result = await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=sink)
+
+        assert result == {"ok": True}, "usage_sink must not change claude_dispatch's return contract"
+        assert len(sink) == 1
+        usage = sink[0]
+        assert usage.cost_usd == 0.5414490000000001
+        assert usage.input_tokens == 2
+        assert usage.output_tokens == 52
+        assert usage.model == "claude-fable-5"
+
+    @pytest.mark.asyncio
+    async def test_usage_sink_none_when_legacy_bare_blob(self) -> None:
+        """A legacy bare-JSON test double (no result event) with
+        usage_sink set still appends exactly one DispatchUsage -- all
+        fields None, never 0.0 -- rather than silently appending nothing
+        or fabricating a zero-cost record."""
+        from nexus.operators.dispatch import claude_dispatch, DispatchUsage
+
+        proc = _make_proc(stdout=b'{"ok": true}')
+        sink: list[DispatchUsage] = []
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            result = await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=sink)
+
+        assert result == {"ok": True}
+        assert len(sink) == 1
+        assert sink[0].cost_usd is None
+        assert sink[0].model is None
+
+
+class TestUsageSinkAppendsBeforeSubsequentRaises:
+    """review findings (code-review-expert Important + substantive-critic
+    Significant #1): ``usage_sink.append()`` runs right after
+    ``_parse_stream_json_output(raw)``, which is BEFORE three of
+    ``claude_dispatch``'s six possible raises -- the append and the raise
+    both happen on those three paths, not one or the other. Coordinator
+    decision: adopt that as the contract (real spend is recorded whenever
+    a result envelope parsed, even when the dispatch then raises -- this
+    serves the arc's cost-tracking goal and .p1b builds on it), correct
+    the docstring to say so precisely (done), and cover all three paths
+    here -- previously zero test exercised usage_sink through any of
+    them."""
+
+    @pytest.mark.asyncio
+    async def test_is_error_true_still_appends_usage_then_raises(self) -> None:
+        """A result envelope with is_error=true (claude exited 0 but
+        reported an application-level error) still carries real,
+        non-zero spend -- the append must happen before the
+        OperatorError raise, not be skipped by it."""
+        from nexus.operators.dispatch import claude_dispatch, DispatchUsage, OperatorError
+
+        ndjson = "\n".join([
+            '{"type":"system","subtype":"init","cwd":"/tmp","session_id":"s1"}',
+            '{"type":"result","is_error":true,'
+            '"result":"claude reported: rate limit exceeded for this account",'
+            '"subtype":"error_during_execution","structured_output":null,'
+            '"total_cost_usd":0.42,"duration_ms":1000,"duration_api_ms":900,'
+            '"num_turns":1,'
+            '"usage":{"input_tokens":10,"output_tokens":20,'
+            '"cache_creation_input_tokens":0,"cache_read_input_tokens":0},'
+            '"modelUsage":{"claude-fable-5":{"inputTokens":10,"outputTokens":20,'
+            '"cacheReadInputTokens":0,"cacheCreationInputTokens":0,'
+            '"costUSD":0.42,"canonicalModel":"claude-fable-5"}}}',
+        ])
+        proc = _make_proc(stdout=ndjson.encode(), returncode=0, stderr=b"")
+        sink: list[DispatchUsage] = []
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError, match="rate limit exceeded"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=sink)
+
+        assert len(sink) == 1, "the append must happen even though the call raises"
+        assert sink[0].cost_usd == 0.42
+        assert sink[0].input_tokens == 10
+        assert sink[0].model == "claude-fable-5"
+
+    @pytest.mark.asyncio
+    async def test_null_structured_output_still_appends_usage_then_raises(self) -> None:
+        """is_error=false but structured_output=null: still a parsed
+        envelope with real usage, still appended before the
+        OperatorOutputError raise."""
+        from nexus.operators.dispatch import claude_dispatch, DispatchUsage, OperatorOutputError
+
+        ndjson = (
+            '{"type":"result","is_error":false,'
+            '"result":"","structured_output":null,'
+            '"total_cost_usd":0.13,"duration_ms":500,"duration_api_ms":450,'
+            '"num_turns":1,'
+            '"usage":{"input_tokens":5,"output_tokens":6,'
+            '"cache_creation_input_tokens":0,"cache_read_input_tokens":0},'
+            '"modelUsage":{"claude-fable-5":{"inputTokens":5,"outputTokens":6,'
+            '"cacheReadInputTokens":0,"cacheCreationInputTokens":0,'
+            '"costUSD":0.13,"canonicalModel":"claude-fable-5"}}}'
+        )
+        proc = _make_proc(stdout=ndjson.encode(), returncode=0, stderr=b"")
+        sink: list[DispatchUsage] = []
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorOutputError, match="null structured_output"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=sink)
+
+        assert len(sink) == 1, "the append must happen even though the call raises"
+        assert sink[0].cost_usd == 0.13
+        assert sink[0].output_tokens == 6
+
+    @pytest.mark.asyncio
+    async def test_invalid_json_fallback_still_appends_all_none_usage_then_raises(self) -> None:
+        """No stream-json result event at all AND the raw blob fails
+        json.loads: the append still runs (with the all-None DispatchUsage
+        _parse_dispatch_usage produces when final_result is None), then
+        the OperatorOutputError fires."""
+        from nexus.operators.dispatch import claude_dispatch, DispatchUsage, OperatorOutputError
+
+        proc = _make_proc(stdout=b'not valid json {{{{', returncode=0, stderr=b"")
+        sink: list[DispatchUsage] = []
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorOutputError, match="not valid JSON"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=sink)
+
+        assert len(sink) == 1, "the append must happen even though the call raises"
+        assert sink[0].cost_usd is None
+        assert sink[0].model is None
+
+
+def _result_ndjson(
+    *, cost_usd: float, input_tokens: int, output_tokens: int,
+    model: str, structured_output: dict | None = None,
+) -> bytes:
+    """Build a minimal-but-real terminal stream-json result event, shaped
+    like the fixture (RDR-196 .p1b Gap-1 addendum tests)."""
+    payload = {
+        "type": "result", "is_error": False,
+        "result": "", "structured_output": structured_output or {"summary": "ok"},
+        "total_cost_usd": cost_usd,
+        "duration_ms": 1000, "duration_api_ms": 900, "num_turns": 1,
+        "usage": {
+            "input_tokens": input_tokens, "output_tokens": output_tokens,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+        },
+        "modelUsage": {
+            model: {
+                "inputTokens": input_tokens, "outputTokens": output_tokens,
+                "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                "costUSD": cost_usd, "canonicalModel": model,
+            },
+        },
+    }
+    return json.dumps(payload).encode()
+
+
+class TestAmbientUsageSink:
+    """RDR-196 .p1b Gap-1 addendum (nexus-nyry9.8 coordinator directive,
+    2026-08-20): ``ambient_usage_sink`` closes the isolated/bundle-
+    fallback usage-observability gap the original .p1b handback left
+    open -- an operator_* MCP tool's OWN internal claude_dispatch call,
+    several stack frames past anywhere a caller could pass an explicit
+    usage_sink kwarg, is now captured via a contextvar instead."""
+
+    @pytest.mark.asyncio
+    async def test_ambient_sink_is_none_outside_any_scope(self) -> None:
+        from nexus.operators.dispatch import _ambient_usage_sink
+
+        assert _ambient_usage_sink.get() is None
+
+    @pytest.mark.asyncio
+    async def test_explicit_and_ambient_sinks_both_receive_same_record(self) -> None:
+        """Both sinks populated from ONE dispatch; the SAME DispatchUsage
+        instance lands in both -- parsed once, never two independently-
+        parsed copies."""
+        from nexus.operators.dispatch import (
+            ambient_usage_sink, claude_dispatch, DispatchUsage,
+        )
+
+        proc = _make_proc(
+            stdout=_result_ndjson(
+                cost_usd=0.07, input_tokens=11, output_tokens=22,
+                model="claude-sonnet-5-20260101",
+            ),
+            returncode=0, stderr=b"",
+        )
+        explicit_sink: list[DispatchUsage] = []
+        ambient_sink: list[DispatchUsage] = []
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with ambient_usage_sink(ambient_sink):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, usage_sink=explicit_sink)
+
+        assert len(explicit_sink) == 1
+        assert len(ambient_sink) == 1
+        assert explicit_sink[0] is ambient_sink[0]
+        assert explicit_sink[0].cost_usd == 0.07
+        assert explicit_sink[0].model == "claude-sonnet-5-20260101"
+
+    @pytest.mark.asyncio
+    async def test_ambient_sink_survives_child_task(self) -> None:
+        """asyncio Tasks copy the current contextvars.Context at creation
+        -- a claude_dispatch call issued from inside an
+        asyncio.create_task() spawned WHILE the ambient scope is active
+        must still be captured. This is the exact shape an operator that
+        internally fans out sub-dispatches would hit."""
+        from nexus.operators.dispatch import (
+            ambient_usage_sink, claude_dispatch, DispatchUsage,
+        )
+
+        proc = _make_proc(
+            stdout=_result_ndjson(
+                cost_usd=0.09, input_tokens=5, output_tokens=6,
+                model="claude-sonnet-5-20260101",
+            ),
+            returncode=0, stderr=b"",
+        )
+        sink: list[DispatchUsage] = []
+
+        async def _child() -> None:
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with ambient_usage_sink(sink):
+                task = asyncio.create_task(_child())
+                await task
+
+        assert len(sink) == 1, "ambient sink must survive a child asyncio.Task"
+        assert sink[0].cost_usd == 0.09
+
+    @pytest.mark.asyncio
+    async def test_two_sequential_scopes_no_cross_contamination(self) -> None:
+        """Two consecutive ambient-sink scopes, distinguished by cost --
+        each sink must contain ONLY its own scope's usage, not the
+        other's, and the ambient var must not leak state between them."""
+        from nexus.operators.dispatch import (
+            _ambient_usage_sink, ambient_usage_sink, claude_dispatch, DispatchUsage,
+        )
+
+        sink_a: list[DispatchUsage] = []
+        sink_b: list[DispatchUsage] = []
+
+        proc_a = _make_proc(
+            stdout=_result_ndjson(
+                cost_usd=0.11, input_tokens=1, output_tokens=2,
+                model="claude-sonnet-5-20260101",
+            ),
+            returncode=0, stderr=b"",
+        )
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc_a)):
+            with ambient_usage_sink(sink_a):
+                await claude_dispatch("prompt-a", _SIMPLE_SCHEMA)
+
+        assert _ambient_usage_sink.get() is None, "scope must fully reset after exit"
+
+        proc_b = _make_proc(
+            stdout=_result_ndjson(
+                cost_usd=0.22, input_tokens=3, output_tokens=4,
+                model="claude-opus-4-20260514",
+            ),
+            returncode=0, stderr=b"",
+        )
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc_b)):
+            with ambient_usage_sink(sink_b):
+                await claude_dispatch("prompt-b", _SIMPLE_SCHEMA)
+
+        assert len(sink_a) == 1 and sink_a[0].cost_usd == 0.11
+        assert len(sink_b) == 1 and sink_b[0].cost_usd == 0.22
+
+    @pytest.mark.asyncio
+    async def test_isolated_operator_summarize_records_real_usage(self) -> None:
+        """End-to-end through the REAL call chain: operator_summarize (an
+        MCP tool that owns its own internal claude_dispatch call, never
+        touched by plans/runner.py directly) still gets captured because
+        the ambient sink is set around the CALLER's dispatch, not around
+        claude_dispatch's own call site."""
+        from nexus.mcp.core import operator_summarize
+        from nexus.operators.dispatch import ambient_usage_sink, DispatchUsage
+
+        proc = _make_proc(
+            stdout=_result_ndjson(
+                cost_usd=0.031, input_tokens=40, output_tokens=15,
+                model="claude-sonnet-5-20260101",
+                structured_output={"summary": "a concise summary"},
+            ),
+            returncode=0, stderr=b"",
+        )
+        sink: list[DispatchUsage] = []
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with ambient_usage_sink(sink):
+                result = await operator_summarize(content="some long content")
+
+        assert result == {"summary": "a concise summary"}
+        assert len(sink) == 1
+        assert sink[0].model == "claude-sonnet-5-20260101"
+        assert sink[0].cost_usd == 0.031
+        assert sink[0].input_tokens == 40
+
+
+@pytest.mark.integration
+class TestClaudeDispatchLiveUsage:
+    """Live claude -p dispatch records non-zero cost -- the fixture alone
+    only proves the parser handles a captured shape, not that it still
+    matches production's actual wire payload. Skipped by default; requires
+    ``claude`` on PATH with valid credentials.
+
+    Run with: uv run pytest -m integration tests/test_operator_dispatch.py -k LiveUsage
+    """
+
+    @staticmethod
+    def _claude_auth_available() -> bool:
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["claude", "auth", "status", "--json"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                return False
+            data = json.loads(result.stdout)
+            return bool(data.get("loggedIn") or data.get("isLoggedIn"))
+        except Exception:
+            return False
+
+    @pytest.mark.asyncio
+    async def test_live_dispatch_records_nonzero_cost(self) -> None:
+        if not self._claude_auth_available():
+            pytest.skip("claude CLI not on PATH or not authenticated -- live dispatch skipped")
+
+        from nexus.operators.dispatch import claude_dispatch, DispatchUsage
+
+        sink: list[DispatchUsage] = []
+        result = await claude_dispatch(
+            'Respond with exactly {"ok": true} and nothing else.',
+            _SIMPLE_SCHEMA,
+            timeout=60.0,
+            usage_sink=sink,
+        )
+
+        assert isinstance(result, dict)
+        assert len(sink) == 1, f"expected exactly one usage record from a live dispatch, got {sink}"
+        usage = sink[0]
+        assert usage.cost_usd is not None and usage.cost_usd > 0, (
+            f"live dispatch must record a non-zero cost, got {usage.cost_usd!r}"
+        )
+        assert usage.input_tokens is not None and usage.input_tokens > 0
+        assert usage.model is not None and usage.model != "", (
+            "live dispatch must record a canonical model id"
+        )
+
+
+@pytest.mark.integration
+class TestClaudeDispatchPerOperatorSchemaCheapTier:
+    """RDR-196 .p2b DO 5 (nexus-nyry9.15): every operator's own real
+    json_schema, dispatched at the cheap tier, must still produce
+    schema-conforming structured output. Per the RDR's failure mode, a
+    schema-conformance error on the cheap tier surfaces as an operator
+    failure -- exercising all 10 real per-operator schemas here (not one
+    blanket schema) is what keeps .p2c's quality-proxy measurement from
+    confounding a genuine tier-quality regression with a plumbing bug
+    this test would have caught first.
+
+    Schemas and prompt shapes are copied verbatim from the 10
+    ``@mcp.tool``-registered operators in ``src/nexus/mcp/core.py``
+    (``operator_extract`` .. ``operator_aggregate``) -- read-only source,
+    not re-derived or simplified, so a schema drift in core.py is a
+    genuine signal here rather than noise from two independently
+    maintained copies.
+
+    Skipped by default; requires ``claude`` on PATH with valid
+    credentials.
+
+    Run with:
+      uv run pytest -m integration tests/test_operator_dispatch.py -k PerOperatorSchema
+    """
+
+    @staticmethod
+    def _claude_auth_available() -> bool:
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["claude", "auth", "status", "--json"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                return False
+            data = json.loads(result.stdout)
+            return bool(data.get("loggedIn") or data.get("isLoggedIn"))
+        except Exception:
+            return False
+
+    # (operator_name, prompt, schema) -- schema/prompt copied verbatim
+    # from src/nexus/mcp/core.py as of RDR-196 .p2b.
+    _CHECK_EVIDENCE_ITEM_SCHEMA = {
+        "type": "object",
+        "required": ["item_id", "quote", "role"],
+        "properties": {
+            "item_id": {"type": "string"},
+            "quote": {"type": "string"},
+            "role": {
+                "type": "string",
+                "enum": ["supports", "contradicts", "neutral"],
+            },
+        },
+    }
+
+    _CASES = [
+        (
+            "operator_extract",
+            "Extract the following fields from each item: name\n\n"
+            'Items:\n[{"name": "Alice", "age": 30}]',
+            {
+                "type": "object",
+                "required": ["extractions"],
+                "properties": {
+                    "extractions": {"type": "array", "items": {"type": "object"}},
+                },
+            },
+        ),
+        (
+            "operator_rank",
+            "Rank the following items by size.\n"
+            "Return them in ranked order, best first.\n\n"
+            'Items:\n["small", "medium", "large"]',
+            {
+                "type": "object",
+                "required": ["ranked"],
+                "properties": {
+                    "ranked": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        ),
+        (
+            "operator_compare",
+            "Compare the following items.\n\n"
+            'Items:\n["apple", "orange"]',
+            {
+                "type": "object",
+                "required": ["comparison"],
+                "properties": {"comparison": {"type": "string"}},
+            },
+        ),
+        (
+            "operator_summarize",
+            "Summarize the following content concisely.\n\n"
+            "Nexus is a semantic search and knowledge management CLI.",
+            {
+                "type": "object",
+                "required": ["summary"],
+                "properties": {
+                    "summary": {"type": "string"},
+                    "citations": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        ),
+        (
+            "operator_generate",
+            "Generate a one-sentence description.\n\n"
+            "Context:\nA CLI tool for semantic search.",
+            {
+                "type": "object",
+                "required": ["output"],
+                "properties": {
+                    "output": {"type": "string"},
+                    "citations": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        ),
+        (
+            "operator_filter",
+            "Filter the following items by this criterion: is a fruit\n"
+            "Return only the items that satisfy the criterion in the "
+            "'items' array. Populate 'rationale' with one entry per "
+            "input item, keyed by the item's id, giving the reason each "
+            "item was kept or rejected. The output 'items' array must "
+            "be a subset of the input; never add synthetic items.\n\n"
+            'Items:\n[{"id": "1", "name": "apple"}, {"id": "2", "name": "car"}]',
+            {
+                "type": "object",
+                "required": ["items", "rationale"],
+                "properties": {
+                    "items": {"type": "array", "items": {"type": "object"}},
+                    "rationale": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["id", "reason"],
+                            "properties": {
+                                "id": {"type": "string"},
+                                "reason": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            },
+        ),
+        (
+            "operator_check",
+            "Check whether the following items are consistent with this "
+            "claim or question: all items are fruit\n"
+            "Set ok=true when every item supports the claim, false when "
+            "at least one item contradicts it. Populate 'evidence' with "
+            "a record per item containing a short grounding 'quote' and "
+            "a 'role' of 'supports', 'contradicts', or 'neutral'.\n\n"
+            'Items:\n[{"id": "1", "name": "apple"}, {"id": "2", "name": "car"}]',
+            {
+                "type": "object",
+                "required": ["ok", "evidence"],
+                "properties": {
+                    "ok": {"type": "boolean"},
+                    "evidence": {
+                        "type": "array",
+                        "items": _CHECK_EVIDENCE_ITEM_SCHEMA,
+                    },
+                },
+            },
+        ),
+        (
+            "operator_verify",
+            "Verify whether the following claim is grounded in the "
+            "evidence provided.\n\n"
+            "Claim: the sky is blue\n\n"
+            "Evidence:\nOn a clear day, the sky appears blue due to "
+            "Rayleigh scattering.\n\n"
+            "Set verified=true only when the claim is directly "
+            "supported by the evidence. Provide a concise 'reason'. "
+            "Populate 'citations' with locators.",
+            {
+                "type": "object",
+                "required": ["verified", "reason", "citations"],
+                "properties": {
+                    "verified": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                    "citations": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        ),
+        (
+            "operator_groupby",
+            "Partition the following items by this key: category\n"
+            "Output a list of groups. Each group has a string "
+            "`key_value` and an `items` array carrying each item's "
+            "full content INLINE.\n\n"
+            'Items:\n[{"id": "1", "name": "apple", "category": "fruit"}, '
+            '{"id": "2", "name": "car", "category": "vehicle"}]',
+            {
+                "type": "object",
+                "required": ["groups"],
+                "properties": {
+                    "groups": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["key_value", "items"],
+                            "properties": {
+                                "key_value": {"type": "string"},
+                                "items": {"type": "array", "items": {"type": "object"}},
+                            },
+                        },
+                    },
+                },
+            },
+        ),
+        (
+            "operator_aggregate",
+            "Reduce each group of items into a per-group summary using "
+            "this reducer instruction: count the items\n\n"
+            "Output one aggregate per input group, preserving the "
+            "group's `key_value` verbatim.\n\n"
+            'Groups:\n[{"key_value": "fruit", "items": [{"id": "1", "name": "apple"}]}]',
+            {
+                "type": "object",
+                "required": ["aggregates"],
+                "properties": {
+                    "aggregates": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["key_value", "summary"],
+                            "properties": {
+                                "key_value": {"type": "string"},
+                                "summary": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            },
+        ),
+    ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "operator_name, prompt, schema", _CASES, ids=[c[0] for c in _CASES],
+    )
+    async def test_cheap_tier_produces_schema_conforming_output(
+        self, operator_name: str, prompt: str, schema: dict,
+    ) -> None:
+        if not self._claude_auth_available():
+            pytest.skip("claude CLI not on PATH or not authenticated -- live dispatch skipped")
+
+        import jsonschema
+
+        from nexus.operators.dispatch import claude_dispatch
+        from nexus.operators.model_tiers import resolve_model_for_tier
+
+        result = await claude_dispatch(
+            prompt, schema, timeout=60.0,
+            model=resolve_model_for_tier("cheap"), operator=operator_name,
+        )
+
+        jsonschema.validate(result, schema)
