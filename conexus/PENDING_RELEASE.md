@@ -31,6 +31,12 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release (pinned: v7.13.0)
 
+- `conexus/skills/composition-probe/SKILL.md`, `conexus/skills/cli-controller/SKILL.md`, `conexus/skills/orchestration/SKILL.md`
+  — nexus-c00dw, commit `e974d23b5`: the documented subagent Maven runner is
+  now `scripts/mvnw-leased.sh test -Dtest=<class>` (single-builder lease for
+  `service/target`) instead of a bare `mvn test`; rule text only, no hook or
+  tool behaviour change. Until the next release tag ships, installed copies
+  still show the bare invocation.
 - `conexus/hooks/scripts/routing/_lib.py` and `sn/hooks/scripts/routing/_lib.py`
   — nexus-pfuns, commit `02ef7ee63`: the fallback routing-log path
   (`_DEFAULT_LOG_PATH`) is now resolved by a call-time `_default_log_path()`
