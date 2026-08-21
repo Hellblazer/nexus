@@ -404,7 +404,7 @@ class TestCheckOrphanT1Handoff:
     reaped, and a live pid's marker is left completely untouched."""
 
     def _run(self, config_dir: Path) -> tuple[bool, list[HealthResult]]:
-        with patch("nexus.config.nexus_config_dir", return_value=config_dir):
+        with patch.dict(os.environ, {"NEXUS_CONFIG_DIR": str(config_dir)}):
             results = _check_orphan_t1_handoff()
         ok = all(r.ok for r in results)
         return ok, results

@@ -324,7 +324,7 @@ def test_discover_pg_binaries_finds_bundle_without_env(tmp_path, monkeypatch, ma
     monkeypatch.delenv(pg_bundle.BUNDLE_ENV, raising=False)
     # discover_pg_binaries does a local `from nexus.config import nexus_config_dir`,
     # so patch it at the source module.
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: config_dir)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
 
     bins = pgp.discover_pg_binaries()
     assert bins.bin_dir == bin_dir

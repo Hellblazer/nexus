@@ -26,6 +26,7 @@ the same treatment for free.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -177,7 +178,7 @@ class TestPostgresProbeAgainstARealSocket:
 
     def _creds_at(self, tmp_path: Path, port: int):
         (tmp_path / "pg_credentials").write_text(f"PG_PORT={port}\n")
-        return patch("nexus.config.nexus_config_dir", return_value=tmp_path)
+        return patch.dict(os.environ, {"NEXUS_CONFIG_DIR": str(tmp_path)})
 
     def test_detects_a_live_listener(self, tmp_path: Path) -> None:
         import socket as _s
@@ -211,7 +212,7 @@ class TestPostgresProbeAgainstARealSocket:
     def test_absent_credentials_report_nothing(self, tmp_path: Path) -> None:
         from nexus.daemon import installer
 
-        with patch("nexus.config.nexus_config_dir", return_value=tmp_path):
+        with patch.dict(os.environ, {"NEXUS_CONFIG_DIR": str(tmp_path)}):
             assert installer._probe_live_postgres() is None
 
 

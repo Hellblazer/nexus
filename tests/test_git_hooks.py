@@ -419,7 +419,7 @@ class TestDoctorStanzaDrift:
         import json
         cfg = tmp_path / "nx_config_drift"
         cfg.mkdir(exist_ok=True)
-        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: cfg)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
         registry_path = cfg / "repos.json"
         registry_path.write_text(json.dumps({"repos": {str(repo): {}}}))
 
@@ -477,7 +477,7 @@ class TestDoctorDeadOwnerRendering:
         import json
         cfg = tmp_path / cfg_name
         cfg.mkdir(exist_ok=True)
-        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: cfg)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
         registry_path = cfg / "repos.json"
         registry_path.write_text(json.dumps({"repos": {str(repo_path): {}}}))
 

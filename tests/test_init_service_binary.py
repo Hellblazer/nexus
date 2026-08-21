@@ -130,7 +130,7 @@ def test_init_cmd_does_not_start_service_when_no_binary(tmp_path, monkeypatch):
     monkeypatch.setattr(binary_install, "PINNED_SERVICE_TAG", None)
     # isolate: throwaway config dir, local mode, PG + embedder steps stubbed.
     monkeypatch.setattr(_config, "is_local_mode", lambda: True)
-    monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr(init_mod, "_provision_postgres_step", lambda: None)
     monkeypatch.setattr(init_mod, "_provision_service_embedder_step", lambda e: None)
 

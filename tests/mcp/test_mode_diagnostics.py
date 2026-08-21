@@ -30,7 +30,7 @@ class TestResolveModeDiagnostics:
         monkeypatch.setattr(
             "nexus.db.local_ef.local_model_token", lambda: "minilm-l6-v2-384"
         )
-        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr("nexus.config.get_credential", lambda name: "")
 
         result = _resolve_mode_diagnostics()
@@ -40,7 +40,7 @@ class TestResolveModeDiagnostics:
 
     def test_cloud_mode_returns_none_local_embedder(self, monkeypatch, tmp_path) -> None:
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr("nexus.config.get_credential", lambda name: "")
 
         result = _resolve_mode_diagnostics()
@@ -56,7 +56,7 @@ class TestResolveModeDiagnostics:
         # keys) -- the diagnostic must evidence WHICH one fired, as booleans only,
         # never the credential values themselves.
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
         def _fake_credential(name: str) -> str:
             return {
@@ -81,7 +81,7 @@ class TestResolveModeDiagnostics:
         monkeypatch.setattr(
             "nexus.db.local_ef.local_model_token", lambda: "minilm-l6-v2-384"
         )
-        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr(
             "nexus.config.get_credential", lambda name: "super-secret-token-value"
         )
@@ -93,7 +93,7 @@ class TestResolveModeDiagnostics:
 
     def test_config_dir_reflects_resolved_path(self, monkeypatch, tmp_path) -> None:
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr("nexus.config.get_credential", lambda name: "")
 
         result = _resolve_mode_diagnostics()
@@ -102,7 +102,7 @@ class TestResolveModeDiagnostics:
 
     def test_returns_home_and_nx_local_env_verbatim(self, monkeypatch, tmp_path) -> None:
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setattr("nexus.config.get_credential", lambda name: "")
         monkeypatch.setenv("HOME", "/Users/probe-home")
         monkeypatch.setenv("NX_LOCAL", "1")

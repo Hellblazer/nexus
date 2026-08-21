@@ -159,7 +159,7 @@ def test_missing_bundle_fails_loud_and_names_the_bundle(monkeypatch, tmp_path) -
     """
     monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
     # An empty config dir => no extracted bundle => both sanctioned legs miss.
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
     with pytest.raises(PgBinaryNotFoundError) as exc:
         discover_pg_binaries()
@@ -192,7 +192,7 @@ def test_a_host_pg_on_path_is_not_used(monkeypatch, tmp_path) -> None:
 
     monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
     monkeypatch.setenv("PATH", f"{fake_host_pg}:{tmp_path}")
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path / "cfg")
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
 
     with pytest.raises(PgBinaryNotFoundError):
         discover_pg_binaries()

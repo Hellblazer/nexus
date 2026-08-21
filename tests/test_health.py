@@ -366,7 +366,7 @@ def test_vector_service_unreachable_surfaces_boot_failure(monkeypatch, tmp_path)
         raise RuntimeError("connection refused")
 
     monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     _write_service_log(tmp_path, _REAL_INCIDENT_LOG_TAIL)
 
     line = _check_vector_service()
@@ -388,7 +388,7 @@ def test_vector_service_unreachable_no_log_degrades_to_bare_message(
         raise RuntimeError("connection refused")
 
     monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     # No logs/ dir created at all.
 
     line = _check_vector_service()
@@ -409,7 +409,7 @@ def test_vector_service_unreachable_log_present_no_marker_degrades(
         raise RuntimeError("connection refused")
 
     monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     _write_service_log(tmp_path, "2026-07-08T10:22:01.123Z INFO starting up\n")
 
     line = _check_vector_service()
@@ -425,7 +425,7 @@ def test_vector_service_reachable_never_surfaces_stale_boot_failure(
     from nexus.health import _check_vector_service
 
     monkeypatch.setattr("nexus.db.http_vector_client._get", lambda *a, **kw: [])
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     # Stale log from a PRIOR crash still on disk even though the service is
     # currently reachable.
     _write_service_log(tmp_path, _REAL_INCIDENT_LOG_TAIL)
@@ -470,7 +470,7 @@ def test_vector_service_auth_failure_is_not_reported_as_unreachable(
     monkeypatch.setattr(
         "nexus.db.http_vector_client._get", _raise_vector_service_error(code)
     )
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
     line = _check_vector_service()
     assert line.ok is False
@@ -499,7 +499,7 @@ def test_vector_service_auth_failure_never_surfaces_stale_boot_failure(
     monkeypatch.setattr(
         "nexus.db.http_vector_client._get", _raise_vector_service_error(401)
     )
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     _write_service_log(tmp_path, _REAL_INCIDENT_LOG_TAIL)
 
     line = _check_vector_service()
@@ -517,7 +517,7 @@ def test_vector_service_other_http_status_surfaces_the_code(
     monkeypatch.setattr(
         "nexus.db.http_vector_client._get", _raise_vector_service_error(500)
     )
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
     line = _check_vector_service()
     assert line.ok is False
@@ -539,7 +539,7 @@ def test_vector_service_transport_failure_still_reports_unreachable(
     monkeypatch.setattr(
         "nexus.db.http_vector_client._get", _raise_vector_service_error(None)
     )
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     _write_service_log(tmp_path, _REAL_INCIDENT_LOG_TAIL)
 
     line = _check_vector_service()
