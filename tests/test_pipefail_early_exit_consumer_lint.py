@@ -804,7 +804,6 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse.sh:300",
         "tests/e2e/migration-rehearsal/rehearse.sh:301",
         "tests/e2e/migration-rehearsal/rehearse_acquire.sh:122",
-        "tests/e2e/migration-rehearsal/rehearse_acquire.sh:134",
         "tests/e2e/migration-rehearsal/rehearse_acquire.sh:80",
         "tests/e2e/migration-rehearsal/rehearse_cold.sh:113",
         "tests/e2e/migration-rehearsal/rehearse_cold.sh:77",
@@ -1046,7 +1045,7 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
 # `head -1` site, deleted with the leg) removed entries wholesale:
 # 169 - 21 - 15 - 1 = 132. The remaining 5 run.sh sites were retargeted in
 # place, not counted as a change.
-_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 134
+_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 133
 
 
 def test_pipefail_early_exit_exempt_ratchet() -> None:
