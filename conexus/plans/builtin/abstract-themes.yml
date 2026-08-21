@@ -72,7 +72,7 @@ plan_json:
     - tool: aggregate
       args:
         groups: $step2.groups
-        reducer: key themes and findings about $intent in these chunks
+        reducer: $intent
     - tool: summarize
       args:
         inputs: $step3.aggregates

@@ -103,14 +103,15 @@ plan_json:
     - tool: rank
       args:
         criterion: >-
-          Relevance to the question "$question". Prefer factual
-          evidence — concrete claims, named entities, numeric values,
-          dates — over topical mentions. The candidates are fused from
-          vector recall and citation/relation-graph traversal; value
-          direct evidence over loose association.
+          Relevance to the question included alongside the candidates.
+          Prefer factual evidence — concrete claims, named entities,
+          numeric values, dates — over topical mentions. The candidates
+          are fused from vector recall and citation/relation-graph
+          traversal; value direct evidence over loose association.
         inputs:
           - $step3.contents
           - $step4.contents
+          - $question
     - tool: generate
       args:
         outline: factual-answer

@@ -28,8 +28,8 @@ plan_json:
         limit: $limit
     - tool: rank
       args:
-        criterion: "match_count above $threshold indicates promotion-worthy usage pattern"
-        inputs: [$step1.text]
+        criterion: "match_count above the threshold value included alongside the candidates indicates promotion-worthy usage pattern"
+        inputs: [$step1.text, $threshold]
     - tool: generate
       args:
         outline: promotion-shortlist

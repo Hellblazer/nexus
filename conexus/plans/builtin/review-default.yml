@@ -18,7 +18,7 @@ plan_json:
   steps:
   - tool: query
     args:
-      question: catalog entries for paths $changed_paths
+      question: catalog entries for these changed paths
       subtree: $changed_paths
       corpus: all
   - tool: traverse

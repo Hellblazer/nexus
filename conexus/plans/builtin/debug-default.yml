@@ -18,7 +18,7 @@ plan_json:
   steps:
   - tool: query
     args:
-      question: design context and authoring RDRs for $failing_path
+      question: design context and authoring RDRs for this failing path
       subtree: $failing_path
       author: nexus
       corpus: all
