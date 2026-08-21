@@ -469,6 +469,92 @@ client-tag push; `scripts/check_engine_release_floor.py` is the mechanical gate.
 #### Step 2: Quality proxy wired (RDR-090 / fixture set); baseline run all-strong, candidate run tiered; record both
 #### Step 3: Flip default only if cost/latency improve at ≥ proxy-equal quality; otherwise record the negative result in the RDR and stop
 
+##### OUTCOME (nexus-nyry9.17, 2026-08-21)
+
+Per-operator decision, against the criteria pre-registered in T2
+`nexus_rdr/196-phase2-ab-measurement-REGISTERED-2026-08-21` (frozen before
+any .p2c measurement ran) and measured in T2 `nexus_rdr/
+196-phase2-ab-measurement` (n=3/arm, same box/day):
+
+| operator | verdict | n | cost ratio (cand/base) | agreement min/mean | threshold | caveats |
+|---|---|---|---|---|---|---|
+| `operator_filter` | **FLIP** | 3 | 0.068 (14.7× cheaper) | 1.000 / 1.000 | 0.80 | ceiling effect — scored 1.0 on every pair; external validity beyond the 8-item fixture untested |
+| `operator_groupby` | **FLIP** | 3 | 0.061 (16.3× cheaper) | 1.000 / 1.000 | 0.80 | same ceiling-effect caveat as filter |
+| `operator_extract` | **FLIP** | 3 | 0.060 (16.6× cheaper) | 1.000 / 1.000 | 0.85 | same ceiling-effect caveat |
+| `operator_rank` | **FLIP** | 3 | 0.049 (20.4× cheaper) | 0.952 / 0.960 | 0.60 | min score sits BELOW .p2a's own strong-vs-strong noise floor (0.9762) — cite the large threshold margin (0.9524 vs 0.60), not a noise-band comparison (round-2 correction) |
+| `operator_check` | **HOLD** | — | — | — | 0.70 | no tiering delta — both strong-tier in every arm per the .p2b table (no cheap-tier candidate arm exists to A/B against) |
+| `operator_verify` | **HOLD** | — | — | — | 0.70 | no tiering delta, same reason as check; separately UNDECIDABLE on the .p2a proxy itself (n=4 pairs, mean 0.800, min 0.733, margin only +0.033 over threshold — thin even before any tiering question) |
+| `operator_aggregate` | **HOLD (by construction)** | — | — | — | — | no .p2a quality proxy exists (free-text output, LLM-as-judge rejected); pinned `"strong"` in `model_tiers.OPERATOR_MODEL_TIER` and mechanically guarded by `test_every_cheap_entry_has_a_registered_proxy_metric` — a future re-flip cannot silently skip adding proxy coverage first |
+| `operator_summarize` | **HOLD (by construction)** | — | — | — | — | same as aggregate |
+| `operator_compare` | **HOLD (by construction)** | — | — | — | — | same as aggregate |
+| `operator_generate` | **HOLD (by construction)** | — | — | — | — | same as aggregate |
+| inline planner | **UNMEASURED** | 0 (candidate) | — | — | — | .p2c's candidate-planner arm never ran — budget exhausted (~$19 of ~$20 cap) after the operator core + 3 baseline-planner runs; baseline-only mean cost $2.86/call (corrected). Left HOLD (safe side) pending a dedicated top-up (~3 cheap-tier planner dispatches, small marginal spend once separated from the operator core) — Sam's call whether/when to fund it, not spent here. |
+
+**Zero negative results** — every measured operator either cleared both
+pre-registered refutation criteria (filter/groupby/extract/rank) or had
+no tiering delta to measure in the first place (check/verify). No
+operator's default flip was attempted and rejected.
+
+**What flipped, mechanically**: `nexus.operators.model_tiers.FLIPPED_OPERATORS`
+(filter/groupby/extract/rank) is now consulted UNCONDITIONALLY on the
+plan-run dispatch path (`plans/runner.py::_default_dispatcher`, which is
+what `nx_answer` / `plan_run` use to invoke operator steps) — no env var
+required. The only other consult site is `mcp/core.py::_nx_answer_plan_miss`
+(the inline planner), and that one stays strong unless
+`NX_OPERATOR_MODEL_TIERING=1`. The operator MCP tools themselves
+(`operator_filter` etc.) never consult the tier table: an agent calling
+them DIRECTLY, outside a plan, still gets the strong tier unless it passes
+`model=` — so the 14-20x savings measured here apply to plan-mediated
+dispatch only, not to direct tool use. Every other operator gets no
+`model` override by default, unchanged from pre-.p2d behaviour.
+
+Evidence caveat carried from the .p2c round-2 critique (T2
+`nexus/review-nexus-nyry9.16-round2`): of the four flipped operators only
+extract's costs are cross-referenced to a persisted `nx_answer_runs` row by
+run id; filter/groupby/rank costs come from the dispatch's own structured
+envelope (real, same telemetry path) and are not independently traceable to
+a persisted row. `scripts/bench/operator_proxy_ab.stitch_run_id` closes that
+for future runs; the already-spent measurement was not re-run. `NX_OPERATOR_MODEL_TIERING=1` keeps its .p2c meaning: a
+measurement override that consults the WHOLE tier table (including
+"strong" entries) for future A/B re-verification.
+`NX_OPERATOR_MODEL_TIERING=0` is a new kill switch — forces every
+operator back to strong (pre-.p2d behaviour) without a code change, for
+rollback. See `docs/cli-reference.md`'s "Per-operator model tiering"
+section for the full env-var contract.
+
+**Bundles stay strong, unconditionally.** `nexus.plans.bundle.dispatch_bundle`
+/ `compose_bundle_prompt` never import `model_tiers` and never pass a
+`model` kwarg to `claude_dispatch` — a bundle containing a flipped
+operator (e.g. a fused filter→groupby chain) dispatches at the default
+(strong) model, not cheap. This is unchanged from .p1b's note that
+bundling bypasses the SQL fast path too: the .p2c/.p2d measurement was
+scoped to ISOLATED single-step plans specifically to hold bundling
+constant/absent, so there is no A/B evidence for a flipped operator's
+quality *inside* a bundle — leaving bundles on strong is the safe,
+evidence-consistent default until a future bead measures the bundled
+case separately.
+
+**verify/check verdict for Phase 4 (`nexus-nyry9.23`)**: the cheap tier
+was never tested against either operator (no tiering delta existed to
+measure — see the table above), so this bead cannot say the cheap tier
+is "not good enough" for them; it can only say the question was never
+asked at the model-tier level. Phase 4's own framing (cheap-first
+escalate-on-low-confidence) is a DIFFERENT mechanism than static tier
+routing, so `.p4` is **not closed as not-needed** by this bead — it
+remains open, gated on its own precondition being independently
+evaluated, not on this bead's HOLD verdict for check/verify.
+
+**RDR-196 h33x8/hmu02 bench caveat, restated**: the retrieval-bench
+non-regression check (`tests/integration/test_rdr_196_p2c_retrieval_bench.py`)
+proved `off == on` for search/query outputs against a real freshly-indexed
+corpus (5/5 non-error queries, byte-identical both arms) — tiering does
+not touch retrieval, which is structurally guaranteed and now empirically
+confirmed. It did NOT prove retrieval QUALITY is good (NDCG@3=0.0 in
+both arms, traced to a pre-existing `scripts/bench/paths.py` metadata-
+extraction bug, unrelated to .p2c/.p2d). Read this OUTCOME's flip
+decisions as validated against the OPERATOR quality proxy only, not as
+a broader nx_answer end-to-end quality claim.
+
 ### Phase 3: Cost-Ranked Choice + Budget
 
 #### Step 0: derive the default `budget_usd` from Phase 1 history (named percentile of observed per-plan cost); enforcement stays off until the derived value exists

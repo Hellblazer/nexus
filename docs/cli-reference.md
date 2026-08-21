@@ -3213,6 +3213,40 @@ lookup failure or a deleted plan degrades that row's predicted fields to
 `"plan-not-found"` / `"plan-json-missing"`), never a crash and never a
 silent `0`.
 
+### Per-operator model tiering (RDR-196 Phase 2 Step 3)
+
+`nexus.operators.model_tiers.FLIPPED_OPERATORS` — `operator_filter`,
+`operator_groupby`, `operator_extract`, `operator_rank` — dispatch at the
+cheap model tier **by default**, no opt-in required, since the .p2c A/B
+measurement (nexus-nyry9.16/.17) cleared both pre-registered refutation
+criteria for all four (14-20x cheaper, agreement at/above the .p2a
+quality-proxy threshold on every measured pair). Every other operator
+(`check`/`verify`/`aggregate`/`summarize`/`compare`/`generate`) is
+unaffected by default — still dispatches at the untiered default model,
+either because no tiering delta was ever proposed for it (check/verify)
+or because no quality proxy exists to validate a cheap-tier switch
+(aggregate/summarize/compare/generate). See
+`docs/rdr/rdr-196-cost-aware-nx-answer.md`'s Phase 2 OUTCOME block for
+the full per-operator decision table.
+
+`NX_OPERATOR_MODEL_TIERING` is a 3-state override, consulted by the two
+production call sites that route operator dispatches (`plans/runner.py`'s
+isolated-step path, `mcp/core.py`'s inline planner):
+
+| value | meaning |
+|---|---|
+| unset (default) | the .p2d default flip above — only the 4 flipped operators route cheap |
+| `1` | measurement override: consult the WHOLE tier table (`nexus.operators.model_tiers.OPERATOR_MODEL_TIER`), including "strong" entries — for A/B re-verification, not production traffic |
+| `0` | kill switch: forces every operator back to strong (pre-.p2d behaviour), without a code change — rollback lever |
+
+A plan step (or MCP tool call) that already supplies its own `model=`
+argument always wins over any of the above — the tiering machinery only
+ever fills a gap the caller left unset. Bundled operator dispatches
+(`nexus.plans.bundle.dispatch_bundle`) are never affected by any of the
+three states — bundling never consults model tiers, so a bundle
+containing a flipped operator still dispatches at the default (strong)
+model.
+
 ---
 
 ## nx census

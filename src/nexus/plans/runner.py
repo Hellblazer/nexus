@@ -1145,31 +1145,50 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # Auto-hydration + arg normalization: shared with the bundle path.
     resolved_tool, args = _hydrate_operator_args(tool, args)
 
-    # RDR-196 .p2c (nexus-nyry9.16): MEASUREMENT-ONLY opt-in for the .p2c
-    # A/B — NOT the .p2d default-tier flip (which is a later, deliberate
-    # bead). Gated on ``NX_OPERATOR_MODEL_TIERING=1``; unset (the default
-    # for every non-.p2c caller) is a complete no-op, leaving ``args``
-    # byte-identical to pre-.p2c behavior. When set, an isolated-step
-    # operator dispatch resolved to a tool this bead's tier table names
-    # gets ``args["model"]`` set to that tier's ``--model`` alias — the
-    # ONE call site the repo-wide "not consulted" guard
-    # (``tests/test_operator_model_tiers.py::TestNotConsultedRepoWide``)
-    # allows, and only reached behind this env check. Applied for every
-    # ``OPERATOR_MODEL_TIER`` entry, not just the 4 operators .p2c's own
-    # quality proxy covers (filter/groupby/rank/extract) — an operator
-    # whose MCP-tool signature doesn't accept ``model`` (check/verify/
-    # generate/compare/aggregate/summarize, as of this bead) simply has
-    # the kwarg silently dropped + logged by the existing kwargs-drop
-    # pass below, same as any other tool-incompatible arg. A caller that
-    # already resolved its own ``model`` wins — never overridden here.
-    if "model" not in args and _os.environ.get("NX_OPERATOR_MODEL_TIERING") == "1":
-        from nexus.operators.model_tiers import (  # noqa: PLC0415 — measurement-only opt-in, not a default-path import
-            OPERATOR_MODEL_TIER,
-            resolve_model_for_operator,
-        )
+    # RDR-196 .p2d (nexus-nyry9.17): DEFAULT-ON per-operator tiering, plus
+    # the .p2c measurement override and a kill switch — a 3-way branch on
+    # ``NX_OPERATOR_MODEL_TIERING``, all gated behind "model" not already
+    # supplied by the caller (an explicit step-author override always
+    # wins, never touched here):
+    #
+    #   == "1"  measurement override (.p2c, UNCHANGED): consult the WHOLE
+    #           ``OPERATOR_MODEL_TIER`` table, including "strong" entries
+    #           — for A/B re-verification, not production traffic. An
+    #           operator whose MCP-tool signature doesn't accept ``model``
+    #           (check/verify/generate/compare/aggregate/summarize) has
+    #           the kwarg silently dropped + logged by the kwargs-drop
+    #           pass below, same as any other tool-incompatible arg.
+    #   != "0"  (unset, or any other value) DEFAULT PATH (.p2d): only the
+    #           4 :data:`~nexus.operators.model_tiers.FLIPPED_OPERATORS`
+    #           (filter/groupby/extract/rank) get the cheap-tier alias —
+    #           every other operator (HOLD/UNDECIDED per .p2d's decision
+    #           table) gets no ``model`` kwarg at all, same as pre-.p2c.
+    #   == "0"  kill switch: neither branch fires, ``args`` stays
+    #           untouched — every operator dispatches at whatever the
+    #           untiered (pre-.p2d, strong) default has always been.
+    #           Rollback without a code change.
+    #
+    # Each branch's env check is inlined (not hoisted to a local) so the
+    # AST structural guard (``TestNotConsultedRepoWide::
+    # test_p2c_opt_in_call_sites_are_env_gated``) — which requires the
+    # resolver call be lexically nested inside an if/while whose test
+    # source names ``NX_OPERATOR_MODEL_TIERING`` — inspects the real
+    # branch condition, not a variable read.
+    if "model" not in args:
+        if _os.environ.get("NX_OPERATOR_MODEL_TIERING") == "1":
+            from nexus.operators.model_tiers import (  # noqa: PLC0415 — measurement-only opt-in, not a default-path import
+                OPERATOR_MODEL_TIER,
+                resolve_model_for_operator,
+            )
 
-        if resolved_tool in OPERATOR_MODEL_TIER:
-            args = {**args, "model": resolve_model_for_operator(resolved_tool)}
+            if resolved_tool in OPERATOR_MODEL_TIER:
+                args = {**args, "model": resolve_model_for_operator(resolved_tool)}
+        elif _os.environ.get("NX_OPERATOR_MODEL_TIERING") != "0":
+            from nexus.operators.model_tiers import resolve_model_for_flipped_operator  # noqa: PLC0415 — default-path resolver, kept adjacent to its measurement-override sibling above
+
+            _default_model = resolve_model_for_flipped_operator(resolved_tool)
+            if _default_model is not None:
+                args = {**args, "model": _default_model}
 
     # RDR-093 S-1: pop runner-attached truncation metadata before the
     # kwargs-drop pass so the operator never sees the marker (it's not

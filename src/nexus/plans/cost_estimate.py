@@ -24,18 +24,25 @@ matcher.py. It is a pure function of already-materialized ``plan_json`` +
 an already-built price table.
 
 NOT COUPLED TO PHASE 2 MODEL TIERING: this module deliberately does NOT
-import ``nexus.operators.model_tiers`` / ``OPERATOR_MODEL_TIER``. Model-
-tier routing is OFF by default (gated behind ``NX_OPERATOR_MODEL_TIERING``,
-.p2d's still-pending default-tier flip) -- today every LLM operator
-dispatch actually runs under the SAME (untiered) default model regardless
-of what a tier table would say, so pricing by an inert tier split would
-be misleading, not merely premature. The bead's own acceptance criteria
-name exactly ONE static-fallback source -- T2 ``nexus_rdr/
-196-phase2-quality-proxy``'s measured STRONG-tier costs -- applied
-uniformly to every non-sql-fast-path LLM operator; per-operator
-differentiation resumes once real per-operator HISTORY exists (this
-module's primary price source already handles that, keyed off the
-CANONICAL model recorded on each dispatch, never a tier alias).
+import ``nexus.operators.model_tiers`` / ``OPERATOR_MODEL_TIER`` /
+``FLIPPED_OPERATORS``. UPDATED (RDR-196 .p2d, nexus-nyry9.17, landed
+2026-08-21): model-tier routing is now ON by default for 4 operators
+(filter/groupby/extract/rank route to cheap-tier automatically; see
+``model_tiers.FLIPPED_OPERATORS``) -- but this module still prices every
+non-sql-fast-path LLM operator uniformly via the SAME static fallback
+(below) and the SAME history path, deliberately NOT importing the tier
+table to special-case flipped operators. This is not stale from .p2d --
+it is still correct, for a different reason than pre-.p2d: HISTORY
+(``build_operator_price_table``, keyed off the CANONICAL model recorded
+on each real dispatch) already differentiates a flipped operator's real
+cheap-tier cost from a HOLD operator's real strong-tier cost, the moment
+either has >= ``MIN_HISTORY_SAMPLES`` recorded calls -- no tier-table
+special-casing is needed to get that right, and adding one would
+duplicate what history already proves. The static fallback below only
+ever prices the THIN-HISTORY case (any operator, flipped or not, with
+fewer than 3 recorded samples) uniformly at the T2-sourced strong-tier
+figure -- see that constant's own comment for why this is an accepted,
+self-narrowing approximation rather than a bug.
 
 NOT MODELLED: ``MAX_BUNDLE_PROMPT_CHARS`` runtime bundle fallback
 (``nexus.plans.bundle``, 200_000 chars). :func:`estimate_plan_cost` prices
@@ -125,17 +132,36 @@ PLAN_CHOICE_CONFIDENCE_BAND: Final[float] = 0.05
 # round trip has an ~11s floor independent of workload" (nx_answer
 # docstring, mcp/core.py) -- the substrate's session-bootstrap cost.
 #
-# FORWARD-LINK (code review round 1, T2 nyry9.20-code-review-2026-08-21,
-# item #3): this single flat figure stands in for EVERY LLM operator
-# because model-tier routing is off by default (see the module
-# docstring's "NOT COUPLED TO PHASE 2 MODEL TIERING" section). Once
-# .p2d (nexus-nyry9.17) flips the default and cheap-tier operators
-# (extract/filter/groupby/aggregate/rank/summarize) actually route to a
-# cheaper model in production, THIS constant must be re-priced (most
-# likely split back into a cheap/strong pair, sourced from .p2c's real
-# A/B measurement rather than the .p2a baseline-only figure above) --
-# otherwise every cheap-tier operator's estimate silently over-counts
-# relative to its new real cost. Tracked on nexus-nyry9.17 (bd comment).
+# RESOLVED (RDR-196 .p2d, nexus-nyry9.17, 2026-08-21): the forward-link
+# above predicted operators "extract/filter/groupby/aggregate/rank/
+# summarize" would flip -- .p2d's actual decision (T2 nexus_rdr/
+# 196-phase2-ab-measurement) flipped only 4: filter/groupby/extract/rank.
+# aggregate/summarize stayed "strong" (no .p2a quality proxy exists for
+# either; see model_tiers.OPERATOR_MODEL_TIER's own comment) -- the
+# forward-link's operator list was a pre-decision guess, now superseded.
+#
+# LEFT UNCHANGED, deliberately, not re-priced: this constant only backstops
+# an operator whose recorded-history sample count is below
+# MIN_HISTORY_SAMPLES (3) -- once .p2d's flip is live, the 4 flipped
+# operators accumulate CHEAP-tier `cost_usd` history from real production
+# calls almost immediately (any nx_answer plan-match hit that dispatches
+# one of them writes a StepRecord), so within a handful of real calls
+# they resolve via the HISTORY path above, not this fallback, and their
+# history correctly reflects the new cheap-tier cost -- no silent
+# over-count once >=3 samples exist. This constant's role narrows
+# exactly as the ORIGINAL (pre-.p2d) comment predicted: a backstop for
+# operators with thin history, which after .p2d means (a) the 6
+# still-strong (HOLD) operators, always, and (b) the 4 flipped operators
+# ONLY in the brief window before their first 3 real cheap-tier calls
+# land. A re-price (splitting this into a cheap/strong pair) is not
+# needed to close that window -- it self-closes via the history path
+# already in this module -- and re-pricing without dedicated cheap-tier
+# production history to source it from would just substitute a second
+# guess for the first. Revisit if/when real cheap-tier `cost_usd` history
+# (observed in this bead's own .p2c measurement: candidate mean
+# 0.033-0.056 USD/call across the 4 flipped operators, vs this $0.23
+# strong-tier-sourced figure) suggests the THIN-HISTORY window itself
+# is materially mispriced in practice, not merely in theory.
 STATIC_FALLBACK_COST_USD: Final[float] = 0.23
 STATIC_FALLBACK_MS: Final[int] = 11_000
 

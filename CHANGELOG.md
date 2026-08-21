@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **RDR-196 .p2d: per-operator model-tier default flip (behaviour change).**
+  `operator_filter`, `operator_groupby`, `operator_extract`, and
+  `operator_rank` now dispatch at the cheap tier by default (no opt-in) —
+  each cleared both pre-registered A/B refutation criteria (14-20x cheaper,
+  agreement at/above the .p2a quality-proxy threshold on every measured
+  pair, n=3). Every other operator (`check`/`verify`/`aggregate`/
+  `summarize`/`compare`/`generate`) is unaffected — still dispatches at
+  the untiered default. `NX_OPERATOR_MODEL_TIERING=0` rolls all operators
+  back to strong (kill switch); `NX_OPERATOR_MODEL_TIERING=1` keeps its
+  prior meaning (consult the whole tier table, for measurement). Bundled
+  operator dispatches are unaffected — bundling never consults model
+  tiers, regardless of whether a bundled step is one of the four flipped
+  operators.
+
 ## [7.13.0] - 2026-08-20
 
 Engine identity moves to `engine-service-v0.1.84` (paired release, deploy-first:

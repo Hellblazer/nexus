@@ -6246,6 +6246,17 @@ async def _nx_answer_plan_miss(
     # unchanged; candidate: env set, planner dispatches at the "cheap"
     # tier alias). Unset (default) is a complete no-op — ``model=None``
     # appends no ``--model`` flag, byte-identical to every pre-.p2c call.
+    #
+    # RDR-196 .p2d (nexus-nyry9.17): the planner is UNMEASURED, not HOLD-
+    # by-decision — the .p2c candidate arm never ran (budget exhausted
+    # before the 4th dispatch, see T2 nexus_rdr/196-phase2-ab-measurement).
+    # NO code change here: the planner does NOT join .p2d's default-on
+    # flip (``model_tiers.FLIPPED_OPERATORS`` is operator-tool-only) —
+    # it stays gated on ``== "1"`` exactly as .p2c left it, so the
+    # default path (env unset) and the kill switch (``== "0"``) both
+    # leave ``_planner_model`` at ``None``, unchanged. A future bead can
+    # spend a small dedicated top-up (~3 cheap-tier planner dispatches,
+    # per .p2d's dev notes) to resolve UNMEASURED into a real verdict.
     _planner_model: str | None = None
     if _os.environ.get("NX_OPERATOR_MODEL_TIERING") == "1":
         from nexus.operators.model_tiers import resolve_model_for_tier  # noqa: PLC0415 — rare/branch-local path; measurement-only opt-in

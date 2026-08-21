@@ -80,7 +80,11 @@ def _resolve_model_call_lines(source: str, filename: str = "<scratch>") -> list[
         name = func.attr if isinstance(func, ast.Attribute) else (
             func.id if isinstance(func, ast.Name) else None
         )
-        if name in ("resolve_model_for_tier", "resolve_model_for_operator"):
+        if name in (
+            "resolve_model_for_tier",
+            "resolve_model_for_operator",
+            "resolve_model_for_flipped_operator",
+        ):
             offenders.append(node.lineno)
     return sorted(set(offenders))
 
@@ -177,6 +181,60 @@ class TestOperatorModelTierTable:
         )
 
 
+class TestFlippedOperators:
+    """RDR-196 .p2d (nexus-nyry9.17): the decided (not just eligible)
+    default-flip set + its resolver."""
+
+    def test_flipped_operators_matches_the_p2d_decision(self) -> None:
+        from nexus.operators.model_tiers import FLIPPED_OPERATORS
+
+        assert FLIPPED_OPERATORS == frozenset({
+            "operator_filter", "operator_groupby",
+            "operator_extract", "operator_rank",
+        })
+
+    def test_flipped_operators_is_a_subset_of_cheap_eligible(self) -> None:
+        """Decided must never exceed eligible -- a flip absent from the
+        table's own 'cheap' set would be nonsensical."""
+        from nexus.operators.model_tiers import FLIPPED_OPERATORS, OPERATOR_MODEL_TIER
+
+        cheap = {op for op, tier in OPERATOR_MODEL_TIER.items() if tier == "cheap"}
+        assert FLIPPED_OPERATORS <= cheap
+
+    def test_hold_operators_excluded_by_construction(self) -> None:
+        from nexus.operators.model_tiers import FLIPPED_OPERATORS
+
+        hold = {
+            "operator_check", "operator_verify", "operator_aggregate",
+            "operator_summarize", "operator_compare", "operator_generate",
+        }
+        assert FLIPPED_OPERATORS.isdisjoint(hold)
+
+
+class TestResolveModelForFlippedOperator:
+    def test_flipped_operator_resolves_to_cheap_alias(self) -> None:
+        from nexus.operators.model_tiers import resolve_model_for_flipped_operator
+
+        for op in ("operator_filter", "operator_groupby", "operator_extract", "operator_rank"):
+            assert resolve_model_for_flipped_operator(op) == "haiku"
+
+    def test_hold_operator_resolves_to_none(self) -> None:
+        from nexus.operators.model_tiers import resolve_model_for_flipped_operator
+
+        for op in (
+            "operator_check", "operator_verify", "operator_aggregate",
+            "operator_summarize", "operator_compare", "operator_generate",
+        ):
+            assert resolve_model_for_flipped_operator(op) is None
+
+    def test_unknown_operator_resolves_to_none_not_a_raise(self) -> None:
+        """Deliberately non-raising -- see the function's own docstring:
+        an unknown name degrades to the safe HOLD side."""
+        from nexus.operators.model_tiers import resolve_model_for_flipped_operator
+
+        assert resolve_model_for_flipped_operator("operator_does_not_exist") is None
+
+
 class TestResolveModelForTier:
     def test_cheap_resolves_to_haiku_alias(self) -> None:
         from nexus.operators.model_tiers import resolve_model_for_tier
@@ -242,9 +300,26 @@ class TestNotConsultedRepoWide:
     file-scoped test passing while the table WAS being consulted by
     default elsewhere. This is the repo-wide counterpart, same pattern
     as ``TestSingleMappingLocation`` above: it walks every non-test
-    source file and asserts none of them reach into this module. The
-    default-tier flip is bead .p2d, which will deliberately update this
-    test at the same time it wires the table in for real."""
+    source file and asserts none of them reach into this module.
+
+    UPDATED for .p2d (nexus-nyry9.17): the default-tier flip has now
+    landed, so "not consulted by default" is no longer this class's
+    guarantee for the 2 allowlisted files -- they DO consult the module
+    on the default path now, for exactly ``FLIPPED_OPERATORS``. What
+    this class still guarantees, unchanged:
+      * the module is imported/referenced by NOTHING outside those 2
+        files (``test_model_tiers_imported_by_zero_production_modules``);
+      * no OTHER production module calls any resolver function
+        (``test_no_production_module_calls_resolve_model_functions``,
+        now also covering ``resolve_model_for_flipped_operator``);
+      * the WHOLE-TABLE measurement-override resolver call
+        (``resolve_model_for_operator``, gated on ``== "1"``) stays
+        lexically env-gated (``test_p2c_opt_in_call_sites_are_env_gated``,
+        now also covering the ``resolve_model_for_flipped_operator``
+        call, gated on ``!= "0"`` -- see that test's updated docstring).
+    See ``TestP2DDefaultFlipDispatcherBehavior`` below for the BEHAVIORAL
+    guarantee that HOLD operators never receive a ``model`` kwarg on the
+    default path, and that only the 4 flipped operators do."""
 
     #: RDR-196 .p2c (nexus-nyry9.16): the ONE measurement-only opt-in call
     #: site this bead adds, gated behind ``NX_OPERATOR_MODEL_TIERING=1``
@@ -358,6 +433,17 @@ class TestNotConsultedRepoWide:
         test expression's source mentions ``NX_OPERATOR_MODEL_TIERING`` —
         the mechanical half of "exactly one call site, gated on the env"
         the .p2c bead DO instructs.
+
+        UPDATED for .p2d (nexus-nyry9.17): this now also walks
+        ``resolve_model_for_flipped_operator`` calls (matches the same
+        ``resolve_model_for_*`` prefix). That call sits in an
+        ``elif ... != "0":`` branch — its own test source still literally
+        names ``NX_OPERATOR_MODEL_TIERING`` (the env check is inlined at
+        each branch, not hoisted to a shared variable, precisely so this
+        guard keeps working unmodified), so "gated" here means "reachable
+        only through a branch that inspects this env var", not "requires
+        the env var to be truthy" — the default-flip branch is
+        deliberately the ELSE-shaped one.
         """
         import ast
         import pathlib
@@ -420,24 +506,35 @@ class TestP2COptInDispatcherBehavior:
     UNSET the argv has no --model and with it SET the argv has the
     tier's alias' — the behavioral half of the opt-in, exercised
     directly against ``plans/runner.py``'s ``_default_dispatcher``
-    (isolated-step path) without spending a real dispatch."""
+    (isolated-step path) without spending a real dispatch.
+
+    UPDATED for .p2d (nexus-nyry9.17): ``test_env_unset_injects_no_model_kwarg``
+    below now exercises a HOLD operator (``check``), not ``filter`` —
+    ``filter`` is one of the 4 :data:`~nexus.operators.model_tiers.
+    FLIPPED_OPERATORS` and now DOES get a cheap-tier ``model`` kwarg with
+    the env unset (see ``TestP2DDefaultFlipDispatcherBehavior`` below for
+    that behavior). This class's remaining scope is the ``== "1"``
+    measurement-override path, which is unchanged by .p2d."""
 
     @pytest.mark.asyncio
     async def test_env_unset_injects_no_model_kwarg(self, monkeypatch) -> None:
+        """A HOLD operator (not in FLIPPED_OPERATORS) gets no ``model``
+        kwarg with the env unset -- the measurement-override path never
+        fires without ``== "1"``, and the default-flip path only ever
+        sets a model for a FLIPPED operator."""
         monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
         from nexus.plans.runner import _default_dispatcher
         from nexus.mcp import core as mcp_core
 
         captured: dict = {}
 
-        async def fake_operator_filter(items, criterion, timeout=300.0,
-                                        source="auto", aspect_field="",
-                                        model=None):
+        async def fake_operator_check(items, check_instruction, timeout=300.0,
+                                       model=None):
             captured["model"] = model
-            return {"items": [], "rationale": []}
+            return {"ok": True, "evidence": []}
 
-        monkeypatch.setattr(mcp_core, "operator_filter", fake_operator_filter)
-        await _default_dispatcher("filter", {"items": "[]", "criterion": "x"})
+        monkeypatch.setattr(mcp_core, "operator_check", fake_operator_check)
+        await _default_dispatcher("check", {"items": "[]", "check_instruction": "x"})
         assert captured["model"] is None
 
     @pytest.mark.asyncio
@@ -498,6 +595,243 @@ class TestP2COptInDispatcherBehavior:
         monkeypatch.setattr(mcp_core, "search", fake_search)
         await _default_dispatcher("search", {"query": "x", "structured": True})
         assert captured["called"] is True
+
+
+class TestP2DDefaultFlipDispatcherBehavior:
+    """RDR-196 .p2d (nexus-nyry9.17): the DEFAULT (no env override) path.
+    Exercised directly against ``plans/runner.py``'s ``_default_dispatcher``
+    (isolated-step path), mirroring ``TestP2COptInDispatcherBehavior``'s
+    pattern, without spending a real dispatch.
+
+    Bead VERIFICATION requires: 'a test asserts the new default argv per
+    flipped operator' -- the 4 ``test_default_*_gets_cheap_model`` tests
+    below are that assertion, one per flipped operator. The 6
+    ``test_default_hold_*`` tests are the complementary negative: every
+    HOLD operator must NOT receive a model kwarg on the same default
+    path. ``test_kill_switch_*`` covers the rollback lever."""
+
+    @pytest.mark.asyncio
+    async def test_default_filter_gets_cheap_model(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
+        from nexus.plans.runner import _default_dispatcher
+        from nexus.mcp import core as mcp_core
+
+        captured: dict = {}
+
+        async def fake(items, criterion, timeout=300.0, source="auto",
+                        aspect_field="", model=None):
+            captured["model"] = model
+            return {"items": [], "rationale": []}
+
+        monkeypatch.setattr(mcp_core, "operator_filter", fake)
+        await _default_dispatcher("filter", {"items": "[]", "criterion": "x"})
+        assert captured["model"] == "haiku"
+
+    @pytest.mark.asyncio
+    async def test_default_groupby_gets_cheap_model(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
+        from nexus.plans.runner import _default_dispatcher
+        from nexus.mcp import core as mcp_core
+
+        captured: dict = {}
+
+        async def fake(items, key, timeout=300.0, source="auto",
+                        aspect_field="", model=None):
+            captured["model"] = model
+            return {"groups": []}
+
+        monkeypatch.setattr(mcp_core, "operator_groupby", fake)
+        await _default_dispatcher("groupby", {"items": "[]", "key": "x"})
+        assert captured["model"] == "haiku"
+
+    @pytest.mark.asyncio
+    async def test_default_extract_gets_cheap_model(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
+        from nexus.plans.runner import _default_dispatcher
+        from nexus.mcp import core as mcp_core
+
+        captured: dict = {}
+
+        async def fake(inputs, fields, timeout=300.0, model=None):
+            captured["model"] = model
+            return {"extractions": []}
+
+        monkeypatch.setattr(mcp_core, "operator_extract", fake)
+        await _default_dispatcher("extract", {"inputs": "[]", "fields": "x"})
+        assert captured["model"] == "haiku"
+
+    @pytest.mark.asyncio
+    async def test_default_rank_gets_cheap_model(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
+        from nexus.plans.runner import _default_dispatcher
+        from nexus.mcp import core as mcp_core
+
+        captured: dict = {}
+
+        async def fake(items, criterion, timeout=300.0, model=None):
+            captured["model"] = model
+            return {"ranked": []}
+
+        monkeypatch.setattr(mcp_core, "operator_rank", fake)
+        await _default_dispatcher("rank", {"items": "[]", "criterion": "x"})
+        assert captured["model"] == "haiku"
+
+    @pytest.mark.asyncio
+    async def test_default_hold_check_gets_no_model(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
+        from nexus.plans.runner import _default_dispatcher
+        from nexus.mcp import core as mcp_core
+
+        captured: dict = {}
+
+        async def fake(items, check_instruction, timeout=300.0, model=None):
+            captured["model"] = model
+            return {"ok": True, "evidence": []}
+
+        monkeypatch.setattr(mcp_core, "operator_check", fake)
+        await _default_dispatcher("check", {"items": "[]", "check_instruction": "x"})
+        assert captured["model"] is None
+
+    @pytest.mark.asyncio
+    async def test_default_hold_verify_gets_no_model(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
+        from nexus.plans.runner import _default_dispatcher
+        from nexus.mcp import core as mcp_core
+
+        captured: dict = {}
+
+        async def fake(claim, evidence, timeout=300.0, model=None):
+            captured["model"] = model
+            return {"verified": True, "reason": "", "citations": []}
+
+        monkeypatch.setattr(mcp_core, "operator_verify", fake)
+        await _default_dispatcher("verify", {"claim": "x", "evidence": "y"})
+        assert captured["model"] is None
+
+    @pytest.mark.asyncio
+    async def test_default_hold_aggregate_gets_no_model(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
+        from nexus.plans.runner import _default_dispatcher
+        from nexus.mcp import core as mcp_core
+
+        captured: dict = {}
+
+        async def fake(groups, reducer, timeout=300.0, source="auto",
+                        aspect_field="", model=None):
+            captured["model"] = model
+            return {"groups": []}
+
+        monkeypatch.setattr(mcp_core, "operator_aggregate", fake)
+        await _default_dispatcher("aggregate", {"groups": "[]", "reducer": "x"})
+        assert captured["model"] is None
+
+    @pytest.mark.asyncio
+    async def test_default_hold_summarize_gets_no_model(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
+        from nexus.plans.runner import _default_dispatcher
+        from nexus.mcp import core as mcp_core
+
+        captured: dict = {}
+
+        async def fake(content, cited=False, timeout=300.0, model=None):
+            captured["model"] = model
+            return {"summary": ""}
+
+        monkeypatch.setattr(mcp_core, "operator_summarize", fake)
+        await _default_dispatcher("summarize", {"content": "x"})
+        assert captured["model"] is None
+
+    @pytest.mark.asyncio
+    async def test_default_hold_compare_gets_no_model(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
+        from nexus.plans.runner import _default_dispatcher
+        from nexus.mcp import core as mcp_core
+
+        captured: dict = {}
+
+        async def fake(items="", focus="", timeout=300.0, *, items_a="",
+                        items_b="", label_a="A", label_b="B", model=None):
+            captured["model"] = model
+            return {"comparison": ""}
+
+        monkeypatch.setattr(mcp_core, "operator_compare", fake)
+        await _default_dispatcher("compare", {"items": "[]"})
+        assert captured["model"] is None
+
+    @pytest.mark.asyncio
+    async def test_default_hold_generate_gets_no_model(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
+        from nexus.plans.runner import _default_dispatcher
+        from nexus.mcp import core as mcp_core
+
+        captured: dict = {}
+
+        async def fake(template, context, cited=False, timeout=300.0, model=None):
+            captured["model"] = model
+            return {"generated": ""}
+
+        monkeypatch.setattr(mcp_core, "operator_generate", fake)
+        await _default_dispatcher("generate", {"template": "x", "context": "y"})
+        assert captured["model"] is None
+
+    @pytest.mark.asyncio
+    async def test_kill_switch_forces_none_for_flipped_operator(self, monkeypatch) -> None:
+        """``NX_OPERATOR_MODEL_TIERING=0`` rolls a flipped operator back
+        to strong (no model kwarg) -- the rollback lever."""
+        monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "0")
+        from nexus.plans.runner import _default_dispatcher
+        from nexus.mcp import core as mcp_core
+
+        captured: dict = {}
+
+        async def fake(items, criterion, timeout=300.0, source="auto",
+                        aspect_field="", model=None):
+            captured["model"] = model
+            return {"items": [], "rationale": []}
+
+        monkeypatch.setattr(mcp_core, "operator_filter", fake)
+        await _default_dispatcher("filter", {"items": "[]", "criterion": "x"})
+        assert captured["model"] is None
+
+    @pytest.mark.asyncio
+    async def test_kill_switch_never_overrides_caller_supplied_model(self, monkeypatch) -> None:
+        monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "0")
+        from nexus.plans.runner import _default_dispatcher
+        from nexus.mcp import core as mcp_core
+
+        captured: dict = {}
+
+        async def fake(items, criterion, timeout=300.0, source="auto",
+                        aspect_field="", model=None):
+            captured["model"] = model
+            return {"items": [], "rationale": []}
+
+        monkeypatch.setattr(mcp_core, "operator_filter", fake)
+        await _default_dispatcher(
+            "filter", {"items": "[]", "criterion": "x", "model": "opus"},
+        )
+        assert captured["model"] == "opus"
+
+    @pytest.mark.asyncio
+    async def test_measurement_override_still_wins_over_default_flip(self, monkeypatch) -> None:
+        """``== "1"`` still means "consult the whole table", not "consult
+        FLIPPED_OPERATORS" -- for a HOLD operator this means the
+        measurement override CAN set a (strong-tier) model where the
+        default path never would, proving the two branches are genuinely
+        different code paths, not the same effective behavior."""
+        monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "1")
+        from nexus.plans.runner import _default_dispatcher
+        from nexus.mcp import core as mcp_core
+
+        captured: dict = {}
+
+        async def fake(items, check_instruction, timeout=300.0, model=None):
+            captured["model"] = model
+            return {"ok": True, "evidence": []}
+
+        monkeypatch.setattr(mcp_core, "operator_check", fake)
+        await _default_dispatcher("check", {"items": "[]", "check_instruction": "x"})
+        assert captured["model"] == "sonnet"
 
 
 class TestP2COptInPlannerBehavior:
