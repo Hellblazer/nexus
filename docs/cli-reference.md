@@ -3202,7 +3202,8 @@ predicted_cost_usd, basis}`; `None` on any path that never reaches Step
 Derives the default `budget_usd` from recorded **post-flip** history and
 prints, instead of the report: rows scanned, executed-ok count, the three
 exclusion counts (no step records = pre-7.14.0 client; pre-flip = a
-filter/groupby/extract/rank step recorded a non-cheap canonical model;
+flipped-operator step (`model_tiers.FLIPPED_OPERATORS`, read live)
+recorded a non-cheap canonical model;
 unknown cost), the qualifying run count `n`, and for p50/p75/p90/p95 the
 per-run cost value plus the fraction of qualifying runs each would have
 refused. Below the non-vacuity floor (`MIN_DERIVATION_RUNS`, 30) it names
@@ -3237,16 +3238,22 @@ silent `0`.
 ### Per-operator model tiering (RDR-196 Phase 2 Step 3)
 
 `nexus.operators.model_tiers.FLIPPED_OPERATORS` — `operator_filter`,
-`operator_groupby`, `operator_extract`, `operator_rank` — dispatch at the
-cheap model tier **by default**, no opt-in required, since the .p2c A/B
-measurement (nexus-nyry9.16/.17) cleared both pre-registered refutation
-criteria for all four (14-20x cheaper, agreement at/above the .p2a
-quality-proxy threshold on every measured pair). Every other operator
-(`check`/`verify`/`aggregate`/`summarize`/`compare`/`generate`) is
-unaffected by default — still dispatches at the untiered default model,
-either because no tiering delta was ever proposed for it (check/verify)
-or because no quality proxy exists to validate a cheap-tier switch
-(aggregate/summarize/compare/generate). See
+`operator_groupby`, `operator_extract`, `operator_rank`, plus
+`operator_check` and `operator_verify` since 2026-08-21 (nexus-3mea3) —
+dispatch at the cheap model tier **by default**, no opt-in required. The
+original four cleared both pre-registered refutation criteria in the .p2c
+A/B measurement (nexus-nyry9.16/.17: 14-20x cheaper, agreement at/above
+the .p2a quality-proxy threshold on every measured pair); check/verify
+were added on the pre-registered three-arm study (T2
+`nexus_rdr/196-model-tier-study`: check agreed 1.000 on every pair across
+all three models, verify fable-vs-haiku min 0.941 against a 0.70
+threshold, cheap tier ~0.07-0.08x the cost — verify carries a recorded
+caveat: it is UNDECIDABLE on the .p2a strong-vs-strong proxy, margin
++0.033). Every other operator (`aggregate`/`summarize`/`compare`/
+`generate`) is unaffected by default — no quality proxy exists to
+validate a cheap-tier switch, and the synthesis three-arm study
+(`nexus_rdr/196-synthesis-tier-study`) REFUTED the cheap arms for
+summarize/generate/compare outright. See
 `docs/rdr/rdr-196-cost-aware-nx-answer.md`'s Phase 2 OUTCOME block for
 the full per-operator decision table.
 
@@ -3256,7 +3263,7 @@ isolated-step path, `mcp/core.py`'s inline planner):
 
 | value | meaning |
 |---|---|
-| unset (default) | the .p2d default flip above — only the 4 flipped operators route cheap |
+| unset (default) | the default flip above — only the FLIPPED_OPERATORS set routes cheap |
 | `1` | measurement override: consult the WHOLE tier table (`nexus.operators.model_tiers.OPERATOR_MODEL_TIER`), including "strong" entries — for A/B re-verification, not production traffic |
 | `0` | kill switch: forces every operator back to strong (pre-.p2d behaviour), without a code change — rollback lever |
 

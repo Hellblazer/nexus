@@ -115,12 +115,14 @@ _REAL_OPERATOR_NAMES = frozenset({
 # just the RDR's original textual proposal. See
 # model_tiers.OPERATOR_MODEL_TIER's own docstring comment for the full
 # rationale.
+# check/verify moved to "cheap" 2026-08-21 (nexus-3mea3): three-arm
+# study evidence, see model_tiers.OPERATOR_MODEL_TIER's dated comment.
 _EXPECTED_CHEAP = frozenset({
     "operator_extract", "operator_filter", "operator_groupby",
-    "operator_rank",
+    "operator_rank", "operator_check", "operator_verify",
 })
 _EXPECTED_STRONG = frozenset({
-    "operator_generate", "operator_check", "operator_verify",
+    "operator_generate",
     "operator_compare", "operator_aggregate", "operator_summarize",
 })
 
@@ -191,6 +193,8 @@ class TestFlippedOperators:
         assert FLIPPED_OPERATORS == frozenset({
             "operator_filter", "operator_groupby",
             "operator_extract", "operator_rank",
+            # nexus-3mea3 (2026-08-21): the three-arm-study flip.
+            "operator_check", "operator_verify",
         })
 
     def test_flipped_operators_is_a_subset_of_cheap_eligible(self) -> None:
@@ -205,24 +209,51 @@ class TestFlippedOperators:
         from nexus.operators.model_tiers import FLIPPED_OPERATORS
 
         hold = {
-            "operator_check", "operator_verify", "operator_aggregate",
+            "operator_aggregate",
             "operator_summarize", "operator_compare", "operator_generate",
         }
         assert FLIPPED_OPERATORS.isdisjoint(hold)
+
+
+class TestFlippedOperatorSignaturesAcceptModel:
+    def test_every_flipped_operator_mcp_signature_accepts_model(self) -> None:
+        """nexus-3mea3: the runner injects ``model=`` for a flipped
+        operator, and its kwargs-drop pass SILENTLY discards the kwarg
+        when the target signature lacks it — so a FLIPPED_OPERATORS entry
+        whose ``nexus.mcp.core`` function has no ``model`` parameter is a
+        silent no-op flip (exactly what the check/verify flip would have
+        shipped without the core.py half). Structural guard: every
+        flipped operator's real signature must accept ``model``."""
+        import inspect
+
+        from nexus.mcp import core as mcp_core
+        from nexus.operators.model_tiers import FLIPPED_OPERATORS
+
+        missing = []
+        for op in sorted(FLIPPED_OPERATORS):
+            fn = getattr(mcp_core, op)
+            if "model" not in inspect.signature(fn).parameters:
+                missing.append(op)
+        assert missing == [], (
+            f"flipped operators whose MCP signature lacks model= (the "
+            f"runner would silently drop the injected kwarg, making the "
+            f"flip a no-op): {missing}"
+        )
 
 
 class TestResolveModelForFlippedOperator:
     def test_flipped_operator_resolves_to_cheap_alias(self) -> None:
         from nexus.operators.model_tiers import resolve_model_for_flipped_operator
 
-        for op in ("operator_filter", "operator_groupby", "operator_extract", "operator_rank"):
+        for op in ("operator_filter", "operator_groupby", "operator_extract",
+                   "operator_rank", "operator_check", "operator_verify"):
             assert resolve_model_for_flipped_operator(op) == "haiku"
 
     def test_hold_operator_resolves_to_none(self) -> None:
         from nexus.operators.model_tiers import resolve_model_for_flipped_operator
 
         for op in (
-            "operator_check", "operator_verify", "operator_aggregate",
+            "operator_aggregate",
             "operator_summarize", "operator_compare", "operator_generate",
         ):
             assert resolve_model_for_flipped_operator(op) is None
@@ -552,8 +583,9 @@ class TestP2COptInDispatcherBehavior:
     directly against ``plans/runner.py``'s ``_default_dispatcher``
     (isolated-step path) without spending a real dispatch.
 
-    UPDATED for .p2d (nexus-nyry9.17): ``test_env_unset_injects_no_model_kwarg``
-    below now exercises a HOLD operator (``check``), not ``filter`` —
+    UPDATED for .p2d (nexus-nyry9.17) and nexus-3mea3 (check/verify
+    flipped 2026-08-21): ``test_env_unset_injects_no_model_kwarg``
+    below now exercises a HOLD operator (``compare``), not ``filter`` —
     ``filter`` is one of the 4 :data:`~nexus.operators.model_tiers.
     FLIPPED_OPERATORS` and now DOES get a cheap-tier ``model`` kwarg with
     the env unset (see ``TestP2DDefaultFlipDispatcherBehavior`` below for
@@ -572,13 +604,13 @@ class TestP2COptInDispatcherBehavior:
 
         captured: dict = {}
 
-        async def fake_operator_check(items, check_instruction, timeout=300.0,
-                                       model=None):
+        async def fake_operator_compare(items="", focus="", timeout=300.0,
+                                        model=None, **kw):
             captured["model"] = model
-            return {"ok": True, "evidence": []}
+            return {"comparison": "c"}
 
-        monkeypatch.setattr(mcp_core, "operator_check", fake_operator_check)
-        await _default_dispatcher("check", {"items": "[]", "check_instruction": "x"})
+        monkeypatch.setattr(mcp_core, "operator_compare", fake_operator_compare)
+        await _default_dispatcher("compare", {"items": "[]", "focus": "x"})
         assert captured["model"] is None
 
     @pytest.mark.asyncio
@@ -721,7 +753,8 @@ class TestP2DDefaultFlipDispatcherBehavior:
         assert captured["model"] == "haiku"
 
     @pytest.mark.asyncio
-    async def test_default_hold_check_gets_no_model(self, monkeypatch) -> None:
+    async def test_default_check_gets_cheap_model(self, monkeypatch) -> None:
+        """nexus-3mea3 (2026-08-21): check joined FLIPPED_OPERATORS."""
         monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
         from nexus.plans.runner import _default_dispatcher
         from nexus.mcp import core as mcp_core
@@ -734,10 +767,11 @@ class TestP2DDefaultFlipDispatcherBehavior:
 
         monkeypatch.setattr(mcp_core, "operator_check", fake)
         await _default_dispatcher("check", {"items": "[]", "check_instruction": "x"})
-        assert captured["model"] is None
+        assert captured["model"] == "haiku"
 
     @pytest.mark.asyncio
-    async def test_default_hold_verify_gets_no_model(self, monkeypatch) -> None:
+    async def test_default_verify_gets_cheap_model(self, monkeypatch) -> None:
+        """nexus-3mea3 (2026-08-21): verify joined FLIPPED_OPERATORS."""
         monkeypatch.delenv("NX_OPERATOR_MODEL_TIERING", raising=False)
         from nexus.plans.runner import _default_dispatcher
         from nexus.mcp import core as mcp_core
@@ -750,7 +784,7 @@ class TestP2DDefaultFlipDispatcherBehavior:
 
         monkeypatch.setattr(mcp_core, "operator_verify", fake)
         await _default_dispatcher("verify", {"claim": "x", "evidence": "y"})
-        assert captured["model"] is None
+        assert captured["model"] == "haiku"
 
     @pytest.mark.asyncio
     async def test_default_hold_aggregate_gets_no_model(self, monkeypatch) -> None:
@@ -862,19 +896,21 @@ class TestP2DDefaultFlipDispatcherBehavior:
         FLIPPED_OPERATORS" -- for a HOLD operator this means the
         measurement override CAN set a (strong-tier) model where the
         default path never would, proving the two branches are genuinely
-        different code paths, not the same effective behavior."""
+        different code paths, not the same effective behavior. Uses
+        ``generate`` since nexus-3mea3 flipped check to the default-cheap
+        set."""
         monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "1")
         from nexus.plans.runner import _default_dispatcher
         from nexus.mcp import core as mcp_core
 
         captured: dict = {}
 
-        async def fake(items, check_instruction, timeout=300.0, model=None):
+        async def fake(template, context, cited=False, timeout=300.0, model=None):
             captured["model"] = model
-            return {"ok": True, "evidence": []}
+            return {"output": "x", "citations": []}
 
-        monkeypatch.setattr(mcp_core, "operator_check", fake)
-        await _default_dispatcher("check", {"items": "[]", "check_instruction": "x"})
+        monkeypatch.setattr(mcp_core, "operator_generate", fake)
+        await _default_dispatcher("generate", {"template": "t", "context": "c"})
         assert captured["model"] == "sonnet"
 
 

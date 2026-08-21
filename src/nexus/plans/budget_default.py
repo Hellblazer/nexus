@@ -13,8 +13,8 @@ can tell whether the world moved.
 
 R3 prevention (nx_plan_audit fold, 2026-08-20): pre-flip rows (recorded
 while every operator dispatched at the strong tier) and post-flip rows
-(.p2d, nexus-nyry9.17: filter/groupby/extract/rank dispatch at the cheap
-tier by default) are DIFFERENT populations. Pooling them yields a median
+(.p2d, nexus-nyry9.17, extended by nexus-3mea3 2026-08-21: the
+FLIPPED_OPERATORS set dispatches at the cheap tier by default) are DIFFERENT populations. Pooling them yields a median
 that describes neither. The derivation therefore filters on the per-step
 canonical ``model`` via :func:`is_post_flip_run` -- a model predicate,
 not a timestamp cutoff, so it survives a later re-flip (it reads
@@ -74,8 +74,11 @@ _log = structlog.get_logger(__name__)
 # in conexus 7.14.0 / engine-service-v0.1.85 on 2026-08-21, and the newest
 # recorded run (2026-08-19) came from a 7.13.0 client, so no row carries a
 # ``steps`` list at all. Tier configuration in force for the eventual
-# derivation: FLIPPED_OPERATORS = {filter, groupby, extract, rank} at the
-# cheap alias ``haiku``; everything else HOLD (no override).
+# derivation: FLIPPED_OPERATORS = {filter, groupby, extract, rank, check,
+# verify} at the cheap alias ``haiku`` (check/verify added by nexus-3mea3
+# 2026-08-21; any run recorded between the 7.14.0 flip and that date with
+# a strong-model check/verify step correctly classifies PRE-flip under
+# is_post_flip_run's live read of the set); everything else HOLD.
 #
 # When a derivation run reports ``sufficient`` (n >= MIN_DERIVATION_RUNS),
 # set this to the chosen percentile's value and REPLACE this comment with:

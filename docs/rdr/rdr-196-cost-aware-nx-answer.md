@@ -484,8 +484,8 @@ any .p2c measurement ran) and measured in T2 `nexus_rdr/
 | `operator_groupby` | **FLIP** | 3 | 0.061 (16.3× cheaper) | 1.000 / 1.000 | 0.80 | same ceiling-effect caveat as filter |
 | `operator_extract` | **FLIP** | 3 | 0.060 (16.6× cheaper) | 1.000 / 1.000 | 0.85 | same ceiling-effect caveat |
 | `operator_rank` | **FLIP** | 3 | 0.049 (20.4× cheaper) | 0.952 / 0.960 | 0.60 | min score sits BELOW .p2a's own strong-vs-strong noise floor (0.9762) — cite the large threshold margin (0.9524 vs 0.60), not a noise-band comparison (round-2 correction) |
-| `operator_check` | **HOLD** | — | — | — | 0.70 | no tiering delta — both strong-tier in every arm per the .p2b table (no cheap-tier candidate arm exists to A/B against) |
-| `operator_verify` | **HOLD** | — | — | — | 0.70 | no tiering delta, same reason as check; separately UNDECIDABLE on the .p2a proxy itself (n=4 pairs, mean 0.800, min 0.733, margin only +0.033 over threshold — thin even before any tiering question) |
+| `operator_check` | **HOLD** → **FLIP 2026-08-21** | 9 cross pairs | ~0.08x (three-arm) | 1.000 / 1.000 | 0.70 | HOLD at this bead ("no tiering delta — both strong-tier in every arm"); flipped by nexus-3mea3 (Sam decision) on the pre-registered three-arm study (T2 `nexus_rdr/196-model-tier-study`): every within- and cross-arm pair 1.000 across fable/sonnet/haiku. Caveat on record: that proxy saturates (ceiling effect — it cannot RANK the models, only fail to refute), and check's `{ok: bool}` gates plan branching; `.p4`'s escalate-on-low-confidence is the designed safety half and is now the natural follow-up rather than an alternative (see the Phase 4 note below) |
+| `operator_verify` | **HOLD** → **FLIP 2026-08-21** | 9 cross pairs | ~0.07x (three-arm) | 0.980 / 0.941 | 0.70 | HOLD at this bead; flipped by nexus-3mea3 on the three-arm study (fable-vs-haiku min 0.941, haiku noise min 1.000 — the cleanest verify result in the arc). Caveat ON RECORD: verify remains UNDECIDABLE on the .p2a strong-vs-strong proxy (margin +0.033) and the study registration pre-declared verify verdicts non-binding — the flip is a recorded Sam decision on the three-arm data, individually revertible |
 | `operator_aggregate` | **HOLD (by construction)** | — | — | — | — | no .p2a quality proxy exists (free-text output, LLM-as-judge rejected); pinned `"strong"` in `model_tiers.OPERATOR_MODEL_TIER` and mechanically guarded by `test_every_cheap_entry_has_a_registered_proxy_metric` — a future re-flip cannot silently skip adding proxy coverage first |
 | `operator_summarize` | **HOLD (by construction)** | — | — | — | — | same as aggregate |
 | `operator_compare` | **HOLD (by construction)** | — | — | — | — | same as aggregate |
@@ -493,12 +493,14 @@ any .p2c measurement ran) and measured in T2 `nexus_rdr/
 | inline planner | **UNMEASURED** | 0 (candidate) | — | — | — | .p2c's candidate-planner arm never ran — budget exhausted (~$19 of ~$20 cap) after the operator core + 3 baseline-planner runs; baseline-only mean cost $2.86/call (corrected). Left HOLD (safe side) pending a dedicated top-up (~3 cheap-tier planner dispatches, small marginal spend once separated from the operator core) — Sam's call whether/when to fund it, not spent here. |
 
 **Zero negative results** — every measured operator either cleared both
-pre-registered refutation criteria (filter/groupby/extract/rank) or had
+pre-registered refutation criteria (filter/groupby/extract/rank; check/verify
+followed on the three-arm study, nexus-3mea3 2026-08-21) or had
 no tiering delta to measure in the first place (check/verify). No
 operator's default flip was attempted and rejected.
 
 **What flipped, mechanically**: `nexus.operators.model_tiers.FLIPPED_OPERATORS`
-(filter/groupby/extract/rank) is now consulted UNCONDITIONALLY on the
+(filter/groupby/extract/rank, + check/verify since nexus-3mea3
+2026-08-21) is now consulted UNCONDITIONALLY on the
 plan-run dispatch path (`plans/runner.py::_default_dispatcher`, which is
 what `nx_answer` / `plan_run` use to invoke operator steps) — no env var
 required. The only other consult site is `mcp/core.py::_nx_answer_plan_miss`
@@ -545,6 +547,17 @@ escalate-on-low-confidence) is a DIFFERENT mechanism than static tier
 routing, so `.p4` is **not closed as not-needed** by this bead — it
 remains open, gated on its own precondition being independently
 evaluated, not on this bead's HOLD verdict for check/verify.
+
+> **Amended 2026-08-21 (nexus-3mea3):** the sentence above's premise
+> ("the cheap tier was never tested against either operator") no longer
+> holds — the three-arm study (T2 `nexus_rdr/196-model-tier-study`)
+> tested both, and nexus-3mea3 flipped check/verify to cheap by default
+> on that evidence (Sam decision; verify's .p2a-undecidable caveat on
+> record). This INVERTS `.p4`'s role: cheap-first is now the default for
+> check/verify, so escalate-on-low-confidence is the missing SAFETY half
+> of the design rather than an alternative routing mechanism.
+> nexus-nyry9.23 now depends on nexus-3mea3 and its evaluation should
+> start from this state.
 
 **RDR-196 h33x8/hmu02 bench caveat, restated**: the retrieval-bench
 non-regression check (`tests/integration/test_rdr_196_p2c_retrieval_bench.py`)

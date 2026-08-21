@@ -11,11 +11,13 @@ path; ``mcp/core.py::_nx_answer_plan_miss``, the inline planner) — see
 ``tests/test_operator_model_tiers.py::TestNotConsultedRepoWide``.
 
 **RDR-196 .p2d landed (nexus-nyry9.17, 2026-08-21)**: the DEFAULT path
-(``NX_OPERATOR_MODEL_TIERING`` unset, the common case) now routes the 4
-:data:`FLIPPED_OPERATORS` (filter/groupby/extract/rank) to the cheap
-tier automatically — no opt-in required. Every other operator (check/
-verify/aggregate/summarize/compare/generate) still gets no ``model``
-override by default (HOLD). ``NX_OPERATOR_MODEL_TIERING=1`` keeps its
+(``NX_OPERATOR_MODEL_TIERING`` unset, the common case) now routes the
+:data:`FLIPPED_OPERATORS` to the cheap tier automatically — no opt-in
+required. **Extended 2026-08-21 (nexus-3mea3, Sam decision)**: check and
+verify joined the original 4 (filter/groupby/extract/rank) on the
+three-arm study's evidence (T2 nexus_rdr/196-model-tier-study). Every
+other operator (aggregate/summarize/compare/generate) still gets no
+``model`` override by default (HOLD). ``NX_OPERATOR_MODEL_TIERING=1`` keeps its
 .p2c meaning — a measurement override that consults the WHOLE tier
 table (including "strong" entries) for A/B re-verification.
 ``NX_OPERATOR_MODEL_TIERING=0`` is the kill switch: forces every
@@ -77,8 +79,21 @@ OPERATOR_MODEL_TIER: Final[dict[str, Tier]] = {
     "operator_rank": "cheap",
     "operator_summarize": "strong",  # no proxy (196-R4); not flip-eligible until one exists
     "operator_generate": "strong",
-    "operator_check": "strong",
-    "operator_verify": "strong",
+    # check/verify flipped to "cheap" 2026-08-21 (nexus-3mea3, Sam
+    # decision) on the pre-registered three-arm study (T2 nexus_rdr/
+    # 196-model-tier-study [23196]): check agreed 1.000 on every pair
+    # across all three models; verify fable-vs-haiku min 0.941 with
+    # haiku noise min 1.000 (threshold 0.70 each), haiku ~0.07-0.08x
+    # fable's cost. verify carries a caveat on record: it is UNDECIDABLE
+    # on the .p2a strong-vs-strong proxy (margin +0.033, T2 [23121]) and
+    # the study registration pre-declared its verdicts non-binding — the
+    # flip is Sam's decision on the three-arm data, individually
+    # revertible per RDR-196's mitigation. The SYNTHESIS study
+    # (nexus-rv9xp) does not bear on these two: check/verify are
+    # structured judgment operators with .p2a proxies, not free-text
+    # synthesis.
+    "operator_check": "cheap",
+    "operator_verify": "cheap",
     "operator_compare": "strong",
 }
 
@@ -96,15 +111,19 @@ OPERATOR_MODEL_TIER: Final[dict[str, Tier]] = {
 #: a future eligibility change to the table, e.g. re-flipping aggregate/
 #: summarize once a proxy exists for them, must not silently ALSO
 #: become a default-flip without its own .p2d-shaped decision bead).
-#: check/verify (HOLD — no tiering delta between arms, both strong in
-#: every arm per this table) and aggregate/summarize/compare/generate
-#: (HOLD by construction — no .p2a quality proxy) are absent by
-#: construction, not by omission.
+#: aggregate/summarize/compare/generate stay HOLD: no .p2a quality proxy
+#: (and the nexus-rv9xp synthesis study REFUTED the cheap arms for
+#: summarize/generate/compare outright).
 FLIPPED_OPERATORS: Final[frozenset[str]] = frozenset({
     "operator_filter",
     "operator_groupby",
     "operator_extract",
     "operator_rank",
+    # 2026-08-21 (nexus-3mea3): check/verify joined on the three-arm
+    # study evidence — see the OPERATOR_MODEL_TIER comment above for the
+    # numbers and verify's recorded caveat.
+    "operator_check",
+    "operator_verify",
 })
 
 

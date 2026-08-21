@@ -151,7 +151,7 @@ class TestDerivation:
 
     def test_tier_config_names_the_flipped_set_and_cheap_alias(self) -> None:
         d = derive_budget_default(_store([]))
-        for op in ("filter", "groupby", "extract", "rank"):
+        for op in ("filter", "groupby", "extract", "rank", "check", "verify"):
             assert op in d.tier_config
         assert "haiku" in d.tier_config
 

@@ -1155,12 +1155,14 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     #           ``OPERATOR_MODEL_TIER`` table, including "strong" entries
     #           — for A/B re-verification, not production traffic. An
     #           operator whose MCP-tool signature doesn't accept ``model``
-    #           (check/verify/generate/compare/aggregate/summarize) has
+    #           (generate/compare/aggregate/summarize; check/verify
+    #           accept it since nexus-3mea3) has
     #           the kwarg silently dropped + logged by the kwargs-drop
     #           pass below, same as any other tool-incompatible arg.
     #   != "0"  (unset, or any other value) DEFAULT PATH (.p2d): only the
-    #           4 :data:`~nexus.operators.model_tiers.FLIPPED_OPERATORS`
-    #           (filter/groupby/extract/rank) get the cheap-tier alias —
+    #           :data:`~nexus.operators.model_tiers.FLIPPED_OPERATORS`
+    #           (filter/groupby/extract/rank, + check/verify since
+    #           nexus-3mea3 2026-08-21) get the cheap-tier alias —
     #           every other operator (HOLD/UNDECIDED per .p2d's decision
     #           table) gets no ``model`` kwarg at all, same as pre-.p2c.
     #   == "0"  kill switch: neither branch fires, ``args`` stays

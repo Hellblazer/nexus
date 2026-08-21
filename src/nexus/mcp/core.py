@@ -5015,6 +5015,7 @@ async def operator_check(
     items: str,
     check_instruction: str,
     timeout: float = 300.0,
+    model: str | None = None,
 ) -> dict:
     """Check a claim's consistency across peer items using claude -p.
 
@@ -5037,6 +5038,11 @@ async def operator_check(
             question to evaluate across the items (e.g. "do all papers
             agree on the baseline numbers?").
         timeout: Seconds before the subprocess is killed. Default 300s.
+        model: Opt-in ``--model`` override (nexus-3mea3, the 2026-08-21
+            check/verify default flip), pass-through to ``claude_dispatch``
+            exactly as on ``operator_filter``. ``None`` (default) is a
+            no-op — argv unchanged; the plan runner's tiering branch is
+            what supplies the cheap alias on the default path.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -5061,7 +5067,7 @@ async def operator_check(
             },
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
 
 
 @mcp.tool(
@@ -5072,6 +5078,7 @@ async def operator_verify(
     claim: str,
     evidence: str,
     timeout: float = 300.0,
+    model: str | None = None,
 ) -> dict:
     """Verify a single claim against a single evidence source using claude -p.
 
@@ -5090,6 +5097,9 @@ async def operator_verify(
             Typically a section text, extracted passage, or document
             body. Not a collection of items.
         timeout: Seconds before the subprocess is killed. Default 300s.
+        model: Opt-in ``--model`` override (nexus-3mea3, the 2026-08-21
+            check/verify default flip) — same pass-through contract as
+            ``operator_check``'s ``model``.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -5116,7 +5126,7 @@ async def operator_verify(
             },
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
 
 
 @mcp.tool(
