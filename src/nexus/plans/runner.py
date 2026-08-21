@@ -288,15 +288,16 @@ class StepRecord:
     sketch, required by the RDR's OWN risk register (risk 1: "absent
     fields record None, never 0.0"). Two distinct zero-vs-unknown
     populations exist: a ``"sql"`` step is a TRUE, known zero (no
-    claude -p call happened at all) — ``0``/``0``/``0.0``. An isolated
-    or bundle-fallback ``"llm"`` step (dispatched through the
-    :class:`ToolDispatcher` abstraction, several stack frames away from
-    the ``claude_dispatch`` call an ``operator_*`` MCP tool owns
-    internally) genuinely SPENT money but this layer cannot observe it
-    today — ``None``, not a fabricated ``0``. Only the ``"bundle"``
-    path (wired with a real ``usage_sink`` into ``dispatch_bundle`` ->
-    ``claude_dispatch``) gets real, non-``None`` values when the
-    dispatch reached a parsed result.
+    claude -p call happened at all) — ``0``/``0``/``0.0``. An ``"llm"``
+    step whose dispatch reached a parsed result envelope carries the
+    real figures: the ``"bundle"`` path threads an explicit ``usage_sink``
+    into ``dispatch_bundle`` -> ``claude_dispatch``, and the isolated /
+    bundle-fallback path (dispatched through the :class:`ToolDispatcher`
+    abstraction into an ``operator_*`` MCP tool that owns its own
+    ``claude_dispatch`` call) is captured by the ambient ContextVar sink
+    (``dispatch.ambient_usage_sink``) the runner sets around each step.
+    Only a dispatch that produced no envelope at all (timeout, non-zero
+    exit, empty stdout) records ``None`` — unknown, not a fabricated ``0``.
 
     ``run_id`` defaults to ``""`` — :func:`plan_run` has no concept of
     a persisted run id (the PG primary key ``.p1c``/``.p1d`` will add
@@ -1487,12 +1488,12 @@ async def plan_run(
         ``nexus.operators.dispatch.DispatchUsage`` or ``None``.
 
         Priority: real ``usage`` always wins when present (the "bundle"
-        path, or a future path that captures it). Absent real usage: a
-        "sql" step is a TRUE, known zero (no claude -p call happened at
-        all) — ``0``/``0``/``0.0``. Any other source with no observable
-        usage (isolated/bundle-fallback "llm" dispatches — the
-        ``ToolDispatcher`` abstraction has no usage channel today) is
-        genuinely UNKNOWN — ``None``, never a fabricated ``0``.
+        path via its explicit sink, the isolated / bundle-fallback path
+        via the ambient ContextVar sink). Absent real usage: a "sql" step
+        is a TRUE, known zero (no claude -p call happened at all) —
+        ``0``/``0``/``0.0``. Any "llm"/"bundle" step whose dispatch never
+        produced a result envelope (timeout, non-zero exit, empty stdout)
+        is genuinely UNKNOWN — ``None``, never a fabricated ``0``.
         """
         if usage is not None:
             model = usage.model
