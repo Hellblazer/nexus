@@ -153,21 +153,23 @@ def _live_handlers(corpus: str, scope_b: str) -> dict[str, PathHandler]:
     """Build handlers that hit the real retrieval surface.
 
     Imported lazily so unit tests don't pay the cost of touching ``nexus.mcp``
-    or starting a T3 client.
+    or building a catalog reader.
     """
     from bench.paths import run_path_a, run_path_b, run_path_c
-    from nexus.mcp_infra import get_t3
+    from nexus.catalog.factory import make_catalog_reader
 
-    t3 = get_t3()
+    # nexus-hmu02: Path B/C resolve chash -> path through the catalog
+    # manifest (the chromadb-era T3 lookup is gone).
+    catalog = make_catalog_reader()
 
     def _a(q: Query) -> dict[str, Any]:
         return run_path_a(q, corpus=corpus)
 
     def _b(q: Query) -> dict[str, Any]:
-        return run_path_b(q, t3, scope=scope_b)
+        return run_path_b(q, catalog, scope=scope_b)
 
     def _c(q: Query) -> dict[str, Any]:
-        return run_path_c(q, t3, corpus=corpus)
+        return run_path_c(q, catalog, corpus=corpus)
 
     return {"A": _a, "B": _b, "C": _c}
 

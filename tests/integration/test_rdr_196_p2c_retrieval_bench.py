@@ -142,10 +142,25 @@ def test_p2c_retrieval_bench_not_regressed(tmp_path) -> None:
     _OUT_PATH.write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))
 
-    # Non-vacuity: this check means nothing if every query errored.
-    assert report["non_error_queries_off"] > 0, (
-        f"every query errored against freshly-indexed corpus {corpus!r} "
+    # Non-vacuity (nexus-hmu02): bench.paths reports a result set whose
+    # every chunk resolved to an empty path as a ``vacuous`` error (the
+    # pre-fix failure mode: legacy ``source_path`` read, catalog-resolved
+    # ``_display_path`` ignored, NDCG@3 = 0.0 on every query). ANY such
+    # error, or every query erroring, or no query scoring above 0.0,
+    # means the bench proved nothing about retrieval quality.
+    vacuous = {q: e for q, e in errors_off.items() if e.startswith("vacuous")}
+    assert not vacuous, (
+        f"bench is vacuous -- retrieved chunks carry no resolvable path "
+        f"against {corpus!r}: {vacuous}"
+    )
+    assert not errors_off, (
+        f"queries errored against freshly-indexed corpus {corpus!r} "
         f"-- this is not a real non-regression check; errors: {errors_off}"
+    )
+    assert any(v > 0.0 for v in scores_off.values()), (
+        f"every query scored NDCG@3 == 0.0 against {corpus!r} with no error "
+        f"-- ground truth never matched a retrieved path; diagnostic paths: "
+        f"{report['diagnostic_q1_deduped_source_paths']}"
     )
     # The actual claim: opt-in off vs on must be IDENTICAL (retrieval
     # tools are outside NX_OPERATOR_MODEL_TIERING's scope by
