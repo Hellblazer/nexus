@@ -15,6 +15,7 @@ related_issues: []
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
+> Prose follows docs/writing-style.md; the gate runs nx prose lint on this file and blocks on any finding.
 
 ## Problem Statement
 
@@ -23,7 +24,7 @@ Refine as research deepens understanding.]
 
 ### Enumerated gaps to close
 
-*`/conexus:rdr-gate` (Layer 1) and `/conexus:rdr-close` (for `--reason implemented`) enforce this structure for post-65 RDRs. Missing or malformed headings will block the gate — not just the close. Use exactly the `#### Gap N: <title>` format (regex `^#{3,5} Gap \d+:`). One heading per distinct gap. Replacing the Problem Statement with free-form prose will fail the gate; prefer adding real gap headings, or override with `/conexus:rdr-gate <id> --skip-gaps` only when the structure truly does not fit.*
+*`/conexus:rdr-gate` (Layer 1) and `/conexus:rdr-close` (for `--reason implemented`) enforce this structure for post-65 RDRs. Missing or malformed headings block the gate, not just the close. Use exactly the `#### Gap N: <title>` format (regex `^#{3,5} Gap \d+:`). One heading per distinct gap. Replacing the Problem Statement with free-form prose will fail the gate; prefer adding real gap headings, or override with `/conexus:rdr-gate <id> --skip-gaps` only when the structure truly does not fit.*
 
 #### Gap 1: <gap title>
 
@@ -62,19 +63,19 @@ standards. Cite specific locations.]
 
 [Label each finding's evidence basis:
 
-- **Verified** — confirmed by spike/POC/experiment
-- **Documented** — from official docs or source reading
-- **Assumed** — needs validation before implementation]
+- **Verified**: confirmed by spike/POC/experiment
+- **Documented**: from official docs or source reading
+- **Assumed**: needs validation before implementation]
 
 ### Critical Assumptions
 
-[Load-bearing assumptions — if wrong, the approach fails.
+[Critical assumptions: if wrong, the approach fails.
 Each must be verified before marking this RDR Final.]
 
-- [ ] [Assumption 1] — **Status**: Verified | Unverified
-  — **Method**: Source Search | Spike | Docs Only
-- [ ] [Assumption 2] — **Status**: Verified | Unverified
-  — **Method**: Source Search | Spike | Docs Only
+- [ ] [Assumption 1] (**Status**: Verified | Unverified;
+  **Method**: Source Search | Spike | Docs Only)
+- [ ] [Assumption 2] (**Status**: Verified | Unverified;
+  **Method**: Source Search | Spike | Docs Only)
 
 **Method definitions**:
 
@@ -83,7 +84,7 @@ Each must be verified before marking this RDR Final.]
 - **Spike**: Behavior verified by running code
   against a live service (for opaque services only)
 - **Docs Only**: Based on documentation reading alone
-  (insufficient for load-bearing assumptions)
+  (insufficient for critical assumptions)
 
 ## Proposed Solution
 
@@ -99,7 +100,7 @@ extension points.]
 **Code guidance**:
 
 - Specify interfaces (function signatures, input/output
-  types, error contracts) — not class implementations
+  types, error contracts), not class implementations
 - Mark every external API call as Verified (source
   search) or Assumed (needs validation before
   implementation)
@@ -118,7 +119,7 @@ extension points.]
 
 [List existing modules that overlap with proposed
 components. For each, state whether to reuse, extend,
-or replace — with justification.]
+or replace, with justification.]
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
@@ -160,8 +161,8 @@ One-sentence rejection for trivially eliminated options.]
 [Positive and negative consequences of the chosen
 approach.]
 
-- [Consequence 1 — positive or negative]
-- [Consequence 2 — positive or negative]
+- [Consequence 1: positive or negative]
+- [Consequence 2: positive or negative]
 
 ### Risks and Mitigations
 
@@ -183,7 +184,7 @@ path? How does a developer diagnose the problem?]
 ### Minimum Viable Validation
 
 [The single end-to-end proof that the approach works.
-Must be in scope — not deferred.]
+Must be in scope, not deferred.]
 
 ### Phase 1: Code Implementation
 
@@ -229,14 +230,14 @@ scenarios that cover the design's edge cases and failure
 modes. The gate (Layer 3) will evaluate whether this plan
 covers the design adequately.]
 
-- **Scenario**: [Description] — **Verify**: [Expected result]
-- **Scenario**: [Description] — **Verify**: [Expected result]
+- **Scenario**: [Description]; **Verify**: [Expected result]
+- **Scenario**: [Description]; **Verify**: [Expected result]
 
 ## Validation
 
 ### Testing Strategy
 
-[Test scenarios and coverage goals — what to test and
+[Test scenarios and coverage goals: what to test and
 what constitutes "done." For non-functional concerns
 (performance, security): state measurement strategy,
 not estimates.]
@@ -248,7 +249,7 @@ not estimates.]
 
 [Do not include effort estimates or speculative
 throughput targets. Rough performance metrics are
-appropriate only when comparing alternatives — note
+appropriate only when comparing alternatives: note
 empirical data or obvious gains that support the
 chosen approach over a rejected one.]
 

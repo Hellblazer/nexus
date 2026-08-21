@@ -6,6 +6,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`nx prose lint` and `docs/writing-style.md`** (bead nexus-ptwm2). A
+  positive register spec for everything written under the project's name,
+  and a regex lint for the part a machine can check (em dashes,
+  `load-bearing`, the LLM marker lexicon, contrast frames, formulaic
+  closers, sycophantic openers, hedge stacks, unnamed attribution).
+  `--baseline` is a one-way ratchet for existing files; new files start at
+  zero. `tests/test_prose_style_lint.py` (`-m lint`) runs it over docs,
+  blog posts, README, this `[Unreleased]` section, the RDR templates, and
+  every active RDR. The RDR gate preamble runs the same lint on the RDR
+  being gated and blocks Layer 1 on any finding. The 22 active RDRs and
+  the plugin's RDR templates and skills were rewritten to zero findings
+  (709 em dashes and 14 `load-bearing` across the active set; the template
+  itself carried 19 and taught the pattern to every new RDR). Closed RDRs
+  and shipped CHANGELOG sections are untouched.
+
 ## [7.14.0] - 2026-08-21
 
 Engine identity moves to `engine-service-v0.1.85` (paired release, deploy-first:

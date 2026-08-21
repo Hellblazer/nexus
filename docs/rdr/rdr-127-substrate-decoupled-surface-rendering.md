@@ -17,13 +17,13 @@ related_tests: []
 supersedes: [RDR-123, RDR-124]
 ---
 
-# RDR-127: Surface Rendering — Palinex is Downstream
+# RDR-127: Surface Rendering: Palinex is Downstream
 
 > Architecture for a2ui v0.9 surface emission, the SurfaceBroker port,
 > the postMessage RPC, and the Claude Code MCP UI plugin lives in
 > palinex's own RDRs ([RDR-001](https://github.com/Hellblazer/palinex/blob/main/docs/rdr/rdr-001-architecture.md),
 > [RDR-002](https://github.com/Hellblazer/palinex/blob/main/docs/rdr/rdr-002-pyodide-as-runtime-augmentation.md),
-> RDR-003 — plugin + HTTP sidecar packaging). This RDR records nexus's
+> RDR-003: plugin + HTTP sidecar packaging). This RDR records nexus's
 > *non-decision*: nexus ships no surface-rendering code.
 
 ## Problem Statement
@@ -60,10 +60,10 @@ Same direction of dependency.
 ## Supersession bookkeeping
 
 RDR-123 (nx_answer surfaces) and RDR-124 (subagent surfaces) are superseded
-by this decision. Their intents — `nx_answer` returning surfaces, subagents
-emitting surfaces — are preserved at the palinex layer:
+by this decision. Their intents (`nx_answer` returning surfaces, subagents
+emitting surfaces) are preserved at the palinex layer:
 
-- For `nx_answer`: callers wanting a surface render compose two tools — call
+- For `nx_answer`: callers wanting a surface render compose two tools: call
   `nx_answer` for the synthesis + chash list, then pass to the palinex plugin's
   `render_surface` tool. Or: a future `nx_answer` could emit a surface payload
   directly as part of its response when called with an appropriate flag, with
@@ -81,7 +81,7 @@ T2 `nexus_rdr/RDR-127` entry will be updated to reflect this slimmed scope.
 
 Was: nexus imports palinex, registers an MCP tool wrapping it, ships a chash
 resolver in nexus code. Rejected because the dependency direction was backward:
-palinex was downstream, but nexus was importing it. Inversion is cleaner —
+palinex was downstream, but nexus was importing it. Inversion is cleaner:
 palinex owns the integration and depends on nexus when it needs to.
 
 ### Alt 2: Embed surface rendering in cockpit substrate (RDR-118/119)
@@ -98,38 +98,38 @@ any nexus-side substrate work.
 
 - (+) Nexus stays clean of surface-rendering code; the integration story lives
   one repo over where it belongs.
-- (+) Palinex can iterate independently — plugin updates, sidecar evolution,
-  renderer changes — without churning nexus's release cycle.
+- (+) Palinex can iterate independently (plugin updates, sidecar evolution,
+  renderer changes) without churning nexus's release cycle.
 - (+) Users compose tools through Claude (the agent) rather than via a baked-in
   resolver inside an MCP tool. Composition stays general.
-- (−) "Integration" is now spread across two repos — palinex's documentation
+- (−) "Integration" is now spread across two repos: palinex's documentation
   has to clearly describe the nexus integration. Mitigated by palinex RDR-003.
 - (−) Two install commands instead of one (`pip install conexus`, then install
   palinex plugin in Claude Code). Acceptable cost for the cleaner boundary.
 
 ## References
 
-- **palinex RDR-001** — architecture (a2ui v0.9 as IR, SurfaceBroker, three
+- **palinex RDR-001**: architecture (a2ui v0.9 as IR, SurfaceBroker, three
   delivery shapes, postMessage RPC, markdown sidecar):
   <https://github.com/Hellblazer/palinex/blob/main/docs/rdr/rdr-001-architecture.md>
-- **palinex RDR-002** — Pyodide as preferred runtime augmentation:
+- **palinex RDR-002**: Pyodide as preferred runtime augmentation:
   <https://github.com/Hellblazer/palinex/blob/main/docs/rdr/rdr-002-pyodide-as-runtime-augmentation.md>
-- **palinex RDR-003** — Claude Code plugin + HTTP sidecar packaging (in progress)
-- palinex repo — <https://github.com/Hellblazer/palinex>
-- palinex on PyPI — <https://pypi.org/project/palinex/>
-- RDR-053 — Xanadu fidelity (chash addresses; nexus exposes via existing
+- **palinex RDR-003**: Claude Code plugin + HTTP sidecar packaging (in progress)
+- palinex repo: <https://github.com/Hellblazer/palinex>
+- palinex on PyPI: <https://pypi.org/project/palinex/>
+- RDR-053: Xanadu fidelity (chash addresses; nexus exposes via existing
   catalog API for palinex to use)
-- RDR-118, RDR-119 — Scrapped; lineage preserved as tombstones
-- RDR-122 — LLM-JSON Repair Pass (orthogonal, still valid)
-- RDR-123, RDR-124 — Superseded by this RDR (intent preserved at palinex layer)
+- RDR-118, RDR-119: Scrapped; lineage preserved as tombstones
+- RDR-122: LLM-JSON Repair Pass (orthogonal, still valid)
+- RDR-123, RDR-124: Superseded by this RDR (intent preserved at palinex layer)
 
 ## Revision History
 
-_2026-05-22 (v1) — drafted as a substantial integration RDR proposing nexus-side
+_2026-05-22 (v1): drafted as a substantial integration RDR proposing nexus-side
 `render_surface` MCP tool importing palinex. Implementation landed alongside,
 then immediately reversed when the dependency direction was reconsidered._
 
-_2026-05-22 (v2, current) — slimmed to the operative decision: nexus ships no
+_2026-05-22 (v2, current): slimmed to the operative decision: nexus ships no
 surface-rendering code; palinex (a downstream project) owns the integration
 via its own Claude Code plugin and HTTP sidecar, with nexus as a `[nexus]`
 extra dependency. Implementation files removed; supersession of RDR-123/124

@@ -41,8 +41,8 @@ it is a hard floor for an external consumer that wants to pin a *passage*, not a
 **Consumer driver (Conductus RDR-001 OQ-3):** Conductus wants to map Obsidian sub-document
 references to precise catalog spans. Today it can only approximate to the containing chunk, and
 that approximation breaks on every re-index. Conductus needs a span that **survives re-chunking**
-of unchanged document content. (Surviving document *edits* — the author-anchor-relocation problem,
-`[[Note#Heading]]` / `[[Note^blockid]]` tracking — was considered and is explicitly **out of
+of unchanged document content. (Surviving document *edits*, the author-anchor-relocation problem of
+`[[Note#Heading]]` / `[[Note^blockid]]` tracking, was considered and is explicitly **out of
 scope** for this RDR; see Alternatives.)
 
 The gap: there is no span form whose offsets are stable across re-chunking. The two source-relative
@@ -51,7 +51,7 @@ content-identity stamp for stale detection.
 
 ## Decision
 
-Add a fifth span form: **`dchash:<doc_content_hash>:<start>-<end>`** — a char-range whose offsets
+Add a fifth span form: **`dchash:<doc_content_hash>:<start>-<end>`**, a char-range whose offsets
 index the document's **canonical text** (the whole document), not a chunk. Because the offsets are
 document-relative, chunk boundaries are irrelevant and the span survives any re-chunking of
 unchanged content. The embedded `doc_content_hash` is the existing **file-level `content_hash`**
@@ -75,15 +75,15 @@ A new branch in `resolve_span_text_for_entry`:
 
 ### Phasing
 
-The stored-copy fallback is a **new storage obligation** — a content-addressed `document_content`
+The stored-copy fallback is a **new storage obligation**: a content-addressed `document_content`
 table (`content_hash → raw text`, deduped). This collides with **RDR-152** (the in-flight
 SQLite→Postgres/Java-service cutover): any new T2 table must be carried through that migration, and
 `develop` is world-blocked on the release boundary. Therefore:
 
-- **Phase 1 — source-only.** Ship `dchash:` syntax + resolution + stale-detection reading from the
+- **Phase 1: source-only.** Ship `dchash:` syntax + resolution + stale-detection reading from the
   **source only** (`file_path`). Zero new storage, no cutover collision, fully usable for
   file-backed Conductus / Obsidian documents.
-- **Phase 2 — stored-copy fallback.** Add the content-addressed `document_content` table,
+- **Phase 2: stored-copy fallback.** Add the content-addressed `document_content` table,
   **sequenced after the RDR-152 cutover** so the table is born in Postgres, not retrofitted into the
   retiring SQLite. Delivers the no-source-present guarantee.
 
@@ -92,16 +92,16 @@ SQLite→Postgres/Java-service cutover): any new T2 table must be carried throug
 
 ## Alternatives Considered
 
-- **Family B — author-supplied stable anchors** (`anchor:<doc>#Heading` / `^blockid`): store
+- **Family B: author-supplied stable anchors** (`anchor:<doc>#Heading` / `^blockid`): store
   Obsidian anchors as first-class span ids, re-located at index time, surviving re-chunking **and**
   edits. Rejected for this RDR: the chosen stability bar is survive-re-chunking-only; anchor
   relocation across edits is materially more machinery (anchor extraction at index, an
   anchor→location mapping refreshed each re-index) for a guarantee Conductus did not ask for. Left
   as a possible future RDR if the edit-survival bar is later raised.
 - **Reconstruct-from-chunks offsets** (offsets into the concatenation of ordered chunk texts):
-  rejected — chunk overlaps/separators differ across chunkings, so the reconstructed text (and thus
+  rejected: chunk overlaps/separators differ across chunkings, so the reconstructed text (and thus
   the offsets) drift, defeating the survive-re-chunking purpose.
-- **Do nothing / keep `chash:` only:** rejected — leaves Conductus approximating to the containing
+- **Do nothing / keep `chash:` only:** rejected: leaves Conductus approximating to the containing
   chunk with a span that breaks on every re-index.
 
 ## Consequences
@@ -110,7 +110,7 @@ SQLite→Postgres/Java-service cutover): any new T2 table must be carried throug
   content edits (hash mismatch → stale), which is the honest, detectable failure mode D5 already
   established.
 - Phase 1 is a pure additive parser+resolver change reusing existing primitives (line-range file
-  read, file-level `content_hash`, `link_audit` stale signal) — small surface.
+  read, file-level `content_hash`, `link_audit` stale signal); the surface is small.
 - Phase 2 introduces a durable content store; it is deliberately deferred behind RDR-152 so it does
   not couple new schema to the dying SQLite tier.
 - Producer/consumer contract: Conductus supplies `dchash:<hash>:<start>-<end>` as `from_span` /
@@ -124,7 +124,7 @@ SQLite→Postgres/Java-service cutover): any new T2 table must be carried throug
 2. Define the exact `dchash:` regex so it cannot collide with `chash:` or the `N:N-N`
    chunk-index:char form.
 3. Decide `content_hash` canonicalization (newline / encoding normalization) so the source-read and
-   stored-copy paths hash identically — otherwise step 2 of resolution false-flags stale.
+   stored-copy paths hash identically; otherwise step 2 of resolution false-flags stale.
 4. Phase-2 storage must target the **post-cutover Postgres** schema; coordinate the table shape with
    RDR-152 (`nexus-gmiaf`).
 5. Confirm whether Conductus computes offsets against the raw note bytes or a normalized form; the

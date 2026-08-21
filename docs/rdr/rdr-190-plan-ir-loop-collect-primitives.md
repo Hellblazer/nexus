@@ -11,7 +11,7 @@ related_issues: []
 related: [RDR-078, RDR-079, RDR-084, RDR-088, RDR-089, RDR-093, RDR-097, RDR-179, RDR-189]
 ---
 
-# RDR-190: Plan-IR Fan-Out and Fold — `loop` and `collect`
+# RDR-190: Plan-IR Fan-Out and Fold: `loop` and `collect`
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
@@ -35,7 +35,7 @@ collection, no fold of many results into one, and no sub-plan.
 `_OPERATOR_MAX_INPUTS = 100` (`runner.py:698`). When a step's input
 exceeds it, the runner keeps the first 100 and attaches
 `{truncated, original_count, kept_count}` (`:763-791`). The truncation is
-honestly reported — it is not silent — but a plan author has no way to
+honestly reported (it is not silent), but a plan author has no way to
 opt out and no construct to process the remainder. Any question whose
 evidence set exceeds 100 chunks/documents is answered from a positional
 prefix.
@@ -45,7 +45,7 @@ prefix.
 There is no way for a plan to run a sub-sequence per item and hand the
 *aggregate* back. An agent wanting per-item treatment across N items must
 either accept the 100-cap or issue N tool calls from its own loop, which
-puts N raw payloads into its context — the exact pattern the
+puts N raw payloads into its context: the exact pattern the
 code-mode literature prices at ~126x (catalog `1.14.24`).
 
 #### Gap 3: The two primitives that close this are already specified, and we skipped them
@@ -57,7 +57,7 @@ indexed in `knowledge__knowledge`) specifies a five-primitive DSL:
 step) and an implicit `pipe` (`$stepN` references). We have neither
 `loop` nor `collect`. The paper's `collect` exists precisely for
 "HYBRID agent-engine patterns (agent reviews the batch, not individual
-items) — O(1) reasoning passes instead of O(N)."
+items): O(1) reasoning passes instead of O(N)."
 
 ## Context
 
@@ -79,10 +79,10 @@ items) — O(1) reasoning passes instead of O(N)."
   isolation.** Parmar's break-even is K\* ≈ 0.04 executions. Measured
   reuse in the live library is ~0 (RDR-189 R8; `nexus-sbl4m`). Adding
   expressiveness to plans nobody re-runs buys nothing. **This RDR is
-  worth doing only alongside raising K** — see Open Question 1.
+  worth doing only alongside raising K**: see Open Question 1.
 - **RDR-079 is the cautionary predecessor.** "Operator Dispatch + Plan
   Execution End-to-End" was abandoned because a synchronous
-  `subprocess.run` blocked the asyncio event loop — a concurrency defect,
+  `subprocess.run` blocked the asyncio event loop: a concurrency defect,
   not a design failure. Any primitive that introduces concurrency must
   confront that directly. This RDR avoids it by deferring `parallel`.
 - Operator dispatch already goes out-of-context via `claude_dispatch`,
@@ -96,14 +96,14 @@ items) — O(1) reasoning passes instead of O(N)."
    step, running a bounded sub-sequence per item, with per-item context
    injected.
 2. A plan step can `collect` the outputs of a loop into a single
-   aggregate passed to one downstream operator call — one reasoning pass
+   aggregate passed to one downstream operator call: one reasoning pass
    over N items, not N.
 3. Workloads above 100 items are expressible without positional
    truncation, or the ceiling is a declared per-step budget rather than a
    global constant.
 4. The exclusions hold: no conditionals, no variables, no string
    manipulation, no arbitrary code.
-5. `PlanResult` still returns one distilled object to the caller —
+5. `PlanResult` still returns one distilled object to the caller:
    per-item intermediates never reach the calling agent's context.
 
 ## Research Findings
@@ -111,34 +111,34 @@ items) — O(1) reasoning passes instead of O(N)."
 Marked **[verified]** where confirmed by opening the cited file during
 drafting.
 
-### R1 — The IR has no fan-out, fold, or sub-plan **[verified]**
+### R1: The IR has no fan-out, fold, or sub-plan **[verified]**
 
 `grep -rniE "sub_?workflow|nested_plan|subplan" src/nexus/plans/` returns
 nothing. `schema.py` carries no loop/branch/parallel construct; its only
 structural vocabulary is `_REQUIRED_DIMENSIONS` (`:94`) and
 `_TRAVERSAL_TOOLS` (`:99`). `plan_run` is a single pass over a flat list.
 
-### R2 — Truncation is reported, not silent, and has no opt-out **[verified]**
+### R2: Truncation is reported, not silent, and has no opt-out **[verified]**
 
 `runner.py:763-791` logs a warning and attaches
 `{truncated: True, original_count, kept_count}` to the operator envelope.
 Good hygiene, but `_OPERATOR_MAX_INPUTS` is a module constant (`:698`)
 with no per-step override, so the ceiling is not a policy a plan can set.
 
-### R3 — Nexus has `call` + implicit `pipe`, and nothing else of the five **[verified]**
+### R3: Nexus has `call` + implicit `pipe`, and nothing else of the five **[verified]**
 
 Every step is a `call`; `$stepN.field` references give `pipe`. `loop`,
 `parallel`, `collect` are absent.
 
-### R4 — Open: what actually breaks at >100 today
+### R4: Open: what actually breaks at >100 today
 
 Not measured. Before committing, quantify how often real `nx_answer` runs
 hit the truncation warning. `runner.py:765` already emits a structured
-warning with `input_count` — the signal exists and can be counted. If the
+warning with `input_count`: the signal exists and can be counted. If the
 answer is "almost never," this RDR is premature and should be closed in
 favour of raising the constant.
 
-## Decision (draft — to resolve in research)
+## Decision (draft, to resolve in research)
 
 **D1. Is `loop` per-item over a sub-sequence, or a single fan-out into a
 batched operator call?** The latter is much smaller and may cover most
@@ -159,25 +159,25 @@ expressive primitives to a planner that already drops unknown steps
 
 ## Approach (phased, draft)
 
-### P0 — Evidence gate (no code)
+### P0: Evidence gate (no code)
 
 Answer R4 by counting truncation warnings in real runs. Resolve D1-D3. If
 truncation is rare, close this RDR and file a one-line constant bump
 instead. **This phase can conclude "not worth building."**
 
-### P1 — `collect` alone
+### P1: `collect` alone
 
 The higher-value half and the smaller one. Fold N prior outputs into a
 single operator dispatch, generalizing RDR-093's bundled
 `groupby → aggregate`. Shippable and useful without `loop`.
 
-### P2 — `loop`
+### P2: `loop`
 
 Bounded fan-out over a resolved array with per-item context injection,
 with an explicit iteration cap in the step declaration (no unbounded
 iteration, ever).
 
-### P3 — Input-budget policy
+### P3: Input-budget policy
 
 Replace or supplement `_OPERATOR_MAX_INPUTS` per D3, keeping the existing
 truncation envelope as the reporting mechanism.
@@ -185,14 +185,14 @@ truncation envelope as the reporting mechanism.
 ## Alternatives Considered
 
 - **Add `parallel` too, completing Parmar's five.** Rejected for this
-  RDR. It is a latency optimization, not a capability gain — everything
+  RDR. It is a latency optimization, not a capability gain: everything
   expressible with `parallel` is expressible with `loop`, more slowly.
   It also introduces exactly the concurrency surface that killed RDR-079.
   Revisit once `loop` is real and the RDR-079 event-loop hazard has a
   named owner.
 - **Add conditionals.** Rejected on the source paper's reasoning, which
   nexus's own architecture already follows: branching is agent territory.
-- **Build a script sandbox (code mode).** Rejected — Parmar's four
+- **Build a script sandbox (code mode).** Rejected: Parmar's four
   arguments against generated code apply, and it is a large new
   execution and security surface for a codebase under a no-knob-reflex
   directive.
@@ -231,17 +231,17 @@ truncation envelope as the reporting mechanism.
   (DEVONthink `x-devonthink-item://079D1F3D-60D6-4901-AAAC-E18A01909BF2`).
 - Code-mode measurement: catalog `1.14.24`,
   `knowledge__knowledge__voyage-context-3__v1`.
-- `docs/exploration/workflow-engine-*.md` — May 2026 landscape work.
+- `docs/exploration/workflow-engine-*.md`: May 2026 landscape work.
   **Caution**: its closing section ties the design to RDR-110/111/112,
   all scrapped 2026-05-19; that integration story is dead.
-- VADAOrchestra borrowables note (`knowledge__knowledge`, 2026-06-25) —
+- VADAOrchestra borrowables note (`knowledge__knowledge`, 2026-06-25):
   bounded replanning and recursive catalog rules, both still unfiled.
 - Code: `src/nexus/plans/runner.py`, `src/nexus/plans/schema.py`,
   `src/nexus/mcp/core.py`.
 
 ## Revision History
 
-- 2026-07-26 — created (draft). Scope set at `loop` + `collect`;
+- 2026-07-26: created (draft). Scope set at `loop` + `collect`;
   `parallel` deferred with RDR-079's event-loop defect named as the
   reason; conditionals excluded per the source paper. P0 is an evidence
   gate empowered to close the RDR in favour of a constant bump.

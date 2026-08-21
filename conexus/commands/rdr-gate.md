@@ -14,17 +14,17 @@ $ARGUMENTS
 **Targeted load**: parse the **numeric ID** (and any `--skip-research` flag)
 from `$ARGUMENTS` and run, via the Bash tool, `nx rdr preamble rdr-gate -- <ID>`
 with literal argv tokens. Never splice raw `$ARGUMENTS` into a shell-quoted
-line — free text with apostrophes/quotes breaks the quoting (nexus-ybvyo).
+line: free text with apostrophes/quotes breaks the quoting (nexus-ybvyo).
 
 ## Action
 
-All data is pre-loaded above — no additional tool calls needed.
+All data is pre-loaded above; no additional tool calls needed.
 
 - RDR directory is shown above (from `.nexus.yml` `indexing.rdr_paths[0]`).
 - Run all three gate layers in sequence:
-  - **Layer 1 — Structural**: Use the Section Structure and Section Summaries above to check completeness (required headings present, no empty sections). **If no research findings exist** and `--skip-research` was NOT passed, report **BLOCKED** and stop — do not proceed to Layer 2 or 3. If `--skip-research` was passed, note the override and continue.
-  - **Layer 2 — Assumption audit**: Use T2 Research Findings above to verify assumptions are evidenced. Every finding classified as "Assumed" must have an explicit risk assessment.
-  - **Layer 3 — AI critique**: Dispatch the `substantive-critic` agent via Agent tool with the full RDR content. If the RDR has `related_issues` listing other RDR IDs, read those RDRs and include their content in the critique prompt — the critic should check for consistency and contradictions between related RDRs (P7).
+  - **Layer 1 (Structural)**: Use the Section Structure and Section Summaries above to check completeness (required headings present, no empty sections); the preamble also runs `nx prose lint` on the RDR and prints a BLOCKED line on any finding, which stops the gate the same way an incomplete section does. **If no research findings exist** and `--skip-research` was NOT passed, report **BLOCKED** and stop; do not proceed to Layer 2 or 3. If `--skip-research` was passed, note the override and continue.
+  - **Layer 2 (Assumption audit)**: Use T2 Research Findings above to verify assumptions are evidenced. Every finding classified as "Assumed" must have an explicit risk assessment.
+  - **Layer 3 (AI critique)**: Dispatch the `substantive-critic` agent via Agent tool with the full RDR content. If the RDR has `related_issues` listing other RDR IDs, read those RDRs and include their content in the critique prompt; the critic should check for consistency and contradictions between related RDRs (P7).
 - Gate outcomes: **BLOCKED** (critical issues found, must fix and re-gate) or **PASSED** (no critical issues). Do not use "Conditional Accept" or other ad-hoc outcomes.
 - **Write T2 gate result** after completing all layers. Use the repo name from above:
   Use **memory_put** tool: project="{repo_name}_rdr", title="{id}-gate-latest", ttl="permanent", tags="rdr,gate", content with:

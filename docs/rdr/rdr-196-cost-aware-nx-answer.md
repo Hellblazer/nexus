@@ -23,14 +23,14 @@ Kaoudi & Giurgiu, *Rethinking Query Optimization for Multi-Agent Systems [Vision
 pipelines as a new query-optimization problem with four coupled pieces: (§5.1) a joint
 topology × model × engine search under multiple objectives, (§5.2) unified *distributional*
 cost models, (§5.3) continuous re-planning under stochastic execution, and (§5.4) a semantic
-cache of sub-plans and optimization decisions. Their measured baseline — one familiar model
-assigned to every agent, fixed topology — is the expensive corner: 153× cost / 5× latency /
+cache of sub-plans and optimization decisions. Their measured baseline (one familiar model
+assigned to every agent, fixed topology) is the expensive corner: 153× cost / 5× latency /
 25% quality spread across the plan space, with 96% of Pareto-optimal plans using *mixed*
 model assignments.
 
 `nx_answer` already has the *sub-plan half* of the paper's §5.4 piece and is the paper's
 baseline on everything else. The plan library (RDR-078/080/084/100) is a semantically indexed,
-auto-grown cache of retrieval plans — sub-plan topologies keyed by intent, which is the artifact
+auto-grown cache of retrieval plans (sub-plan topologies keyed by intent), which is the artifact
 the paper says existing semantic caches lack. It does **not** yet cache model or engine
 assignments, because nexus makes none (Gaps 2–5); once Phases 1–3 record those decisions, the
 same library is where they would live.
@@ -39,7 +39,7 @@ estimate, the run record stores `cost_usd = 0.0` unconditionally, `budget_usd` i
 for future enforcement", and `plan_match` ranks candidates on match confidence alone. The
 measured consequence is already on file: nexus-h33x8.6 found `nx_answer` used 4 times in its
 lifetime against a mandate routing every analytical question through it, with 23% of runs
-taking 2–5 minutes — a capability/latency defect, not a compliance one.
+taking 2-5 minutes: a capability/latency defect, not a compliance one.
 
 This RDR adopts the paper's own build order, bounded to what nexus can measure: telemetry
 first (so a cost model has data), then per-operator model routing (the paper's single
@@ -50,25 +50,25 @@ escalate-on-low-confidence) is an optional, gated last phase.
 
 ### Enumerated gaps to close
 
-#### Gap 1: No per-step cost, latency, or model record — the run log cannot feed any cost model
+#### Gap 1: No per-step cost, latency, or model record (the run log cannot feed any cost model)
 
 `_record_nx_answer_run` (`src/nexus/mcp/core.py:5760-5786`) persists one row per invocation
 with `question, plan_id, matched_confidence, step_count, final_text, cost_usd, duration_ms`;
 every call site passes `cost_usd=0.0` (`core.py:6441, 6547, 6573, 6641`). `plan_run` emits
 `nx_answer_step_start` / `nx_answer_step_complete` structlog events with `elapsed_ms`
-(`src/nexus/plans/runner.py:1210-1345`) — to the log file only, never to the store, and
+(`src/nexus/plans/runner.py:1210-1345`): to the log file only, never to the store, and
 without model, tokens, or cost. `claude_dispatch` (`src/nexus/operators/dispatch.py:538`)
 parses the subprocess's stream-json result envelope and discards its cost/usage fields
 (no `cost_usd` / `usage` reference anywhere in the module). NOMA §5.2's observation that
-monetary cost is "almost analytic" (tokens × published price) is true here too — and nexus
+monetary cost is "almost analytic" (tokens × published price) is true here too; nexus
 throws the tokens away.
 
-#### Gap 2: One model for every operator — the paper's "habit" baseline by construction
+#### Gap 2: One model for every operator (the paper's "habit" baseline by construction)
 
 `claude_dispatch` builds `["claude", "-p", "--output-format", "stream-json", ...]`
-(`dispatch.py:643-659`) with no `--model`; every operator — `extract`, `filter`, `rank`,
+(`dispatch.py:643-659`) with no `--model`; every operator (`extract`, `filter`, `rank`,
 `groupby`, `aggregate`, `compare`, `check`, `verify`, `summarize`, `generate`, the inline
-planner — runs on the session's default model. 18 call sites across 4 modules go through
+planner) runs on the session's default model. 18 call sites across 4 modules go through
 this one function. There is no per-operator model policy, no way to express one, and no
 measurement that would justify one.
 
@@ -80,7 +80,7 @@ fastest is never preferred because nothing records which that is. `nx_answer(bud
 documents itself as "reserved for future enforcement" (`core.py:6283`): a plan that will cost
 $0.60 runs to completion against a $0.25 cap.
 
-#### Gap 4: The tool-free operator dispatch loads the user's entire MCP server set — ~2× context and cost per call, for tools it cannot use
+#### Gap 4: The tool-free operator dispatch loads the user's entire MCP server set (~2× context and cost per call, for tools it cannot use)
 
 `claude_dispatch`'s default argv passes `--mcp-config` only when a caller opts into tools and
 never passes `--strict-mcp-config` (`dispatch.py:643-694`), so every operator subprocess
@@ -113,22 +113,22 @@ that row too, with the notable exception of its plan library.
 
 Adjacent nexus work this RDR must not duplicate:
 
-- **RDR-179 (draft)** — self-correction machinery: relight plan-reuse, retrieval benchmarking,
+- **RDR-179 (draft)**: self-correction machinery: relight plan-reuse, retrieval benchmarking,
   plan-library hygiene. Its benchmarking leg is the natural home for the *quality* signal this
   RDR needs; this RDR consumes it, does not redefine it.
-- **RDR-090 (closed, implementation parked)** — realistic AgenticScholar benchmark: the candidate
+- **RDR-090 (closed, implementation parked)**: realistic AgenticScholar benchmark: the candidate
   fixed eval set for any quality measurement.
-- **RDR-100 (closed)** — plan-cache improvements (diversity, floor, dispatcher, hierarchy): the
+- **RDR-100 (closed)**: plan-cache improvements (diversity, floor, dispatcher, hierarchy): the
   §5.4 piece. RDR-196 adds a cost dimension to what RDR-100 matches on; it does not change
   matching.
-- **RDR-177 (draft)** — tenant-scoped telemetry/usage metering on the engine. Its design is
+- **RDR-177 (draft)**: tenant-scoped telemetry/usage metering on the engine. Its design is
   tenant-level aggregate snapshots; RDR-196's `nx_answer_steps` is a per-run, per-step event
-  log — a different grain, not a competing table. The relationship is one-directional:
+  log (a different grain, not a competing table). The relationship is one-directional:
   RDR-177's per-tenant nx_answer cost aggregates, if built, roll up from `nx_answer_steps`
   (this RDR's table is the event source, RDR-177 is a consumer). No conditional sequencing.
-- **RDR-190 (draft)** — plan-IR `loop`/`collect` primitives; topology vocabulary that Phase 3's
+- **RDR-190 (draft)**: plan-IR `loop`/`collect` primitives; topology vocabulary that Phase 3's
   escalate loop would reuse rather than invent.
-- **nexus-h33x8.6** — the nx_answer latency/capability measurement that motivates Phase 1.
+- **nexus-h33x8.6**: the nx_answer latency/capability measurement that motivates Phase 1.
 
 ### Technical Environment
 
@@ -138,8 +138,8 @@ Adjacent nexus work this RDR must not duplicate:
 - Telemetry: `nx_answer_runs` table owned by the engine (`telemetry-001-baseline.xml`),
   written via `POST /v1/telemetry/nx_answer_runs/record`. All schema change goes through
   Liquibase on the engine (hot rule: ALL DDL through Liquibase).
-- Operator bundling (`plans/bundle.py`) already performs NOMA's *fusion* transformation —
-  adjacent operators collapsed into one dispatch — heuristically and unrecorded.
+- Operator bundling (`plans/bundle.py`) already performs NOMA's *fusion* transformation
+  (adjacent operators collapsed into one dispatch), heuristically and unrecorded.
 
 ## Research Findings
 
@@ -149,12 +149,12 @@ Adjacent nexus work this RDR must not duplicate:
   authors: (1) unified cost model over fixed topology, (2) generation, (3) refiner, (4) cache.
 - Code reads cited in the gaps above.
 - Four research records in T2 (`nexus_rdr/196-research-1..4`), summarized:
-  - **196-R1 (verified, spike)** — the stream-json `result` event carries `total_cost_usd`,
+  - **196-R1 (verified, spike)**: the stream-json `result` event carries `total_cost_usd`,
     `duration_ms`, `duration_api_ms`, `num_turns`, `usage.{input,output,cache_creation,cache_read}`
     and `modelUsage.{<model>: {…, costUSD, canonicalModel}}` (per-model, so bundled multi-turn
     dispatches are attributable); assistant events carry `message.model` + per-turn usage.
     `dispatch.py` keeps none of it.
-  - **196-R2 (verified, spike)** — `--model haiku|sonnet` composes with `--json-schema` +
+  - **196-R2 (verified, spike)**: `--model haiku|sonnet` composes with `--json-schema` +
     `stream-json` + `--no-session-persistence`; structured output validates; `modelUsage`
     reports the canonical id. Cost of one trivial operator-shaped dispatch, same box, same day:
 
@@ -167,9 +167,9 @@ Adjacent nexus work this RDR must not duplicate:
 
     ~13× spread between tiers at identical output; harness context dominates the tokens
     regardless of operator input.
-  - **196-R3 (verified, spike)** — Gap 4 above: no `--strict-mcp-config` in the tool-free
+  - **196-R3 (verified, spike)**: Gap 4 above: no `--strict-mcp-config` in the tool-free
     default.
-  - **196-R4 (documented, source search)** — no operator-level quality proxy exists; RDR-090's
+  - **196-R4 (documented, source search)**: no operator-level quality proxy exists; RDR-090's
     `scripts/bench/` harness scores *retrieval* (NDCG@3, 5 queries in `bench/queries/spike_5q.yaml`),
     which RDR-179 P2 plans to operationalize. Phase 2 therefore defines its own proxy:
     tier-agreement against the strong model on a fixed operator-input set (exact membership for
@@ -189,13 +189,13 @@ Adjacent nexus work this RDR must not duplicate:
 
 ### Key Discoveries
 
-- **Documented** — `cost_usd` is a constant 0.0 at every run-record call site.
-- **Documented** — no `--model` in the dispatch argv; no model policy anywhere in the operator layer.
-- **Documented** — `plan_match` ranking is confidence-only; `budget_usd` unenforced.
-- **Documented** — bundling already changes topology (fusion) without recording the decision.
-- **Documented (paper)** — 96% of Pareto-optimal plans in the paper's 10-agent pipeline mix
+- **Documented**: `cost_usd` is a constant 0.0 at every run-record call site.
+- **Documented**: no `--model` in the dispatch argv; no model policy anywhere in the operator layer.
+- **Documented**: `plan_match` ranking is confidence-only; `budget_usd` unenforced.
+- **Documented**: bundling already changes topology (fusion) without recording the decision.
+- **Documented (paper)**: 96% of Pareto-optimal plans in the paper's 10-agent pipeline mix
   models; cheap-first + escalate dominated the best fixed-topology plan at equal quality.
-- **Assumed → resolved per operator by Phase 2 (2026-08-21, see the Phase 2 OUTCOME block)** —
+- **Assumed → resolved per operator by Phase 2 (2026-08-21, see the Phase 2 OUTCOME block)**:
   the paper's result transfers to nexus operators: VERIFIED on the fixture for
   extract/filter/groupby/rank (both frozen criteria passed, n=3, ceiling effect noted);
   NOT TESTED for check/verify (no tiering delta) and for aggregate/summarize/compare/generate
@@ -204,18 +204,18 @@ Adjacent nexus work this RDR must not duplicate:
 ### Critical Assumptions
 
 - [x] The `claude -p` result envelope exposes cost/usage/model per dispatch (and per bundled
-      turn) — **Status**: Verified (196-R1) — **Method**: Spike (fixture + live CLI).
-- [x] `--model` composes with `--json-schema` + `stream-json` — **Status**: Verified (196-R2)
-      for `haiku`/`sonnet` on the operator-shaped trivial prompt — **Method**: Spike. Per-operator
+      turn). **Status**: Verified (196-R1). **Method**: Spike (fixture + live CLI).
+- [x] `--model` composes with `--json-schema` + `stream-json`. **Status**: Verified (196-R2)
+      for `haiku`/`sonnet` on the operator-shaped trivial prompt. **Method**: Spike. Per-operator
       prompt shapes are exercised by Phase 2's own runs, not assumed.
-- [x] A quality proxy for Phase 2 — **Status**: Verified-as-ABSENT (196-R4): no operator-level
+- [x] A quality proxy for Phase 2. **Status**: Verified-as-ABSENT (196-R4): no operator-level
       proxy exists; Phase 2 defines tier-agreement-vs-strong on a fixed input set (see Research
-      Findings) — **Method**: Source Search. The proxy's construction is Phase 2 Step 2, in scope.
+      Findings). **Method**: Source Search. The proxy's construction is Phase 2 Step 2, in scope.
 - [x] A strict empty MCP config is accepted by the CLI and removes the inherited tool-schema
-      context — **Status**: Verified (196-R3) — **Method**: Spike.
+      context. **Status**: Verified (196-R3). **Method**: Spike.
 - [ ] Per-step rows at nx_answer's real volume are negligible store load (h33x8.6: single-digit
-      lifetime runs; even at 100/day × 6 steps this is trivial) — **Status**: Verified by
-      arithmetic — **Method**: Docs Only (acceptable: not load-bearing at this volume).
+      lifetime runs; even at 100/day × 6 steps this is trivial). **Status**: Verified by
+      arithmetic. **Method**: Docs Only (acceptable: not decisive at this volume).
 
 ## Proposed Solution
 
@@ -223,34 +223,34 @@ Adjacent nexus work this RDR must not duplicate:
 
 Adopt NOMA's build order, each phase gated by the measurement the previous one produces:
 
-0. **Phase 0 — stop paying for tools the operator cannot call (Gap 4).** Pass
+0. **Phase 0: stop paying for tools the operator cannot call (Gap 4).** Pass
    `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` in the tool-free default argv (the
    opt-in `mcp_servers` path is unchanged). Measured on the default model: ~2× fewer context
    tokens and ~2× lower cost per dispatch before any routing. Lands with Phase 1 so the
    telemetry records the post-fix baseline; correct `_PER_PAPER_COST_USD` from the measured
    per-dispatch cost rather than the 0.01 literal.
 
-1. **Phase 1 — measure (Gap 1, Gap 5).** Capture per-step `{plan_id, run_id, step_index,
+1. **Phase 1: measure (Gap 1, Gap 5).** Capture per-step `{plan_id, run_id, step_index,
    operator, source (sql|llm|bundle), model, input_tokens, output_tokens, cost_usd,
    elapsed_ms, ok}` from the dispatch result envelope and the operator fast-path branch; write
    them alongside the run row; stop writing `cost_usd=0.0` (sum of steps). Surface via
    `nx telemetry`-style read (or `nx doctor` line) and the existing `nx_answer` `structured`
    output. This alone answers "what does nx_answer cost and where does the time go", which
    nobody can answer today.
-2. **Phase 2 — per-operator model routing (Gap 2).** A small, explicit policy table
+2. **Phase 2: per-operator model routing (Gap 2).** A small, explicit policy table
    `operator → model tier` (default: cheap tier for extract/filter/groupby/aggregate/rank/
    summarize; strong tier for generate/check/verify/compare and the inline planner), threaded
    to `claude_dispatch(model=...)`; measured on the Phase-1 telemetry plus the quality proxy
    before it becomes the default. The paper's number to beat is the all-strong baseline at
    equal proxy quality.
-3. **Phase 3 — cost-ranked plan choice + budget (Gap 3).** When ≥2 plans clear the confidence
+3. **Phase 3: cost-ranked plan choice + budget (Gap 3).** When ≥2 plans clear the confidence
    floor, prefer the one with the lower recorded median cost (latency as tiebreak); enforce
    `budget_usd` as a pre-flight refusal (estimated > cap → refuse with the estimate) and a
    mid-run stop at the step boundary where the running sum crosses the cap. Estimates come
    from the per-plan history Phase 1 accumulates; a plan with no history runs with a warning.
-4. **Phase 4 (optional, gated on Phase 2 evidence) — one topology transformation.** For
+4. **Phase 4 (optional, gated on Phase 2 evidence): one topology transformation.** For
    `verify`/`check`, cheap-model first and escalate to the strong model only when the cheap
-   verdict is low-confidence, as a bounded loop — the single transformation the paper measured.
+   verdict is low-confidence, as a bounded loop (the single transformation the paper measured).
    Only if Phase 2 shows the cheap tier is *not* good enough for verify/check on its own.
 
 Out of scope, stated so it is not silently re-entered: generative pipeline synthesis (§5.1),
@@ -262,7 +262,7 @@ semantics (RDR-100 owns that), any change to operator semantics.
 - `claude_dispatch(..., model: str | None = None)` appends `--model <tier-or-id>` when set;
   returns, in addition to the parsed JSON, a `DispatchUsage` record
   `{model, input_tokens, output_tokens, cost_usd, elapsed_ms}` parsed from the result event
-  (field names **Assumed** — verify against the fixture). Existing callers are unaffected
+  (field names **Assumed**: verify against the fixture). Existing callers are unaffected
   (keyword-only, default None).
 
 > **CORRECTION (2026-08-20, nexus-nyry9.7):** The `DispatchUsage` field names above were
@@ -274,9 +274,9 @@ semantics (RDR-100 owns that), any change to operator semantics.
 > (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`,
 > `cache_read_input_tokens`); per-model `modelUsage.<key>.*` is camelCase (`inputTokens`,
 > `outputTokens`, `costUSD`, `canonicalModel`), and the map key can differ from
-> `canonicalModel` (a requested alias vs. the resolved id) — the recorded model id must be
+> `canonicalModel` (a requested alias vs. the resolved id). The recorded model id must be
 > `canonicalModel`, never the key (196-R3). Separately: "existing callers are unaffected"
-> does not hold for a tuple-return shape — all ~17 non-`aspect_extractor.py` call sites do
+> does not hold for a tuple-return shape: all ~17 non-`aspect_extractor.py` call sites do
 > bare `return await claude_dispatch(...)` with no unpacking, so `.p1a`'s implementation
 > instead added a keyword-only `usage_sink: list[DispatchUsage] | None = None` out-param
 > (default `None` is a true no-op) rather than changing the return type. Implemented in
@@ -291,7 +291,7 @@ semantics (RDR-100 owns that), any change to operator semantics.
   becomes the sum of steps.
 - Model policy: a module-level typed table in `operators/` (`OPERATOR_MODEL_TIER: dict[str, Tier]`)
   plus a per-call override; tiers resolve to concrete model ids in one place so a model rename
-  is one edit. Configurable per repo via `.nexus.yml` `[tuning]` only if Phase 2 shows a need —
+  is one edit. Configurable per repo via `.nexus.yml` `[tuning]` only if Phase 2 shows a need,
   not pre-emptively.
 - Plan choice: `plan_match` returns candidates above the floor with their recorded
   `median_cost_usd`/`p50_ms` (joined from `nx_answer_steps` history, cached per process);
@@ -299,11 +299,11 @@ semantics (RDR-100 owns that), any change to operator semantics.
   (band width is a named constant, not a knob exposed to users).
 - Budget: estimate = median cost of the matched plan's history; pre-flight refusal carries the
   estimate and the cap in the error text; mid-run stop returns the partial result with an
-  explicit `budget_exhausted_at_step` marker **in both output shapes** — a top-level field in
-  `structured=True` output and a leading `[budget exhausted after step N of M — partial answer]`
+  explicit `budget_exhausted_at_step` marker **in both output shapes**: a top-level field in
+  `structured=True` output and a leading `[budget exhausted after step N of M: partial answer]`
   line in the default text output (`nx_answer`'s default is `structured=False`, so a
   structured-only marker would be a silent-truncation shape for most callers). The same
-  two-shape rule applies to the "no cost history — ran unestimated" warning. Fail loud, no
+  two-shape rule applies to the "no cost history: ran unestimated" warning. Fail loud, no
   silent truncation, on every path a caller can take.
 
 ```text
@@ -324,7 +324,7 @@ StepRecord = {run_id, step_index, operator, source: "llm"|"sql"|"bundle",
 | Cost-ranked choice | `plans/matcher.py` | Extend: return candidate set with history; selection in `nx_answer` |
 | Budget enforcement | `nx_answer(budget_usd)` parameter | Extend: enforce what is already declared |
 | Escalate loop (Phase 4) | `plans/bundle.py` fusion, RDR-190 `loop` primitive (draft) | Reuse RDR-190's primitive if landed; otherwise a runner-local bounded retry |
-| Quality proxy | RDR-090 benchmark, RDR-179 benchmarking leg | Reuse; if absent, a small fixture set — never an LLM-judge-only proxy for the cheap-tier decision |
+| Quality proxy | RDR-090 benchmark, RDR-179 benchmarking leg | Reuse; if absent, a small fixture set. Never an LLM-judge-only proxy for the cheap-tier decision |
 
 ### Decision Rationale
 
@@ -406,7 +406,7 @@ inline planner and `generate`/`verify` are where quality concentrates.
 
 ### Prerequisites
 
-- [x] All Critical Assumptions verified (196-research-1..4: envelope fields + `--model` composition + strict-MCP by spike; quality proxy by source search — absent, Phase 2 builds it)
+- [x] All Critical Assumptions verified (196-research-1..4: envelope fields + `--model` composition + strict-MCP by spike; quality proxy by source search: absent, Phase 2 builds it)
 - [ ] RDR-177 status checked: write through its surface if it has landed
 
 ### Minimum Viable Validation
@@ -425,7 +425,7 @@ into the in-flight release). Argv now always carries `--strict-mcp-config`; tool
 zero servers, opt-in `mcp_servers` => only those.** RDR-196 does not re-implement it; Phase 1's
 telemetry records the post-fix baseline.
 
-> **CORRECTION (2026-08-20, plan audit fold — nexus-nyry9.6 / epic comment):** "LANDED" holds
+> **CORRECTION (2026-08-20, plan audit fold, nexus-nyry9.6 / epic comment):** "LANDED" holds
 > for `claude_dispatch` only. `src/nexus/aspect_extractor.py:1559` runs its OWN
 > `["claude", "-p", "--output-format", "json"]` subprocess that never goes through
 > `claude_dispatch`, so Gap 4 is NOT closed for `nx enrich aspects` (one of the four consumers
@@ -439,16 +439,16 @@ telemetry records the post-fix baseline.
 > follow-up beads, not prose).
 >
 > **OUTCOME (2026-08-20, nexus-nyry9.6):** Option B taken, not Option A. Reason: PR_SET_PDEATHSIG
-> parity — `aspect_extractor.py`'s `Popen` call (~1572-1580) arms parent-death protection for the
+> parity. `aspect_extractor.py`'s `Popen` call (~1572-1580) arms parent-death protection for the
 > aspect-worker daemon (RDR-173 RF-8 / nexus-4r9ja); `claude_dispatch`'s
 > `asyncio.create_subprocess_exec` call (dispatch.py:943-948) has no equivalent, and rerouting
 > would silently regress that incident-driven safety guarantee (stacked-review-corrected
-> reasoning — an earlier draft cited `HookRegistry.fire_document` as a sync-contract blocker;
+> reasoning: an earlier draft cited `HookRegistry.fire_document` as a sync-contract blocker;
 > that was wrong, it only enqueues; the real sync callers are `aspect_worker.py:571` and
 > `commands/enrich.py:1363`). `--strict-mcp-config` landed directly at `aspect_extractor.py:1559`
 > (consequence 2, fixed in this bead). The stream-json/partial-capture consequence (3) is tracked
 > as follow-up bead nexus-rhwbx. `_PER_PAPER_COST_USD` = 1.18, a single measured sample (n=1,
-> default model `claude-fable-5`, 2026-08-20) — not Option A's live-metered figure.
+> default model `claude-fable-5`, 2026-08-20); not Option A's live-metered figure.
 #### Step 2: replace `_PER_PAPER_COST_USD` literal with a measured per-dispatch figure (or derive from Phase 1 history once available)
 
 ### Phase 1: Measure
@@ -480,19 +480,19 @@ any .p2c measurement ran) and measured in T2 `nexus_rdr/
 
 | operator | verdict | n | cost ratio (cand/base) | agreement min/mean | threshold | caveats |
 |---|---|---|---|---|---|---|
-| `operator_filter` | **FLIP** | 3 | 0.068 (14.7× cheaper) | 1.000 / 1.000 | 0.80 | ceiling effect — scored 1.0 on every pair; external validity beyond the 8-item fixture untested |
+| `operator_filter` | **FLIP** | 3 | 0.068 (14.7× cheaper) | 1.000 / 1.000 | 0.80 | ceiling effect: scored 1.0 on every pair; external validity beyond the 8-item fixture untested |
 | `operator_groupby` | **FLIP** | 3 | 0.061 (16.3× cheaper) | 1.000 / 1.000 | 0.80 | same ceiling-effect caveat as filter |
 | `operator_extract` | **FLIP** | 3 | 0.060 (16.6× cheaper) | 1.000 / 1.000 | 0.85 | same ceiling-effect caveat |
-| `operator_rank` | **FLIP** | 3 | 0.049 (20.4× cheaper) | 0.952 / 0.960 | 0.60 | min score sits BELOW .p2a's own strong-vs-strong noise floor (0.9762) — cite the large threshold margin (0.9524 vs 0.60), not a noise-band comparison (round-2 correction) |
-| `operator_check` | **HOLD** | — | — | — | 0.70 | no tiering delta — both strong-tier in every arm per the .p2b table (no cheap-tier candidate arm exists to A/B against) |
-| `operator_verify` | **HOLD** | — | — | — | 0.70 | no tiering delta, same reason as check; separately UNDECIDABLE on the .p2a proxy itself (n=4 pairs, mean 0.800, min 0.733, margin only +0.033 over threshold — thin even before any tiering question) |
-| `operator_aggregate` | **HOLD (by construction)** | — | — | — | — | no .p2a quality proxy exists (free-text output, LLM-as-judge rejected); pinned `"strong"` in `model_tiers.OPERATOR_MODEL_TIER` and mechanically guarded by `test_every_cheap_entry_has_a_registered_proxy_metric` — a future re-flip cannot silently skip adding proxy coverage first |
-| `operator_summarize` | **HOLD (by construction)** | — | — | — | — | same as aggregate |
-| `operator_compare` | **HOLD (by construction)** | — | — | — | — | same as aggregate |
-| `operator_generate` | **HOLD (by construction)** | — | — | — | — | same as aggregate |
-| inline planner | **UNMEASURED** | 0 (candidate) | — | — | — | .p2c's candidate-planner arm never ran — budget exhausted (~$19 of ~$20 cap) after the operator core + 3 baseline-planner runs; baseline-only mean cost $2.86/call (corrected). Left HOLD (safe side) pending a dedicated top-up (~3 cheap-tier planner dispatches, small marginal spend once separated from the operator core) — Sam's call whether/when to fund it, not spent here. |
+| `operator_rank` | **FLIP** | 3 | 0.049 (20.4× cheaper) | 0.952 / 0.960 | 0.60 | min score sits BELOW .p2a's own strong-vs-strong noise floor (0.9762); cite the large threshold margin (0.9524 vs 0.60), not a noise-band comparison (round-2 correction) |
+| `operator_check` | **HOLD** | N/A | N/A | N/A | 0.70 | no tiering delta: both strong-tier in every arm per the .p2b table (no cheap-tier candidate arm exists to A/B against) |
+| `operator_verify` | **HOLD** | N/A | N/A | N/A | 0.70 | no tiering delta, same reason as check; separately UNDECIDABLE on the .p2a proxy itself (n=4 pairs, mean 0.800, min 0.733, margin only +0.033 over threshold: thin even before any tiering question) |
+| `operator_aggregate` | **HOLD (by construction)** | N/A | N/A | N/A | N/A | no .p2a quality proxy exists (free-text output, LLM-as-judge rejected); pinned `"strong"` in `model_tiers.OPERATOR_MODEL_TIER` and mechanically guarded by `test_every_cheap_entry_has_a_registered_proxy_metric`; a future re-flip cannot silently skip adding proxy coverage first |
+| `operator_summarize` | **HOLD (by construction)** | N/A | N/A | N/A | N/A | same as aggregate |
+| `operator_compare` | **HOLD (by construction)** | N/A | N/A | N/A | N/A | same as aggregate |
+| `operator_generate` | **HOLD (by construction)** | N/A | N/A | N/A | N/A | same as aggregate |
+| inline planner | **UNMEASURED** | 0 (candidate) | N/A | N/A | N/A | .p2c's candidate-planner arm never ran: budget exhausted (~$19 of ~$20 cap) after the operator core + 3 baseline-planner runs; baseline-only mean cost $2.86/call (corrected). Left HOLD (safe side) pending a dedicated top-up (~3 cheap-tier planner dispatches, small marginal spend once separated from the operator core); Sam's call whether/when to fund it, not spent here. |
 
-**Zero negative results** — every measured operator either cleared both
+**Zero negative results**: every measured operator either cleared both
 pre-registered refutation criteria (filter/groupby/extract/rank) or had
 no tiering delta to measure in the first place (check/verify). No
 operator's default flip was attempted and rejected.
@@ -500,13 +500,13 @@ operator's default flip was attempted and rejected.
 **What flipped, mechanically**: `nexus.operators.model_tiers.FLIPPED_OPERATORS`
 (filter/groupby/extract/rank) is now consulted UNCONDITIONALLY on the
 plan-run dispatch path (`plans/runner.py::_default_dispatcher`, which is
-what `nx_answer` / `plan_run` use to invoke operator steps) — no env var
+what `nx_answer` / `plan_run` use to invoke operator steps); no env var
 required. The only other consult site is `mcp/core.py::_nx_answer_plan_miss`
 (the inline planner), and that one stays strong unless
 `NX_OPERATOR_MODEL_TIERING=1`. The operator MCP tools themselves
 (`operator_filter` etc.) never consult the tier table: an agent calling
 them DIRECTLY, outside a plan, still gets the strong tier unless it passes
-`model=` — so the 14-20x savings measured here apply to plan-mediated
+`model=`, so the 14-20x savings measured here apply to plan-mediated
 dispatch only, not to direct tool use. Every other operator gets no
 `model` override by default, unchanged from pre-.p2d behaviour.
 
@@ -519,37 +519,37 @@ a persisted row. `scripts/bench/operator_proxy_ab.stitch_run_id` closes that
 for future runs; the already-spent measurement was not re-run. `NX_OPERATOR_MODEL_TIERING=1` keeps its .p2c meaning: a
 measurement override that consults the WHOLE tier table (including
 "strong" entries) for future A/B re-verification.
-`NX_OPERATOR_MODEL_TIERING=0` is a new kill switch — forces every
+`NX_OPERATOR_MODEL_TIERING=0` is a new kill switch: forces every
 operator back to strong (pre-.p2d behaviour) without a code change, for
 rollback. See `docs/cli-reference.md`'s "Per-operator model tiering"
 section for the full env-var contract.
 
 **Bundles stay strong, unconditionally.** `nexus.plans.bundle.dispatch_bundle`
 / `compose_bundle_prompt` never import `model_tiers` and never pass a
-`model` kwarg to `claude_dispatch` — a bundle containing a flipped
+`model` kwarg to `claude_dispatch`: a bundle containing a flipped
 operator (e.g. a fused filter→groupby chain) dispatches at the default
 (strong) model, not cheap. This is unchanged from .p1b's note that
 bundling bypasses the SQL fast path too: the .p2c/.p2d measurement was
 scoped to ISOLATED single-step plans specifically to hold bundling
 constant/absent, so there is no A/B evidence for a flipped operator's
-quality *inside* a bundle — leaving bundles on strong is the safe,
+quality *inside* a bundle; leaving bundles on strong is the safe,
 evidence-consistent default until a future bead measures the bundled
 case separately.
 
 **verify/check verdict for Phase 4 (`nexus-nyry9.23`)**: the cheap tier
 was never tested against either operator (no tiering delta existed to
-measure — see the table above), so this bead cannot say the cheap tier
+measure; see the table above), so this bead cannot say the cheap tier
 is "not good enough" for them; it can only say the question was never
 asked at the model-tier level. Phase 4's own framing (cheap-first
 escalate-on-low-confidence) is a DIFFERENT mechanism than static tier
-routing, so `.p4` is **not closed as not-needed** by this bead — it
+routing, so `.p4` is **not closed as not-needed** by this bead; it
 remains open, gated on its own precondition being independently
 evaluated, not on this bead's HOLD verdict for check/verify.
 
 **RDR-196 h33x8/hmu02 bench caveat, restated**: the retrieval-bench
 non-regression check (`tests/integration/test_rdr_196_p2c_retrieval_bench.py`)
 proved `off == on` for search/query outputs against a real freshly-indexed
-corpus (5/5 non-error queries, byte-identical both arms) — tiering does
+corpus (5/5 non-error queries, byte-identical both arms): tiering does
 not touch retrieval, which is structurally guaranteed and now empirically
 confirmed. It did NOT prove retrieval QUALITY is good (NDCG@3=0.0 in
 both arms, traced to a pre-existing `scripts/bench/paths.py` metadata-
@@ -561,7 +561,7 @@ a broader nx_answer end-to-end quality claim.
 
 > **Sequencing note (2026-08-21, .rg2 finding):** Phase 3 Step 1 (`.p3b`,
 > nexus-nyry9.20, commit 078c15976) shipped BEFORE the Phase 2 boundary gate
-> ran — 2 min before `.p2c`'s commit and 35 min before `.p2d`'s flip. That was
+> ran: 2 min before `.p2c`'s commit and 35 min before `.p2d`'s flip. That was
 > deliberate: Sam's option (a) re-scope (predicted cost from step shape) decoupled
 > `.p3b` from the recorded-history premise Phases 1/2 were to produce, and its
 > price table keys on `(operator, canonical model)`, so the flip cannot pool

@@ -62,8 +62,8 @@ embedding.
 
 #### Gap 3: Availability semantics need to be explicit
 
-"qwen-MCP-or-nothing" is the constraint, but the exact discipline —
-pre-flight check vs try-and-skip-on-timeout — needs to be settled
+"qwen-MCP-or-nothing" is the constraint, but the exact discipline
+(pre-flight check vs try-and-skip-on-timeout) needs to be settled
 before implementation.
 
 #### Gap 4: Idempotency across re-ingest
@@ -81,11 +81,11 @@ spike branch) explored multiple paths for handling visually rich PDFs:
 
 | Path | Status |
 |---|---|
-| Full M3DocRAG pipeline (Qwen2-VL in answer path) | REJECTED — nexus has no generation path |
-| ColPali retrieval on Apple Silicon | REJECTED 2026-05-17 — retrieval ranking too flat |
+| Full M3DocRAG pipeline (Qwen2-VL in answer path) | REJECTED: nexus has no generation path |
+| ColPali retrieval on Apple Silicon | REJECTED 2026-05-17: retrieval ranking too flat |
 | Text-only ColBERT reranker | Different problem (vocabulary mismatch on text); independently revivable |
-| SigLIP figure-only retrieval | PASSED 2026-05-17 (bead `nexus-8siy`) — kept as historical option |
-| **VL-augmentation via qwen** | **PASSED 2026-05-17** — bead `nexus-6h0e` |
+| SigLIP figure-only retrieval | PASSED 2026-05-17 (bead `nexus-8siy`): kept as historical option |
+| **VL-augmentation via qwen** | **PASSED 2026-05-17**: bead `nexus-6h0e` |
 
 With the qwen coprocessor now operational and the user constraint
 "qwen-MCP-or-nothing," the multi-path branching collapses. SigLIP
@@ -126,12 +126,12 @@ figure-bearing queries) cleared.
 
 ### Prior art consulted
 
-- M3DocRAG paper (Cho et al., arXiv:2411.04952) §5.1 — text-vs-
+- M3DocRAG paper (Cho et al., arXiv:2411.04952) §5.1: text-vs-
   multimodal gap concentrated in visual evidence.
-- The local M3DocRAG proposal — spike outcomes carry forward.
-- RDR-112 storage-as-service / daemon model — relevant for nexus's
+- The local M3DocRAG proposal: spike outcomes carry forward.
+- RDR-112 storage-as-service / daemon model: relevant for nexus's
   MCP-client lifecycle.
-- RDR-113 host-trust model — relevant for trusting the qwen
+- RDR-113 host-trust model: relevant for trusting the qwen
   supervisor's connection.
 
 ## Research Findings
@@ -169,30 +169,30 @@ spike outcomes from `m3docrag-application.md` are the empirical basis.
 
 ### Critical Assumptions
 
-- [ ] **A1** — A Python MCP-client library is mature enough to depend
+- [ ] **A1**: A Python MCP-client library is mature enough to depend
   on (lifecycle, reconnection, schema). **Status**: Unverified.
   **Method**: Source Search (`mcp-python-sdk`, anthropic `mcp` package)
   + tiny spike (connect, list-tools, call one tool).
-- [ ] **A2** — `qwen_oneshot` (or equivalent) accepts image content
+- [ ] **A2**: `qwen_oneshot` (or equivalent) accepts image content
   in a stable format and returns structured text suitable for chunk
-  augmentation. **Status**: Unverified. **Method**: Spike — call
+  augmentation. **Status**: Unverified. **Method**: Spike, call
   with a fixture figure; inspect response shape.
-- [ ] **A3** — Pre-flight availability check via `qwen_backends`
+- [ ] **A3**: Pre-flight availability check via `qwen_backends`
   returns a deterministic VL-capable flag. **Status**: Unverified.
   **Method**: Source Search of qwen supervisor + spike.
-- [ ] **A4** — Figure-chash idempotency cache survives re-ingest
+- [ ] **A4**: Figure-chash idempotency cache survives re-ingest
   without correctness hazards (figures with different surrounding
   context should not cross-pollute). **Status**: Unverified.
   **Method**: Paper design + small spike with two papers sharing a
   figure (rare but possible).
-- [ ] **A5** — Docling's figure bounding boxes are stable enough that
+- [ ] **A5**: Docling's figure bounding boxes are stable enough that
   the same paper re-ingested produces matching chashes (i.e., the
   rendered PNG bytes are deterministic). **Status**: Unverified.
-  **Method**: Spike — index the same paper twice; compare cache hit
+  **Method**: Spike, index the same paper twice; compare cache hit
   rate (target 100 %).
-- [ ] **A6** — Pre-flight check is the right discipline (vs
+- [ ] **A6**: Pre-flight check is the right discipline (vs
   per-figure try-and-skip-on-timeout). **Status**: Settled by
-  constraint — pre-flight matches "either every figure in this
+  constraint: pre-flight matches "either every figure in this
   ingest gets augmented or none do." Documented for traceability.
 
 ## Proposed Solution
@@ -247,7 +247,7 @@ ingest:
 ```
 
 The configuration shape mirrors `~/.qwen-coprocessor-stack/config.json`
-where overlapping — no duplication, just nexus's view of the
+where overlapping; no duplication, just nexus's view of the
 connection.
 
 #### 3. Pre-flight availability check
@@ -263,7 +263,7 @@ At ingest start (once per ingest run), the augmentation hook:
    (`vl_augmentation_unavailable`), set the run's augmentation flag
    to False, ingest continues unchanged.
 
-The flag is sticky for the run — no per-figure rechecks. Either every
+The flag is sticky for the run: no per-figure rechecks. Either every
 figure gets augmented or none do. Matches the "explicit no-op"
 constraint.
 
@@ -309,13 +309,13 @@ CREATE TABLE vl_augmentation_cache (
 
 Cache lookup is keyed by `figure_chash`. Including `model_id` +
 `prompt_version` in the row enables future cache invalidation if the
-prompt or model changes meaningfully — but lookup is by chash alone
-(simpler).
+prompt or model changes meaningfully; lookup itself stays keyed by chash
+alone, which is simpler.
 
 #### 6. Chunk attachment
 
 The augmentation text is appended to the chunk whose bounding-box
-region contains the figure. The chunk's byte budget is honored —
+region contains the figure. The chunk's byte budget is honored:
 augmentation truncated if necessary. Chunk metadata is updated with:
 
 - `vl_augmented: true`
@@ -339,14 +339,14 @@ today" constraint, made explicit.
 
 | Proposed Component | Existing Module | Decision |
 |---|---|---|
-| MCP-client capability | none in nexus | **New** — `src/nexus/mcp_client/` |
+| MCP-client capability | none in nexus | **New**: `src/nexus/mcp_client/` |
 | Qwen supervisor connection | external (qwen-coprocessor-stack) | **Adopt entire** |
 | Figure bounding boxes | Docling/MinerU output | **Reuse entire** |
 | `pdf2image` region render | existing dep | **Reuse entire** |
-| `vl_augmentation_cache` table | none | **New** — T2 migration |
-| Augmentation hook on ingest path | none | **New** — `src/nexus/ingest/vl_augmentation.py` |
-| Configuration | `.nexus.yml` | **Extend** — new `ingest.qwen_mcp` block |
-| Chunk metadata fields | existing chunker | **Extend** — add `vl_augmented`, `vl_augmentation_chashes`, `vl_augmentation_model` |
+| `vl_augmentation_cache` table | none | **New**: T2 migration |
+| Augmentation hook on ingest path | none | **New**: `src/nexus/ingest/vl_augmentation.py` |
+| Configuration | `.nexus.yml` | **Extend**: new `ingest.qwen_mcp` block |
+| Chunk metadata fields | existing chunker | **Extend**: add `vl_augmented`, `vl_augmentation_chashes`, `vl_augmentation_model` |
 
 ### Decision Rationale
 
@@ -398,7 +398,7 @@ endpoint directly, discovering the URL from
   tool shape.
 - Reading the supervisor's config from disk is fragile across upgrades.
 
-**Reason for rejection**: the user constraint is explicit — "use our
+**Reason for rejection**: the user constraint is explicit: "use our
 qwen MCP interface."
 
 ### Alternative 3: Fallback to SigLIP figure-only embeddings when qwen
@@ -653,7 +653,7 @@ explicitly.
 
 ## Finalization Gate
 
-(deferred — sketch only)
+(deferred; sketch only)
 
 ### Contradiction Check
 
@@ -661,7 +661,7 @@ explicitly.
 
 ### Assumption Verification
 
-(deferred — A1–A5 unverified; spikes required before Phase 2)
+(deferred: A1–A5 unverified; spikes required before Phase 2)
 
 ### Scope Verification
 
@@ -681,7 +681,7 @@ production code; replicate the lift. Reactivates bead `nexus-6h0e`.
 - **IDE compatibility**: N/A.
 - **Incremental adoption**: `ingest.qwen_mcp.enabled: false` disables
   the hook entirely (default opt-in but easy to opt-out).
-- **Secret/credential lifecycle**: N/A — qwen supervisor connection
+- **Secret/credential lifecycle**: N/A; qwen supervisor connection
   is local (UDS or stdio); no credentials.
 - **Memory management**: VL response text is bounded by chunk byte
   budget; truncation discipline matches existing chunker.
@@ -696,9 +696,9 @@ RDR.
 ## References
 
 - `docs/proposals/m3docrag-application.md` (branch
-  `feature/nexus-m3docrag-proposal-and-colbert-spike`) — superseded by
+  `feature/nexus-m3docrag-proposal-and-colbert-spike`), superseded by
   this RDR; spike data carries forward.
-- Cho et al., M3DocRAG (arXiv:2411.04952) §5.1 — text-vs-multimodal
+- Cho et al., M3DocRAG (arXiv:2411.04952) §5.1: text-vs-multimodal
   gap evidence.
 - Qwen 3.6-35B-A3B model card (unsloth GGUF release, 2026-04-24).
 - RDR-110: Semantic Tuple Space (subspaces for structured event
@@ -706,12 +706,12 @@ RDR.
 - RDR-112: Storage-as-Service Container Boundary (daemon lifecycle
   applies to the MCP-client side).
 - RDR-113: Host-Trust Model (qwen supervisor connection trust).
-- Bead `nexus-6h0e` — VL augmentation hook (filed during spike;
+- Bead `nexus-6h0e`: VL augmentation hook (filed during spike;
   reactivated under this RDR).
 
 ## Revision History
 
-_2026-05-21 — initial draft. Supersedes the multi-path proposal at
+_2026-05-21: initial draft. Supersedes the multi-path proposal at
 `docs/proposals/m3docrag-application.md`. Single-path design under the
 constraint "qwen-MCP-or-nothing": MCP-client integration with the qwen
 supervisor; pre-flight availability check; per-figure synchronous

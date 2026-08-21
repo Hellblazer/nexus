@@ -78,10 +78,10 @@ accumulation as beads close.]
 ### Critical Assumptions
 
 - [ ] A `scope` + `entity_name` dimension improves targeted retrieval without
-  fragmenting memory into unusable shards — **Status**: Unverified
-  — **Method**: Spike
+  fragmenting memory into unusable shards. **Status**: Unverified.
+  **Method**: Spike
 - [ ] Bead-ID regex entity-tagging has acceptable precision/recall as a v1
-  heuristic — **Status**: Unverified — **Method**: Spike
+  heuristic. **Status**: Unverified. **Method**: Spike
 
 ## Proposed Solution
 

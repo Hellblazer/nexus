@@ -330,6 +330,45 @@ class TestRdrGate:
         assert "BLOCKED" in result.output
         assert "gap structure" in result.output.lower()
 
+    def test_rdr_gate_blocked_on_prose_findings(self, rdr_env):
+        """nexus-ptwm2: an em dash in the body blocks Layer 1 before the
+        section structure is printed; the message names the lint command."""
+        body = (
+            "## Problem Statement\n\n"
+            "#### Gap 1: Something\nThe store is slow — very slow.\n\n"
+            "## Proposed Solution\n\nFix it."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-140-prose.md",
+            {"title": "Prose", "status": "draft", "type": "decision", "priority": "P1"},
+            body=body,
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "140"])
+        assert result.exit_code == 0, result.output
+        assert "BLOCKED" in result.output
+        assert "prose style" in result.output.lower()
+        assert "em-dash" in result.output
+        assert "nx prose lint" in result.output
+        assert "Section Structure" not in result.output
+
+    def test_rdr_gate_prose_clean_line_precedes_structure(self, rdr_env):
+        body = (
+            "## Problem Statement\n\n"
+            "#### Gap 1: Something\nThe store is slow: two seconds per call.\n\n"
+            "## Proposed Solution\n\nFix it."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-141-prose-ok.md",
+            {"title": "Prose OK", "status": "draft", "type": "decision", "priority": "P1"},
+            body=body,
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "141"])
+        assert result.exit_code == 0, result.output
+        assert "Prose style: clean" in result.output
+        assert result.output.index("Prose style: clean") < result.output.index("Section Structure")
+
     def test_rdr_gate_post65_with_gaps_prints_gap_list(self, rdr_env):
         """Post-65 RDR with gap headings: lists gaps before Section Structure."""
         body = (

@@ -88,10 +88,10 @@ injection token budget; confirm `session_end_flush` is the right hook point.]
 ### Critical Assumptions
 
 - [ ] Recency-windowed rollups improve injection quality without losing
-  needed detail (drill-down preserves raw entries) — **Status**: Unverified
-  — **Method**: Spike
+  needed detail (drill-down preserves raw entries). **Status**: Unverified.
+  **Method**: Spike
 - [ ] Post-session async summarization latency is acceptable and never blocks
-  `session_end_flush` — **Status**: Unverified — **Method**: Spike
+  `session_end_flush`. **Status**: Unverified. **Method**: Spike
 
 ## Proposed Solution
 

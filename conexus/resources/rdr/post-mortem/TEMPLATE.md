@@ -67,8 +67,8 @@ apply with the count of instances.
 | **Internal contradiction** | | | |
 | **Missing cross-cutting concern** | | | |
 
-**Preventable?** column: "Yes — source search" or
-"Yes — spike" if verification would have prevented the
+**Preventable?** column: "Yes, source search" or
+"Yes, spike" if verification would have prevented the
 drift, "No" if inherently unpredictable.
 
 ### Pattern References
@@ -79,25 +79,25 @@ exists). This enables incremental synthesis updates.]
 
 ### Drift Category Definitions
 
-- **Unvalidated assumption** — a claim presented as fact
+- **Unvalidated assumption**: a claim presented as fact
   but never verified by source search or spike
-- **Framework API detail** — method signatures, interface
+- **Framework API detail**: method signatures, interface
   contracts, or config syntax wrong
-- **Missing failure mode** — what breaks, what fails
+- **Missing failure mode**: what breaks, what fails
   silently, recovery path not considered
-- **Missing Day 2 operation** — bootstrap, CI/CD,
+- **Missing Day 2 operation**: bootstrap, CI/CD,
   removal, rollback, migration not planned
-- **Deferred critical constraint** — downstream use case
+- **Deferred critical constraint**: downstream use case
   that validates the approach was out of scope
-- **Over-specified code** — implementation code that was
+- **Over-specified code**: implementation code that was
   substantially rewritten
-- **Under-specified architecture** — architectural
+- **Under-specified architecture**: architectural
   decision that should have been made but wasn't
-- **Scope underestimation** — sub-feature that grew into
+- **Scope underestimation**: sub-feature that grew into
   its own major effort
-- **Internal contradiction** — research findings or stated
+- **Internal contradiction**: research findings or stated
   principles conflicting with the proposal
-- **Missing cross-cutting concern** — versioning,
+- **Missing cross-cutting concern**: versioning,
   licensing, config cache, deployment model, etc.
 
 ---
@@ -137,11 +137,11 @@ implementation:
 List 3-5 actionable insights framed as improvements to
 the RDR authoring process itself. Each takeaway should be:
 
-- **Generalizable** — applicable to future RDRs beyond
+- **Generalizable**: applicable to future RDRs beyond
   this specific topic
-- **Actionable** — something an RDR author can do
+- **Actionable**: something an RDR author can do
   differently, not just "be more careful"
-- **Evidence-based** — tied to a specific divergence or
+- **Evidence-based**: tied to a specific divergence or
   gap found in this post-mortem
 
 1. **[Imperative verb phrase]**: [Explanation tied to

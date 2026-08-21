@@ -14,12 +14,12 @@ $ARGUMENTS
 **Targeted load**: if an RDR ID appears in `$ARGUMENTS`, run, via the Bash
 tool, `nx rdr preamble rdr-show -- <ID>` with the parsed **numeric ID** as a
 literal argv token (e.g. `nx rdr preamble rdr-show -- 003`). Never splice raw
-`$ARGUMENTS` into a shell-quoted line — free text with apostrophes/quotes
+`$ARGUMENTS` into a shell-quoted line: free text with apostrophes/quotes
 breaks the quoting (nexus-ybvyo).
 
 ## Action
 
-All data is pre-loaded above — no additional tool calls needed.
+All data is pre-loaded above; no additional tool calls needed.
 
 - If an RDR ID was given: display metadata table, full content, T2 metadata, research findings, and linked beads.
 - If no ID given: display the list table + content index (most recently modified first).

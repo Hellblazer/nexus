@@ -14,7 +14,7 @@ related_tests: []
 implementation_notes: ""
 ---
 
-# RDR-134: RDR-070 Phase 5 — Taxonomy-Aware Recall in nx_answer
+# RDR-134: RDR-070 Phase 5, Taxonomy-Aware Recall in nx_answer
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
@@ -49,7 +49,7 @@ falls back to Ward clustering. `nx_answer`'s composed retrieval does not pass a
 taxonomy or use topic assignments / centroids to prefilter the collections it
 queries. The highest-traffic query path is the one not reading the structure.
 
-#### Gap 2: prefilter-granularity fork — per-topic centroids exist, per-collection summaries do not
+#### Gap 2: prefilter-granularity fork (per-topic centroids exist, per-collection summaries do not)
 
 RDR-070 produces per-**topic** centroids (`taxonomy__centroids`, MiniLM 384d),
 not per-**collection** summary embeddings. A recall prefilter can either (a)
@@ -78,19 +78,19 @@ evidence"), not let an operator synthesize from ambient context. Fix
 
 RDR-070's own Problem Statement is the precedent: its features "exist behind
 config flags nobody sets and CLI commands nobody runs." This RDR is the same
-diagnosis one layer up — the taxonomy is built, the recall path does not read it.
+diagnosis one layer up: the taxonomy is built, the recall path does not read it.
 
 ### Technical Environment
 
-- `src/nexus/search_engine.py` `search_cross_corpus(... cluster_by, taxonomy, topic ...)`
-  — already accepts a `taxonomy` instance and a `topic` prefilter; default
+- `src/nexus/search_engine.py` `search_cross_corpus(... cluster_by, taxonomy, topic ...)`:
+  already accepts a `taxonomy` instance and a `topic` prefilter; default
   `cluster_by=_CLUSTER_DEFAULT` ("semantic").
-- `src/nexus/db/t2/catalog_taxonomy.py` `CatalogTaxonomy` — `top_topics_for_collection`,
+- `src/nexus/db/t2/catalog_taxonomy.py` `CatalogTaxonomy`: `top_topics_for_collection`,
   `get_topic_docs`, `project_against`, `get_distinct_collections`; centroids in
   `taxonomy__centroids`.
-- `nx_answer` / `plan_run` — the composed-retrieval path whose `search` steps do
+- `nx_answer` / `plan_run`: the composed-retrieval path whose `search` steps do
   not currently inject a taxonomy or topic scope.
-- RDR-075 (Cross-Collection Topic Projection) — relevant prior art for the
+- RDR-075 (Cross-Collection Topic Projection): relevant prior art for the
   centroid-projection mechanics (`project_against`).
 
 ## Research Findings
@@ -103,7 +103,7 @@ be injected there; measure recall/latency of a topic-centroid prefilter vs the
 current blind fan-out; decide Gap-2 granularity empirically; evaluate top-K vs
 **band-similarity** centroid-neighbor selection per Dehghankar et al. 2026
 ("Random-Access Ranked Retrieval and Similarity Search", catalog tumbler
-`1.12.6`, §2 Example 2 and §6 Stripe Range Retrieval) — selecting all topics
+`1.12.6`, §2 Example 2 and §6 Stripe Range Retrieval): selecting all topics
 whose centroid similarity falls in a band around the best avoids silently
 dropping equally-relevant boundary clusters that strict top-K drops.]
 
@@ -119,16 +119,16 @@ dropping equally-relevant boundary clusters that strict top-K drops.]
 ### Critical Assumptions
 
 - [ ] A taxonomy-aware recall prefilter measurably improves `nx_answer`
-  answer quality / latency vs blind fan-out — **Status**: Unverified
-  — **Method**: Spike
+  answer quality / latency vs blind fan-out. **Status**: Unverified.
+  **Method**: Spike
 - [ ] Per-topic centroids are sufficient as the prefilter index (no need to
-  build per-collection summaries) — **Status**: Unverified — **Method**: Spike
+  build per-collection summaries). **Status**: Unverified. **Method**: Spike
 - [ ] An empty/low-confidence prefilter fails honestly rather than degrading
-  (depends on `nexus-n1908`) — **Status**: Unverified — **Method**: Spike
+  (depends on `nexus-n1908`). **Status**: Unverified. **Method**: Spike
 - [ ] Top-K centroid neighbor selection does not silently drop equally-relevant
   boundary clusters; evaluate band-similarity selection (per Dehghankar et al.
   2026, catalog tumbler `1.12.6`) as a design variant before committing to
-  top-K — **Status**: Unverified — **Method**: Spike
+  top-K. **Status**: Unverified. **Method**: Spike
 
 ## Proposed Solution
 
@@ -155,12 +155,12 @@ to be completed during research.]
 
 ## References
 
-- RDR-070 (Incremental Taxonomy & Clustered Search) — the substrate this
+- RDR-070 (Incremental Taxonomy & Clustered Search): the substrate this
   consumes; this is its natural Phase 5.
 - RDR-075 (Cross-Collection Topic Projection), RDR-080 (nx_answer / retrieval
   consolidation).
 - Beads: `nexus-9napz` (superseded by this RDR), `nexus-n1908` (nx_answer
-  empty-retrieval honesty — prerequisite).
+  empty-retrieval honesty, prerequisite).
 - Dehghankar, Asudeh, Mittal, Shetiya, Das. 2026. "Random-Access Ranked
   Retrieval and Similarity Search." Catalog tumbler `1.12.6`, T3 collection
   `knowledge__dt-papers__voyage-context-3__v1`. Source for the band-similarity

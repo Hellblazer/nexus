@@ -175,6 +175,11 @@ cat <<'WORKTREE_PREFLIGHT'
 | Preflight | If dispatched with isolation:worktree: run `scripts/agent-worktree-preflight.sh [required-sha]` as your FIRST action; stop on any PREFLIGHT_FAIL line (nexus-5kwkf) |
 WORKTREE_PREFLIGHT
 
+# nexus-ptwm2: prose register. Own heredoc, same <500-byte guard.
+cat <<'PROSE_STYLE'
+| Prose | Anything you write for humans (docs, RDRs, CHANGELOG, bead text, T2 notes, PR bodies) follows docs/writing-style.md: outcome first, plain words, verbs not nominalizations, no em dashes, no hedge stacks. Run `uv run nx prose lint <file>` on files before returning. |
+PROSE_STYLE
+
 # Serena + Context7 guidance injected by sn plugin (sn/hooks/scripts/mcp-inject.sh).
 
 if [[ $SKIP_STORAGE_DOCS -eq 0 ]]; then

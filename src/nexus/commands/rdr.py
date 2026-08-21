@@ -17,6 +17,8 @@ from pathlib import Path
 import click
 import yaml
 
+from nexus.prose_lint import lint_file as lint_prose_file
+
 
 # ---------------------------------------------------------------------------
 # lint helpers (unchanged)
@@ -875,6 +877,24 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
             "skipping the Layer 1 gap check."
         )
         print()
+
+    # Prose style pre-check (nexus-ptwm2, docs/writing-style.md). Client-side
+    # so it is live without a plugin release; the gate skill treats any
+    # finding as a Layer 1 BLOCK.
+    _prose_findings = lint_prose_file(rdr_file)
+    if _prose_findings:
+        print(
+            f"> **BLOCKED** (Layer 1 — prose style): RDR-{t2_key} has "
+            f"{len(_prose_findings)} finding(s) against `docs/writing-style.md`. "
+            f"Run `nx prose lint {rdr_file}` for the list; first five:"
+        )
+        for _f in _prose_findings[:5]:
+            print(f"> - line {_f.line}: {_f.rule}: {_f.message} ({_f.excerpt!r})")
+        print(">")
+        print("> Fix the prose and re-run the gate. There is no override flag for this check.")
+        return
+    print("#### Prose style: clean (`docs/writing-style.md`)")
+    print()
 
     clean = _strip_code_blocks(text)
 
