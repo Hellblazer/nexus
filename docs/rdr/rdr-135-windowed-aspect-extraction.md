@@ -52,8 +52,8 @@ Windowing the document and extracting per window means reconciling N partial
 aspect records into one. Scalar fields (`problem_formulation`,
 `proposed_method`) need a "best/most-confident wins" rule; list fields
 (`experimental_datasets`, `experimental_baselines`) likely need a union. That
-merge strategy is the decisive design decision here, and the reason this is
-not a one-line knob.
+merge strategy is the load-bearing design decision and the reason this is not a
+one-line knob.
 
 ## Context
 
@@ -94,11 +94,11 @@ validate the per-field merge rule against multi-section papers.]
 ### Critical Assumptions
 
 - [ ] Windowed extraction improves field completeness on long papers vs
-  single-shot. **Status**: Unverified. **Method**: Spike
+  single-shot — **Status**: Unverified — **Method**: Spike
 - [ ] A per-field merge rule (scalar best-wins, list union) reconciles windows
-  without contradiction. **Status**: Unverified. **Method**: Spike
-- [ ] Short papers are unaffected (single window = current behavior).
-  **Status**: Unverified. **Method**: Spike
+  without contradiction — **Status**: Unverified — **Method**: Spike
+- [ ] Short papers are unaffected (single window = current behavior) —
+  **Status**: Unverified — **Method**: Spike
 
 ## Proposed Solution
 
@@ -128,5 +128,5 @@ test plan, finalization gate: to be completed during research.]
 
 - MemForest paper, Appendix C, catalog tumbler `1.14.4`
 - T3 synthesis: `research-memforest-nexus-leverage-2026-05-27` (idea #4)
-- RDR-089 (Structured Aspect Extraction at Ingest), the extractor this extends
+- RDR-089 (Structured Aspect Extraction at Ingest) — the extractor this extends
 - Bead `nexus-u4qxk` (superseded by this RDR)

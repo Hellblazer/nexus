@@ -17,12 +17,12 @@ related: [RDR-070, RDR-075, RDR-095, RDR-108, RDR-155, RDR-156, RDR-164, RDR-181
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
 
-Gate log: run 1 (2026-08-15) BLOCKED: 1 Critical (sync unbounded commit →
+Gate log: run 1 (2026-08-15) BLOCKED — 1 Critical (sync unbounded commit →
 made async via shared `EngineJobs`), 5 Significant (jsonb `||` merge,
 discover existing-topics guard, symmetric rename tie-break,
-`updated_at`→`indexed_at`/nexus-927mo, two-step `action` CTE), all folded
+`updated_at`→`indexed_at`/nexus-927mo, two-step `action` CTE) — all folded
 in below; critique T2 `nexus/critique-rdr-193-gate-2026-08-15` [22617].
-Run 2 (2026-08-15) PASS: all 10 run-1 findings verified resolved; 2 new
+Run 2 (2026-08-15) PASS — all 10 run-1 findings verified resolved; 2 new
 Significant (one `EngineJobs` instance per job kind; client 409/410/failed
 envelope handling + contract test) folded in; critique T2
 `nexus/critique-rdr-193-gate-run2-2026-08-15` [22620].
@@ -37,7 +37,7 @@ Indexing has two remaining time sinks that are round-trip and egress shaped.
 Both manipulate state whose canonical copy already lives on the engine host,
 and both do that manipulation on the client, one HTTP call at a time. Every
 catalog op costs the ~0.1s cloud round-trip floor regardless of payload
-(measured: T2 `flush-tail-investigation-2026-08-08` [21723]: `begin_index_run_many`
+(measured: T2 `flush-tail-investigation-2026-08-08` [21723] — `begin_index_run_many`
 0.114 s/call as the batched control against 0.10-0.13 s for every per-row op).
 
 Both have been *batched* incrementally over 2026-07/08 (nexus-dst5h one-fetch
@@ -61,14 +61,14 @@ Per `nx index repo` run (`src/nexus/indexer.py`):
   `update` / `register` fallbacks.
 - `_run_housekeeping` (~:1531-1610) downloads the SAME owner list a SECOND
   time, then does miss_count reset / increment, rename detection by
-  `meta.content_hash`, rename link transfer, and orphan delete, as ONE POST
+  `meta.content_hash`, rename link transfer, and orphan delete — as ONE POST
   PER ROW (`w.update`, `w.link_if_absent`, `w.delete_document`), serial. A
   `/delete_many` route exists and is unused here.
 - `_build_frecency_doc_id_map` (~:1739) downloads the owner list a THIRD
   time to build `{file_path: tumbler}`.
 - Link generation (`catalog/link_generator.py`) issues ~8 UNBOUNDED
   `GET /list?content_type=` full-corpus downloads per run and one
-  `POST /link` per edge; there is NO batch link route.
+  `POST /link` per edge — there is NO batch link route.
 - `nx index md` (`doc_indexer.py` `_register_or_lookup_doc_id` :565 +
   `_catalog_markdown_hook` :2583) and `nx store put`
   (`catalog/store_hook.py::catalog_store_hook_tracked` :180) spend 3-6
@@ -77,8 +77,8 @@ Per `nx index repo` run (`src/nexus/indexer.py`):
 
 The client work that genuinely needs the client is: walking the tree,
 `stat`, sha256, ephemeral-path guard, content classification, and the regex
-scan that finds link targets. Everything else (the diff, the upsert, the
-miss_count state machine, rename detection, link resolution) is a
+scan that finds link targets. Everything else — the diff, the upsert, the
+miss_count state machine, rename detection, link resolution — is a
 set-operation over rows the engine already holds.
 
 ### Gap 2: Taxonomy discover downloads the entire collection to cluster it, though embeddings are born on the engine
@@ -86,12 +86,12 @@ set-operation over rows the engine already holds.
 The flush-time ASSIGN leg is already server-side (`nexus.assign_from_chashes_<dim>`,
 Liquibase `taxonomy-006`, shipped conexus 7.4.0 / engine v0.1.68; measured
 20-30x lower, T2 `indexing-perf-assessment-7.4.0` [21715]). What remains
-client-side is exactly four orchestrators (`discover`, `rebuild`, `split`,
-`project_against`) plus the labeler's two N+1 loops and the per-pair
+client-side is exactly four orchestrators — `discover`, `rebuild`, `split`,
+`project_against` — plus the labeler's two N+1 loops and the per-pair
 `persist_cross_links`:
 
 - `discover_for_collection` (`commands/taxonomy_cmd.py` :242 → :143 → :68)
-  pages EVERY chunk's text (250/req, `POST /v1/vectors/get`: the server
+  pages EVERY chunk's text (250/req, `POST /v1/vectors/get` — the server
   ignores `include=` and returns full documents) AND EVERY embedding
   (300/req, `/get-embeddings`) to the client, runs sklearn HDBSCAN
   (n ≤ 5000; `min_cluster_size=5`, `max_cluster_size=max(n//4, 50)`, eom,
@@ -118,7 +118,7 @@ data never needed to leave the host.
 
 At production corpus scale the taxonomy leg is again ~100% of flush-grain
 hook cost (90.1 s of 90.2 s over 3 flushes, nexus-ap8l0, 2026-08-10) even on
-the server-side assign path: an unexplained per-POST cost this RDR folds in
+the server-side assign path — an unexplained per-POST cost this RDR folds in
 as a measurement obligation (an `EXPLAIN` of `assign_from_chashes_1024` at
 ~600 centroids / 1000 chashes) rather than a fresh guess.
 
@@ -170,7 +170,7 @@ engine can require the manifest and the document to arrive together.
   precedent): a route the engine lacks 404s and propagates; the client never
   recomputes locally. The engine floor (`REQUIRED_ENGINE_VERSION`) bumps in
   the same client release under the paired-release choreography.
-- **All DDL through Liquibase; SQL functions are the established shape**:
+- **All DDL through Liquibase; SQL functions are the established shape** —
   `catalog-004` manifest fns, `catalog-006/007/008/012` combined-query fns
   (per-dim triplicate, `CREATE OR REPLACE`, explicit GRANT re-issue),
   `catalog-020` fence, `catalog-023/024/027/028` `gc_*` procedures (thin
@@ -181,12 +181,12 @@ engine can require the manifest and the document to arrive together.
   tumblers in input order via `claimNextSeq` :1565 on the owner's `next_seq`),
   `updateDocumentsMany` (~:1889, batched alias resolution + `ctx.batch`).
 - **A `staging` schema exists** (`staging-001-landing-tables.xml`:
-  `staging.chunks`, FORCE RLS, tenant_isolation policy): the landing-table
+  `staging.chunks`, FORCE RLS, tenant_isolation policy) — the landing-table
   idiom for "upload rows cheaply, commit once".
 - **Async job registry with 202+poll exists** (`http/RekeyJobs.java`,
   nexus-b878d): needed because the TLS proxy (`conexus-engine-tls` nginx
   `proxy_read_timeout` ~120 s) 504s any long synchronous request while the
-  txn commits anyway: the GH #1390 hazard class. A discover over a large
+  txn commits anyway — the GH #1390 hazard class. A discover over a large
   collection is a minutes-scale job and MUST NOT be a synchronous route.
 - **The engine already carries the numeric/text substrate:** onnxruntime +
   DJL tokenizers (Seam B, local bge-768 embed), jOOQ, GraalVM native-image
@@ -199,7 +199,7 @@ engine can require the manifest and the document to arrive together.
   `catalog_owners.next_seq` under the prevent-rather-than-catch stance for
   the address PK). A SQL reconcile either moves the claim into plpgsql
   (`SELECT … FOR UPDATE` on the owner row + increment) or receives
-  pre-minted tumblers from Java: an implementation decision recorded in
+  pre-minted tumblers from Java — an implementation decision recorded in
   Phase 1, not a design fork.
 - **Search-time taxonomy use is NOT the problem:** `cluster_by="semantic"`
   tries topic grouping first (batched reads) and falls back to Ward on the
@@ -212,7 +212,7 @@ engine can require the manifest and the document to arrive together.
   RDR-191 (unified `nexus.chunks` + `nexus.taxonomy_centroids`, manifest FK,
   server-side GC that already retired the client-side prune fallback),
   RDR-070/075/077 (taxonomy origin; "not LLM-based topic naming at discover"
-  is an explicit non-goal: the LLM relabel stays client-side).
+  is an explicit non-goal — the LLM relabel stays client-side).
 
 ## Decision
 
@@ -221,16 +221,16 @@ transaction; SQL wherever SQL can express it; a Java job only where an
 algorithm (clustering) has no SQL form. The client keeps exactly the work
 that needs the local filesystem or the operator's LLM.
 
-### Part A (Catalog): `reconcile` (stage → commit) replaces hook + housekeeping + link fan-out
+### Part A — Catalog: `reconcile` (stage → commit) replaces hook + housekeeping + link fan-out
 
 **A1 Engine.** New changeset `catalog-032-reconcile.xml`:
 
 1. `staging.catalog_reconcile(tenant_id, run_id, owner_tumbler, source_uri,
    file_path, physical_collection, content_hash, head_hash, source_mtime,
-   meta jsonb, content_type, title, …)`: FORCE RLS, tenant_isolation
+   meta jsonb, content_type, title, …)` — FORCE RLS, tenant_isolation
    policy, same shape as `staging.chunks`.
 2. `nexus.catalog_reconcile_commit(p_owner text, p_run_id text)
-   RETURNS TABLE(source_uri text, tumbler text, action text)`: plpgsql,
+   RETURNS TABLE(source_uri text, tumbler text, action text)` — plpgsql,
    VOLATILE, SECURITY INVOKER (RLS scopes every row), ONE transaction:
    - UPSERT `catalog_documents` from staging `ON CONFLICT (tenant_id, source_uri)
      [live-only identity `ux_catalog_documents_live_source_uri`, catalog-016]
@@ -250,7 +250,7 @@ that needs the local filesystem or the operator's LLM.
      silently restores the write storm" is the parity test.
    - Every `meta` write in the function (miss_count reset/increment, rename
      bookkeeping) uses `meta || jsonb_build_object(...)` / `jsonb_set`, NEVER
-     a bare `SET meta = …`: the merge-not-replace contract of
+     a bare `SET meta = …` — the merge-not-replace contract of
      `updateDocument` (nexus-ke45f). A miss_count-only touch does NOT move
      `indexed_at`.
    - Housekeeping, set-based: owner docs absent from staging →
@@ -262,29 +262,29 @@ that needs the local filesystem or the operator's LLM.
      (numeric segment order) is the target, among `missing` candidates the
      lowest tumbler is the source, each missing row is consumed at most
      once, and any leftover missing rows fall through to the miss_count
-     branch, a declared rule (Resolved Q2), tested with a multi-collision
+     branch — a declared rule (Resolved Q2), tested with a multi-collision
      fixture (the live catalog carries 201 duplicated `source_uri`s per
      catalog-002, so many-to-one is not hypothetical).
      The two-run grace window semantics are unchanged (see
-     `_prune_deleted_files`'s docstring: the manifest FK cascade + server-side
+     `_prune_deleted_files`'s docstring — the manifest FK cascade + server-side
      GC already handle chunk cleanup).
    - Owner `head_hash` update (`_set_owner_head_hash` folds in).
    - `DELETE FROM staging.catalog_reconcile WHERE run_id = p_run_id`.
    - Tumbler minting for `created` rows happens INSIDE the function (owner-row
      `FOR UPDATE` + highest-child self-heal, the `claimNextSeq` contract in
-     plpgsql, per Resolved Q1). Rename tie-break: lowest tumbler by numeric
-     segment order (declared rule, Resolved Q2).
+     plpgsql — Resolved Q1). Rename tie-break: lowest tumbler by numeric
+     segment order (declared rule — Resolved Q2).
    - `nexus.catalog_reconcile_reap(p_interval)` drops stale runs (newest
      stage row older than the interval, default 24 h); invoked at the start
      of every `stage` call for the tenant (Resolved Q9).
 3. `nexus.catalog_links_upsert_by_path(p_owner text, p_edges jsonb)
-   RETURNS TABLE(created int, skipped int, unresolved jsonb)`: resolves
+   RETURNS TABLE(created int, skipped int, unresolved jsonb)` — resolves
    `file_path → tumbler` in SQL, `INSERT … ON CONFLICT DO NOTHING` (with the
    `co_discovered_by` merge), one txn. Kills link_generator's ~8 full-corpus
    lists and per-edge POSTs.
 
 Routes (`CatalogHandler` switch + `CatalogRepository`, inside
-`tenantScope.withTenant`). **`commit` is ASYNC**: the same TLS-proxy
+`tenantScope.withTenant`). **`commit` is ASYNC** — the same TLS-proxy
 reasoning that makes B2's discover a job applies to any route whose
 duration scales with corpus size (GH #1390 class: a 504 while the txn
 commits anyway). Phase 1 therefore generalises `RekeyJobs` into a shared
@@ -302,9 +302,9 @@ extra round trip.
 |---|---|---|
 | `POST /v1/catalog/reconcile/stage` | `{owner, run_id, rows[≤1000]}` | `{staged}` |
 | `POST /v1/catalog/reconcile/commit` | `{owner, run_id}` | `202 {job_id, poll}`; `409 {job_id}` if a commit for the tenant is running |
-| `GET /v1/catalog/reconcile/{job_id}` | n/a | `200 {status: running}` \| `200 {status: succeeded, created:[{source_uri,tumbler}], updated:[…], unchanged_count, trashed:[…], renamed:[{old,new}], path_to_tumbler:{…}}` \| `200 {status: failed, error}` \| `410 {status: lost}` (foreign epoch: re-commit is idempotent and self-answering) |
+| `GET /v1/catalog/reconcile/{job_id}` | — | `200 {status: running}` \| `200 {status: succeeded, created:[{source_uri,tumbler}], updated:[…], unchanged_count, trashed:[…], renamed:[{old,new}], path_to_tumbler:{…}}` \| `200 {status: failed, error}` \| `410 {status: lost}` (foreign epoch — re-commit is idempotent and self-answering) |
 | `POST /v1/catalog/links/upsert_many` | `{owner, edges:[{from_path,to_path,type,created_by,spans?}]}` | `{created, skipped, unresolved}` |
-| `POST /v1/catalog/doc/resolve_or_register` | `{owner_name/curator, source_uri \| file_path, title, year?, title_fallback?}` | `{tumbler, created}`: `title`/`year` backfill via `COALESCE` on empty; GHOST-only title match when `title_fallback` (Resolved Q3) |
+| `POST /v1/catalog/doc/resolve_or_register` | `{owner_name/curator, source_uri \| file_path, title, year?, title_fallback?}` | `{tumbler, created}` — `title`/`year` backfill via `COALESCE` on empty; GHOST-only title match when `title_fallback` (Resolved Q3) |
 
 `path_to_tumbler` in the commit envelope replaces the frecency third
 download. `MAX_BATCH_DOC_IDS = 1000` mirrored on stage; commit is one txn
@@ -312,7 +312,7 @@ regardless of staged count (a 20k-file repo = 20 stage calls + 1 commit +
 polls). Perf obligation (Phase 1 gate, not assumed): a Java test drives a
 synthetic 20k-row owner through stage → commit on the test substrate and
 records commit wall time; the accept bar is < 30 s at 20k rows (set-based
-SQL over indexed keys, expected single-digit seconds), and the async
+SQL over indexed keys — expected single-digit seconds), and the async
 envelope makes the TLS ceiling a latency fact rather than a correctness
 hazard either way.
 
@@ -330,7 +330,7 @@ idempotent re-commit is a no-op; 20k-row perf gate; job envelope states
 **A2 Client.**
 
 - `catalog/http_catalog_client.py`: `reconcile_stage`, `reconcile_commit`,
-  `links_upsert_many`, `resolve_or_register`: added to
+  `links_upsert_many`, `resolve_or_register` — added to
   `_SERVICE_ONLY_WRITE_OPS` (`catalog/factory.py` idiom; the capability check
   is honest and, since every mode is service mode, never false).
 - `indexer.py` `_catalog_hook`: keep walk/stat/sha256/ephemeral/classify;
@@ -341,7 +341,7 @@ idempotent re-commit is a no-op; 20k-row perf gate; job envelope states
   edges, one `links_upsert_many` per generator.
 - `doc_indexer.py` `_register_or_lookup_doc_id` + `_catalog_markdown_hook`
   → one `resolve_or_register` carrying `title`/`year`/`source_mtime`
-  (`chunk_count` is already folded into `write_manifest_many`, nexus-u2kwq
+  (`chunk_count` is already folded into `write_manifest_many` — nexus-u2kwq
   "chunk_count fold-in", `CatalogRepository.EX_DOC_CHUNKS`; the markdown
   hook's remaining writes are exactly title/year/indexed_at/source_mtime,
   doc_indexer.py ~2613-2660); the ephemeral-worktree guard stays
@@ -356,7 +356,7 @@ idempotent re-commit is a no-op; 20k-row perf gate; job envelope states
   ran, or the run is already committed and re-commit is a no-op) after
   logging `catalog_reconcile_job_lost`; `failed` → surface the error and
   exit non-zero, never continue the index run as if reconciled.
-- Tests: `_catalog_hook` contract re-pinned in the dst5h style: commit
+- Tests: `_catalog_hook` contract re-pinned in the dst5h style — commit
   exactly 1/run, stage = ceil(N/1000), ZERO single `update` / `register` /
   `delete` / `link` calls in a warm run; job-envelope contract test
   (409 waits, 410 re-submits once, failed aborts); service-mode contract
@@ -367,18 +367,18 @@ Expected effect (warm 1930-file run, 0.1 s RTT floor): catalog phase from
 round trips; link phase from ~8 lists + O(edges) POSTs → O(generators)
 POSTs; `nx index md` identity trips per file 6 → 1.
 
-### Part B: Taxonomy on the engine
+### Part B — Taxonomy on the engine
 
 **B1 SQL wins (ship with Part A; no clustering involved).** New changeset
 `taxonomy-008-serverside-projection-links.xml`:
 
-- `nexus.taxonomy_project_collection_<dim>(p_src_collection, p_threshold)`:
+- `nexus.taxonomy_project_collection_<dim>(p_src_collection, p_threshold)` —
   the whole-collection generalisation of the `assign_from_chashes` cross
   pass: `chunks ⋈ foreign centroids` argmax `≥ PROJECTION_THRESHOLD`, upsert
   `topic_assignments` (`assigned_by='projection'`, GREATEST semantics
   verbatim), one statement, zero egress. Replaces `project_against` and
   `_svc_fetch_all_embeddings`.
-- `nexus.taxonomy_cross_links(p_collection, p_threshold)`: centroid ×
+- `nexus.taxonomy_cross_links(p_collection, p_threshold)` — centroid ×
   foreign-centroid cosine via `<=>`, `INSERT topic_links ON CONFLICT`,
   returns count. Replaces `compute_cross_links` + the N+1
   `persist_cross_links`.
@@ -403,7 +403,7 @@ POSTs; `nx index md` identity trips per file 6 → 1.
   array `[{collection, status, topics, error}]`; per-tenant single-flight
   (409). Content guard INSIDE each collection's txn: if the collection
   already has topics and `force` is false the collection is reported
-  `skipped_existing` and nothing is written: the server-side atomic
+  `skipped_existing` and nothing is written — the server-side atomic
   backstop that today's `discover_skip_existing` preflight + persist-time
   guard provide (a duplicate submit or a client that forgot `force` cannot
   duplicate topics; concurrency is the 409's job, content is this guard's).
@@ -423,7 +423,7 @@ POSTs; `nx index md` identity trips per file 6 → 1.
   selection with the nexus-9b9oi `max_cluster_size` cap → centroid centres)
   and k-means++ / MiniBatch for n > 5000 (`k = max(10, √n/3)`, seed 42).
   Behaviour-preserving; native-image friendly. Ships with its own
-  `taxonomy/VectorMath` (no reusable Java vector utility exists, per Resolved
+  `taxonomy/VectorMath` (no reusable Java vector utility exists — Resolved
   Q8; ~1.3-1.5k LOC Java total before tests). Parity gate = the
   `hdbscan_rootgrab_400x1024_f16.npz` fixture (Resolved Q5).
   Rejected: k-means-only (changes small-collection taxonomy shape, forces
@@ -455,19 +455,19 @@ POSTs; `nx index md` identity trips per file 6 → 1.
 
 ### Sequencing (DECIDED: A first, then B2)
 
-1. **Phase 1: A1 engine half** (changeset + repo + `EngineJobs` + handler +
+1. **Phase 1 — A1 engine half** (changeset + repo + `EngineJobs` + handler +
    Java tests incl. the 20k-row commit perf gate).
-2. **Phase 2: A2 client half** (switch + deletion + contract tests) +
+2. **Phase 2 — A2 client half** (switch + deletion + contract tests) +
    warm-index perf probe (`service_catalog_op_stats`).
-3. **Phase 3: B1** SQL functions + labeler batch routes + ap8l0 EXPLAIN.
+3. **Phase 3 — B1** SQL functions + labeler batch routes + ap8l0 EXPLAIN.
    Ships in the same engine cut as Phase 1.
-4. **Engine cut #1** via the `engine-release` skill: migration-rehearsal
+4. **Engine cut #1** via the `engine-release` skill — migration-rehearsal
    `--candidate-migration` MANDATORY (db/changelog cut); floor bump in the
    same client release; deploy at client-tag push (paired-release
    choreography).
-5. **Phase 4: B2 engine job** (Java clustering port + discover service +
+5. **Phase 4 — B2 engine job** (Java clustering port + discover service +
    routes + tests).
-6. **Phase 5: B2 client half** (submit/poll, deletions, contract test) +
+6. **Phase 5 — B2 client half** (submit/poll, deletions, contract test) +
    discover perf probe.
 7. **Engine cut #2**, same gates.
 
@@ -502,7 +502,7 @@ Each phase: engine half + client half, dual-reviewed
 - Positive: warm `nx index repo` catalog phase from O(files) round trips to
   O(1); `nx index md` / `store put` identity trips 6 → 1; discover CLUSTERING
   egress from ~GBs to ~0 and round trips from ~740 to a submit + polls (the
-  LLM relabel still pulls per-topic sample texts by design (bounded, ~KBs
+  LLM relabel still pulls per-topic sample texts by design — bounded, ~KBs
   per topic via `label_context_many`, RDR-070 non-goal preserved); the
   client sheds the reconcile state machine, sklearn/HDBSCAN from the
   discover path, and the centroid-cache staleness class named at
@@ -510,8 +510,8 @@ Each phase: engine half + client half, dual-reviewed
 - Negative / cost: two engine cuts; a Java HDBSCAN port (the single largest
   item) with a parity obligation against the sklearn output; the
   `staging.catalog_reconcile` table and job registry are new operational
-  surfaces (stale run_id rows are reaped by `catalog_reconcile_reap` at every `stage` call, per Resolved Q9).
-- Migration: none for data: the new procedures operate on existing tables.
+  surfaces (stale run_id rows are reaped by `catalog_reconcile_reap` at every `stage` call — Resolved Q9).
+- Migration: none for data — the new procedures operate on existing tables.
   Existing ENGINE routes (`register_many`, `update_many`, per-row `update`/
   `delete`/`link`, `centroids/foreign`) remain served for other callers
   until a later retirement RDR; the nexus CLIENT (indexer, taxonomy CLI,
@@ -532,14 +532,14 @@ Every question raised at draft time is now either resolved from the code, a
 declared decision, or a spike scheduled at a named phase with a named gate.
 Nothing here blocks the gate.
 
-1. **Tumbler minting inside `catalog_reconcile_commit`: RESOLVED (research-1):**
+1. **Tumbler minting inside `catalog_reconcile_commit` — RESOLVED (research-1):**
    the claim moves into plpgsql. `claimNextSeq` is `SELECT … FOR UPDATE` on the
    owner row + `max(next_seq, highest_child_seq)+1` self-heal + `UPDATE`, one
    txn, no Java-side state; the SQL function reimplements the highest-child
    self-heal and a constraint-retry loop inline.
-2. **Rename precedence: DECIDED as a DECLARED BEHAVIOUR CHANGE (research-2):**
+2. **Rename precedence — DECIDED as a DECLARED BEHAVIOUR CHANGE (research-2):**
    today's rule is last-write-wins over `by_owner`'s lexicographic
-   `ORDER BY tumbler`, an accident. The SQL pins ONE rule: among `created`
+   `ORDER BY tumbler` — an accident. The SQL pins ONE rule: among `created`
    rows sharing a `content_hash` with a missing row, the lowest tumbler by
    numeric segment order wins; symmetrically the lowest-tumbler MISSING row
    is the rename source, each consumed at most once, leftovers fall to the
@@ -547,24 +547,24 @@ Nothing here blocks the gate.
    multi-collision fixture.
    Link transfer reuses the engine's `ON CONFLICT` + `co_discovered_by` merge
    on `(tenant_id, from_tumbler, to_tumbler, link_type)`.
-3. **`resolve_or_register` scope: RESOLVED (research-3):** keyed on
+3. **`resolve_or_register` scope — RESOLVED (research-3):** keyed on
    `(owner, source_uri)` with `title_fallback` for the GHOST-only third-tier
    match; body carries `title`/`year` backfill (`COALESCE` on empty); the
    ephemeral-worktree guard stays client-side (filesystem predicate).
-4. **c-TF-IDF via `to_tsvector`: RESOLVED BY SPIKE (research-6, research-12):**
+4. **c-TF-IDF via `to_tsvector` — RESOLVED BY SPIKE (research-6, research-12):**
    same top term as sklearn in 8/8 proxy clusters, top-10 prefix overlap
    4-8/10; rank by stem, display the modal surface form via
    `ts_lexize('english_stem', word)` (verified in SQL). No Java tokenizer.
    No downstream consumer depends on tokenisation.
-5. **HDBSCAN parity gate: DECIDED (research-5, research-13):** fixture
+5. **HDBSCAN parity gate — DECIDED (research-5, research-13):** fixture
    `tests/fixtures/hdbscan_rootgrab_400x1024_f16.npz` (real geometry; synthetic
    blobs do not reproduce eom root-grab). Java port must reproduce: capped run
    → 16 clusters, largest 40; uncapped run → 2 clusters [359, 23]; ARI ≥ 0.90
    vs sklearn labels (floor for tie-order; ~1.0 expected). Plus `_merge_labels`
    (greedy descending-similarity bipartite claim, threshold 0.8) and
    `compute_split` (KMeans n_init=10, seed 42) reproduced exactly on seeded
-   fixtures. Noise chunks get no assignment row at discover; kept.
-6. **Discover job shape: DECIDED (authorial call informed by research-8,
+   fixtures. Noise chunks get no assignment row at discover — kept.
+6. **Discover job shape — DECIDED (authorial call informed by research-8,
    which established RekeyJobs' single-outcome envelope does not settle it):**
    ONE job per submit; existing-topics content guard inside each collection's
    txn (`skipped_existing` unless `force`);
@@ -575,26 +575,26 @@ Nothing here blocks the gate.
    so an engine death mid-job leaves a truthful partial record; per-tenant
    single-flight (409), epoch-fenced 410 semantics carried verbatim from
    RekeyJobs. `record_discover_count` moves inside the collection's txn.
-7. **`assign_batch` / `compute_assignments`: RESOLVED (research-7):** zero
+7. **`assign_batch` / `compute_assignments` — RESOLVED (research-7):** zero
    production callers; B1 retires the CLIENT methods `assign_batch`,
    `compute_assignments`, `project_against`, `_svc_fetch_all_embeddings`,
    `compute_cross_links`, `persist_cross_links`, and the client's use of the
    `centroids/foreign` route (the engine-side HTTP route itself is retained
-   until a later retirement RDR; see Consequences). Re-grep at Phase 3
+   until a later retirement RDR — see Consequences). Re-grep at Phase 3
    planning.
-8. **Vector math: DECIDED (research-10):** no reusable Java utility exists;
+8. **Vector math — DECIDED (research-10):** no reusable Java utility exists;
    B2 ships a small `taxonomy/VectorMath` (dot, norm, cosine, pairwise
    distance, mean) alongside `Hdbscan`, `KMeans`, `LabelMerge`. Sizing:
    HDBSCAN ~500-700 LOC, k-means++/MiniBatch ~150-200, merge/split ~100,
-   vector math ~100, discover service + jobs + handler ~400, totaling
-   ~1.3-1.5k LOC Java before tests. Estimate revisited at Phase 4 planning against the
+   vector math ~100, discover service + jobs + handler ~400 — ~1.3-1.5k LOC
+   Java before tests. Estimate revisited at Phase 4 planning against the
    actual port.
-9. **Staging reaper: DECIDED (research-4):** `catalog_reconcile_commit`
+9. **Staging reaper — DECIDED (research-4):** `catalog_reconcile_commit`
    deletes its own `run_id` rows; `nexus.catalog_reconcile_reap(interval)`
    drops runs whose newest stage row is older than the interval (default
    24 h) and is invoked at the start of every `stage` call for the same
-   tenant; self-cleaning, no scheduler.
-10. **nexus-ap8l0 cause: SPIKE AT PHASE 3 (research-11):** `EXPLAIN (ANALYZE,
+   tenant — self-cleaning, no scheduler.
+10. **nexus-ap8l0 cause — SPIKE AT PHASE 3 (research-11):** `EXPLAIN (ANALYZE,
     BUFFERS)` of `assign_from_chashes_1024` at ~600 centroids / 1000 chashes
     against a populated tenant; gate: cross pass uses the per-dim partial
     HNSW on unified centroids. Not assumed either way.
@@ -606,10 +606,10 @@ Nothing here blocks the gate.
 | 1 | A1: catalog-032 changeset, `catalog_reconcile_commit` (+ `_reap`), `catalog_links_upsert_by_path`, `EngineJobs` registry (RekeyJobs generalised), 5 routes incl. commit poll, Java tests incl. 20k-row perf gate | epic + 1-2 |
 | 2 | A2: client switch, deletions, contract tests, warm-index perf probe | 1-2 |
 | 3 | B1: taxonomy-008 changeset, project/cross-links fns, labeler batch routes, ap8l0 EXPLAIN | 1-2 |
-| n/a | Engine cut #1 + paired client release | release beads |
+| — | Engine cut #1 + paired client release | release beads |
 | 4 | B2 engine: Java HDBSCAN + k-means, `TaxonomyDiscoverService`, job routes, tests | 2-3 |
 | 5 | B2 client: submit/poll, deletions, contract test, discover perf probe | 1 |
-| n/a | Engine cut #2 + paired client release | release beads |
+| — | Engine cut #2 + paired client release | release beads |
 
 Beads to be created at accept; not before (RDR-024 guardrail).
 
@@ -617,21 +617,21 @@ Beads to be created at accept; not before (RDR-024 guardrail).
 
 ### Key Discoveries
 
-- **✅ Verified** (source search): Tumbler minting can move into plpgsql: `claimNextSeq` = owner-row `FOR UPDATE` + highest-child self-heal + `UPDATE`, one txn, no Java-only state. *Source: CatalogRepository.java:1037,1080-1083,1121-1133,1565-1575 (research-1)*
-- **✅ Verified** (source search): Rename precedence today is last-write-wins over `by_owner`'s lexicographic `ORDER BY tumbler`; the SQL rule is a declared behaviour change. `catalog_links` unique key `(tenant_id, from_tumbler, to_tumbler, link_type)` with an existing ON CONFLICT merge. *Source: indexer.py:1549-1600; CatalogRepository.java:2905-2912 (research-2)*
-- **✅ Verified** (source search): store_put URI is `chroma://<collection>/<title>`; `_find_ghost_by_title` is a GHOST-only third tier; `_catalog_markdown_hook` also backfills title/year and applies an ephemeral-worktree guard. *Source: store_hook.py:126,180; doc_indexer.py:565,2583 (research-3)*
-- **✅ Verified** (source search): Line refs: `update_many` at indexer.py:1250; `writeManifestMany` body/loop/withTenant at CatalogRepository.java:4351/4365/4388. Staging: 300-row batch load, FORCE RLS, no reaper. `miss_count` is meta-jsonb-only; meta merge is `||`. *Source: StagingHandler.java:245-310; staging-001 (research-4)*
-- **✅ Verified** (source search): Exact sklearn surface the Java port must reproduce (params, cap, eom, centroid store, MiniBatch branch, `_merge_labels` greedy algorithm @0.8, `compute_split` KMeans n_init=10) and what is incidental. *Source: taxonomy_compute.py:50,153-422 (research-5)*
-- **✅ Verified** (source search): Nothing downstream depends on c-TF-IDF tokenisation; `terms` feed only the LLM relabel prompt. *Source: taxonomy_cmd.py:1782-1788; http_taxonomy_store.py:1559-1581 (research-6)*
-- **✅ Verified** (source search): `assign_batch`/`compute_assignments` have zero production callers; live B1 targets are `project_against` (4 call sites) and the cross-links pair. *Source: grep 2026-08-15; http_taxonomy_store.py:1071-1083,1414-1446; taxonomy_cmd.py:188,2027,2167; commands/index.py:1126 (research-7)*
-- **✅ Verified** (source search): RekeyJobs wiring/route/epoch/409/retention shape; envelope is single-outcome; purge-trash VACUUM is fire-and-forget and NOT a template. *Source: RekeyJobs.java, RemapHandler.java, NexusService.java:323-326,462 (research-8)*
-- **✅ Verified** (source search): Discover CLI semantics to preserve (`--all` enumeration, `local_exclude_collections=["code__*"]` at config.py:969, preflight guard, `--force`→rebuild, `record_discover_count`, synchronous per-collection post-index auto-discover with failure isolation). *Source: taxonomy_cmd.py:41-65,294-314,596-629; commands/index.py:195-210,1289-1304 (research-9)*
-- **✅ Verified** (source search): Pure-Java clustering needs no native-image metadata; NO existing Java vector-math utility to reuse. *Source: pom.xml:115-121; TaxonomyCentroidRepository.java:123-131,390 (research-10)*
-- **✅ Verified** (spike, PG 17.5 bundled): `to_tsvector('english')` class-TF-IDF reproduces sklearn's top term in 8/8 proxy clusters (top-10 prefix overlap 4-8/10); stems display as modal surface form via `ts_lexize`. *Source: scratchpad tsvector_spike.py (research-12)*
-- **✅ Verified** (source search): Parity fixture exists: `tests/fixtures/hdbscan_rootgrab_400x1024_f16.npz` (capped → 16 clusters/largest 40; uncapped → 2 [359,23]). *Source: tests/fixtures/PROVENANCE-hdbscan-rootgrab.md (research-13)*
-- **❓ Assumed** (spike, Phase 3): ap8l0's 30 s/flush is a plan/HNSW-usage issue in the `assign_from_chashes` cross pass; ARI ≥ 0.9 floor holds on the fixture. *(research-11, narrowed by research-12/13)*
+- **✅ Verified** (source search) — Tumbler minting can move into plpgsql: `claimNextSeq` = owner-row `FOR UPDATE` + highest-child self-heal + `UPDATE`, one txn, no Java-only state. *Source: CatalogRepository.java:1037,1080-1083,1121-1133,1565-1575 (research-1)*
+- **✅ Verified** (source search) — Rename precedence today is last-write-wins over `by_owner`'s lexicographic `ORDER BY tumbler`; the SQL rule is a declared behaviour change. `catalog_links` unique key `(tenant_id, from_tumbler, to_tumbler, link_type)` with an existing ON CONFLICT merge. *Source: indexer.py:1549-1600; CatalogRepository.java:2905-2912 (research-2)*
+- **✅ Verified** (source search) — store_put URI is `chroma://<collection>/<title>`; `_find_ghost_by_title` is a GHOST-only third tier; `_catalog_markdown_hook` also backfills title/year and applies an ephemeral-worktree guard. *Source: store_hook.py:126,180; doc_indexer.py:565,2583 (research-3)*
+- **✅ Verified** (source search) — Line refs: `update_many` at indexer.py:1250; `writeManifestMany` body/loop/withTenant at CatalogRepository.java:4351/4365/4388. Staging: 300-row batch load, FORCE RLS, no reaper. `miss_count` is meta-jsonb-only; meta merge is `||`. *Source: StagingHandler.java:245-310; staging-001 (research-4)*
+- **✅ Verified** (source search) — Exact sklearn surface the Java port must reproduce (params, cap, eom, centroid store, MiniBatch branch, `_merge_labels` greedy algorithm @0.8, `compute_split` KMeans n_init=10) and what is incidental. *Source: taxonomy_compute.py:50,153-422 (research-5)*
+- **✅ Verified** (source search) — Nothing downstream depends on c-TF-IDF tokenisation; `terms` feed only the LLM relabel prompt. *Source: taxonomy_cmd.py:1782-1788; http_taxonomy_store.py:1559-1581 (research-6)*
+- **✅ Verified** (source search) — `assign_batch`/`compute_assignments` have zero production callers; live B1 targets are `project_against` (4 call sites) and the cross-links pair. *Source: grep 2026-08-15; http_taxonomy_store.py:1071-1083,1414-1446; taxonomy_cmd.py:188,2027,2167; commands/index.py:1126 (research-7)*
+- **✅ Verified** (source search) — RekeyJobs wiring/route/epoch/409/retention shape; envelope is single-outcome; purge-trash VACUUM is fire-and-forget and NOT a template. *Source: RekeyJobs.java, RemapHandler.java, NexusService.java:323-326,462 (research-8)*
+- **✅ Verified** (source search) — Discover CLI semantics to preserve (`--all` enumeration, `local_exclude_collections=["code__*"]` at config.py:969, preflight guard, `--force`→rebuild, `record_discover_count`, synchronous per-collection post-index auto-discover with failure isolation). *Source: taxonomy_cmd.py:41-65,294-314,596-629; commands/index.py:195-210,1289-1304 (research-9)*
+- **✅ Verified** (source search) — Pure-Java clustering needs no native-image metadata; NO existing Java vector-math utility to reuse. *Source: pom.xml:115-121; TaxonomyCentroidRepository.java:123-131,390 (research-10)*
+- **✅ Verified** (spike, PG 17.5 bundled) — `to_tsvector('english')` class-TF-IDF reproduces sklearn's top term in 8/8 proxy clusters (top-10 prefix overlap 4-8/10); stems display as modal surface form via `ts_lexize`. *Source: scratchpad tsvector_spike.py (research-12)*
+- **✅ Verified** (source search) — Parity fixture exists: `tests/fixtures/hdbscan_rootgrab_400x1024_f16.npz` (capped → 16 clusters/largest 40; uncapped → 2 [359,23]). *Source: tests/fixtures/PROVENANCE-hdbscan-rootgrab.md (research-13)*
+- **❓ Assumed** (spike, Phase 3) — ap8l0's 30 s/flush is a plan/HNSW-usage issue in the `assign_from_chashes` cross pass; ARI ≥ 0.9 floor holds on the fixture. *(research-11, narrowed by research-12/13)*
 
 Measured baselines to compare against: T2 [21715] (7.4.0 flush-tail),
 [21723] (round-trip floor + lock convoy), nexus-ap8l0 (production-scale
-taxonomy leg 90 s / 3 flushes; prune-deleted-files 547 s; the latter already
+taxonomy leg 90 s / 3 flushes; prune-deleted-files 547 s — the latter already
 addressed server-side by RDR-191 Phase 6).

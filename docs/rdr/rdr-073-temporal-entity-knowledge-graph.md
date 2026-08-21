@@ -88,15 +88,15 @@ CREATE TABLE IF NOT EXISTS entity_aliases (
 
 ### MCP tools (3)
 
-- `entity_add(subject, predicate, object, valid_from?)`: auto-creates entities, adds triple
-- `entity_query(subject, predicate?, as_of?)`: returns all matching triples
-- `entity_invalidate(subject, predicate, object, ended)`: sets valid_to
+- `entity_add(subject, predicate, object, valid_from?)` — auto-creates entities, adds triple
+- `entity_query(subject, predicate?, as_of?)` — returns all matching triples
+- `entity_invalidate(subject, predicate, object, ended)` — sets valid_to
 
 ### CLI (3 commands)
 
-- `nx entity list [--type TYPE]`: browse entities
-- `nx entity show NAME`: all triples for an entity, current by default
-- `nx entity show NAME --as-of 2026-01`: historical state
+- `nx entity list [--type TYPE]` — browse entities
+- `nx entity show NAME` — all triples for an entity, current by default
+- `nx entity show NAME --as-of 2026-01` — historical state
 
 ### What is NOT in scope (v1)
 

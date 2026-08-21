@@ -24,7 +24,7 @@ implementation_notes: ""
 > genuinely-novel-for-nexus idea; MemForest paper at catalog tumbler `1.14.4`).
 > Problem Statement and Approach are sketched; deeper gate sections await
 > `/conexus:rdr-research`. **High scope-creep risk** (see Gap 2 and the
-> overlap note with RDR-073): this stub deliberately bounds the idea before
+> overlap note with RDR-073) — this stub deliberately bounds the idea before
 > any implementation.
 
 ## Problem Statement
@@ -61,14 +61,14 @@ about a recurring subject regardless of which session produced it. The synthesis
 flagged the nexus analog as novel and high-value but high-effort: a cross-tier
 Entity Cluster keyed by entity name, driven automatically by the relay `Bead`
 field. Strongly overlaps RDR-073 (Temporal Entity Knowledge Graph, currently
-deferred). Research must reconcile the two before either proceeds.
+deferred) — research must reconcile the two before either proceeds.
 
 ### Technical Environment
 
 - T2 `memory` store (`db/t2/memory_store.py`).
 - Catalog graph + typed links (`src/nexus/catalog/`, RDR-108 identity model).
 - T3 chunks (content-addressed; `document_chunks` manifest joins doc to chunks).
-- BERTopic taxonomy (`db/t2/catalog_taxonomy.py`), collection granularity only.
+- BERTopic taxonomy (`db/t2/catalog_taxonomy.py`) — collection granularity only.
 
 ## Research Findings
 
@@ -82,16 +82,16 @@ whether the cluster is a materialized T2 table or a query-time view.]
 
 - **Documented**: MemForest entity-tree cross-session aggregation (tumbler `1.14.4`).
 - **Assumed**: entity resolution can be bootstrapped from bead-ID mentions.
-  Resolution quality is the risk everything else here depends on.
+  Resolution quality is the load-bearing risk.
 
 ### Critical Assumptions
 
 - [ ] A cross-tier entity handle delivers materially better context bundles
-  than separate per-tier queries. **Status**: Unverified. **Method**: Spike
+  than separate per-tier queries — **Status**: Unverified — **Method**: Spike
 - [ ] The cluster can stay an aggregation/index (not a source of truth) and
-  avoid duplicating the catalog. **Status**: Unverified. **Method**: Spike
-- [ ] This does not duplicate or conflict with RDR-073. **Status**: Unverified.
-  **Method**: Source Search (RDR-073)
+  avoid duplicating the catalog — **Status**: Unverified — **Method**: Spike
+- [ ] This does not duplicate or conflict with RDR-073 — **Status**: Unverified
+  — **Method**: Source Search (RDR-073)
 
 ## Proposed Solution
 
@@ -122,5 +122,5 @@ boundaries.]
 
 - T3 synthesis: `research-memforest-nexus-leverage-2026-05-27` (idea #7, novel)
 - MemForest paper, catalog tumbler `1.14.4`
-- RDR-073 (Temporal Entity Knowledge Graph, deferred; reconcile), RDR-050
+- RDR-073 (Temporal Entity Knowledge Graph, deferred — reconcile), RDR-050
   (knowledge-graph query planning), RDR-108 (graph identity normalization)

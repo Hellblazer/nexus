@@ -85,7 +85,7 @@ on Claude Code 2.1.153 (entries below cite that source unless noted).
 - **Hook input (per chunk):** `{session_id, transcript_path, cwd,
   hook_event_name: "MessageDisplay", turn_id, message_id, index, final,
   delta}`. `delta` carries newly completed lines (whole lines except the
-  final chunk, which can end mid-line or arrive empty). `message_id`
+  final chunk, which may end mid-line and may be empty). `message_id`
   and `turn_id` are stable across chunks.
 - **Hook output:** `{"hookSpecificOutput": {"hookEventName":
   "MessageDisplay", "displayContent": "<text>"}}`. `displayContent` is
@@ -146,14 +146,14 @@ pinned spec; multi-line markers need a different design).]
 
 - [ ] A canonical, single-line marker grammar covers the routing and
   projection use cases without colliding with palinex surface
-  descriptors (RDR-127) or normal agent prose markdown. **Status**:
-  Unverified. **Method**: Spike
+  descriptors (RDR-127) or normal agent prose markdown — **Status**:
+  Unverified — **Method**: Spike
 - [ ] Hook latency stays below the threshold where users perceive
-  streaming stutter (target: sub-50ms p99 per chunk). **Status**:
-  Unverified. **Method**: Spike
+  streaming stutter (target: sub-50ms p99 per chunk) — **Status**:
+  Unverified — **Method**: Spike
 - [ ] Markers re-entering the model's context next turn (display-only
-  scope) is a feature, not a bug, for routing. **Status**: Unverified.
-  **Method**: Source Search (RDR-121/125 design intent)
+  scope) is a feature, not a bug, for routing — **Status**: Unverified
+  — **Method**: Source Search (RDR-121/125 design intent)
 
 ## Proposed Solution
 
@@ -202,9 +202,9 @@ plan, finalization gate: to be completed during research.]
 - `code.claude.com/docs/en/hooks.md` § MessageDisplay (verified
   2026-05-27, Claude Code 2.1.153).
 - Claude Code CHANGELOG 2.1.152 (MessageDisplay shipped).
-- RDR-111 (ORB, scrapped; conceptual ancestor of the projection
+- RDR-111 (ORB, scrapped — conceptual ancestor of the projection
   substrate).
 - RDR-121 (Hook-Enforced Tool Routing), RDR-125 (Routing-Hook Plugin
-  Ownership): the routing-hook discipline this consumes.
-- RDR-127 (Substrate-Decoupled Surface Rendering; palinex as
-  downstream): the natural consumer of the mirrored stream.
+  Ownership) — the routing-hook discipline this consumes.
+- RDR-127 (Substrate-Decoupled Surface Rendering — palinex as
+  downstream) — the natural consumer of the mirrored stream.

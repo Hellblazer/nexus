@@ -21,7 +21,7 @@ related: [RDR-030, RDR-087, RDR-152, RDR-155, RDR-161, RDR-166]
 
 Before RDR-152/155, nexus was effectively a single Python process: one `structlog`
 stream under `~/.config/nexus/logs/` was enough to reconstruct any operation. The
-6.0.0 boundary changed the shape: a single logical operation now crosses four
+6.0.0 boundary changed the shape — a single logical operation now crosses four
 process boundaries (`nx` CLI / MCP tool → T2 daemon → Java engine-service → Postgres),
 and in the managed deployment (RDR-166) the Java service runs in the cloud
 (conexus engine/controlplane). The logging did not follow the architecture across
@@ -41,7 +41,7 @@ Postgres. The HTTP clients send `X-Nexus-Tenant` (tenant isolation) but no
 `X-Request-ID` / `traceparent`. Postgres statement logging is not configured. So to
 debug "operation X returned wrong/empty results at 14:32:15," an operator must grep
 three disjoint log files by wall-clock timestamp and guess which lines belong to the
-same logical call. In a multi-tenant managed deployment this is not just slow; it
+same logical call. In a multi-tenant managed deployment this is not just slow — it
 risks mis-attributing log lines across tenants.
 
 #### Gap 2: The Java service's RequestContext is not wired to SLF4J MDC
@@ -87,8 +87,8 @@ Discovered during the 6.0.0 local service-stack validation campaign (2026-06-24)
 The campaign stood up the mac-native binary + host PG16/pgvector + onnx-local bge-768
 and drove greenfield install + 5.x→6.0 migration. Three service-mode defects surfaced
 ONLY by hand-reading `~/.config/nexus/logs/storage_service_native.log` and CLI
-tracebacks. The most serious (`nexus-7y0ab`: service-mode `nx index repo` silently
-not populating the catalog) produced an exception that was caught and logged as a
+tracebacks. The most serious (`nexus-7y0ab`) — service-mode `nx index repo` silently
+not populating the catalog — produced an exception that was caught and logged as a
 `phase4_migration_failed` warning, then swallowed. With a correlation ID + a telemetry
 surface + a service-mode logging test, that class would have been visible at the
 point of failure instead of three layers deep in a manual probe.
@@ -96,8 +96,8 @@ point of failure instead of three layers deep in a manual probe.
 RDR-030 (silent-error audit + logging policy), RDR-087 (collection observability
 surfaces + `search_telemetry`), and RDR-017 (indexing progress) already established a
 deliberate **local** observability posture. This RDR extends that posture across the
-**tier boundary** that RDR-152/155 introduced. It does not re-litigate the local
-design; it connects it to the service.
+**tier boundary** that RDR-152/155 introduced — it does not re-litigate the local
+design, it connects it to the service.
 
 ### Technical Environment
 
@@ -108,7 +108,7 @@ design; it connects it to the service.
   (console appender, plain text). Endpoints: `HealthHandler`, `VersionHandler`, the
   `*Handler` family; `AuthFilter` + `RequestContext` (ThreadLocal, virtual-thread-per-request).
 - T2 daemon: `src/nexus/daemon/` (per-call `request_id` for same-process RPC handshake
-  only, NOT a distributed trace ID).
+  only — NOT a distributed trace ID).
 - Managed deployment: conexus engine/controlplane images (ECR); cloud log shipping
   is currently the container log driver only.
 
@@ -118,15 +118,15 @@ design; it connects it to the service.
 
 To be completed during `/conexus:rdr-research`. Anchor points already identified:
 
-- `service/src/main/resources/logback.xml`: current appender/pattern (no MDC, no JSON).
-- `service/src/main/java/dev/nexus/service/http/RequestContext.java`: ThreadLocal
+- `service/src/main/resources/logback.xml` — current appender/pattern (no MDC, no JSON).
+- `service/src/main/java/dev/nexus/service/http/RequestContext.java` — ThreadLocal
   principal; the source of truth to bridge into MDC.
-- `service/src/main/java/dev/nexus/service/http/AuthFilter.java`: where the request
+- `service/src/main/java/dev/nexus/service/http/AuthFilter.java` — where the request
   principal is established (the natural MDC set/clear seam).
-- `HealthHandler` / `VersionHandler`: current probe surface; `/ready` lands here.
-- Python HTTP client request builders (catalog/T2/T3): where an outbound
+- `HealthHandler` / `VersionHandler` — current probe surface; `/ready` lands here.
+- Python HTTP client request builders (catalog/T2/T3) — where an outbound
   `X-Request-ID` header is attached.
-- `src/nexus/logging_setup.py`: structlog processor chain; where an inbound/contextvar
+- `src/nexus/logging_setup.py` — structlog processor chain; where an inbound/contextvar
   request id is bound for the Python tiers.
 
 #### Dependency Source Verification
@@ -140,28 +140,28 @@ To be completed during `/conexus:rdr-research`. Anchor points already identified
 
 ### Key Discoveries
 
-- **Documented**: `RequestContext` already carries tenant/session per request but is
+- **Documented** — `RequestContext` already carries tenant/session per request but is
   not bridged to MDC (`logback.xml` has no `%X{...}`).
-- **Documented**: Python HTTP clients attach `X-Nexus-Tenant` but no request/trace
+- **Documented** — Python HTTP clients attach `X-Nexus-Tenant` but no request/trace
   header (verified by the validation pass).
-- **Assumed**: a single `X-Request-ID` propagated header + MDC bridge is sufficient
+- **Assumed** — a single `X-Request-ID` propagated header + MDC bridge is sufficient
   for correlation without adopting a full tracing backend (OTEL collector). Needs a
   decision in research.
 
 ### Critical Assumptions
 
 - [ ] **MDC is safe and correct under virtual-thread-per-request** with a strict
-  set-on-entry / clear-on-exit discipline in `AuthFilter`. **Status**: Unverified.
-  **Method**: Spike (assert MDC value isolation across concurrent virtual-thread requests)
+  set-on-entry / clear-on-exit discipline in `AuthFilter` — **Status**: Unverified
+  — **Method**: Spike (assert MDC value isolation across concurrent virtual-thread requests)
 - [ ] **A propagated `X-Request-ID` (or `traceparent`) header threaded through the
-  Python HTTP clients reaches the Java handlers and lands on log lines** end-to-end.
-  **Status**: Unverified. **Method**: Spike (one logical op, grep one id across all tiers)
+  Python HTTP clients reaches the Java handlers and lands on log lines** end-to-end —
+  **Status**: Unverified — **Method**: Spike (one logical op, grep one id across all tiers)
 - [ ] **JSON Logback + the MDC pattern do not regress the existing Java contract tests
-  or the plain-text expectations of any current log consumer**. **Status**: Unverified.
-  **Method**: Source Search + Spike
+  or the plain-text expectations of any current log consumer** — **Status**: Unverified
+  — **Method**: Source Search + Spike
 - [ ] **A `/ready` gate can cheaply and correctly report schema/embedder/vector
-  readiness** without a heavyweight health framework. **Status**: Unverified.
-  **Method**: Source Search (what the service already knows at startup)
+  readiness** without a heavyweight health framework — **Status**: Unverified
+  — **Method**: Source Search (what the service already knows at startup)
 
 ## Proposed Solution
 
@@ -196,7 +196,7 @@ Four coordinated, independently-shippable pieces, smallest-blast-radius first:
    service-mode catalog operations).
 
 Cloud log shipping (CloudWatch/OTEL exporters) is noted as a **dimension**, not built
-here: once logs are JSON + correlated, shipping is a deployment concern for the
+here — once logs are JSON + correlated, shipping is a deployment concern for the
 managed image (RDR-166 territory), and the local case (the primary scope) needs none
 of it.
 
@@ -253,9 +253,9 @@ later without paying for it now.
 
 ### Briefly Rejected
 
-- **Per-call-site field threading instead of MDC**: rejected. It is the status quo,
+- **Per-call-site field threading instead of MDC**: rejected — it is the status quo,
   inconsistent and unenforceable; MDC is the one-seam fix.
-- **Postgres `log_statement=all` as the correlation substrate**: rejected: high
+- **Postgres `log_statement=all` as the correlation substrate**: rejected — high
   volume, no app-level id, doesn't correlate to the CLI/MCP origin.
 
 ## Trade-offs
@@ -282,7 +282,7 @@ later without paying for it now.
 - Missing/blank request id → service generates one (never blocks a request); the
   correlation is degraded, not broken.
 - `/ready` false-negative during boot → traffic correctly withheld (the intended
-  behaviour). Diagnose via the `checks` block in the body.
+  behaviour) — diagnose via the `checks` block in the body.
 
 ## Implementation Plan
 
@@ -294,7 +294,7 @@ later without paying for it now.
 
 A single logical operation (`nx` issues a service-backed catalog write) produces, in
 both the CLI/MCP structlog stream and the Java `storage_service` log, log lines
-carrying the **same** `request_id`, asserted by an automated cross-tier test, not a
+carrying the **same** `request_id` — asserted by an automated cross-tier test, not a
 manual grep. In scope, not deferred.
 
 ### Phase 1: Code Implementation
@@ -317,18 +317,18 @@ manual grep. In scope, not deferred.
 
 ### New Dependencies
 
-- Possibly `logstash-logback-encoder` (JSON): confirm license (Apache-2.0 expected)
+- Possibly `logstash-logback-encoder` (JSON) — confirm license (Apache-2.0 expected)
   during research before adding.
 
 ## Test Plan
 
-- **Scenario**: One service-backed op end-to-end. **Verify**: same `request_id` in
+- **Scenario**: One service-backed op end-to-end — **Verify**: same `request_id` in
   CLI structlog + service log (the MVV).
-- **Scenario**: `/health` with DB down. **Verify**: 503 + logged at WARN.
-- **Scenario**: `/ready` during simulated mid-migration. **Verify**: 503 + `checks`
+- **Scenario**: `/health` with DB down — **Verify**: 503 + logged at WARN.
+- **Scenario**: `/ready` during simulated mid-migration — **Verify**: 503 + `checks`
   identifies the not-ready component.
-- **Scenario**: concurrent requests, two tenants. **Verify**: no MDC tenant bleed.
-- **Scenario**: `/version` response shape. **Verify**: contract pinned.
+- **Scenario**: concurrent requests, two tenants — **Verify**: no MDC tenant bleed.
+- **Scenario**: `/version` response shape — **Verify**: contract pinned.
 
 ## Validation
 
@@ -370,7 +370,7 @@ The MVV (cross-tier shared `request_id`, automated) is in scope for Phase 1.
 
 - **Versioning**: N/A (additive headers/endpoints; `/version` unchanged).
 - **Build tool compatibility**: confirm any new logback encoder dep builds under the
-  native-image path (RDR-161); reachability metadata.
+  native-image path (RDR-161) — reachability metadata.
 - **Licensing**: confirm JSON-encoder license before adding.
 - **Deployment model**: JSON default in managed image; toggle for local.
 - **Secret/credential lifecycle**: N/A (no secrets; ensure request id / MDC never
