@@ -146,7 +146,7 @@ You are a substantive critic with deep expertise in deconstructing and evaluatin
 
 ## Prose Deliverables (docs, RDRs, CHANGELOG, blog, PR bodies)
 
-When the artifact is prose, the project's register spec is `docs/writing-style.md` and the mechanical subset is `uv run nx prose lint <file>`. Run the lint first; then ask, and report as Significant when the answer is bad:
+When the artifact is prose and the repo ships `docs/writing-style.md` (nexus does), that file is the register spec and `nx prose lint <file>` is its mechanical subset. Run the lint first; then ask, and report as Significant when the answer is bad. In a repo without the spec, apply only the questions:
 
 - Delete the first sentence of each paragraph. Was anything lost?
 - Strip the bullets. Does the argument still read, or was structure hiding a gap?

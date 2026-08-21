@@ -177,7 +177,7 @@ WORKTREE_PREFLIGHT
 
 # nexus-ptwm2: prose register. Own heredoc, same <500-byte guard.
 cat <<'PROSE_STYLE'
-| Prose | Anything you write for humans (docs, RDRs, CHANGELOG, bead text, T2 notes, PR bodies) follows docs/writing-style.md: outcome first, plain words, verbs not nominalizations, no em dashes, no hedge stacks. Run `uv run nx prose lint <file>` on files before returning. |
+| Prose | If the repo ships docs/writing-style.md, prose you write (docs, RDRs, CHANGELOG, bead text, PR bodies) follows it: outcome first, plain words, verbs not nominalizations, no em dashes. Lint with `nx prose lint <file>` (`uv run nx ...` in a dev checkout) before returning; skip both in repos without the spec. |
 PROSE_STYLE
 
 # Serena + Context7 guidance injected by sn plugin (sn/hooks/scripts/mcp-inject.sh).

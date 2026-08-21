@@ -1,22 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nexus-ptwm2: prose style gate over the project's written surfaces.
 
-Runs ``nexus.prose_lint`` over docs, blog posts, README, the
-``[Unreleased]`` CHANGELOG section, the plugin's RDR templates, and every
-RDR whose status is active (``draft`` / ``accepted`` / ``deferred``).
+Two tolerance classes (rescoped after the fable design review, T2
+ptwm2-design-critique-fable-2026-08-21):
+
+- **Zero**: the RDR templates, ``docs/writing-style.md``, and the
+  ``[Unreleased]`` CHANGELOG section. Surfaces authored now, under the
+  spec.
+- **Ratchet**: docs/ and blog/ trees, README, and ACTIVE RDRs (draft /
+  accepted / deferred), against ``docs/.prose-baseline.json``. A file may
+  never exceed its recorded count; a count that drops must be written
+  back (stale-high fails); new files start at 0. Active RDRs sit here,
+  not at zero: mechanically rewriting the decision record was reviewed
+  and reverted (T2 ptwm2-rdr-sweep-editorial-fable-2026-08-21), and a
+  draft RDR must not red CI mid-draft. New RDR prose is enforced at gate
+  time by ``nx rdr preamble rdr-gate`` (override: ``--skip-prose``).
+
 Closed and superseded RDRs and shipped CHANGELOG sections are exempt:
 rewriting them costs git-blame for no reader benefit (nexus-ibdl).
-
-Two tolerance classes:
-
-- **Zero**: active RDRs, RDR templates, ``docs/writing-style.md``, the
-  ``[Unreleased]`` CHANGELOG section. These are authored or re-authored
-  now, and the RDR gate blocks on the same findings.
-- **Ratchet**: everything else, against ``docs/.prose-baseline.json``. A
-  file may never exceed its recorded count; a count that drops must be
-  written back (a stale-high baseline fails), and new files start at 0.
-  Regenerate with ``uv run python -m tests.test_prose_style_lint`` (the
-  ``__main__`` block below writes the baseline from this file's own set).
+Regenerate the baseline with ``uv run python -m tests.test_prose_style_lint``.
 """
 from __future__ import annotations
 
@@ -62,13 +64,15 @@ def rdr_templates() -> list[Path]:
 
 
 def ratchet_files() -> list[Path]:
-    """Every markdown file under docs/ (minus docs/rdr, which has its own
-    status-based rule, and the spec itself) and blog/ (minus ``.pulled.md``
-    mirrors of published posts), plus README.md."""
+    """docs/ tree (minus docs/rdr, handled by status, and the spec itself),
+    docs/rdr's own AGENTS.md and README.md, ACTIVE RDRs, blog/ (minus
+    ``.pulled.md`` mirrors of published posts), and README.md."""
     files = [
         p for p in (REPO / "docs").rglob("*.md")
         if "rdr" not in p.relative_to(REPO / "docs").parts and p.name != "writing-style.md"
     ]
+    files += [REPO / "docs" / "rdr" / "AGENTS.md", REPO / "docs" / "rdr" / "README.md"]
+    files += active_rdrs()
     files += [p for p in (REPO / "blog").rglob("*.md") if ".pulled." not in p.name]
     files.append(REPO / "README.md")
     return sorted(p for p in files if p.is_file())
@@ -88,16 +92,14 @@ def test_gate_scans_a_real_population():
     n_active, n_tpl, n_ratchet = len(active_rdrs()), len(rdr_templates()), len(ratchet_files())
     assert n_active >= 5, f"only {n_active} active RDRs found; status regex drifted?"
     assert n_tpl >= 2, f"only {n_tpl} RDR templates found"
-    assert n_ratchet >= 30, f"only {n_ratchet} ratchet files found"
+    assert n_ratchet >= 60, f"only {n_ratchet} ratchet files found"
+    ratchet_rel = {_rel(p) for p in ratchet_files()}
+    assert all(_rel(p) in ratchet_rel for p in active_rdrs()), (
+        "active RDRs must ride the ratchet"
+    )
 
 
 # --- zero tolerance ------------------------------------------------------
-
-
-@pytest.mark.parametrize("path", active_rdrs(), ids=lambda p: p.name)
-def test_active_rdr_is_clean(path: Path):
-    findings = lint_file(path)
-    assert not findings, "\n".join(f.render(_rel(path)) for f in findings[:20])
 
 
 @pytest.mark.parametrize("path", rdr_templates(), ids=lambda p: _rel(p))
@@ -119,7 +121,7 @@ def test_changelog_unreleased_section_is_clean():
 
 def test_zero_tolerance_surfaces_have_no_baseline_entry():
     base = load_baseline(BASELINE)
-    zero = {_rel(p) for p in active_rdrs() + rdr_templates()}
+    zero = {_rel(p) for p in rdr_templates()}
     zero.add("docs/writing-style.md")
     leaked = sorted(zero & set(base))
     assert not leaked, f"baseline must not carry zero-tolerance files: {leaked}"
@@ -140,5 +142,7 @@ def test_ratchet_surfaces_within_baseline():
 if __name__ == "__main__":  # regenerate the ratchet baseline from this file's own file set
     from nexus.prose_lint import write_baseline
 
+    import sys
+
     write_baseline(BASELINE, {_rel(p): len(lint_file(p)) for p in ratchet_files()})
-    print(f"wrote {BASELINE}")
+    sys.stdout.write(f"wrote {BASELINE}\n")

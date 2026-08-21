@@ -19,7 +19,10 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-_HEDGES = r"(?:could|might|may|potentially|arguably|somewhat|relatively|perhaps)"
+# "may" is matched lowercase-only so the month ("The May 2026 release")
+# never counts as a hedge; a sentence-initial "May ..." hedge is a rare,
+# accepted miss. The other hedges keep IGNORECASE via inline (?i:).
+_HEDGES = r"(?:(?i:could|might|potentially|arguably|somewhat|relatively|perhaps)|may)"
 
 # (rule, pattern, message). Patterns run per line unless noted.
 _LINE_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
@@ -38,7 +41,7 @@ _LINE_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
         re.compile(
             r"\b(?:delv(?:e|es|ed|ing)|tapestry|plethora|meticulous(?:ly)?"
             r"|seamless(?:ly)?|boast(?:s|ed|ing)?|leverag(?:e|es|ed|ing)"
-            r"|crucial(?:ly)?|game-changer|paradigm shift"
+            r"|game-changer|paradigm shift"
             r"|it is worth noting|it's worth noting|it is important to note)\b",
             re.IGNORECASE,
         ),
@@ -48,8 +51,8 @@ _LINE_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
         "contrast-frame",
         re.compile(
             r"\b(?:not|isn['\u2019]t|aren['\u2019]t|wasn['\u2019]t|weren['\u2019]t|is not|are not)"
-            r" (?:just|only|merely|simply) \b.{1,60}?"
-            r",\s*(?:it['\u2019]?s|it is|this is|that is|but)\b",
+            r" (?:just|only|merely|simply) .{1,60}?"
+            r",\s*(?:it['\u2019]?s|it is|this is|that is)\b",
             re.IGNORECASE,
         ),
         "'not X, it's Y' contrast frame; state Y, or show the real tension",
@@ -63,33 +66,32 @@ _LINE_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
         ),
         "unnamed source; name who, or drop the appeal",
     ),
-    (
-        "sycophantic-opener",
-        re.compile(
-            r"^\s*(?:Great|Excellent|Good|Fantastic) (?:question|point|idea)"
-            r"|^\s*Certainly[!,]"
-            r"|^\s*Absolutely[!,]"
-            r"|^\s*I'd be happy to\b"
-            r"|^\s*I would be happy to\b",
-            re.IGNORECASE,
-        ),
-        "sycophantic opener; start with the content",
-    ),
+)
+
+_OPENER = re.compile(
+    r"^\s*(?:[>*-]\s+)*(?:(?:Great|Excellent|Good|Fantastic) (?:question|point|idea)"
+    r"|Certainly!"
+    r"|Absolutely!"
+    r"|I'd be happy to\b"
+    r"|I would be happy to\b)",
+    re.IGNORECASE,
 )
 
 _CLOSER = re.compile(
-    r"^\s*(?:In conclusion|In summary|To summarize|To sum up|Overall),", re.IGNORECASE
+    r"^\s*(?:[>*-]\s+)*(?:In conclusion|In summary|To summarize|To sum up),",
+    re.IGNORECASE,
 )
 # Split on terminal punctuation followed by an uppercase/quote/paren start,
 # so "e.g. this" and "vs. that" stay inside their sentence.
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'(\[])")
-_HEDGE = re.compile(rf"\b{_HEDGES}\b", re.IGNORECASE)
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9`*\"'(\[])")
+_HEDGE = re.compile(rf"\b{_HEDGES}\b")
 
 # Closer must use the same character run as the opener (CommonMark: at least
 # as long; we accept same-or-longer). An unterminated fence masks to EOF,
 # which is what a renderer does with it too.
 _FENCE = re.compile(
-    r"^(`{3,}|~{3,})[^\n]*$.*?(?:^\1[`~]*[ \t]*$|\Z)", re.MULTILINE | re.DOTALL
+    r"^ {0,3}(`{3,}|~{3,})[^\n]*$.*?(?:^ {0,3}\1[`~]*[ \t]*$|\Z)",
+    re.MULTILINE | re.DOTALL,
 )
 _INLINE_CODE = re.compile(r"`[^`\n]*`")
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
@@ -147,6 +149,11 @@ def lint_text(text: str) -> list[Finding]:
                 Finding(idx, "formulaic-closer", "restates instead of adding; cut or synthesize",
                         _excerpt(line, m))
             )
+        if prev_blank and (m := _OPENER.search(line)):
+            findings.append(
+                Finding(idx, "sycophantic-opener", "sycophantic opener; start with the content",
+                        _excerpt(line, m))
+            )
         for sentence in _SENTENCE_SPLIT.split(line):
             if len(_HEDGE.findall(sentence)) >= 2:
                 findings.append(
@@ -159,7 +166,7 @@ def lint_text(text: str) -> list[Finding]:
 
 
 def lint_file(path: Path) -> list[Finding]:
-    return lint_text(path.read_text(encoding="utf-8"))
+    return lint_text(path.read_text(encoding="utf-8", errors="replace"))
 
 
 # --- ratchet baseline ----------------------------------------------------

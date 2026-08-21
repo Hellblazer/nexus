@@ -37,7 +37,7 @@ def test_load_bearing_is_flagged_case_insensitively():
 @pytest.mark.parametrize(
     "word",
     ["delve", "delves", "Delving", "tapestry", "plethora", "meticulous",
-     "seamlessly", "boasts", "leverage", "leveraging", "crucially"],
+     "seamlessly", "boasts", "leverage", "leveraging"],
 )
 def test_marker_lexicon(word: str):
     assert "marker-lexicon" in _rules(f"We {word} into the data.")
@@ -57,14 +57,22 @@ def test_contrast_frame():
         "It's not just a bug fix, it's a paradigm shift."
     )
     assert "contrast-frame" in _rules("This isn't just faster, it's cheaper.")
-    assert "contrast-frame" in _rules("Not only faster, but cheaper.")
 
 
-def test_contrast_frame_spares_plain_not_only_but_also():
-    # A factual conjunction with no comma-anchored reveal is not the frame.
+def test_contrast_frame_spares_plain_conjunctions():
+    # "not only X but (also) Y" is an ordinary conjunction, not the
+    # dash-for-drama reveal; only the "..., it's Y" shape is the frame.
     assert "contrast-frame" not in _rules(
         "The client must not only page on count but also on bytes."
     )
+    assert "contrast-frame" not in _rules(
+        "We test not only the client, but the engine."
+    )
+
+
+def test_contrast_frame_matches_across_a_masked_span():
+    # X being inline code (masked to spaces) must not hide the frame.
+    assert "contrast-frame" in _rules("This is not just `code`, it's a redesign.")
 
 
 def test_hedge_stack_splitter_keeps_abbreviations_inside_the_sentence():
@@ -99,7 +107,7 @@ def test_vague_attribution():
 
 
 @pytest.mark.parametrize(
-    "opener", ["In conclusion,", "In summary,", "Overall,", "To summarize,"]
+    "opener", ["In conclusion,", "In summary,", "To summarize,"]
 )
 def test_formulaic_closer_at_paragraph_start(opener: str):
     assert "formulaic-closer" in _rules(f"Body.\n\n{opener} the gate works.")
@@ -107,6 +115,37 @@ def test_formulaic_closer_at_paragraph_start(opener: str):
 
 def test_formulaic_closer_not_flagged_mid_sentence():
     assert "formulaic-closer" not in _rules("The overall, aggregate count is 3.")
+
+
+def test_overall_is_a_legitimate_transition():
+    assert "formulaic-closer" not in _rules("Body.\n\nOverall, the migration succeeded.")
+
+
+def test_certainly_with_comma_is_a_concession_not_sycophancy():
+    assert "sycophantic-opener" not in _rules("Certainly, the cache helps.")
+
+
+def test_sycophantic_opener_only_at_paragraph_start():
+    assert "sycophantic-opener" not in _rules(
+        "The fix landed and the suite is green.\nI'd be happy to see it hold.\n"
+    )
+
+
+def test_may_the_month_is_not_a_hedge():
+    assert "hedge-stack" not in _rules("The May 2026 release might land in June.")
+
+
+def test_lowercase_may_still_hedges():
+    assert "hedge-stack" in _rules("It may help and might even land.")
+
+
+def test_indented_fence_is_masked():
+    text = "Prose.\n\n   ```bash\n   # Token (shown once — store it now):\n   ```\n\nAfter.\n"
+    assert lint_text(text) == []
+
+
+def test_crucial_is_not_flagged():
+    assert "marker-lexicon" not in _rules("This is the crucial step.")
 
 
 @pytest.mark.parametrize("opener", ["Great question!", "Certainly!", "I'd be happy to help."])

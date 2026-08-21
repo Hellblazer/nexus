@@ -17,7 +17,7 @@ from pathlib import Path
 import click
 import yaml
 
-from nexus.prose_lint import lint_file as lint_prose_file
+from nexus.prose_lint import lint_text
 
 
 # ---------------------------------------------------------------------------
@@ -850,9 +850,10 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
     except ValueError:
         _rdr_id_int = -1
 
-    if _rdr_id_int >= 65 and len(_gap_headings) == 0 and not _skip_gaps:
+    _gap_blocked = _rdr_id_int >= 65 and len(_gap_headings) == 0 and not _skip_gaps
+    if _gap_blocked:
         print(
-            f"> **BLOCKED** (Layer 1 — gap structure): RDR-{t2_key} has no "
+            f"> **BLOCKED** (Layer 1, gap structure): RDR-{t2_key} has no "
             f"`#### Gap N: <title>` headings in `## Problem Statement` or `## Problem`."
         )
         print(r"> Expected format: `#### Gap 1: <gap title>` (regex: `^#{3,5} Gap \d+:`).")
@@ -862,7 +863,7 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
             "Add the headings now before accept, or re-run the gate "
             "with `--skip-gaps` to record an intentional override."
         )
-        return
+        print()
     elif _rdr_id_int >= 65 and len(_gap_headings) > 0:
         print(f"#### Gap structure: {len(_gap_headings)} gap heading(s) present")
         print()
@@ -878,23 +879,46 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
         )
         print()
 
-    # Prose style pre-check (nexus-ptwm2, docs/writing-style.md). Client-side
-    # so it is live without a plugin release; the gate skill treats any
-    # finding as a Layer 1 BLOCK.
-    _prose_findings = lint_prose_file(rdr_file)
-    if _prose_findings:
+    # Prose style pre-check (nexus-ptwm2). Runs ONLY when the repo ships
+    # its own docs/writing-style.md, so an installed conexus in a repo
+    # without the spec never blocks on it. `--skip-prose` is the audited
+    # override, mirroring `--skip-gaps`. Both this and the gap check
+    # report in the same run: one round trip fixes both.
+    _skip_prose = "--skip-prose" in args_str
+    _style_spec = Path(repo_root) / "docs" / "writing-style.md"
+    _prose_blocked = False
+    if not _style_spec.exists():
+        print("#### Prose style: no docs/writing-style.md in this repo; check skipped")
+        print()
+    elif _skip_prose:
         print(
-            f"> **BLOCKED** (Layer 1 — prose style): RDR-{t2_key} has "
-            f"{len(_prose_findings)} finding(s) against `docs/writing-style.md`. "
-            f"Run `nx prose lint {rdr_file}` for the list; first five:"
+            "#### Prose style: SKIPPED by --skip-prose (intentional override, "
+            "recorded in the gate audit trail)"
         )
-        for _f in _prose_findings[:5]:
-            print(f"> - line {_f.line}: {_f.rule}: {_f.message} ({_f.excerpt!r})")
-        print(">")
-        print("> Fix the prose and re-run the gate. There is no override flag for this check.")
+        print()
+    else:
+        _prose_findings = lint_text(text)
+        if _prose_findings:
+            _prose_blocked = True
+            print(
+                f"> **BLOCKED** (Layer 1, prose style): RDR-{t2_key} has "
+                f"{len(_prose_findings)} finding(s) against `docs/writing-style.md`. "
+                f"Run `nx prose lint {rdr_file}` for the list; first five:"
+            )
+            for _f in _prose_findings[:5]:
+                print(f"> - line {_f.line}: {_f.rule}: {_f.message} ({_f.excerpt!r})")
+            print(">")
+            print(
+                "> Fix the prose and re-run the gate, or re-run with "
+                "`--skip-prose` to record an intentional override."
+            )
+            print()
+        else:
+            print("#### Prose style: clean (`docs/writing-style.md`)")
+            print()
+
+    if _gap_blocked or _prose_blocked:
         return
-    print("#### Prose style: clean (`docs/writing-style.md`)")
-    print()
 
     clean = _strip_code_blocks(text)
 

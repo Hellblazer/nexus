@@ -330,9 +330,17 @@ class TestRdrGate:
         assert "BLOCKED" in result.output
         assert "gap structure" in result.output.lower()
 
+    @staticmethod
+    def _arm_prose(rdr_env) -> None:
+        """The prose check only arms in repos that ship the spec."""
+        spec = rdr_env["repo_root"] / "docs" / "writing-style.md"
+        spec.write_text("# Writing style\n\nHouse register spec.\n", encoding="utf-8")
+
     def test_rdr_gate_blocked_on_prose_findings(self, rdr_env):
         """nexus-ptwm2: an em dash in the body blocks Layer 1 before the
-        section structure is printed; the message names the lint command."""
+        section structure is printed; the message names the lint command
+        and the --skip-prose override."""
+        self._arm_prose(rdr_env)
         body = (
             "## Problem Statement\n\n"
             "#### Gap 1: Something\nThe store is slow — very slow.\n\n"
@@ -350,9 +358,11 @@ class TestRdrGate:
         assert "prose style" in result.output.lower()
         assert "em-dash" in result.output
         assert "nx prose lint" in result.output
+        assert "--skip-prose" in result.output
         assert "Section Structure" not in result.output
 
     def test_rdr_gate_prose_clean_line_precedes_structure(self, rdr_env):
+        self._arm_prose(rdr_env)
         body = (
             "## Problem Statement\n\n"
             "#### Gap 1: Something\nThe store is slow: two seconds per call.\n\n"
@@ -368,6 +378,63 @@ class TestRdrGate:
         assert result.exit_code == 0, result.output
         assert "Prose style: clean" in result.output
         assert result.output.index("Prose style: clean") < result.output.index("Section Structure")
+
+    def test_rdr_gate_prose_check_skipped_when_repo_has_no_spec(self, rdr_env):
+        """Installed conexus in a repo without docs/writing-style.md must
+        never block on prose (fable design review, ship-blocker #1)."""
+        body = (
+            "## Problem Statement\n\n"
+            "#### Gap 1: Something\nThe store is slow — very slow.\n\n"
+            "## Proposed Solution\n\nFix it."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-142-no-spec.md",
+            {"title": "No Spec", "status": "draft", "type": "decision", "priority": "P1"},
+            body=body,
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "142"])
+        assert result.exit_code == 0, result.output
+        assert "no docs/writing-style.md in this repo; check skipped" in result.output
+        assert "BLOCKED" not in result.output
+        assert "Section Structure" in result.output
+
+    def test_rdr_gate_skip_prose_override_is_recorded(self, rdr_env):
+        self._arm_prose(rdr_env)
+        body = (
+            "## Problem Statement\n\n"
+            "#### Gap 1: Something\nThe store is slow — very slow.\n\n"
+            "## Proposed Solution\n\nFix it."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-143-skip.md",
+            {"title": "Skip", "status": "draft", "type": "decision", "priority": "P1"},
+            body=body,
+        )
+        result = _runner().invoke(
+            rdr, ["preamble", "rdr-gate", "--", "143", "--skip-prose"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "SKIPPED by --skip-prose" in result.output
+        assert "BLOCKED" not in result.output
+        assert "Section Structure" in result.output
+
+    def test_rdr_gate_reports_gap_and_prose_blocks_in_one_run(self, rdr_env):
+        """One round trip: an RDR failing BOTH checks sees both blocks."""
+        self._arm_prose(rdr_env)
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-144-both.md",
+            {"title": "Both", "status": "draft", "type": "decision", "priority": "P1"},
+            body="## Problem Statement\n\nNo gaps — and an em dash.\n\n## Approach\n\nDo.",
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-gate", "--", "144"])
+        assert result.exit_code == 0, result.output
+        assert "gap structure" in result.output
+        assert "prose style" in result.output.lower()
+        assert result.output.count("BLOCKED") == 2
+        assert "Section Structure" not in result.output
 
     def test_rdr_gate_post65_with_gaps_prints_gap_list(self, rdr_env):
         """Post-65 RDR with gap headings: lists gaps before Section Structure."""

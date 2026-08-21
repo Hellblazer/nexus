@@ -43,7 +43,7 @@ Read the RDR markdown file. Check that these sections are present AND non-empty 
 
 **Gap-structure sub-check (post-65 RDRs only)**: the `## Problem Statement` (or `## Problem`) section must contain one or more `#### Gap N: <title>` headings (regex `^#{3,5} Gap \d+:`). The command preamble script emits a BLOCKED outcome automatically when this check fails; the gate skill should not attempt to run Layers 2 or 3 after that block. Legacy RDRs with `id < 65` are grandfathered and skip the gap check. Use `/conexus:rdr-gate <id> --skip-gaps` to override for the rare RDR where the structure does not fit; the override is recorded in the gate audit trail.
 
-**Prose-lint sub-check**: the command preamble also runs `nx prose lint` on the RDR file and prints a BLOCKED line on any finding. Treat this exactly like the gap-structure block above: stop, do not run Layers 2 or 3, and there is no override flag.
+**Prose-lint sub-check**: in repos that ship `docs/writing-style.md`, the command preamble also runs `nx prose lint` on the RDR file and prints a BLOCKED line on any finding; repos without the spec skip the check. Treat a block exactly like the gap-structure block above: stop, do not run Layers 2 or 3. `--skip-prose` is the audited override, same contract as `--skip-gaps`.
 
 **If any section is missing or contains only placeholder text** (e.g., `[What is the specific challenge]`):
 - Report which sections are incomplete

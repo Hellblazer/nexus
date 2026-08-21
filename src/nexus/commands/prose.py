@@ -27,7 +27,14 @@ def _collect(paths: tuple[Path, ...]) -> list[Path]:
             out.extend(sorted(q for q in p.rglob("*.md") if q.is_file()))
         else:
             out.append(p)
-    return out
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for q in out:
+        r = q.resolve()
+        if r not in seen:
+            seen.add(r)
+            unique.append(q)
+    return unique
 
 
 @prose.command("lint")

@@ -3396,14 +3396,14 @@ Options for `lint`:
 |--------|-------------|
 | `--baseline FILE` | Ratchet mode. `FILE` maps relative paths to allowed finding counts. A file may not exceed its count; a count that has dropped must be lowered (stale-high fails); an entry for an unscanned file fails. |
 | `--root DIR` | Directory the baseline keys are relative to (default: cwd). |
-| `--write-baseline` | With `--baseline`: record the current counts instead of checking. |
+| `--write-baseline` | With `--baseline` (required): record the current counts instead of checking. |
 
 ```bash
 nx prose lint docs/rdr/rdr-196-cost-aware-nx-answer.md
-nx prose lint docs/*.md blog/*.md README.md --baseline docs/.prose-baseline.json --root .
+uv run python -m tests.test_prose_style_lint   # regenerate docs/.prose-baseline.json from the gate's own file set
 ```
 
-`uv run pytest -m lint tests/test_prose_style_lint.py` runs the same lint over the project's written surfaces; `nx rdr preamble rdr-gate` runs it on the RDR being gated and blocks Layer 1 on any finding.
+`uv run pytest -m lint tests/test_prose_style_lint.py` runs the same lint over the project's written surfaces. Never regenerate the baseline with hand-typed globs: the gate's file set is defined in the test module, and the `-m` form uses exactly that set. `nx rdr preamble rdr-gate` runs the lint on the RDR being gated in repos that ship `docs/writing-style.md` and blocks Layer 1 on any finding; `--skip-prose` records an audited override.
 
 ## nx rdr
 

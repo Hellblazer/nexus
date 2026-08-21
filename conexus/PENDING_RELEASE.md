@@ -72,3 +72,10 @@ mechanize, it matters enough to ship.
 - `conexus/hooks/scripts/subagent-start.sh`: nexus-ptwm2 added a PROSE_STYLE
   preflight row pointing every subagent at docs/writing-style.md and the
   lint; inert in installed sessions until the pin advances.
+- `conexus/skills/rdr-gate/SKILL.md`: nexus-ptwm2 remediation round
+  documents spec-conditionality and the `--skip-prose` audited override.
+- `conexus/commands/rdr-gate.md`: same remediation, same two facts on the
+  Layer 1 bullet.
+- `conexus/resources/rdr/TEMPLATE.md`: prose blockquote line now states
+  the check is conditional on the repo shipping docs/writing-style.md and
+  names `--skip-prose`.

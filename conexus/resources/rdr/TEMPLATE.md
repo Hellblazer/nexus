@@ -15,7 +15,7 @@ related_issues: []
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
-> Prose follows docs/writing-style.md; the gate runs nx prose lint on this file and blocks on any finding.
+> In repos that ship docs/writing-style.md, prose follows it; the gate runs nx prose lint on this file and blocks on findings (--skip-prose is the audited override).
 
 ## Problem Statement
 
