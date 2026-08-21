@@ -175,11 +175,12 @@ class TestDerivation:
 
 
 class TestEnforcementStillOff:
-    def test_derived_value_set_and_enforcement_still_off(self) -> None:
-        """.p3a produced the number (p90, n=31, 2026-08-21); enforcement
-        stays OFF until .p3c."""
+    def test_derived_value_set_and_enforcement_now_on(self) -> None:
+        """.p3a produced the number (p90, n=30, 2026-08-21); .p3c
+        (nexus-nyry9.21) flips enforcement ON now that a real derived
+        default exists."""
         assert DERIVED_BUDGET_USD == pytest.approx(1.0530)
-        assert BUDGET_ENFORCEMENT_ENABLED is False
+        assert BUDGET_ENFORCEMENT_ENABLED is True
         assert MIN_DERIVATION_RUNS >= 30
 
     def test_enforcement_cannot_be_on_with_a_none_default(self) -> None:

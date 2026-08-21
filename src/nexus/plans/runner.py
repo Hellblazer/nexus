@@ -342,6 +342,14 @@ class PlanResult:
     #: was active. ``None`` (the default) means the run completed or
     #: failed through the pre-a4 sentinel-and-continue path unchanged.
     budget_exhausted_at_step: int | None = None
+    #: RDR-196 .p3c (nexus-nyry9.21): which budget axis cut the run short
+    #: — ``"time"`` (the ``deadline`` mechanism above) or ``"cost"`` (the
+    #: ``budget_usd_remaining`` pre-segment check). ``None`` whenever
+    #: ``budget_exhausted_at_step`` is also ``None``. Threaded into the
+    #: single marker emitter's text (``core.py``'s
+    #: ``_budget_exhausted_response``) so a caller can tell which budget
+    #: ran out without inventing a second marker shape.
+    budget_exhausted_kind: str | None = None
     #: Total steps in the plan as parsed, regardless of how many actually
     #: ran. Lets a caller render "step N of M" without re-parsing
     #: ``match.plan_json`` itself.
@@ -1374,6 +1382,7 @@ async def plan_run(
     dispatcher: ToolDispatcher | None = None,
     bundle_operators: bool = True,
     deadline: float | None = None,
+    budget_usd_remaining: float | None = None,
 ) -> PlanResult:
     """Execute the steps in *match* and return the captured outputs.
 
@@ -1406,10 +1415,34 @@ async def plan_run(
     kwarg, and if it raises ``OperatorTimeoutError`` anyway, the
     reconstructed ``partial_text``/``event_count`` are captured into the
     terminal sentinel and the loop stops. Either trigger sets
-    :attr:`PlanResult.budget_exhausted_at_step` (1-indexed). Retrieval
+    :attr:`PlanResult.budget_exhausted_at_step` (1-indexed) and
+    :attr:`PlanResult.budget_exhausted_kind` to ``"time"``. Retrieval
     steps are never budget-cut mid-flight — they don't accept a
     ``timeout`` kwarg — only the pre-segment deadline check can stop
     the loop before one starts.
+
+    ``budget_usd_remaining`` (RDR-196 .p3c, nexus-nyry9.21): an OPTIONAL
+    USD ceiling on the sum of already-completed steps' ``cost_usd``
+    (``StepRecord.cost_usd``, non-``None`` entries only — an unknown-cost
+    step never contributes a fabricated 0 to the running sum, and never
+    trips the check either). ``None`` (the default) reproduces pre-.p3c
+    behavior exactly — no cost check runs. When set, checked at the SAME
+    point as the ``deadline`` check above — BEFORE dispatching each
+    segment — because a dispatch's real cost is unknowable until it
+    returns; unlike ``deadline``, there is no mid-dispatch cost cut. This
+    makes the budget a STOP-LINE, not a hard ceiling: the running sum is
+    only ever compared to the cap using costs already known when a
+    segment STARTS, so the segment that pushes the sum over the cap
+    still finishes and its own cost is not counted until AFTER it
+    completes — the final executed segment's cost can carry the run
+    total above ``budget_usd_remaining``. Treat this as the documented
+    contract, not a bug: the caller learns of any overshoot from the
+    step's own recorded ``cost_usd``, same as it always could. When the
+    check trips, the loop stops (the segment about to start does not
+    dispatch) and :attr:`PlanResult.budget_exhausted_at_step` /
+    :attr:`PlanResult.budget_exhausted_kind` (``"cost"``) are set exactly
+    like the ``deadline`` trigger, sharing the same marker convention on
+    the ``nx_answer`` side.
     """
     from nexus.plans.bundle import (  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         BUNDLED_INTERMEDIATE,
@@ -1507,6 +1540,9 @@ async def plan_run(
     #: nexus-h33x8.6 a4: set when ``deadline`` cuts the run short. See
     #: :class:`PlanResult` and the ``deadline`` docstring above.
     budget_exhausted_at_step: int | None = None
+    #: RDR-196 .p3c: "time" or "cost", set alongside budget_exhausted_at_step
+    #: whichever axis cut the run short. See PlanResult.budget_exhausted_kind.
+    budget_exhausted_kind: str | None = None
     #: RDR-196 .p1b (nexus-nyry9.8): one StepRecord per executed dispatch
     #: segment. See StepRecord's own docstring for the source/model/cost
     #: attribution rules.
@@ -1591,13 +1627,46 @@ async def plan_run(
                     budget_exhausted_at_step = seg.plan_indices[0] + 1
                 else:
                     budget_exhausted_at_step = seg.plan_index + 1
+                budget_exhausted_kind = "time"
                 _log.info(
                     "nx_answer_budget_exhausted",
                     at_step=budget_exhausted_at_step,
                     total_steps=len(steps),
                     steps_completed=len(step_outputs),
+                    kind=budget_exhausted_kind,
                 )
                 break
+
+            # RDR-196 .p3c (nexus-nyry9.21): USD cost check, same
+            # pre-segment placement as the deadline check above (a
+            # dispatch's real cost is unknowable until it returns, so
+            # this can only ever be a stop-line before the NEXT segment,
+            # not a hard ceiling -- see budget_usd_remaining's own
+            # docstring paragraph above). Sums only the non-None costs
+            # of steps already completed in THIS plan_run call; an
+            # unknown-cost step contributes nothing to the running sum
+            # (never a fabricated 0) and therefore can never trip this
+            # check on its own.
+            if budget_usd_remaining is not None:
+                _spent_so_far = sum(
+                    r.cost_usd for r in step_records if r.cost_usd is not None
+                )
+                if _spent_so_far >= budget_usd_remaining:
+                    if isinstance(seg, OperatorBundleSlice):
+                        budget_exhausted_at_step = seg.plan_indices[0] + 1
+                    else:
+                        budget_exhausted_at_step = seg.plan_index + 1
+                    budget_exhausted_kind = "cost"
+                    _log.info(
+                        "nx_answer_budget_exhausted",
+                        at_step=budget_exhausted_at_step,
+                        total_steps=len(steps),
+                        steps_completed=len(step_outputs),
+                        kind=budget_exhausted_kind,
+                        spent_usd=_spent_so_far,
+                        budget_usd_remaining=budget_usd_remaining,
+                    )
+                    break
 
             # nexus-0qi9: per-step progress visibility. Emit start/complete
             # log events at each segment boundary so the silent claude -p
@@ -1811,6 +1880,7 @@ async def plan_run(
                             exc=exc,
                         ))
                         budget_exhausted_at_step = seg.plan_indices[0] + 1
+                        budget_exhausted_kind = "time"
                         # A timeout NEVER reaches claude_dispatch's usage_sink
                         # append (.p1a contract) — usage is genuinely None,
                         # never fabricated. Still one record: one dispatch
@@ -1980,6 +2050,7 @@ async def plan_run(
                         tool=tool, step_index=index, exc=exc,
                     ))
                     budget_exhausted_at_step = index + 1
+                    budget_exhausted_kind = "time"
                     # RDR-196 .p1b: a timeout never reaches usage_sink's
                     # append (.p1a contract) — usage genuinely None (the
                     # ambient sink is symmetric: it appends at the same site
@@ -2063,6 +2134,7 @@ async def plan_run(
         steps=step_outputs,
         final=step_outputs[-1] if step_outputs else None,
         budget_exhausted_at_step=budget_exhausted_at_step,
+        budget_exhausted_kind=budget_exhausted_kind,
         total_planned_steps=len(steps),
         step_records=step_records,
     )

@@ -2094,6 +2094,161 @@ async def test_bundle_receives_remaining_budget_as_timeout_kwarg_on_success() ->
     assert kwargs["timeout"] == pytest.approx(12.5, abs=2.0)
 
 
+# ── RDR-196 .p3c (nexus-nyry9.21): USD cost check ───────────────────────────
+#
+# Mirrors the deadline check's pre-segment placement exactly:
+# ``budget_usd_remaining`` is compared against the running sum of already-
+# completed steps' non-None cost_usd BEFORE dispatching the next segment.
+# Unlike the deadline, there is no mid-dispatch cost cut (a dispatch's real
+# cost is unknowable until it returns) -- so this is a stop-line, not a
+# hard ceiling: the segment that pushes the sum over the cap still runs to
+# completion.
+
+
+@pytest.mark.asyncio
+async def test_budget_usd_remaining_stops_before_next_segment() -> None:
+    """A bundle dispatch costing more than budget_usd_remaining must be
+    allowed to finish (cost is unknowable before it returns), but the
+    NEXT segment must not be dispatched -- pre-segment stop-line, not a
+    mid-dispatch cut."""
+    from unittest.mock import AsyncMock, patch
+
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "extract", "args": {"fields": "a", "inputs": "[]"}},
+            {"tool": "summarize", "args": {"cited": False, "content": "$step1.extractions"}},
+            {"tool": "search", "args": {"query": "x"}},
+        ],
+    }
+    bundle_usage = _usage(cost_usd=0.60)
+
+    async def fake_bundle(bundle, *, usage_sink=None, **kwargs):
+        if usage_sink is not None:
+            usage_sink.append(bundle_usage)
+        return {"summary": "synthesis"}
+
+    search_calls: list[str] = []
+
+    async def stub_search(**kwargs):
+        search_calls.append("search")
+        return {"ids": ["a"], "tumblers": [], "distances": [], "collections": []}
+
+    from nexus.mcp import core as mcp_core
+
+    with patch.object(mcp_core, "search", stub_search), \
+         patch("nexus.plans.bundle.dispatch_bundle", fake_bundle):
+        result = await plan_run(_match(plan), {}, budget_usd_remaining=0.5)
+
+    assert search_calls == [], "the retrieval step must not have dispatched"
+    assert len(result.step_records) == 1
+    assert result.step_records[0].cost_usd == pytest.approx(0.60)
+    assert result.budget_exhausted_at_step == 3  # 1-indexed: the search step
+    assert result.budget_exhausted_kind == "cost"
+
+
+@pytest.mark.asyncio
+async def test_budget_usd_remaining_generous_cap_runs_to_completion() -> None:
+    """A cap comfortably above the total spend must let every segment
+    run -- no exhaustion field set, mirroring the deadline check's own
+    'no-op when not exceeded' behavior."""
+    from unittest.mock import AsyncMock, patch
+
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "extract", "args": {"fields": "a", "inputs": "[]"}},
+            {"tool": "summarize", "args": {"cited": False, "content": "$step1.extractions"}},
+            {"tool": "search", "args": {"query": "x"}},
+        ],
+    }
+    bundle_usage = _usage(cost_usd=0.60)
+
+    async def fake_bundle(bundle, *, usage_sink=None, **kwargs):
+        if usage_sink is not None:
+            usage_sink.append(bundle_usage)
+        return {"summary": "synthesis"}
+
+    async def stub_search(**kwargs):
+        return {"ids": ["a"], "tumblers": [], "distances": [], "collections": []}
+
+    from nexus.mcp import core as mcp_core
+
+    with patch.object(mcp_core, "search", stub_search), \
+         patch("nexus.plans.bundle.dispatch_bundle", fake_bundle):
+        result = await plan_run(_match(plan), {}, budget_usd_remaining=100.0)
+
+    assert len(result.step_records) == 2  # bundle + search, both dispatched
+    assert result.budget_exhausted_at_step is None
+    assert result.budget_exhausted_kind is None
+
+
+@pytest.mark.asyncio
+async def test_budget_usd_remaining_none_preserves_default_fields() -> None:
+    """``budget_usd_remaining=None`` (the default) must leave the new
+    PlanResult fields at their inert defaults -- proves the .p3c param
+    does not silently change behavior when unset."""
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+    disp = _FakeDispatcher(outputs=[{"ids": [], "tumblers": []}])
+    result = await plan_run(_match(plan), {}, dispatcher=disp)
+
+    assert result.budget_exhausted_at_step is None
+    assert result.budget_exhausted_kind is None
+
+
+@pytest.mark.asyncio
+async def test_budget_usd_remaining_unknown_cost_steps_never_trip() -> None:
+    """An isolated LLM-tool step whose dispatch produces no captured
+    DispatchUsage records cost_usd=None (genuinely unknown, never a
+    fabricated 0 -- see StepRecord's own docstring). A tiny
+    budget_usd_remaining must NOT stop a run built entirely of such
+    steps: an unknown cost contributes nothing to the running sum and
+    therefore can never trip the check on its own.
+
+    This proves the BLIND SPOT exists at the runner level (dispatch
+    continues, nothing accumulates, nothing trips). RDR-196 .p3c round
+    2 (critic Significant 1, T2 p3c-critique-2026-08-21) surfaces this
+    to the caller as a WARNING one layer up -- see
+    ``TestNxAnswerBudgetUsdEnforcement::
+    test_unknown_cost_steps_surface_the_blind_spot_warning`` in
+    tests/test_nx_answer.py, which proves the SIGNAL now fires."""
+    from unittest.mock import patch
+
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "extract", "args": {"fields": "a", "inputs": "[]"}},
+            {"tool": "extract", "args": {"fields": "b", "inputs": "[]"}},
+            {"tool": "extract", "args": {"fields": "c", "inputs": "[]"}},
+        ],
+    }
+    calls: list[str] = []
+
+    async def stub_extract(**kwargs):
+        calls.append("extract")
+        return {"extractions": []}
+
+    from nexus.mcp import core as mcp_core
+
+    with patch.object(mcp_core, "operator_extract", stub_extract):
+        result = await plan_run(
+            _match(plan), {}, budget_usd_remaining=0.01, bundle_operators=False,
+        )
+
+    assert calls == ["extract", "extract", "extract"], (
+        "every step must have run -- unknown (None) per-step cost must "
+        "never be treated as a fabricated 0 that would trip the check"
+    )
+    assert result.budget_exhausted_at_step is None
+    assert result.budget_exhausted_kind is None
+    assert all(r.cost_usd is None for r in result.step_records)
+
+
 # ── StepRecord (RDR-196 .p1b, nexus-nyry9.8) ────────────────────────────────
 
 

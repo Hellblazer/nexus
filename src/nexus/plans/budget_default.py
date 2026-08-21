@@ -97,8 +97,15 @@ _log = structlog.get_logger(__name__)
 # traffic at the first opportunity.
 DERIVED_BUDGET_USD: Final[float | None] = 1.0530
 
-#: ``.p3c`` flips this; this bead leaves enforcement OFF by construction.
-BUDGET_ENFORCEMENT_ENABLED: Final[bool] = False
+#: RDR-196 .p3c (nexus-nyry9.21) flips this ON now that DERIVED_BUDGET_USD
+#: carries a real, provenance-recorded value (.p3a). Gates ALL budget_usd
+#: enforcement in ``nx_answer`` -- both an explicit caller-supplied cap
+#: and the derived default -- so setting this back to False is a true
+#: rollback kill switch (nx_answer's pre-flight refusal, mid-run
+#: step-boundary stop, and bounds check all read this constant, never a
+#: literal). ``check_enforcement_invariant`` above still runs at import
+#: and would refuse this flip if DERIVED_BUDGET_USD were None.
+BUDGET_ENFORCEMENT_ENABLED: Final[bool] = True
 
 
 def check_enforcement_invariant(enabled: bool, derived: float | None) -> None:

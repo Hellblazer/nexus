@@ -6490,10 +6490,12 @@ _NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN: int = 0
 #: the STABLE PREFIX of the budget-exhausted partial-answer marker text
 #: -- the single emitter below (``_budget_exhausted_response``) builds
 #: the full marker as
-#: ``f"{NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX} after step {N} of
-#: {M} — partial answer]"``; only this prefix is a stable, shared
-#: contract (N/M vary per run, so the full string is never itself a
-#: constant). ``commands/answer_runs.py``'s ``_row_is_failed`` imports
+#: ``f"{NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX} ({kind}) after step
+#: {N} of {M} — partial answer]"`` (``kind`` is ``"time"`` or ``"cost"``
+#: -- RDR-196 .p3c, nexus-nyry9.21: the USD budget reuses this exact
+#: marker rather than a second shape); only this prefix is a stable,
+#: shared contract (kind/N/M vary per run, so the full string is never
+#: itself a constant). ``commands/answer_runs.py``'s ``_row_is_failed`` imports
 #: THIS constant to recognize a budget-exhausted row's ``final_text``
 #: rather than retyping the literal -- a second hand-typed copy would
 #: silently drift the moment either side's wording changed (exactly the
@@ -6585,16 +6587,71 @@ async def nx_answer(
         scope: Catalog subtree or corpus filter (e.g. ``"1.2"`` or ``"knowledge"``).
         context: Supplementary caller-supplied context for the plan matcher.
         max_steps: Cap on plan DAG size (passed to inline planner on miss).
-        budget_usd: Per-invocation cost cap in USD. ``None`` (the default)
+        budget_usd: Soft per-invocation cost GUIDANCE in USD, not a hard
+            limit -- an over-estimate warns rather than refuses, and the
+            mid-run stop can overshoot by up to one segment's cost (see
+            below). ``None`` (the default)
             means "use the derived default",
             :data:`nexus.plans.budget_default.DERIVED_BUDGET_USD` --
             1.0530 since 2026-08-21 (RDR-196 .p3a: p90 of n=30 config-conformant
             runs, ``nx answer-runs --derive-budget``; provenance on the
             constant). The former ``0.25`` literal predated any
-            measurement and is gone (RDR-196 § Risks). NOT YET ENFORCED:
-            enforcement (pre-flight refusal + step-boundary stop) lands
-            in .p3c and stays OFF until then
-            (:data:`nexus.plans.budget_default.BUDGET_ENFORCEMENT_ENABLED`).
+            measurement and is gone (RDR-196 § Risks). ENFORCED as of
+            RDR-196 .p3c (nexus-nyry9.21) whenever
+            :data:`nexus.plans.budget_default.BUDGET_ENFORCEMENT_ENABLED`
+            is True (the single gate for everything below -- setting it
+            back False is a true rollback):
+
+            - A non-positive ``budget_usd`` (``<= 0``) is a loud bounds
+              error, returned immediately, before any dispatch. ``0``
+              does NOT mean "unlimited".
+            - PRE-FLIGHT PRICE CHECK, a WARNING not a refusal (round-2
+              deviation from the accepted RDR text, Sam's decision —
+              see ``docs/rdr/rdr-196-cost-aware-nx-answer.md`` § Phase 3
+              for the dated note): once Step 1 resolves a plan (matched
+              or inline-planner-grown), its predicted cost
+              (:func:`nexus.plans.cost_estimate.estimate_plan_cost`,
+              the SAME step-shape estimate the .p3b plan-choice logic
+              already computes) is compared against the REMAINING
+              budget (the cap minus whatever the inline planner's own
+              dispatch already spent — the .r2 gap, closed on this
+              axis by nexus-nyry9.21 D5). This estimate has NO per-plan
+              discriminating power in the live population (a same-day
+              20-run measurement found every live plan predicting the
+              IDENTICAL bundle-dominant ceiling, median actual/predicted
+              ratio 0.805, worst overestimate 11.2x) — so exceeding the
+              remaining budget now WARNS and RUNS rather than refusing,
+              naming the estimate, the remaining budget, the full cap,
+              and any already-spent amount. A plan with NO estimate (an
+              operator this table has never priced) gets the same
+              treatment — it always ran, never refused on that basis
+              alone. Both cases surface via the SAME single warning
+              emitter: a leading warning line (text mode) / a
+              ``budget_warnings`` field (structured mode).
+              nexus-nyry9.21 round 2 also added an ``"unknown-cost"``
+              warning kind through the identical emitter: when one or
+              more executed steps report no ``cost_usd``, the mid-run
+              running sum could not include them and the check below
+              may have been blind for part of the run — surfaced once
+              per run, never silently.
+            - MID-RUN STOP-LINE, not a hard ceiling, and the REAL
+              enforcement (it sums MEASURED ``StepRecord`` costs, not a
+              step-shape guess): the remaining
+              budget is threaded into ``plan_run`` as
+              ``budget_usd_remaining``, checked BEFORE dispatching each
+              segment against the sum of already-completed steps'
+              known cost (see ``plan_run``'s own docstring for why a
+              dispatch's real cost can only ever be known AFTER it
+              returns). The segment that pushes the running sum over
+              the cap still finishes; only the segment AFTER it is
+              stopped. The run total can therefore end up above
+              ``budget_usd`` by up to that final segment's own cost —
+              this is the documented contract, not a bug. When it
+              trips, ``nx_answer`` returns the SAME
+              ``[budget exhausted ...]`` marker ``budget_seconds``
+              already produces (see below), with ``(cost)`` in place of
+              ``(time)`` — one emitter, parameterized by which budget
+              axis tripped, never a second marker shape.
         budget_seconds: nexus-h33x8.6 a4 — an OPTIONAL hard wall-clock
             budget for the plan-EXECUTION phase ONLY (Step 4 below,
             the ``plan_run`` call), measured from this call's own
@@ -6606,11 +6663,13 @@ async def nx_answer(
             retrieved results plus any reconstructed partial operator
             text are returned instead of raising or blocking further —
             "here are the retrieved chunks; synthesis skipped, budget
-            exceeded". Marked with a leading ``[budget exhausted after
-            step N of M — partial answer]`` line (text mode) or a
+            exceeded". Marked with a leading ``[budget exhausted (time)
+            after step N of M — partial answer]`` line (text mode) or a
             top-level ``budget_exhausted_at_step`` field (structured
-            mode; converges with RDR-196 §Approach's marker convention
-            for the later USD-budget work).
+            mode). RDR-196 .p3c (nexus-nyry9.21): the USD budget
+            (``budget_usd`` above) reuses this exact marker with
+            ``(cost)`` in place of ``(time)`` — one emitter, never a
+            second shape.
 
             **CORRECTED (nexus-nyry9.2, RDR-196 .r2):** the plan-MISS
             inline-planner phase (``_nx_answer_plan_miss``, its own
@@ -6691,9 +6750,15 @@ async def nx_answer(
     from types import SimpleNamespace  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site (nexus-nyry9.2 pre-Step-2 budget stand-in)
 
     from nexus.mcp_infra import get_t1_plan_cache  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
+    from nexus.plans.budget_default import (  # noqa: PLC0415 — deferred for startup cost; call-time import so a test's monkeypatch on the module attribute is honored every call (RDR-196 .p3c, nexus-nyry9.21)
+        BUDGET_ENFORCEMENT_ENABLED as _budget_enforcement_enabled,
+        DERIVED_BUDGET_USD as _derived_budget_usd,
+    )
     from nexus.plans.cost_estimate import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
         PLAN_CHOICE_CONFIDENCE_BAND,
+        PlanCostEstimate,
         choose_within_band,
+        estimate_plan_cost,
         get_cached_price_table,
     )
     from nexus.plans.matcher import plan_match as _plan_match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -6718,6 +6783,54 @@ async def nx_answer(
     # deadline exemption a prior classify_plan bucket used to carry was
     # deleted — see that function's own docstring).
     deadline = start + budget_seconds if budget_seconds is not None else None
+
+    # RDR-196 .p3c (nexus-nyry9.21): USD budget enforcement state, all
+    # declared here (bound to inert defaults) for the same reason
+    # `_plan_choice_info` is above -- every `_result(...)` call site,
+    # including ones on paths that resolve before pricing ever runs,
+    # must see a defined value. `effective_budget_usd` is computed just
+    # before Step 1 below (after `_result` is defined, alongside the
+    # `min_confidence` bounds check) -- the caller's `budget_usd` when
+    # supplied, else the derived default, but ONLY when
+    # `BUDGET_ENFORCEMENT_ENABLED` -- the single gate for ALL
+    # enforcement (bounds check, pre-flight refusal, mid-run stop).
+    effective_budget_usd: "float | None" = None
+    #: Captures the inline planner's own claude_dispatch cost (D5 /
+    #: nexus-nyry9.21, closing the .r2 gap for the USD axis) via the
+    #: ambient sink wrapped around the Step 1 miss-path dispatch below.
+    #: Stays empty (spend 0.0) on a plan-match HIT — no planner dispatch
+    #: happens on that path.
+    _planner_usage_sink: list = []
+    #: Set once, in the pre-Step-2 budget check below, to
+    #: `effective_budget_usd` minus whatever the planner already spent.
+    #: Threaded into `plan_run` at Step 4 as `budget_usd_remaining`.
+    #: `None` whenever enforcement is inactive for this call -- mirrors
+    #: `deadline`'s own "only pass the kwarg when set" discipline.
+    _budget_remaining_usd: "float | None" = None
+    #: RDR-196 .p3c round-2 (Sam's decision on the critic's CRITICAL, T2
+    #: p3c-critique-2026-08-21) / round-3 (critic Significant, T2
+    #: p3c-critique round 3): the ONE accumulator for every budget
+    #: WARNING this call can produce -- D4's no-estimate case, the
+    #: demoted over-cap pre-flight (was a hard refusal; the step-shape
+    #: estimator has no per-plan discriminating power in the live
+    #: population, see `_emit_budget_warning`'s own docstring below),
+    #: and the mid-run unknown-cost blind-spot signal (critic
+    #: Significant 1). Each entry is a ``{"kind": ..., "detail": ...}``
+    #: dict, not a formatted string -- round 3 made this
+    #: MACHINE-READABLE (critic Significant: "over-cap fires on every
+    #: tight-budget call; no-estimate/unknown-cost are rare
+    #: cost-tracking-quality anomalies" -- a caller/`.22` needs to tell
+    #: those apart without grepping prose) so `_result`'s closure below
+    #: can derive BOTH the human leading text line(s) AND a structured
+    #: `budget_warnings` list from the SAME data, never two
+    #: independently-maintained shapes. A list, not a single dict:
+    #: independent warning kinds can co-occur in one call (e.g. a
+    #: no-estimate pre-flight warning AND an unknown-cost blind spot
+    #: found during execution) and must not silently overwrite each
+    #: other. Read by `_result`'s closure so EVERY exit path this call
+    #: can take after a warning is emitted carries all of them, in both
+    #: shapes.
+    _budget_warning_entries: "list[dict[str, str]]" = []
 
     # RDR-137 followup (nexus-n1908): normalize a malformed comma-list
     # scope to broad search (with a warning) so it doesn't filter
@@ -6744,8 +6857,42 @@ async def nx_answer(
                 chunks: "list | None" = None,
                 budget_exhausted_at_step: "int | None" = None,
                 step_records: "list | None" = None) -> "str | dict":
+        # RDR-196 .p3c (nexus-nyry9.21), extended round 2 / round 3:
+        # single emitter for every budget WARNING, both shapes. Reads
+        # the closure list `_budget_warning_entries` (declared near the
+        # top of this function, appended to by `_emit_budget_warning`,
+        # never overwritten) so EVERY exit path this call can take
+        # after ANY warning is emitted — success, a later error, the
+        # exhaustion marker itself — carries all of them, never
+        # silently dropped for a structured=False caller. The human
+        # text line shape is UNCHANGED from round 2:
+        # ``[budget warning (kind): detail]``, one per entry, joined.
+        _budget_warning_text = (
+            "\n".join(
+                f"[budget warning ({e['kind']}): {e['detail']}]"
+                for e in _budget_warning_entries
+            )
+            if _budget_warning_entries else None
+        )
+        # RDR-196 .p3c round 3 (code review Medium, co-occurrence bug
+        # found via the new test): when the exhaustion marker is ALSO
+        # present, it must stay the LEADING line — commands/answer_runs.
+        # py's `_row_is_failed` keys on
+        # ``final_text.startswith(NX_ANSWER_BUDGET_EXHAUSTED_MARKER_
+        # PREFIX)``, which an unconditional warning-first prepend would
+        # break the moment a warning and an exhaustion co-occur (now a
+        # real possibility since a warned run PROCEEDS to execute
+        # instead of being refused). Prepend in the normal case
+        # (unchanged from round 2); append after the marker when one is
+        # present, so the marker's prefix contract always holds.
+        if not _budget_warning_text:
+            _text = text
+        elif text.startswith(NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX):
+            _text = f"{text}\n{_budget_warning_text}"
+        else:
+            _text = f"{_budget_warning_text}\n{text}"
         if not structured:
-            return text
+            return _text
         # RDR-196 .p1e (nexus-nyry9.11): per-step breakdown in the
         # structured envelope, same field names as the wire (reuses
         # _step_record_to_wire — the exact dict TelemetryHandler's
@@ -6762,7 +6909,7 @@ async def nx_answer(
         ]
         cost_usd = sum(_known_costs) if _known_costs else None
         return {
-            "final_text": text,
+            "final_text": _text,
             "chunks": chunks if chunks is not None else [],
             "plan_id": plan_id,
             "step_count": step_count,
@@ -6772,6 +6919,25 @@ async def nx_answer(
             "budget_exhausted_at_step": budget_exhausted_at_step,
             "steps": [_step_record_to_wire(s) for s in _steps],
             "cost_usd": cost_usd,
+            # RDR-196 .p3c round 3 (critic Significant, T2 p3c-critique
+            # round 3) / round 4 (a THIRD shape carrying the same
+            # information — the joined-prose `budget_estimate_warning`
+            # field this diff shipped in round 3 — was itself the exact
+            # defect class this bead's marker-convergence rule exists to
+            # prevent, caught before it ever landed; deleted, not kept
+            # for "back-compat" that never existed since the field never
+            # shipped). MACHINE-READABLE: over-cap fires chronically on
+            # any tight-budget call and is fundamentally different from
+            # the rare no-estimate / unknown-cost cost-tracking-quality
+            # anomalies; a caller (`.22`, `nx answer-runs`) needs to tell
+            # them apart by `kind` without parsing prose. Derived from
+            # `_budget_warning_entries` (the SAME accumulator the leading
+            # text line above is also built from — exactly two shapes,
+            # never three). Always present, ``[]`` (not None) when
+            # empty, same "always present" convention as
+            # `budget_exhausted_at_step` above and the same empty-list
+            # convention as `chunks`.
+            "budget_warnings": list(_budget_warning_entries),
             # RDR-196 Phase 3 Step 1 (nexus-nyry9.20): the Step 1 plan-
             # choice decision, when it ran (None on force_dynamic, a
             # plan-miss, or any error path before Step 1's hit branch —
@@ -6803,6 +6969,17 @@ async def nx_answer(
         _budget_step = getattr(result, "budget_exhausted_at_step", None)
         if not isinstance(_budget_step, int):
             return None
+        # RDR-196 .p3c (nexus-nyry9.21) D3: which budget axis tripped --
+        # "time" (the shipped budget_seconds mechanism) or "cost" (this
+        # bead's budget_usd mechanism), reusing this SAME emitter rather
+        # than adding a second marker shape. Defaults to "time" for any
+        # PlanResult / stand-in that predates this field (every real
+        # caller from before .p3c only ever exhausted on time) or a test
+        # double that doesn't set it -- never raises on a missing/odd
+        # attribute, same defensive posture as `_budget_step` above.
+        _budget_kind = getattr(result, "budget_exhausted_kind", None)
+        if _budget_kind not in ("time", "cost"):
+            _budget_kind = "time"
         # code-review Important (T2 code-review-nexus-h33x8.6-a4-a2-
         # 2026-08-19): use PlanResult.total_planned_steps -- the field
         # a4 added to runner.py specifically so callers don't re-parse
@@ -6825,7 +7002,7 @@ async def nx_answer(
         except (json.JSONDecodeError, TypeError):
             total_planned = 0
         marker = (
-            f"{NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX} after step "
+            f"{NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX} ({_budget_kind}) after step "
             f"{_budget_step} of {total_planned} — partial answer]"
         )
         # Harvest retrieved chunks the same way Step 5's structured path
@@ -6888,6 +7065,7 @@ async def nx_answer(
             "nx_answer_budget_partial_result",
             plan_id=best.plan_id,
             budget_exhausted_at_step=_budget_step,
+            budget_exhausted_kind=_budget_kind,
             total_planned_steps=total_planned,
             chunk_count=len(partial_chunks),
             has_partial_operator_text=bool(partial_operator_text),
@@ -6925,6 +7103,52 @@ async def nx_answer(
             step_records=_step_records,
         )
 
+    def _emit_budget_warning(kind: str, detail: str) -> None:
+        """RDR-196 .p3c round 2 (Sam's decision on the critic's CRITICAL,
+        T2 p3c-critique-2026-08-21): single emitter for every budget
+        WARNING this call can produce, parameterized by `kind` — the
+        same convergence discipline `_budget_exhausted_response` above
+        already applies to the exhaustion marker via ITS `kind`. Never
+        grow a second, parallel warning mechanism; every new warning
+        class calls this with a new `kind` string.
+
+        Known kinds (as of this round): ``"no-estimate"`` (D4's
+        original no-history/unpriceable path), ``"over-cap"`` (the
+        pre-flight check DEMOTED from a hard refusal — .p3b's
+        step-shape estimator has no per-plan discriminating power in
+        the live population: a same-day 20-run measurement found all 4
+        live plans predicting the IDENTICAL $0.90433 because
+        bundle-dominant pricing always resolves to the same
+        generate@opus ceiling, median actual/predicted 0.805, worst
+        overestimate 11.2x — so a hard refusal at that number is a
+        step function, not a per-plan judgement, and would wrongly
+        refuse real runs costing a fraction of the estimate),
+        ``"unknown-cost"`` (critic Significant 1: the mid-run running
+        sum could not accumulate for one or more steps, so the cost
+        check may have been blind for part of this run — the mid-run
+        stop-line itself is UNCHANGED and still enforces on every
+        MEASURED StepRecord cost; only the coverage gap needs
+        surfacing, once per run).
+
+        Appends rather than overwrites: independent kinds can co-occur
+        in one call (e.g. a `"no-estimate"` pre-flight warning and an
+        `"unknown-cost"` blind spot found during execution) and must
+        not silently replace each other — `_result`'s closure derives
+        BOTH the joined human text (unchanged shape from round 2) AND
+        the round-3 machine-readable ``budget_warnings`` structured
+        field from this SAME accumulator, never two independently
+        maintained shapes.
+
+        Stores a ``{"kind": kind, "detail": detail}`` dict (round 3,
+        critic Significant: the joined-prose-only shape gave a caller
+        no way to tell "over-cap fired again, as it does on every
+        tight-budget call" apart from the rare no-estimate/unknown-cost
+        cost-tracking-quality anomalies without grepping text) rather
+        than a pre-formatted string — the ONE accumulator, not a
+        parallel one.
+        """
+        _budget_warning_entries.append({"kind": kind, "detail": detail})
+
     # ── Step 1: plan-match gate ──────────────────────────────────────────
     # RDR-092 Phase 2 Option A: effective floor is the caller's override
     # when supplied, otherwise the RDR-079 P5 default (0.40). Bounds-
@@ -6939,6 +7163,18 @@ async def nx_answer(
         min_confidence if min_confidence is not None
         else _PLAN_MATCH_MIN_CONFIDENCE
     )
+
+    # RDR-196 .p3c (nexus-nyry9.21) D1: BUDGET_ENFORCEMENT_ENABLED gates
+    # ALL budget_usd enforcement -- an explicit caller-supplied cap and
+    # the derived default alike -- so flipping it back False is a true
+    # rollback. Checked here (mirrors the min_confidence bounds check
+    # immediately above) so a degenerate cap fails loudly, before any
+    # dispatch, exactly like a degenerate min_confidence.
+    if _budget_enforcement_enabled:
+        if budget_usd is not None and budget_usd <= 0:
+            return _result(f"budget_usd must be > 0, got {budget_usd!r}")
+        effective_budget_usd = budget_usd if budget_usd is not None else _derived_budget_usd
+
     if force_dynamic:
         # RDR-090 P1.1: skip the plan-match gate entirely. The
         # dynamic-planner path below picks up matches=[].
@@ -6980,10 +7216,21 @@ async def nx_answer(
             question=question[:100] if trace else "[redacted]",
         )
         try:
-            best = await _nx_answer_plan_miss(
-                question, scope=scope, max_steps=max_steps,
-                few_shot_matches=matches,
+            # RDR-196 .p3c (nexus-nyry9.21) D5: capture the planner's own
+            # claude_dispatch cost via the ambient sink so it can be
+            # seeded into the running USD spend below (.r2's gap on the
+            # cost axis — the planner phase already charges against
+            # budget_seconds via the deadline check further down).
+            # Wrapped unconditionally (cheap contextvar set/reset); only
+            # CONSUMED when budget enforcement is active.
+            from nexus.operators.dispatch import (  # noqa: PLC0415 — deferred; matches this function's convention
+                ambient_usage_sink as _ambient_usage_sink,
             )
+            with _ambient_usage_sink(_planner_usage_sink):
+                best = await _nx_answer_plan_miss(
+                    question, scope=scope, max_steps=max_steps,
+                    few_shot_matches=matches,
+                )
         except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
             elapsed_ms = int((time.monotonic() - start) * 1000)
             _log.warning("nx_answer_planner_failed", error=str(exc))
@@ -7118,12 +7365,119 @@ async def nx_answer(
             total_planned = 0
         _pre_plan_stub = SimpleNamespace(
             budget_exhausted_at_step=_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN,
+            budget_exhausted_kind="time",
             steps=[],
             total_planned_steps=total_planned,
         )
         _budget_response = _budget_exhausted_response(_pre_plan_stub)
         if _budget_response is not None:
             return _budget_response
+
+    # ── Pre-Step-2 USD budget check (nexus-nyry9.21, RDR-196 .p3c) ────────
+    # D5: the planner's own dispatch cost (captured above via the ambient
+    # sink around Step 1's miss path; empty/0.0 on a plan-match HIT,
+    # which never dispatches a planner) is seeded into the running spend
+    # BEFORE the remaining budget is computed — closes the same .r2-class
+    # gap on the cost axis that the time check above already closed on
+    # the wall-clock axis.
+    if effective_budget_usd is not None:
+        _planner_spent_usd = sum(
+            u.cost_usd for u in _planner_usage_sink if getattr(u, "cost_usd", None) is not None
+        )
+        _budget_remaining_usd = effective_budget_usd - _planner_spent_usd
+        if _budget_remaining_usd <= 0:
+            # D5: reuse the EXISTING pre-plan sentinel path rather than
+            # inventing a new one — same stand-in shape as the time
+            # check above, kind="cost" is the only difference.
+            try:
+                total_planned = len(json.loads(best.plan_json).get("steps") or [])
+            except (json.JSONDecodeError, TypeError):
+                total_planned = 0
+            _pre_plan_stub = SimpleNamespace(
+                budget_exhausted_at_step=_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN,
+                budget_exhausted_kind="cost",
+                steps=[],
+                total_planned_steps=total_planned,
+            )
+            _budget_response = _budget_exhausted_response(_pre_plan_stub)
+            if _budget_response is not None:
+                return _budget_response
+        else:
+            # D4: pre-flight PRICE CHECK on the chosen/grown plan. Reuse
+            # the PlanCostEstimate the .p3b plan-choice path already
+            # computed for `best` on a plan-match HIT
+            # (`_plan_choice_info["predicted_cost_usd"]`/`["basis"]` —
+            # `best` IS `_chosen`, so these values are exactly what a
+            # fresh `estimate_plan_cost(best.plan_json, ...)` call would
+            # produce); price the grown plan fresh, with the same price
+            # table, on a plan-miss / force_dynamic run, where no such
+            # candidate estimate exists.
+            if _plan_choice_info is not None:
+                _plan_estimate_usd = _plan_choice_info.get("predicted_cost_usd")
+                _plan_estimate_basis = _plan_choice_info.get("basis") or ""
+            else:
+                try:
+                    with _t2_ctx() as _cost_db2:
+                        _price_table2 = get_cached_price_table(_cost_db2.telemetry)
+                    _estimate = estimate_plan_cost(best.plan_json, _price_table2)
+                except Exception:  # noqa: BLE001 — boundary catch; degrade to "no estimate", must not crash caller
+                    _estimate = PlanCostEstimate(usd=None, ms=None, basis="pricing-unavailable")
+                _plan_estimate_usd = _estimate.usd
+                _plan_estimate_basis = _estimate.basis
+            # RDR-196 .p3c round 2 (Sam's decision on the critic's
+            # CRITICAL, T2 p3c-critique-2026-08-21): DEMOTED from a hard
+            # refusal to a WARNING. The bundle-dominant step-shape
+            # estimator has NO per-plan discriminating power in the live
+            # population — a same-day 20-run measurement found all 4
+            # live plans predicting the IDENTICAL $0.90433 (bundle
+            # pricing always resolves to the generate@opus ceiling),
+            # median actual/predicted ratio 0.805 (systematic
+            # over-estimate), worst overestimate 11.2x, only 3/20
+            # under-predicted. A hard refusal at that number is a STEP
+            # FUNCTION at $0.90433, not a per-plan judgement: under the
+            # derived default cap (1.0530) it never fires; under any
+            # caller-supplied budget_usd near real median spend
+            # (~$0.70-0.80) it refused every real run deterministically
+            # and wrongly, including runs that would truly land under
+            # the cap. The mid-run stop-line below is UNCHANGED and
+            # remains the real enforcement mechanism — it sums MEASURED
+            # StepRecord costs rather than a step-shape guess, which is
+            # exactly why it survives review while this predicted-cost
+            # half does not. Re-enabling a hard refusal here is gated on
+            # the estimator gaining real per-plan discrimination.
+            if _plan_estimate_usd is not None and _plan_estimate_usd > _budget_remaining_usd:
+                # code-review Medium 1 (T2 p3c-code-review-2026-08-21):
+                # name BOTH the actual comparison operand (remaining,
+                # which is what "exceeds" is checked against) and the
+                # full original cap, plus the already-spent amount when
+                # nonzero — the prior text labelled the full cap as
+                # "the budget cap" while comparing against the smaller
+                # remaining, so the headline clause could read as
+                # numerically false whenever D5's planner spend was
+                # nonzero (e.g. remaining $0.45 < estimate $0.50 <
+                # full cap $1.0530 — "$0.50 exceeds $1.0530" is false
+                # as literally stated).
+                _emit_budget_warning(
+                    "over-cap",
+                    f"estimated plan cost ${_plan_estimate_usd:.4f} exceeds the "
+                    f"remaining budget ${_budget_remaining_usd:.4f} "
+                    f"(full cap ${effective_budget_usd:.4f}"
+                    + (
+                        f", ${_planner_spent_usd:.4f} already spent before plan execution)"
+                        if _planner_spent_usd > 0 else ")"
+                    )
+                    + f". basis: {_plan_estimate_basis}. Running anyway — the "
+                    "step-shape estimate has no per-plan discriminating power "
+                    "in the live population; the mid-run cost check (measured, "
+                    "not predicted) is the real enforcement.",
+                )
+            if _plan_estimate_usd is None:
+                # D4: no-history / unpriceable plan — WARN, never refuse.
+                _emit_budget_warning(
+                    "no-estimate",
+                    f"({_plan_estimate_basis}) — running without a pre-flight "
+                    "cost check",
+                )
 
     # ── Step 2: single-step guard ────────────────────────────────────────
     if plan_class == "single_query":
@@ -7391,6 +7745,13 @@ async def nx_answer(
     _plan_run_kwargs: dict[str, Any] = {}
     if deadline is not None:
         _plan_run_kwargs["deadline"] = deadline
+    # RDR-196 .p3c (nexus-nyry9.21) D5: same "only pass when set"
+    # discipline as deadline above -- None whenever enforcement is
+    # inactive for this call, so a caller/test double with a fixed
+    # (match, bindings) signature and no budget_usd/enforcement in play
+    # sees byte-identical behavior.
+    if _budget_remaining_usd is not None:
+        _plan_run_kwargs["budget_usd_remaining"] = _budget_remaining_usd
 
     try:
         result = await _plan_run(best, run_bindings, **_plan_run_kwargs)
@@ -7434,6 +7795,37 @@ async def nx_answer(
     # already knows the run produced nothing. It could not have been right: at
     # this point the outcome is literally not yet computed. Moved to the two
     # branches that DO know, further down.
+
+    # RDR-196 .p3c round 2 (critic Significant 1, T2 p3c-critique-2026-08-21):
+    # unknown-cost blind-spot signal. "Never fabricate a 0 for an unknown
+    # cost_usd" is correct (StepRecord's own doctrine), but its corollary
+    # is silent: the mid-run running sum cannot accumulate for a step
+    # whose real cost was never captured, so `budget_usd_remaining`'s
+    # check may have been blind for part of this run. Fail loud, per the
+    # repo's own no-silent-fallbacks-for-correctness rule — once per
+    # RUN, not once per step, through the single warning emitter. Only
+    # meaningful when enforcement was actually active for this call
+    # (`_budget_remaining_usd is not None`); an unenforced run was never
+    # promising a cost guarantee to begin with. Checked BEFORE the
+    # exhaustion-marker early-return below so the signal still surfaces
+    # even on a run that also hit the exhaustion marker — the two are
+    # independent observations (a run can be BOTH "stopped early on
+    # measured cost" and "some earlier step's cost was never measured").
+    if _budget_remaining_usd is not None:
+        _unknown_cost_step_records = getattr(result, "step_records", None)
+        if not isinstance(_unknown_cost_step_records, list):
+            _unknown_cost_step_records = []
+        _unknown_cost_count = sum(
+            1 for r in _unknown_cost_step_records if getattr(r, "cost_usd", None) is None
+        )
+        if _unknown_cost_count:
+            _emit_budget_warning(
+                "unknown-cost",
+                f"{_unknown_cost_count} of {len(_unknown_cost_step_records)} "
+                "executed step(s) reported no cost_usd — the running spend "
+                "could not include them, so the budget_usd_remaining check "
+                "may not have caught an overrun for this run",
+            )
 
     # ── nexus-h33x8.6 a4: budget-exhausted partial-result path ────────────
     # Runs BEFORE Step 5's normal extraction — a budget cutoff bypasses
