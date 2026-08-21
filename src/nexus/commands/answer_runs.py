@@ -333,6 +333,89 @@ def _step_breakdown(rows: "list[dict]") -> dict[str, Any]:
     }
 
 
+#: Short connect/read timeout for the BEST-EFFORT plan-library lookups
+#: below -- distinct from HttpPlanLibrary's own 30s default. This column
+#: is a nice-to-have enrichment of an already-successful report, never a
+#: gate; a slow/unreachable plan-library service should degrade this ONE
+#: column to None quickly rather than making the whole `--steps` report
+#: wait up to 30s per plan_id.
+_PREDICTED_COST_LOOKUP_TIMEOUT_S: float = 3.0
+
+
+def _add_predicted_costs(by_plan: dict[str, dict[str, Any]], telemetry_store: Any) -> None:
+    """Read-time estimate-vs-actual (RDR-196 Phase 3 Step 1, nexus-nyry9.20,
+    code-review round 1 dormancy item #2): for each real ``plan_id`` key in
+    *by_plan* (``"fallback"`` -- the ad-hoc inline-planner sentinel, no
+    plan JSON exists for it -- is skipped), fetch the plan's stored
+    ``plan_json`` from the plan library and compute a PREDICTED cost via
+    :func:`nexus.plans.cost_estimate.estimate_plan_cost` against a price
+    table built from *telemetry_store* -- the SAME mechanism ``nx_answer``'s
+    own Step 1 selection uses, so a caller comparing this column against
+    the row's recorded ``median_cost_usd`` sees the estimate the live
+    system would actually have produced, not an independently-reimplemented
+    approximation.
+
+    Client-only and computed FRESH on every call -- nothing here is
+    persisted; ``predicted_cost_usd`` is not yet a column on
+    ``nx_answer_runs``/``nx_answer_steps`` (see docs/cli-reference.md's
+    "Predicted vs actual cost" section for what is and is not yet wired).
+
+    Mutates *by_plan* in place, adding ``predicted_cost_usd`` (``float |
+    None``) and ``predicted_basis`` (``str``) to every entry. Fails soft
+    at every boundary -- a price-table build failure, an unreachable plan
+    library, a deleted plan, or a malformed ``plan_json`` all degrade that
+    plan's (or every plan's) predicted fields to ``None`` with a named
+    ``predicted_basis`` reason, never crash the report and never a silent
+    ``0``.
+    """
+    from nexus.plans.cost_estimate import (  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
+        build_operator_price_table,
+        estimate_plan_cost,
+    )
+
+    price_table = None
+    try:
+        price_table = build_operator_price_table(telemetry_store)
+    except Exception:  # noqa: BLE001 — boundary catch; predicted-cost column degrades to None, must not crash the report
+        _log.debug("answer_runs_price_table_build_failed", exc_info=True)
+
+    library = None
+    if price_table is not None:
+        try:
+            from nexus.db.t2.http_plan_library import HttpPlanLibrary  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
+
+            library = HttpPlanLibrary(timeout=_PREDICTED_COST_LOOKUP_TIMEOUT_S)
+        except Exception:  # noqa: BLE001 — boundary catch; predicted-cost column degrades to None, must not crash the report
+            _log.debug("answer_runs_plan_library_init_failed", exc_info=True)
+
+    for plan_key, entry in by_plan.items():
+        entry["predicted_cost_usd"] = None
+        entry["predicted_basis"] = "unavailable"
+        if plan_key == "fallback" or price_table is None or library is None:
+            if plan_key == "fallback":
+                entry["predicted_basis"] = "ad-hoc-no-plan-json"
+            continue
+        try:
+            plan_id = int(plan_key)
+        except ValueError:
+            continue
+        try:
+            row = library.get_plan(plan_id)
+        except Exception:  # noqa: BLE001 — boundary catch; this plan's predicted cost stays None, others unaffected
+            _log.debug("answer_runs_plan_lookup_failed", plan_id=plan_id, exc_info=True)
+            continue
+        if row is None:
+            entry["predicted_basis"] = "plan-not-found"
+            continue
+        plan_json = row.get("plan_json")
+        if not plan_json:
+            entry["predicted_basis"] = "plan-json-missing"
+            continue
+        estimate = estimate_plan_cost(plan_json, price_table)
+        entry["predicted_cost_usd"] = estimate.usd
+        entry["predicted_basis"] = estimate.basis
+
+
 @click.command("answer-runs")
 @click.option(
     "--since", "since", default=None,
@@ -427,6 +510,7 @@ def answer_runs_cmd(
     _emit_report(
         result, since=since, limit=limit, json_out=json_out,
         want_steps=want_steps, include_failed=include_failed,
+        telemetry_store=store,
     )
 
 
@@ -438,6 +522,7 @@ def _emit_report(
     json_out: bool,
     want_steps: bool = False,
     include_failed: bool = False,
+    telemetry_store: Any = None,
 ) -> None:
     rows = result.get("rows") or []
     executed_ok_rows, executed_failed_rows, degenerate_by_class = _split_three_way(rows)
@@ -463,6 +548,14 @@ def _emit_report(
                 "steps_supported": steps_supported,
                 **_step_breakdown(breakdown_rows),
             }
+            # RDR-196 Phase 3 Step 1 (nexus-nyry9.20, code-review round 1
+            # dormancy item #2): read-time estimate-vs-actual, computed
+            # fresh on every call -- never persisted (see docs/
+            # cli-reference.md's "Predicted vs actual cost" section for
+            # what nx_answer's own Step 1 logs but does not yet write to
+            # this table).
+            if telemetry_store is not None:
+                _add_predicted_costs(step_data["by_plan"], telemetry_store)
 
     # RDR-196 .p1e review-fix (S2, substantive-critic T2 [23111]): a
     # page-scoped latency view of the SAME executed-ok population the
@@ -613,15 +706,22 @@ def _emit_report(
                 )
             by_plan = step_data["by_plan"]
             if by_plan:
-                click.echo(f"  by plan ({pop_label}, median cost / median elapsed):")
+                click.echo(
+                    f"  by plan ({pop_label}, median cost / median elapsed / "
+                    f"predicted cost, RDR-196 Phase 3 Step 1 -- read-time, "
+                    f"not persisted):"
+                )
                 for plan_key, agg in sorted(by_plan.items()):
                     mc = agg["median_cost_usd"]
                     me = agg["median_elapsed_ms"]
                     mc_s = f"{mc:.6f}" if mc is not None else "unknown"
                     me_s = f"{me:.0f}ms" if me is not None else "unknown"
+                    pc = agg.get("predicted_cost_usd")
+                    pc_s = f"{pc:.6f}" if pc is not None else agg.get("predicted_basis", "unavailable")
                     click.echo(
                         f"    plan={plan_key:<8} runs={agg['run_count']:<4} "
-                        f"median_cost_usd={mc_s} median_elapsed_ms={me_s}"
+                        f"median_cost_usd={mc_s} median_elapsed_ms={me_s} "
+                        f"predicted_cost_usd={pc_s}"
                     )
             violations = step_data["cost_consistency_violations"]
             if violations:

@@ -6415,6 +6415,25 @@ async def nx_answer(
     3. **Execute plan**: run via ``plan_run``.
     4. **Record**: write run metrics to T2 ``nx_answer_runs``.
 
+    **Plan choice (RDR-196 Phase 3 Step 1, nexus-nyry9.20).** On EVERY
+    plan-match hit (not only when more than one candidate is returned —
+    ``candidate_count == 1`` is the common case today, per nexus-nyry9.3's
+    census), the top-confidence match is no longer picked unconditionally:
+    among the CONTIGUOUS PREFIX of ``matches`` (matcher order) within
+    ``PLAN_CHOICE_CONFIDENCE_BAND`` (``nexus.plans.cost_estimate``, a
+    named constant) of the best raw confidence — the prefix stops
+    permanently at the first out-of-band candidate, so cost can never
+    reach past a relevance demotion the matcher's own RDR-091 scope-fit
+    re-ranking already made — the one with the lowest PREDICTED cost from
+    its step shape (not a recorded per-plan median) is chosen; ties break
+    by earlier matcher position. Outside the prefix, confidence wins
+    regardless of cost. Logged on every hit as a ``nx_answer_plan_choice``
+    structlog event (candidate count, candidates, estimates, the choice)
+    and in the ``structured=True`` envelope's ``plan_choice`` field. See
+    docs/cli-reference.md's ``nx answer-runs`` § "Predicted vs actual
+    cost" for the read-time estimate-vs-actual column and what is and is
+    not yet persisted.
+
     **Latency.** This is NOT a sub-second call in the general case, and
     the figures below correct an earlier docstring version that
     overstated the fast end by ~45x (it counted degenerate zero-step
@@ -6543,11 +6562,26 @@ async def nx_answer(
     from types import SimpleNamespace  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site (nexus-nyry9.2 pre-Step-2 budget stand-in)
 
     from nexus.mcp_infra import get_t1_plan_cache  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
+    from nexus.plans.cost_estimate import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        PLAN_CHOICE_CONFIDENCE_BAND,
+        choose_within_band,
+        get_cached_price_table,
+    )
     from nexus.plans.matcher import plan_match as _plan_match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.plans.runner import plan_run as _plan_run  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
     _log = _slog.get_logger()
     start = time.monotonic()
+    # RDR-196 Phase 3 Step 1 (nexus-nyry9.20, code-review round 1
+    # dormancy item, T2 nyry9.20-code-review-2026-08-21): captured by
+    # Step 1 below when it resolves a plan-match hit, read by `_result`'s
+    # closure to populate the structured envelope's `plan_choice` field.
+    # Declared here (bound to None) so every `_result(...)` call site --
+    # including ones on paths that never reach Step 1's hit branch, e.g.
+    # the inline-planner-miss error path -- has a defined value to read;
+    # a closure that only got assigned inside one conditional branch
+    # would raise on any call from an earlier-returning path.
+    _plan_choice_info: "dict | None" = None
     # nexus-h33x8.6 a4: anchored at call entry (not at plan_run's own
     # start) so "budget_seconds" reads as "answer me within N seconds
     # total", matching caller intuition. Threaded through to plan_run
@@ -6609,6 +6643,17 @@ async def nx_answer(
             "budget_exhausted_at_step": budget_exhausted_at_step,
             "steps": [_step_record_to_wire(s) for s in _steps],
             "cost_usd": cost_usd,
+            # RDR-196 Phase 3 Step 1 (nexus-nyry9.20): the Step 1 plan-
+            # choice decision, when it ran (None on force_dynamic, a
+            # plan-miss, or any error path before Step 1's hit branch —
+            # a closure read of `_plan_choice_info`, always defined, see
+            # its declaration near the top of this function). Shape when
+            # present: {candidates, candidate_count, chosen_plan_id,
+            # predicted_cost_usd, basis} — the SAME per-candidate dicts
+            # the nx_answer_plan_choice structlog event carries, so a
+            # caller reading the envelope and one tailing the log see one
+            # shape.
+            "plan_choice": _plan_choice_info,
         }
 
     # nexus-h33x8.6 a4 / nexus-nyry9.2 (RDR-196 .r2): single shared
@@ -6833,6 +6878,56 @@ async def nx_answer(
             )
     else:
         best = matches[0]
+        # RDR-196 Phase 3 Step 1 (nexus-nyry9.20; Sam's 2026-08-21 OPTION
+        # (a) decision, superseding the RDR's original recorded-median
+        # design after nexus-nyry9.3's .r3 census found zero plans with a
+        # rankable recorded-history population): among above-floor
+        # candidates within PLAN_CHOICE_CONFIDENCE_BAND of the best raw
+        # confidence, prefer the cheapest PREDICTED cost (from step
+        # shape, priced against Phase 1 telemetry with a static
+        # fallback) instead of unconditionally taking matches[0].
+        # RDR-100 fence: `matches` and every Match.confidence value are
+        # untouched inputs from the plan-match gate above — this only
+        # picks which already-computed candidate the runner executes.
+        # Degrades to the pre-existing top-confidence choice (best stays
+        # matches[0]) on any failure — cost ranking must never be able to
+        # crash or block an otherwise-successful nx_answer call.
+        #
+        # UNCONDITIONAL (code-review round 1 dormancy item, T2
+        # nyry9.20-code-review-2026-08-21): previously gated on
+        # `len(matches) > 1`, which — per nexus-nyry9.3's .r3/.r1 census
+        # — is almost never true on today's library (matches is usually
+        # length 1), making the feature's activity rate unmeasurable.
+        # choose_within_band handles a single-candidate list trivially
+        # (one cheap estimate_plan_cost call, returns it unchanged), so
+        # there is no meaningful cost to always computing + logging this.
+        try:
+            with _t2_ctx() as _cost_db:
+                _price_table = get_cached_price_table(_cost_db.telemetry)
+            _chosen, _decision_log = choose_within_band(
+                matches, _price_table, band=PLAN_CHOICE_CONFIDENCE_BAND,
+            )
+            _chosen_row = next(
+                (r for r in _decision_log if r["plan_id"] == _chosen.plan_id), None,
+            )
+            _plan_choice_info = {
+                "candidates": _decision_log,
+                "candidate_count": len(matches),
+                "chosen_plan_id": _chosen.plan_id,
+                "predicted_cost_usd": _chosen_row["predicted_cost_usd"] if _chosen_row else None,
+                "basis": _chosen_row["basis"] if _chosen_row else None,
+            }
+            _log.info(
+                "nx_answer_plan_choice",
+                candidate_count=len(matches),
+                candidates=_decision_log,
+                chosen_plan_id=_chosen.plan_id,
+                top_confidence_plan_id=matches[0].plan_id,
+                band=PLAN_CHOICE_CONFIDENCE_BAND,
+            )
+            best = _chosen
+        except Exception:  # noqa: BLE001 — boundary catch; degrade to top-confidence match, must not crash caller
+            _log.warning("nx_answer_plan_cost_ranking_failed", exc_info=True)
 
     if best.plan_id == 0:
         conf_str = "ad-hoc"

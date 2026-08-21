@@ -1163,3 +1163,149 @@ class TestStepsFlag:
             "both run.cost_usd and sum(steps) are None -- unknown vs "
             "unknown agrees trivially, not a violation"
         )
+
+
+class TestPredictedCostColumn:
+    """RDR-196 Phase 3 Step 1 (nexus-nyry9.20, code-review round 1
+    dormancy item #2): --steps' by_plan entries carry a READ-TIME
+    predicted cost (nexus.plans.cost_estimate.estimate_plan_cost against
+    a price table built from the SAME telemetry store), computed fresh
+    on every call and never persisted, alongside the recorded actual
+    median_cost_usd."""
+
+    def test_predicted_cost_computed_from_plan_shape(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+        from nexus.plans.cost_estimate import STATIC_FALLBACK_COST_USD
+
+        class _FakeStore:
+            def query_nx_answer_runs(self, *, since=None, limit=20, include_steps=False):
+                return _steps_gated(_steps_result(), include_steps)
+
+        class _FakePlanLibrary:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def get_plan(self, plan_id: int):
+                assert plan_id == 7
+                # A single strong-tier LLM operator step -> static
+                # fallback (the 2 recorded "summarize" samples in
+                # _steps_result are below MIN_HISTORY_SAMPLES, so history
+                # doesn't engage).
+                return {"id": 7, "plan_json": json.dumps({
+                    "steps": [{"tool": "search"}, {"tool": "operator_summarize"}],
+                })}
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda: _FakeStore(),
+        )
+        monkeypatch.setattr(
+            "nexus.db.t2.http_plan_library.HttpPlanLibrary",
+            _FakePlanLibrary,
+        )
+        result = CliRunner().invoke(answer_runs_cmd, ["--steps", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        entry = payload["step_breakdown"]["by_plan"]["7"]
+        assert entry["predicted_cost_usd"] == pytest.approx(STATIC_FALLBACK_COST_USD)
+        assert "static-fallback" in entry["predicted_basis"]
+        # Estimate and actual sit side by side, not merged.
+        assert entry["median_cost_usd"] == pytest.approx(0.03)
+
+    def test_human_output_renders_predicted_cost_beside_actual(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        class _FakeStore:
+            def query_nx_answer_runs(self, *, since=None, limit=20, include_steps=False):
+                return _steps_gated(_steps_result(), include_steps)
+
+        class _FakePlanLibrary:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def get_plan(self, plan_id: int):
+                return {"id": 7, "plan_json": json.dumps({
+                    "steps": [{"tool": "search"}, {"tool": "operator_summarize"}],
+                })}
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda: _FakeStore(),
+        )
+        monkeypatch.setattr(
+            "nexus.db.t2.http_plan_library.HttpPlanLibrary",
+            _FakePlanLibrary,
+        )
+        result = CliRunner().invoke(answer_runs_cmd, ["--steps"])
+        assert result.exit_code == 0, result.output
+        assert "predicted_cost_usd=" in result.output
+
+    def test_plan_library_lookup_failure_degrades_to_none_not_a_crash(
+        self, monkeypatch,
+    ) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        class _FakeStore:
+            def query_nx_answer_runs(self, *, since=None, limit=20, include_steps=False):
+                return _steps_gated(_steps_result(), include_steps)
+
+        class _BrokenPlanLibrary:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def get_plan(self, plan_id: int):
+                raise RuntimeError("plan library unreachable")
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda: _FakeStore(),
+        )
+        monkeypatch.setattr(
+            "nexus.db.t2.http_plan_library.HttpPlanLibrary",
+            _BrokenPlanLibrary,
+        )
+        result = CliRunner().invoke(answer_runs_cmd, ["--steps", "--json"])
+        assert result.exit_code == 0, result.output
+        entry = json.loads(result.stdout)["step_breakdown"]["by_plan"]["7"]
+        assert entry["predicted_cost_usd"] is None
+        assert entry["predicted_basis"] == "unavailable"
+
+    def test_add_predicted_costs_skips_fallback_key_directly(self) -> None:
+        # Direct unit test of the helper (not through the CLI): the
+        # "fallback" bucket (genuine planner-error miss, no plan_id at
+        # all) has no plan JSON to fetch -- it must be named as such, not
+        # silently attempted against the plan library.
+        from nexus.commands.answer_runs import _add_predicted_costs
+
+        by_plan = {"fallback": {"run_count": 1, "median_cost_usd": None, "median_elapsed_ms": None}}
+
+        class _UnusedTelemetryStore:
+            def query_nx_answer_runs(self, *, limit: int, include_steps: bool) -> dict:
+                return {"rows": [], "steps_supported": True}
+
+        _add_predicted_costs(by_plan, _UnusedTelemetryStore())
+        assert by_plan["fallback"]["predicted_cost_usd"] is None
+        assert by_plan["fallback"]["predicted_basis"] == "ad-hoc-no-plan-json"
+
+    def test_add_predicted_costs_plan_not_found(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import _add_predicted_costs
+
+        by_plan = {"999": {"run_count": 1, "median_cost_usd": 0.1, "median_elapsed_ms": 100}}
+
+        class _NoHistoryStore:
+            def query_nx_answer_runs(self, *, limit: int, include_steps: bool) -> dict:
+                return {"rows": [], "steps_supported": True}
+
+        class _EmptyPlanLibrary:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def get_plan(self, plan_id: int):
+                return None
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_plan_library.HttpPlanLibrary", _EmptyPlanLibrary,
+        )
+        _add_predicted_costs(by_plan, _NoHistoryStore())
+        assert by_plan["999"]["predicted_cost_usd"] is None
+        assert by_plan["999"]["predicted_basis"] == "plan-not-found"

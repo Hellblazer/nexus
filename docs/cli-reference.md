@@ -3172,6 +3172,47 @@ include_steps"; `--json`'s `step_breakdown` is exactly
 `{"steps_supported": false}` — never an empty breakdown indistinguishable
 from "no steps were ever recorded".
 
+### Predicted vs actual cost (RDR-196 Phase 3 Step 1)
+
+When `plan_match` returns more than one above-floor candidate, `nx_answer`
+picks among the CONTIGUOUS PREFIX of candidates (matcher order, starting
+from the top match) within `PLAN_CHOICE_CONFIDENCE_BAND` (a named
+constant, `nexus.plans.cost_estimate`) of the best raw confidence by the
+**lowest PREDICTED cost** — an estimate from the candidate's step shape
+(`nexus.plans.cost_estimate.estimate_plan_cost`), not a recorded per-plan
+median (nexus-nyry9.3's `.r3` census found zero plans with a rankable
+recorded-run population — see the RDR for detail). The prefix stops
+permanently at the first candidate outside the band even if a later one
+would individually qualify, so cost-ranking can never reach past a
+relevance demotion the matcher's own scope-fit re-ranking (RDR-091)
+already made; ties within the prefix break by earlier matcher position,
+never by confidence. Outside the prefix, confidence wins regardless of
+predicted cost. This decision runs on EVERY plan-match hit, not only when
+more than one candidate is returned (candidate_count=1 is the common
+case today per nexus-nyry9.3's census) — every candidate considered, its
+predicted `usd`/`ms`/`basis`, and which one was chosen are written to
+`structlog` as a `nx_answer_plan_choice` event on every hit (tail
+`~/.config/nexus/logs/mcp.log`), and to the `structured=True` envelope's
+`plan_choice` field (`{candidates, candidate_count, chosen_plan_id,
+predicted_cost_usd, basis}`; `None` on any path that never reaches Step
+1's hit branch — force_dynamic, a plan-miss, or an error before Step 1).
+
+**In this table**: `--steps`' `by_plan` entries carry `predicted_cost_usd`
+and `predicted_basis` alongside the recorded `median_cost_usd` —
+estimate vs actual, side by side. This is computed READ-TIME on every
+`nx answer-runs --steps` call (fetches each plan's stored `plan_json`
+from the plan library, prices it via `estimate_plan_cost` against a price
+table built from the SAME telemetry query), never persisted — there is
+still no `predicted_cost_usd` COLUMN on `nx_answer_runs`/`nx_answer_steps`
+(the engine-side wire is unchanged; folding a persisted column in is
+deferred to a later RDR-196 Phase 3 step). The `"fallback"` bucket (a
+genuine planner-error miss with no `plan_id`, hence no stored plan JSON)
+always reports `predicted_basis: "ad-hoc-no-plan-json"`; a plan library
+lookup failure or a deleted plan degrades that row's predicted fields to
+`None` with a named `predicted_basis` (`"unavailable"` /
+`"plan-not-found"` / `"plan-json-missing"`), never a crash and never a
+silent `0`.
+
 ---
 
 ## nx census
