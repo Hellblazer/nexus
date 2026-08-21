@@ -471,6 +471,12 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # capability_census.jsonl`` during the .p1f battery's lint stage. No
     # test writes it (grep tests/ for the name: none).
     "capability_census.jsonl",
+    # T1 handoff markers written by the conexus SessionStart hook on
+    # /clear and /resume (nexus-d76vc; src/nexus/daemon/t1_handoff.py),
+    # consumed and removed by the MCP lifespan's handoff watcher within a
+    # poll tick -- appear and vanish during any pytest run that overlaps
+    # another session's /clear on this box. Observed 2026-08-21 (78blw run).
+    "t1_handoff.",
 )
 
 
