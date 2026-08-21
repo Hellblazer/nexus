@@ -539,6 +539,17 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 SAME BUCKETS, EVERY TIME" per the shakedown playbook, so the
                 edges live here and in ``TelemetryRepository`` only, never
                 re-derived per caller.
+            steps_supported: RDR-196 .p1e (nexus-nyry9.11) — present ONLY
+                when ``include_steps=True`` was requested. Reuses the SAME
+                capability probe (:meth:`_supports_nx_answer_steps`) the
+                write side already gates on, so a caller can distinguish
+                "the engine ignored ``include_steps`` because it predates
+                the read route" from "the engine supports it and these
+                particular rows genuinely carry no steps". An older engine
+                200s on an unrecognized query param and every row simply
+                omits ``steps`` — without this signal that reads
+                identically to "nothing was ever recorded", which is
+                exactly the kind of silent-zero this arc exists to end.
 
         There is no session_id filter: the table has no session_id column
         (checked against the live schema before adding one — a session
@@ -551,7 +562,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             params["include_steps"] = "true"
         resp = self._get("/v1/telemetry/nx_answer_runs/query", params=params)
         if not isinstance(resp, dict):  # defensive: a stripped proxy response
-            return {
+            out: dict[str, Any] = {
                 "rows": [], "total": 0, "oldest_created_at": "",
                 "hit_count": 0, "fallback_count": 0,
                 "avg_duration_ms": None, "avg_cost_usd": None,
@@ -560,7 +571,10 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                     "2min_to_5min": 0, "over_5min": 0,
                 },
             }
-        return {
+            if include_steps:
+                out["steps_supported"] = self._supports_nx_answer_steps()
+            return out
+        out = {
             "rows": list(resp.get("rows") or []),
             "total": int(resp.get("total") or 0),
             "oldest_created_at": str(resp.get("oldest_created_at") or ""),
@@ -570,6 +584,9 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "avg_cost_usd": resp.get("avg_cost_usd"),
             "latency_buckets": dict(resp.get("latency_buckets") or {}),
         }
+        if include_steps:
+            out["steps_supported"] = self._supports_nx_answer_steps()
+        return out
 
     def record_hook_failure(
         self,

@@ -1225,6 +1225,52 @@ class TestQueryNxAnswerRuns:
         assert len(result["rows"]) == 1
         assert result["rows"][0]["steps"] == []
 
+    # ── RDR-196 .p1e (nexus-nyry9.11): read-side capability signal ────────
+
+    def test_include_steps_true_carries_steps_supported_true(self, client):
+        """.p1c critique fold (T2 [23099], recorded on .11): reuse the
+        SAME capability probe the write side already gates on so a
+        caller can tell 'the engine ignored include_steps' apart from
+        'these rows genuinely have no steps'."""
+        _VERSION_RESPONSE.clear()
+        _VERSION_RESPONSE.update({"nx_answer_steps_supported": True})
+        client.record_nx_answer_run(
+            question="q", plan_id=None, matched_confidence=None,
+            step_count=0, final_text="", cost_usd=0.0, duration_ms=1_000,
+        )
+
+        result = client.query_nx_answer_runs(include_steps=True)
+
+        assert result["steps_supported"] is True
+
+    def test_include_steps_true_carries_steps_supported_false_for_older_engine(
+        self, client,
+    ):
+        _VERSION_RESPONSE.clear()
+        _VERSION_RESPONSE.update({"app_version": "1.0-SNAPSHOT"})  # pre-.p1c: no field
+        client.record_nx_answer_run(
+            question="q", plan_id=None, matched_confidence=None,
+            step_count=0, final_text="", cost_usd=0.0, duration_ms=1_000,
+        )
+
+        result = client.query_nx_answer_runs(include_steps=True)
+
+        assert result["steps_supported"] is False
+
+    def test_include_steps_false_omits_steps_supported_key(self, client):
+        """The capability signal only makes sense when steps were
+        actually requested -- must not appear (not even as None) on the
+        default no-steps call, matching the existing 'no steps key at
+        all' contract for the rows themselves."""
+        client.record_nx_answer_run(
+            question="q", plan_id=None, matched_confidence=None,
+            step_count=0, final_text="", cost_usd=0.0, duration_ms=1_000,
+        )
+
+        result = client.query_nx_answer_runs()
+
+        assert "steps_supported" not in result
+
     def test_null_cost_usd_reads_back_as_none_not_zero(self, client):
         """RDR-196 .p1c-b (nexus-lme1s) review fix: the fake server used to
         hardcode cost_usd null -> 0.0 on the write path, citing a

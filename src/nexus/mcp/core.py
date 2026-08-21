@@ -6363,11 +6363,24 @@ _NX_ANSWER_DEFAULT_BUDGET_SECONDS: float | None = None
 #: than a re-purposed ``-1`` or ``plan_run``'s own 1-indexed step
 #: numbering (:mod:`nexus.plans.runner`, always >= 1): 0 can never
 #: collide with a real step index, so a marker reading "step 0 of M"
-#: is unambiguous evidence that zero plan steps ran. (Deliberately not
-#: reproduced here as a single-line bracketed literal — the exhaustion
-#: marker text has exactly ONE emitter in this module, and a second
-#: copy of its exact shape here would defeat the grep that proves it.)
+#: is unambiguous evidence that zero plan steps ran.
 _NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN: int = 0
+
+#: RDR-196 .p1e review-fix round 2 (code-review-expert T2 [23115]):
+#: the STABLE PREFIX of the budget-exhausted partial-answer marker text
+#: -- the single emitter below (``_budget_exhausted_response``) builds
+#: the full marker as
+#: ``f"{NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX} after step {N} of
+#: {M} — partial answer]"``; only this prefix is a stable, shared
+#: contract (N/M vary per run, so the full string is never itself a
+#: constant). ``commands/answer_runs.py``'s ``_row_is_failed`` imports
+#: THIS constant to recognize a budget-exhausted row's ``final_text``
+#: rather than retyping the literal -- a second hand-typed copy would
+#: silently drift the moment either side's wording changed (exactly the
+#: duplication this module's docstring notes elsewhere have avoided by
+#: keeping the marker to one emitter; the read side needs the prefix
+#: too, so it is exported as a named constant instead of inlined here).
+NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX: str = "[budget exhausted"
 
 
 @mcp.tool(
@@ -6566,9 +6579,25 @@ async def nx_answer(
     # directly; structured mode wraps it into the documented envelope.
     def _result(text: str, *, plan_id: int = 0, step_count: int = 0,
                 chunks: "list | None" = None,
-                budget_exhausted_at_step: "int | None" = None) -> "str | dict":
+                budget_exhausted_at_step: "int | None" = None,
+                step_records: "list | None" = None) -> "str | dict":
         if not structured:
             return text
+        # RDR-196 .p1e (nexus-nyry9.11): per-step breakdown in the
+        # structured envelope, same field names as the wire (reuses
+        # _step_record_to_wire — the exact dict TelemetryHandler's
+        # nx_answer_steps route expects, so a caller sees one shape
+        # whether it reads the envelope or `nx answer-runs --json`).
+        # ``[]`` when no plan_run steps executed (single-step fast path,
+        # or any error/miss path before plan_run ever ran).
+        # ``cost_usd`` mirrors _nx_answer_record_run's own blanket rule:
+        # the sum of every step's non-None cost, or None when no step
+        # reports a known cost — never a fabricated 0.0.
+        _steps = step_records or []
+        _known_costs = [
+            s.cost_usd for s in _steps if getattr(s, "cost_usd", None) is not None
+        ]
+        cost_usd = sum(_known_costs) if _known_costs else None
         return {
             "final_text": text,
             "chunks": chunks if chunks is not None else [],
@@ -6578,6 +6607,8 @@ async def nx_answer(
             # (None on every non-budget-exhausted path) so callers can
             # rely on the key rather than checking membership.
             "budget_exhausted_at_step": budget_exhausted_at_step,
+            "steps": [_step_record_to_wire(s) for s in _steps],
+            "cost_usd": cost_usd,
         }
 
     # nexus-h33x8.6 a4 / nexus-nyry9.2 (RDR-196 .r2): single shared
@@ -6620,8 +6651,8 @@ async def nx_answer(
         except (json.JSONDecodeError, TypeError):
             total_planned = 0
         marker = (
-            f"[budget exhausted after step {_budget_step} of "
-            f"{total_planned} — partial answer]"
+            f"{NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX} after step "
+            f"{_budget_step} of {total_planned} — partial answer]"
         )
         # Harvest retrieved chunks the same way Step 5's structured path
         # does, so a partial answer still surfaces what was found. The
@@ -6717,6 +6748,7 @@ async def nx_answer(
             budget_final_text, plan_id=best.plan_id, step_count=len(result.steps),
             chunks=partial_chunks if structured else None,
             budget_exhausted_at_step=_budget_step,
+            step_records=_step_records,
         )
 
     # ── Step 1: plan-match gate ──────────────────────────────────────────
@@ -7141,12 +7173,27 @@ async def nx_answer(
     except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
         elapsed_ms = int((time.monotonic() - start) * 1000)
         _log.error("nx_answer_plan_run_error", plan_id=best.plan_id, error=str(exc))
+        # RDR-196 .p1d critique fold (T2 [23092], nexus-nyry9.11): plan_run
+        # now attaches the step_records completed BEFORE the raise to the
+        # exception instance itself (runner.py's outer try/except) —
+        # extract them here instead of the old hardcoded ``[]`` so a
+        # FAILED run still records real per-step telemetry. Defensive
+        # isinstance check, not a bare getattr default: an exception this
+        # module raises directly (never touched runner.py's attach point)
+        # correctly has no such attribute, and a MagicMock test double's
+        # unconfigured attribute access is itself a truthy non-list
+        # MagicMock — same landmine already documented on
+        # ``_result_step_records`` above.
+        _exc_step_records = getattr(exc, "step_records", None)
+        if not isinstance(_exc_step_records, list):
+            _exc_step_records = []
         try:
             with _t2_ctx() as db:
                 _nx_answer_record_run(
                     db.telemetry, question=question, plan_id=best.plan_id,
-                    matched_confidence=best.confidence, step_count=0,
-                    final_text=f"Error: {exc}", step_records=[],
+                    matched_confidence=best.confidence,
+                    step_count=len(_exc_step_records),
+                    final_text=f"Error: {exc}", step_records=_exc_step_records,
                     duration_ms=elapsed_ms, trace=trace,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
@@ -7155,6 +7202,8 @@ async def nx_answer(
         return _result(
             f"Error during plan execution: {exc}",
             plan_id=best.plan_id,
+            step_count=len(_exc_step_records),
+            step_records=_exc_step_records,
         )
     # nexus-yg49g: the success record USED to be here — before final_text is
     # even extracted (below) and ~60 lines before the empty-retrieval guard that
@@ -7289,6 +7338,7 @@ async def nx_answer(
         return _result(
             no_match, plan_id=best.plan_id,
             step_count=len(result.steps), chunks=[],
+            step_records=_result_step_records,
         )
 
     # nexus-yg49g: SUCCESS is recorded HERE — past the empty-retrieval guard,
@@ -7396,6 +7446,7 @@ async def nx_answer(
         plan_id=best.plan_id,
         step_count=len(result.steps),
         chunks=envelope_chunks if structured else None,
+        step_records=_result_step_records,
     )
 
 

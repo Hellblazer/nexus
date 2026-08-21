@@ -3151,3 +3151,219 @@ class TestNxAnswerClassifyPlanPrefixedOperatorNames:
             }),
         )
         assert _nx_answer_classify_plan(match) == "needs_operators"
+
+
+# ── RDR-196 .p1e: structured-envelope steps/cost_usd ────────────────────────
+
+
+class TestStructuredEnvelopeStepBreakdown:
+    """nexus-nyry9.11 (RDR-196 .p1e): ``structured=True`` must surface a
+    ``steps`` list (same field names as the wire — ``_step_record_to_wire``)
+    and a ``cost_usd`` field (sum of known step costs, or None) alongside
+    the existing envelope fields."""
+
+    @pytest.mark.asyncio
+    async def test_success_envelope_carries_steps_and_summed_cost(self, tmp_path):
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult, StepRecord
+
+        match = _make_match(confidence=0.75)
+        records = [
+            StepRecord(
+                step_index=0, operator="search", source="sql",
+                model=None, input_tokens=0, output_tokens=0,
+                cost_usd=0.0, elapsed_ms=50, ok=True,
+            ),
+            StepRecord(
+                step_index=1, operator="summarize", source="llm",
+                model="claude-sonnet-5-20260101", input_tokens=100,
+                output_tokens=50, cost_usd=0.02, elapsed_ms=1200, ok=True,
+            ),
+        ]
+        run_result = PlanResult(
+            steps=[{"text": "The final answer."}],
+            step_records=records,
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q", structured=True)
+
+        assert result["cost_usd"] == pytest.approx(0.02)
+        assert len(result["steps"]) == 2
+        assert result["steps"][0] == {
+            "step_index": 0, "operator": "search", "source": "sql",
+            "model": None, "input_tokens": 0, "output_tokens": 0,
+            "cost_usd": 0.0, "elapsed_ms": 50, "ok": True, "bundled_steps": [],
+        }
+        assert result["steps"][1]["operator"] == "summarize"
+        assert result["steps"][1]["model"] == "claude-sonnet-5-20260101"
+
+    @pytest.mark.asyncio
+    async def test_no_steps_executed_envelope_carries_empty_list_and_none_cost(
+        self, tmp_path,
+    ):
+        """The single-step fast path (and any pre-plan_run error/miss)
+        bypasses plan_run entirely — no StepRecord is ever produced.
+        ``steps`` must be ``[]`` and ``cost_usd`` must be ``None`` (never
+        a fabricated ``0.0``), matching ``_nx_answer_record_run``'s own
+        blanket rule."""
+        import nexus.mcp_infra as _infra
+        from nexus.plans.match import Match
+
+        match = Match(
+            plan_id=1, name="single-query-plan", description="test",
+            confidence=0.75, dimensions={}, tags="",
+            plan_json=json.dumps({
+                "steps": [{"tool": "query", "args": {"question": "$intent", "corpus": "knowledge"}}],
+            }),
+            required_bindings=[], optional_bindings=[],
+            default_bindings={}, parent_dims=None,
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch("nexus.mcp.core.query", return_value={
+                "ids": [], "collections": [], "chunk_text_hash": [], "distances": [],
+            }),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q", structured=True)
+
+        assert result["steps"] == []
+        assert result["cost_usd"] is None
+
+    @pytest.mark.asyncio
+    async def test_plan_run_failure_records_and_returns_partial_step_records(
+        self, tmp_path,
+    ):
+        """RDR-196 .p1d critique fold (T2 [23092]): a plan_run exception
+        that carries partial step_records (runner.py's outer try/except)
+        must be both (a) recorded to telemetry with the real step data
+        (not a hardcoded []), and (b) reflected in the structured
+        envelope's own ``steps``/``cost_usd`` fields for this same
+        (failed) call."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanRunStepRefError, StepRecord
+
+        match = _make_match(confidence=0.75)
+        partial_record = StepRecord(
+            step_index=0, operator="search", source="sql",
+            model=None, input_tokens=0, output_tokens=0,
+            cost_usd=0.0, elapsed_ms=75, ok=True,
+        )
+        exc = PlanRunStepRefError(ref="step2", reason="boom")
+        exc.step_records = [partial_record]
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(side_effect=exc)),
+            patch("nexus.mcp.core._nx_answer_record_run") as record_run_spy,
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q", structured=True)
+
+        assert record_run_spy.called
+        recorded = record_run_spy.call_args.kwargs.get("step_records")
+        assert recorded == [partial_record]
+        assert record_run_spy.call_args.kwargs.get("step_count") == 1
+
+        assert result["cost_usd"] == pytest.approx(0.0)
+        assert len(result["steps"]) == 1
+        assert result["steps"][0]["operator"] == "search"
+
+    @pytest.mark.asyncio
+    async def test_plan_run_failure_without_step_records_attribute_degrades_to_empty(
+        self, tmp_path,
+    ):
+        """A plan_run exception that never went through runner.py's
+        attach point (or a test double raising a bare exception) must
+        still degrade to an empty list, not crash on ``getattr``."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+
+        match = _make_match(confidence=0.75)
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run",
+                         AsyncMock(side_effect=RuntimeError("no attribute here"))),
+            patch("nexus.mcp.core._nx_answer_record_run") as record_run_spy,
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q", structured=True)
+
+        assert record_run_spy.call_args.kwargs.get("step_records") == []
+        assert record_run_spy.call_args.kwargs.get("step_count") == 0
+        assert result["steps"] == []
+        assert result["cost_usd"] is None
+
+
+class TestNxAnswerLatencyDocstringPinned:
+    """nexus-nyry9.11 (RDR-196 .p1e DO item 4): the docstring's measured
+    latency figures were 45x-wrong for months (32% under 5s, when the
+    real executed-only figure was 0.7%) because nothing pinned them
+    against drift.
+
+    SOURCE (review-fix S4, substantive-critic T2 [23111]): T2 [22886]
+    (bead nexus-h33x8.6, measured 2026-08-19), n=142 executed-only rows:
+    p50 80.1s, p95 217.1s, p99 316.7s, mean 97.7s, 0.7% under 5s, 88.7%
+    >= 30s, 33.8% >= 2min — unchanged from the docstring already on
+    develop; verified against that recorded measurement, not re-measured
+    here.
+
+    TRANSCRIPTION PIN, NOT A REGIME PIN: this test only catches the
+    docstring drifting away from the 2026-08-19 pre-Phase-2 (all-strong-
+    model) measurement above — it does NOT re-derive the distribution and
+    cannot detect the distribution itself going stale. RDR-196 Phase 2
+    (per-operator model tier routing, nexus-nyry9.15/.16/.17) will change
+    the cost/latency profile these figures describe; when that ships, the
+    n=142 numbers become systematically stale while this test keeps
+    passing (it only checks the docstring matches ITSELF, not reality).
+    Re-derivation-on-Phase-2-flip is tracked as a forward-pointer on
+    nexus-nyry9.17 (`bd comments add nexus-nyry9.17`, RDR-196 .p2d, sets
+    the FLIP/HOLD/UNDECIDED per-operator gate) — that bead is where a
+    default actually flips, so it is the natural trigger to re-run this
+    measurement and update both the docstring and this pin together.
+    """
+
+    def test_docstring_pins_the_measured_executed_only_figures(self):
+        from nexus.mcp.core import nx_answer
+
+        # The docstring line-wraps at ~79 chars, so a figure can straddle
+        # a "\n    " boundary (e.g. "p95\n    217.1s") — normalize
+        # whitespace before matching rather than pinning to the exact
+        # wrap points, which would make this test as brittle as the
+        # drift it exists to catch.
+        doc = " ".join((nx_answer.__doc__ or "").split())
+        for needle in (
+            "n=142", "p50 80.1s", "p95 217.1s", "p99 316.7s", "mean 97.7s",
+            "0.7% finish under 5s", "88.7% take >= 30s", "33.8% take >= 2min",
+        ):
+            assert needle in doc, (
+                f"nx_answer docstring drifted -- expected {needle!r} in the "
+                "latency paragraph; re-derive from `nx answer-runs --json` "
+                "(executed-only rows) and update both the docstring and "
+                "this pin together"
+            )

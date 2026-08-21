@@ -2487,3 +2487,101 @@ class TestStepRecords:
         assert rolled_same.cost_usd == pytest.approx(0.35)
         assert rolled_same.input_tokens == 40
         assert rolled_same.output_tokens == 60
+
+
+class TestPartialStepRecordsOnException(object):
+    """RDR-196 .p1d critique fold (T2 [23092], consumed by nexus-nyry9.11):
+    a mid-loop exception must not discard the step_records already
+    completed -- failed runs are exactly the population that produced the
+    45x-wrong latency docstring (nexus-h33x8.6), so telemetry that only
+    records SUCCESSFUL runs measures the wrong population. ``plan_run``
+    attaches the partial ``step_records`` list directly to the raised
+    exception instance (no new carrier type) so a caller's except-handler
+    can still record real per-step data.
+    """
+
+    @pytest.mark.asyncio
+    async def test_exception_after_one_completed_step_carries_its_record(self):
+        """Step 0 (isolated, real dispatch) succeeds and is recorded;
+        step 1's dispatcher returns a non-dict, which raises
+        PlanRunStepRefError from OUTSIDE any of the loop's own
+        try/except blocks -- the exact "escapes the loop" shape the
+        critique named. The raised exception must still carry
+        step_records=[<step 0's record>], not []."""
+        from nexus.plans.runner import PlanRunStepRefError, plan_run
+
+        plan = {"steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "search", "args": {"query": "y"}},
+        ]}
+        outputs = [{"ids": ["a"], "tumblers": [], "distances": [], "collections": []}, "not-a-dict"]
+
+        async def disp(tool, args):
+            return outputs.pop(0)
+
+        with pytest.raises(PlanRunStepRefError) as excinfo:
+            await plan_run(_match(plan), dispatcher=disp, bundle_operators=False)
+
+        step_records = getattr(excinfo.value, "step_records", None)
+        assert step_records is not None, (
+            "the raised exception must carry a step_records attribute, "
+            "even when empty -- getattr defaulting to None would mean the "
+            "attach never happened"
+        )
+        assert len(step_records) == 1
+        assert step_records[0].step_index == 0
+        assert step_records[0].ok is True
+
+    @pytest.mark.asyncio
+    async def test_exception_before_any_step_completes_carries_empty_list(self):
+        """A failure on the FIRST step (before any _record_step call) must
+        still attach step_records -- an empty list, not a missing
+        attribute -- so a caller need not special-case "no attribute" vs
+        "attribute present but empty"."""
+        from nexus.plans.runner import PlanRunStepRefError, plan_run
+
+        plan = {"steps": [
+            {"tool": "search", "args": {"query": "x"}},
+        ]}
+
+        async def disp(tool, args):
+            return "not-a-dict"
+
+        with pytest.raises(PlanRunStepRefError) as excinfo:
+            await plan_run(_match(plan), dispatcher=disp, bundle_operators=False)
+
+        step_records = getattr(excinfo.value, "step_records", None)
+        assert step_records == []
+
+    @pytest.mark.asyncio
+    async def test_operator_arg_missing_reraise_still_carries_step_records(self):
+        """A re-raised (not freshly raised) exception -- the
+        PlanRunOperatorArgMissingError patch-and-reraise-from path --
+        must ALSO carry step_records, proving the attach happens at the
+        single outer boundary regardless of how many times the
+        exception object was replaced inside the loop."""
+        from nexus.plans.runner import PlanRunOperatorArgMissingError, plan_run
+
+        plan = {"steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "summarize", "args": {}},  # missing required 'content'
+        ]}
+
+        async def disp(tool, args):
+            if tool == "search":
+                return {"ids": ["a"], "tumblers": [], "distances": [], "collections": []}
+            # step_index=-1 is the sentinel _default_dispatcher stamps when
+            # it can't see its own position in the plan (see that
+            # function's docstring) -- the runner patches in the real
+            # index and re-raises a NEW exception instance "from exc".
+            raise PlanRunOperatorArgMissingError(
+                step_index=-1, tool="summarize", missing_arg="content",
+            )
+
+        with pytest.raises(PlanRunOperatorArgMissingError) as excinfo:
+            await plan_run(_match(plan), dispatcher=disp, bundle_operators=False)
+
+        step_records = getattr(excinfo.value, "step_records", None)
+        assert step_records is not None
+        assert len(step_records) == 1
+        assert step_records[0].step_index == 0
