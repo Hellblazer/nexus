@@ -463,6 +463,14 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # this checkout's index run -- during a sibling's pytest run that
     # coincided with an orchestrator commit.
     "locks/",
+    # SessionEnd capability census (src/nexus/_session_end_census.py:82,
+    # launched by _session_end_launcher.py when a Claude Code session or
+    # subagent ends); appends one line per ending session. On a box running
+    # orchestration, subagents end continuously, so this appends during
+    # any multi-minute pytest run. Observed 2026-08-21 as ``MODIFIED
+    # capability_census.jsonl`` during the .p1f battery's lint stage. No
+    # test writes it (grep tests/ for the name: none).
+    "capability_census.jsonl",
 )
 
 
