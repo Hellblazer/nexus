@@ -13,7 +13,7 @@ $ARGUMENTS
 
 ## Action
 
-All data is pre-loaded above; no additional tool calls needed.
+All data is pre-loaded above — no additional tool calls needed.
 
 - RDR directory is shown above (from `.nexus.yml` `indexing.rdr_paths[0]`).
 - Use the existing RDR list to determine the next sequential ID (shown as **Next ID** above).

@@ -6,30 +6,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-
-- **`nx prose lint` and `docs/writing-style.md`** (bead nexus-ptwm2). A
-  register spec for prose written under the project's name, stated as
-  positive targets with an exemplar, and a regex lint for the mechanical
-  subset (em dashes, `load-bearing`, the measured LLM marker lexicon,
-  the `not X, it's Y` contrast frame, formulaic closers, sycophantic
-  openers, hedge stacks, unnamed attribution). Fenced and inline code,
-  frontmatter, and HTML comments are masked. `--baseline` is a one-way
-  ratchet: a file may not exceed its recorded count, a stale-high count
-  fails, new files start at zero. `tests/test_prose_style_lint.py`
-  (`-m lint`) holds the RDR templates, the spec, and this section at
-  zero findings and the docs/, blog/, README, and active-RDR surfaces to
-  the ratchet (`docs/.prose-baseline.json`). The RDR gate
-  (`nx rdr preamble rdr-gate`) blocks Layer 1 on findings in repos that
-  ship the spec; `--skip-prose` is the audited override. The RDR
-  templates and rdr-* plugin skills were rewritten to the register
-  (the template itself taught the old pattern to every new RDR).
-  A mechanical sweep of 21 active RDRs was tried, review-read line by
-  line, and reverted: 19% of the 721 edits read worse or drifted in
-  meaning, so existing prose stays as written and the ratchet holds the
-  line instead (fable review round, T2 `ptwm2-*-fable-2026-08-21`).
-  Policy decisions that remain open are drafted in RDR-197.
-
 ## [7.14.0] - 2026-08-21
 
 Engine identity moves to `engine-service-v0.1.85` (paired release, deploy-first:

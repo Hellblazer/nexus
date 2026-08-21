@@ -3382,29 +3382,6 @@ in insertion order) and exits — the operator read surface for the
 
 ---
 
-## nx prose
-
-Prose style lint against `docs/writing-style.md`. Regex rules only: em dashes, `load-bearing`, the LLM marker lexicon, the `not X, it's Y` contrast frame, formulaic closers, sycophantic openers, hedge stacks, unnamed attribution. Fenced code, inline code, YAML frontmatter, and HTML comments are skipped.
-
-| Subcommand | Description |
-|------------|-------------|
-| `lint PATHS...` | Lint markdown files or directories; one `path:line: rule: message` line per finding on stderr. Exit 0 clean, 1 findings, 2 nothing to lint. |
-
-Options for `lint`:
-
-| Option | Description |
-|--------|-------------|
-| `--baseline FILE` | Ratchet mode. `FILE` maps relative paths to allowed finding counts. A file may not exceed its count; a count that has dropped must be lowered (stale-high fails); an entry for an unscanned file fails. |
-| `--root DIR` | Directory the baseline keys are relative to (default: cwd). |
-| `--write-baseline` | With `--baseline` (required): record the current counts instead of checking. |
-
-```bash
-nx prose lint docs/rdr/rdr-196-cost-aware-nx-answer.md
-uv run python -m tests.test_prose_style_lint   # regenerate docs/.prose-baseline.json from the gate's own file set
-```
-
-`uv run pytest -m lint tests/test_prose_style_lint.py` runs the same lint over the project's written surfaces. Never regenerate the baseline with hand-typed globs: the gate's file set is defined in the test module, and the `-m` form uses exactly that set. `nx rdr preamble rdr-gate` runs the lint on the RDR being gated in repos that ship `docs/writing-style.md` and blocks Layer 1 on any finding; `--skip-prose` records an audited override.
-
 ## nx rdr
 
 RDR (Research-Design-Review) authoring helpers.

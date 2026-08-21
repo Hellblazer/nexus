@@ -82,22 +82,6 @@ class TestSubagentStartHook:
         assert m is not None, "ORCH heredoc missing from subagent-start.sh"
         assert len(m.group(1).encode()) < 500
 
-    def test_prose_style_row_injected_and_under_ceiling(self) -> None:
-        """nexus-ptwm2: the PROSE_STYLE row rides the live injection path on
-        the default dispatch branch, and its heredoc body stays under the
-        same 500-byte pipe-deadlock ceiling as ORCH."""
-        import re
-
-        src = SCRIPT.read_text()
-        m = re.search(r"cat <<'PROSE_STYLE'\n(.*?)\nPROSE_STYLE\n", src, re.S)
-        assert m is not None, "PROSE_STYLE heredoc missing from subagent-start.sh"
-        assert len(m.group(1).encode()) < 500
-        result = _run_hook()
-        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "| Prose |" in ctx
-        assert "docs/writing-style.md" in ctx
-        assert "nx prose lint" in ctx
-
 
 class TestSessionIdExport:
     """nexus-7o1zh: this hook runs detached from any live nx-mcp process and

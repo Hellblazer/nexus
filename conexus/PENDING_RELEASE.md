@@ -31,51 +31,10 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release (pinned: v7.14.0)
 
-- `conexus/skills/nexus/reference.md`:
+- `conexus/skills/nexus/reference.md` —
   nexus-nyry9.19 (RDR-196 .p3a): the `nx_answer` parameter table's
   `budget_usd` row no longer documents the unmeasured `0.25` default; it
   now reads `None` = "use `budget_default.DERIVED_BUDGET_USD`" (itself
   unset until a sufficient post-flip derivation is recorded), enforcement
   landing in .p3c. Docs-only drift: an installed plugin at v7.14.0 shows
   a default the 7.15.0 tool no longer has.
-- `conexus/resources/rdr/TEMPLATE.md`: nexus-ptwm2 fixed 20 `nx prose lint`
-  findings (em dashes, `load-bearing`) and added a pointer to
-  docs/writing-style.md under the top blockquote.
-- `conexus/resources/rdr/post-mortem/TEMPLATE.md`: nexus-ptwm2 fixed 15
-  `nx prose lint` findings (em dashes) in the drift-category definitions
-  and takeaway criteria.
-- `conexus/skills/rdr-create/SKILL.md`: nexus-ptwm2 fixed 2 `nx prose lint`
-  findings (em dashes).
-- `conexus/skills/rdr-gate/SKILL.md`: nexus-ptwm2 fixed 9 `nx prose lint`
-  findings (em dashes, including the three Layer heading separators) and
-  documented the new prose-lint preamble check under Layer 1.
-- `conexus/commands/rdr-create.md`: nexus-ptwm2 fixed 1 `nx prose lint`
-  finding (em dash).
-- `conexus/commands/rdr-gate.md`: nexus-ptwm2 fixed 7 `nx prose lint`
-  findings (em dashes) and documented the prose-lint preamble check
-  alongside the Layer 1 bullet.
-- `conexus/commands/rdr-accept.md`: nexus-ptwm2 fixed 26 `nx prose lint`
-  findings (em dashes) across the step and planning-chain labels.
-- `conexus/commands/rdr-close.md`: nexus-ptwm2 fixed 2 `nx prose lint`
-  findings (em dashes).
-- `conexus/commands/rdr-research.md`: nexus-ptwm2 fixed 2 `nx prose lint`
-  findings (em dashes).
-- `conexus/commands/rdr-show.md`: nexus-ptwm2 fixed 2 `nx prose lint`
-  findings (em dashes).
-- `conexus/commands/rdr-list.md`: nexus-ptwm2 fixed 1 `nx prose lint`
-  finding (em dash).
-- `conexus/commands/rdr-audit.md`: nexus-ptwm2 fixed 5 `nx prose lint`
-  findings (em dashes).
-- `conexus/agents/substantive-critic.md`: nexus-ptwm2 added a "Prose
-  Deliverables" section (point at docs/writing-style.md, run `nx prose
-  lint` first, six review questions reported as Significant).
-- `conexus/hooks/scripts/subagent-start.sh`: nexus-ptwm2 added a PROSE_STYLE
-  preflight row pointing every subagent at docs/writing-style.md and the
-  lint; inert in installed sessions until the pin advances.
-- `conexus/skills/rdr-gate/SKILL.md`: nexus-ptwm2 remediation round
-  documents spec-conditionality and the `--skip-prose` audited override.
-- `conexus/commands/rdr-gate.md`: same remediation, same two facts on the
-  Layer 1 bullet.
-- `conexus/resources/rdr/TEMPLATE.md`: prose blockquote line now states
-  the check is conditional on the repo shipping docs/writing-style.md and
-  names `--skip-prose`.

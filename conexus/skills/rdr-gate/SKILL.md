@@ -6,7 +6,7 @@ effort: medium
 
 # RDR Gate Skill
 
-Optional validation for high-stakes decisions. Most RDRs don't need a formal gate; use this when the decision is expensive to reverse and you want to confront what you don't actually know before committing.
+Optional validation for high-stakes decisions. Most RDRs don't need a formal gate — use this when the decision is expensive to reverse and you want to confront what you don't actually know before committing.
 
 Delegates Layer 3 to the **substantive-critic** agent (sonnet). See [registry.yaml](../../registry.yaml).
 
@@ -18,7 +18,7 @@ Delegates Layer 3 to the **substantive-critic** agent (sonnet). See [registry.ya
 
 ## Input
 
-- RDR ID (required): e.g., `003`
+- RDR ID (required) — e.g., `003`
 
 ## Path Detection
 
@@ -26,7 +26,7 @@ Resolve RDR directory from `.nexus.yml` `indexing.rdr_paths[0]`; default `docs/r
 
 ## Three Validation Layers (run in sequence)
 
-### Layer 1: Structural Validation (no AI)
+### Layer 1 — Structural Validation (no AI)
 
 Read the RDR markdown file. Check that these sections are present AND non-empty (not just the heading with placeholder text):
 
@@ -39,18 +39,16 @@ Read the RDR markdown file. Check that these sections are present AND non-empty 
 - Implementation Plan / Approach / Steps / Phases (with at least one numbered Phase/Step/Stage)
 - Finalization Gate / Success Criteria (must have written responses, not just template placeholders)
 
-**Heading matching**: RDRs use varied heading names. Match any of the variants listed above (separated by `/`). If none of the variants match, report the section as missing; do NOT silently skip it.
+**Heading matching**: RDRs use varied heading names. Match any of the variants listed above (separated by `/`). If none of the variants match, report the section as missing — do NOT silently skip it.
 
-**Gap-structure sub-check (post-65 RDRs only)**: the `## Problem Statement` (or `## Problem`) section must contain one or more `#### Gap N: <title>` headings (regex `^#{3,5} Gap \d+:`). The command preamble script emits a BLOCKED outcome automatically when this check fails; the gate skill should not attempt to run Layers 2 or 3 after that block. Legacy RDRs with `id < 65` are grandfathered and skip the gap check. Use `/conexus:rdr-gate <id> --skip-gaps` to override for the rare RDR where the structure does not fit; the override is recorded in the gate audit trail.
-
-**Prose-lint sub-check**: in repos that ship `docs/writing-style.md`, the command preamble also runs `nx prose lint` on the RDR file and prints a BLOCKED line on any finding; repos without the spec skip the check. Treat a block exactly like the gap-structure block above: stop, do not run Layers 2 or 3. `--skip-prose` is the audited override, same contract as `--skip-gaps`.
+**Gap-structure sub-check (post-65 RDRs only)**: the `## Problem Statement` (or `## Problem`) section must contain one or more `#### Gap N: <title>` headings (regex `^#{3,5} Gap \d+:`). The command preamble script emits a BLOCKED outcome automatically when this check fails — the gate skill should not attempt to run Layers 2 or 3 after that block. Legacy RDRs with `id < 65` are grandfathered and skip the gap check. Use `/conexus:rdr-gate <id> --skip-gaps` to override for the rare RDR where the structure does not fit; the override is recorded in the gate audit trail.
 
 **If any section is missing or contains only placeholder text** (e.g., `[What is the specific challenge]`):
 - Report which sections are incomplete
-- STOP: do not proceed to Layer 2 or 3
+- STOP — do not proceed to Layer 2 or 3
 - Status remains Draft
 
-### Layer 2: Assumption Audit (from T2, no AI)
+### Layer 2 — Assumption Audit (from T2, no AI)
 
 mcp__plugin_conexus_nexus__memory_get(project="{repo}_rdr", title=""
 
@@ -65,7 +63,7 @@ Display:
 Assumption Audit for RDR NNN:
 - 3 verified (2 source search, 1 spike)
 - 1 documented (docs only)
-- 2 assumed: ⚠ UNRESOLVED
+- 2 assumed — ⚠ UNRESOLVED
   [seq 4] "Library X supports feature Y" (docs only) ← HIGH RISK
   [seq 6] "Latency under 100ms" (docs only) ← HIGH RISK
 ```
@@ -73,9 +71,9 @@ Assumption Audit for RDR NNN:
 If assumed findings remain:
 - Ask: "Proceed with 2 unverified assumptions? (recorded as acknowledged)"
 - If yes: update T2 records with `acknowledged: true`
-- If no: STOP; user should verify or remove assumptions first
+- If no: STOP — user should verify or remove assumptions first
 
-### Layer 3: AI Critique (substantive-critic agent)
+### Layer 3 — AI Critique (substantive-critic agent)
 
 Before dispatch, seed link-context so the gate critique auto-links to the RDR:
 ```
