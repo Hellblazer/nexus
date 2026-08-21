@@ -590,7 +590,10 @@ smoke_verify_count "$SMOKE_PASSED" "$SMOKE_EXPECTED" || exit 1
 # passed/skipped guard below never sees — so tagging tests lived_in (to
 # dodge a red test, or via careless merge) would silently shrink coverage.
 # Exact count, not <=: growing the carve-out must be a conscious edit here.
-LIVED_IN_EXPECTED=39
+# 2026-08-21: 39 -> 41 for nexus-nyry9.11's two RDR-196 Phase 1 MVV tests
+# (tests/integration/test_nx_answer_step_telemetry_mvv.py, module-marked
+# lived_in: isolated and bundled step-telemetry round trips).
+LIVED_IN_EXPECTED=41
 LIVED_IN_COUNT="$(uv run pytest -m "integration and lived_in" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
 if [ "$LIVED_IN_COUNT" -ne "$LIVED_IN_EXPECTED" ]; then
   echo "[gate] VACUITY GUARD TRIPPED: lived_in carve-out is $LIVED_IN_COUNT tests, expected exactly $LIVED_IN_EXPECTED" >&2
