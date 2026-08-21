@@ -4,6 +4,24 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.14.0] - 2026-08-21
+
+Plugin version aligned with conexus 7.14.0. Pin advance activates the
+entries accumulated in PENDING_RELEASE.md since v7.13.0: the subagent
+git-write guard's structure-agnostic, fail-closed rewrite covering
+multi-line, heredoc, continuation, command-substitution, and spliced-
+expansion command shapes (nine review rounds; a reviewer subagent had
+wiped uncommitted production files via a `git checkout --` placed on a
+later line of a multi-line command after a heredoc, which the prior
+structural parser missed) plus `git switch` added to the destructive-verb
+set (nexus-3c92m); the routing-log fallback path resolved at call time
+instead of import time in both plugin copies (conexus and sn `_lib.py`),
+so a hook subprocess honors `NX_ROUTING_LOG_PATH`/`HOME` as they are when
+the hook runs (nexus-pfuns); and the composition-probe, cli-controller,
+and orchestration skill text updated to name `scripts/mvnw-leased.sh` (the
+single-builder lease that prevents two concurrent Maven builds from
+corrupting `service/target`) in place of a bare `mvn test` (nexus-c00dw).
+
 ## [7.13.0] - 2026-08-20
 
 Plugin version aligned with conexus 7.13.0. Pin advance activates the entries
