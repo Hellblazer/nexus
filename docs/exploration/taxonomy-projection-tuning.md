@@ -17,7 +17,8 @@ discovery), RDR-075 (cross-collection projection routing), RDR-076
 `topic_assignments.similarity` stores **raw cosine similarity** between
 the source chunk embedding and the target topic centroid, always. No
 ICF weighting, no rescaling, no post-processing. The value is what
-ChromaDB returned (`1.0 - distance`) at write time.
+`TaxonomyCentroidRepository`'s pgvector ANN lookup returned (`1.0 - distance`)
+at write time.
 
 This is deliberate. A single stored value can be re-interpreted by any
 number of query-time ranking strategies — ICF-weighted, time-decayed,

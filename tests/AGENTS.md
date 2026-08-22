@@ -161,7 +161,7 @@ measuring the wrong service. A differing unit is fail-loud
 
 ## Mode defaults (RDR-109 Phase 1)
 
-The suite runs in **local mode by default** — no API keys, ONNX MiniLM embedding function via `chromadb.DefaultEmbeddingFunction`. This matches CI (which has no credentials) and reproduces a clean-install developer environment.
+The suite runs in **local mode by default** — no API keys, ONNX MiniLM embedding function via `nexus.db.minilm_direct.MiniLMDirectEmbeddingFunction` (aliased `DefaultEmbeddingFunction` in test imports, e.g. `tests/conftest.py`). This matches CI (which has no credentials) and reproduces a clean-install developer environment.
 
 Tests that exercise **cloud-mode behavior** (real Voyage calls, `CloudClient` routing, `_has_credentials()`-gated code paths, `voyage-context-3` / `voyage-code-3` embedder assertions) **opt in** by depending on the `cloud_mode` fixture:
 

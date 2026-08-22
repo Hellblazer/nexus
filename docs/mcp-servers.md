@@ -15,7 +15,7 @@ The `nexus` and `nexus-catalog` servers register automatically when you install 
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
-## `nexus` — retrieval + storage (38 tools)
+## `nexus` — retrieval + storage (36 tools)
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
@@ -93,13 +93,10 @@ default their `timeout` to 600s, `nx_enrich_beads` to 300s (heavy analytical
 workloads — see the failure-modes section). `nx_answer` has no `timeout`
 parameter; its per-operator steps carry their own.
 
-Three further tools round out the server (RDR-126/182): `daemon_uninstall`
+One further tool rounds out the server (RDR-126): `daemon_uninstall`
 (remove the storage-service OS autostart unit — plus any legacy
 `com.nexus.t2` unit left behind by a pre-retirement install — and stop the
-engine-service + Postgres stack; destructive, `confirm=true` gated),
-`forensics` (read-only diagnostic playbook for upgrade-edge topics, opt-in
-gated), and `remediate` (consent-gated guided recovery playbook — describe
-first, `confirm=true` to release).
+engine-service + Postgres stack; destructive, `confirm=true` gated).
 
 ## `nexus-catalog` — document catalog (10 tools)
 

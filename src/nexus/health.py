@@ -1462,10 +1462,59 @@ def _check_index_log() -> list[HealthResult]:
             detail="no index activity recorded yet (no run logs, hooks have not fired)",
         )]
     mtime, path, kind = max(candidates)
-    return [HealthResult(
-        label="index log", ok=True,
-        detail=f"{path} ({kind}, last write: {_age_str(mtime)})",
-    )]
+    detail = f"{path} ({kind}, last write: {_age_str(mtime)})"
+
+    # This check reported RECENCY ONLY and returned ok=True unconditionally,
+    # so it could not fail -- the nexus-moht0 vacuous-gate shape. The hook log
+    # is the sole sink for a DETACHED background index run, which means it is
+    # also the only place that run's warnings land; on a working box it had
+    # accumulated 1528 aspect_source_path_uncanonical warnings and 49
+    # manifest_write_many_failed events that nothing ever surfaced. Report the
+    # MOST RECENT run's warnings only: a live recurring fault shows on every
+    # doctor run, while historical noise cannot nag forever.
+    warned = _recent_index_log_warnings(hook_log)
+    if warned:
+        top = ", ".join(f"{name} x{count}" for name, count in warned[:3])
+        return [HealthResult(
+            label="index log", ok=False, warn=True,
+            detail=f"{detail}; last run emitted warnings: {top}",
+            fix_suggestions=[
+                f"read the last run: sed -n '/^=== nx index/,$p' {hook_log}",
+            ],
+        )]
+    return [HealthResult(label="index log", ok=True, detail=detail)]
+
+
+def _recent_index_log_warnings(hook_log: Path) -> list[tuple[str, int]]:
+    """Warning events in the LAST stamped run of the hook log, most first.
+
+    Scoped to the final ``=== nx index ...`` header so the count reflects the
+    most recent run rather than the file's whole history. Best-effort: an
+    unreadable or absent log yields no warnings rather than an error, because
+    a doctor check must never fail on its own telemetry.
+    """
+    import collections as _collections  # noqa: PLC0415 — local, keeps CLI startup cost off this path
+    import re as _re  # noqa: PLC0415 — local, same reason
+
+    try:
+        if not hook_log.exists():
+            return []
+        # Read a bounded tail; the hook rotates at 4MiB and a single run is
+        # far smaller, so 2MiB always covers the last run in practice.
+        size = hook_log.stat().st_size
+        with hook_log.open("rb") as fh:
+            if size > 2_097_152:
+                fh.seek(size - 2_097_152)
+            body = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    marker = body.rfind("=== nx index ")
+    if marker != -1:
+        body = body[marker:]
+    counts: _collections.Counter[str] = _collections.Counter()
+    for match in _re.finditer(r"event='([a-z_]+)'[^\n]*level='warning'", body):
+        counts[match.group(1)] += 1
+    return counts.most_common()
 
 
 #: Fallback staleness window for a T1 session lease file this check cannot
@@ -3382,7 +3431,7 @@ def _check_migration_state(
                 "(octet_length <> 32 — legacy pre-RDR-108 ids, or chash "
                 "CHECK constraints were dropped out-of-band). The engine "
                 "serves fine with these rows (the octet-width CHECKs stay "
-                "NOT VALID until the chash-rekey rung heals them), but "
+                "NOT VALID for these rows), but "
                 "they are unhealed upgrade-ladder debt (GH #1414 / "
                 "nexus-pnwu0). Re-indexing affected content HEALS these "
                 "rows in place and lowers this count (new conformant rows "
@@ -3393,21 +3442,22 @@ def _check_migration_state(
             ),
             fix_suggestions=[
                 "Step 1 — find each affected collection's repo: "
-                "`nx catalog owners list`",
+                "`nx catalog owners`",
                 "Step 2 — re-index the file-backed legacy collections: "
-                "`nx index repo <path>` (additive, per-collection; "
-                "store_put-only notes need nothing — the rekey rung "
-                "heals those from stored text)",
-                "Step 3 — run the ladder: `nx upgrade` (the chash-rekey "
-                "rung recomputes correct ids from stored chunk text)",
-                "Step 4 — re-run `nx doctor`; upgrade the engine once "
+                "`nx index repo <path>` (additive, per-collection). This "
+                "is the ONLY remedy: re-indexing writes conformant rows "
+                "before pruning stale ones. Content with no file behind "
+                "it (store_put-only notes) cannot be healed this way — "
+                "re-put it if the count matters.",
+                "Step 3 — re-run `nx doctor`; upgrade the engine once "
                 "this warning clears.",
                 "Do NOT drop the chash length constraints to 'unblock' "
                 "anything — that is what caused GH #1390.",
                 "The will-not-boot class ONLY (service crash-looping at "
                 "startup on a pre-v0.1.48 engine) recovers on the "
                 "LAST_MIGRATION_CAPABLE pinned release (this version no "
-                "longer ships the rollback tooling) — see §8.1 of "
+                "longer ships the rollback tooling) — see \"If the "
+                "service will not start\" in "
                 "https://github.com/Hellblazer/nexus/blob/main/docs/"
                 "migration-runbook.md",
             ],
@@ -4467,9 +4517,8 @@ def _check_chash_conformance_report() -> list[HealthResult]:
                 "content heals these rows in place." + unroutable_suffix
             ),
             fix_suggestions=[
-                "nx catalog owners list        (find affected collections' repos)",
+                "nx catalog owners             (find affected collections' repos)",
                 "nx index repo <path>          (re-index file-backed collections, additive)",
-                "nx upgrade                    (the chash-rekey rung recomputes conformant ids)",
                 "nx doctor                     (re-run; this warning clears once healed)",
             ],
         )]

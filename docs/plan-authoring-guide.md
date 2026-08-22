@@ -103,7 +103,7 @@ Every plan pins at minimum `verb` and `scope`. The canonical axes:
 
 | Axis | Values | When to pin |
 |------|--------|-------------|
-| `verb` | `research`, `review`, `analyze`, `debug`, `document`, `plan-author`, `plan-promote`, `plan-inspect` | Always. The action the plan performs. |
+| `verb` | `research`, `review`, `analyze`, `debug`, `document`, `query`, `lookup`, `plan-author`, `plan-promote`, `plan-inspect` | Always. The action the plan performs. |
 | `scope` | `personal`, `rdr-<slug>`, `project`, `repo`, `global` | Always. Where the plan is published. |
 | `strategy` | `default`, `security`, `performance`, `compliance`, … | When a verb has multiple valid strategies; defaults to `default`. |
 | `object` | `change-set`, `rdr`, `module`, `test-suite`, … | When the verb specifically targets a known artefact type. |
@@ -240,9 +240,9 @@ Every scope above `personal` is a git-tracked YAML path:
 | Scope | Location | Promotion |
 |-------|----------|-----------|
 | `personal` | T2 only (local plans DB) | `plan_save` at runtime |
-| `rdr-<slug>` | `docs/rdr/<slug>/plans.yml` (peer to the RDR) | `nx catalog setup` when RDR is `status: accepted` |
-| `project` | `.nexus/plans/*.yml` or `.nexus/plans.yml` | `nx catalog setup` |
-| `repo` | umbrella `.nexus/plans/_repo.yml` | `nx catalog setup` (umbrella detection) |
+| `rdr-<slug>` | `docs/rdr/<slug>/plans.yml` (peer to the RDR) | `nx plan reseed` when RDR is `status: accepted` |
+| `project` | `.nexus/plans/*.yml` or `.nexus/plans.yml` | `nx plan reseed` |
+| `repo` | umbrella `.nexus/plans/_repo.yml` | `nx plan reseed` (umbrella detection) |
 | `global` | `conexus/plans/builtin/*.yml` (conexus plugin) | plugin release |
 
 A plan authored at one scope can be *promoted* — copied to a higher
@@ -252,8 +252,11 @@ RDR-079) is out of scope here; forward-reference only.
 **Lifecycle ops deferred:** `nx plan promote` CLI, `nx plan audit`
 CLI, and RDR-close hooks for plan seeding / archival all ship in
 **RDR-079** (not RDR-078). The `verb:plan-promote, strategy:propose`
-meta-seed (Phase 4d) is a primitive form of the audit CLI usable
-today via `plan_run`.
+meta-seed (Phase 4d) that once stood in for the audit CLI was retired
+(commit af1b292bc, `RETIRED_TEMPLATE_DIMENSIONS` in `seed_loader.py`)
+— it required caller-supplied bindings `nx_answer` cannot bind, so it
+was never offerable in practice. There is no builtin plan-promote
+template today; the deferred lifecycle ops above remain the path.
 
 ## Bindings
 
@@ -273,6 +276,36 @@ conflict):
 Naming conventions: snake_case, descriptive. `$intent`, `$concept`,
 `$changed_paths` are all from existing scenario templates — reuse
 these names when the plan does the same thing they do.
+
+### Typed bindings derived from the question (`binding_infer`)
+
+`nx_answer` binds only `intent` (plus `_nx_scope` when the caller passed
+a scope) — every other value a plan needs has to come from somewhere
+else. For a plan whose `required_bindings` names a typed value such as
+`content_type` or `author`, that "somewhere else" is
+`nexus.plans.binding_infer.infer_typed_bindings`, which reads the
+question text and derives the binding when it names the value plainly:
+"papers by Grossberg" derives `author: "Grossberg"`; "which RDRs mention
+chunk identity" derives `content_type: "rdr"`. Derived values are merged
+in before caller-supplied `bindings`, so an explicit caller value always
+wins.
+
+Without this, a plan requiring a typed binding is permanently
+unofferable to `nx_answer` — `find-by-author` and `type-scoped-search`
+were both written for question shapes that carry the value they need,
+and were unreachable before `binding_infer` existed.
+
+Derivation is deliberately conservative: it fires only on an explicit,
+unambiguous mention, and anything else derives nothing. A question
+naming two content types ("papers and RDRs") derives neither, and a
+bare `by X` with no bibliographic noun or authorship verb in front of it
+derives no author. An underived binding leaves the plan unofferable and
+`nx_answer` falls through to the inline planner — today's behaviour, and
+safe. The alternative is worse: `src/nexus/plans/schema.py` records a
+plan that returned zero results with a wrong `content_type` filter where
+the identical query without it returned the correct paper as its top
+hit. A wrong typed filter produces a confident empty answer, which is
+why an ambiguous question is left unofferable rather than guessed.
 
 ## `$var` and `$stepN.<field>` resolution
 
@@ -321,20 +354,6 @@ If a plan hits an edge case where bundling breaks its contract, opt
 out with `plan_run(match, bundle_operators=False)`. The size-guard
 also auto-falls-back when the composite prompt would exceed 200k
 characters — logged as `bundle_oversized_fallback_to_per_step`.
-
-## Pointer: `verb:plan-author`
-
-The `verb:plan-author, scope:global, strategy:default` meta-seed
-(Phase 4d) is a self-referential plan that authors new plan
-templates. It walks this guide, the dimension registry, and the
-schema, then prompts you for the new plan's dimensions / description
-/ bindings, drafts a candidate `plan_json`, and saves via
-`plan_save`. Invoke it via:
-
-```
-plan_match("author a new plan template", dimensions={verb: "plan-author"}, n=1)
-→ plan_run(match, bindings={concept: "what the new plan does"})
-```
 
 ## `scope_tags` (matcher routing)
 
@@ -431,7 +450,8 @@ the `"all"` wildcard end up agnostic (`scope_tags=""`) in that case.
 - `nx doctor --check-plan-library` (RDR-092 Phase 0c) reports plan
   rows by bucket (authored vs backfilled vs non-dimensional) and
   flags a stale global tier. Run after any plugin install to
-  confirm `nx catalog setup` seeded the 15 builtins.
+  confirm `nx plan reseed` seeded the 12 builtins (see
+  [Plan-Centric Retrieval § The 12 builtin scenario templates](plan-centric-retrieval.md#the-12-builtin-scenario-templates)).
 - `nx plan repair` (RDR-092 Phase 0d) backfills `verb` / `name` /
   `dimensions` on legacy NULL-dimension rows using a 20-rule stem
   dictionary + wh-fallback, and lists `backfill-low-conf` rows for

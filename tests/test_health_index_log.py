@@ -65,3 +65,77 @@ def test_run_logs_only_no_hook_log(config_dir: Path) -> None:
 
     assert result.ok
     assert "run log" in result.detail
+
+
+# ── warning surfacing (nexus-lgdel follow-on) ────────────────────────────────
+#
+# The check above returned ok=True UNCONDITIONALLY: it reported recency and
+# never read content. That is the nexus-moht0 vacuous-gate shape — a check
+# that cannot fail. It mattered because the hook log is the ONLY sink for a
+# DETACHED background `nx index repo` run, so it is also the only place that
+# run's warnings land. On a working box it had silently accumulated 1528
+# `aspect_source_path_uncanonical` warnings and 49 `manifest_write_many_failed`
+# events, none of which any surface reported.
+
+_HEADER = "=== nx index post-commit /repo 2026-08-22T07:00:00+0000 ===\n"
+
+
+def _warn_line(event: str) -> str:
+    return (
+        f"event='{event}' timestamp='2026-08-22T14:00:00Z' level='warning' "
+        "collection='rdr__1-1__voyage-context-3__v1'\n"
+    )
+
+
+def test_warnings_in_the_last_run_are_surfaced(config_dir: Path) -> None:
+    (config_dir / "index.log").write_text(
+        _HEADER + _warn_line("aspect_source_path_uncanonical") * 3
+        + _warn_line("manifest_write_many_failed")
+    )
+
+    (result,) = _check_index_log()
+
+    assert result.ok is False and result.warn is True
+    assert "aspect_source_path_uncanonical x3" in result.detail
+    assert "manifest_write_many_failed x1" in result.detail
+    assert any("sed -n" in f for f in result.fix_suggestions)
+
+
+def test_warnings_from_EARLIER_runs_do_not_nag(config_dir: Path) -> None:
+    """Scoped to the last stamped run, so history cannot warn forever.
+
+    Without this the 1528 historical warnings above would make doctor warn on
+    every invocation for as long as the file survived, which is how a real
+    signal becomes something people learn to ignore.
+    """
+    (config_dir / "index.log").write_text(
+        _HEADER + _warn_line("aspect_source_path_uncanonical") * 500
+        + _HEADER + "event='indexer_done' level='info'\n"
+    )
+
+    (result,) = _check_index_log()
+
+    assert result.ok is True
+    # NB: match on the emitted phrase, not the bare word — pytest's tmp_path
+    # is named after the test, so "warnings" appears in the path itself.
+    assert "emitted warnings" not in result.detail
+
+
+def test_clean_last_run_stays_ok(config_dir: Path) -> None:
+    (config_dir / "index.log").write_text(_HEADER + "event='x' level='info'\n")
+
+    (result,) = _check_index_log()
+
+    assert result.ok is True
+
+
+def test_unreadable_log_never_fails_the_check(config_dir: Path) -> None:
+    """Doctor must not fail on its own telemetry being unreadable."""
+    log = config_dir / "index.log"
+    log.write_text(_HEADER)
+    log.chmod(0o000)
+    try:
+        (result,) = _check_index_log()
+        assert result.ok is True
+    finally:
+        log.chmod(0o644)

@@ -258,6 +258,11 @@ def test_log_path_fallback_resolves_home_at_call_time_not_import_time(tmp_path, 
     import-time-default class already fixed once for
     ``gc_purge_marker.py``."""
     monkeypatch.delenv("NX_ROUTING_LOG_PATH", raising=False)
+    # NEXUS_CONFIG_DIR now takes precedence over the home fallback (it is what
+    # isolates this log from the real config dir under test). Clear it so this
+    # test exercises the home-fallback branch it is actually about; the
+    # override's own precedence is pinned separately below.
+    monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
     lib = _load_lib()
     new_home = tmp_path / "new-home"
     new_home.mkdir()
@@ -560,3 +565,49 @@ def test_get_bash_command_empty_when_not_bash():
 def test_get_bash_command_empty_on_missing():
     lib = _load_lib()
     assert lib.get_bash_command({}) == ""
+
+
+# ── NEXUS_CONFIG_DIR isolation (2026-08-22) ──────────────────────────────────
+#
+# This was the ONE append log in the tree that ignored NEXUS_CONFIG_DIR. A test
+# suite sets that var to isolate itself; the routing log ignored it and wrote to
+# the REAL ~/.config/nexus on every routed tool call, so the nexus-pfuns
+# real-config-dir mutation guard failed the whole run — twice on 2026-08-22,
+# each time surfacing as `rc=1` with 14000+ passed and ZERO failing tests. The
+# per-session capability census (same append-log shape) already resolved through
+# nexus.config.nexus_config_dir; this brings the routing log into line.
+
+def test_default_log_path_honours_nexus_config_dir(tmp_path, monkeypatch):
+    lib = _load_lib()
+    monkeypatch.delenv("NX_ROUTING_LOG_PATH", raising=False)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+
+    assert lib._default_log_path() == tmp_path / "routing_log.jsonl"
+
+
+def test_default_log_path_falls_back_to_home_without_the_override(tmp_path, monkeypatch):
+    lib = _load_lib()
+    monkeypatch.delenv("NX_ROUTING_LOG_PATH", raising=False)
+    monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert lib._default_log_path() == tmp_path / ".config" / "nexus" / "routing_log.jsonl"
+
+
+def test_blank_nexus_config_dir_is_ignored(tmp_path, monkeypatch):
+    """An empty/whitespace override must not resolve the log to a bare filename."""
+    lib = _load_lib()
+    monkeypatch.delenv("NX_ROUTING_LOG_PATH", raising=False)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", "   ")
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert lib._default_log_path() == tmp_path / ".config" / "nexus" / "routing_log.jsonl"
+
+
+def test_explicit_log_path_still_wins_over_config_dir(tmp_path, monkeypatch):
+    lib = _load_lib()
+    explicit = tmp_path / "explicit.jsonl"
+    monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(explicit))
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+
+    assert lib._log_path() == explicit

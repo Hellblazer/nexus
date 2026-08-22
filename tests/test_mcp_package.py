@@ -41,9 +41,9 @@ def test_core_registered_tools():
         "daemon_uninstall",
         # RDR-156 P4 combined-query primitives (nexus-joesk, nexus-houg9)
         "search_metadata_scoped", "search_topic_scoped", "search_graph_hop",
-        # RDR-182 P3 consent-gated remediation surface (nexus-ykzbj.10/.11;
-        # replaced the throwaway A4 spike tool).
-        "forensics", "remediate",
+        # RDR-182 P3 consent-gated remediation surface (forensics/remediate)
+        # DELETED at nexus-lgdel: the chash-rekey upgrade rung it steered
+        # operators toward no longer exists.
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 

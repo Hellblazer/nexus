@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-13 agents (10 active + 3 stubs pointing at MCP tools), 45 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
+13 agents (10 active + 3 stubs pointing at MCP tools), 43 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
 
 ## Installation
 
@@ -48,11 +48,11 @@ story.
 ## What You Get
 
 - **13 agents** (10 active + 3 MCP-tool redirect stubs) matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
-- **45 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
+- **43 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
-- **Two bundled MCP servers** — `nexus` (38 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, 10 LLM-backed operators, 4 orchestration tools including `nx_answer` for plan-centric retrieval, and the consent-gated `forensics`/`remediate` pair) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking` fetched via npx
+- **Two bundled MCP servers** — `nexus` (36 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, 10 LLM-backed operators, and 4 orchestration tools including `nx_answer` for plan-centric retrieval) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking` fetched via npx
 
 ### Pick your entry point
 
@@ -78,7 +78,7 @@ conexus/
 │   │   ├── MAINTENANCE.md       # How to maintain/update agents
 │   │   ├── README.md            # _shared directory guide (this section)
 │   │   └── RELAY_TEMPLATE.md    # Canonical relay message format
-│   └── *.md                 # 14 command-invoked + 2 query-dispatched = 16 agent definitions
+│   └── *.md                 # 13 agent definitions (10 active + 3 MCP-tool stubs)
 ├── commands/
 │   └── *.md                 # Slash commands (/conexus:research, /conexus:create-plan, /conexus:review-code, etc.)
 ├── hooks/
@@ -145,7 +145,7 @@ conexus/
     └── rdr-audit/           # RDR: audit project RDR lifecycle
 ```
 
-## Standalone Skills (24)
+## Standalone Skills (25)
 
 Skills that dispatch a tool or agent directly — no relay to a full sub-agent.
 This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure skills.
@@ -182,8 +182,11 @@ This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure
 | git-worktrees | Isolated workspace setup via git worktrees with safety verification |
 | nexus | Nexus CLI reference for all tiers (T1/T2/T3) |
 | orchestration | Agent routing reference — routing tables, pipeline templates |
+| phase-review-gate | Phase-boundary gate — cross-walks RDR §Approach against closing beads to block silent scope reduction |
 | receiving-review | Technical evaluation of code review feedback |
 | serena-code-nav | Navigate code by symbol — definitions, callers, type hierarchies |
+| test-authoring | Test-authoring reference for the nexus repo — dev-loop selection, scenario-vs-parametrize, contract-suite placement |
+| upgrade | Shows what `nx upgrade` would converge, then runs it |
 | using-nx-skills | Skill invocation discipline — check skills before every response |
 | writing-nx-skills | Guide for authoring conexus plugin skills |
 
@@ -234,10 +237,9 @@ Defined in `registry.yaml`:
 - **onboarding**: codebase-deep-analyzer → strategic-planner
 - **architecture**: codebase-deep-analyzer → deep-analyst → strategic-planner → architect-planner
 
-MCP-tool steps replaced the `plan-auditor`, `plan-enricher`, and
-`knowledge-tidier` agents per RDR-080.  Callers invoke the tool directly
-instead of dispatching a sub-agent.
-- **architecture**: codebase-deep-analyzer → deep-analyst → strategic-planner → plan-auditor → architect-planner
+The `nx_plan_audit` / `nx_enrich_beads` / `nx_tidy` MCP-tool steps above replaced the
+`plan-auditor`, `plan-enricher`, and `knowledge-tidier` agents per RDR-080. Callers
+invoke the tool directly instead of dispatching a sub-agent.
 
 ## Hooks
 
@@ -245,16 +247,24 @@ See `hooks/hooks.json` for exact wiring. Paths below use `$CLAUDE_PLUGIN_ROOT` a
 
 | Event | Script | Purpose |
 |-------|--------|---------|
+| `SessionStart` | `nx upgrade --auto` | Auto-converge the CLI to the plugin's minimum required version |
+| `SessionStart` | `hooks/scripts/preflight.py` | Silent health check of skill-routed tool reachability; emits a `## nx Preflight: FAILED` marker on gaps (nexus-hwbj) |
 | `SessionStart` | `nx hook session-start` | Resolve/propagate session id; emit the skill-invocation guidance imperative (nexus-h33x8.4 — moved here from the pinned `cat .../using-nx-skills/SKILL.md` entry so guidance edits ship at PyPI-release/reinstall cadence instead of plugin-release cadence; see `nexus.session_start_guidance`) |
 | `SessionStart` | `hooks/scripts/session_start_hook.py` | Surface T2 memory, ready beads, and scratch context at session start |
 | `SessionStart` | `hooks/scripts/rdr_hook.py` | Reconcile RDR file frontmatter ↔ T2 metadata (self-healing on divergence) |
 | `SessionStart` (matcher `startup`) | `hooks/scripts/version_lockstep_hook.py` | Detect plugin↔CLI version skew (RDR-143); nudge and dispatch a detached, extras-preserving upgrade that takes effect next session |
+| `SessionEnd` | `nx-session-end-launcher` | Flush session-end bookkeeping (memory, beads, scratch) via a detached grandchild |
 | `PostCompact` | `hooks/scripts/post_compact_hook.sh` | Re-prime context (memory, beads, scratch) after `/compact` |
 | `Stop` | `hooks/scripts/stop_verification_hook.sh` | Opt-in session-end verification: tests + git state (see [Configuration § Verification](../docs/configuration.md#verification)) |
 | `StopFailure` | `hooks/scripts/stop_failure_hook.py` | Advisory on abnormal session termination |
 | `PreToolUse` (`Bash`) | `hooks/scripts/pre_close_verification_hook.sh` | Opt-in bd-close gate: verifies before `bd close` / `bd done` |
+| `PreToolUse` (`Bash`) | `hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` | Deny index-writing / working-tree-destroying git verbs from subagents in the shared tree (RDR-184 Gap-4) |
+| `PreToolUse` (`Bash`) | `hooks/scripts/routing/phase_review_close_requires_gate.py` | Deny `bd close` on a phase-review bead without a fresh PASSED gate sentinel (RDR-121 P2) |
 | `PreToolUse` (`Agent\|Task`) | `hooks/scripts/agent-dispatch-expect.sh` | Write the RDR-184 EXPECT ledger row from the dispatch's own `subagent_type` + `run_in_background`, so orchestration doesn't have to hand-write it (nexus-qc4p1) |
+| `PostToolUse` | `hooks/scripts/divergence-language-guard.sh` | Advisory scan of RDR post-mortem writes for divergence-language patterns (RDR-065 Gap 2) |
 | `SubagentStart` | `hooks/scripts/subagent-start.sh` | Inject inherited context (active bead, session, MCP priority) into spawned subagents |
+| `SubagentStart` | `hooks/scripts/subagent-start-stamp.sh` | Record the RDR-184 EXPECT-ledger START row (agent id + type) at dispatch time (nexus-ccs9v.16) |
+| `SubagentStop` | `hooks/scripts/subagent-stop.sh` | Block a named background teammate's idle once if it never sent a completion report (RDR-184 Gap 1) |
 | `PermissionRequest` (`mcp__plugin_conexus_.*`) | `hooks/scripts/auto-approve-nx-mcp.sh` | Auto-approve nexus and nexus-catalog MCP tool calls |
 
 ## Slash Commands
@@ -307,7 +317,6 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 | Plans (RDR-078) | `plan_save`, `plan_search`, `plan_delete`, `traverse` |
 | Operators (RDR-079/088/093) | `operator_extract`, `operator_rank`, `operator_compare`, `operator_summarize`, `operator_generate`, `operator_filter`, `operator_groupby`, `operator_aggregate`, `operator_check`, `operator_verify` |
 | Orchestration (RDR-080) | `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit` |
-| Remediation (RDR-182, consent-gated) | `forensics`, `remediate` |
 | Admin | `daemon_uninstall` |
 
 **`nx_answer`** is the retrieval entry point for multi-step questions.

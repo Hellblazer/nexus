@@ -49,9 +49,6 @@ def test_all_command_modules_registered():
         "tenant_cmd": "tenant",
         "tier_status": "tier-status",
         "answer_runs": "answer-runs",
-        # RDR-182: one module, two commands (opposite sides of the consent
-        # taxonomy — display-only forensics vs consented remediate).
-        "remediation_cmd": ["forensics", "remediate"],
     }
 
     missing = []

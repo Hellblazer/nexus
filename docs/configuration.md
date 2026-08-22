@@ -194,11 +194,12 @@ run:
    run.
    Optionally create `nexus_diag` (NOSUPERUSER NOCREATEDB NOCREATEROLE
    BYPASSRLS LOGIN) — the client-side diagnostic role for the pre-upgrade
-   chash-poison probe and `nx forensics`; without it those checks degrade to a
-   loud WARN, never a false clean. Note the client probe is **local-only by
-   design** (nexus-y3wuu): it reaches only a local Postgres via the local
-   `pg_credentials` file, so on a remote/managed store the role serves
-   server-side diagnostics run with your own credentials, not `nx forensics`.
+   chash-poison probe (`nx doctor`, the `install-binary` gate); without it
+   that check degrades to a loud WARN, never a false clean. Note the client
+   probe is **local-only by design** (nexus-y3wuu): it reaches only a local
+   Postgres via the local `pg_credentials` file, so on a remote/managed
+   store the role serves server-side diagnostics run with your own
+   credentials.
    Also run `GRANT pg_monitor TO nexus_admin WITH ADMIN OPTION;` (nexus-hzhgl,
    RDR-191 Phase 3/4 pre-flight) — PostgreSQL only lets a role grant
    membership in another role it already holds WITH ADMIN OPTION (or as

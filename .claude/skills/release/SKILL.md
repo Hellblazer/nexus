@@ -287,15 +287,19 @@ git merge origin/main   # resolve: changelogs = union (fold main's released
 # so bump by pattern, not by exact-previous-version string match.
 
 # Stage ALL SEVEN bump targets from Step 3, plus uv.lock and both changelogs,
-# plus Step 0b's pre-tag snapshot. mcpb/pyproject.toml + mcpb/manifest.json
-# are the easy-to-miss pair here and their omission fails CI's mcpb-manifest-
-# version parity check; omitting .release-gates/remediation-snapshot.json
-# fails release.yml's --verify-snapshot step outright (missing snapshot).
+# plus Step 0b's pre-tag snapshot and the cleared PENDING_RELEASE.md ledger.
+# mcpb/pyproject.toml + mcpb/manifest.json are the easy-to-miss pair here and
+# their omission fails CI's mcpb-manifest-version parity check; omitting
+# .release-gates/remediation-snapshot.json fails release.yml's
+# --verify-snapshot step outright (missing snapshot); omitting
+# conexus/PENDING_RELEASE.md leaves a stale entry that fails
+# tests/test_plugin_release_drift_ledger.py.
 git add pyproject.toml uv.lock CHANGELOG.md conexus/CHANGELOG.md \
         mcpb/pyproject.toml mcpb/manifest.json \
         .claude-plugin/marketplace.json \
         conexus/.claude-plugin/plugin.json \
         sn/.claude-plugin/plugin.json \
+        conexus/PENDING_RELEASE.md \
         .release-gates/remediation-snapshot.json
 git commit -m "chore(release): conexus X.Y.Z"
 

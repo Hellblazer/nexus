@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-182 P2.2 (nexus-ykzbj.9): pre-emission read-only SQL lint.
 
-Guarantees any SQL a DIAGNOSTIC (forensics) playbook emits is read-only and
-metadata-scoped BEFORE it ever reaches an agent — mutating diagnostics are
-impossible-by-construction. Fail-closed allowlist, not a deny-list: a
-statement passes only when it provably matches a read-only shape; anything
-unrecognized fails. (The audit note is explicit: the test-suite's
-leading-keyword ``_DML_TARGET_RE`` pattern is NOT sufficient — CTEs and DO
-blocks must be caught.)
+Guarantees any DIAGNOSTIC SQL is read-only and metadata-scoped BEFORE it
+ever reaches an agent — mutating diagnostics are impossible-by-construction.
+Fail-closed allowlist, not a deny-list: a statement passes only when it
+provably matches a read-only shape; anything unrecognized fails. (The audit
+note is explicit: the test-suite's leading-keyword ``_DML_TARGET_RE``
+pattern is NOT sufficient — CTEs and DO blocks must be caught.)
+
+The RDR-182 diagnostic-playbook EMITTER this lint was wired into is
+deleted (nexus-lgdel — the chash-rekey rung it steered operators toward no
+longer exists); ``sql_lint`` itself is general-purpose and stays, consumed
+directly by ``nexus.db.diag_connection`` and ``nexus.health``.
 """
 from __future__ import annotations
 
@@ -128,7 +132,7 @@ def test_unqualified_but_safe_targets_pass(stmt):
     assert ok is True, reason
 
 
-# ── the batch assertion + emitter wiring ────────────────────────────────────
+# ── the batch assertion ──────────────────────────────────────────────────────
 
 def test_assert_batch_raises_on_first_violation():
     lint = _lint()
@@ -142,60 +146,3 @@ def test_assert_batch_raises_on_first_violation():
 
 def test_empty_batch_is_fine():
     _lint().assert_read_only_diagnostics([])
-
-
-def test_emitter_refuses_a_diagnostic_playbook_with_mutating_sql(monkeypatch):
-    """Wired into the emitter path: a (hypothetical future) diagnostic topic
-    whose builder embeds mutating SQL cannot be emitted at all."""
-    from nexus.remediation import StoreState, emit_playbook, sql_lint
-    from nexus.remediation import playbook as pb_mod
-
-    def _evil_topic(store_state):
-        pb = pb_mod._chash_poison(store_state)
-        object.__setattr__(pb, "diagnostic_sql",
-                           ("DELETE FROM nexus.memory",))
-        return pb
-
-    monkeypatch.setitem(pb_mod._TOPICS, "evil-diag", _evil_topic)
-    with pytest.raises(sql_lint.DiagnosticSqlViolation):
-        emit_playbook("evil-diag", StoreState(detail="x"))
-
-
-def test_emitter_passes_a_clean_diagnostic_playbook(monkeypatch):
-    from nexus.remediation import StoreState, emit_playbook
-    from nexus.remediation import playbook as pb_mod
-
-    def _clean_topic(store_state):
-        pb = pb_mod._chash_poison(store_state)
-        object.__setattr__(pb, "diagnostic_sql",
-                           ("SELECT count(*) FROM nexus.chunks WHERE length(chash) <> 32",))
-        return pb
-
-    monkeypatch.setitem(pb_mod._TOPICS, "clean-diag", _clean_topic)
-    pb = emit_playbook("clean-diag", StoreState(detail="x"))
-    assert pb.diagnostic_sql
-
-
-def test_diagnostic_sql_renders_in_tool_return(monkeypatch):
-    """(review-foundations Medium) Linted SQL the agent never SEES is a
-    silent gap: a populated diagnostic_sql must appear verbatim in the MCP
-    rendering — and stay OUT of the CLI/agent-prompt renderings."""
-    from nexus.remediation import StoreState, emit_playbook
-    from nexus.remediation import playbook as pb_mod
-
-    stmt = "SELECT count(*) FROM nexus.chunks WHERE length(chash) <> 32"
-
-    def _clean_topic(store_state):
-        pb = pb_mod._chash_poison(store_state)
-        object.__setattr__(pb, "diagnostic_sql", (stmt,))
-        return pb
-
-    monkeypatch.setitem(pb_mod._TOPICS, "clean-diag", _clean_topic)
-    pb = emit_playbook("clean-diag", StoreState(detail="x"))
-    assert stmt in pb.tool_return()
-    assert "lint-verified" in pb.tool_return()
-    assert stmt not in pb.agent_prompt()
-    assert stmt not in pb.terminal_block()
-    # And the empty-default case renders NO sql block at all.
-    plain = emit_playbook("chash-poison", StoreState(detail="x"))
-    assert "diagnostic SQL" not in plain.tool_return()

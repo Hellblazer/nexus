@@ -92,11 +92,17 @@ coexisting.
 
 Service-backed since RDR-155 P4b: in service mode `get_t1_database` routes
 scratch to `HttpScratchStore` over the one `nexus-service`, scoped by the
-Claude session-id (both the parent session and any sibling resolve the same
-session-id from `~/.config/nexus/current_session`, so child agents and
-Bash-tool siblings share scratch space and see each other's entries).
-Concurrent independent Claude Code windows stay isolated because each has its
-own session-id.
+Claude session-id resolved via `nexus.session.resolve_active_session_id()`'s
+tiered chain: `NX_SESSION_ID` env, then `CLAUDE_CODE_SESSION_ID` env
+(inherited by child Agent-tool and Bash-tool processes, so they resolve the
+same session-id as their parent and share scratch space), and only as a
+last resort the flat file `~/.config/nexus/current_session` — a
+machine-wide, last-writer-wins record a concurrent session can overwrite.
+An explicit `NX_SESSION_ID`/`CLAUDE_CODE_SESSION_ID` with no live lease
+fails loud with `T1ServerNotFoundError` rather than silently falling
+through to the flat file; only a **bare** invocation (neither env var set)
+uses the flat-file fallback. Concurrent independent Claude Code windows
+stay isolated because each has its own session-id.
 
 The chroma-backed per-session T1 server (and its `t1_addr.<session_id>`
 lease discovery) retired with the chroma substrate. The in-process
@@ -120,7 +126,7 @@ T2 is the persistent local layer that bridges sessions. Notes, project state, an
 - **Developer notes** — hypotheses, findings, decisions-in-progress via `nx memory put`
 - **Project memory** — design notes, working state, active decisions. Store with `nx memory put`, retrieve with `nx memory get`. 
 - **RDR metadata** — status, type, priority, dates for each RDR document. See [RDR: Nexus Integration](rdr.md#nexus-integration).
-- **Plan library** — saved query execution plans with project scoping, full-text search, dimensional identity (`verb`, `scope`, `strategy` + optional axes), and optional TTL. Fourteen builtin templates are seeded via `nx plan reseed` (5 legacy + 9 RDR-078 scenario plans for `verb: research` / `review` / `analyze` / `debug` / `document` + 4 meta-seeds; idempotent by default — only previously-missing builtins insert, `--force` reloads all of them). Access via `plan_save` / `plan_search` MCP tools, or indirectly via `nx_answer` (the retrieval trunk — see [Plan-Centric Retrieval](plan-centric-retrieval.md)). Note: auto-growth of the library from successful ad-hoc plans is filed as RDR-084 (draft, not yet implemented) — today the library stays at the 14 seed templates plus any manually-authored YAMLs.
+- **Plan library** — saved query execution plans with project scoping, full-text search, dimensional identity (`verb`, `scope`, `strategy` + optional axes), and optional TTL. Twelve builtin templates (`conexus/plans/builtin/*.yml`; five `*-default` plans plus seven scenario-strategy plans) are seeded via `nx plan reseed`, idempotent by default — only previously-missing builtins insert, `--force` reloads all of them. Access via `plan_save` / `plan_search` MCP tools, or indirectly via `nx_answer` (the retrieval trunk — see [Plan-Centric Retrieval](plan-centric-retrieval.md)). Note: auto-growth of the library from successful ad-hoc plans is filed as RDR-084 (draft, not yet implemented) — today the library stays at the 12 seed templates plus any manually-authored YAMLs.
 - **Agent relay** — context passed between agent invocations
 - **Promoted scratch** — T1 entries flagged during a session are auto-flushed to T2 at session end
 
@@ -165,7 +171,7 @@ Merges run as a single transaction against the engine so UPDATE and DELETE are a
 
 The taxonomy spans two storage tiers:
 
-*T2 schema* — four tables in the shared `memory.db`:
+*T2 schema* — four tables, served through `HttpTaxonomyStore` over the engine's Postgres (the only backend, per T2's domain split above — no separate `memory.db`):
 
 | Table | Purpose |
 |-------|---------|

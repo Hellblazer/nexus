@@ -303,9 +303,13 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     def record_consent(self, *, scope: str, ts: str, granted: bool) -> None:
         """Record a consent grant/revoke. Calls ``POST /v1/telemetry/consents/record``.
 
-        RDR-182 nexus-ng2sy: the service-mode twin of ``Telemetry.record_consent``
-        — the consent audit the ``remediate`` release records at layer 5.
         Append-only; ``granted`` distinguishes a grant from a revoke.
+
+        Introduced for RDR-182's ``remediate`` consent audit (nexus-ng2sy).
+        That surface is deleted, so this method has NO production caller.
+        It survives because ``tests/db/t2_store_contract.py`` requires it of
+        every telemetry store — the HTTP/engine parity contract owns it now,
+        not RDR-182. Removing it is a parity-suite change, not a cleanup.
         """
         self._post("/v1/telemetry/consents/record", {
             "scope":   scope,
@@ -317,8 +321,9 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """Read the tenant's consent-audit trail (grants and revokes, in
         insertion order). Calls ``GET /v1/telemetry/consents/list``.
 
-        The service-mode twin of ``Telemetry.list_consents`` — the read
-        surface behind ``nx remediate --history``.
+        No production caller: the ``nx remediate --history`` surface this
+        read was built for is deleted. Kept by the same parity contract as
+        ``record_consent`` above.
         """
         data = self._get("/v1/telemetry/consents/list")
         return data if isinstance(data, list) else []

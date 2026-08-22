@@ -58,7 +58,7 @@ RDRs are iterative across a project, not within a single document. Write one, lo
 
 Research may reveal that one RDR needs to split into several; that's normal. Cross-reference related RDRs to maintain conceptual integrity. Stack them by dependency so implementation order is clear.
 
-The Nexus project has produced over 125 RDRs across its development. The corpus is searchable, so when starting a new design, prior decisions surface automatically, preventing contradictions and avoiding redundant investigation.
+The Nexus project has produced 191 RDRs across its development (through rdr-196). The corpus is searchable, so when starting a new design, prior decisions surface automatically, preventing contradictions and avoiding redundant investigation.
 
 ## Statuses and types
 
@@ -155,7 +155,7 @@ The RDR is now searchable via `nx search --corpus rdr` and tracked in T2.
 
 ## Create (`/conexus:rdr-create`)
 
-Prompts for title, type, and priority. Creates `docs/rdr/NNN-kebab-title.md` from the standard template with metadata prefilled, writes a T2 record, and regenerates the RDR index. Status: **Draft**.
+Prompts for title, type, and priority. Creates `docs/rdr/rdr-NNN-kebab-title.md` from the standard template with metadata prefilled, writes a T2 record, and regenerates the RDR index. Status: **Draft**.
 
 On first use in a repository, `/conexus:rdr-create` bootstraps the `docs/rdr/` directory and copies the template automatically.
 

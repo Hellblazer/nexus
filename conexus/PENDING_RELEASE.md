@@ -157,3 +157,27 @@ mechanize, it matters enough to ship.
   ledgers that age past 7 days in the meantime. Running
   `expectations_archive` by hand from a sourced `tests/e2e/lib/expectations.sh`
   covers the gap in the interim; that is a manual stopgap, not the trigger.
+- `conexus/hooks/scripts/routing/_lib.py`, `sn/hooks/scripts/routing/_lib.py`:
+  `_default_log_path()` hardcoded `Path.home()` and ignored `NEXUS_CONFIG_DIR`,
+  so the routing log always wrote to the REAL config dir — including from a
+  test run that had redirected the config dir somewhere else. Two full-suite
+  runs exited rc=1 with ZERO failing tests before the cause was found. The
+  per-session capability census, an identical append-log shape, already
+  resolved through `nexus.config.nexus_config_dir` and said so in its own
+  comment. A parity test keeps the two plugin copies byte-identical, so the
+  fix lands twice.
+  **INERT UNTIL RELEASE.** The hooks that write this log load from the pinned
+  v7.14.0 tag, so until the pin advances a dev session's own tool calls still
+  write to the real config dir, and a suite run started while a session is
+  active can still red spuriously. `sn` is pinned independently at the same
+  ref, so this is drift on two plugins, not one.
+- `conexus/hooks/scripts/auto-approve-nx-mcp.sh`: dropped the
+  `mcp__plugin_conexus_nexus__forensics` and
+  `mcp__plugin_conexus_nexus__remediate` case arms. Both MCP tools are deleted
+  with the rest of the RDR-182 surface, and the auto-approve list was still
+  granting them. No test could have caught this:
+  `tests/hooks/test_permission_request_hooks.py` enumerates the live FastMCP
+  registry and asserts registered-tools ⊆ allow-list, one direction only —
+  nothing iterates the script's case arms, so a stale arm naming a
+  nonexistent tool is undetectable by construction. Do not read that test as
+  a two-way drift gate.

@@ -13,6 +13,7 @@ single command. Migration: ``nx enrich <coll>`` → ``nx enrich bib
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -824,6 +825,28 @@ def _enrich_apply(
                     break
             if found_any:
                 continue
+            # Step 1b: an ABSOLUTE path has an exact key — its `source_uri`
+            # (`file://<abspath>`, RDR-096 P3.1), which is what the INDEXER
+            # writes and resolves by (`doc_indexer.by_source_uri`). Step 1
+            # above can never match one, because the catalog stores
+            # `file_path` RELATIVE; without this, an absolute path always
+            # fell through to the O(collection) walk below. Point query,
+            # collection-checked, and immune to the basename collisions the
+            # suffix match can hit (this repo really does carry both
+            # `docs/rdr/X.md` and `docs/rdr/post-mortem/X.md`).
+            if os.path.isabs(sp):
+                by_uri = getattr(reader, "by_source_uri", None)
+                if by_uri is not None:
+                    try:
+                        hit = by_uri("file://" + sp)
+                    except Exception:  # noqa: BLE001 — best-effort; fall through to the walk
+                        hit = None
+                    if hit is not None and (
+                        not collection_name
+                        or hit.physical_collection == collection_name
+                    ):
+                        target_tumblers.append(Tumbler.parse(str(hit.tumbler)))
+                        continue
             # Step 2: suffix match — sp LIKE '%/' || file_path from the original SQL.
             # The catalog stores relative file_path; the caller may supply an absolute path.
             # Walk the collection and check if sp ends with '/' + file_path.

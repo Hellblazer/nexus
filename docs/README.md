@@ -31,6 +31,7 @@ Start with [Getting Started](getting-started.md) for installation. Then find you
 
 - [Contributing](contributing.md) — Dev setup, testing, code style, release process
 - [Architecture](architecture.md) — Reference architecture, module map, design decisions
+- [Benchmarking](benchmarking.md) — `scripts/bench/` harnesses: retrieval-quality scoring (RDR-090) and the operator quality proxy (RDR-196 .p2a)
 - [Wire Contract Pending](wire-contract-pending.md) — Ledger of engine/client wire-contract pairings deployed ahead of their client half (nexus-1vogq tripwire)
 - [`testing/`](testing/) — [6.0.0 plugin surface coverage matrix](testing/6.0.0-plugin-surface-coverage-matrix.md)
 - [`tutorial/`](tutorial/) — **In progress, not on `main`.** The tutorial-recording pipeline lives on the `wip/tutorial` branch; this directory on `main` is a placeholder.

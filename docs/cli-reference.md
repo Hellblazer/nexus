@@ -115,6 +115,8 @@ Two related output lines are new since the RUNFENCE arc (nexus-5xn3k): `skipped:
 
 **Exit code (nexus-tp8yk):** `nx index repo` and `nx dt index` now EXIT NON-ZERO when the run ends with any completion refusal, catalog manifest-write failure, manifest-identity drop, or superseded-chunk sweep skip — the WARNING classes described above. Previously these were WARNING-only (`rc=0`); a script or CI job that gated on the exit code alone could not tell a damaged run from a clean one. The failure message names the remedy (re-index with `--force`; `nx catalog manifest-verify <tumbler>`, formerly also named here, is [retired](#nx-catalog-manifest-verify--retired) as of RDR-191 Phase 6 — use `nx catalog show <tumbler>` instead). This is a NEW exit-code condition on an existing command — a "clean" run that used to exit 0 with WARNING lines now exits non-zero; any automation keying on `nx index repo` / `nx dt index`'s rc should account for this. An UNCONFIRMED completion stamp (a pre-fence engine's `None` sentinel — no verify was possible at all) is a separate case and stays WARNING-only at `rc=0`; only a POSITIVE engine verdict (a refusal) or a write/identity failure triggers the non-zero exit.
 
+**Unextractable-file exit code (nexus-deyd5): a single skip stays clean, a systemic skip does not.** A file that raises `UnextractableContentError` during `nx index repo` is skipped and counted, but no longer fails the run by itself (`rc=0`) — nothing was ever written for that file, so skipping it alone costs no data; a `Note:` line on stderr names the count and points at the WARNING/ERROR log line(s) for the affected path(s). Separately, after the run's drain and post-processing have all already completed and committed, the AGGREGATE skip population across the whole run is checked against a systemic-skip floor: 100% of attempted files skipped, or at least 20 files attempted with 50% or more skipped. Crossing that floor raises a `ClickException` (non-zero exit) naming the skipped/attempted counts and percentage, even though the run itself finished and its successful work was already committed — nothing is discarded by this check, it only decides the exit code. The message suggests the most likely legitimate cause: scanned/image-only PDFs, since the default extractor does not run OCR (retry with `--extractor mineru` or set `pdf.extractor: mineru` in `.nexus.yml`).
+
 **`pdf --dir` batch exit code (nexus-uqq9z):** `nx index pdf --dir` now EXITS NON-ZERO when one or more files land in the run's failures list — real per-file exceptions (extraction errors, pipeline conflicts, completion refusals) AND manifest-identity drops alike, i.e. any entry the printed `N failure(s):` list carries. Previously the batch always exited 0 regardless of how many files failed, the same "clean rc, damaged run" gap `nx index repo` / `nx dt index` closed above, just left open one layer down for the `--dir` batch path. Per-file isolation is UNCHANGED — every PDF in the directory is still attempted and the failures list still prints exactly as before; only the batch's own exit code is new. The failure message is `N of M file(s) failed — see list above`. Single-file `nx index pdf PATH` (no `--dir`) already exited non-zero on its own failures (nexus-7f5qj) and is unaffected.
 
 **`pdf` and `md` flags:**
@@ -705,27 +707,41 @@ nx aspects requeue-failed --limit 100            # pace a large backlog
 nx aspects requeue-failed --dry-run              # report only, no writes
 ```
 
-### nx aspects backfill-source-uri
+### nx aspects backfill-source-uri (retired)
 
 ```
-nx aspects backfill-source-uri [--apply]
+nx aspects backfill-source-uri [--apply]   # refuses with guidance
 ```
 
-Backfill NULL/empty `source_uri` rows in `document_aspects` (RDR-120 §A8 repair verb, carved out of the old migration chain). RDR-096 added `document_aspects.source_uri` in 4.16.0; rows written before that (plus a transient writer-path gap) lack a URI, and the 4.31.0 migration that drops the legacy `source_path` column refuses to run until every row has one; run this before the next upgrade if your database has unbackfilled rows.
+**RETIRED.** This verb backfilled NULL/empty `source_uri` rows in the LOCAL
+SQLite `document_aspects` (RDR-120 §A8 repair verb) ahead of the 4.31.0
+migration that dropped the legacy `source_path` column. That migration
+chain was deleted in the RDR-158 P4 retirement, and on this version the
+local `.db` is a FROZEN migration source (RDR-176 Gap 2) that must never be
+written — the unguarded raw UPDATE this verb carried was the last write path
+into it. The command now raises `click.UsageError` unconditionally, with or
+without `--apply`. If a pre-migration install still needs the repair, run it
+on the last migration-capable 6.x release, which still ships both the verb
+and the migration it serves.
 
-Idempotent: only touches rows where `source_uri` is NULL/empty AND `source_path` is populated. URI schemes match the writer: `file://` for `rdr__*` / `docs__*` / `code__*`, `chroma://` for `knowledge__*` and other chroma-backed prefixes. Rows with empty `source_path` are skipped and counted separately for manual triage. Dry-run by default; `--apply` writes.
-
-Operates on the local SQLite T2 via a direct connection, deliberately bypassing the normal migration chain: the verb must work precisely when that chain is stuck on this precondition. No-op when no local T2 database exists (i.e. on migrated service-mode installs).
-
-### nx aspects gc-pre-rdr096
+### nx aspects gc-pre-rdr096 (retired)
 
 ```
-nx aspects gc-pre-rdr096 [--apply]
+nx aspects gc-pre-rdr096 [--apply]   # refuses with guidance
 ```
 
-Delete pre-RDR-096 read-failure rows from `document_aspects` (RDR-120 §A8 repair verb). Uses the seven-clause discriminator from RDR-096 research-3: every aspect field empty AND `confidence IS NULL`, a fingerprint structurally reachable only from a pre-RDR-096 read failure, because the going-forward writer contract records structured-zero successes (parser ran, no scholarly structure) with an explicit `confidence = 1.0`. The `confidence IS NULL` clause is load-bearing: without it the verb would silently drop legitimate structured-zero rows.
-
-Idempotent; safe on a missing table or empty database. Dry-run by default; `--apply` deletes. Same local-SQLite scope as `backfill-source-uri`.
+**RETIRED.** This verb deleted pre-RDR-096 read-failure rows from the LOCAL
+SQLite `document_aspects` (RDR-120 §A8 repair verb), using the seven-clause
+discriminator from RDR-096 research-3: every aspect field empty AND
+`confidence IS NULL`, reachable only from a pre-RDR-096 read failure. On
+this version the local `.db` is a FROZEN migration source (RDR-176 Gap 2)
+that must never be written — the raw DELETE this verb carried was an
+unguarded write path into it — and the engine's live table cannot hold the
+pre-RDR-096 fingerprint (the going-forward writer contract predates the
+migration), so there is nothing to sweep service-side either. The command
+now raises `click.UsageError` unconditionally, with or without `--apply`.
+If a pre-migration install still needs the sweep, run it on the last
+migration-capable 6.x release.
 
 ---
 
@@ -1389,8 +1405,8 @@ nx taxonomy project --backfill --persist        # project all collections
 nx taxonomy hubs --min-collections 5 --max-icf 1.2 --explain  # hub detector (RDR-077)
 nx taxonomy audit --collection code__nexus                    # projection quality audit (RDR-077)
 nx taxonomy validate-refs docs/**/*.md                        # stale-reference validator (RDR-081)
-nx taxonomy backfill-source-collection                        # dry-run: backfill legacy source_collection rows
-nx taxonomy backfill-source-collection --apply                # commit the backfill (irreversible)
+nx taxonomy backfill-source-collection                        # RETIRED: refuses with guidance
+nx taxonomy backfill-source-collection --apply                # RETIRED: refuses with guidance
 ```
 
 ### `nx taxonomy show --assignments`
@@ -1531,7 +1547,7 @@ taxonomy:
 | `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (optional; when omitted uses per-corpus defaults: `code__*` 0.70, `knowledge__*` 0.50, `docs__*`/`rdr__*` 0.55 — see [taxonomy-projection-tuning.md](exploration/taxonomy-projection-tuning.md)). `--top-k N` caps centroids considered per chunk (default: 3). `--use-icf` suppresses hub topics via Inverse Collection Frequency weighting (RDR-077). `--persist` to write assignments. `--backfill` to project all collections against each other |
 | `hubs` | List generic-pattern hub topics (RDR-077 Phase 5). `--min-collections N` (default 2), `--max-icf F` filter, `--warn-stale` flags hubs whose latest assignment post-dates the newest `last_discover_at` across contributing source collections, `--explain` shows DF / ICF / matched stopword tokens per row. |
 | `audit --collection NAME` | Per-collection projection-quality report (RDR-077 Phase 6): total assignments, p10/p50/p90 of raw cosine, count below threshold (re-projection candidates), top receiving topics with ICF, pattern-pollution flags. `--threshold F` overrides the per-corpus default; `--top-n N` caps the receiving-topic list. |
-| `backfill-source-collection` | Backfill `topic_assignments.source_collection` for legacy hdbscan/centroid rows (RDR-087 Phase 4.1). Dry-run by default; `--apply` commits the writes (irreversible — review the dry-run output first) |
+| `backfill-source-collection` | **RETIRED.** Backfilled `topic_assignments.source_collection` for legacy hdbscan/centroid rows (RDR-087 Phase 4.1) via raw SQL over the LOCAL SQLite store, which was deleted in the RDR-158 P4 retirement; the engine exposes no equivalent read-then-update API. Raises `click.UsageError` unconditionally, with or without `--apply`. If a pre-migration install still holds legacy NULL `source_collection` rows, run the backfill on the last migration-capable 6.x release before migrating |
 
 **Configuration** (in `.nexus.yml`):
 
@@ -1956,6 +1972,17 @@ first `nx doctor` shows no pending rungs and the diagnostic views exist. A
 convergence failure never fails init — it defers with a pointer at
 `nx upgrade` (idempotent).
 
+**Builtin plan-template seeding (nexus-e1ti4):** immediately after the
+ladder converges, `nx init` also seeds/reconciles the builtin plan-template
+library (the same reconcile `nx plan reseed` runs). Before this, a virgin
+install left the global plan tier at zero rows — only the manual
+`nx plan reseed` populated it — so `nx_answer`'s plan-match gate missed
+100% of the time on a fresh box. Idempotent (dedups on the plan's
+`(project, dimensions)` key) and best-effort: a seeding failure is echoed
+to stderr and logged, never silently swallowed, and never fails an
+otherwise-successful init. `nx doctor --check-plan-library` is the durable
+signal if it ever fails; the fix is `nx plan reseed`.
+
 **Service autostart (RDR-174 P2.4, decide-first):** in local mode `nx init`
 decides autostart *before* starting any supervisor. Interactive runs prompt
 (default yes); `--yes` accepts, `--no-autostart` declines. A non-interactive run
@@ -2063,7 +2090,7 @@ nx config init
 | `init` | Interactive managed-service (cloud) credential wizard — collects `service_url` + `service_token`. Local mode uses `nx init` instead. |
 | `list` | Show all config values |
 | `get KEY` | Get single value (masked by default) |
-| `set KEY VALUE` | Set single value; also accepts `KEY=VALUE` form. Setting `claude_assisted_remediation.enabled` (RDR-182) also writes a grant/revoke row to the consent-audit trail (best-effort; inspect with `nx remediate --history`). |
+| `set KEY VALUE` | Set single value; also accepts `KEY=VALUE` form. |
 
 **`get` flags:**
 
@@ -2248,6 +2275,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--phase ID` | With `--check-storage-boundary`, the RDR-120 phase identifier used to record the `120-phase-<phase>-catalog-allowlist-count` T2 metric |
 | `--check-t1` | Diagnose T1 session lease presence + freshness. Checks `~/.config/nexus/t1_session_lease.<session_id>`. Exits 1 only when a session-id resolves AND a lease file exists AND it is expired/corrupt; a resolved session with no lease file at all is informational (a bare CLI legitimately has none — the MCP lifespan mints its own) |
 | `--check-mineru` | Verify MinerU is importable — surfaces a corrupt install at doctor-time instead of waiting for the first math-heavy PDF index to fail |
+| `--check-wal-retention` | Sample retained WAL bytes (local service only) via `pg_ls_waldir()`, escalating a `nexus_svc` session to `pg_monitor` with `SET ROLE` first — unconditionally, since `nexus_svc` is `NOINHERIT` in every deployment posture, so `pg_monitor`'s privileges are never ambient without it. Purely informational (RDR-191 Phase 4 trough-window context, not a pass/fail gate): **always exits 0**. Reports UNMEASURED (never a false clean) when the sample can't be taken |
 | `--json` | Emit machine-parseable JSON. On the MAIN sweep (no mode flag) this emits `{"checks": [{name, ok, status: ok\|warn\|fail, detail, fatal, fix_suggestions}], "summary": {total, ok, warn, fail}, "local_mode"}` (nexus-0vycz — previously the flag was silently ignored there). Also honored by `--check-search`, `--check-quotas`, `--check-mcp-logs`. Combining `--json` with any other mode flag that cannot honor it is a usage error, never a silent ignore. |
 
 The `--fix` flag retroactively applies HNSW `search_ef` tuning to all existing local-mode collections. New collections get this automatically. In cloud mode (SPANN), prints a skip message — SPANN defaults are adequate.
@@ -2283,6 +2311,24 @@ census against real service data — exit 1 when the global-tier builtin
 count is below the floor (fix: `nx plan reseed`), exit 2 (counts UNKNOWN)
 when the service is unreachable. No `nx plan repair` hint (that command
 group no longer exists; see [`nx plan repair`](#nx-plan-repair-removed)).
+
+**Disk-vs-live template parity (nexus-f1mbo).** The count floor above can
+only fail against a library that is nearly empty — it cannot fail against
+one that is the wrong shape. Beside the floor, the check now compares every
+template shipped on disk against its stored row and fails with the same
+exit 1 (fix: `nx plan reseed`, or `nx plan reseed --force` for a drifted
+row — see [`nx plan reseed`](#nx-plan-reseed)) on:
+
+- **missing** — a shipped template with no library row at all;
+- **drifted** — a library row whose content no longer matches its
+  template.
+
+An **orphaned** row (a `builtin-template`-tagged row with no template
+shipped on disk) is reported as a WARN, not a failure — remove it with
+`nx plan delete <id>` if intended. When the live listing hits its page cap,
+absence is unprovable — the check reports drift (still trustworthy for the
+rows it did see) but notes that missing templates were not checked, rather
+than silently under-reporting.
 
 `--check-t3-legacy-metadata` / `--strict-legacy-metadata` (nexus-1714) were
 DELETED at nexus-lgdel.l2: the check surveyed local Chroma T3 collections
@@ -2341,7 +2387,7 @@ nx plan delete PLAN_ID           # Delete a plan row (prompts unless -y)
 nx plan disable PLAN_ID          # Soft-disable a plan without deleting it
 nx plan enable PLAN_ID           # Re-enable a previously disabled plan
 nx plan set-scope PLAN_ID TAGS   # Override a plan's scope_tags
-nx plan reseed [--force]         # Re-run the builtin seed loader
+nx plan reseed [--force] [--insert-only]  # Re-run the builtin seed loader
 nx plan hygiene [--apply]        # Flag/disable bead-dumps, null-verb, always-failing plans
 ```
 
@@ -2350,8 +2396,8 @@ Service mode is the only mode: all verbs (`list` / `show` / `delete` /
 engine-served plan library over HTTP. The `NX_STORAGE_BACKEND=sqlite` escape
 hatch is retired (RDR-158 P3 — setting it is a hard error), and the `repair`
 group that used to require it was deleted along with the local SQLite plan
-library (RDR-158 P4, nexus-i711w sub-stage A3); see below. `reseed --force`
-now refuses unconditionally, in every mode (see below).
+library (RDR-158 P4, nexus-i711w sub-stage A3); see below. `reseed`
+reconciles by default (nexus-f1mbo) — see below.
 
 ### nx plan hygiene
 
@@ -2438,17 +2484,25 @@ source as the automatic #1069 fallback in `save_plan`.
 ### nx plan reseed
 
 ```
-nx plan reseed [--force]
+nx plan reseed [--force] [--insert-only]
 ```
 
-Re-runs the builtin plan-template seed loader. Idempotent by default: only
-previously-missing builtins insert. `--force` deletes every builtin row first so
-description or `plan_json` changes to an existing builtin pick up cleanly (the
-deduper keys on canonical dimensions, so a tweak on an existing dimension is
-invisible to the idempotent path). `--force` now **refuses unconditionally, in
-every mode** — the purge was raw SQL against the local SQLite plan library,
-which died with the =sqlite opt-out (RDR-158 P3/P4). Delete builtin rows
-individually via `nx plan delete <id>`, then rerun `nx plan reseed`.
+Re-runs the four-tier plan-library seed loader. **Reconciles by default**
+(nexus-f1mbo): each shipped template is compared against its stored row and
+the row is rewritten when they differ, and any missing template is inserted.
+A rewritten row is re-created, so its match/use counters reset — correct,
+since those counters described the superseded text. Rows tagged grown/ad-hoc
+are never rewritten, and library rows with no template on disk are left
+alone; both cases are reported rather than acted on.
+
+Reconcile used to be gated behind `--force`, which meant an install could
+only be made correct by a user who already knew the library was wrong — an
+install that never ran `--force` silently kept a stale snapshot with
+templates missing and rows drifted. `--force` is now **accepted for
+compatibility and is a no-op**: reconcile is the default, so the flag
+changes nothing. `--insert-only` selects the pre-nexus-f1mbo behavior —
+skip the update leg, insert missing templates only, and leave drifted rows
+alone.
 
 ### nx plan repair (removed)
 
@@ -2713,7 +2767,7 @@ binary and the PG bundle (RDR-161).
 |------|-------------|
 | `--pg-bundle/--no-pg-bundle` | Also acquire + verify the relocatable PostgreSQL bundle from the same release (default on). `--no-pg-bundle` installs only the service binary (e.g. a cloud habitat with a managed Postgres). |
 | `--config-dir` | Config directory override. |
-| `--force` | Override the chash-poison pre-check (nexus-pnwu0 / GH #1414). The gate classifies the store first: width-non-conformant rows REFUSE the install (heal ladder-first per [migration-runbook §8.1](migration-runbook.md) before swapping engines); an unverifiable store (service/PG not up) proceeds with a loud UNVERIFIED warning — install-binary is the designated recovery tool for the will-not-boot class. Use `--force` ONLY after remediating. |
+| `--force` | Override the chash-poison pre-check (nexus-pnwu0 / GH #1414). The gate classifies the store first: width-non-conformant rows REFUSE the install (re-index the affected collections and confirm `nx doctor` clears before swapping engines — see [migration-runbook.md](migration-runbook.md)); an unverifiable store (service/PG not up) proceeds with a loud UNVERIFIED warning — install-binary is the designated recovery tool for the will-not-boot class. Use `--force` ONLY after remediating. |
 
 ### nx daemon aspect-worker start
 
@@ -2776,6 +2830,16 @@ nx upgrade --yes                  # Unattended: pre-approve the billed re-embed 
 | `--auto` | Quiet mode for the SessionStart hook. The engine install is skipped (hook timeout budget); exit 0 always |
 | `--skip-t3` | Skip T3 upgrade steps for a fast T2-only run. Also suppresses the precondition stage's engine install and process cycle (verdicts are still reported) |
 | `--yes` | Assume yes to the **billed re-embed** consent prompt only (equivalent to `NX_ASSUME_YES=1`) — the unattended channel for a walk that would otherwise block on the cost preview. Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic |
+
+**Plan-library precondition runs on every invocation, never skipped.**
+Beside package/engine/process/lockstep, `nx upgrade` also converges the
+builtin plan-template library (reconciling it against the templates this
+build ships, the same reconcile `nx plan reseed` runs) as its own
+precondition axis. Unlike the others, this one is never suppressed by
+`--skip-t3` or `--auto` — it is stateless and recurs on every release that
+edits a template, so it is re-derived every time rather than gated behind a
+flag. Failure is non-fatal and reported (a stale plan library degrades
+retrieval; it does not block the upgrade or fail the invocation).
 
 **Ladder position is derived, never stored.** How far an install is from current has exactly two answers, by class: DATA-rung state comes solely from the ladder position derived from per-rung completion records; PRECONDITION freshness (package, engine, processes) comes solely from a fresh comparison of on-disk installed state against required, and is deliberately stateless — re-derived at every invocation, never recorded. A rung is recorded complete only when its own verify passed ([RDR-142](rdr/rdr-142-migration-completeness-vs-version-row.md)), so the position never advances past deferred or failed work.
 
@@ -3320,74 +3384,6 @@ A session that dispatched nothing is a **measured zero**, not unmeasurable — d
 ## nx command-context
 
 Generates the agent-relay preamble context that the conexus skills consume (RDR-130 P2). Each subcommand mirrors a skill (`analyze-code`, `architecture`, `create-plan`, `implement`, `debug`, `deep-analysis`, `enrich-plan`, `knowledge-tidy`, `pdf-process`, `plan-audit`, and more) and prints the working-directory, project-type, git-branch, and ready-bead context blocks the agent needs. Run `nx command-context --help` for the full subcommand list. Primarily invoked by tooling, not by hand.
-
----
-
-## nx forensics
-
-```
-nx forensics [TOPIC]
-```
-
-Print the read-only diagnostic playbook for an upgrade-edge TOPIC (default:
-`chash-poison`, the GH #1414 / nexus-pnwu0 width-non-conformant class; GH
-#1390 was the original, closed incident) — RDR-182. Output includes
-the full clickable recovery-runbook URL.
-
-The guidance TEXT is display-only and ungated: a human typing this command
-and choosing what to copy is the consent act. The LIVE store-diagnostics leg
-(the credentialed, product-provisioned read that embeds actual store counts)
-is opt-in — it runs only when `claude_assisted_remediation.enabled` is set
-in your global config (`nx config set claude_assisted_remediation.enabled
-true`); otherwise the playbook notes that live counts were not included, and
-the guidance is unaffected. This mirrors the MCP tools: the credentialed
-probe is the capability the opt-in gates, on every autonomously-reachable
-surface (a shell-capable agent gets no more than the MCP transport does).
-When enabled, credentials absent or a probe failure render as an explicit
-"unavailable"/"unknown" note, never a silent all-clean.
-
-The live-diagnostics leg is **local-only by design** (nexus-y3wuu): it
-shells a local `psql` at the local bundle Postgres using the local
-`pg_credentials` file — there is deliberately no remote host or credential
-resolution. On a managed/BYO service deployment the leg refuses with that
-contract stated (it is not a missing-credentials condition); run the
-diagnostics server-side with the store operator's own credentials.
-
----
-
-## nx remediate
-
-```
-nx remediate [TOPIC]
-```
-
-Guided recovery for an upgrade-edge TOPIC (default: `chash-poison`) —
-RDR-182. Prints the pre-consent description first (what consenting
-authorizes, the hard do-NOTs, and the clickable runbook URL — all of which
-stay on screen regardless), then asks for a per-invocation interactive
-confirmation. As with `nx forensics`, the embedded live store counts are
-opt-in via `claude_assisted_remediation.enabled`; the guidance text is not.
-Declining is safe: nothing runs, nothing is recorded. The prompt defaults to
-NO and aborts on EOF, and there is deliberately no `--yes` flag. The RELEASE
-of the recovery playbook (and its consent-audit row) ALSO requires the
-durable `claude_assisted_remediation.enabled` opt-in — not just the confirm —
-so an automation piping `y` cannot forge a human-looking consent row without
-the flag being set. The pre-consent description stays ungated display.
-
-An accepted confirmation is recorded to the consent-audit trail
-(`claude_assisted_remediation_consents`, scope `remediate:<topic>`) BEFORE
-the recovery playbook prints; if the audit cannot be written the release is
-refused. The playbook's steps are executed by you (or the agent you paste
-them to) with your credentials — the product itself never mutates the store.
-
-Grants and revocations of the durable MCP-surface flag are also audited:
-`nx config set claude_assisted_remediation.enabled true|false` writes a
-`flag:claude_assisted_remediation` grant/revoke row (best-effort — the flag
-change itself never blocks on audit problems).
-
-`nx remediate --history` prints the consent-audit trail (grants and revokes,
-in insertion order) and exits — the operator read surface for the
-`claude_assisted_remediation_consents` table.
 
 ---
 

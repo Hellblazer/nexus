@@ -53,6 +53,18 @@ ESCAPE_REASON_MIN_LENGTH = 8
 def _default_log_path() -> pathlib.Path:
     """Fallback routing-log path, resolved at CALL time.
 
+    Honours ``NEXUS_CONFIG_DIR`` before falling back to ``~/.config/nexus``.
+    Without that, this log was the ONE append log in the tree that ignored
+    the config-dir override (the per-session capability census, same append
+    -log shape, already resolved through ``nexus.config.nexus_config_dir``).
+    The consequence was not cosmetic: a test suite sets ``NEXUS_CONFIG_DIR``
+    to isolate itself, this log ignored it and wrote to the REAL config dir
+    on every routed tool call, and the nexus-pfuns mutation guard failed the
+    whole run -- twice on 2026-08-22, each time reported as `rc=1` with zero
+    failing tests. Read the env var directly rather than importing
+    ``nexus.config``: this module is loaded by a bare interpreter with no
+    dependency on the ``nexus`` package.
+
     nexus-pfuns: this used to be a module-level constant
     (``pathlib.Path.home()`` evaluated once at import). A bare-interpreter
     subprocess (this script has no dependency on the ``nexus`` package)
@@ -66,8 +78,10 @@ def _default_log_path() -> pathlib.Path:
     for exactly that reason -- a module-level default resists any patch
     applied after the module's own import.
     """
+    override = os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+    if override:
+        return pathlib.Path(override) / "routing_log.jsonl"
     return pathlib.Path.home() / ".config" / "nexus" / "routing_log.jsonl"
-
 
 # ---------------------------------------------------------------------------
 # Envelope builders (pure — return JSON strings)
