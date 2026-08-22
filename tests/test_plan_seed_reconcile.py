@@ -247,6 +247,33 @@ def test_two_templates_in_one_run_cannot_clobber_each_other(tmp_path, library):
     assert row is not None, f"{survivor} was written and then destroyed"
 
 
+def test_a_freed_description_can_be_claimed_later_in_the_same_run(tmp_path, library):
+    """Deleting a row must free its description within the run.
+
+    The reconcile path drops the old row before re-inserting under a
+    changed description. If the index keeps the old text, a later
+    template that legitimately wants it is refused for colliding with a
+    row that no longer exists — fail-closed, so no data is lost, but a
+    correct template silently never lands.
+    """
+    original = "A description that will be handed over."
+    _write_template(tmp_path, "aaa-giver", description=original)
+    load_seed_directory(tmp_path, library=library)
+
+    # aaa-giver moves off the description; bbb-taker claims it. Filenames
+    # are ordered so the giver is processed first.
+    _write_template(tmp_path, "aaa-giver", description="Something else entirely.")
+    _write_template(tmp_path, "bbb-taker", description=original)
+
+    result = load_seed_directory(tmp_path, library=library, reconcile=True)
+
+    assert result.protected == [], (
+        f"the freed description was still treated as taken: {result.protected}"
+    )
+    assert result.updated == ["aaa-giver.yml"]
+    assert result.inserted == ["bbb-taker.yml"]
+
+
 def test_rewriting_a_rows_own_description_is_not_a_collision(tmp_path, library):
     """The guard must not fire on the row being updated itself, or every
     same-description rewrite would refuse."""

@@ -108,13 +108,25 @@ _VERB_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # are carved out of.
     ("research", re.compile(
         r"\bresearch\b|\bexplain\b|\barchitecture\b|\bdesign\s+of\b"
-        # Interrogative openers. Both the wh- forms and the yes/no forms:
-        # "does the corpus have anything about X" is as much a retrieval
-        # question as "what does the corpus say about X", and omitting the
-        # yes/no half left corpus-coverage-check — a template written for
-        # exactly that phrasing — underivable, so it could never be routed.
+        # wh- openers, plus the mid-sentence forms: "in the catalog, what
+        # is a tumbler?" is the same question with a preamble, and an
+        # anchored-only pattern misses it.
         r"|^\s*(what|which|who|where|how|when|why)\b"
+        r"|\bwhat\s+(is|are|does|do|did)\b"
+        r"|\bhow\s+(does|do|is|are|did)\b"
+        # Yes/no openers, but ONLY about the corpus. "Does the corpus have
+        # anything about X" is a retrieval question and corpus-coverage-
+        # check is written for exactly that phrasing, so without this the
+        # template most precisely aimed at the shape was underivable. A
+        # BARE yes/no opener is not enough, though: "Are we done here?"
+        # and "Should we merge this PR?" are not retrieval questions, and
+        # deriving a verb for them routes a cosine miss to a confident,
+        # irrelevant corpus search instead of falling through to the
+        # planner. The corpus noun is what makes the shape a question
+        # about stored material rather than about anything at all.
         r"|^\s*(do|does|did|is|are|was|were|can|could|should|has|have)\b"
+        r"[^?]*\b(corpus|corpora|document|documents|paper|papers|rdr|rdrs"
+        r"|knowledge|index|store|collection|library|codebase)\b"
         r"|\b(find|list|show|search\s+for|look\s+up)\b"
     )),
 )

@@ -31,6 +31,8 @@ dispatch with ``missing required bindings``.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from nexus.mcp.core import PlanBindingUnsatisfiableError, _autoalias_bindings
@@ -118,3 +120,40 @@ def test_free_text_bindings_are_unaffected_by_a_typed_sibling() -> None:
             required=["concept", "content_type"], run_bindings={},
             defaults={}, question=QUESTION, plan_id=1, plan_name="p",
         )
+
+
+def test_usage_typed_binding_refuses_the_question_too() -> None:
+    """nexus-7y4v0: this gate and the matcher's must agree on "typed".
+
+    A binding is typed because of what it DOES. `debug-default` declares
+    `failing_path` — a free-text-sounding name — and passes it as
+    `subtree: $failing_path`, so aliasing the question into it puts prose
+    where a tumbler prefix belongs and the retrieval step matches nothing.
+    The matcher's gate learned this first; if this one had been left on
+    the name test alone, a plan the matcher refuses to offer would still
+    get its structural filter stuffed with prose the moment any other
+    path offered it.
+    """
+    plan_json = json.dumps({
+        "steps": [{"tool": "query", "args": {"subtree": "$failing_path"}}],
+        "required_bindings": ["failing_path"],
+    })
+    with pytest.raises(PlanBindingUnsatisfiableError):
+        _autoalias_bindings(
+            required=["failing_path"], run_bindings={}, defaults={},
+            question=QUESTION, plan_id=1, plan_name="debug-default",
+            plan_json=plan_json,
+        )
+
+
+def test_free_text_binding_still_aliases_when_plan_json_is_supplied() -> None:
+    """The usage test must not turn every binding typed."""
+    plan_json = json.dumps({
+        "steps": [{"tool": "query", "args": {"question": "$concept"}}],
+        "required_bindings": ["concept"],
+    })
+    out = _autoalias_bindings(
+        required=["concept"], run_bindings={}, defaults={},
+        question=QUESTION, plan_id=1, plan_name="p", plan_json=plan_json,
+    )
+    assert out["concept"] == QUESTION

@@ -277,6 +277,19 @@ class _QueryIndex:
         """Register a row this run just wrote, so later templates see it."""
         self._by_query[query] = {"id": row_id, "name": name, "tags": tags}
 
+    def forget(self, query: str) -> None:
+        """Drop a description whose row this run just deleted.
+
+        The reconcile path deletes the old row before re-inserting under a
+        changed description. Without this the old description stays in the
+        index pointing at a dead id, and a later template that legitimately
+        wants that text is refused for colliding with a row that no longer
+        exists. Fail-closed, so the cost is a false refusal rather than
+        data loss — but a false refusal on a correct template is still a
+        template that silently never lands.
+        """
+        self._by_query.pop(query, None)
+
 
 def _query_collision(
     library: Any,
@@ -457,7 +470,11 @@ def load_seed_directory(
             # query and collide with the dimensional unique index, so the
             # stale row goes first. An unchanged description upserts in
             # place and keeps its row.
+            stale_query = existing.get("query") or ""
             library.delete_plan(int(existing["id"]))
+            idx = query_index.get(project)
+            if idx is not None:
+                idx.forget(stale_query)
 
         written_id = library.save_plan(
             query=desired.query,

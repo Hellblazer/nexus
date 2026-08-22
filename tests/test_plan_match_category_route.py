@@ -306,6 +306,18 @@ def test_category_predicate_matches_comma_tokens(tags, expected):
         ("Where is the debug output written?", "debug"),
         # An unambiguous failure word still outranks documentation.
         ("What documentation explains this traceback?", "debug"),
+        # A yes/no opener alone is NOT a retrieval question. Deriving a
+        # verb for these routes a cosine miss to a confident, irrelevant
+        # corpus search instead of falling through to the planner.
+        ("Are we done here?", None),
+        ("Should we merge this PR?", None),
+        ("Can you take a look at this?", None),
+        # ...but a yes/no question ABOUT STORED MATERIAL is retrieval, and
+        # corpus-coverage-check is written for exactly that shape.
+        ("Does the corpus have anything about tumblers at all?", "research"),
+        ("Is there a paper on membership churn?", "research"),
+        # Mid-sentence wh- forms: the same question with a preamble.
+        ("In the catalog, what is a tumbler?", "research"),
         # No confident reading -> no routing -> today's behaviour.
         ("", None),
         ("   ", None),

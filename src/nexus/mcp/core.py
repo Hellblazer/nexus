@@ -6309,6 +6309,7 @@ def _autoalias_bindings(
     question: str,
     plan_id: int,
     plan_name: str,
+    plan_json: str | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fill unsupplied required bindings from *question*; refuse typed ones.
 
@@ -6319,23 +6320,33 @@ def _autoalias_bindings(
     fallback, whose constructed plans get every binding filled from the
     question text. That remains correct for free text.
 
-    A binding in :data:`nexus.plans.schema.TYPED_FILTER_BINDINGS`
-    cannot be derived from a
-    question, so an unsatisfied one raises
+    A TYPED binding cannot be derived from a question, so an unsatisfied
+    one raises
     :class:`PlanBindingUnsatisfiableError` rather than being guessed. The
     raise happens before any binding is handed to the runner, so a plan
     never executes half-bound.
 
     Caller-supplied values and plan defaults are never overwritten, and
     either one satisfies a typed binding.
-    """
-    from nexus.plans.schema import TYPED_FILTER_BINDINGS  # noqa: PLC0415 — deferred; matches this module's convention
 
+    "Typed" must mean the same thing here as it does in the matcher's own
+    gate, or a plan the matcher would refuse to offer gets its structural
+    filter stuffed with prose the moment something else offers it. Since
+    nexus-7y4v0 that means BOTH the name test and the usage test: a
+    binding a plan feeds into a typed argument slot is typed whatever it
+    is called (``debug-default`` declares ``failing_path`` and passes it
+    as ``subtree: $failing_path``). *plan_json* is optional only so a
+    caller without the plan text still gets the name test; omitting it
+    re-opens exactly the hole nexus-7y4v0 closed.
+    """
+    from nexus.plans.schema import TYPED_FILTER_BINDINGS, typed_by_usage  # noqa: PLC0415 — deferred; matches this module's convention
+
+    typed = TYPED_FILTER_BINDINGS | typed_by_usage(plan_json)
     out = dict(run_bindings)
     for req in required:
         if req in out or req in defaults:
             continue
-        if req in TYPED_FILTER_BINDINGS:
+        if req in typed:
             raise PlanBindingUnsatisfiableError(
                 binding=req, plan_id=plan_id, plan_name=plan_name,
             )
@@ -7791,6 +7802,7 @@ async def nx_answer(
                     question=question,
                     plan_id=best.plan_id,
                     plan_name=best.name or "",
+                    plan_json=best.plan_json,
                 )
             except PlanBindingUnsatisfiableError as exc:
                 elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -8004,6 +8016,7 @@ async def nx_answer(
             question=question,
             plan_id=best.plan_id,
             plan_name=best.name or "",
+            plan_json=best.plan_json,
         )
     except PlanBindingUnsatisfiableError as exc:
         elapsed_ms = int((time.monotonic() - start) * 1000)
