@@ -120,3 +120,21 @@ mechanize, it matters enough to ship.
   until the next release ships; the bead-close review gate
   (`pre_close_verification_hook.sh`) is untouched and stays live.
 
+- `conexus/agents/developer.md`:
+  nexus-4bqre.2 — re-anchors the sequential-thinking directive from a
+  self-diagnosed internal state to the edit itself. Three escape hatches
+  stripped ("to avoid thrashing" at the Test-First bullet, "when you find
+  yourself thrashing or stuck" at Sequential Execution, and "When facing
+  complexity:" gating the whole Problem-Solving Approach — the third was
+  found during this edit and is not in the bead's original scope, but is
+  the same class and made its own numbered step dead on arrival). Adds a
+  `Thought 1..7` chain skeleton for a code change, modelled on
+  deep-analyst.md's investigation pattern, with falsification at steps 4-6
+  and an explicit `isRevision` instruction. Measured basis: developer
+  performs 90 pct of all mutations at 0.0377 thoughts/mutation with 78.9
+  pct of runs at zero, while the file already carries hardened
+  every-decision wording — so wording is falsified in place and this tests
+  the skeleton and the contradiction, not forcefulness. Thresholds for the
+  verdict were pinned in nexus-4bqre.8 BEFORE this edit landed. Inert on
+  the pinned v7.14.0 tag until the next release, which means the post
+  window opens at release, not at merge.
