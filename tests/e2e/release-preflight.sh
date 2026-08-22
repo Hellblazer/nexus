@@ -99,6 +99,70 @@ prev_stale_check () {
 }
 check "pkg-upgrade-staleness"     prev_stale_check
 
+# 9-12 are RELOCATIONS, not new lints: each is an existing gate predicate that
+# already fails the battery, just far too late. Sourced/derived from the gate
+# scripts themselves so the two cannot drift apart.
+
+# 9. release-sandbox.sh:851 FIXTURE_FILES staleness -- 36 hard-coded repo paths
+#    `test -f`-ed at shakedown step 2/11, roughly 40 minutes into the battery
+#    and inside its LAST leg, so a trip re-runs the whole shakedown. Extracting
+#    the array from the script keeps one source of truth.
+fixture_files_check () {
+  local arr n missing=0 f
+  arr="$(sed -n '/^        FIXTURE_FILES=(/,/^        )/p' tests/e2e/release-sandbox.sh)"
+  [ -n "$arr" ] || { echo "FATAL: could not extract FIXTURE_FILES from release-sandbox.sh"; return 1; }
+  eval "$arr"
+  n=${#FIXTURE_FILES[@]}
+  [ "$n" -gt 0 ] || { echo "FATAL: FIXTURE_FILES extracted empty -- parser drift"; return 1; }
+  for f in "${FIXTURE_FILES[@]}" tests/fixtures/tc-sql.pdf tests/fixtures/bft-to-smr.pdf; do
+    [ -f "$f" ] || { echo "FATAL: shakedown fixture missing from repo: $f"; missing=1; }
+  done
+  [ "$missing" -eq 0 ] || return 1
+  echo "$n fixture files + 2 pdfs present"
+}
+check "shakedown-fixtures"        fixture_files_check
+
+# 10. release-sandbox.sh:1040 pins a pytest node id by hand; a rename makes
+#     pytest exit 4/5 and the branch hard-exits at shakedown step 5/11 --
+#     past the repo index, BOTH pdf indexes (incl. the cold MinerU download)
+#     and the RDR index.
+nodeid_check () {
+  local nid
+  nid="$(grep -oE 'tests/[A-Za-z0-9_/]+\.py::[A-Za-z0-9_]+' tests/e2e/release-sandbox.sh | head -1)"
+  [ -n "$nid" ] || { echo "FATAL: could not extract the pinned node id from release-sandbox.sh"; return 1; }
+  uv run pytest --collect-only -q -m "" "$nid" >/dev/null 2>&1 \
+    || { echo "FATAL: pinned node id does not collect: $nid"; return 1; }
+  echo "$nid collects"
+}
+check "shakedown-nodeid"          nodeid_check
+
+# 11. local-service-gate.sh:599/:634 marker carve-out EXACT counts. Highest
+#     likelihood on the list -- LIVED_IN_EXPECTED moved 39 -> 41 -> 42 inside
+#     one month, and test_lived_in_marker_registration.py explicitly disclaims
+#     enforcing it ("the behavioral bound lives in the gate script itself").
+#     Currently aborts ~3-6 min in, but before LSG's 13.5-minute pytest leg.
+#     COST: ~16s of this preflight's runtime, the largest single item. Kept
+#     deliberately -- it is still 16 seconds against a 6-minute rediscovery.
+marker_counts_check () {
+  local m exp act
+  for m in lived_in cloud_mode; do
+    case "$m" in
+      lived_in)   exp="$(sed -n 's/^LIVED_IN_EXPECTED=\([0-9]*\).*/\1/p'   tests/e2e/local-service-gate.sh | head -1)" ;;
+      cloud_mode) exp="$(sed -n 's/^CLOUD_MODE_EXPECTED=\([0-9]*\).*/\1/p' tests/e2e/local-service-gate.sh | head -1)" ;;
+    esac
+    [ -n "$exp" ] || { echo "FATAL: could not read the expected count for $m"; return 1; }
+    act="$(uv run pytest -m "integration and $m" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
+    [ "$act" -eq "$exp" ] || { echo "FATAL: $m carve-out is $act tests, gate expects exactly $exp"; return 1; }
+  done
+  echo "lived_in + cloud_mode counts match the gate"
+}
+check "marker-carveout-counts"    marker_counts_check
+
+# 12. uv.lock freshness -- `uv lock --check` is run.sh:639's `uv export
+#     --locked` predicate at 0.02s. Mostly shadowed by item 5, which pins
+#     uv.lock's conexus version; this covers an unlocked NEW dependency.
+check "uv-lock-fresh"             uv lock --check
+
 # 8. Docker is a hard dependency of the migration-rehearsal legs. Absent Docker
 #    is a SKIP that makes the whole preflight UNVERIFIED, never a pass.
 if docker info >/dev/null 2>&1; then
@@ -112,7 +176,9 @@ echo "== preflight summary: $PASS passed, $FAIL failed, $SKIP skipped =="
 if [ "$FAIL" -gt 0 ]; then
   echo "PREFLIGHT FAILED -- fix ALL of the above before starting the expensive battery:"
   for r in "${RESULTS[@]}"; do
-    case "$r" in FAIL\|*) echo "  - ${r#FAIL|}" ;; esac
+    [ "${r%%|*}" = "FAIL" ] || continue
+    r="${r#FAIL|}"
+    printf '  - %s: %s\n' "${r%%|*}" "${r#*|}"
   done
   exit 1
 fi
