@@ -109,19 +109,15 @@ mechanize, it matters enough to ship.
   behaviour, while a WRONG typed filter yields a confident empty answer
   (schema.py records plan 14 returning zero results on a bad
   content_type). An explicit caller binding always wins.
-- `conexus/hooks/scripts/routing/git_add_all_redirects_to_explicit_paths.py`:
-  nexus-xtv8y — the push guard's review-coverage check FAILS CLOSED now.
-  It used to warn and allow when the T2 lookup failed, on the rationale
-  that a broken verification path must not brick every push; on
-  2026-08-21 it did exactly what that rationale ignores and waved a
-  genuinely unreviewed commit onto origin, the one time the check
-  mattered. A gate that cannot check must not degrade to permitting, and
-  the push is not bricked — it costs one deliberate, audited
-  NX_REVIEW_GATE_OVERRIDE=1. The lookup retries once first (the first
-  attempt keeps the full clamped budget; the retry is conditional on
-  budget remaining) so a slow-but-working `nx` under load does not cost a
-  push — an earlier version that split the budget in half caused exactly
-  that, and it reproduced only under full-suite load. Deny messages also
-  name the blocking commit's AUTHOR, since on a shared checkout the
-  commit blocking your push is frequently not yours.
+- `conexus/hooks/scripts/routing/git_add_all_redirects_to_explicit_paths.py`
+  (DELETED), `conexus/hooks/hooks.json`, `conexus/hooks/scripts/routing/registry.yaml`:
+  Sam's decision, 2026-08-22 — the push-time review-coverage gate
+  (nexus-4av2n) is removed outright, not modified. Measured one true
+  positive in its life (denying correct, already-reviewed pushes), it is
+  self-attested (the same agent writes the markers it is checked
+  against), and it guards `develop`, which is already PR-gated to `main`
+  with required checks — unreviewed code there ships to nobody. An
+  installed plugin at the pinned v7.14.0 tag still enforces this gate
+  until the next release ships; the bead-close review gate
+  (`pre_close_verification_hook.sh`) is untouched and stays live.
 

@@ -1133,9 +1133,11 @@ write-back lost"** — an idempotent-notification-handling discipline — not
 
 **Practical guidance:**
 
-- `review-completed` markers go through the **`nx` CLI** — that is what the
-  pre-push hook reads. Writing them via the MCP scratch tool alone does not
-  satisfy the hook.
+- `review-completed` markers go through the **`nx` CLI** — that is what
+  `pre_close_verification_hook.sh` (the bead-close review gate) reads.
+  Writing them via the MCP scratch tool alone does not satisfy the hook.
+  (The push-time review-coverage gate that used to read the same markers,
+  `git_add_all_redirects_to_explicit_paths.py`, was deleted 2026-08-22.)
 - Design-of-record and write-back entries stored only via the **MCP scratch
   tool** die with the MCP process. Anything that must survive an MCP restart
   or be readable across sessions/processes belongs in T2 (`nx memory put`),
