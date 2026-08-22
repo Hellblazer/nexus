@@ -138,3 +138,22 @@ mechanize, it matters enough to ship.
   verdict were pinned in nexus-4bqre.8 BEFORE this edit landed. Inert on
   the pinned v7.14.0 tag until the next release, which means the post
   window opens at release, not at merge.
+- `conexus/hooks/scripts/expectations.sh`, `conexus/hooks/scripts/subagent-stop.sh`:
+  nexus-4bqre.1 — new `expectations_archive` (plus `_expectations_archive_dir`),
+  called from subagent-stop.sh immediately BEFORE `expectations_sweep` so
+  RDR-184 ledgers are preserved past the sweep's 7-day reap. Rides the
+  existing sweep site rather than taking a hook registration, so the
+  ordering holds by construction and the PreToolUse:Bash four-rule cap is
+  untouched.
+  **INERT UNTIL RELEASE, and that is the point of this entry.** Hooks load
+  from the pinned v7.14.0 tag, so this trigger does not fire in any running
+  session until the next release ships — the precise pattern this ledger's
+  preamble records (three guards merged, closed as "mechanized", protecting
+  nothing). Consequence is bounded and was measured: the census's agent-type
+  attribution does NOT depend on the archive (agentType comes from
+  `agent-<id>.meta.json`, 99 pct coverage, never swept), so nexus-4bqre.8's
+  verdict is unaffected. What is genuinely at risk until release is only the
+  EXPECT and CONSUMED lifecycle rows, which meta.json does not carry, on
+  ledgers that age past 7 days in the meantime. Running
+  `expectations_archive` by hand from a sourced `tests/e2e/lib/expectations.sh`
+  covers the gap in the interim; that is a manual stopgap, not the trigger.
