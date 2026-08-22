@@ -16,6 +16,40 @@ nothing on disk has changed. Implementation uses
 :meth:`HttpPlanLibrary.get_plan_by_dimensions` to short-circuit before
 :meth:`HttpPlanLibrary.save_plan`.
 
+RECONCILE (nexus-f1mbo). The insert-only path above is idempotent but
+also *inert*: an edited template on disk can never reach a library that
+already holds a row for its dimensions, so the live library froze at
+whatever the first seed run inserted (April 2026 on this project's own
+install — 2 templates never seeded at all, 3 descriptions drifted).
+Passing ``reconcile=True`` adds the missing update leg: a row whose
+content differs from disk is rewritten in place.
+
+Two mechanics matter and neither is obvious from the client API:
+
+* The library's UNIQUE key is ``(tenant_id, project, dimensions)`` but
+  :meth:`HttpPlanLibrary.save_plan` upserts on ``(tenant_id, project,
+  query)`` — the *description text*. So a template whose description
+  changed cannot be updated by calling ``save_plan`` alone: it would
+  INSERT under the new description and collide with the dimensional
+  unique index. The reconcile path therefore deletes the stale row
+  first when (and only when) the description changed.
+* ``save_plan`` resets ``created_at`` and every counter to zero, by
+  design (it mirrors the pre-service Python contract). A reconciled row
+  loses its match/use history. That is correct for a row whose content
+  changed — the counters described different text — but it is why
+  unchanged rows are still skipped rather than blindly rewritten.
+
+Grown plans are the only plans in this library that currently match
+anything, so the reconcile path refuses to touch any row tagged
+``grown`` or ``ad-hoc`` even when its dimensions collide with a
+template, and records the refusal instead of overwriting.
+
+Orphans — library rows whose dimensions match no template on disk — are
+LEFT IN PLACE and reported, never deleted. Disk is authoritative for the
+templates it ships, not for the whole table: an orphan is as likely to
+be a template from a different plugin version or tier as it is to be
+dead weight, and deletion is irreversible.
+
 SC-6, SC-14.
 """
 from __future__ import annotations
@@ -44,7 +78,12 @@ from nexus.plans.schema import (
     validate_plan_template,
 )
 
-__all__ = ["SeedLoadResult", "load_seed_directory"]
+__all__ = [
+    "DesiredRow",
+    "SeedLoadResult",
+    "desired_row_for_template",
+    "load_seed_directory",
+]
 
 _log = logging.getLogger(__name__)
 
@@ -56,10 +95,24 @@ class SeedLoadResult:
     inserted: list[str] = field(default_factory=list)
     skipped_existing: list[str] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)
+    #: Rows rewritten because the on-disk template no longer matched the
+    #: stored row (``reconcile=True`` only; empty on the insert-only path).
+    updated: list[str] = field(default_factory=list)
+    #: ``(filename, reason)`` for a template whose dimensions collide with a
+    #: row the reconcile path refuses to overwrite (a grown / ad-hoc plan).
+    #: Reported rather than raised: one protected collision must not abort
+    #: the rest of the seed run.
+    protected: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def total_scanned(self) -> int:
-        return len(self.inserted) + len(self.skipped_existing) + len(self.errors)
+        return (
+            len(self.inserted)
+            + len(self.skipped_existing)
+            + len(self.errors)
+            + len(self.updated)
+            + len(self.protected)
+        )
 
 
 def _default_project_for_scope(scope: str) -> str:
@@ -76,6 +129,124 @@ def _default_project_for_scope(scope: str) -> str:
     return scope
 
 
+@dataclass(frozen=True)
+class DesiredRow:
+    """The library row a template says should exist, before any comparison.
+
+    Public so ``nx doctor --check-plan-library`` can run the same
+    disk-vs-live comparison the loader uses, rather than a second,
+    drift-prone transcription of it.
+    """
+
+    query: str
+    plan_json: str
+    tags: str
+    name: str | None
+    verb: str | None
+    scope: str | None
+    default_bindings: str | None
+    parent_dims: str | None
+
+    def differs_from(self, existing: dict[str, Any]) -> bool:
+        """True when the stored row no longer matches this template.
+
+        ``dimensions`` is excluded deliberately: it is the lookup key, so
+        it matches by construction. ``verb`` / ``scope`` ARE compared,
+        because a row can be reached by canonical dimensions while
+        carrying stale denormalised copies of them.
+        """
+        if (existing.get("query") or "") != self.query:
+            return True
+        if (existing.get("tags") or "") != self.tags:
+            return True
+        if (existing.get("name") or None) != (self.name or None):
+            return True
+        if (existing.get("verb") or None) != (self.verb or None):
+            return True
+        if (existing.get("scope") or None) != (self.scope or None):
+            return True
+        if (existing.get("parent_dims") or None) != (self.parent_dims or None):
+            return True
+        if not _json_equal(existing.get("plan_json"), self.plan_json):
+            return True
+        return not _json_equal(
+            existing.get("default_bindings"), self.default_bindings
+        )
+
+
+def desired_row_for_template(template: dict[str, Any]) -> DesiredRow:
+    """Build the library row *template* describes.
+
+    Binding declarations are folded into ``plan_json`` here (nexus-80tk):
+    the YAML author declares ``required_bindings`` / ``optional_bindings``
+    at the top level, and without this merge they never reach the DB —
+    ``_validate_bindings`` then sees an empty list and lets unfilled
+    ``$var`` placeholders leak into operator prompts.
+    """
+    dimensions = template["dimensions"]
+    plan_json_payload: dict[str, Any] = dict(template["plan_json"])
+    if template.get("required_bindings"):
+        plan_json_payload["required_bindings"] = list(
+            template["required_bindings"]
+        )
+    if template.get("optional_bindings"):
+        plan_json_payload["optional_bindings"] = list(
+            template["optional_bindings"]
+        )
+    return DesiredRow(
+        query=template["description"],
+        plan_json=json.dumps(plan_json_payload),
+        tags=template.get("tags", "") or "",
+        name=template.get("name"),
+        verb=dimensions.get("verb"),
+        scope=dimensions.get("scope"),
+        default_bindings=(
+            json.dumps(template["default_bindings"])
+            if template.get("default_bindings") else None
+        ),
+        parent_dims=(
+            canonical_dimensions_json(template["parent"])
+            if template.get("parent") else None
+        ),
+    )
+
+
+#: Tags that mark a row as user-grown rather than template-seeded. The
+#: reconcile path never overwrites one. Grown plans are the only plans in
+#: this library that currently match anything (~68% of hits), so a
+#: reconcile that keyed on the wrong identity and clobbered them would
+#: take the working path down with it.
+_GROWN_TAGS: frozenset[str] = frozenset({"grown", "ad-hoc"})
+
+
+def _protected_reason(row: dict[str, Any]) -> str | None:
+    """Return why *row* must not be overwritten, or ``None`` if it may be."""
+    tags = {t.strip() for t in (row.get("tags") or "").split(",") if t.strip()}
+    hit = sorted(tags & _GROWN_TAGS)
+    if hit:
+        return (
+            f"library row id={row.get('id')} is tagged {'/'.join(hit)} "
+            "(user-grown); refusing to overwrite it from disk"
+        )
+    return None
+
+
+def _json_equal(stored: str | None, desired: str | None) -> bool:
+    """Compare two JSON payloads by VALUE, not by bytes.
+
+    ``plan_json`` and ``default_bindings`` are ``jsonb`` columns, so PG
+    hands back its own canonicalisation — reordered keys, normalised
+    whitespace. A byte comparison against ``json.dumps`` output would
+    report drift on every single row forever.
+    """
+    if stored is None or desired is None:
+        return stored == desired
+    try:
+        return json.loads(stored) == json.loads(desired)
+    except (TypeError, ValueError):
+        return stored == desired
+
+
 def load_seed_directory(
     directory: Path,
     *,
@@ -84,6 +255,7 @@ def load_seed_directory(
     outcome: str = "success",
     file_filter: Any = None,
     scope_override: str | None = None,
+    reconcile: bool = False,
 ) -> SeedLoadResult:
     """Load every ``*.yml`` / ``*.yaml`` plan template under *directory*.
 
@@ -101,10 +273,23 @@ def load_seed_directory(
     the filename + message and continue. Any plan whose canonical
     ``(project, dimensions)`` key already exists in *library* is
     skipped without re-inserting — the SC-14 idempotency contract.
+
+    *reconcile* extends that contract with an update leg (nexus-f1mbo):
+    an existing row whose content has drifted from its template is
+    rewritten and reported under ``updated``; an unchanged row is still
+    skipped, so a reconcile run over an already-current library performs
+    zero writes. A row tagged ``grown``/``ad-hoc`` is never rewritten —
+    it lands in ``protected`` instead. Rows on disk that are absent from
+    the library insert under both settings; rows in the library that are
+    absent from disk are left untouched under both. See the module
+    docstring for why deletion is not the orphan policy.
     """
     result = SeedLoadResult()
     if not directory.exists():
-        _log.info("seed_directory_missing", path=str(directory))
+        # stdlib logging, not structlog: keyword fields would raise TypeError
+        # here, turning "the seed dir is absent" into a crash on the one path
+        # that is supposed to degrade quietly.
+        _log.info("seed_directory_missing: path=%r", str(directory))
         return result
 
     template_loader = PlanTemplateLoader(
@@ -154,48 +339,42 @@ def load_seed_directory(
         project = _default_project_for_scope(
             template["dimensions"].get("scope", "")
         )
+        desired = desired_row_for_template(template)
+
         existing = library.get_plan_by_dimensions(
             project=project, dimensions=canonical,
         )
         if existing is not None:
-            result.skipped_existing.append(path.name)
-            continue
+            if not reconcile or not desired.differs_from(existing):
+                result.skipped_existing.append(path.name)
+                continue
+            protected_reason = _protected_reason(existing)
+            if protected_reason is not None:
+                result.protected.append((path.name, protected_reason))
+                continue
+            # save_plan upserts on (project, QUERY), not on dimensions, so a
+            # changed description would INSERT and collide with the
+            # dimensional unique index. Drop the stale row first in exactly
+            # that case; an unchanged description upserts in place.
+            if (existing.get("query") or "") != desired.query:
+                library.delete_plan(int(existing["id"]))
 
-        dimensions = template["dimensions"]
-        # Carry binding declarations into the stored plan_json so
-        # ``Match.from_plan_row`` can recover them (nexus-80tk). The
-        # YAML author declares required_bindings/optional_bindings at
-        # the top level; without this merge they never reach the DB,
-        # and ``_validate_bindings`` sees an empty list and lets
-        # unfilled ``$var`` placeholders leak into operator prompts.
-        plan_json_payload: dict[str, Any] = dict(template["plan_json"])
-        if template.get("required_bindings"):
-            plan_json_payload["required_bindings"] = list(
-                template["required_bindings"]
-            )
-        if template.get("optional_bindings"):
-            plan_json_payload["optional_bindings"] = list(
-                template["optional_bindings"]
-            )
         library.save_plan(
-            query=template["description"],
-            plan_json=json.dumps(plan_json_payload),
+            query=desired.query,
+            plan_json=desired.plan_json,
             outcome=outcome,
-            tags=template.get("tags", "") or "",
+            tags=desired.tags,
             project=project,
-            name=template.get("name"),
-            verb=dimensions.get("verb"),
-            scope=dimensions.get("scope"),
+            name=desired.name,
+            verb=desired.verb,
+            scope=desired.scope,
             dimensions=canonical,
-            default_bindings=(
-                json.dumps(template["default_bindings"])
-                if template.get("default_bindings") else None
-            ),
-            parent_dims=(
-                canonical_dimensions_json(template["parent"])
-                if template.get("parent") else None
-            ),
+            default_bindings=desired.default_bindings,
+            parent_dims=desired.parent_dims,
         )
-        result.inserted.append(path.name)
+        if existing is None:
+            result.inserted.append(path.name)
+        else:
+            result.updated.append(path.name)
 
     return result

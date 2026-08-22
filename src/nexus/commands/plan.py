@@ -570,37 +570,42 @@ def set_scope_cmd(plan_id: int, tags: str, from_project: bool) -> None:
 @plan.command("reseed")
 @click.option(
     "--force",
+    "reconcile",
     is_flag=True,
-    help="Delete every builtin row first so description / template "
-    "changes pick up cleanly. Without --force the loader is idempotent "
-    "and only inserts missing rows.",
+    help="Also rewrite rows whose stored content has drifted from the "
+    "template on disk. Without it the loader only inserts missing rows, "
+    "so an edited description or plan_json never reaches an existing "
+    "library.",
 )
-def reseed_cmd(force: bool) -> None:
+def reseed_cmd(reconcile: bool) -> None:
     """Re-run the four-tier plan-library seed loader.
 
     \b
-    By default this is idempotent: only previously-missing builtins
-    insert. Use ``--force`` when you've edited a builtin's description
-    or replaced its plan_json — the deduper keys on canonical
-    dimensions, so a description tweak on an existing dimension is
-    invisible to the idempotent path.
-    """
-    if force:
-        # The --force purge was raw SQL against the local SQLite plan
-        # library, which died in nexus-i711w Stage 2 sub-stage A3 (its
-        # dead branch had already become an AttributeError trap: lib._lock
-        # / lib.conn on an HttpPlanLibrary — porter-f defect report,
-        # 2026-07-30). The engine-served library keeps the existing
-        # service-mode contract: delete builtin rows individually.
-        raise click.ClickException(
-            "--force is unavailable (the raw-SQL purge died with the local "
-            "SQLite plan library). Delete builtin rows via "
-            "`nx plan delete <id>`, then rerun `nx plan reseed`."
-        )
+    By default this is insert-only: previously-missing templates land,
+    everything else is skipped. That is idempotent but also inert — the
+    deduper keys on canonical dimensions, so an edited description or a
+    replaced plan_json on an existing dimension is invisible to it, and
+    a library seeded once stays frozen at whatever it first received
+    (nexus-f1mbo).
 
-    # _seed_plan_templates writes through T2Database.plans, which is
+    \b
+    ``--force`` adds the update leg: each template is compared against
+    its stored row and rewritten when they differ. A rewritten row is
+    re-created, so its match/use counters reset — correct, since those
+    counters described the superseded text. Rows tagged grown/ad-hoc
+    are never rewritten, and library rows with no template on disk are
+    left alone; both cases are reported rather than acted on.
+    """
+    # seed_plan_templates writes through T2Database.plans, which is
     # facade-routed (HttpPlanLibrary in service mode) — the seed half of
     # this verb is backend-correct in both modes.
-    from nexus.commands.catalog import _seed_plan_templates  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands.catalog)
-    seeded = _seed_plan_templates()
-    click.echo(f"Seeded {seeded} new builtin row(s).")
+    from nexus.commands.catalog import seed_plan_templates  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands.catalog)
+    summary = seed_plan_templates(reconcile=reconcile)
+    click.echo(f"Seeded {summary.inserted} new builtin row(s).")
+    if reconcile:
+        click.echo(f"Reconciled {summary.updated} drifted row(s).")
+    elif summary.inserted == 0:
+        click.echo(
+            "Nothing inserted. If you edited a template, rerun with "
+            "--force — the insert-only pass cannot see content drift."
+        )

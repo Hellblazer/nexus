@@ -78,6 +78,7 @@ def _load_tier(
     project_label: str,
     library: HttpPlanLibrary,
     file_filter: Any = None,
+    reconcile: bool = False,
 ) -> SeedLoadResult:
     """Load one scope tier, normalising mismatched scope declarations.
 
@@ -115,6 +116,7 @@ def _load_tier(
     return load_seed_directory(
         directory, library=library, outcome="success",
         file_filter=file_filter, scope_override=scope,
+        reconcile=reconcile,
     )
 
 
@@ -160,10 +162,16 @@ def load_all_tiers(
     plugin_root: Path,
     repo_root: Path,
     library: HttpPlanLibrary,
+    reconcile: bool = False,
 ) -> dict[str, SeedLoadResult]:
     """Walk the four tiers in order and return ``{scope: result}``.
 
     Tiers that have no files produce no entry in the returned dict.
+
+    *reconcile* is forwarded to every tier: when True, a library row that
+    has drifted from its on-disk template is rewritten rather than
+    skipped (nexus-f1mbo). See :func:`~nexus.plans.seed_loader.
+    load_seed_directory` for the update contract and its guardrails.
     """
     results: dict[str, SeedLoadResult] = {}
 
@@ -171,7 +179,7 @@ def load_all_tiers(
     global_dir = plugin_root / "plans" / "builtin"
     global_result = _load_tier(
         directory=global_dir, scope="global",
-        project_label="", library=library,
+        project_label="", library=library, reconcile=reconcile,
     )
     if global_result.total_scanned or global_dir.exists():
         results["global"] = global_result
@@ -198,6 +206,7 @@ def load_all_tiers(
             tier_result = _load_tier(
                 directory=rdr_plans_dir, scope=scope_name,
                 project_label=scope_name, library=library,
+                reconcile=reconcile,
             )
             if tier_result.total_scanned or rdr_plans_dir.exists():
                 results[scope_name] = tier_result
@@ -208,6 +217,7 @@ def load_all_tiers(
         directory=project_dir, scope="project",
         project_label="project", library=library,
         file_filter=_filter_project_excluding_repo,
+        reconcile=reconcile,
     )
     if project_result.total_scanned or (
         project_dir.exists()
@@ -223,6 +233,7 @@ def load_all_tiers(
         directory=project_dir, scope="repo",
         project_label="repo", library=library,
         file_filter=_filter_repo_only,
+        reconcile=reconcile,
     )
     if repo_result.total_scanned or (project_dir / "_repo.yml").exists():
         results["repo"] = repo_result

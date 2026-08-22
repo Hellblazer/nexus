@@ -344,11 +344,40 @@ def test_plan_delete_routes_to_service(runner, _service_plans):
 # usage error, not a routed verb with a refusal branch.
 
 
-def test_plan_reseed_force_refuses(runner, monkeypatch):
-    """--force refuses unconditionally: the raw-SQL purge died with the
-    SQLite plan library (nexus-i711w Stage 2 sub-stage A3); the refusal
-    message routes the operator to per-id deletes."""
+def _stub_seed(monkeypatch, summary):
+    seen: dict = {}
+
+    def _fake(*, reconcile: bool = False):
+        seen["reconcile"] = reconcile
+        return summary
+    monkeypatch.setattr("nexus.commands.catalog.seed_plan_templates", _fake)
+    return seen
+
+
+def test_plan_reseed_force_reconciles(runner, monkeypatch):
+    """--force is the reconcile leg now (nexus-f1mbo). It used to refuse
+    unconditionally — its raw-SQL purge died with the SQLite plan library
+    (nexus-i711w Stage 2 sub-stage A3) and was never replaced, which is
+    how an edited template lost its only route into an existing library."""
+    from nexus.commands.catalog import _SeedSummary
+
+    seen = _stub_seed(monkeypatch, _SeedSummary(inserted=1, updated=3, protected=[]))
     result = runner.invoke(main, ["plan", "reseed", "--force"])
-    assert result.exit_code != 0
-    assert "--force is unavailable" in result.output
-    assert "nx plan delete" in result.output
+
+    assert result.exit_code == 0, result.output
+    assert seen["reconcile"] is True
+    assert "Seeded 1 new builtin row(s)." in result.output
+    assert "Reconciled 3 drifted row(s)." in result.output
+
+
+def test_plan_reseed_without_force_stays_insert_only(runner, monkeypatch):
+    """And says so when it inserted nothing — the silent 'Seeded 0' is what
+    made the frozen library look healthy."""
+    from nexus.commands.catalog import _SeedSummary
+
+    seen = _stub_seed(monkeypatch, _SeedSummary(inserted=0, updated=0, protected=[]))
+    result = runner.invoke(main, ["plan", "reseed"])
+
+    assert result.exit_code == 0, result.output
+    assert seen["reconcile"] is False
+    assert "--force" in result.output
