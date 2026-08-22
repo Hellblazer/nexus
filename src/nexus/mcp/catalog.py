@@ -33,6 +33,7 @@ _BULK_DELETE_CONFIRM_THRESHOLD = 10
     name="search",
     title="Catalog Metadata Search",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def catalog_search(
     query: str = "",
@@ -144,6 +145,7 @@ def catalog_search(
     name="show",
     title="Show Catalog Entry",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def catalog_show(
     tumbler: str = "",
@@ -183,6 +185,7 @@ def catalog_show(
     name="list",
     title="List Catalog Entries",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def catalog_list(
     owner: str = "",
@@ -236,6 +239,7 @@ def catalog_list(
     name="register",
     title="Register Document in Catalog",
     annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
 )
 def catalog_register(
     title: str,
@@ -343,6 +347,7 @@ def catalog_register(
     name="update",
     title="Update Catalog Entry",
     annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
 )
 def catalog_update(
     tumbler: str,
@@ -390,6 +395,7 @@ def catalog_update(
     name="link",
     title="Create Catalog Link",
     annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
 )
 def catalog_link(
     from_tumbler: str,
@@ -452,6 +458,7 @@ def catalog_link(
     name="links",
     title="Get Document Links",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def catalog_links(
     tumbler: str,
@@ -495,6 +502,7 @@ def catalog_links(
     name="link_query",
     title="Query Link Table",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def catalog_link_query(
     from_tumbler: str = "",
@@ -543,6 +551,7 @@ def catalog_link_query(
     name="resolve",
     title="Resolve Identifier to Entry",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def catalog_resolve(
     tumbler: str = "",
@@ -598,6 +607,7 @@ def catalog_resolve(
     name="stats",
     title="Catalog Statistics",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def catalog_stats() -> dict:
     """Catalog health summary: owner/document/link counts by type."""

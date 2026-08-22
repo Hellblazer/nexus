@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from mcp.types import CallToolResult
 
 from nexus.db.t1 import T1Database
 from nexus.db.t2 import T2Database
@@ -28,6 +29,7 @@ from nexus.mcp_server import (
     _inject_t1,
     _inject_t3,
     _reset_singletons,
+    _search_render,
     collection_info,
     collection_list,
     collection_verify,
@@ -210,7 +212,7 @@ def test_search_returns_results(t3):
         collection="knowledge__test__voyage-context-3__v1",
         content="chromadb vector database", title="doc1",
     )
-    result = search(
+    result = _search_render(
         query="vector database",
         corpus="knowledge__test__voyage-context-3__v1",
         limit=5,
@@ -268,7 +270,7 @@ class TestNexusHmxiRoundTripGrandfathering:
         assert "art-overview" in listing
         assert "art-followup" in listing
         # And via ``search``.
-        sresult = search(
+        sresult = _search_render(
             query="ART data Phase-5",
             corpus="knowledge__art",
             limit=5,
@@ -293,7 +295,7 @@ class TestNexusHmxiRoundTripGrandfathering:
 
 
 def test_search_no_results(t3):
-    result = search(query="nonexistent topic", corpus="knowledge__empty")
+    result = _search_render(query="nonexistent topic", corpus="knowledge__empty")
     assert not result.startswith("Error:")
     assert "no" in result.lower()
 
@@ -314,7 +316,7 @@ def test_search_threshold_kwarg_routed_to_engine():
     _mock_t3([{"name": "knowledge__test", "count": 5}])
     captured, fake = _capture_search_kwargs()
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        search(query="vector db", corpus="knowledge__test", threshold=0.7)
+        _search_render(query="vector db", corpus="knowledge__test", threshold=0.7)
     assert captured, "engine must be invoked"
     assert captured[0].get("threshold_override") == pytest.approx(0.7)
 
@@ -324,7 +326,7 @@ def test_search_no_threshold_kwarg_passes_none():
     _mock_t3([{"name": "knowledge__test", "count": 5}])
     captured, fake = _capture_search_kwargs()
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        search(query="vector db", corpus="knowledge__test")
+        _search_render(query="vector db", corpus="knowledge__test")
     assert captured[0].get("threshold_override") is None
 
 
@@ -365,7 +367,7 @@ def test_search_ranks_by_hybrid_score_not_raw_distance():
 
     with patch("nexus.search_engine.search_cross_corpus", fake), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
-        out = search(query="hybrid ranking pin", corpus="code__test",
+        out = _search_render(query="hybrid ranking pin", corpus="code__test",
                       cluster_by="", structured=True)
     assert out["ids"] == [
         "mid_dist_high_frecency", "low_dist_no_boost", "high_dist_no_boost",
@@ -420,7 +422,7 @@ def test_search_and_cli_helper_rank_identically():
 
     with patch("nexus.search_engine.search_cross_corpus", fake), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
-        mcp_out = search(query="parity pin", corpus="code__test",
+        mcp_out = _search_render(query="parity pin", corpus="code__test",
                           cluster_by="", structured=True)
 
     assert mcp_out["ids"] == cli_order
@@ -446,7 +448,7 @@ def test_cluster_by_semantic_discards_the_boosted_order():
 
     with patch("nexus.search_engine.search_cross_corpus", fake), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
-        out = search(query="cluster order pin", corpus="code__test",
+        out = _search_render(query="cluster order pin", corpus="code__test",
                       cluster_by="semantic", structured=True)
 
     # NOT the hybrid-boosted order (mid/low/high) — the pre-boost order
@@ -657,7 +659,7 @@ def test_no_ansi_in_output(t1, t3, t2_path):
     results = [
         scratch(action="put", content="ansi test"),
         scratch(action="list"),
-        search(query="test", corpus="knowledge"),
+        _search_render(query="test", corpus="knowledge"),
         memory_put(content="ansi check", project="test", title="ansi.md"),
         memory_get(project="test", title="ansi.md"),
         memory_search(query="ansi"),
@@ -713,7 +715,7 @@ def test_search_corpus_routing(corpus_arg, available, expected_in, expected_not_
     captured, fake = _capture_search()
     kwargs = {"corpus": corpus_arg} if corpus_arg is not None else {}
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        search("test query", **kwargs)
+        _search_render("test query", **kwargs)
     assert len(captured) == 1
     for name in expected_in:
         assert name in captured[0]
@@ -881,8 +883,8 @@ def test_page_turn_serves_from_lookahead_without_reembedding(monkeypatch):
         ]
 
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        page1 = search(query="q", corpus="knowledge__test", limit=2, offset=0)
-        page2 = search(query="q", corpus="knowledge__test", limit=2, offset=2)
+        page1 = _search_render(query="q", corpus="knowledge__test", limit=2, offset=0)
+        page2 = _search_render(query="q", corpus="knowledge__test", limit=2, offset=2)
 
     assert len(calls) == 1, f"page-turn must reuse the lookahead fetch, got {calls}"
     assert calls[0] >= 4  # the first fetch covered at least two pages
@@ -901,8 +903,8 @@ def test_page_cache_misses_on_different_query(monkeypatch):
                              collection="knowledge__test", metadata={})]
 
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        search(query="first", corpus="knowledge__test", limit=2, offset=0)
-        search(query="second", corpus="knowledge__test", limit=2, offset=0)
+        _search_render(query="first", corpus="knowledge__test", limit=2, offset=0)
+        _search_render(query="second", corpus="knowledge__test", limit=2, offset=0)
 
     assert calls == ["first", "second"]
 
@@ -922,9 +924,9 @@ def test_page_cache_expires_on_ttl(monkeypatch):
                 for i in range(6)]
 
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        search(query="q", corpus="knowledge__test", limit=2, offset=0)
+        _search_render(query="q", corpus="knowledge__test", limit=2, offset=0)
         t["now"] += mcp_core._PAGE_CACHE_TTL_S + 1
-        search(query="q", corpus="knowledge__test", limit=2, offset=2)
+        _search_render(query="q", corpus="knowledge__test", limit=2, offset=2)
 
     assert len(calls) == 2, "an expired cache entry must refetch"
 
@@ -942,8 +944,8 @@ def test_page_beyond_lookahead_refetches_wider(monkeypatch):
                 for i in range(n_results)]
 
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        search(query="q", corpus="knowledge__test", limit=2, offset=0)   # covers ~3 pages
-        search(query="q", corpus="knowledge__test", limit=2, offset=20)  # beyond lookahead
+        _search_render(query="q", corpus="knowledge__test", limit=2, offset=0)   # covers ~3 pages
+        _search_render(query="q", corpus="knowledge__test", limit=2, offset=20)  # beyond lookahead
 
     assert len(calls) == 2
     assert calls[1] >= 22  # refetched wide enough for the requested window
@@ -964,12 +966,12 @@ def test_store_put_invalidates_page_cache(t3, monkeypatch):
                 for i in range(6)]
 
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        search(query="q", corpus="knowledge", limit=2, offset=0)
-        search(query="q", corpus="knowledge", limit=2, offset=2)
+        _search_render(query="q", corpus="knowledge", limit=2, offset=0)
+        _search_render(query="q", corpus="knowledge", limit=2, offset=2)
         assert len(calls) == 1, "page-turn burst must serve from cache pre-write"
         store_put(content="written mid-burst", collection="knowledge",
                   title="cache-inval")
-        search(query="q", corpus="knowledge", limit=2, offset=2)
+        _search_render(query="q", corpus="knowledge", limit=2, offset=2)
 
     assert len(calls) == 2, (
         "a store_put must invalidate the page cache — a repeat search "
@@ -994,10 +996,10 @@ def test_store_delete_invalidates_page_cache(t3, monkeypatch):
                 for i in range(6)]
 
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        search(query="q", corpus="knowledge", limit=2, offset=0)
+        _search_render(query="q", corpus="knowledge", limit=2, offset=0)
         assert len(calls) == 1
         store_delete(doc_id=real_doc_id, collection="knowledge")
-        search(query="q", corpus="knowledge", limit=2, offset=0)
+        _search_render(query="q", corpus="knowledge", limit=2, offset=0)
 
     assert len(calls) == 2, "a store_delete must invalidate the page cache"
 
@@ -1024,8 +1026,8 @@ def test_cached_zero_hit_preserves_threshold_diag(monkeypatch):
         return []
 
     with patch("nexus.search_engine.search_cross_corpus", fake):
-        first = search(query="q", corpus="knowledge__test", limit=2, offset=0)
-        second = search(query="q", corpus="knowledge__test", limit=2, offset=0)
+        first = _search_render(query="q", corpus="knowledge__test", limit=2, offset=0)
+        second = _search_render(query="q", corpus="knowledge__test", limit=2, offset=0)
 
     assert len(calls) == 1, "the repeat zero-hit must serve from cache"
     assert "dropped at distance" in first, "uncached path must carry the hint"
@@ -1038,7 +1040,7 @@ def test_search_pagination_first_page(t3):
     coll = "knowledge__pag__voyage-context-3__v1"
     for i in range(5):
         t3.put(collection=coll, content=f"document about topic {i}", title=f"doc{i}")
-    result = search(query="topic", corpus=coll, limit=2, offset=0)
+    result = _search_render(query="topic", corpus=coll, limit=2, offset=0)
     assert "showing 1-2" in result and "offset=2" in result
 
 
@@ -1046,8 +1048,8 @@ def test_search_pagination_pages_differ(t3):
     coll = "knowledge__pag2__voyage-context-3__v1"
     for i in range(6):
         t3.put(collection=coll, content=f"unique searchable content number {i}", title=f"doc{i}")
-    page1 = search(query="searchable content", corpus=coll, limit=2, offset=0)
-    page2 = search(query="searchable content", corpus=coll, limit=2, offset=2)
+    page1 = _search_render(query="searchable content", corpus=coll, limit=2, offset=0)
+    page2 = _search_render(query="searchable content", corpus=coll, limit=2, offset=2)
     assert not page2.startswith("Error:")
     p1 = {l.split("]")[0] for l in page1.split("\n") if l.startswith("[")}
     p2 = {l.split("]")[0] for l in page2.split("\n") if l.startswith("[")}
@@ -1057,13 +1059,13 @@ def test_search_pagination_pages_differ(t3):
 def test_search_pagination_last_page(t3):
     coll = "knowledge__pag3__voyage-context-3__v1"
     t3.put(collection=coll, content="only document about finality", title="solo")
-    assert "(end)" in search(query="finality", corpus=coll, limit=10, offset=0)
+    assert "(end)" in _search_render(query="finality", corpus=coll, limit=10, offset=0)
 
 
 def test_search_pagination_offset_beyond_end(t3):
     coll = "knowledge__pag4__voyage-context-3__v1"
     t3.put(collection=coll, content="small collection", title="one")
-    assert "No results at offset 100" in search(query="small", corpus=coll, limit=10, offset=100)
+    assert "No results at offset 100" in _search_render(query="small", corpus=coll, limit=10, offset=100)
 
 
 def test_store_list_pagination(t3):
@@ -1120,7 +1122,7 @@ def test_search_caps_oversized_result(monkeypatch):
     ]
     with patch("nexus.search_engine.search_cross_corpus", lambda *a, **kw: results), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
-        out = search(query="padding", corpus="code__test", limit=20)
+        out = _search_render(query="padding", corpus="code__test", limit=20)
     assert "[search: result capped at 100 chars" in out
     assert out.endswith("narrow the query, lower limit, or page with offset=...]")
 
@@ -1131,8 +1133,113 @@ def test_search_under_cap_is_unaffected():
                lambda *a, **kw: [SearchResult(id="r1", content="small", distance=0.1,
                                               collection="code__test", metadata={})]), \
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
-        out = search(query="small", corpus="code__test")
+        out = _search_render(query="small", corpus="code__test")
     assert "result capped" not in out
+
+
+# ── structuredContent spike (nexus-6jlki) ───────────────────────────────────
+#
+# The wire-facing ``search()`` wrapper (distinct from ``_search_render``,
+# the business logic exercised by every test above) attaches protocol-level
+# ``structuredContent`` alongside byte-identical human text. These tests
+# call ``search()`` directly as a plain Python function — a real
+# ``CallToolResult`` is returned either way (no FastMCP ToolManager/transport
+# needed to observe ``.content`` / ``.structuredContent``).
+
+def test_search_default_mode_returns_calltoolresult_with_structured_content():
+    _mock_t3([{"name": "code__test", "count": 1}])
+    with patch("nexus.search_engine.search_cross_corpus",
+               lambda *a, **kw: [SearchResult(id="r1", content="vector database internals",
+                                              distance=0.1234, collection="code__test",
+                                              metadata={"tumbler": "1.1",
+                                                        "chunk_text_hash": "ab" * 32})]), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        result = search(query="vector database", corpus="code__test")
+
+    assert isinstance(result, CallToolResult)
+    # Text is byte-identical to what _search_render (the pre-nexus-6jlki
+    # tool body) would have returned on its own for the same inputs.
+    assert len(result.content) == 1
+    assert result.content[0].type == "text"
+    text = result.content[0].text
+    assert "vector database internals" in text.lower() or "r1" in text
+
+    with patch("nexus.search_engine.search_cross_corpus",
+               lambda *a, **kw: [SearchResult(id="r1", content="vector database internals",
+                                              distance=0.1234, collection="code__test",
+                                              metadata={"tumbler": "1.1",
+                                                        "chunk_text_hash": "ab" * 32})]), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        expected_text = _search_render(query="vector database", corpus="code__test")
+    assert text == expected_text, "structuredContent wiring must not alter the text shape"
+
+    data = result.structuredContent
+    assert data["ids"] == ["r1"]
+    assert data["tumblers"] == ["1.1"]
+    assert data["distances"] == [pytest.approx(0.1234)]
+    assert data["collections"] == ["code__test"]
+    assert data["chunk_text_hash"] == ["ab" * 32]
+    assert data["truncated"] is False
+    assert data["truncated_chars"] == 0
+
+
+def test_search_structured_true_wire_call_unchanged():
+    """``structured=True`` over the wire is untouched: bare dict, no
+    CallToolResult, no new keys — the plan-runner in-process contract."""
+    _mock_t3([{"name": "code__test", "count": 1}])
+    with patch("nexus.search_engine.search_cross_corpus",
+               lambda *a, **kw: [SearchResult(id="r1", content="x", distance=0.1,
+                                              collection="code__test", metadata={})]), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        result = search(query="x", corpus="code__test", structured=True)
+    assert isinstance(result, dict)
+    assert set(result.keys()) == {
+        "ids", "tumblers", "distances", "collections",
+        "chunk_collections", "chunk_text_hash",
+    }
+    assert "truncated" not in result
+    assert "truncated_chars" not in result
+
+
+def test_search_structured_content_reflects_text_truncation(monkeypatch):
+    from nexus.mcp import core as mcp_core
+
+    monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
+    _mock_t3([{"name": "code__test", "count": 20}])
+    results = [
+        SearchResult(id=f"r{i}", content=f"padding content number {i} " * 10,
+                     distance=0.1, collection="code__test", metadata={})
+        for i in range(20)
+    ]
+    with patch("nexus.search_engine.search_cross_corpus", lambda *a, **kw: results), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        result = search(query="padding", corpus="code__test", limit=20)
+
+    assert isinstance(result, CallToolResult)
+    assert "[search: result capped at 100 chars" in result.content[0].text
+    assert result.structuredContent["truncated"] is True
+    assert result.structuredContent["truncated_chars"] > 0
+
+
+def test_search_corpus_resolution_error_gets_empty_structured_shape():
+    """nexus-6jlki finding: ``_search_render``'s ``if not target: return
+    f"No collections match corpus {corpus!r}"`` fires UNCONDITIONALLY —
+    unlike the ``if not results`` / ``if not page`` branches further down,
+    it is not gated on ``structured``, so ``_search_render(...,
+    structured=True)`` against an unresolvable corpus ALSO returns that
+    string rather than the promised empty dict (a pre-existing
+    ``_search_render`` quirk, unrelated to and not fixed by this spike —
+    see the T3 insight this test's sibling finding is filed under).
+    The wire wrapper does not special-case this: the text is unaffected,
+    and structuredContent degrades to the empty shape rather than being
+    omitted, so a structuredContent-only consumer never has to guess
+    whether it got an error string or a real result."""
+    _mock_t3([])
+    result = search(query="q", corpus="zzznope")
+    assert isinstance(result, CallToolResult)
+    assert "No collections match corpus" in result.content[0].text
+    assert result.structuredContent["ids"] == []
+    assert result.structuredContent["truncated"] is False
 
 
 def test_scoped_search_tools_cap_oversized_results(monkeypatch):
@@ -1451,7 +1558,7 @@ def _search_clustered(results, corpus="knowledge,docs", cluster_by="semantic"):
     _mock_t3(collections)
     with patch("nexus.search_engine.search_cross_corpus",
                lambda q, c, n_results=10, t3=None, where=None, **kw: results):
-        return search("test query", corpus=corpus, cluster_by=cluster_by)
+        return _search_render("test query", corpus=corpus, cluster_by=cluster_by)
 
 
 def test_cluster_labels_in_output():

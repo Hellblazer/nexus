@@ -149,18 +149,24 @@ def test_decorator_wraps_sync_and_async() -> None:
 
 
 def test_search_surface_degrades_loud() -> None:
-    from nexus.mcp.core import search
+    # nexus-6jlki: ``@degrade_loud_when_migrating`` moved to the private
+    # ``_search_render`` when the wire-facing ``search()`` was split out to
+    # carry structuredContent (RDR see s4-structuredcontent-design). The
+    # decorator, the banner contract, and this test's assertions are
+    # otherwise unchanged — ``search()`` still degrades the same way, it
+    # just does so by delegating to ``_search_render`` for its `str` branch.
+    from nexus.mcp.core import _search_render
 
     with patch("nexus.mcp.core._get_t3", return_value=MagicMock()), patch(
         "nexus.mcp.core._get_collection_names", return_value=[]
     ):
         # not-migrating: untouched (cheap "no collections" path).
-        baseline = search("q", corpus="zzznope")
+        baseline = _search_render("q", corpus="zzznope")
         assert isinstance(baseline, str)
         assert "knowledge migrating" not in baseline
 
         _set_migrating(done=2, total=6)
-        migrating = search("q", corpus="zzznope")
+        migrating = _search_render("q", corpus="zzznope")
         assert "knowledge migrating: 2/6" in migrating
         # The landed body (the real surface message) is still present.
         assert "No collections match corpus" in migrating
