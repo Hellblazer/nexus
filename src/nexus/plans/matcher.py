@@ -615,12 +615,11 @@ def plan_match(
             # floor comfortably. The actual cause was the unanchored-grown
             # drop below, which is why this override now bypasses that too.
             #
-            # Bypasses the CONFIDENCE floors (via confidence=1.0) and the
-            # unanchored-grown drop. Deliberately does NOT bypass the
-            # always-failing skip, the dimension filter, the unmet-binding
-            # gate, or a genuine scope CONFLICT — those are correctness
-            # gates about whether the plan can run at all, not about
-            # whether the caller means this plan.
+            # Bypasses the CONFIDENCE floors (via confidence=1.0) and
+            # NOTHING else. Not the always-failing skip, not the dimension
+            # filter, not the unmet-binding gate, not the unanchored-grown
+            # drop, not a scope conflict. Those answer "can this plan run
+            # here at all", which a repeated question does not speak to.
             is_verbatim = _is_verbatim_repeat(row, normalized_intent)
             if is_verbatim:
                 confidence = 1.0
@@ -663,15 +662,27 @@ def plan_match(
             # grown plan (no scope_tags AND no project) — it has no
             # provenance and would otherwise compete globally at the
             # grown floor inside the unrelated-same-domain band.
-            # nexus-7g0rg: a byte-identical repeat of the question that
-            # GREW this plan carries its own provenance — that is what the
-            # anchor requirement is trying to establish, so demanding a
-            # scope tag as well is asking for a weaker proof of a fact
-            # already in hand. Measured live: a grown plan at cosine 0.9400
-            # was dropped here while every other candidate scored <= 0.240,
-            # so the caller paid the inline planner for a question the
-            # library had already answered.
-            if scope_pref_is_real and not is_verbatim and _is_unanchored_grown(row):
+            # nexus-7g0rg REVERTED here (2026-08-22). A verbatim-repeat
+            # bypass of this drop was shipped and taken straight back out:
+            # `_scope_fit` returns 0.0 (neutral KEEP) for an empty
+            # scope_tags, which is the defining condition of "unanchored",
+            # so this drop is the ONLY gate — bypassing it reopened the
+            # nexus-mz5tv cross-project leak in full.
+            #
+            # The argument for the bypass equivocated on one word. It said
+            # a byte-identical repeat "carries its own provenance". The
+            # provenance this drop protects is SCOPE provenance — which
+            # project's data the plan retrieves from — not "did this
+            # question produce this plan". Two projects can ask an
+            # identical question, and the plan's baked retrieval steps
+            # would then answer one from the other's corpus.
+            #
+            # The trade is also the wrong way round: the bug costs latency
+            # (a miss falls through to the inline planner and still
+            # answers correctly), while the fix returned another project's
+            # data as a confident answer. nexus-7g0rg's real remedy is to
+            # stop grown plans becoming unanchored in the first place.
+            if scope_pref_is_real and _is_unanchored_grown(row):
                 scope_conflict_drops += 1
                 continue
             fit = _scope_fit(m.scope_tags, scope_pref)

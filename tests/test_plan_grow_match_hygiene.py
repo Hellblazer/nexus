@@ -257,16 +257,31 @@ def test_unanchored_grown_dropped_under_scope_pref(library) -> None:
     )
 
 
-def test_verbatim_repeat_survives_the_unanchored_grown_drop(library) -> None:
-    """nexus-7g0rg: the drop asks for a scope anchor as proof of
-    provenance. A byte-identical repeat of the question that GREW the plan
-    IS that proof, so demanding a tag as well is asking for a weaker
-    proof of a fact already in hand.
+def test_verbatim_repeat_does_NOT_survive_the_unanchored_grown_drop(library) -> None:
+    """The bypass this test used to assert was shipped and reverted same day.
 
-    Measured live before the fix: a grown plan at cosine 0.9400 was
-    dropped here while every other candidate scored <= 0.240, so the
-    caller paid the inline planner for a question the library had already
-    answered.
+    nexus-7g0rg is real — a grown plan at cosine 0.9400 was dropped here
+    while every other candidate scored <= 0.240, so the caller paid the
+    inline planner for a question the library had already answered. The
+    remedy tried first was to let a verbatim repeat bypass the drop, on
+    the argument that a byte-identical question "carries its own
+    provenance".
+
+    That equivocated on one word. The provenance this drop protects is
+    SCOPE provenance — which project's data the plan retrieves from — not
+    "did this question produce this plan". Two projects can ask an
+    identical question, and `_is_verbatim_repeat` compares text only. The
+    T1 plan cache is global across projects within a session, and
+    `_scope_fit` returns 0.0 (neutral KEEP) for empty scope_tags, so this
+    drop is the ONLY gate: bypassing it reopened the nexus-mz5tv
+    cross-project attractor in full.
+
+    The trade also ran the wrong way. The bug costs latency — a miss
+    falls through to the inline planner and still answers correctly. The
+    "fix" returned another project's data as a confident answer.
+
+    nexus-7g0rg's real remedy is upstream: stop grown plans becoming
+    unanchored. Tracked in nexus-nobvo.
     """
     from nexus.plans.matcher import plan_match
 
@@ -280,9 +295,10 @@ def test_verbatim_repeat_survives_the_unanchored_grown_drop(library) -> None:
         min_confidence=0.40, n=5,
         scope_preference="knowledge__nexus",
     )
-    assert [m.plan_id for m in result] == [plan_id], (
-        "a verbatim repeat of the plan's own question must survive the "
-        "unanchored-grown drop"
+    assert result == [], (
+        "an unanchored grown plan must drop under a scope_preference even "
+        "on a verbatim repeat — the question text says nothing about which "
+        "project's corpus the plan retrieves from"
     )
 
 

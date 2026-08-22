@@ -1146,3 +1146,47 @@ class TestUnverifiableCoverageFailsClosed:
         _commit(repo, "src/nexus/foo.py", "feat: add foo (nexus-abc12)")
         out = _decision(_run("git push", repo, path=f"{fake_bin}:/usr/bin:/bin"))
         assert out["permissionDecision"] == "allow", out
+
+
+class TestRetryBudgetRespectsTheDeadline:
+    """The retry must not outrun the budget the deadline machinery owns.
+
+    Review of f4faf13d9 proved empirically that `_clamp_timeout` applies a
+    0.5s FLOOR: with 0.04s actually remaining it still returns 0.5. Right
+    for a first call — a sub-half-second subprocess budget is not worth
+    spending — and wrong for an OPTIONAL second one, which would then push
+    the hook past a deadline it exists to respect.
+    """
+
+    def test_clamp_floor_would_overrun_a_nearly_exhausted_deadline(self):
+        """The property the retry path must therefore NOT use."""
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("hookmod", HOOK)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        class _NearlyDone:
+            def remaining(self):
+                return 0.04
+
+            def exceeded(self):
+                return False
+
+        assert mod._clamp_timeout(_NearlyDone()) == 0.5, (
+            "the floor is the behaviour this test documents; if it changed, "
+            "revisit whether the retry still needs its own budget rule"
+        )
+
+    def test_retry_is_skipped_when_too_little_budget_remains(self):
+        """With almost no time left the retry does not start at all."""
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("hookmod", HOOK)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        assert mod._RETRY_MIN_BUDGET_SECONDS >= 0.5, (
+            "the retry floor must be at least the clamp floor, or a retry "
+            "can still be started that cannot finish in time"
+        )

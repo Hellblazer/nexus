@@ -666,6 +666,13 @@ class _Deadline:
         return max(0.0, self._seconds - (time.monotonic() - self._start))
 
 
+#: Minimum remaining wall clock worth spending on the OPTIONAL retry of a
+#: coverage lookup. Below this the retry is skipped rather than started:
+#: an attempt that cannot finish inside the deadline buys nothing and
+#: pushes the hook past a budget it exists to respect.
+_RETRY_MIN_BUDGET_SECONDS: float = 0.5
+
+
 def _clamp_timeout(deadline: "_Deadline", *, floor: float = 0.5, ceiling: float = 15.0) -> float:
     """Per-call subprocess timeout clamped to the deadline's remaining
     budget (nexus-4av2n round 3): defense in depth so a single hanging
@@ -861,6 +868,9 @@ def _t1_scratch_entries(
     of a marker IN T1 -- the caller still tries T2 before concluding
     absence overall, see ``_review_coverage_check``)."""
     if shutil.which("nx") is None:
+        # Distinguished from a failed lookup: no retry happens here, and
+        # telling the operator to run `nx doctor` when `nx` is what is
+        # missing is circular advice (review of f4faf13d9).
         return False, []
     try:
         r = subprocess.run(
@@ -921,10 +931,16 @@ def _t2_memory_search(
     r = None
     for attempt in range(2):
         if attempt:
-            if deadline is None or deadline.exceeded():
+            # The retry uses the deadline's RAW remaining budget, never
+            # _clamp_timeout: that helper applies a 0.5s FLOOR, so with
+            # 0.04s left it would still hand out 0.5s and the retry would
+            # overrun the hook's own deadline by nearly half a second.
+            # The floor is right for a first call (a sub-0.5s subprocess
+            # budget is not worth spending) and wrong for an optional one.
+            if deadline is None:
                 break
-            budget = _clamp_timeout(deadline)
-            if budget <= 0:
+            budget = deadline.remaining()
+            if budget < _RETRY_MIN_BUDGET_SECONDS:
                 break
         else:
             budget = timeout
@@ -1014,8 +1030,9 @@ class _T2Budget:
 
 def _bead_status(bead_id: str, t1_entries: list[tuple[str, str]], budget: "_T2Budget") -> str:
     """Returns "covered" | "missing" | "uncertain" | "deadline" for one
-    bead id. "uncertain" = T2 was reachable but nx itself failed for this
-    query (capability gap, still allows with a warning). "deadline" = the
+    bead id. "uncertain" = the T2 lookup did not succeed for this query
+    (DENIES since nexus-xtv8y -- it used to allow with a warning, and
+    that is how an unreviewed commit reached origin). "deadline" = the
     wall-clock budget ran out before T2 could even be attempted (round 3:
     denies -- indistinguishable in effect from "would have found
     nothing")."""
@@ -1135,8 +1152,8 @@ def _uncertain_only_message(
     shas = ", ".join(f"{s[:12]} ({subj})" for s, subj, _p in uncertain)
     lines.append(
         f"Push blocked: could not verify review-completed coverage for "
-        f"gated commit(s) {shas}. The T2 lookup failed after a retry -- "
-        f"NOT confirmed missing, just UNCHECKED.\n"
+        f"gated commit(s) {shas}. The T2 lookup did not succeed -- NOT "
+        f"confirmed missing, just UNCHECKED.\n"
         f"This used to warn and allow, on the rationale that a broken "
         f"verification path must not brick every push. It did exactly "
         f"what that rationale ignores: on 2026-08-21 it waved a genuinely "
@@ -1144,8 +1161,10 @@ def _uncertain_only_message(
         f"(nexus-xtv8y). A gate that cannot check must not degrade to "
         f"permitting -- and the push is not bricked, it costs one "
         f"deliberate, audited env var.\n"
-        f"Fix the lookup (is the engine up? `nx doctor`), or write the "
-        f"marker and retry, or override:\n"
+        f"Fix the lookup -- if `nx` is on PATH the engine may be down "
+        f"(`nx doctor`); if it is not, install it, since without `nx` you "
+        f"can neither verify a marker nor write one. Or write the marker "
+        f"and retry. Or override:\n"
         f"  NX_REVIEW_GATE_OVERRIDE=1 <your push command>"
     )
     return "\n".join(lines)

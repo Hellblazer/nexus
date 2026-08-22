@@ -153,38 +153,53 @@ def test_best_threshold_clears_minimum_f1(scored):
     )
 
 
-def test_this_dataset_no_longer_calibrates_the_live_floor(scored):
-    """Pins WHY this harness cannot justify min_confidence any more.
+def test_this_dataset_only_partly_calibrates_the_live_floor(scored):
+    """Pins how far this harness can justify min_confidence — which is
+    less than it used to, and MORE than an earlier version of this test
+    claimed.
 
-    Every positive here targets a category-level verb default, and those
-    plans no longer reach the confidence floor at all: they route by
-    DIMENSION (T2 design-dimension-routed-category-plans-2026-08-21). So
-    the population this dataset measures and the population the floor
-    governs are now disjoint, and a threshold "optimised" against these
-    numbers would be tuned on traffic that does not use it.
+    That earlier version said the dataset and the floor govern "disjoint"
+    populations, because category-level plans route by DIMENSION now. The
+    routing is real but the disjointness is FALSE: the category route only
+    fires when nx_answer derives a verb, and `infer_verb` returns None for
+    plenty of ordinary questions (its own parametrization asserts as much
+    — "tumblers", "catalog manifest"). On that path a category plan is
+    gated by min_confidence exactly as RDR-079 measured it. The
+    populations OVERLAP, on the verb-underivable path.
 
-    Measured 2026-08-22, and the numbers are the design's premise seen
-    from the other side: F1 peaks near 0.15 — a threshold that admits
-    essentially everything — and the intended plan is rank 1 for only
-    about half the curated paraphrases even with the threshold ignored.
-    Cosine has no discriminative power at this genericity, which is
-    exactly why these plans stopped competing on it.
+    So this dataset still says something about the live floor; it just no
+    longer says everything, and nothing here exercises plan_match end to
+    end, so treat these numbers as embedding-level evidence rather than
+    routing-level evidence. Closing that gap is nexus-kinam.
 
-    What the floor governs now is INSTANCE-level grown plans, for which
-    no calibration dataset exists. That gap is filed, not papered over.
+    Measured 2026-08-22: F1 plateaus around 0.06-0.11 (F1 = 0.698) and is
+    0.367 at the shipped 0.40 — a curve whose optimum sits at a threshold
+    that admits nearly everything. That is the routing design's premise
+    seen from the other side: cosine has no discriminative power at
+    category-plan genericity.
     """
     best_f1, best_t = 0.0, 0.0
-    for step in range(10, 71):
+    for step in range(1, 71):
         threshold = step / 100.0
         f1, _, _, _ = _f1_at(scored, threshold)
         if f1 > best_f1:
             best_f1, best_t = f1, threshold
 
+    # NON-VACUITY: a total embedding failure zeroes every score, which
+    # would satisfy both assertions below for the wrong reason.
+    assert best_f1 > 0.5, (
+        f"best F1 is {best_f1:.3f} — the scoring pipeline is degenerate, "
+        f"so nothing below this line means anything"
+    )
+    assert any(s > 0.3 for _p, _b, s in scored), (
+        "no intent scores above 0.3 against any template; the embedder or "
+        "match-text synthesis is broken, not merely uncalibrated"
+    )
+
     assert best_t < _SHIPPED_FLOOR, (
         f"F1 now peaks at {best_t:.2f}, at or above the shipped floor "
         f"{_SHIPPED_FLOOR}. If category-plan cosine matching genuinely "
-        f"improved, the dimension route may no longer be needed for them "
-        f"— re-measure before assuming either way."
+        f"improved, re-measure before assuming the routing is still needed."
     )
 
     positives = [s for p, _, s in scored if p.is_positive]

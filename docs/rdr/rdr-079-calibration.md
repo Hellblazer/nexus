@@ -202,17 +202,24 @@ importantly, so has its relevance:
 | **0.40** (shipped) | **0.367** | 9 | 6 | 25 |
 | 0.50 | 0.222 | 5 | 0 | 35 |
 
-F1 now peaks near 0.15 — a threshold nobody would ship, since it admits
-nearly everything — and the intended plan is rank 1 for only 22 of 40
+F1 plateaus around 0.06-0.11 (F1 = 0.698) and is 0.367 at the shipped
+0.40 — the optimum sits at a threshold that admits nearly everything — and the intended plan is rank 1 for only 22 of 40
 curated paraphrases even ignoring the threshold. That is this document's
 own dataset corroborating, from the other side, why category-level plans
 stopped competing on cosine at all.
 
-Which is the point: **every positive in this dataset is a category-level
-verb default, and those plans no longer reach the confidence floor.**
-They route by dimension. So this calibration measures a population
-disjoint from the one `min_confidence` now governs — instance-level
-grown plans — for which no dataset exists. The 0.40 floor is therefore
+Which is most of the point: every positive in this dataset is a
+category-level verb default, and those plans usually no longer reach the
+confidence floor — they route by dimension instead.
+
+**Usually, not always.** The category route fires only when `nx_answer`
+derives a verb from the question, and `infer_verb` returns `None` for
+plenty of ordinary phrasings. On that path a category plan is gated by
+`min_confidence` exactly as this document measured. So the populations
+OVERLAP rather than being disjoint (an earlier version of this note
+claimed disjoint; that was wrong), and the floor still governs
+category plans whenever verb inference misses — as well as the
+instance-level grown plans for which no dataset exists at all. The 0.40 floor is therefore
 inherited rather than justified: the same state RDR-078's 0.85 was in
 before this document measured it. Tracked; do not re-tune the floor from
 the curve above, which would be calibrating against traffic that does not

@@ -13,7 +13,8 @@ The 8 meta-verb positives (plan-author, plan-inspect x2, plan-promote)
 were REMOVED 2026-08-22: those four templates are retired (nexus-77cct),
 so their entries labelled a correct answer that no longer exists — a
 dataset that scores a matcher against absent plans measures nothing.
-Total positive: 40.
+Their intent lists went with them; a retained-but-unreferenced constant
+reads as coverage that is not there. Total positive: 40.
 
 Plus 6 "adversarial" intents that don't map to any plan in the library
 — they should score below min_confidence for all 9 plans.
@@ -93,27 +94,6 @@ _DOCUMENT = [
 
 
 # ── Meta-verb positives (2 each = 8) ───────────────────────────────────────
-
-_PLAN_AUTHOR = [
-    "help me author a new plan template for batch labeling",
-    "draft a brand new plan template — my verb is 'triage'",
-]
-
-_PLAN_INSPECT_DEFAULT = [
-    "inspect the runtime metrics of plan id 42",
-    "show me use_count and success rate for the research-default plan",
-]
-
-_PLAN_INSPECT_DIMENSIONS = [
-    "list every registered dimension and how many plans use each",
-    "which axes are canonical vs specialization in the current library",
-]
-
-_PLAN_PROMOTE_PROPOSE = [
-    "which plans look promotable based on metrics so far",
-    "survey the library and rank promotion candidates",
-]
-
 
 # ── Adversarial negatives (6) — should NOT match any seed above threshold ─
 
