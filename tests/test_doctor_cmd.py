@@ -573,7 +573,17 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
     assert "1 collections" in result.output
     # RDR-155 P4b: the legacy-Chroma "on disk" size report died with the
     # migration machinery — the census is the pgvector service count only.
-    assert "on disk" not in result.output
+    #
+    # Pinned on the census LINE rather than on the whole output. The bare
+    # substring stopped meaning what it says once an unrelated check began
+    # reporting templates "on disk" (nexus-f1mbo's plan-library parity),
+    # and a pin that fails on a phrase appearing anywhere is a pin that
+    # will keep failing for reasons it does not care about.
+    census_line = next(
+        line for line in result.output.splitlines() if "1 collections" in line
+    )
+    assert "on disk" not in census_line
+    assert "MB" not in census_line
 
 
 # ── doctor --fix-paths ─────────────────────────────────────────────────────

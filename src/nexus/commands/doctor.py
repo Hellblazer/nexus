@@ -584,6 +584,18 @@ class _ParityReport:
         return bool(self.missing or self.drifted)
 
 
+def _summarise(names: list[str], limit: int = 5) -> str:
+    """Join *names*, eliding past *limit* so one bad seed is still readable.
+
+    A fresh or unseeded library puts every shipped template in this list,
+    and a 17-item comma run wraps into an unreadable block exactly when
+    the operator most needs to read it.
+    """
+    if len(names) <= limit:
+        return ", ".join(names)
+    return f"{', '.join(names[:limit])} and {len(names) - limit} more"
+
+
 def _plan_library_parity(rows: list[dict[str, Any]], *, truncated: bool) -> _ParityReport:
     """Compare shipped builtin templates against the live library.
 
@@ -779,22 +791,22 @@ def _run_check_plan_library() -> None:
             )
         if parity.missing:
             click.echo(
-                f"  FAIL: {len(parity.missing)} template(s) on disk are "
-                f"absent from the library: {', '.join(parity.missing)}",
+                f"  FAIL: {len(parity.missing)} template(s) absent from the "
+                f"library: {_summarise(parity.missing)}",
                 err=True,
             )
             click.echo("    Fix: run `nx plan reseed`.", err=True)
         if parity.drifted:
             click.echo(
                 f"  FAIL: {len(parity.drifted)} library row(s) no longer "
-                f"match their template: {', '.join(parity.drifted)}",
+                f"match their template: {_summarise(parity.drifted)}",
                 err=True,
             )
             click.echo("    Fix: run `nx plan reseed --force`.", err=True)
         if parity.orphaned:
             click.echo(
                 f"  WARN: {len(parity.orphaned)} builtin row(s) have no "
-                f"template on disk: {', '.join(parity.orphaned)}. Left in "
+                f"template shipped: {_summarise(parity.orphaned)}. Left in "
                 "place — remove with `nx plan delete <id>` if intended.",
                 err=True,
             )
