@@ -30,6 +30,14 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
+# `cmd | head -1` pipes a producer into an early-exit consumer, which
+# tests/test_pipefail_early_exit_consumer_lint.py forbids under `set -o
+# pipefail`: head can exit before the producer finishes, masking its status
+# (or SIGPIPE-ing it). This script is NEW, so it takes the clean shape rather
+# than joining that lint's exemption list -- capture the whole value, then
+# slice the first line with a parameter expansion. No pipe, no early exit.
+first_line () { printf '%s' "${1%%$'\n'*}"; }
+
 PASS=0; FAIL=0; SKIP=0
 declare -a RESULTS=()
 
@@ -53,12 +61,24 @@ check () { # name, command...
     # Strip ANSI first: pytest colourises source context, and an un-stripped
     # grep happily returns a highlighted SOURCE line instead of the assertion.
     # The detail line is what the next person reads -- it must name the cause.
-    record FAIL "$name" "$(printf '%s' "$out" \
+    local detail
+    detail="$(printf '%s' "$out" \
       | sed -e 's/\x1b\[[0-9;]*m//g' \
       | grep -aE '^(FAILED|E  +|FATAL)|GATE (FAILED|UNVERIFIABLE|BLOCKED)|assert' \
-      | head -1 | sed -e 's/^E  *//' | cut -c1-160)"
+      | sed -e 's/^E  *//' | cut -c1-160)"
+    record FAIL "$name" "$(first_line "$detail")"
   fi
 }
+
+# Step 0: refresh remote refs. check_engine_release_floor's pin-currency and
+# source-ancestry arms read LOCAL `git tag -l`, and the snapshot replay below
+# reads origin/main. release.yml checks out with fetch-depth:0, so CI sees
+# origin's refs. An engine tag published since your last fetch therefore
+# GREENS locally and REDS AT PUBLISH -- where the tree is frozen at the tag
+# and a same-tag re-run reads the identical tree, so the remedy is a whole new
+# tag rather than a retry. Cheap insurance against an expensive, un-retryable
+# class.
+git fetch --tags --force --quiet origin 2>/dev/null || echo "  [warn] could not fetch remote refs -- tag/branch checks may be stale"
 
 echo "== release preflight =="
 
@@ -75,7 +95,11 @@ check "remediation-snapshot"      uv run python scripts/check_remediation_commit
                                     --release-ref HEAD --release-base-ref origin/main \
                                     --bd-export-json .release-gates/remediation-snapshot.json --verify-snapshot
 # 5. Seven version surfaces + both source.ref fields + the emptied ledger.
-check "version-parity+ledger"     uv run pytest tests/test_plugin_structure.py tests/test_plugin_release_drift_ledger.py -q
+# plugin-drift-ledger.yml runs this with NX_REQUIRE_PLUGIN_DRIFT_CHECK=1 and
+# NX_TEST_T2_SUBSTRATE=none, which turns a SKIP into a failure. Running it bare
+# here would let a skip pass locally and differ from CI.
+check "version-parity+ledger"     env NX_REQUIRE_PLUGIN_DRIFT_CHECK=1 NX_TEST_T2_SUBSTRATE=none \
+                                    uv run pytest tests/test_plugin_structure.py tests/test_plugin_release_drift_ledger.py -q
 # 6. THE 13.5-MINUTE ONE. Markers disabled so the integration-marked live
 #    branch-protection drift test actually RUNS -- under default selection it
 #    is deselected and this proves nothing.
@@ -89,7 +113,7 @@ prev_stale_check () {
   local rel tag cur
   rel="$(_derive_prev_release)" || return 1
   tag="$(_derive_prev_engine_tag "$rel")" || return 1
-  cur="$(sed -n 's/^REQUIRED_ENGINE_VERSION[^(]*(\([0-9]*\), *\([0-9]*\), *\([0-9]*\)).*/\1.\2.\3/p' src/nexus/engine_version.py | head -1)"
+  cur="$(first_line "$(sed -n 's/^REQUIRED_ENGINE_VERSION[^(]*(\([0-9]*\), *\([0-9]*\), *\([0-9]*\)).*/\1.\2.\3/p' src/nexus/engine_version.py)")"
   [ -n "$cur" ] || { echo "FATAL: cannot read REQUIRED_ENGINE_VERSION"; return 1; }
   if [ "$tag" = "engine-service-v$cur" ]; then
     echo "FATAL: PREV_ENGINE_TAG ($tag) equals REQUIRED_ENGINE_VERSION ($cur) -- --package-upgrade would refuse as vacuous"
@@ -128,7 +152,7 @@ check "shakedown-fixtures"        fixture_files_check
 #     and the RDR index.
 nodeid_check () {
   local nid
-  nid="$(grep -oE 'tests/[A-Za-z0-9_/]+\.py::[A-Za-z0-9_]+' tests/e2e/release-sandbox.sh | head -1)"
+  nid="$(first_line "$(grep -oE 'tests/[A-Za-z0-9_/]+\.py::[A-Za-z0-9_]+' tests/e2e/release-sandbox.sh)")"
   [ -n "$nid" ] || { echo "FATAL: could not extract the pinned node id from release-sandbox.sh"; return 1; }
   uv run pytest --collect-only -q -m "" "$nid" >/dev/null 2>&1 \
     || { echo "FATAL: pinned node id does not collect: $nid"; return 1; }
@@ -147,8 +171,8 @@ marker_counts_check () {
   local m exp act
   for m in lived_in cloud_mode; do
     case "$m" in
-      lived_in)   exp="$(sed -n 's/^LIVED_IN_EXPECTED=\([0-9]*\).*/\1/p'   tests/e2e/local-service-gate.sh | head -1)" ;;
-      cloud_mode) exp="$(sed -n 's/^CLOUD_MODE_EXPECTED=\([0-9]*\).*/\1/p' tests/e2e/local-service-gate.sh | head -1)" ;;
+      lived_in)   exp="$(first_line "$(sed -n 's/^LIVED_IN_EXPECTED=\([0-9]*\).*/\1/p'   tests/e2e/local-service-gate.sh)")" ;;
+      cloud_mode) exp="$(first_line "$(sed -n 's/^CLOUD_MODE_EXPECTED=\([0-9]*\).*/\1/p' tests/e2e/local-service-gate.sh)")" ;;
     esac
     [ -n "$exp" ] || { echo "FATAL: could not read the expected count for $m"; return 1; }
     act="$(uv run pytest -m "integration and $m" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
@@ -162,6 +186,37 @@ check "marker-carveout-counts"    marker_counts_check
 #     --locked` predicate at 0.02s. Mostly shadowed by item 5, which pins
 #     uv.lock's conexus version; this covers an unlocked NEW dependency.
 check "uv-lock-fresh"             uv lock --check
+
+# 13. THE ONE THAT WOULD HAVE BLOCKED THE 7.15.0 PR. `-m lint` is deselected
+#     by the default addopts, so NO local battery step runs it -- but ci.yml's
+#     test-lint feeds pytest-gate, which is main's required check. A line-pinned
+#     exemption list in test_pipefail_early_exit_consumer_lint.py restale-izes
+#     on ANY edit that shifts lines in a covered script, so this reds from
+#     ordinary edits, not just from new violations. ~2 min: by far the most
+#     expensive item here, and admitted anyway because the alternative is
+#     discovering it as a failed required check on the release PR.
+#     NO_COLOR is load-bearing: the floor parser anchors its summary regex at
+#     end-of-line, and an ANSI reset after the duration makes it read 0
+#     executed and trip on a perfectly good run.
+lint_leg_check () {
+  local out plain
+  out="$(NO_COLOR=1 uv run pytest -m lint -q 2>&1)"
+  plain="$(printf '%s' "$out" | sed -e 's/\x1b\[[0-9;]*m//g')"
+  # No `| grep -q` here: that is the very pattern this leg lints for. Match
+  # against the captured variable instead, exactly as the lint's own remedy
+  # text prescribes.
+  [[ "$plain" =~ ([0-9]+)\ passed ]] || { printf '%s\n' "$plain" | tail -3; return 1; }
+  printf '%s' "$plain" > "${TMPDIR:-/tmp}/nx-preflight-lint.txt"
+  uv run python scripts/check_lint_leg_non_vacuity.py "${TMPDIR:-/tmp}/nx-preflight-lint.txt" || return 1
+}
+check "lint-leg+floor"            lint_leg_check
+
+# 14. ci.yml's test-mode-census job, also merge-blocking via pytest-gate. The
+#     session-items census skips under `-n auto` (each xdist worker sees a
+#     partial view), so the fast local loop cannot fire it -- exactly how a
+#     mode-lint violation reached this branch in the first place. 20s.
+check "mode-census"               env NX_CENSUS_ONLY_JOB=1 NX_SCENARIO_SKIP_BUDGET=999 NX_TEST_T2_SUBSTRATE=none \
+                                    uv run pytest tests/ -q
 
 # 8. Docker is a hard dependency of the migration-rehearsal legs. Absent Docker
 #    is a SKIP that makes the whole preflight UNVERIFIED, never a pass.
