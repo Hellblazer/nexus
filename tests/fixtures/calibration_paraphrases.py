@@ -7,9 +7,13 @@ calibration harness looks up the plan_id by loading the builtin plans
 and matching on ``(verb, scope, strategy)``.
 
 Coverage: 8 intents per verb for the 5 scenario verbs (analyze, debug,
-document, research, review) = 40 positive examples. Plus 2 intents
-per meta-verb (plan-author, plan-inspect-default, plan-inspect-dimensions,
-plan-promote-propose) = 8 positive examples. Total positive: 48.
+document, research, review) = 40 positive examples.
+
+The 8 meta-verb positives (plan-author, plan-inspect x2, plan-promote)
+were REMOVED 2026-08-22: those four templates are retired (nexus-77cct),
+so their entries labelled a correct answer that no longer exists — a
+dataset that scores a matcher against absent plans measures nothing.
+Total positive: 40.
 
 Plus 6 "adversarial" intents that don't map to any plan in the library
 — they should score below min_confidence for all 9 plans.
@@ -138,14 +142,6 @@ def paraphrase_dataset() -> list[Paraphrase]:
         out.append(Paraphrase(intent, "debug", "default"))
     for intent in _DOCUMENT:
         out.append(Paraphrase(intent, "document", "default"))
-    for intent in _PLAN_AUTHOR:
-        out.append(Paraphrase(intent, "plan-author", "default"))
-    for intent in _PLAN_INSPECT_DEFAULT:
-        out.append(Paraphrase(intent, "plan-inspect", "default"))
-    for intent in _PLAN_INSPECT_DIMENSIONS:
-        out.append(Paraphrase(intent, "plan-inspect", "dimensions"))
-    for intent in _PLAN_PROMOTE_PROPOSE:
-        out.append(Paraphrase(intent, "plan-promote", "propose"))
     for intent in _NEGATIVES:
         out.append(Paraphrase(intent, "", ""))
     return out

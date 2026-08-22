@@ -603,17 +603,26 @@ def plan_match(
             # guaranteed hit, REGARDLESS of the raw cosine score. This
             # runs BEFORE the min_confidence gate deliberately — the
             # hybrid match-text embedding (query + verb + name + scope,
-            # see nexus.plans.match_text) dilutes cosine similarity even
-            # for an exact repeat, which is exactly what let an unrelated
-            # higher-scoring candidate win and short-circuit the T1 path
-            # before FTS5 ever saw the exact match (T2
-            # nx-answer-capability-analysis-2026-08-19, row 382).
-            # Deliberately does NOT bypass the always-failing skip or
-            # the scope-conflict filter below — only the CONFIDENCE
-            # floors (this one and the grown-plan floor) are affected,
-            # and setting confidence=1.0 clears both without having to
-            # special-case either.
-            if _is_verbatim_repeat(row, normalized_intent):
+            # see nexus.plans.match_text) costs a little cosine even on an
+            # exact repeat.
+            #
+            # CORRECTION (nexus-7g0rg): this comment used to assert that
+            # the dilution "is exactly what let an unrelated higher-scoring
+            # candidate win" on run 382. That was an inference, and it was
+            # MEASURED FALSE — dilution across all 21 live plans averaged
+            # -0.034, and the plan in question went 1.0000 -> 0.9400, still
+            # rank 1 by a 0.70 margin over the runner-up. It cleared every
+            # floor comfortably. The actual cause was the unanchored-grown
+            # drop below, which is why this override now bypasses that too.
+            #
+            # Bypasses the CONFIDENCE floors (via confidence=1.0) and the
+            # unanchored-grown drop. Deliberately does NOT bypass the
+            # always-failing skip, the dimension filter, the unmet-binding
+            # gate, or a genuine scope CONFLICT — those are correctness
+            # gates about whether the plan can run at all, not about
+            # whether the caller means this plan.
+            is_verbatim = _is_verbatim_repeat(row, normalized_intent)
+            if is_verbatim:
                 confidence = 1.0
             # The category route (see docstring) lifts the floor, and ONLY
             # the floor, for builtin templates whose verb the caller
@@ -654,7 +663,15 @@ def plan_match(
             # grown plan (no scope_tags AND no project) — it has no
             # provenance and would otherwise compete globally at the
             # grown floor inside the unrelated-same-domain band.
-            if scope_pref_is_real and _is_unanchored_grown(row):
+            # nexus-7g0rg: a byte-identical repeat of the question that
+            # GREW this plan carries its own provenance — that is what the
+            # anchor requirement is trying to establish, so demanding a
+            # scope tag as well is asking for a weaker proof of a fact
+            # already in hand. Measured live: a grown plan at cosine 0.9400
+            # was dropped here while every other candidate scored <= 0.240,
+            # so the caller paid the inline planner for a question the
+            # library had already answered.
+            if scope_pref_is_real and not is_verbatim and _is_unanchored_grown(row):
                 scope_conflict_drops += 1
                 continue
             fit = _scope_fit(m.scope_tags, scope_pref)

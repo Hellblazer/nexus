@@ -108,6 +108,7 @@ def _fake_nx(
     memory_default: str = "No results found.",
     memory_rc: int = 0,
     memory_unreachable: bool = False,
+    memory_flaky_once: bool = False,
     sleep_seconds: float = 0.0,
     call_log: pathlib.Path | None = None,
 ) -> pathlib.Path:
@@ -120,6 +121,12 @@ def _fake_nx(
     every call to that subcommand fail (nonzero exit), regardless of the
     configured text -- the CAPABILITY-gap path, distinct from a reachable
     call that legitimately finds nothing.
+
+    `memory_flaky_once` (nexus-xtv8y): the FIRST `memory search` call for
+    any given query fails, every later one succeeds — a transient, as
+    distinct from `memory_unreachable`'s permanent failure. Exists because
+    the coverage lookup now retries once before concluding it failed, and
+    a retry nobody tests is a retry that can silently stop happening.
 
     `sleep_seconds` (nexus-4av2n round 3): makes EVERY invocation (scratch
     or memory) sleep before responding -- deterministically reproduces a
@@ -153,6 +160,16 @@ def _fake_nx(
         "if args[:2] == ['memory', 'search']:\n"
         f"    if {memory_unreachable!r}:\n"
         "        sys.exit(1)\n"
+        f"    if {memory_flaky_once!r}:\n"
+        "        import os, hashlib\n"
+        "        q = args[2] if len(args) > 2 else ''\n"
+        "        stamp = os.path.join(\n"
+        "            os.path.dirname(os.path.abspath(__file__)),\n"
+        "            '.flaky-' + hashlib.sha1(q.encode()).hexdigest()[:12],\n"
+        "        )\n"
+        "        if not os.path.exists(stamp):\n"
+        "            open(stamp, 'w').close()\n"
+        "            sys.exit(1)\n"
         "    query = args[2] if len(args) > 2 else ''\n"
         f"    cases = {cases!r}\n"
         "    for k, v in cases.items():\n"
@@ -388,22 +405,46 @@ class TestOverride:
 
 
 class TestCapabilityGapBothSourcesDown:
-    """Renamed from round 1's T1-only class: the honest capability-gap
-    signal now requires BOTH T1 and T2 to be unreachable, since either
-    source alone can satisfy coverage."""
+    """A gate that cannot check must not degrade to permitting (nexus-xtv8y).
 
-    def test_both_unreachable_allows_with_loud_warning(self, repo, tmp_path):
+    These two cases used to ALLOW with a warning, on the rationale that a
+    broken verification path must not brick every push. On 2026-08-21
+    that rationale did what it ignores: the lookup failed, the guard
+    warned, and a genuinely unreviewed commit went to origin — the one
+    time the check mattered. The push is still not bricked; it costs one
+    deliberate, audited env var, which is the difference between an
+    escape hatch and a hole.
+
+    The lookup retries once before concluding it failed, so a transient
+    does not cost a push either.
+    """
+
+    def test_both_unreachable_denies(self, repo, tmp_path):
         _commit(repo, "src/nexus/foo.py", "feat: add foo (nexus-abc12)")
         fake_bin = _fake_nx(tmp_path, scratch_unreachable=True, memory_unreachable=True)
         out = _decision(_run("git push", repo, path=f"{fake_bin}:/usr/bin:/bin"))
-        assert out["permissionDecision"] == "allow", out
-        ctx = out.get("additionalContext", "").lower()
-        assert "uncertain" in ctx or "not verify" in ctx or "budget" in ctx
+        assert out["permissionDecision"] == "deny", out
+        ctx = out.get("permissionDecisionReason", "") + out.get("additionalContext", "")
+        assert "NX_REVIEW_GATE_OVERRIDE=1" in ctx, (
+            "a deny must name its own unbrick path"
+        )
 
-    def test_nx_missing_entirely_allows_with_loud_warning(self, repo):
+    def test_both_unreachable_still_yields_to_the_audited_override(self, repo, tmp_path):
+        """The escape hatch is what makes failing closed affordable."""
+        _commit(repo, "src/nexus/foo.py", "feat: add foo (nexus-abc12)")
+        fake_bin = _fake_nx(tmp_path, scratch_unreachable=True, memory_unreachable=True)
+        out = _decision(_run(
+            "NX_REVIEW_GATE_OVERRIDE=1 git push",
+            repo, path=f"{fake_bin}:/usr/bin:/bin",
+        ))
+        assert out["permissionDecision"] == "allow", out
+
+    def test_nx_missing_entirely_denies(self, repo):
+        """No nx means no way to VERIFY and no way to WRITE a marker. That
+        is a broken environment in a nexus checkout, not a licence."""
         _commit(repo, "src/nexus/foo.py", "feat: add foo (nexus-abc12)")
         out = _decision(_run("git push", repo, path=_NO_NX_PATH))
-        assert out["permissionDecision"] == "allow", out
+        assert out["permissionDecision"] == "deny", out
 
 
 class TestTagPushExemption:
@@ -1059,3 +1100,49 @@ class TestMalformedQuotingNeverBypasses:
             repo, path=f"{fake_bin}:/usr/bin:/bin",
         ))
         assert out["permissionDecision"] == "deny", out
+
+
+class TestUnverifiableCoverageFailsClosed:
+    """nexus-xtv8y: the incident this fix exists for, pinned end to end."""
+
+    def test_the_2026_08_21_shape_is_now_denied(self, repo, tmp_path):
+        """One session pushed develop and carried a sibling's unreviewed
+        commit. The T2 lookup failed, the guard warned, and the commit
+        reached origin unreviewed."""
+        _commit(repo, "src/nexus/foo.py", "feat: add foo (nexus-abc12)")
+        fake_bin = _fake_nx(tmp_path, scratch_unreachable=True, memory_unreachable=True)
+        out = _decision(_run("git push origin develop", repo,
+                             path=f"{fake_bin}:/usr/bin:/bin"))
+        assert out["permissionDecision"] == "deny", out
+
+    def test_a_deny_names_the_blocking_commits_author(self, repo, tmp_path):
+        """On a shared checkout the commit blocking your push is often not
+        yours — `git push` sends the branch, not your commits. Naming the
+        author turns "why am I blocked" into "coordinate with them"
+        rather than into a reflex override."""
+        _commit(repo, "src/nexus/foo.py", "feat: add foo (nexus-abc12)")
+        fake_bin = _fake_nx(tmp_path, scratch_unreachable=False, memory_unreachable=False)
+        out = _decision(_run("git push", repo, path=f"{fake_bin}:/usr/bin:/bin"))
+        assert out["permissionDecision"] == "deny", out
+        ctx = out.get("permissionDecisionReason", "") + out.get("additionalContext", "")
+        assert "author:" in ctx, (
+            f"deny message does not attribute the blocking commit: {ctx}"
+        )
+
+    def test_a_transient_lookup_failure_does_not_cost_a_push(self, repo, tmp_path):
+        """The lookup retries once, so a single flake is absorbed. Without
+        this, failing closed would turn every blip into a blocked push —
+        the objection the old fail-open was answering."""
+        fake_bin = _fake_nx(
+            tmp_path,
+            memory_flaky_once=True,
+            memory_by_query={
+                "nexus-abc12": _t2_marker(
+                    "nexus/review-nexus-abc12",
+                    "review-completed: nexus-abc12",
+                ),
+            },
+        )
+        _commit(repo, "src/nexus/foo.py", "feat: add foo (nexus-abc12)")
+        out = _decision(_run("git push", repo, path=f"{fake_bin}:/usr/bin:/bin"))
+        assert out["permissionDecision"] == "allow", out

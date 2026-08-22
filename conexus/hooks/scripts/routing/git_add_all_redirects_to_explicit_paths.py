@@ -778,6 +778,19 @@ def _commit_subject(cwd: str, sha: str) -> str:
     return _git_out(cwd, "log", "-1", "--format=%s", sha) or ""
 
 
+def _commit_author(cwd: str, sha: str) -> str:
+    """Author of *sha*, for the deny message (nexus-xtv8y).
+
+    On a shared checkout the commit blocking your push is frequently not
+    yours: `git push` sends the whole branch, not the commits you wrote.
+    That is precisely how the 2026-08-21 incident happened — one session
+    pushed and carried a sibling session's unreviewed commit. Naming the
+    author turns "why am I blocked" into "go coordinate with them",
+    instead of into a reflex override.
+    """
+    return _git_out(cwd, "log", "-1", "--format=%an", sha) or ""
+
+
 def _commit_bead_ids(cwd: str, sha: str) -> list[str]:
     body_text = _git_out(cwd, "log", "-1", "--format=%B", sha) or ""
     seen: set[str] = set()
@@ -873,7 +886,8 @@ def _t1_scratch_entries(
 
 
 def _t2_memory_search(
-    query: str, cwd: str, payload: dict[str, Any], *, timeout: float
+    query: str, cwd: str, payload: dict[str, Any], *, timeout: float,
+    deadline: "_Deadline | None" = None,
 ) -> tuple[bool, list[tuple[str, str]]]:
     """T2 fallback (nexus-4av2n round 2 Critical-1): ``nx memory search
     <query>`` -- T2 is the cross-process shared bus (PG-backed) per
@@ -891,14 +905,40 @@ def _t2_memory_search(
     """
     if shutil.which("nx") is None:
         return False, []
-    try:
-        r = subprocess.run(
-            ["nx", "memory", "search", query], cwd=cwd, capture_output=True,
-            text=True, timeout=timeout, env=_nx_cli_env(payload),
-        )
-    except Exception:  # noqa: BLE001
-        return False, []
-    if r.returncode != 0:
+    # ONE retry before concluding the lookup failed (nexus-xtv8y). A
+    # verdict of "could not verify" now DENIES, so a single transient --
+    # a busy engine, a lease being republished -- must not cost a push.
+    #
+    # The FIRST attempt gets the caller's full clamped budget. An earlier
+    # version split it in half so the pair could not exceed the original
+    # allowance, and that traded a rare fail-open for a routine one in the
+    # other direction: a slow-but-WORKING nx (the shape under load, which
+    # is exactly when a push happens) got half the time, failed twice, and
+    # was reported as unverifiable. It reproduced as a full-suite failure
+    # the isolated test could not show. The retry is instead conditional
+    # on budget still remaining, so it costs nothing when there is none
+    # and the deadline machinery stays the single authority on wall clock.
+    r = None
+    for attempt in range(2):
+        if attempt:
+            if deadline is None or deadline.exceeded():
+                break
+            budget = _clamp_timeout(deadline)
+            if budget <= 0:
+                break
+        else:
+            budget = timeout
+        try:
+            r = subprocess.run(
+                ["nx", "memory", "search", query], cwd=cwd, capture_output=True,
+                text=True, timeout=budget, env=_nx_cli_env(payload),
+            )
+        except Exception:  # noqa: BLE001
+            r = None
+            continue
+        if r.returncode == 0:
+            break
+    if r is None or r.returncode != 0:
         return False, []
     lines = r.stdout.splitlines()
     entries: list[tuple[str, str]] = []
@@ -965,7 +1005,8 @@ class _T2Budget:
         if self.deadline.exceeded():
             return None
         result = _t2_memory_search(
-            query, self._cwd, self._payload, timeout=_clamp_timeout(self.deadline)
+            query, self._cwd, self._payload,
+            timeout=_clamp_timeout(self.deadline), deadline=self.deadline,
         )
         self._cache[query] = result
         return result
@@ -1030,6 +1071,7 @@ def _uncovered_message(
     uncertain: list[tuple[str, str, list[str]]],
     tip: str | None,
     truncation_note: str,
+    cwd: str = "",
 ) -> str:
     lines = []
     if truncation_note:
@@ -1042,7 +1084,12 @@ def _uncovered_message(
         for sha, subject, paths in uncovered:
             short = sha[:12]
             path_list = ", ".join(paths[:5]) + (", ..." if len(paths) > 5 else "")
-            lines.append(f"  {short}  {subject}\n    gated paths: {path_list}")
+            who = _commit_author(cwd, sha)
+            attribution = f" [author: {who}]" if who else ""
+            lines.append(
+                f"  {short}  {subject}{attribution}\n"
+                f"    gated paths: {path_list}"
+            )
     if deadline_hit:
         lines.append(
             f"Push blocked: coverage could not be VERIFIED within the hook's "
@@ -1087,13 +1134,19 @@ def _uncertain_only_message(
         lines.append(truncation_note)
     shas = ", ".join(f"{s[:12]} ({subj})" for s, subj, _p in uncertain)
     lines.append(
-        f"WARNING: could not verify review-completed coverage for gated "
-        f"commit(s) {shas} -- T2 was reachable in general but this "
-        f"specific lookup failed (a capability gap, not a time-budget "
-        f"issue). Pushing anyway (a broken verification path must not "
-        f"brick every push) but this is NOT the same as verified review "
-        f"coverage. To silence this deliberately, set "
-        f"NX_REVIEW_GATE_OVERRIDE=1."
+        f"Push blocked: could not verify review-completed coverage for "
+        f"gated commit(s) {shas}. The T2 lookup failed after a retry -- "
+        f"NOT confirmed missing, just UNCHECKED.\n"
+        f"This used to warn and allow, on the rationale that a broken "
+        f"verification path must not brick every push. It did exactly "
+        f"what that rationale ignores: on 2026-08-21 it waved a genuinely "
+        f"unreviewed commit onto origin, the one time the check mattered "
+        f"(nexus-xtv8y). A gate that cannot check must not degrade to "
+        f"permitting -- and the push is not bricked, it costs one "
+        f"deliberate, audited env var.\n"
+        f"Fix the lookup (is the engine up? `nx doctor`), or write the "
+        f"marker and retry, or override:\n"
+        f"  NX_REVIEW_GATE_OVERRIDE=1 <your push command>"
     )
     return "\n".join(lines)
 
@@ -1249,13 +1302,18 @@ def _review_coverage_check(
         return "ok", "", False
 
     if uncovered or deadline_hit:
-        msg = _uncovered_message(uncovered, deadline_hit, uncertain, tip, truncation_note)
+        msg = _uncovered_message(
+            uncovered, deadline_hit, uncertain, tip, truncation_note, cwd,
+        )
         if _override_active(command):
             return "warn", "OVERRIDE (NX_REVIEW_GATE_OVERRIDE=1): " + msg, True
         return "deny", msg, False
 
     if uncertain:
-        return "warn", _uncertain_only_message(uncertain, truncation_note), False
+        msg = _uncertain_only_message(uncertain, truncation_note)
+        if _override_active(command):
+            return "warn", "OVERRIDE (NX_REVIEW_GATE_OVERRIDE=1): " + msg, True
+        return "deny", msg, False
 
     return "warn", truncation_note, False
 

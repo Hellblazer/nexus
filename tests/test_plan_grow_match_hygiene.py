@@ -229,7 +229,15 @@ def _seed_unanchored(library, *, query: str, tags: str, project: str = "") -> in
 def test_unanchored_grown_dropped_under_scope_pref(library) -> None:
     """A grown plan with empty scope_tags AND empty project must NOT match
     a scoped caller — it has no provenance and would otherwise compete
-    globally at the grown floor (the mz5tv residual)."""
+    globally at the grown floor (the mz5tv residual).
+
+    The intent here is a PARAPHRASE, not the plan's own question. That
+    distinction is the whole test: this version used a byte-identical
+    intent, so it was asserting the drop on exactly the case where the
+    drop is wrong (nexus-7g0rg — a verbatim repeat carries its own
+    provenance, and the drop was costing real matches at 0.94). It passed
+    for the wrong reason; the companion test below covers that case.
+    """
     from nexus.plans.matcher import plan_match
 
     plan_id = _seed_unanchored(
@@ -238,7 +246,7 @@ def test_unanchored_grown_dropped_under_scope_pref(library) -> None:
     )
     cache = _FakeCache(hits=[(plan_id, 0.15)])  # confidence 0.85, above grown floor
     result = plan_match(
-        intent="how does the projector replay events",
+        intent="what is the replay behaviour of the projector",
         library=library, cache=cache,
         min_confidence=0.40, n=5,
         scope_preference="knowledge__nexus",
@@ -246,6 +254,35 @@ def test_unanchored_grown_dropped_under_scope_pref(library) -> None:
     assert result == [], (
         f"unanchored grown plan must drop under a scope_preference; "
         f"got {[(m.plan_id, m.confidence) for m in result]}"
+    )
+
+
+def test_verbatim_repeat_survives_the_unanchored_grown_drop(library) -> None:
+    """nexus-7g0rg: the drop asks for a scope anchor as proof of
+    provenance. A byte-identical repeat of the question that GREW the plan
+    IS that proof, so demanding a tag as well is asking for a weaker
+    proof of a fact already in hand.
+
+    Measured live before the fix: a grown plan at cosine 0.9400 was
+    dropped here while every other candidate scored <= 0.240, so the
+    caller paid the inline planner for a question the library had already
+    answered.
+    """
+    from nexus.plans.matcher import plan_match
+
+    question = "how does the projector replay events"
+    plan_id = _seed_unanchored(
+        library, query=question, tags="ad-hoc,grown", project="",
+    )
+    cache = _FakeCache(hits=[(plan_id, 0.06)])  # 0.94, the measured value
+    result = plan_match(
+        intent=question, library=library, cache=cache,
+        min_confidence=0.40, n=5,
+        scope_preference="knowledge__nexus",
+    )
+    assert [m.plan_id for m in result] == [plan_id], (
+        "a verbatim repeat of the plan's own question must survive the "
+        "unanchored-grown drop"
     )
 
 
