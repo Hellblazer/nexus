@@ -33,11 +33,13 @@ Two mechanics matter and neither is obvious from the client API:
   INSERT under the new description and collide with the dimensional
   unique index. The reconcile path therefore deletes the stale row
   first when (and only when) the description changed.
-* ``save_plan`` resets ``created_at`` and every counter to zero, by
-  design (it mirrors the pre-service Python contract). A reconciled row
-  loses its match/use history. That is correct for a row whose content
-  changed — the counters described different text — but it is why
-  unchanged rows are still skipped rather than blindly rewritten.
+* ``save_plan`` re-stamps ``created_at``, and a reconcile that changes
+  the DESCRIPTION additionally drops and re-inserts the row, so that row
+  loses its match/use history. Correct for a row whose text changed —
+  the counters described the superseded wording — but it is why
+  unchanged rows are still skipped rather than blindly rewritten. A
+  same-description rewrite upserts in place and the service's ON
+  CONFLICT list preserves the counters.
 
 Grown plans are the only plans in this library that currently match
 anything, so the reconcile path refuses to touch any row tagged
@@ -231,6 +233,72 @@ def _protected_reason(row: dict[str, Any]) -> str | None:
     return None
 
 
+class _QueryIndex:
+    """Lazy ``query -> row`` index over one project's plan rows.
+
+    Built at most once per seed run, and only if the run actually writes.
+    It exists because the write key and the lookup key differ: templates
+    are identified by canonical dimensions, but ``save_plan`` upserts on
+    the description text, so the only way to know what a write will land
+    on is to look the description up.
+
+    ``complete`` is False when the listing hit its page cap, in which
+    case absence is unprovable and callers must fail closed rather than
+    assume no collision.
+    """
+
+    def __init__(self, library: Any, project: str) -> None:
+        from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred to keep import cost off the CLI path
+
+        rows = library.list_plans(
+            limit=MAX_QUERY_RESULTS, project=project, include_disabled=True,
+        )
+        self.complete = len(rows) < MAX_QUERY_RESULTS
+        self._by_query: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            # list_plans without a project filter returns every project;
+            # the upsert key is scoped, so the index must be too.
+            if (row.get("project") or "") != project:
+                continue
+            self._by_query.setdefault(row.get("query") or "", row)
+
+    def get(self, query: str) -> dict[str, Any] | None:
+        return self._by_query.get(query)
+
+
+def _query_collision(
+    library: Any,
+    *,
+    project: str,
+    query: str,
+    own_id: int | None,
+    index: dict[str, _QueryIndex],
+) -> str | None:
+    """Return why writing *query* would clobber another row, else ``None``.
+
+    *index* is a per-run cache keyed by project so a multi-template run
+    pays for the listing once.
+    """
+    idx = index.get(project)
+    if idx is None:
+        idx = _QueryIndex(library, project)
+        index[project] = idx
+    if not idx.complete:
+        return (
+            "cannot prove this description is unused: the plan listing hit "
+            "its page cap, and writing it could silently overwrite an "
+            "unrelated row"
+        )
+    hit = idx.get(query)
+    if hit is None or (own_id is not None and int(hit["id"]) == own_id):
+        return None
+    return (
+        f"description already belongs to library row id={hit.get('id')} "
+        f"(name={hit.get('name')!r}, tags={hit.get('tags')!r}); writing it "
+        "would overwrite that row"
+    )
+
+
 def _json_equal(stored: str | None, desired: str | None) -> bool:
     """Compare two JSON payloads by VALUE, not by bytes.
 
@@ -285,6 +353,8 @@ def load_seed_directory(
     docstring for why deletion is not the orphan policy.
     """
     result = SeedLoadResult()
+    # Per-run, per-project query index; built lazily on the first write.
+    query_index: dict[str, _QueryIndex] = {}
     if not directory.exists():
         # stdlib logging, not structlog: keyword fields would raise TypeError
         # here, turning "the seed dir is absent" into a crash on the one path
@@ -352,12 +422,33 @@ def load_seed_directory(
             if protected_reason is not None:
                 result.protected.append((path.name, protected_reason))
                 continue
-            # save_plan upserts on (project, QUERY), not on dimensions, so a
-            # changed description would INSERT and collide with the
-            # dimensional unique index. Drop the stale row first in exactly
-            # that case; an unchanged description upserts in place.
-            if (existing.get("query") or "") != desired.query:
-                library.delete_plan(int(existing["id"]))
+
+        # The write below upserts on (project, QUERY) — a DIFFERENT key from
+        # the (project, dimensions) lookup above. So a lookup that found
+        # nothing, or found a row it is allowed to rewrite, proves nothing
+        # about the row the write will actually land on: if this
+        # description collides with some OTHER row's query, the service's
+        # ON CONFLICT DO UPDATE silently rewrites that row's dimensions,
+        # plan_json, verb and tags, with no error. That is how the
+        # "grown plans are never overwritten" guarantee gets bypassed
+        # from the side, and the retained-orphan policy grows the
+        # collision surface over time rather than shrinking it.
+        # Fail closed: refuse the write and say why.
+        collision = _query_collision(
+            library, project=project, query=desired.query,
+            own_id=None if existing is None else int(existing["id"]),
+            index=query_index,
+        )
+        if collision is not None:
+            result.protected.append((path.name, collision))
+            continue
+
+        if existing is not None and (existing.get("query") or "") != desired.query:
+            # Changed description: the upsert would INSERT under the new
+            # query and collide with the dimensional unique index, so the
+            # stale row goes first. An unchanged description upserts in
+            # place and keeps its row.
+            library.delete_plan(int(existing["id"]))
 
         library.save_plan(
             query=desired.query,

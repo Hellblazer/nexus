@@ -157,6 +157,76 @@ def test_reconcile_refuses_to_overwrite_a_grown_plan(tmp_path, library):
     assert surviving["query"] == "What did the user actually ask?"
 
 
+def test_write_refuses_when_the_description_belongs_to_another_row(tmp_path, library):
+    """nexus-wp94t. The write key is (project, QUERY); the lookup key is
+    (project, dimensions). So a lookup that found nothing — or found a row
+    we may rewrite — proves nothing about the row the write LANDS on. If
+    the description already belongs to a grown plan, the service's
+    ON CONFLICT DO UPDATE rewrites that plan's dimensions, plan_json and
+    tags with no error at all. Fail closed instead."""
+    shared_description = "A description two rows both want."
+    library.save_plan(
+        query=shared_description,
+        plan_json='{"steps": []}',
+        tags="ad-hoc,grown",
+        project="",
+        name="grown-victim",
+        verb="research",
+        scope="global",
+        dimensions='{"scope":"global","strategy":"grown-victim","verb":"research"}',
+    )
+    _write_template(tmp_path, "collide", description=shared_description)
+
+    result = load_seed_directory(tmp_path, library=library, reconcile=True)
+
+    assert result.inserted == []
+    assert result.updated == []
+    assert [name for name, _ in result.protected] == ["collide.yml"]
+    assert "would overwrite that row" in result.protected[0][1]
+    victim = library.get_plan_by_dimensions(
+        project="",
+        dimensions='{"scope":"global","strategy":"grown-victim","verb":"research"}',
+    )
+    assert victim is not None, "the grown plan was destroyed by the seed write"
+    assert victim["tags"] == "ad-hoc,grown"
+
+
+def test_collision_guard_applies_to_the_insert_only_path_too(tmp_path, library):
+    """The hazard is in save_plan's upsert key, so it predates the
+    reconcile leg and is not conditional on it."""
+    shared_description = "Another description two rows both want."
+    library.save_plan(
+        query=shared_description,
+        plan_json='{"steps": []}',
+        tags="ad-hoc,grown",
+        project="",
+        name="grown-victim-2",
+        verb="research",
+        scope="global",
+        dimensions='{"scope":"global","strategy":"grown-victim-2","verb":"research"}',
+    )
+    _write_template(tmp_path, "collide2", description=shared_description)
+
+    result = load_seed_directory(tmp_path, library=library)
+
+    assert result.inserted == []
+    assert [name for name, _ in result.protected] == ["collide2.yml"]
+
+
+def test_rewriting_a_rows_own_description_is_not_a_collision(tmp_path, library):
+    """The guard must not fire on the row being updated itself, or every
+    same-description rewrite would refuse."""
+    _write_template(tmp_path, "self-update")
+    load_seed_directory(tmp_path, library=library)
+    new_steps = {"steps": [{"tool": "search", "args": {"query": "$intent"}}]}
+    _write_template(tmp_path, "self-update", plan_json=new_steps)
+
+    result = load_seed_directory(tmp_path, library=library, reconcile=True)
+
+    assert result.protected == []
+    assert result.updated == ["self-update.yml"]
+
+
 # ── doctor parity assert ───────────────────────────────────────────────────
 
 
@@ -248,7 +318,7 @@ def test_parity_reports_an_orphan_without_failing():
     assert report.orphaned == ["retired-template"]
 
 
-def test_parity_degrades_to_unavailable_when_the_listing_was_truncated():
+def test_truncated_listing_does_not_manufacture_missing_rows():
     """A template absent from a capped page proves nothing. The check must
     not manufacture a red any more than it may manufacture a green."""
     from nexus.commands.doctor import _plan_library_parity
@@ -257,5 +327,23 @@ def test_parity_degrades_to_unavailable_when_the_listing_was_truncated():
 
     report = _plan_library_parity(rows, truncated=True)
 
-    assert report.unavailable is not None
+    assert report.missing == []
     assert not report.failed
+    assert report.missing_unchecked, (
+        "half-checked must not read as fully checked"
+    )
+
+
+def test_truncated_listing_still_reports_drift_it_could_see():
+    """Drift on a row we DID read is trustworthy even when absence is not,
+    and suppressing it would discard a real finding to avoid a false one."""
+    from nexus.commands.doctor import _plan_library_parity
+
+    rows = _live_rows_from_disk()[:3]
+    rows[0]["query"] = "Text this template never carried."
+
+    report = _plan_library_parity(rows, truncated=True)
+
+    assert report.failed
+    assert len(report.drifted) == 1
+    assert report.missing_unchecked

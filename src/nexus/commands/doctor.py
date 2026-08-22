@@ -569,9 +569,15 @@ class _ParityReport:
     drifted: list[str]
     #: builtin-tagged library rows matching no template on disk.
     orphaned: list[str]
-    #: Set when parity could not be established (templates unreadable, or
-    #: the live listing hit its page cap so "absent" is unprovable).
+    #: Set when parity could not be established at all (templates
+    #: unreadable, or nothing to compare against).
     unavailable: str | None = None
+    #: True when drift WAS checked but absence could not be: the live
+    #: listing hit its page cap, so a template with no row here may simply
+    #: be on a page we never read. Reported explicitly — a partially
+    #: checked gate that reads as fully checked is the failure mode this
+    #: whole check exists to remove.
+    missing_unchecked: bool = False
 
     @property
     def failed(self) -> bool:
@@ -642,13 +648,11 @@ def _plan_library_parity(rows: list[dict[str, Any]], *, truncated: bool) -> _Par
         elif desired.differs_from(row):
             drifted.append(path.name)
 
-    if truncated and not drifted:
-        return _ParityReport(
-            [], [], [],
-            unavailable=(
-                "live listing hit the page cap — absent rows are unprovable"
-            ),
-        )
+    if truncated:
+        # Drift is still trustworthy — a row we DID see either matches its
+        # template or does not. Absence is not, and neither is orphanhood,
+        # since both are claims about rows we may never have read.
+        return _ParityReport([], drifted, [], missing_unchecked=True)
 
     orphaned = sorted(
         str(r.get("name") or r.get("id"))
@@ -767,6 +771,12 @@ def _run_check_plan_library() -> None:
             err=True,
         )
     else:
+        if parity.missing_unchecked:
+            click.echo(
+                "  NOTE: drift was checked, but MISSING templates were not — "
+                "the live listing hit its page cap, so absence is unprovable.",
+                err=True,
+            )
         if parity.missing:
             click.echo(
                 f"  FAIL: {len(parity.missing)} template(s) on disk are "
