@@ -408,3 +408,100 @@ def test_truncated_listing_still_reports_drift_it_could_see():
     assert report.failed
     assert len(report.drifted) == 1
     assert report.missing_unchecked
+
+
+# ── deliberate retirement (nexus-77cct) ────────────────────────────────────
+
+
+def test_retired_templates_are_removed_from_the_library(tmp_path, library):
+    """Deleting the YAML is not enough — the row has to go too.
+
+    The orphan policy deliberately leaves an unrecognised row alone, so a
+    template deleted from disk would linger in every existing install
+    forever. For the four meta templates that is the whole problem: they
+    absorb any question containing the word "plan" and outrank the plan
+    the caller actually wanted, so retiring them without removing them
+    would keep the damage and drop the plans.
+    """
+    from nexus.plans.seed_loader import RETIRED_TEMPLATE_DIMENSIONS
+
+    canonical = sorted(RETIRED_TEMPLATE_DIMENSIONS)[0]
+    library.save_plan(
+        query="A retired meta template.",
+        plan_json='{"steps": []}',
+        tags="builtin-template,rdr-078",
+        project="",
+        name="retired-meta",
+        verb="plan-author",
+        scope="global",
+        dimensions=canonical,
+    )
+
+    result = load_seed_directory(tmp_path, library=library, reconcile=True)
+
+    assert result.retired == ["retired-meta"]
+    assert library.get_plan_by_dimensions(project="", dimensions=canonical) is None
+
+
+def test_retirement_does_not_touch_a_user_plan_at_those_dimensions(tmp_path, library):
+    """Scoped to builtin-template rows. A user plan that happens to occupy a
+    retired template's dimensions is reported and left alone, never deleted
+    out from under them."""
+    from nexus.plans.seed_loader import RETIRED_TEMPLATE_DIMENSIONS
+
+    canonical = sorted(RETIRED_TEMPLATE_DIMENSIONS)[1]
+    library.save_plan(
+        query="A user's own plan that happens to sit here.",
+        plan_json='{"steps": []}',
+        tags="ad-hoc,grown",
+        project="",
+        name="user-plan",
+        verb="plan-inspect",
+        scope="global",
+        dimensions=canonical,
+    )
+
+    result = load_seed_directory(tmp_path, library=library, reconcile=True)
+
+    assert result.retired == []
+    assert [name for name, _ in result.protected] == [canonical]
+    assert library.get_plan_by_dimensions(project="", dimensions=canonical) is not None
+
+
+def test_insert_only_pass_never_retires(tmp_path, library):
+    """Retirement is a reconcile action; the insert-only pass deletes
+    nothing, ever."""
+    from nexus.plans.seed_loader import RETIRED_TEMPLATE_DIMENSIONS
+
+    canonical = sorted(RETIRED_TEMPLATE_DIMENSIONS)[2]
+    library.save_plan(
+        query="Still here after an insert-only pass.",
+        plan_json='{"steps": []}',
+        tags="builtin-template",
+        project="",
+        name="survivor",
+        verb="plan-inspect",
+        scope="global",
+        dimensions=canonical,
+    )
+
+    result = load_seed_directory(tmp_path, library=library)
+
+    assert result.retired == []
+    assert library.get_plan_by_dimensions(project="", dimensions=canonical) is not None
+
+
+def test_no_retired_dimension_is_still_shipped_on_disk():
+    """A template re-shipped at a retired dimension would be deleted on the
+    next reconcile — an infinite insert/delete loop that looks like the
+    seed working. Catch it here instead."""
+    from nexus.plans.schema import canonical_dimensions_json
+    from nexus.plans.seed_loader import RETIRED_TEMPLATE_DIMENSIONS
+
+    for path in sorted(_BUILTIN_DIR.glob("*.yml")):
+        dims = dict(yaml.safe_load(path.read_text())["dimensions"])
+        dims["scope"] = "global"
+        assert canonical_dimensions_json(dims) not in RETIRED_TEMPLATE_DIMENSIONS, (
+            f"{path.name} ships at a RETIRED dimension — either drop the "
+            f"file or remove its entry from RETIRED_TEMPLATE_DIMENSIONS"
+        )

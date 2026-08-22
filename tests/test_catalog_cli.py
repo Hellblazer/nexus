@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import click
 import pytest
@@ -872,6 +873,15 @@ class TestOwnersCommand:
         )
 
 
+#: Derived, never hardcoded: a literal here breaks on every template
+#: added or retired, which teaches people to bump the number rather
+#: than ask why it moved. Retiring the four plan-meta templates
+#: (nexus-77cct) broke five such literals at once.
+_SHIPPED_BUILTIN_COUNT = len(list(
+    (Path(__file__).parent.parent / "conexus" / "plans" / "builtin").glob("*.yml")
+))
+
+
 class TestSeedPlanTemplates:
     def test_seed_creates_legacy_templates(self, tmp_path, monkeypatch):
         """All 17 RDR-078/092/097/098/nexus-h33x8 YAML templates seed on
@@ -893,11 +903,11 @@ class TestSeedPlanTemplates:
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
         from nexus.commands.catalog import _seed_plan_templates
         count = _seed_plan_templates()
-        assert count == 17
+        assert count == _SHIPPED_BUILTIN_COUNT
         db = T2Database(db_path)
         # Every seeded template carries the builtin-template tag.
         results = db.search_plans("builtin-template", limit=20)
-        assert len(results) == 17
+        assert len(results) == _SHIPPED_BUILTIN_COUNT
         db.close()
 
     def test_seed_idempotent(self, tmp_path, monkeypatch):
@@ -907,7 +917,7 @@ class TestSeedPlanTemplates:
         from nexus.commands.catalog import _seed_plan_templates
         first = _seed_plan_templates()
         second = _seed_plan_templates()
-        assert first == 17
+        assert first == _SHIPPED_BUILTIN_COUNT
         assert second == 0
 
     def test_seed_templates_have_builtin_tag(self, tmp_path, monkeypatch):
@@ -918,7 +928,7 @@ class TestSeedPlanTemplates:
         _seed_plan_templates()
         db = T2Database(db_path)
         plans = db.list_plans(limit=20)
-        assert len(plans) == 17
+        assert len(plans) == _SHIPPED_BUILTIN_COUNT
         for p in plans:
             assert "builtin-template" in p["tags"]
         db.close()
@@ -1032,7 +1042,7 @@ class TestSeedPlanTemplates:
         _seed_plan_templates()
         db = T2Database(db_path)
         plans = db.list_plans(limit=20)
-        assert len(plans) == 17
+        assert len(plans) == _SHIPPED_BUILTIN_COUNT
         for p in plans:
             assert p["verb"], f"missing verb on {p['query']!r}"
             assert p["name"], f"missing name on {p['query']!r}"

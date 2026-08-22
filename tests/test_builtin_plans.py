@@ -149,3 +149,61 @@ def test_builtin_templates_load_into_library() -> None:
         f"got new inserts: {result2.inserted}"
     )
     assert len(result2.skipped_existing) == first_run_count
+
+
+@pytest.mark.skipif(
+    not _BUILTIN_DIR.exists() or not _YAML_FILES,
+    reason="conexus/plans/builtin/ dir is empty - defensive skip; expected to be populated",
+)
+@pytest.mark.parametrize("path", _YAML_FILES, ids=[p.name for p in _YAML_FILES])
+def test_builtin_template_is_offerable_to_nx_answer(path: Path) -> None:
+    """Every shipped template must be reachable by SOME question.
+
+    Directive (Sam, 2026-08-22): we should not have unofferable plans. A
+    plan requiring a typed value nothing can supply is dead weight that
+    still competes for cosine rank against plans that work — and it fails
+    silently, because "never offered" looks exactly like "never the best
+    match".
+
+    A typed binding is satisfiable when the plan defaults it, or when
+    nx_answer can derive it from a question (`nexus.plans.binding_infer`
+    — content_type from "which RDRs / papers / code", author from
+    "by Grossberg"). Anything else is unreachable: three templates were
+    in that state and two were fixed by adding derivation for exactly the
+    values their own question shapes carry; the third
+    (traverse-then-generate, requiring catalog tumbler ids) was retired,
+    because no question can carry those.
+
+    If this fails on a new template, the choice is: default the binding,
+    teach binding_infer to derive it, or do not ship the template.
+    """
+    import json
+
+    from nexus.plans.binding_infer import infer_typed_bindings
+    from nexus.plans.schema import unsatisfiable_typed_binding
+
+    template = yaml.safe_load(path.read_text())
+    plan_json = dict(template["plan_json"])
+    required = list(template.get("required_bindings") or [])
+    plan_json["required_bindings"] = required
+
+    # The most generous question this template could ever receive: one
+    # naming every typed value binding_infer knows how to derive.
+    derivable = set(infer_typed_bindings(
+        "Which papers by Grossberg discuss this?"
+    )) | set(infer_typed_bindings("What does the code do?"))
+    available = frozenset({"intent", "_nx_scope"} | derivable)
+
+    unmet = unsatisfiable_typed_binding(
+        required=required,
+        defaults=template.get("default_bindings"),
+        available=available,
+        plan_json=json.dumps(plan_json),
+    )
+    assert unmet is None, (
+        f"{path.name} can never be offered to nx_answer: it requires the "
+        f"typed binding {unmet!r}, which no question supplies and the "
+        f"plan does not default. Default it, teach "
+        f"nexus.plans.binding_infer to derive it, or do not ship the "
+        f"template."
+    )

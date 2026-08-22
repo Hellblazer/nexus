@@ -35,10 +35,21 @@ from nexus.plans.verb_infer import infer_verb
 
 _BUILTIN_DIR = Path(__file__).parent.parent / "conexus" / "plans" / "builtin"
 
-#: What nx_answer can actually bind with no caller-supplied bindings.
-#: Passing this is what makes the probes faithful — omitting it disables
-#: the binding gate entirely and flatters the result.
-_NX_ANSWER_BINDINGS = frozenset({"intent"})
+def _nx_answer_bindings(question: str) -> frozenset[str]:
+    """Exactly what nx_answer would declare for this question.
+
+    Derived through nx_answer's own helper rather than hardcoded: it
+    binds `intent` plus any TYPED value the question itself supplies
+    (an author, a content type), so a hardcoded frozenset would quietly
+    stop matching production the moment derivation improved — the same
+    fidelity trap as stubbing plan_json to "{}".
+    """
+    from nexus.mcp.core import _nx_answer_caller_bindings
+
+    _, available = _nx_answer_caller_bindings(
+        question=question, scope="", bindings=None,
+    )
+    return available
 
 #: (question, outcome-class). Each row records what the pipeline
 #: MEASURABLY does, with nx_answer's real bindings in play. Written from
@@ -47,32 +58,36 @@ _NX_ANSWER_BINDINGS = frozenset({"intent"})
 #:
 #: - "routed": matched nothing before, reaches its template now. The
 #:   route's actual win.
-#: - "gate-fixed": matched a template before that could not run —
-#:   review-default requires `changed_paths`, which it passes as a
-#:   `subtree:` filter, so nx_answer aliased raw question prose into a
-#:   tumbler filter and the plan returned no evidence at all. That was
-#:   LIVE in production, independent of this route, and reads as a
-#:   confident answer. The binding gate now drops it and the route sends
-#:   the question to the other member of its verb class.
-#: - "blocked-upstream": cosine returns a WRONG plan above the floor, so
-#:   the route correctly declines to override it. The meta plans absorb
-#:   any question containing "plan" (nexus-77cct: those four templates
-#:   have no live invocation surface at all, so retiring them fixes this
-#:   as a side effect).
-#: - "declines": the verb derives, but every template in its pool is
-#:   unrunnable, so nothing is offered and the caller falls through to
-#:   the inline planner. debug-default is the sole debug template and it
-#:   requires `failing_path` as a `subtree:` filter. Declining is the
-#:   correct outcome — the alternative is running a plan whose evidence
-#:   step cannot match anything — but it means the route does NOT help
-#:   debug traffic until that template is fixed (nexus-7y4v0).
+#: - "matched-correctly": cosine already reaches the right template. The
+#:   review probe is here only after nexus-7y4v0: it matched
+#:   review-default at 0.512 all along, but that plan passed
+#:   `subtree: $changed_paths` — a tumbler filter — so nx_answer aliased
+#:   raw question prose into it and the plan returned no evidence, live,
+#:   reading as a confident answer. The template now takes free text, so
+#:   the same match finally runs on real evidence.
+#: The "blocked-upstream" class is GONE, and its departure is the point.
+#: "Research how the plan matcher decides..." used to match the WRONG
+#: plan above the floor — plan-inspect/default at 0.429, while the
+#: intended research/default sat at 0.258, rank 5 — because the four
+#: plan-meta templates absorbed any question containing the word "plan".
+#: nexus-77cct retired them (they dispatched a `plan_match` MCP tool that
+#: has never existed, so nothing ever invoked them successfully), and
+#: this probe now reaches its template. Predicted before it was measured,
+#: which is why the pin was written to FAIL when it started passing.
+#: No probe is in a "declines" class any more. debug-default used to be
+#: there — sole member of its verb pool and unrunnable, so debug traffic
+#: got nothing — until nexus-7y4v0 took the `subtree:` scoping off it.
+#: Three templates are still correctly unofferable to a bare question
+#: (find-by-author needs an author, type-scoped-search a content_type,
+#: traverse-then-generate seed tumblers), and that is right: each needs a
+#: typed value no question carries.
 _PROBES = [
     ("Review the changes on this branch for correctness",
-     "default", "analyze", "gate-fixed"),
+     "default", "review", "matched-correctly"),
     ("Research how the plan matcher decides which plan wins",
-     "default", "research", "blocked-upstream"),
+     "default", "research", "routed"),
     ("Debug why the T1 scratch store returns nothing",
-     "default", "debug", "declines"),
+     "default", "debug", "routed"),
     ("Which papers discuss membership churn?",
      "document-discovery", "research", "routed"),
     ("Does the corpus have anything about tumblers at all?",
@@ -207,7 +222,8 @@ def test_probe_outcome_with_the_route(
 
     matches = plan_match(
         question, library=_Library(rows), cache=cache,
-        category_verb=verb, n=5, available_bindings=_NX_ANSWER_BINDINGS,
+        category_verb=verb, n=5,
+        available_bindings=_nx_answer_bindings(question),
     )
 
     if outcome == "declines":
@@ -221,15 +237,6 @@ def test_probe_outcome_with_the_route(
 
     assert matches, f"{question!r} matches nothing"
     got = _identify(rows, matches[0])
-
-    if outcome == "blocked-upstream":
-        assert got != (expected_name, expected_verb), (
-            "pinned as a KNOWN MISS: cosine returns a wrong plan above the "
-            "floor and the route must not override it. If this now passes, "
-            "the upstream cause was fixed — update this table and the "
-            "design memo's known-limitation section."
-        )
-        return
 
     assert got == (expected_name, expected_verb), (
         f"{question!r} routed to {got}, expected "
@@ -254,16 +261,13 @@ def test_probe_baseline_without_the_route(
     """
     baseline = plan_match(
         question, library=_Library(rows), cache=cache,
-        available_bindings=_NX_ANSWER_BINDINGS,
+        available_bindings=_nx_answer_bindings(question),
     )
 
-    if outcome == "blocked-upstream":
+    if outcome == "matched-correctly":
         assert baseline
-        assert _identify(rows, baseline[0]) != (expected_name, expected_verb)
-    else:
-        # "gate-fixed" included: review-default used to win this one and
-        # run without evidence; the binding gate now drops it before the
-        # route ever looks.
+        assert _identify(rows, baseline[0]) == (expected_name, expected_verb)
+    else:  # "routed" — the route's actual win
         assert baseline == [], (
             f"{question!r} now matches without the route — if the cosine "
             f"path improved, the route may no longer be needed for it"

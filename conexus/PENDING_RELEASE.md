@@ -71,3 +71,43 @@ mechanize, it matters enough to ship.
   the findings-append step.
 - `conexus/skills/rdr-accept/SKILL.md`: nexus-3fab5 register line in the
   strategic-planner dispatch brief.
+- `conexus/plans/builtin/{plan-author-default,plan-inspect-default,plan-inspect-dimensions,plan-promote-propose}.yml`,
+  `conexus/skills/plan-{author,inspect,promote}/`, `conexus/registry.yaml`,
+  `conexus/README.md`, `conexus/plans/dimensions.yml`: nexus-77cct RETIRED
+  the three plan-meta skills and their four templates. They dispatched a
+  `plan_match` MCP tool that has never existed (the server registers
+  plan_save / plan_search / plan_delete only), so nothing ever invoked
+  them successfully and there are no users to break; what they described
+  is `nx plan list` / `nx plan show` / `nx plan hygiene`, which work. They
+  were not inert: their templates absorb any question containing the word
+  "plan" and outranked the plan a caller actually wanted. Existing
+  installs lose the rows on the next `nx plan reseed` / `nx upgrade` via
+  `RETIRED_TEMPLATE_DIMENSIONS`, scoped to builtin-template rows only.
+  `dimensions.yml`'s verb enumeration was stale independently (it omitted
+  `query` and `lookup`, which shipped templates use) and is corrected.
+- `conexus/plans/builtin/{debug-default,review-default}.yml`: nexus-7y4v0
+  dropped the `subtree:` scoping. Both required a catalog tumbler prefix
+  nx_answer can never supply, so it aliased raw question prose into the
+  filter and the plans returned no evidence while reading as real
+  answers. review-default was reachable on the plain cosine path (0.512,
+  above the floor), so this was live.
+  `conexus/plans/builtin/traverse-then-generate.yml`: RETIRED. It
+  required caller-supplied catalog tumblers, which no question carries
+  and no live caller can produce, so it was unreachable by construction;
+  hybrid-factual-lookup already serves that shape in the same matcher
+  space. Per Sam's directive there are no unofferable plans, and
+  tests/test_builtin_plans.py now gates it: a template requiring a typed
+  binding that is neither defaulted nor derivable from a question fails
+  CI.
+- `src/nexus/plans/binding_infer.py` (NEW), `src/nexus/mcp/core.py`:
+  nx_answer derives TYPED bindings from the question — content_type from
+  "which RDRs / papers / code", author from "by Grossberg" — the same way
+  it derives a verb. Without it, find-by-author and type-scoped-search
+  were permanently unofferable to the only live caller, despite being
+  written for question shapes that carry the value they need. Derivation
+  is conservative by design: an ambiguous question ("papers and RDRs")
+  derives nothing and the plan stays unofferable, which is the old
+  behaviour, while a WRONG typed filter yields a confident empty answer
+  (schema.py records plan 14 returning zero results on a bad
+  content_type). An explicit caller binding always wins.
+

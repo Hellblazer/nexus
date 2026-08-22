@@ -1,3 +1,11 @@
+# nexus-7y4v0: this plan used to require `failing_path` and pass it as
+# `subtree: $failing_path`. `subtree` takes a catalog tumbler prefix, and
+# nx_answer has no file path to supply — it aliases unbound free-text
+# bindings from the question, so the filter received prose and matched
+# nothing. The plan ran and returned an empty answer that read like a real
+# one. Path scoping was never this plan's purpose (surfacing the design
+# context around a failure is), so it is gone rather than defaulted: the
+# symptom text is what a debug question actually carries.
 name: default
 description: "Dev / debug against a failing code path. Intentionally flat: dev work starts from\
   \ a concrete failure and the primary link walk is the catalog's per-file lookup (not multi-hop\
@@ -9,7 +17,6 @@ dimensions:
   scope: global
   strategy: default
 required_bindings:
-- failing_path
 - symptom
 optional_bindings: []
 default_bindings: {}
@@ -18,8 +25,7 @@ plan_json:
   steps:
   - tool: query
     args:
-      question: design context and authoring RDRs for this failing path
-      subtree: $failing_path
+      question: $symptom
       author: nexus
       corpus: all
   - tool: store_get_many

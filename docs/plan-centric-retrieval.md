@@ -130,7 +130,6 @@ restating the number.
 | `citation-traversal` | research / citation-traversal | Resolve seed → walk `reference-chain` both directions → hydrate → summarise |
 | `type-scoped-search` | research / type-scoped | Catalog content-type filter → semantic query within that bucket → summarise |
 | `hybrid-factual-lookup` | lookup / hybrid-factual-lookup | Vector recall + factual-evidence graph traversal → per-stream `limit_per_source` budgets → rank merge → generate. RDR-097. |
-| `traverse-then-generate` | lookup / traverse-then-generate | Explicit-seeds path: walk `factual-evidence` from caller-supplied tumblers → hydrate → generate. RDR-097 companion to `hybrid-factual-lookup`. |
 | `abstract-themes` | query / abstract-themes | CheapRAG community-summary pipeline: broad over-fetch (`mode: broad`) → `groupby` by BERTopic centroid label → per-group `aggregate` → `summarize` coalesce. Routes "main themes / overview / give a summary" question shapes. RDR-098. |
 
 The first 5 are the "verb" scenarios: they correspond to the 5
@@ -143,7 +142,9 @@ and cross-corpus compare) were retired as redundant with
 `verb: lookup` plans ship RDR-097's hybrid retrieval pattern for
 factual QA; they share matcher space and disambiguate on `strategy`.
 Use `hybrid-factual-lookup` when the caller has a question and needs
-vector recall to find seeds; use `traverse-then-generate` when seed
+vector recall to find seeds (`traverse-then-generate`, the
+explicit-seeds companion, was retired at nexus-77cct — no live caller
+could supply the tumblers it required); when seed
 tumblers are already explicit inputs. The `abstract-themes` template
 (`verb: query, strategy: abstract-themes`) ships RDR-098's
 community-summary pattern: it uses RDR-070's BERTopic taxonomy as a

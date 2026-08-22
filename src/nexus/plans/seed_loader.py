@@ -105,6 +105,9 @@ class SeedLoadResult:
     #: Reported rather than raised: one protected collision must not abort
     #: the rest of the seed run.
     protected: list[tuple[str, str]] = field(default_factory=list)
+    #: Library rows deleted because their template was retired on purpose
+    #: (``reconcile=True`` only). See RETIRED_TEMPLATE_DIMENSIONS.
+    retired: list[str] = field(default_factory=list)
 
     @property
     def total_scanned(self) -> int:
@@ -340,6 +343,68 @@ def _json_equal(stored: str | None, desired: str | None) -> bool:
         return stored == desired
 
 
+#: Templates DELETED from the shipped set on purpose, keyed by the
+#: canonical dimensions they used to occupy (nexus-77cct).
+#:
+#: Removing a YAML file is not enough. The orphan policy deliberately
+#: leaves an unrecognised library row alone, so a deleted template would
+#: linger in every existing install forever — and these four are exactly
+#: the rows that must not linger, because they absorb any question
+#: containing the word "plan" and outrank the plan a caller actually
+#: wanted. Retiring them without removing them would leave the damage and
+#: drop the plans.
+#:
+#: WHY THESE FOUR: they served the plan-author / plan-inspect /
+#: plan-promote skills, and those skills call a `plan_match` MCP tool that
+#: has never existed — the server registers plan_save, plan_search and
+#: plan_delete only. So nothing has ever invoked them successfully, there
+#: are no users to break, and what they described (survey the library,
+#: rank promotion candidates, show a plan's metrics) is `nx plan list` /
+#: `nx plan show` / `nx plan hygiene`, which work.
+#:
+#: An entry here is permanent. Re-shipping a template at the same
+#: dimensions would have it deleted on the next reconcile, so a revived
+#: template needs its entry removed in the same change.
+RETIRED_TEMPLATE_DIMENSIONS: frozenset[str] = frozenset({
+    '{"scope":"global","strategy":"default","verb":"plan-author"}',
+    '{"scope":"global","strategy":"default","verb":"plan-inspect"}',
+    '{"scope":"global","strategy":"dimensions","verb":"plan-inspect"}',
+    '{"scope":"global","strategy":"propose","verb":"plan-promote"}',
+    # traverse-then-generate: required `seeds` (catalog tumbler ids). No
+    # question carries those and plan_match is not an MCP tool, so no live
+    # caller could ever supply them — the plan was unreachable by
+    # construction, and hybrid-factual-lookup already serves the
+    # question-only case in the same matcher space. A shipped plan nothing
+    # can offer is dead weight that still competes for cosine rank.
+    '{"scope":"global","strategy":"traverse-then-generate","verb":"lookup"}',
+})
+
+
+def _reap_retired(library: Any, result: SeedLoadResult) -> None:
+    """Delete library rows whose template was retired on purpose.
+
+    Scoped hard: only rows at a retired dimension AND carrying the
+    builtin-template tag are touched, so a user plan that happens to
+    occupy one of those dimensions is reported and left alone rather than
+    deleted out from under them.
+    """
+    for canonical in sorted(RETIRED_TEMPLATE_DIMENSIONS):
+        row = library.get_plan_by_dimensions(project="", dimensions=canonical)
+        if row is None:
+            continue
+        tags = {t.strip() for t in (row.get("tags") or "").split(",") if t.strip()}
+        if "builtin-template" not in tags:
+            result.protected.append((
+                canonical,
+                f"library row id={row.get('id')} occupies a retired "
+                f"template's dimensions but is not a builtin-template row; "
+                "left alone",
+            ))
+            continue
+        library.delete_plan(int(row["id"]))
+        result.retired.append(str(row.get("name") or row.get("id")))
+
+
 def load_seed_directory(
     directory: Path,
     *,
@@ -380,6 +445,10 @@ def load_seed_directory(
     result = SeedLoadResult()
     # Per-run, per-project query index; built lazily on the first write.
     query_index: dict[str, _QueryIndex] = {}
+    if reconcile:
+        # Retired templates are a GLOBAL-tier statement, so this runs once
+        # per reconcile regardless of which tier directory is being loaded.
+        _reap_retired(library, result)
     if not directory.exists():
         _log.info("seed_directory_missing", path=str(directory))
         return result

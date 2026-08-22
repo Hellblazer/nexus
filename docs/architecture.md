@@ -1023,7 +1023,6 @@ Grouped by verb:
   - `type-scoped-search`: Single-content-type semantic search. Resolves the content-type bucket and runs the query against only those collections.
 - **verb=lookup**
   - `hybrid-factual-lookup`: Factual claim, named entity, or specific data point. Fuses vector recall with FTS lexical match for narrow-target retrieval.
-  - `traverse-then-generate`: Expand from a known seed tumbler. Walks `cites`/`implements`/related edges and generates a factual answer from the linked documents.
 - **verb=document**
   - `document-default`: Documentation authoring or audit. Gathers prose and code touching the area, walks documentation-for edges, hydrates both corpora.
 - **verb=review**

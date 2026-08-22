@@ -157,7 +157,10 @@ class TestPlanTemplates:
         # corpus-coverage-check). Total: 17. Legacy _PLAN_TEMPLATES
         # retired.
         db_path, seed_fn = _seed_templates(tmp_path, monkeypatch)
-        assert seed_fn() == 17
+        assert seed_fn() == len(list(
+            (Path(__file__).parent.parent
+             / 'conexus' / 'plans' / 'builtin').glob('*.yml')
+        ))
         assert seed_fn() == 0  # idempotent
 
     @pytest.mark.parametrize("field,expected", [

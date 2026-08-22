@@ -546,30 +546,6 @@ standalone_skills:
       - "what RDRs should I cite when documenting X"
     tools: [Read]
 
-  plan-author:
-    description: "Meta-seed skill for authoring new plan templates — dispatches plan_match with dimensions={verb:plan-author} and surveys prior art before drafting"
-    triggers:
-      - "author a new plan template"
-      - "how do I write a plan for X"
-      - "draft a plan for this verb"
-    tools: [Read]
-
-  plan-inspect:
-    description: "Meta-seed skill for inspecting plan metrics or the dimension registry — dispatches plan_match with dimensions={verb:plan-inspect}"
-    triggers:
-      - "inspect plan metrics"
-      - "show dimension registry usage"
-      - "what plans are earning their slot"
-    tools: [Read]
-
-  plan-promote:
-    description: "Meta-seed skill that surveys plan library metrics and ranks promotion candidates — dispatches plan_match with dimensions={verb:plan-promote, strategy:propose}"
-    triggers:
-      - "promote high-use plans"
-      - "rank promotion candidates"
-      - "surface plans ready for a higher scope"
-    tools: [Read]
-
 # =============================================================================
 # PIPELINES
 # =============================================================================

@@ -40,9 +40,10 @@
 # downstream filter. Tracked as a systemic fix in nexus-h3e2;
 # hard-coded here until that lands.
 #
-# Companion plan: traverse-then-generate.yml shares the matcher space
+# (Its companion traverse-then-generate.yml was RETIRED at nexus-77cct:
+# it required caller-supplied seed tumblers, which no live caller can
+# produce, so this plan now serves that shape too.)
 # (``verb: lookup``) and disambiguates on ``strategy``. Use
-# traverse-then-generate when the caller already has explicit seed
 # tumblers; use this plan when the caller has a question.
 
 name: hybrid-factual-lookup

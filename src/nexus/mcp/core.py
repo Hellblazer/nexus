@@ -6292,9 +6292,26 @@ def _nx_answer_caller_bindings(
     would reopen the offer-a-plan-that-cannot-run hole from the other
     side.
     """
-    run: dict[str, Any] = {
+    # Typed bindings the question itself supplies, derived FIRST so an
+    # explicit caller value always overrides one that was inferred
+    # (nexus-7y4v0 follow-through). Without this, a plan requiring a typed
+    # value is permanently unofferable to nx_answer, which binds only
+    # `intent` — and the two templates in that state, find-by-author and
+    # type-scoped-search, were written for question shapes that CARRY the
+    # value they need. A template unreachable for the question it exists
+    # to serve is an unreachable feature, not a safe default.
+    #
+    # Derivation is deliberately stubborn: an ambiguous question derives
+    # nothing and the plan stays unofferable, which is today's behaviour.
+    # A WRONG typed filter is the harmful outcome — schema.py records
+    # plan 14 returning zero results on a bad content_type while the same
+    # query without it returned the right paper first.
+    from nexus.plans.binding_infer import infer_typed_bindings  # noqa: PLC0415 — deferred; matches this module's convention
+
+    run: dict[str, Any] = dict(infer_typed_bindings(question))
+    run.update({
         k: v for k, v in (bindings or {}).items() if v is not None
-    }
+    })
     run["intent"] = question
     if scope:
         run["_nx_scope"] = scope

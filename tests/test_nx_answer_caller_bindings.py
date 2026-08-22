@@ -31,10 +31,34 @@ from nexus.mcp.core import _nx_answer_caller_bindings
 
 Q = "which rdrs discuss intermediate representations"
 
+#: A question carrying no derivable typed value. `Q` deliberately DOES
+#: carry one ("rdrs"), which is the point of this file — it is the shape
+#: type-scoped-search exists for.
+Q_PLAIN = "how does the catalog resolve a tumbler"
 
-def test_bare_call_supplies_only_intent() -> None:
+
+def test_bare_call_supplies_intent_and_whatever_the_question_carries() -> None:
+    """nx_answer now derives typed bindings from the question itself.
+
+    This test used to assert a bare call supplies ONLY intent. That was
+    true, and it was the reason type-scoped-search and find-by-author
+    were permanently unofferable to the only live caller despite being
+    written for question shapes that carry the value they need — the very
+    hole this file's docstring opens by describing. Q names a content
+    type, so a bare call now supplies it.
+    """
     run, avail = _nx_answer_caller_bindings(question=Q, scope="", bindings=None)
-    assert run == {"intent": Q}
+    assert run == {"intent": Q, "content_type": "rdr"}
+    assert avail == frozenset({"intent", "content_type"})
+
+
+def test_a_question_carrying_nothing_derivable_supplies_only_intent() -> None:
+    """The other half: derivation is conservative, so an ordinary question
+    leaves the old contract exactly as it was."""
+    run, avail = _nx_answer_caller_bindings(
+        question=Q_PLAIN, scope="", bindings=None,
+    )
+    assert run == {"intent": Q_PLAIN}
     assert avail == frozenset({"intent"})
 
 
@@ -89,9 +113,15 @@ def test_a_free_text_binding_may_also_be_supplied() -> None:
 
 
 def test_none_valued_binding_is_dropped_not_declared() -> None:
-    """A None slips through JSON tool args easily; it must not count as supplied."""
+    """A None slips through JSON tool args easily; it must not count as supplied.
+
+    Uses a question carrying nothing derivable, so the assertion tests
+    the None-drop and not the derivation: with Q the binding would be
+    supplied anyway, by inference, and the test would pass for the wrong
+    reason.
+    """
     run, avail = _nx_answer_caller_bindings(
-        question=Q, scope="", bindings={"content_type": None},
+        question=Q_PLAIN, scope="", bindings={"content_type": None},
     )
     assert "content_type" not in run
     assert "content_type" not in avail, (

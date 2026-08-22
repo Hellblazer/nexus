@@ -115,9 +115,6 @@ conexus/
     ├── debug/               # verb: debug / failing-path investigation
     ├── document/            # verb: document coverage / authoring
     ├── plan-first/          # gate: plan_match before any retrieval
-    ├── plan-author/         # meta-seed: author new plan templates
-    ├── plan-inspect/        # meta-seed: inspect plan metrics
-    ├── plan-promote/        # meta-seed: rank promotion candidates
     │
     │   # RDR-080 pointer skills (dispatch a specific MCP tool — no agent spawn)
     ├── query/               # → mcp__plugin_conexus_nexus__nx_answer
@@ -163,9 +160,6 @@ This includes RDR-078 verb skills, RDR-080 MCP-tool pointers, and infrastructure
 | debug | Dev / debug from a failing code path |
 | document | Documentation authoring or coverage audit |
 | plan-first | Retrieval gate — try `plan_match` before falling through to `/conexus:query` |
-| plan-author | Author a new plan template |
-| plan-inspect | Inspect plan metrics or the dimension registry |
-| plan-promote | Rank promotion candidates by library metrics |
 
 ### MCP-tool pointer skills (RDR-080)
 
