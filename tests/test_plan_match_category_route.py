@@ -297,6 +297,15 @@ def test_category_predicate_matches_comma_tokens(tags, expected):
         # plans outrank real ones on the cosine path today.
         ("Author a new plan for corpus coverage", "plan-author"),
         ("What is the release plan for the engine?", "research"),
+        # "debug" is a noun/adjective as often as a verb in this
+        # codebase's vocabulary, so the bare word must lose to the more
+        # specific documentation noun. It previously won, and since
+        # debug-default is a real routable template that produced a wrong
+        # HIT, not a harmless miss.
+        ("What documentation exists for the debug logging system?", "document"),
+        ("Where is the debug output written?", "debug"),
+        # An unambiguous failure word still outranks documentation.
+        ("What documentation explains this traceback?", "debug"),
         # No confident reading -> no routing -> today's behaviour.
         ("", None),
         ("   ", None),

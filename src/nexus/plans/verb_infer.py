@@ -62,13 +62,14 @@ _VERB_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"\bplan\s+(librar|metric|dimension|match\s+histor)"
         r"|\b(inspect|show)\s+(the\s+)?plan\b"
     )),
-    # Failure investigation. The strongest signal in the set, and the
-    # reason it precedes critique and retrieval: these questions are
-    # usually phrased as "why does X ..." which would otherwise read as
-    # research.
+    # Failure investigation, UNAMBIGUOUS signals. These name a failure,
+    # so they outrank everything below including documentation: "what
+    # documentation explains this traceback" is a debugging question.
+    # Placed ahead of retrieval because such questions are usually phrased
+    # as "why does X ..." which would otherwise read as research.
     ("debug", re.compile(
-        r"\bdebug\b|\btraceback\b|\bstack\s?trace\b|\bregression\b"
-        r"|\b(fail|failing|failure|crash|crashes|crashing|broken|breaks)\b"
+        r"\btraceback\b|\bstack\s?trace\b|\bregression\b"
+        r"|\b(fail|fails|failing|failure|crash|crashes|crashing|broken|breaks)\b"
         r"|\b(error|exception)s?\b"
         r"|\bwhy\s+(does|is|are|did|do|isn't|doesn't|won't|can't)\b"
     )),
@@ -87,6 +88,15 @@ _VERB_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("document", re.compile(
         r"\bdocumentation\b|\bdocument(ed|ing)\b|\bdocstrings?\b|\bdocs?\b"
     )),
+    # Failure investigation, AMBIGUOUS signal. "debug" is a noun and an
+    # adjective as often as a verb in this codebase's own vocabulary —
+    # "debug logging", "debug output", "the debug tool" — so the bare word
+    # sits BELOW documentation. Above it, "what documentation exists for
+    # the debug logging system?" derived `debug` and routed to
+    # debug-default, which is a real routable template, so the wrong verb
+    # produced a wrong HIT rather than a harmless miss. Unambiguous
+    # failure words still outrank documentation, in the class above.
+    ("debug", re.compile(r"\bdebug(ging|ged)?\b")),
     # Critique / synthesis. Covers the {analyze, review, compare} class.
     ("analyze", re.compile(
         r"\banalyz\w+\b|\banalys\w+\b|\bcritique\b|\baudit\b"

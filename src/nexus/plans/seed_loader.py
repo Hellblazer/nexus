@@ -242,6 +242,14 @@ class _QueryIndex:
     the description text, so the only way to know what a write will land
     on is to look the description up.
 
+    The index MUST be told about every write via :meth:`record`. A
+    snapshot taken once and never refreshed reintroduces the exact bug it
+    was added to close, just at run granularity: two templates in one
+    directory sharing a description but differing in dimensions both see
+    the pre-run state, both write, and the second silently overwrites the
+    first while the result object reports two successful inserts. That is
+    worse than no guard at all, because it reports success.
+
     ``complete`` is False when the listing hit its page cap, in which
     case absence is unprovable and callers must fail closed rather than
     assume no collision.
@@ -264,6 +272,10 @@ class _QueryIndex:
 
     def get(self, query: str) -> dict[str, Any] | None:
         return self._by_query.get(query)
+
+    def record(self, query: str, row_id: int, *, name: str | None, tags: str) -> None:
+        """Register a row this run just wrote, so later templates see it."""
+        self._by_query[query] = {"id": row_id, "name": name, "tags": tags}
 
 
 def _query_collision(
@@ -447,7 +459,7 @@ def load_seed_directory(
             # place and keeps its row.
             library.delete_plan(int(existing["id"]))
 
-        library.save_plan(
+        written_id = library.save_plan(
             query=desired.query,
             plan_json=desired.plan_json,
             outcome=outcome,
@@ -460,6 +472,16 @@ def load_seed_directory(
             default_bindings=desired.default_bindings,
             parent_dims=desired.parent_dims,
         )
+        # Keep the collision index current. Without this the guard only
+        # sees rows that existed before the run, and two templates in the
+        # same directory sharing a description clobber each other in
+        # silence.
+        idx = query_index.get(project)
+        if idx is not None:
+            idx.record(
+                desired.query, int(written_id),
+                name=desired.name, tags=desired.tags,
+            )
         if existing is None:
             result.inserted.append(path.name)
         else:

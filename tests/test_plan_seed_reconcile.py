@@ -213,6 +213,40 @@ def test_collision_guard_applies_to_the_insert_only_path_too(tmp_path, library):
     assert [name for name, _ in result.protected] == ["collide2.yml"]
 
 
+def test_two_templates_in_one_run_cannot_clobber_each_other(tmp_path, library):
+    """The collision guard must see writes made by its own run.
+
+    Every other collision test pre-seeds the colliding row before the run
+    starts, which a once-per-run snapshot catches. This one has both
+    colliding rows arrive DURING the run — the first template inserts, and
+    the second shares its description while differing in dimensions. With
+    a stale snapshot the second write's upsert lands on the first's row
+    and destroys it, while the result object cheerfully reports two
+    successful inserts. Reporting success while losing data is worse than
+    having no guard.
+    """
+    shared = "One description, two templates, same run."
+    _write_template(tmp_path, "dup-a", description=shared)
+    _write_template(tmp_path, "dup-b", description=shared)
+
+    result = load_seed_directory(tmp_path, library=library, reconcile=True)
+
+    assert len(result.inserted) == 1, (
+        f"expected exactly one insert, got {result.inserted}"
+    )
+    assert len(result.protected) == 1, (
+        f"the second template must be reported, not silently written: "
+        f"{result.protected}"
+    )
+    survivor = result.inserted[0]
+    template = yaml.safe_load((tmp_path / survivor).read_text())
+    row = library.get_plan_by_dimensions(
+        project="",
+        dimensions=canonical_dimensions_json(template["dimensions"]),
+    )
+    assert row is not None, f"{survivor} was written and then destroyed"
+
+
 def test_rewriting_a_rows_own_description_is_not_a_collision(tmp_path, library):
     """The guard must not fire on the row being updated itself, or every
     same-description rewrite would refuse."""
