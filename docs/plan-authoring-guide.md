@@ -4,8 +4,8 @@ A *plan* is a YAML/JSON template describing a reusable retrieval or
 analysis recipe — what to retrieve, in which order, scoped how,
 parameterised by which caller-supplied bindings. RDR-078 introduced
 the plan-centric retrieval contract; this guide is the canonical
-reference for anyone authoring a new plan template (by hand, via
-`verb:plan-author`, or via a downstream tool).
+reference for anyone authoring a new plan template (by hand or via
+a downstream tool).
 
 Companion references:
 
@@ -103,7 +103,7 @@ Every plan pins at minimum `verb` and `scope`. The canonical axes:
 
 | Axis | Values | When to pin |
 |------|--------|-------------|
-| `verb` | `research`, `review`, `analyze`, `debug`, `document`, `query`, `lookup`, `plan-author`, `plan-promote`, `plan-inspect` | Always. The action the plan performs. |
+| `verb` | `research`, `review`, `analyze`, `debug`, `document`, `query`, `lookup` | Always. The action the plan performs. |
 | `scope` | `personal`, `rdr-<slug>`, `project`, `repo`, `global` | Always. Where the plan is published. |
 | `strategy` | `default`, `security`, `performance`, `compliance`, … | When a verb has multiple valid strategies; defaults to `default`. |
 | `object` | `change-set`, `rdr`, `module`, `test-suite`, … | When the verb specifically targets a known artefact type. |
