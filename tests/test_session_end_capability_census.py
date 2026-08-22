@@ -695,3 +695,84 @@ class TestRotationFailureLogging:
         assert any("rotat" in e.lower() for e in events), (
             f"expected a structlog event naming the rotation failure; got {events!r}"
         )
+
+
+# ── duplicate-append guard (2026-08-22) ──────────────────────────────────────
+#
+# SessionEnd fires many times per session. Measured on a working box: 306 rows
+# across 28 DISTINCT sessions, one session alone writing 134 of them, so ~91
+# pct of the file was duplicate rows and any naive aggregate overcounted by
+# ~2.2x. The guard is a bounded TAIL read, never a read-modify-write — this
+# module's docstring forbids the latter as a concurrency bug class.
+
+def _read_rows(path) -> list[dict]:
+    import json as _json
+    return [_json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+
+
+def test_refire_with_no_new_activity_does_not_append(tmp_path, monkeypatch):
+    from nexus import _session_end_census as mod
+
+    log = tmp_path / "capability_census.jsonl"
+    monkeypatch.setattr(mod, "capability_census_log_path", lambda: log)
+    record = {"session_id": "s1", "total_calls": 10, "capabilities": {"agent": 1}}
+    monkeypatch.setattr(
+        mod, "build_capability_census_record", lambda *a, **k: dict(record)
+    )
+    monkeypatch.setattr(mod, "census_project_dir", lambda: tmp_path, raising=False)
+
+    for _ in range(5):
+        mod.write_session_capability_census("s1")
+
+    rows = _read_rows(log)
+    assert len(rows) == 1, f"expected 1 row after 5 re-fires, got {len(rows)}"
+
+
+def test_refire_WITH_new_activity_still_appends(tmp_path, monkeypatch):
+    """A growing session must still be recorded — the guard is not a mute."""
+    from nexus import _session_end_census as mod
+
+    log = tmp_path / "capability_census.jsonl"
+    monkeypatch.setattr(mod, "capability_census_log_path", lambda: log)
+    calls = iter([10, 10, 42])
+    monkeypatch.setattr(
+        mod,
+        "build_capability_census_record",
+        lambda *a, **k: {"session_id": "s1", "total_calls": next(calls)},
+    )
+    monkeypatch.setattr(mod, "census_project_dir", lambda: tmp_path, raising=False)
+
+    for _ in range(3):
+        mod.write_session_capability_census("s1")
+
+    rows = _read_rows(log)
+    assert [r["total_calls"] for r in rows] == [10, 42]
+
+
+def test_a_different_session_always_appends(tmp_path, monkeypatch):
+    from nexus import _session_end_census as mod
+
+    log = tmp_path / "capability_census.jsonl"
+    monkeypatch.setattr(mod, "capability_census_log_path", lambda: log)
+    sids = iter(["s1", "s2"])
+    monkeypatch.setattr(
+        mod,
+        "build_capability_census_record",
+        lambda *a, **k: {"session_id": next(sids), "total_calls": 10},
+    )
+    monkeypatch.setattr(mod, "census_project_dir", lambda: tmp_path, raising=False)
+
+    mod.write_session_capability_census("s1")
+    mod.write_session_capability_census("s2")
+
+    assert [r["session_id"] for r in _read_rows(log)] == ["s1", "s2"]
+
+
+def test_guard_degrades_to_appending_when_the_tail_is_unreadable(tmp_path):
+    """A census that cannot check must append, never drop."""
+    from nexus._session_end_census import _is_duplicate_of_last_record
+
+    assert _is_duplicate_of_last_record(tmp_path / "nope.jsonl", {"session_id": "s"}) is False
+    corrupt = tmp_path / "c.jsonl"
+    corrupt.write_text("{not json\n")
+    assert _is_duplicate_of_last_record(corrupt, {"session_id": "s"}) is False

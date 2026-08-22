@@ -1,7 +1,7 @@
 # Dimensions registry for RDR-078 plan templates.
 #
 # Each top-level key names a registered dimension; the value is a
-# free-form description used by the plan-author meta-seed and the
+# free-form description used by the
 # SC-19 schema validator. The validator warns (or, with --strict,
 # rejects) plan templates whose dimension keys are not in this set.
 #
@@ -15,7 +15,7 @@
 verb:
   description: >-
     The action a plan performs. One of: research, review, analyze,
-    debug, document, plan-author, plan-promote, plan-inspect.
+    debug, document, query, lookup.
   required: true
 
 scope:

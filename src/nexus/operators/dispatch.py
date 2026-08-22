@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+import math
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -123,7 +124,18 @@ __all__ = [
     "OperatorError",
     "OperatorOutputError",
     "OperatorTimeoutError",
+    "OperatorBudgetExceededError",
+    "NX_DISPATCH_MAX_BUDGET_USD_ENV",
 ]
+
+#: nexus-2g8y7: env fallback for ``claude_dispatch``'s ``max_budget_usd``
+#: kwarg. Param wins when both are set; unset/None on both leaves argv
+#: byte-identical to every pre-nexus-2g8y7 call (no ``--max-budget-usd``
+#: flag at all) -- this is an opt-in per-DISPATCH cost ceiling, not a
+#: default. An invalid (non-float) value fails loud at dispatch time
+#: rather than being silently ignored (see ``claude_dispatch``'s env
+#: resolution).
+NX_DISPATCH_MAX_BUDGET_USD_ENV: str = "NX_DISPATCH_MAX_BUDGET_USD"
 
 
 class OperatorError(Exception):
@@ -163,6 +175,42 @@ class OperatorTimeoutError(OperatorError):
         #: write itself failed (``_persist_timeout_log``'s own best-effort
         #: fallback) or this exception was constructed outside the real
         #: timeout path.
+        self.log_path = log_path
+
+
+class OperatorBudgetExceededError(OperatorError):
+    """Raised when a per-dispatch ``--max-budget-usd`` ceiling aborts
+    ``claude -p`` mid-turn (nexus-2g8y7).
+
+    Only ever raised when the caller (or ``NX_DISPATCH_MAX_BUDGET_USD``)
+    actually set a ceiling for THIS dispatch -- opt-in follows the flag,
+    never fires for a dispatch that never asked for one. Detection is
+    keyword-based on the captured stdout/stderr (see
+    ``_looks_like_budget_exceeded_signal``): the CLI docs do not define a
+    distinct wire signal for a budget abort beyond a bare non-zero exit,
+    and the ambient monthly spend limit currently blocks every
+    ``claude -p`` invocation in dev environments, so the exact shape
+    could not be empirically probed before this bead shipped (see
+    ``scripts/probe_budget_abort.sh``).
+
+    Carries the same partial-output fields as ``OperatorTimeoutError``
+    for the same reason: a budget abort, like a timeout kill, loses
+    whatever tail the subprocess had not yet flushed, so the caller
+    needs the reconstructed partial content programmatically rather
+    than re-parsing the message text or re-reading the log file.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        partial_text: str = "",
+        event_count: int = 0,
+        log_path: Path | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.partial_text = partial_text
+        self.event_count = event_count
         self.log_path = log_path
 
 
@@ -405,6 +453,74 @@ def _persist_timeout_log(
     except Exception as exc:  # noqa: BLE001 - best-effort timeout-log write; logged via log.warning
         _log.warning("operator_timeout_log_failed", error=str(exc))
         return "(log write failed)"
+
+
+def _persist_budget_log(
+    max_budget_usd: float, partial_text: str, stderr: bytes, event_count: int,
+) -> str:
+    """Persist partial subprocess output to a timestamped log file when a
+    per-dispatch ``--max-budget-usd`` ceiling aborts ``claude -p`` mid-turn
+    (nexus-2g8y7).
+
+    Mirrors :func:`_persist_timeout_log`'s shape and contract exactly --
+    same log directory, same best-effort-never-raises posture, failures
+    swallowed so the raised exception (the load-bearing signal) always
+    surfaces -- with a budget-specific filename prefix and header line so
+    a human grepping ``~/.config/nexus/logs`` can tell a budget abort from
+    a timeout kill without opening the file. Kept as a separate function
+    rather than sharing one parametrized helper: the two prefixes carry
+    different meaning to a reader, and the duplication is small enough
+    that a shared helper would cost more in indirection than it saves.
+
+    Returns the file path as a string for inclusion in the raised
+    exception's message. Failures to write the log are swallowed.
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415 - branch-local; deferred to call time
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    try:
+        logs_dir = nexus_config_dir() / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        path = logs_dir / f"operator-budget-{ts}.log"
+        path.write_bytes(
+            f"[operator-budget-exceeded max_budget_usd={max_budget_usd}] {ts}Z\n".encode()
+            + f"--- stdout ({event_count} stream-json events; reconstructed text) ---\n".encode()
+            + partial_text.encode(errors="replace") + b"\n"
+            + b"--- stderr ---\n" + stderr + b"\n"
+        )
+        return str(path)
+    except Exception as exc:  # noqa: BLE001 - best-effort budget-log write; logged via log.warning
+        _log.warning("operator_budget_log_failed", error=str(exc))
+        return "(log write failed)"
+
+
+def _looks_like_budget_exceeded_signal(*texts: str) -> bool:
+    """Conservative, generous keyword match for a ``--max-budget-usd``
+    abort signal in captured stdout/stderr text (nexus-2g8y7).
+
+    The CLI docs do not define a distinct wire signal for a budget abort
+    beyond a bare non-zero exit code, and the ambient monthly spend limit
+    currently blocks every ``claude -p`` invocation in dev environments,
+    so the exact shape could not be empirically probed before this bead
+    shipped -- run ``scripts/probe_budget_abort.sh`` once that clears and
+    tighten this match against real captured output.
+
+    Until then this matches generously and case-insensitively on the
+    ``budget`` token (which also covers ``max-budget``/``--max-budget-usd``
+    echoed back verbatim in a CLI error message) across every text passed
+    in. This can false-positive on an unrelated message that happens to
+    mention "budget" -- e.g. an old CLI's "unrecognized option
+    '--max-budget-usd'" rejection would also match. Accepted per this
+    bead's locked design: the caller-visible exception message always
+    carries the CLI's real stdout/stderr regardless of which exception
+    type fires (``OperatorBudgetExceededError`` vs the generic
+    ``OperatorError``), so nothing is hidden either way -- only the
+    exception TYPE, not the diagnostic content, is at risk of being
+    imprecise.
+    """
+    haystack = "\n".join(texts).lower()
+    return "budget" in haystack
 
 
 def _parse_stream_json_output(raw: str) -> tuple[dict[str, Any] | None, str, int]:
@@ -773,6 +889,33 @@ def _close_dispatch_session(session_id: str | None, session_token: str | None) -
         )
 
 
+def model_family_matches(requested: str | None, canonical: str | None) -> bool:
+    """nexus-ek8tr drift tripwire: does the RECORDED canonical id belong to
+    the REQUESTED model's family? ``requested`` may be an alias ("fable",
+    "haiku") or a full id ("claude-haiku-4-5"); the check is that some
+    alphabetic token of the request appears in the canonical id. Vacuously
+    true when either side is unknown (no basis to warn)."""
+    if not requested or not canonical:
+        return True
+    tokens = [t for t in requested.lower().replace("claude-", "").split("-") if t.isalpha()]
+    canon = canonical.lower()
+    return any(t in canon for t in tokens) if tokens else True
+
+
+def _warn_on_family_drift(requested: str | None, usage: "DispatchUsage | None",
+                          operator: str | None) -> None:
+    """Emit the nexus-ek8tr drift warning when the recorded canonical id
+    falls outside the requested model's family. Never raises."""
+    canonical = usage.model if usage is not None else None
+    if not model_family_matches(requested, canonical):
+        _log.warning(
+            "model_family_drift",
+            requested_model=requested,
+            canonical_model=canonical,
+            operator=operator,
+        )
+
+
 async def claude_dispatch(
     prompt: str,
     json_schema: dict[str, Any],
@@ -783,6 +926,7 @@ async def claude_dispatch(
     usage_sink: list[DispatchUsage] | None = None,
     model: str | None = None,
     operator: str | None = None,
+    max_budget_usd: float | None = None,
 ) -> dict[str, Any]:
     """Dispatch a single operator call to claude -p, fully async.
 
@@ -868,14 +1012,50 @@ async def claude_dispatch(
             error message (only when *model* is also set) so a rejected
             ``--model`` value names both what was rejected and who asked
             for it. Never affects argv or control flow.
+        max_budget_usd: Opt-in per-DISPATCH cost ceiling (nexus-2g8y7),
+            passed straight to the CLI's own ``--max-budget-usd`` flag
+            (added in Claude Code 2.1.217; confirmed present on installed
+            2.1.238). Per the CLI docs, this is a HARD abort at cap:
+            spawning denied, running background subagents halted, exit
+            code 1, no graceful completion -- spend is SHARED across the
+            dispatched process and any subagents it spawns, not
+            per-process. ``None`` (default) falls back to the
+            ``NX_DISPATCH_MAX_BUDGET_USD`` env var (parsed as ``float``;
+            an unparseable value raises ``ValueError`` immediately,
+            before any subprocess is spawned -- never silently ignored).
+            The explicit parameter wins over the env var when both are
+            set. Both unset/None leaves argv byte-identical to every
+            pre-nexus-2g8y7 call -- no ``--max-budget-usd`` flag appears
+            at all. There is deliberately NO derived default here: the
+            step-shape cost estimator (``plans/budget_default.py``) has
+            no discriminating power today (every live plan predicts the
+            same 0.90433 figure) and a real default needs per-dispatch
+            history calibration this bead does not attempt (prerequisite:
+            nexus-se36l). Detection of a budget-triggered abort is
+            keyword-based (see ``_looks_like_budget_exceeded_signal``)
+            because the CLI does not document a distinct wire signal
+            beyond the exit code, and the ambient monthly spend limit
+            currently blocks probing the real shape (see
+            ``scripts/probe_budget_abort.sh``) -- only engaged when this
+            resolves to non-``None``, so a dispatch that never opted in
+            cannot have its ordinary failures reclassified.
 
     Returns:
         Parsed JSON dict from stdout.
 
     Raises:
         OperatorTimeoutError: subprocess exceeded *timeout*.
-        OperatorError: subprocess exited non-zero.
+        OperatorBudgetExceededError: subprocess aborted because the
+            *max_budget_usd* ceiling (param or env) was exceeded. A
+            subclass of ``OperatorError`` -- a caller that only catches
+            ``OperatorError`` still catches this.
+        OperatorError: subprocess exited non-zero for any other reason,
+            including the CLI rejecting an unsupported ``--max-budget-usd``
+            flag outright (old CLI) -- the flag is never silently
+            stripped; the CLI's own stderr surfaces in the message.
         OperatorOutputError: stdout was not valid JSON.
+        ValueError: ``NX_DISPATCH_MAX_BUDGET_USD`` is set but is not a
+            valid float.
     """
     schema_json = json.dumps(json_schema)
     # RDR-196 .p2b review fix (nexus-nyry9.15, code-review-expert [23032]
@@ -889,6 +1069,33 @@ async def claude_dispatch(
     if model is not None and not model.strip():
         _log.warning("claude_dispatch_empty_model_normalized", operator=operator)
         model = None
+    # nexus-2g8y7: resolve the effective per-dispatch budget ceiling.
+    # Param wins over env; both unset leaves argv untouched (no
+    # --max-budget-usd flag appended below). An env value that fails to
+    # parse as a float fails LOUD here, before any subprocess spawns --
+    # never silently ignored (per this bead's "no silent anything"
+    # requirement).
+    effective_max_budget_usd = max_budget_usd
+    if effective_max_budget_usd is None:
+        _env_budget = os.environ.get(NX_DISPATCH_MAX_BUDGET_USD_ENV)
+        if _env_budget is not None and _env_budget.strip():
+            try:
+                effective_max_budget_usd = float(_env_budget)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{NX_DISPATCH_MAX_BUDGET_USD_ENV}={_env_budget!r} is not "
+                    f"a valid float -- unset it or fix the value"
+                ) from exc
+    if effective_max_budget_usd is not None and not (
+        math.isfinite(effective_max_budget_usd) and effective_max_budget_usd > 0
+    ):
+        # Review Medium 2 (review-2g8y7-2xjge-code [23268]): float()
+        # accepts "nan"/"inf"/negatives, none of which is a budget. The
+        # same check covers a nonsensical param value.
+        raise ValueError(
+            f"max_budget_usd={effective_max_budget_usd!r} must be a "
+            f"finite positive dollar amount"
+        )
     # Search review I-6: start in a new process group so we can reach
     # any child processes ``claude -p`` spawns (nested claude calls, tool
     # subprocesses). Same killpg idiom as T1 chroma + MinerU cleanup
@@ -979,6 +1186,11 @@ async def claude_dispatch(
     # byte-identical to before this bead.
     if model:
         argv += ["--model", model]
+    if effective_max_budget_usd is not None:
+        # nexus-2g8y7: fixed-point formatting (never scientific notation,
+        # which `str()` would emit for very small values like 1e-06) so
+        # the CLI always sees an unambiguous decimal literal.
+        argv += ["--max-budget-usd", f"{effective_max_budget_usd:f}"]
     if mcp_servers:
         argv += ["--mcp-config", json.dumps({"mcpServers": mcp_servers})]
     if allowed_tools:
@@ -1196,6 +1408,29 @@ async def claude_dispatch(
                 f" [model={model!r} operator={operator!r}]"
                 if model is not None else ""
             )
+            # nexus-2g8y7: only engaged when THIS dispatch actually opted
+            # into a budget ceiling -- a dispatch that never set
+            # max_budget_usd/NX_DISPATCH_MAX_BUDGET_USD cannot have its
+            # ordinary failures reclassified, so the generic OperatorError
+            # path below is byte-identical to before this bead for every
+            # existing (non-opted-in) call site.
+            if effective_max_budget_usd is not None and _looks_like_budget_exceeded_signal(
+                stdout_text, stderr.decode(errors="replace")
+            ):
+                budget_log_path_str = _persist_budget_log(
+                    effective_max_budget_usd, _partial_text, stderr, _event_count,
+                )
+                raise OperatorBudgetExceededError(
+                    f"claude -p aborted: --max-budget-usd "
+                    f"{effective_max_budget_usd:f} exceeded (dispatch-harness "
+                    f"abort, not a model answer): {detail} [{where}]",
+                    partial_text=_partial_text,
+                    event_count=_event_count,
+                    log_path=(
+                        Path(budget_log_path_str)
+                        if budget_log_path_str != "(log write failed)" else None
+                    ),
+                )
             raise OperatorError(
                 f"claude -p exited {proc.returncode} (dispatch-harness "
                 f"failure, not a model answer): {detail} [{where}]"
@@ -1215,6 +1450,17 @@ async def claude_dispatch(
         # real stream-json (the format this repo's own test doubles use).
         final_result, _partial_text, event_count = _parse_stream_json_output(raw)
         _ambient_sink = _ambient_usage_sink.get()
+        # nexus-ek8tr drift tripwire — OUTSIDE the sink guard (review fix,
+        # T2 [23232] Important #2): the planner's own dispatch runs with
+        # no sink at all, and a pinned dispatch must be drift-checked on
+        # EVERY path, not only telemetry-wrapped ones. Only fires when a
+        # result parsed (final_result present); a failed dispatch has no
+        # canonical id to check.
+        _drift_usage = (
+            _parse_dispatch_usage(final_result) if final_result is not None else None
+        )
+        if model is not None and _drift_usage is not None:
+            _warn_on_family_drift(model, _drift_usage, operator)
         if usage_sink is not None or _ambient_sink is not None:
             # RDR-196 .p1a (nexus-nyry9.7) + .p1b Gap-1 addendum
             # (nexus-nyry9.8, 2026-08-20): capture cost/usage telemetry
@@ -1232,7 +1478,11 @@ async def claude_dispatch(
             # then_raises) both stay true unchanged. Parsed ONCE; the
             # SAME DispatchUsage instance is appended to both sinks when
             # both are active, never two independently-parsed copies.
-            _usage = _parse_dispatch_usage(final_result)
+            # Reuse the drift-check parse when it ran (review r2 suggestion:
+            # a second _parse_dispatch_usage here could double any parse
+            # warning); the fallback covers final_result None, where the
+            # parse itself emits the all-None-usage warning path.
+            _usage = _drift_usage if _drift_usage is not None else _parse_dispatch_usage(final_result)
             if usage_sink is not None:
                 usage_sink.append(_usage)
             if _ambient_sink is not None:

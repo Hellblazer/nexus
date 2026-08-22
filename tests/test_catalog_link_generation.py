@@ -43,7 +43,11 @@ class TestCitationLinks:
         )
         count = generate_citation_links(cat)
         assert count == 1
-        links = cat.links_from(cat.find("Paper A")[0].tumbler, link_type="cites")
+        from tests._catalog_fixture_ops import documents_by_title
+
+        paper_a = documents_by_title("Paper A")
+        assert len(paper_a) == 1
+        links = cat.links_from(paper_a[0].tumbler, link_type="cites")
         assert len(links) == 1
         assert links[0].created_by == "bib_enricher"
 
@@ -218,6 +222,11 @@ class TestCreatedByTracking:
         generate_citation_links(cat)
 
         # Check all links have machine-generated created_by
-        links = cat.links_from(cat.find("Paper A")[0].tumbler)
+        from tests._catalog_fixture_ops import documents_by_title
+
+        paper_a = documents_by_title("Paper A")
+        assert len(paper_a) == 1
+        links = cat.links_from(paper_a[0].tumbler)
+        assert links, "expected at least one auto-generated link from Paper A"
         for link in links:
             assert link.created_by in {"bib_enricher", "index_hook"}

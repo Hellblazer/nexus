@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -549,7 +550,128 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
 #: *.yml``). The check only fails below 9 so a partial install on an
 #: older plugin is still tolerated — same conservative floor the
 #: pre-N/A-stub check used.
+#:
+#: This floor is a BACKSTOP, not the check. It can only detect a
+#: near-empty library: it passed green on this project's own install
+#: while two templates had never been seeded and three descriptions had
+#: drifted (nexus-f1mbo), because 15 > 9. The check that can actually
+#: fail against that condition is the disk-vs-live parity assert below.
 _MIN_GLOBAL_BUILTIN_COUNT: int = 9
+
+
+@dataclass(frozen=True)
+class _ParityReport:
+    """Disk-vs-live comparison of the global builtin plan tier."""
+
+    #: Templates on disk with no library row at their dimensions.
+    missing: list[str]
+    #: Templates whose library row no longer matches the file.
+    drifted: list[str]
+    #: builtin-tagged library rows matching no template on disk.
+    orphaned: list[str]
+    #: Set when parity could not be established at all (templates
+    #: unreadable, or nothing to compare against).
+    unavailable: str | None = None
+    #: True when drift WAS checked but absence could not be: the live
+    #: listing hit its page cap, so a template with no row here may simply
+    #: be on a page we never read. Reported explicitly — a partially
+    #: checked gate that reads as fully checked is the failure mode this
+    #: whole check exists to remove.
+    missing_unchecked: bool = False
+
+    @property
+    def failed(self) -> bool:
+        return bool(self.missing or self.drifted)
+
+
+def _summarise(names: list[str], limit: int = 5) -> str:
+    """Join *names*, eliding past *limit* so one bad seed is still readable.
+
+    A fresh or unseeded library puts every shipped template in this list,
+    and a 17-item comma run wraps into an unreadable block exactly when
+    the operator most needs to read it.
+    """
+    if len(names) <= limit:
+        return ", ".join(names)
+    return f"{', '.join(names[:limit])} and {len(names) - limit} more"
+
+
+def _plan_library_parity(rows: list[dict[str, Any]], *, truncated: bool) -> _ParityReport:
+    """Compare shipped builtin templates against the live library.
+
+    The counterpart to the count floor: it answers "is the library the
+    one these templates describe", which is the question the floor could
+    never fail on.
+
+    A truncated listing degrades to ``unavailable`` rather than reporting
+    false MISSING rows — a template absent from a capped page proves
+    nothing (the vacuous-gate inverse: never manufacture a red either).
+    """
+    from pathlib import Path  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    import yaml  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    from nexus.commands.catalog import _resolve_plugin_root  # noqa: PLC0415 — deferred to keep CLI startup fast
+    from nexus.indexer_utils import find_repo_root  # noqa: PLC0415 — deferred to keep CLI startup fast
+    from nexus.plans.schema import canonical_dimensions_json  # noqa: PLC0415 — deferred to keep CLI startup fast
+    from nexus.plans.seed_loader import desired_row_for_template  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    repo_root = find_repo_root(Path.cwd()) or Path.cwd()
+    builtin_dir = _resolve_plugin_root(repo_root) / "plans" / "builtin"
+    if not builtin_dir.is_dir():
+        return _ParityReport([], [], [], unavailable=f"no template dir at {builtin_dir}")
+
+    paths = sorted(
+        p for p in builtin_dir.iterdir()
+        if p.is_file() and p.suffix in (".yml", ".yaml")
+    )
+    if not paths:
+        return _ParityReport([], [], [], unavailable=f"no templates under {builtin_dir}")
+
+    live: dict[str, dict[str, Any]] = {
+        d: r for r in rows
+        if (r.get("project") or "") == "" and (d := r.get("dimensions"))
+    }
+
+    missing: list[str] = []
+    drifted: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        try:
+            template = dict(yaml.safe_load(path.read_text()) or {})
+            # The global tier stores scope:global under project='', so apply
+            # the same in-memory scope_override the loader applies for this
+            # directory — before deriving BOTH the key and the row, or a file
+            # declaring another scope would be compared against the wrong one.
+            dims = dict(template.get("dimensions") or {})
+            dims["scope"] = "global"
+            template["dimensions"] = dims
+            canonical = canonical_dimensions_json(dims)
+            desired = desired_row_for_template(template)
+        except Exception as exc:  # noqa: BLE001 — an unreadable template makes parity unknowable, not failed
+            return _ParityReport(
+                [], [], [], unavailable=f"{path.name}: {type(exc).__name__}: {exc}",
+            )
+        seen.add(canonical)
+        row = live.get(canonical)
+        if row is None:
+            if not truncated:
+                missing.append(path.name)
+        elif desired.differs_from(row):
+            drifted.append(path.name)
+
+    if truncated:
+        # Drift is still trustworthy — a row we DID see either matches its
+        # template or does not. Absence is not, and neither is orphanhood,
+        # since both are claims about rows we may never have read.
+        return _ParityReport([], drifted, [], missing_unchecked=True)
+
+    orphaned = sorted(
+        str(r.get("name") or r.get("id"))
+        for d, r in live.items()
+        if d not in seen and "builtin-template" in (r.get("tags") or "")
+    )
+    return _ParityReport(missing, drifted, orphaned)
 
 
 def _run_check_plan_library() -> None:
@@ -650,6 +772,45 @@ def _run_check_plan_library() -> None:
         )
         click.echo("    Fix: run `nx plan reseed`.", err=True)
         failed = True
+
+    # Disk-vs-live parity (nexus-f1mbo). The count floor above cannot fail
+    # against a library that is the wrong SHAPE — only against one that is
+    # nearly empty. This is the assert that can.
+    parity = _plan_library_parity(rows, truncated=truncated)
+    if parity.unavailable:
+        click.echo(
+            f"  NOTE: template parity not checked ({parity.unavailable}).",
+            err=True,
+        )
+    else:
+        if parity.missing_unchecked:
+            click.echo(
+                "  NOTE: drift was checked, but MISSING templates were not — "
+                "the live listing hit its page cap, so absence is unprovable.",
+                err=True,
+            )
+        if parity.missing:
+            click.echo(
+                f"  FAIL: {len(parity.missing)} template(s) absent from the "
+                f"library: {_summarise(parity.missing)}",
+                err=True,
+            )
+            click.echo("    Fix: run `nx plan reseed`.", err=True)
+        if parity.drifted:
+            click.echo(
+                f"  FAIL: {len(parity.drifted)} library row(s) no longer "
+                f"match their template: {_summarise(parity.drifted)}",
+                err=True,
+            )
+            click.echo("    Fix: run `nx plan reseed --force`.", err=True)
+        if parity.orphaned:
+            click.echo(
+                f"  WARN: {len(parity.orphaned)} builtin row(s) have no "
+                f"template shipped: {_summarise(parity.orphaned)}. Left in "
+                "place — remove with `nx plan delete <id>` if intended.",
+                err=True,
+            )
+        failed = failed or parity.failed
     if non_dimensional:
         click.echo(
             f"  WARN: {non_dimensional} non-dimensional row(s) "

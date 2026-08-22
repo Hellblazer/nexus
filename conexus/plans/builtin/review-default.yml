@@ -1,3 +1,12 @@
+# nexus-7y4v0: this plan used to require `changed_paths` and pass it as
+# `subtree: $changed_paths`, a catalog tumbler prefix. nx_answer never has
+# a path list, so it aliased the question prose into the filter and the
+# retrieval step matched nothing — an empty answer presented as an answer,
+# and it was reachable on the plain cosine path (0.512 for "review the
+# changes on this branch", above the 0.40 floor), so this was live.
+# Renamed to `change_set` and used as free text: the binding is what the
+# reviewer is asking about, and the catalog resolves it the way
+# citation-traversal resolves its seed.
 name: default
 description: Critique / audit / review of a change set. Resolve the changed files to their catalog
   entries, walk decision-evolution history (which RDRs superseded or cited what touches this
@@ -8,7 +17,7 @@ dimensions:
   scope: global
   strategy: default
 required_bindings:
-- changed_paths
+- change_set
 optional_bindings:
 - depth
 default_bindings:
@@ -18,8 +27,7 @@ plan_json:
   steps:
   - tool: query
     args:
-      question: catalog entries for paths $changed_paths
-      subtree: $changed_paths
+      question: $change_set
       corpus: all
   - tool: traverse
     args:

@@ -368,6 +368,20 @@ def write_session_capability_census(session_id: str | None = None) -> dict[str, 
             )
         except Exception:  # noqa: BLE001 — even the debug log is best-effort
             pass
+    # nexus-h33x8 follow-on, 2026-08-22: SessionEnd fires MANY times per
+    # session (measured: 306 rows across 28 distinct sessions, one session
+    # alone accounting for 134 of them), so an unconditional append made ~91
+    # pct of this file duplicate rows and any naive aggregate over it
+    # overcount by ~2.2x. Skip the append when the newest record for THIS
+    # session is identical modulo its timestamp — a re-fire with no new
+    # activity has nothing to record.
+    #
+    # Deliberately a tail read, never a read-modify-write: the file is
+    # concurrency-safe by line-atomic append (see this module's docstring),
+    # and rewriting it is the exact bug class that docstring forbids. A
+    # re-fire that DID see new activity still appends, which is correct.
+    if _is_duplicate_of_last_record(log_path, record):
+        return record
     with log_path.open("a", encoding="utf-8") as fh:
         # code-review Important #2 (fix pass, 2026-08-20): ONE fh.write()
         # call with the complete line (payload + newline), matching the
@@ -381,3 +395,40 @@ def write_session_capability_census(session_id: str | None = None) -> dict[str, 
         # lines from another process.
         fh.write(json.dumps(record, sort_keys=True) + "\n")
     return record
+
+
+def _is_duplicate_of_last_record(
+    log_path: pathlib.Path, record: dict[str, Any]
+) -> bool:
+    """True when the last line is this session's record modulo ``timestamp``.
+
+    Reads only a bounded TAIL, so cost does not grow with the file and no
+    read-modify-write is introduced. Any read failure returns ``False`` — a
+    census that cannot check degrades to appending (the pre-existing
+    behaviour), never to dropping a record it should have kept.
+    """
+    try:
+        size = log_path.stat().st_size
+    except OSError:
+        return False
+    if not size:
+        return False
+    try:
+        with log_path.open("rb") as fh:
+            if size > 65536:
+                fh.seek(size - 65536)
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    lines = [ln for ln in tail.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    try:
+        last = json.loads(lines[-1])
+    except ValueError:
+        return False
+    if last.get("session_id") != record.get("session_id"):
+        return False
+    return {k: v for k, v in last.items() if k != "timestamp"} == {
+        k: v for k, v in record.items() if k != "timestamp"
+    }

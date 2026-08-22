@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 import click
@@ -67,8 +68,17 @@ def _resolve_plugin_root(repo_root: Path) -> Path:
     return candidates[0]
 
 
-def _seed_plan_templates() -> int:
-    """Seed pre-built plan templates into T2. Idempotent — skips existing.
+@dataclass(frozen=True)
+class _SeedSummary:
+    """Outcome of one full four-tier seed/reconcile pass."""
+
+    inserted: int
+    updated: int
+    protected: list[tuple[str, str]]
+
+
+def seed_plan_templates(*, reconcile: bool = False) -> _SeedSummary:
+    """Seed pre-built plan templates into T2. Idempotent — skips unchanged.
 
     All templates are shipped as YAML files under ``conexus/plans/builtin/``
     and loaded via the four-tier loader, which deduplicates on the
@@ -81,7 +91,14 @@ def _seed_plan_templates() -> int:
     (``research-default`` covers the provenance shape,
     ``analyze-default`` covers the multi-corpus compare shape).
 
-    Returns the total number of newly-inserted rows.
+    With *reconcile* (nexus-f1mbo), a row whose stored content has drifted
+    from its on-disk template is rewritten instead of skipped; without it
+    the loader stays insert-only, which is why the live library could
+    freeze at whatever the first seed run inserted.
+
+    Returns ``(inserted, updated, protected)`` across every tier, where
+    ``protected`` names the templates whose dimensions collided with a
+    user-grown row the reconcile path declined to overwrite.
     """
     from pathlib import Path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
@@ -89,6 +106,8 @@ def _seed_plan_templates() -> int:
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     seeded = 0
+    updated = 0
+    protected: list[tuple[str, str]] = []
     with T2Database(default_db_path()) as db:  # boundary-allow: one-shot `nx catalog setup` plan-seed loader passes Plan dataclasses not in the daemon RPC wire allowlist; not a contention hot path (RDR-128 P3 documented-irreducible)
         from nexus.indexer_utils import find_repo_root  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         from nexus.plans.loader import load_all_tiers  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
@@ -113,6 +132,7 @@ def _seed_plan_templates() -> int:
             plugin_root=plugin_root,
             repo_root=repo_root,
             library=db.plans,
+            reconcile=reconcile,
         )
 
         # RDR-092 Phase 0c.1: fail loud on an empty global tier. A
@@ -152,9 +172,32 @@ def _seed_plan_templates() -> int:
                     f"({source}): {error}",
                     err=True,
                 )
+            for source, reason in result.protected:
+                _log.warning(
+                    "rdr078_seed_protected_row",
+                    scope=scope, source=source, reason=reason,
+                )
+                click.echo(
+                    f"  warning: {source} not reconciled in {scope} tier: "
+                    f"{reason}",
+                    err=True,
+                )
             seeded += len(result.inserted)
+            updated += len(result.updated)
+            protected.extend(result.protected)
 
-    return seeded
+    return _SeedSummary(inserted=seeded, updated=updated, protected=protected)
+
+
+def _seed_plan_templates() -> int:
+    """Insert-only seed pass; returns the count of newly-inserted rows.
+
+    The historical entry point, kept because `nx init` and several suites
+    depend on both its name and its plain-int contract. New callers that
+    need the reconcile leg or the per-tier detail should call
+    :func:`seed_plan_templates` directly.
+    """
+    return seed_plan_templates().inserted
 
 
 def _get_catalog() -> "CatalogReader":

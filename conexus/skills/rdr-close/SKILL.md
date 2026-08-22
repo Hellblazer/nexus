@@ -135,6 +135,8 @@ The audit entries are the measurement surface for CA-4: if `nexus_rdr/*-close-ov
 
 ### Step 2: Create Post-Mortem
 
+Prose register: the post-mortem's reader is the next person about to make the same mistake (see `$RDR_DIR/REGISTER.md`, falling back to `$CLAUDE_PLUGIN_ROOT/resources/rdr/REGISTER.md`). Before finishing it, apply the register's closing check: list undefined terms and define or cut them. Clear, simple, concise.
+
 Create `$RDR_DIR/post-mortem/NNN-kebab-title.md` from the post-mortem template. Populate:
 
 - **RDR Summary**: Extract from the RDR's Problem Statement (or Problem) section

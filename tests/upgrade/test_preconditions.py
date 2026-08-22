@@ -13,6 +13,9 @@ supervisor, so the process check (re-run after) skips naturally.
 """
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 import inspect
 import pathlib
 from dataclasses import dataclass
@@ -497,3 +500,64 @@ def test_default_plugin_version_delegates_to_health_reader(
         lambda registry_path=None: real(registry),
     )
     assert _default_plugin_version() == "6.17.0"
+
+
+# ── plan-library axis (nexus-f1mbo follow-through) ─────────────────────────
+
+
+def _converge_kwargs(**over):
+    """Minimal converge_preconditions kwargs with every axis stubbed inert."""
+    base = dict(
+        config_dir=Path("/nonexistent"),
+        _engine_detect_fn=lambda: SimpleNamespace(applicable=False, converged=True),
+        _engine_converge_fn=lambda: [],
+        _lease_fn=lambda: None,
+        _installed_version_fn=lambda: "7.14.0",
+        _cycle_fn=lambda: None,
+        _provisioned_fn=lambda: True,
+        _plugin_version_fn=lambda: None,
+        _lockstep_marker_fn=lambda: None,
+        _plan_library_fn=lambda: (0, 0),
+    )
+    base.update(over)
+    return base
+
+
+def _axis(reports, name):
+    return next(r for r in reports if r.name == name)
+
+
+def test_plan_library_axis_converges_on_every_upgrade():
+    """The whole point: a user never has to know their library is stale.
+
+    Reconcile used to be opt-in behind `nx plan reseed --force`, which only
+    helps someone who already knows. Every install that never ran it kept
+    an April 2026 snapshot — two templates missing, nine rows drifted, and
+    nx_answer's single-query fast path unreachable the entire time.
+    """
+    reports = converge_preconditions(**_converge_kwargs(
+        _plan_library_fn=lambda: (2, 9),
+    ))
+    axis = _axis(reports, "plan-library")
+    assert axis.applicable and axis.current
+    assert "2 inserted" in axis.detail and "9 rewritten" in axis.detail
+    assert axis.actions
+
+
+def test_plan_library_axis_is_quiet_when_already_current():
+    reports = converge_preconditions(**_converge_kwargs())
+    axis = _axis(reports, "plan-library")
+    assert axis.current
+    assert axis.actions == ()
+
+
+def test_plan_library_failure_never_blocks_the_upgrade():
+    """A stale plan library degrades retrieval; it does not break the
+    install. Reporting it must not turn an upgrade into a failure."""
+    def _boom():
+        raise RuntimeError("service unreachable")
+
+    reports = converge_preconditions(**_converge_kwargs(_plan_library_fn=_boom))
+    axis = _axis(reports, "plan-library")
+    assert axis.applicable and not axis.current
+    assert "nx plan reseed" in axis.detail

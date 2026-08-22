@@ -10,6 +10,7 @@ the no-op lines).
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,8 +30,8 @@ def _invoke(
     extra_args: list[str] | None = None,
 ):
     runner = CliRunner()
-    with patch(
-        "nexus.commands.daemon.nexus_config_dir", return_value=tmp_path,
+    with patch.dict(
+        os.environ, {"NEXUS_CONFIG_DIR": str(tmp_path)},
     ), patch(
         "nexus.upgrade_finish.detect_stale_processes",
         return_value=SkewReport(installed_version="9.9.9"),
@@ -127,8 +128,8 @@ class TestRestartStaleEngineConvergence:
         not abort the whole command — convergence and the diag-view heal are
         independent legs and must still run."""
         runner = CliRunner()
-        with patch(
-            "nexus.commands.daemon.nexus_config_dir", return_value=tmp_path,
+        with patch.dict(
+            os.environ, {"NEXUS_CONFIG_DIR": str(tmp_path)},
         ), patch(
             "nexus.upgrade_finish.detect_stale_processes",
             side_effect=FileNotFoundError("[Errno 2] No such file or directory: 'ps'"),
@@ -160,8 +161,8 @@ class TestRestartStaleEngineConvergence:
         with an unhandled traceback and skipping heal entirely (the exact
         asymmetry the process-skew fix closed one leg earlier)."""
         runner = CliRunner()
-        with patch(
-            "nexus.commands.daemon.nexus_config_dir", return_value=tmp_path,
+        with patch.dict(
+            os.environ, {"NEXUS_CONFIG_DIR": str(tmp_path)},
         ), patch(
             "nexus.upgrade_finish.detect_stale_processes",
             return_value=SkewReport(installed_version="9.9.9"),
@@ -276,8 +277,8 @@ class TestRestartStaleLaunchagentUnload:
         own 'never raises' contract must not abort the command or hide the
         other legs' already-rendered output."""
         runner = CliRunner()
-        with patch(
-            "nexus.commands.daemon.nexus_config_dir", return_value=tmp_path,
+        with patch.dict(
+            os.environ, {"NEXUS_CONFIG_DIR": str(tmp_path)},
         ), patch(
             "nexus.upgrade_finish.detect_stale_processes",
             return_value=SkewReport(installed_version="9.9.9"),

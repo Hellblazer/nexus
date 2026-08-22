@@ -75,6 +75,8 @@ If assumed findings remain:
 
 ### Layer 3 — AI Critique (substantive-critic agent)
 
+The critique itself follows `resources/rdr/REGISTER.md` (clear, simple, concise; addressed to the author, not the machine). Include this question in the critic's brief as criterion 6, WARN-CLASS ONLY (a readability miss never fails or blocks the gate): could a smart reader who does not know this project's jargon follow the problem and the decision from this RDR alone? The useful answer is a list: each undefined term, each sentence assuming tribal knowledge. (REGISTER.md names the reader per stage; jargon is fine when defined on first use.)
+
 Before dispatch, seed link-context so the gate critique auto-links to the RDR:
 ```
 mcp__plugin_conexus_nexus__scratch(action="put", content='{"targets": [{"tumbler": "<rdr-tumbler>", "link_type": "relates"}], "source_agent": "rdr-gate"}', tags="link-context")
@@ -100,6 +102,7 @@ Structured critique with pass/warn/fail per finalization gate criterion:
 3. Scope Verification — pass/warn/fail
 4. Cross-Cutting Concerns — pass/warn/fail
 5. Proportionality — pass/warn/fail
+6. Register Readability — pass/warn ONLY (never fail, never blocks): could a smart reader who does not know this project's jargon follow the problem and the decision from this RDR alone? List each undefined term and each sentence assuming tribal knowledge (see resources/rdr/REGISTER.md). A warn here is guidance to the author, not a gate outcome.
 
 ### Quality Criteria
 - [ ] Every fail has a specific section reference and fix suggestion
@@ -162,6 +165,7 @@ Structured critique with pass/warn/fail per finalization gate criterion:
 3. Scope Verification
 4. Cross-Cutting Concerns
 5. Proportionality
+6. Register Readability (pass/warn ONLY — never fail, never blocks; list undefined terms and tribal-knowledge sentences per resources/rdr/REGISTER.md)
 
 ### Quality Criteria
 - [ ] Every fail has a specific section reference and fix suggestion

@@ -21,6 +21,68 @@ increments a counter and is logged.
 from __future__ import annotations
 
 import json
+
+import pytest
+
+from nexus.plans.schema import typed_by_usage, unsatisfiable_typed_binding
+
+
+class TestTypedByUsage:
+    """nexus-7y4v0: a binding is typed because of what it DOES.
+
+    Keying the gate on the NAME alone let it be bypassed by choosing a
+    free-text-sounding one. debug-default declares `failing_path` and
+    passes it as `subtree: $failing_path`; review-default declares
+    `changed_paths` and does the same. Neither name is in
+    TYPED_FILTER_BINDINGS, so both passed the gate, nx_answer aliased the
+    raw question into a tumbler filter, and the plans ran with evidence
+    steps that could match nothing — an empty result presented as an
+    answer, live in production and independent of the category route.
+    """
+
+    def test_binding_feeding_a_typed_slot_is_typed(self):
+        plan = {"steps": [{"tool": "query", "args": {"subtree": "$failing_path"}}]}
+        assert typed_by_usage(json.dumps(plan)) == frozenset({"failing_path"})
+
+    def test_step_references_are_not_bindings(self):
+        plan = {"steps": [{"tool": "traverse", "args": {"seeds": "$step1.tumblers"}}]}
+        assert typed_by_usage(json.dumps(plan)) == frozenset()
+
+    def test_free_text_slots_do_not_make_a_binding_typed(self):
+        plan = {"steps": [{"tool": "query", "args": {"question": "$intent"}}]}
+        assert typed_by_usage(json.dumps(plan)) == frozenset()
+
+    @pytest.mark.parametrize("bad", ["", None, "not json", "[]", '{"steps": "x"}'])
+    def test_malformed_plan_json_is_not_a_crash(self, bad):
+        assert typed_by_usage(bad) == frozenset()
+
+    def test_gate_drops_a_plan_whose_typed_binding_is_named_like_free_text(self):
+        plan = {
+            "steps": [{"tool": "query", "args": {"subtree": "$failing_path"}}],
+            "required_bindings": ["failing_path"],
+        }
+        assert unsatisfiable_typed_binding(
+            required=["failing_path"], defaults=None,
+            available=frozenset({"intent"}), plan_json=json.dumps(plan),
+        ) == "failing_path"
+
+    def test_a_default_still_satisfies_a_usage_typed_binding(self):
+        plan = {"steps": [{"tool": "query", "args": {"corpus": "$corpus"}}]}
+        assert unsatisfiable_typed_binding(
+            required=["corpus"], defaults={"corpus": "knowledge"},
+            available=frozenset({"intent"}), plan_json=json.dumps(plan),
+        ) is None
+
+    def test_omitting_plan_json_keeps_the_old_name_only_behaviour(self):
+        """The parameter is optional so existing callers keep working —
+        but omitting it re-opens the hole, which is why the matcher passes
+        it."""
+        assert unsatisfiable_typed_binding(
+            required=["failing_path"], defaults=None,
+            available=frozenset({"intent"}),
+        ) is None
+
+import json
 import logging
 from pathlib import Path
 

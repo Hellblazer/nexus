@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 __all__ = [
@@ -68,22 +69,119 @@ TYPED_BINDING_DOMAINS: dict[str, str] = {
 }
 
 
+#: Step-argument slots that consume a typed value even though the slot
+#: name is not itself a binding name. ``seeds`` takes catalog tumblers;
+#: prose aliased into it matches nothing, exactly like ``subtree``.
+_TYPED_ARG_SLOTS: frozenset[str] = TYPED_FILTER_BINDINGS | frozenset({"seeds"})
+
+
+#: ``$name`` anywhere in a string. Anchoring to the start would miss an
+#: interpolated reference like ``"repo/$area"``, which reaches the typed
+#: slot just as completely as a bare one.
+_BINDING_REF_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _binding_refs(value: Any) -> set[str]:
+    """Binding names *value* feeds into whatever slot holds it.
+
+    Recurses through lists and dicts, and scans within strings rather
+    than requiring the whole value to be one reference. The first version
+    checked ``isinstance(value, str) and value.startswith("$")`` with no
+    recursion, which review found blind to two real shapes — a
+    list-valued slot (``ids: [$a, $b]``) and an interpolated one
+    (``subtree: "prefix/$area"``). Either would have let a template
+    requiring an underivable typed binding pass the offerability gate
+    silently, which is the gate failing at exactly its job.
+
+    ``$stepN.field`` is a step reference the runner resolves, not a
+    binding, so a name followed by a dot is skipped.
+    """
+    if isinstance(value, str):
+        return {
+            m.group(1) for m in _BINDING_REF_RE.finditer(value)
+            if not value[m.end():m.end() + 1] == "."
+        }
+    if isinstance(value, list):
+        out: set[str] = set()
+        for item in value:
+            out |= _binding_refs(item)
+        return out
+    if isinstance(value, dict):
+        out = set()
+        for item in value.values():
+            out |= _binding_refs(item)
+        return out
+    return set()
+
+
+def typed_by_usage(plan_json: str | dict[str, Any] | None) -> frozenset[str]:
+    """Bindings a plan feeds into a TYPED argument slot, whatever their name.
+
+    A binding is typed because of what it DOES, not what it is called, and
+    keying the gate on the name alone let the check be bypassed by
+    choosing a free-text-sounding one (nexus-7y4v0). ``debug-default``
+    declares ``failing_path`` and passes it as ``subtree: $failing_path``;
+    ``review-default`` declares ``changed_paths`` and does the same.
+    Neither name is in :data:`TYPED_FILTER_BINDINGS`, so the gate passed
+    them, ``nx_answer`` aliased the raw question into the slot, and the
+    plan ran with a ``subtree`` filter that can match no tumbler — an
+    empty result presented as an answer.
+
+    That is the identical failure this module's own docstring records for
+    ``content_type`` on plan 14 (zero results, 2026-07-25); the only new
+    thing here is that a free-text-looking name hid it from the gate.
+
+    Reference extraction is delegated to :func:`_binding_refs`, which
+    recurses through lists and dicts and scans within strings.
+    ``$stepN.field`` is a step reference the runner resolves, not a
+    binding, and is skipped.
+    """
+    if not plan_json:
+        return frozenset()
+    if isinstance(plan_json, str):
+        try:
+            plan = json.loads(plan_json)
+        except (TypeError, ValueError):
+            return frozenset()
+    else:
+        plan = plan_json
+    if not isinstance(plan, dict):
+        return frozenset()
+
+    found: set[str] = set()
+    for step in plan.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        for slot, value in (step.get("args") or {}).items():
+            if slot in _TYPED_ARG_SLOTS:
+                found.update(_binding_refs(value))
+    return frozenset(found)
+
+
 def unsatisfiable_typed_binding(
     *,
     required: list[str],
     defaults: dict[str, Any] | None,
     available: frozenset[str],
+    plan_json: str | dict[str, Any] | None = None,
 ) -> str | None:
     """Return the first typed binding nothing can supply, else ``None``.
 
     A binding is satisfiable when the caller supplies it or the plan
     carries a default for it. Free-text bindings are always satisfiable —
-    ``nx_answer`` aliases them from the question text — so only members of
-    :data:`TYPED_FILTER_BINDINGS` can make a plan unrunnable.
+    ``nx_answer`` aliases them from the question text — so only TYPED
+    bindings can make a plan unrunnable.
+
+    Typed means either a name in :data:`TYPED_FILTER_BINDINGS` or, when
+    *plan_json* is supplied, a binding the plan feeds into a typed
+    argument slot (see :func:`typed_by_usage`). *plan_json* is optional
+    so pre-existing callers keep working, but omitting it re-opens the
+    hole: pass it wherever the plan is available.
     """
     have = defaults or {}
+    typed = TYPED_FILTER_BINDINGS | typed_by_usage(plan_json)
     for req in required:
-        if req in TYPED_FILTER_BINDINGS and req not in available and req not in have:
+        if req in typed and req not in available and req not in have:
             return req
     return None
 

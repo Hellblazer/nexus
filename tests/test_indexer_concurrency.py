@@ -303,6 +303,303 @@ class TestRunFileLoop:
             )
         assert started == ["f0.py"]
 
+    # ── nexus-deyd5: per-record-survivable extraction failures must not
+    # abort the whole run. ──────────────────────────────────────────────
+
+    def test_survivable_exception_sequential_indexes_every_other_file(self):
+        """One PER_RECORD_SURVIVABLE_EXCEPTIONS-class raise among N leaves
+        the other N-1 files indexed and the run returns normally (no
+        exception) — the literal RED-first repro for nexus-deyd5: a single
+        unextractable file must not abort finalization."""
+        from nexus.errors import UnextractableContentError
+        from nexus.indexer_utils import run_file_loop
+
+        processed: list[str] = []
+
+        def index_one(file, score, timers):
+            processed.append(file.name)
+            if file.name == "f2.py":
+                raise UnextractableContentError("blank_document.pdf: no text extracted")
+            return 1
+
+        # Deliberately the LAST file in submission order, mirroring the
+        # real incident (3159 files succeeded, the last one raised).
+        files = self._files(3)  # f2.py, f1.py, f0.py by descending score
+        written = run_file_loop(
+            files, index_one, concurrency=1,
+            on_file=None, on_stage_timers=None,
+        )
+        assert sorted(processed) == ["f0.py", "f1.py", "f2.py"]
+        assert written == 2  # f0, f1 wrote; f2 skipped
+
+    def test_survivable_exception_concurrent_indexes_every_other_file(self):
+        """Same contract under the ThreadPoolExecutor branch — the shape
+        of the actual laravel/framework incident (concurrency=2)."""
+        from nexus.errors import UnextractableContentError
+        from nexus.indexer_utils import run_file_loop
+
+        processed: set[str] = set()
+        lock = threading.Lock()
+
+        def index_one(file, score, timers):
+            with lock:
+                processed.add(file.name)
+            if file.name == "f4.py":
+                raise UnextractableContentError("blank fixture: no text extracted")
+            return 1
+
+        written = run_file_loop(
+            self._files(8), index_one, concurrency=3,
+            on_file=None, on_stage_timers=None,
+        )
+        assert processed == {f"f{i}.py" for i in range(8)}
+        assert written == 7
+
+    def test_survivable_exception_reported_via_on_skip_with_path_and_reason(self):
+        """The skip must be reported (path + reason), not merely swallowed —
+        loud, not silent."""
+        from nexus.errors import UnextractableContentError
+        from nexus.indexer_utils import run_file_loop
+
+        skips: list[tuple[Path, str]] = []
+
+        def index_one(file, score, timers):
+            if file.name == "f1.py":
+                raise UnextractableContentError("f1.py: produced empty output")
+            return 1
+
+        written = run_file_loop(
+            self._files(3), index_one, concurrency=1,
+            on_file=None, on_stage_timers=None,
+            on_skip=lambda file, reason: skips.append((file, reason)),
+        )
+        assert written == 2
+        assert len(skips) == 1
+        skipped_file, reason = skips[0]
+        assert skipped_file.name == "f1.py"
+        assert "produced empty output" in reason
+
+    def test_survivable_exception_logged_loudly(self):
+        """Skips are not silent — a structured event names the file and the
+        error, even when the caller supplies no on_skip callback."""
+        import structlog.testing
+
+        from nexus.errors import UnextractableContentError
+        from nexus.indexer_utils import run_file_loop
+
+        def index_one(file, score, timers):
+            if file.name == "f0.py":
+                raise UnextractableContentError("f0.py: produced empty output")
+            return 1
+
+        with structlog.testing.capture_logs() as logs:
+            run_file_loop(
+                self._files(2), index_one, concurrency=1,
+                on_file=None, on_stage_timers=None,
+            )
+        skip_events = [l for l in logs if l["event"] == "index_file_skipped_unextractable"]
+        assert len(skip_events) == 1
+        assert "f0.py" in skip_events[0]["file"]
+
+    def test_unclassified_exception_still_fails_the_run(self):
+        """NEGATIVE case, pinning the boundary in the other direction: an
+        exception NOT in PER_RECORD_SURVIVABLE_EXCEPTIONS — e.g. a
+        credentials/auth failure, the data-loss-adjacent class the bead
+        explicitly distinguishes from a per-file extraction failure — must
+        still cancel pending files and fail the whole run. A blanket
+        except-and-continue would silently pass this test's inverse; this
+        pins that we did NOT write one."""
+        from nexus.errors import CredentialsMissingError
+        from nexus.indexer_utils import run_file_loop
+
+        started: list[str] = []
+
+        def index_one(file, score, timers):
+            started.append(file.name)
+            if file.name == "f0.py":
+                raise CredentialsMissingError("voyage API key missing mid-run")
+            return 1
+
+        with pytest.raises(CredentialsMissingError, match="voyage API key missing"):
+            run_file_loop(
+                self._files(50), index_one, concurrency=2,
+                on_file=None, on_stage_timers=None,
+            )
+        assert len(started) < 50
+
+    def test_unclassified_exception_sequential_still_fails_immediately(self):
+        from nexus.errors import CredentialsMissingError
+        from nexus.indexer_utils import run_file_loop
+
+        started: list[str] = []
+
+        def index_one(file, score, timers):
+            started.append(file.name)
+            raise CredentialsMissingError("seq auth boom")
+
+        with pytest.raises(CredentialsMissingError, match="seq auth boom"):
+            run_file_loop(
+                self._files(3), index_one, concurrency=1,
+                on_file=None, on_stage_timers=None,
+            )
+        assert started == ["f0.py"]
+
+    def test_other_per_record_survivable_members_are_not_caught(self):
+        """nexus-deyd5 round 2 (code-review finding): run_file_loop catches
+        ONLY UnextractableContentError by name, deliberately NOT the whole
+        PER_RECORD_SURVIVABLE_EXCEPTIONS tuple -- the tripwire audit that
+        makes tuple membership safe for its dt.py/commands/index.py
+        per-record consumers does not scan indexer_utils.py, so catching
+        the whole tuple here would be an unguarded coupling. Pin it: a
+        SIBLING tuple member (IndexRunVerifyRefused -- a RUNFENCE signal
+        explicitly documented as never safe to swallow into a green
+        summary) must still cancel pending files and fail the run, exactly
+        like any other unclassified exception."""
+        from nexus.errors import IndexRunVerifyRefused
+        from nexus.indexer_utils import run_file_loop
+
+        started: list[str] = []
+
+        def index_one(file, score, timers):
+            started.append(file.name)
+            if file.name == "f0.py":
+                raise IndexRunVerifyRefused(
+                    doc_id="d1", referenced=3, present=1, missing=2, chunk_count=3,
+                )
+            return 1
+
+        with pytest.raises(IndexRunVerifyRefused):
+            run_file_loop(
+                self._files(50), index_one, concurrency=2,
+                on_file=None, on_stage_timers=None,
+            )
+        assert len(started) < 50
+
+    # ── nexus-deyd5 round 3: run_file_loop NEVER raises for the systemic-
+    # skip condition — that verdict moved to a run-level check in
+    # nexus.indexer._run_index (coordinator directive, closing a round-2
+    # HIGH finding: a mid-loop raise skipped the batcher's drain and the
+    # remaining categories, discarding already-completed work). These pin
+    # that run_file_loop itself is now INDIFFERENT to the skip ratio —
+    # it always just returns. The boundary-condition math itself is
+    # pinned separately below, directly against the pure function
+    # nexus.indexer_utils.skip_floor_breached.
+
+    def test_one_bad_fixture_among_many_still_returns_normally(self):
+        """The bead's own literal scenario, at scale: 1 skip out of 3160
+        attempted (0.03%). run_file_loop must return normally, not raise —
+        true regardless of ratio now, since it no longer judges one."""
+        from nexus.errors import UnextractableContentError
+        from nexus.indexer_utils import run_file_loop
+
+        def index_one(file, score, timers):
+            if file.name == "f0.py":
+                raise UnextractableContentError("blank_document.pdf: no text extracted")
+            return 1
+
+        written = run_file_loop(
+            self._files(3160), index_one, concurrency=4,
+            on_file=None, on_stage_timers=None,
+        )
+        assert written == 3159
+
+    def test_total_loss_still_just_returns_zero_never_raises(self):
+        """nexus-deyd5 round 3: even 100% of a batch skipping (the
+        shape that used to raise SystemicExtractionFailureError in round
+        2) must NOT raise from run_file_loop — the run-level verdict
+        belongs to the caller (_run_index), evaluated only after every
+        category and the batcher's drain have completed. A raise from
+        inside this loop would, again, skip the drain and the remaining
+        categories -- exactly the round-2 regression."""
+        from nexus.errors import UnextractableContentError
+        from nexus.indexer_utils import run_file_loop
+
+        def index_one(file, score, timers):
+            raise UnextractableContentError(f"{file.name}: no text extracted")
+
+        written = run_file_loop(
+            self._files(50), index_one, concurrency=4,
+            on_file=None, on_stage_timers=None,
+        )
+        assert written == 0
+
+    def test_skip_summary_logged_regardless_of_ratio(self):
+        import structlog.testing
+
+        from nexus.errors import UnextractableContentError
+        from nexus.indexer_utils import run_file_loop
+
+        def index_one(file, score, timers):
+            raise UnextractableContentError(f"{file.name}: no text extracted")
+
+        with structlog.testing.capture_logs() as logs:
+            written = run_file_loop(
+                self._files(2), index_one, concurrency=1,
+                on_file=None, on_stage_timers=None,
+            )
+        assert written == 0
+        summaries = [l for l in logs if l["event"] == "index_file_loop_skip_summary"]
+        assert len(summaries) == 1
+        assert summaries[0]["skipped"] == 2
+        assert summaries[0]["total"] == 2
+
+
+class TestSkipFloorBreached:
+    """Unit tests for the pure boundary function itself (nexus-deyd5 round
+    3) -- the run-level verdict's math, isolated from run_file_loop /
+    _run_index entirely. Pins the two trip conditions in BOTH directions:
+    a breach and a non-breach are equally load-bearing, since without the
+    negative pin the floor is decoration."""
+
+    def test_total_loss_at_small_n_breaches(self):
+        """Every file in a SMALL batch (below the min-sample-size gate)
+        skipping is still a breach — a pure ratio-with-minimum-N rule
+        alone would miss this; total-loss trips at ANY batch size."""
+        from nexus.indexer_utils import skip_floor_breached
+
+        assert skip_floor_breached(3, 3) is True
+
+    def test_majority_at_scale_breaches(self):
+        """A large batch (>= the min-sample-size gate) going majority-
+        unextractable breaches WITHOUT needing literally every file to
+        fail — the shape of a bad dependency/model/permissions bump, or a
+        scanned-PDF archive without OCR, chewing through half a corpus."""
+        from nexus.indexer_utils import skip_floor_breached
+
+        assert skip_floor_breached(30, 50) is True
+
+    def test_below_ratio_at_scale_does_not_breach(self):
+        """The inverse pin: a large batch skipping LESS than half stays
+        under the floor — the check must not be so aggressive it flags a
+        corpus merely containing a substantial-but-minority chunk of bad
+        files."""
+        from nexus.indexer_utils import skip_floor_breached
+
+        assert skip_floor_breached(20, 50) is False
+
+    def test_one_bad_fixture_at_scale_does_not_breach(self):
+        from nexus.indexer_utils import skip_floor_breached
+
+        assert skip_floor_breached(1, 3160) is False
+
+    def test_below_min_sample_partial_skip_does_not_breach(self):
+        """Below the minimum-sample-size gate, a PARTIAL (non-total) skip
+        must not breach -- only total loss trips at small N; a ratio rule
+        alone would misfire here (1/3 is already 33%)."""
+        from nexus.indexer_utils import skip_floor_breached
+
+        assert skip_floor_breached(1, 3) is False
+
+    def test_zero_skipped_never_breaches(self):
+        from nexus.indexer_utils import skip_floor_breached
+
+        assert skip_floor_breached(0, 500) is False
+
+    def test_zero_attempted_never_breaches(self):
+        from nexus.indexer_utils import skip_floor_breached
+
+        assert skip_floor_breached(0, 0) is False
+
 
 # ── LockedHookRegistry ───────────────────────────────────────────────────────
 

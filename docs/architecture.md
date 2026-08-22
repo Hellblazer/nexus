@@ -1008,7 +1008,7 @@ See `src/nexus/db/t2/__init__.py` for the facade source and
 
 ### Builtin plan templates
 
-The plan-centric retrieval stack ships fifteen builtin templates under `conexus/plans/builtin/`. The seed loader (`nexus.plans.seed_loader.load_seed_directory`) upserts them into `PlanLibrary` on first run; idempotent thereafter. Each template pins a `verb` dimension (and usually `scope: global`); the matcher uses verb to filter candidates before cosine ranking.
+The plan-centric retrieval stack ships twelve builtin templates under `conexus/plans/builtin/`. The seed loader (`nexus.plans.seed_loader.load_seed_directory`) upserts them into `PlanLibrary` on first run; idempotent thereafter. Each template pins a `verb` dimension (and usually `scope: global`); the matcher uses verb to filter candidates before cosine ranking.
 
 Grouped by verb:
 
@@ -1023,20 +1023,16 @@ Grouped by verb:
   - `type-scoped-search`: Single-content-type semantic search. Resolves the content-type bucket and runs the query against only those collections.
 - **verb=lookup**
   - `hybrid-factual-lookup`: Factual claim, named entity, or specific data point. Fuses vector recall with FTS lexical match for narrow-target retrieval.
-  - `traverse-then-generate`: Expand from a known seed tumbler. Walks `cites`/`implements`/related edges and generates a factual answer from the linked documents.
 - **verb=document**
   - `document-default`: Documentation authoring or audit. Gathers prose and code touching the area, walks documentation-for edges, hydrates both corpora.
 - **verb=review**
   - `review-default`: Change-set critique. Resolves changed files to catalog entries, walks decision-evolution history (RDRs superseded or cited), hydrates the RDR context.
 - **verb=debug**
   - `debug-default`: Dev work from a concrete failure. Catalog per-file lookup as the primary link walk; multi-hop graph traversal is delegated to Serena.
-- **verb=plan-author**
-  - `plan-author-default`: Authoring a new plan template. Fetches the authoring guide and dimension registry, surveys prior art for the target verb, drafts a candidate `plan_json`.
-- **verb=plan-inspect**
-  - `plan-inspect-default`: Single-plan runtime metrics and match history (`use_count`, `match_count`, `match_conf_sum`, success/failure counts).
-  - `plan-inspect-dimensions`: Enumerate registered dimensions and count plans per axis. Surfaces the dimension registry to authoring agents.
-- **verb=plan-promote**
-  - `plan-promote-propose`: Rank promotion candidates from runtime metrics against the configured thresholds.
+
+The plan-author / plan-inspect / plan-promote templates and their skills were RETIRED at nexus-77cct. They dispatched a `plan_match` MCP tool that has never existed (the server registers `plan_save`, `plan_search` and `plan_delete` only), so nothing ever invoked them successfully — and they were not inert, since their descriptions absorbed any question containing the word "plan" and outranked the plan a caller actually wanted. What they described is `nx plan list` / `nx plan show` / `nx plan hygiene`, which work. `traverse-then-generate` was retired in the same change: it required caller-supplied catalog tumblers, which no question carries.
+
+Every shipped template must be *offerable* — reachable by some question. A template requiring a typed binding that is neither defaulted nor derivable from a question (`nexus.plans.binding_infer`) fails CI in `tests/test_builtin_plans.py`.
 
 ## Design Decisions
 
@@ -1137,9 +1133,11 @@ write-back lost"** — an idempotent-notification-handling discipline — not
 
 **Practical guidance:**
 
-- `review-completed` markers go through the **`nx` CLI** — that is what the
-  pre-push hook reads. Writing them via the MCP scratch tool alone does not
-  satisfy the hook.
+- `review-completed` markers go through the **`nx` CLI** — that is what
+  `pre_close_verification_hook.sh` (the bead-close review gate) reads.
+  Writing them via the MCP scratch tool alone does not satisfy the hook.
+  (The push-time review-coverage gate that used to read the same markers,
+  `git_add_all_redirects_to_explicit_paths.py`, was deleted 2026-08-22.)
 - Design-of-record and write-back entries stored only via the **MCP scratch
   tool** die with the MCP process. Anything that must survive an MCP restart
   or be readable across sessions/processes belongs in T2 (`nx memory put`),

@@ -5,7 +5,7 @@
 - **Python 3.12 or 3.13** (3.14 is not yet supported — [upstream dependency issue](https://github.com/pydantic/pydantic/issues))
 - **[uv](https://docs.astral.sh/uv/)** — Python package manager
 - **git**
-- **[Node.js](https://nodejs.org/)** — required *only* if you install the Claude Code plugin. The plugin bundles the `sequential-thinking` and `context7` MCP servers, both spawned via `npx -y …`, which requires `node` and `npm` on PATH. The `nx` CLI alone does not need it. Install with `brew install node` (macOS) or follow the [Node.js installer](https://nodejs.org/) for your platform.
+- **[Node.js](https://nodejs.org/)** — required *only* if you install the Claude Code plugin(s). The conexus plugin bundles the `sequential-thinking` MCP server, spawned via `npx -y …`; the companion `sn` plugin bundles `context7` the same way. Either requires `node` and `npm` on PATH. The `nx` CLI alone does not need it. Install with `brew install node` (macOS) or follow the [Node.js installer](https://nodejs.org/) for your platform.
 
 Check your Python version:
 
@@ -71,7 +71,7 @@ See [Document Catalog](catalog.md) for details.
 
 ## Claude Code plugin (optional)
 
-The conexus plugin gives Claude Code agents access to all three storage tiers, 13 specialized agents, and 46 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows.
+The conexus plugin gives Claude Code agents access to all three storage tiers, 13 specialized agents, and 43 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows.
 
 **Plugin-only prerequisite: [Node.js](https://nodejs.org/).** The plugin's `sequential-thinking` and `context7` MCP servers are spawned via `npx -y …` and silently fail to start without `node`/`npm` on PATH. Install with `brew install node` (macOS) or your platform's installer before running the plugin commands below.
 

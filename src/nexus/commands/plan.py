@@ -570,37 +570,49 @@ def set_scope_cmd(plan_id: int, tags: str, from_project: bool) -> None:
 @plan.command("reseed")
 @click.option(
     "--force",
+    "force",
     is_flag=True,
-    help="Delete every builtin row first so description / template "
-    "changes pick up cleanly. Without --force the loader is idempotent "
-    "and only inserts missing rows.",
+    help="Accepted for compatibility and redundant: reconcile is the "
+    "default. Kept so an existing script or habit does not break.",
 )
-def reseed_cmd(force: bool) -> None:
+@click.option(
+    "--insert-only",
+    is_flag=True,
+    help="Skip the update leg — insert missing templates and leave "
+    "drifted rows alone. The pre-nexus-f1mbo behaviour; there is rarely "
+    "a reason to want it.",
+)
+def reseed_cmd(force: bool, insert_only: bool) -> None:
     """Re-run the four-tier plan-library seed loader.
 
     \b
-    By default this is idempotent: only previously-missing builtins
-    insert. Use ``--force`` when you've edited a builtin's description
-    or replaced its plan_json — the deduper keys on canonical
-    dimensions, so a description tweak on an existing dimension is
-    invisible to the idempotent path.
-    """
-    if force:
-        # The --force purge was raw SQL against the local SQLite plan
-        # library, which died in nexus-i711w Stage 2 sub-stage A3 (its
-        # dead branch had already become an AttributeError trap: lib._lock
-        # / lib.conn on an HttpPlanLibrary — porter-f defect report,
-        # 2026-07-30). The engine-served library keeps the existing
-        # service-mode contract: delete builtin rows individually.
-        raise click.ClickException(
-            "--force is unavailable (the raw-SQL purge died with the local "
-            "SQLite plan library). Delete builtin rows via "
-            "`nx plan delete <id>`, then rerun `nx plan reseed`."
-        )
+    RECONCILES BY DEFAULT: each template is compared against its stored
+    row and rewritten when they differ, and missing templates are
+    inserted. Reconcile used to be behind ``--force``, which meant an
+    install could only be made correct by a user who already knew the
+    library was wrong — every install that did not run it silently kept
+    an April 2026 snapshot with two templates missing and nine rows
+    drifted (nexus-f1mbo). A flag guarding the CORRECT behaviour is
+    friction, not safety.
 
-    # _seed_plan_templates writes through T2Database.plans, which is
+    \b
+    A rewritten row is re-created, so its match/use counters reset —
+    correct, since those counters described the superseded text. Rows
+    tagged grown/ad-hoc are never rewritten, and library rows with no
+    template on disk are left alone; both cases are reported rather than
+    acted on.
+    """
+    reconcile = not insert_only
+    # seed_plan_templates writes through T2Database.plans, which is
     # facade-routed (HttpPlanLibrary in service mode) — the seed half of
     # this verb is backend-correct in both modes.
-    from nexus.commands.catalog import _seed_plan_templates  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands.catalog)
-    seeded = _seed_plan_templates()
-    click.echo(f"Seeded {seeded} new builtin row(s).")
+    from nexus.commands.catalog import seed_plan_templates  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands.catalog)
+    summary = seed_plan_templates(reconcile=reconcile)
+    click.echo(f"Seeded {summary.inserted} new builtin row(s).")
+    if reconcile:
+        click.echo(f"Reconciled {summary.updated} drifted row(s).")
+    elif summary.inserted == 0:
+        click.echo(
+            "Nothing inserted, and --insert-only cannot see content "
+            "drift. Drop the flag to reconcile."
+        )

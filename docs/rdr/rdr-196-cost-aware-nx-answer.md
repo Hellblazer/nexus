@@ -2,7 +2,8 @@
 title: "Cost-Aware nx_answer: Per-Step Cost/Quality Telemetry, Per-Operator Model Routing, and Cost-Ranked Plan Choice — Closing the NOMA §5.1–5.3 Gap"
 id: RDR-196
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-08-21
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
@@ -198,8 +199,16 @@ Adjacent nexus work this RDR must not duplicate:
 - **Assumed → resolved per operator by Phase 2 (2026-08-21, see the Phase 2 OUTCOME block)** —
   the paper's result transfers to nexus operators: VERIFIED on the fixture for
   extract/filter/groupby/rank (both frozen criteria passed, n=3, ceiling effect noted);
-  NOT TESTED for check/verify (no tiering delta) and for aggregate/summarize/compare/generate
-  (no quality proxy); UNMEASURED for the inline planner. Originally a premise; now a measurement.
+  VERIFIED for check/verify on the three-arm study (fable/sonnet/haiku, 9 cross pairs each;
+  check 1.000/1.000, verify 0.980 min / 0.941 mean, both against a 0.70 threshold — flipped
+  by nexus-3mea3 as a recorded Sam decision, check's proxy saturated and verify's .p2a
+  margin undecidable, both caveats on record); **REFUTED** for
+  aggregate/summarize/compare/generate — the synthesis study (nexus-rv9xp) built the
+  missing proxy as blind pairwise judging and the cheap arms lost on summarize/generate/
+  compare, with sonnet-on-aggregate the sole non-refuted cell at n=6 (no-signal, not a flip
+  licence); UNMEASURED for the inline planner (nexus-i8to5 is its prerequisite). Originally
+  a premise; now a measurement in both directions — the transfer is real for mechanical
+  operators and does not hold for synthesis.
 
 ### Critical Assumptions
 
@@ -213,7 +222,7 @@ Adjacent nexus work this RDR must not duplicate:
       Findings) — **Method**: Source Search. The proxy's construction is Phase 2 Step 2, in scope.
 - [x] A strict empty MCP config is accepted by the CLI and removes the inherited tool-schema
       context — **Status**: Verified (196-R3) — **Method**: Spike.
-- [ ] Per-step rows at nx_answer's real volume are negligible store load (h33x8.6: single-digit
+- [x] Per-step rows at nx_answer's real volume are negligible store load (h33x8.6: single-digit
       lifetime runs; even at 100/day × 6 steps this is trivial) — **Status**: Verified by
       arithmetic — **Method**: Docs Only (acceptable: not load-bearing at this volume).
 
@@ -243,11 +252,49 @@ Adopt NOMA's build order, each phase gated by the measurement the previous one p
    to `claude_dispatch(model=...)`; measured on the Phase-1 telemetry plus the quality proxy
    before it becomes the default. The paper's number to beat is the all-strong baseline at
    equal proxy quality.
+
+   > **What actually shipped (2026-08-21) differs from the table proposed above, in both
+   > directions — the measurement moved two operators the opposite way from the guess.**
+   > Shipped: cheap tier (`haiku`) for filter/groupby/extract/rank **plus check/verify**;
+   > strong tier for aggregate/summarize/compare/generate, bundles, and the inline planner,
+   > every one of them now pinned EXPLICITLY to `STRONG_DEFAULT_ALIAS` rather than inheriting
+   > the box CLI default (nexus-ek8tr), and that alias re-pointed from `fable` to `opus` on
+   > the synthesis study's opus arm. So `aggregate` and `summarize` — proposed as cheap here —
+   > measured as strong-only, and `check`/`verify` — proposed as strong — measured as
+   > cheap-tolerant. The proposal is left standing as written because the delta between it
+   > and the measurement is the phase's actual finding.
 3. **Phase 3 — cost-ranked plan choice + budget (Gap 3).** When ≥2 plans clear the confidence
    floor, prefer the one with the lower recorded median cost (latency as tiebreak); enforce
    `budget_usd` as a pre-flight refusal (estimated > cap → refuse with the estimate) and a
    mid-run stop at the step boundary where the running sum crosses the cap. Estimates come
    from the per-plan history Phase 1 accumulates; a plan with no history runs with a warning.
+
+   > **What actually shipped (.p3c, 2026-08-21, nexus-nyry9.21 round 2) differs from the
+   > pre-flight half of this bullet — Sam's decision on a critic CRITICAL, T2
+   > p3c-critique-2026-08-21.** As specified above, an over-cap estimate refuses the call.
+   > Shipped instead: an over-cap estimate WARNS and RUNS, through the same single warning
+   > emitter the no-history case already uses (never a second mechanism) — the pre-flight
+   > refusal is demoted to a pre-flight warning. Forcing measurement: `.p3b`'s step-shape
+   > estimator (§ Technical Design below) has NO per-plan discriminating power in the live
+   > population — a same-day 20-run measurement found all 4 live plans predicting the
+   > IDENTICAL $0.90433 (bundle-dominant pricing always resolves to the same generate@opus
+   > ceiling, regardless of which plan), median actual/predicted ratio 0.805 (a systematic
+   > ~24% overestimate on the typical run), worst overestimate 11.2x, only 3/20 runs
+   > under-predicted. A hard refusal at that number is a step function, not a per-plan
+   > judgement: under the derived default cap (1.0530 > 0.90433) it is dormant; under any
+   > caller-supplied `budget_usd` near real median spend (~$0.70–0.80) it would refuse real
+   > runs deterministically and wrongly, including runs that would truly land under the cap.
+   > The MID-RUN stop described in this same bullet is UNCHANGED and remains the real
+   > enforcement — it sums MEASURED `StepRecord.cost_usd`, not a step-shape guess, which is
+   > exactly why it survives this finding while the predicted-cost half does not.
+   > Re-enabling a hard pre-flight refusal is gated on the estimator gaining real per-plan
+   > discriminating power (a recorded-per-plan-median population, RDR-100/nexus-93cc6, or an
+   > equivalent); `BUDGET_ENFORCEMENT_ENABLED` remains the pre-built kill switch for the whole
+   > feature if the warning itself needs to come out. Round 2 additionally surfaces a mid-run
+   > coverage gap (critic Significant 1): a step whose `cost_usd` comes back unknown cannot
+   > contribute to the running sum (correct — never fabricate a 0), so the mid-run stop can be
+   > silently blind for part of a run; this is now reported once per run through the same
+   > warning emitter rather than left unstated.
 4. **Phase 4 (optional, gated on Phase 2 evidence) — one topology transformation.** For
    `verify`/`check`, cheap-model first and escalate to the strong model only when the cheap
    verdict is low-confidence, as a bounded loop — the single transformation the paper measured.
@@ -484,21 +531,32 @@ any .p2c measurement ran) and measured in T2 `nexus_rdr/
 | `operator_groupby` | **FLIP** | 3 | 0.061 (16.3× cheaper) | 1.000 / 1.000 | 0.80 | same ceiling-effect caveat as filter |
 | `operator_extract` | **FLIP** | 3 | 0.060 (16.6× cheaper) | 1.000 / 1.000 | 0.85 | same ceiling-effect caveat |
 | `operator_rank` | **FLIP** | 3 | 0.049 (20.4× cheaper) | 0.952 / 0.960 | 0.60 | min score sits BELOW .p2a's own strong-vs-strong noise floor (0.9762) — cite the large threshold margin (0.9524 vs 0.60), not a noise-band comparison (round-2 correction) |
-| `operator_check` | **HOLD** | — | — | — | 0.70 | no tiering delta — both strong-tier in every arm per the .p2b table (no cheap-tier candidate arm exists to A/B against) |
-| `operator_verify` | **HOLD** | — | — | — | 0.70 | no tiering delta, same reason as check; separately UNDECIDABLE on the .p2a proxy itself (n=4 pairs, mean 0.800, min 0.733, margin only +0.033 over threshold — thin even before any tiering question) |
+| `operator_check` | **HOLD** → **FLIP 2026-08-21** | 9 cross pairs | ~0.08x (three-arm) | 1.000 / 1.000 | 0.70 | HOLD at this bead ("no tiering delta — both strong-tier in every arm"); flipped by nexus-3mea3 (Sam decision) on the pre-registered three-arm study (T2 `nexus_rdr/196-model-tier-study`): every within- and cross-arm pair 1.000 across fable/sonnet/haiku. Caveat on record: that proxy saturates (ceiling effect — it cannot RANK the models, only fail to refute), and check's `{ok: bool}` gates plan branching; `.p4`'s escalate-on-low-confidence is the designed safety half and is now the natural follow-up rather than an alternative (see the Phase 4 note below) |
+| `operator_verify` | **HOLD** → **FLIP 2026-08-21** | 9 cross pairs | ~0.07x (three-arm) | 0.980 / 0.941 | 0.70 | HOLD at this bead; flipped by nexus-3mea3 on the three-arm study (fable-vs-haiku min 0.941, haiku noise min 1.000 — the cleanest verify result in the arc). Caveat ON RECORD: verify remains UNDECIDABLE on the .p2a strong-vs-strong proxy (margin +0.033) and the study registration pre-declared verify verdicts non-binding — the flip is a recorded Sam decision on the three-arm data, individually revertible |
 | `operator_aggregate` | **HOLD (by construction)** | — | — | — | — | no .p2a quality proxy exists (free-text output, LLM-as-judge rejected); pinned `"strong"` in `model_tiers.OPERATOR_MODEL_TIER` and mechanically guarded by `test_every_cheap_entry_has_a_registered_proxy_metric` — a future re-flip cannot silently skip adding proxy coverage first |
 | `operator_summarize` | **HOLD (by construction)** | — | — | — | — | same as aggregate |
 | `operator_compare` | **HOLD (by construction)** | — | — | — | — | same as aggregate |
 | `operator_generate` | **HOLD (by construction)** | — | — | — | — | same as aggregate |
 | inline planner | **UNMEASURED** | 0 (candidate) | — | — | — | .p2c's candidate-planner arm never ran — budget exhausted (~$19 of ~$20 cap) after the operator core + 3 baseline-planner runs; baseline-only mean cost $2.86/call (corrected). Left HOLD (safe side) pending a dedicated top-up (~3 cheap-tier planner dispatches, small marginal spend once separated from the operator core) — Sam's call whether/when to fund it, not spent here. |
 
-**Zero negative results** — every measured operator either cleared both
-pre-registered refutation criteria (filter/groupby/extract/rank) or had
-no tiering delta to measure in the first place (check/verify). No
-operator's default flip was attempted and rejected.
+**Zero negative results AT THIS BEAD** — every operator measured here either
+cleared both pre-registered refutation criteria (filter/groupby/extract/rank)
+or had no tiering delta to measure in the first place (check/verify, later
+measured and flipped on the three-arm study, nexus-3mea3 2026-08-21). No
+operator's default flip was attempted and rejected *here*.
+
+> **Amended 2026-08-21 (nexus-rv9xp):** the arc as a whole DID produce negative
+> results, and this paragraph must not be read as covering them. The synthesis
+> study built the quality proxy the four HOLD-by-construction operators lacked
+> (blind pairwise judging) and REFUTED the cheap arms for summarize, generate,
+> and compare; haiku was refuted everywhere; the sole non-refuted cell was
+> sonnet-on-aggregate at 3/6, which is no-signal at n=6 rather than a flip
+> licence. Those four stay strong — now by measurement rather than by absence
+> of a proxy.
 
 **What flipped, mechanically**: `nexus.operators.model_tiers.FLIPPED_OPERATORS`
-(filter/groupby/extract/rank) is now consulted UNCONDITIONALLY on the
+(filter/groupby/extract/rank, + check/verify since nexus-3mea3
+2026-08-21) is now consulted UNCONDITIONALLY on the
 plan-run dispatch path (`plans/runner.py::_default_dispatcher`, which is
 what `nx_answer` / `plan_run` use to invoke operator steps) — no env var
 required. The only other consult site is `mcp/core.py::_nx_answer_plan_miss`
@@ -546,6 +604,17 @@ routing, so `.p4` is **not closed as not-needed** by this bead — it
 remains open, gated on its own precondition being independently
 evaluated, not on this bead's HOLD verdict for check/verify.
 
+> **Amended 2026-08-21 (nexus-3mea3):** the sentence above's premise
+> ("the cheap tier was never tested against either operator") no longer
+> holds — the three-arm study (T2 `nexus_rdr/196-model-tier-study`)
+> tested both, and nexus-3mea3 flipped check/verify to cheap by default
+> on that evidence (Sam decision; verify's .p2a-undecidable caveat on
+> record). This INVERTS `.p4`'s role: cheap-first is now the default for
+> check/verify, so escalate-on-low-confidence is the missing SAFETY half
+> of the design rather than an alternative routing mechanism.
+> nexus-nyry9.23 now depends on nexus-3mea3 and its evaluation should
+> start from this state.
+
 **RDR-196 h33x8/hmu02 bench caveat, restated**: the retrieval-bench
 non-regression check (`tests/integration/test_rdr_196_p2c_retrieval_bench.py`)
 proved `off == on` for search/query outputs against a real freshly-indexed
@@ -575,6 +644,44 @@ a broader nx_answer end-to-end quality claim.
 ### Phase 4 (optional, gated): Escalate-on-Low-Confidence for verify/check
 
 Only on Phase-2 evidence that the cheap tier is insufficient for these operators alone.
+
+##### OUTCOME (nexus-nyry9.23, 2026-08-21): NOT NEEDED — closed without code
+
+The gate above never opened, and two further conditions independently block
+building the mechanism anyway. Recorded here rather than only on the bead,
+because a reader arriving at this section otherwise sees an optional phase with
+no disposition.
+
+1. **The condition is unmet.** Phase 2, as extended by the three-arm study and
+   the check/verify flip, shows the cheap tier IS good enough for both:
+   `operator_check` scored 1.000/1.000 agreement across every within- and
+   cross-arm pair against a 0.70 threshold, `operator_verify` 0.980 min /
+   0.941 mean against the same threshold (see the Phase 2 OUTCOME table).
+2. **The escalate trigger has no input.** `operator_check` returns
+   `{ok, evidence[]}` and `operator_verify` returns
+   `{verified, reason, citations[]}`. Neither carries a confidence signal, so
+   "escalate when the cheap verdict is low-confidence" has nothing to read.
+   Adding one to an operator's own output is an operator-semantics change —
+   named in this RDR's own out-of-scope fence — and therefore needs its own
+   design of record, not an implementation step inside this arc.
+3. **The deciding measurement cannot discriminate.** Shipping required
+   escalate-on-demand to beat all-strong on cost at ≥ equal agreement, with a
+   non-improvement reverted rather than shipped. `check`'s proxy is saturated
+   at 1.000: it can fail to refute, never rank, so it can show neither an
+   improvement nor a regression. Shipping an unmeasurable mechanism is exactly
+   what Phase 2 Step 3 refused to do for aggregate/summarize/compare/generate
+   (HOLD by construction, mechanically guarded); the opposite call at the arc's
+   last step would leave the arc internally inconsistent.
+
+**The residual risk is carried, not dismissed.** `check`'s `ok` bool gates plan
+branching, so a wrong verdict changes control flow rather than only output text
+— a higher-consequence failure mode than the other five flipped operators.
+Tracked as `nexus-8uk28`, which names the two real prerequisites in order: a
+non-saturated check/verify quality proxy FIRST, then an ungrounded-verdict
+predicate (escalate on a verdict arriving with zero evidence/citations) that
+reads existing fields without crossing the operator-semantics fence. RDR-190's
+`loop`/`collect` primitives were not consulted here because there is nothing to
+build yet; that check moves to the follow-up.
 
 ### Day 2 Operations
 

@@ -70,7 +70,7 @@ Plan-match-first analytical retrieval (RDR-080), reserved for answers that must 
 | `scope` | str | `""` | Catalog subtree (e.g. `"1.2"`) or corpus filter (e.g. `"knowledge"`) |
 | `context` | str | `""` | Supplementary caller-supplied context for the plan matcher |
 | `max_steps` | int | `6` | Cap on plan DAG size (applied to inline planner on miss) |
-| `budget_usd` | float | `0.25` | Per-invocation cost cap (reserved for future enforcement) |
+| `budget_usd` | float \| None | `None` | Per-invocation cost cap; `None` = the derived default (`budget_default.DERIVED_BUDGET_USD`, unset until RDR-196 .p3a derives it); enforcement lands in .p3c |
 | `trace` | bool | `True` | When False, redacts question + final_text in the run log |
 | `dimensions` | dict/null | `null` | Dimensional filter for the matcher. Verb skills pin `{"verb": "research"}` etc. |
 

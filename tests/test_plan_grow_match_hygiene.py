@@ -229,7 +229,15 @@ def _seed_unanchored(library, *, query: str, tags: str, project: str = "") -> in
 def test_unanchored_grown_dropped_under_scope_pref(library) -> None:
     """A grown plan with empty scope_tags AND empty project must NOT match
     a scoped caller — it has no provenance and would otherwise compete
-    globally at the grown floor (the mz5tv residual)."""
+    globally at the grown floor (the mz5tv residual).
+
+    The intent here is a PARAPHRASE, not the plan's own question. That
+    distinction is the whole test: this version used a byte-identical
+    intent, so it was asserting the drop on exactly the case where the
+    drop is wrong (nexus-7g0rg — a verbatim repeat carries its own
+    provenance, and the drop was costing real matches at 0.94). It passed
+    for the wrong reason; the companion test below covers that case.
+    """
     from nexus.plans.matcher import plan_match
 
     plan_id = _seed_unanchored(
@@ -238,7 +246,7 @@ def test_unanchored_grown_dropped_under_scope_pref(library) -> None:
     )
     cache = _FakeCache(hits=[(plan_id, 0.15)])  # confidence 0.85, above grown floor
     result = plan_match(
-        intent="how does the projector replay events",
+        intent="what is the replay behaviour of the projector",
         library=library, cache=cache,
         min_confidence=0.40, n=5,
         scope_preference="knowledge__nexus",
@@ -246,6 +254,51 @@ def test_unanchored_grown_dropped_under_scope_pref(library) -> None:
     assert result == [], (
         f"unanchored grown plan must drop under a scope_preference; "
         f"got {[(m.plan_id, m.confidence) for m in result]}"
+    )
+
+
+def test_verbatim_repeat_does_NOT_survive_the_unanchored_grown_drop(library) -> None:
+    """The bypass this test used to assert was shipped and reverted same day.
+
+    nexus-7g0rg is real — a grown plan at cosine 0.9400 was dropped here
+    while every other candidate scored <= 0.240, so the caller paid the
+    inline planner for a question the library had already answered. The
+    remedy tried first was to let a verbatim repeat bypass the drop, on
+    the argument that a byte-identical question "carries its own
+    provenance".
+
+    That equivocated on one word. The provenance this drop protects is
+    SCOPE provenance — which project's data the plan retrieves from — not
+    "did this question produce this plan". Two projects can ask an
+    identical question, and `_is_verbatim_repeat` compares text only. The
+    T1 plan cache is global across projects within a session, and
+    `_scope_fit` returns 0.0 (neutral KEEP) for empty scope_tags, so this
+    drop is the ONLY gate: bypassing it reopened the nexus-mz5tv
+    cross-project attractor in full.
+
+    The trade also ran the wrong way. The bug costs latency — a miss
+    falls through to the inline planner and still answers correctly. The
+    "fix" returned another project's data as a confident answer.
+
+    nexus-7g0rg's real remedy is upstream: stop grown plans becoming
+    unanchored. Tracked in nexus-nobvo.
+    """
+    from nexus.plans.matcher import plan_match
+
+    question = "how does the projector replay events"
+    plan_id = _seed_unanchored(
+        library, query=question, tags="ad-hoc,grown", project="",
+    )
+    cache = _FakeCache(hits=[(plan_id, 0.06)])  # 0.94, the measured value
+    result = plan_match(
+        intent=question, library=library, cache=cache,
+        min_confidence=0.40, n=5,
+        scope_preference="knowledge__nexus",
+    )
+    assert result == [], (
+        "an unanchored grown plan must drop under a scope_preference even "
+        "on a verbatim repeat — the question text says nothing about which "
+        "project's corpus the plan retrieves from"
     )
 
 

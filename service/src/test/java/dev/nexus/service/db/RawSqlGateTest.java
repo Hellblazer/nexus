@@ -78,6 +78,104 @@ import java.util.stream.Stream;
  * method name" recurring elsewhere in the codebase. That general problem is
  * tracked as nexus-8emxy (P2), not closed by this file.
  *
+ * <p><b>WIDENED SCOPE, SAME-FILE EVOLUTION (nexus-8emxy comment, 2026-08-09;
+ * closed here):</b> the fix above is itself NAME-KEYED, exactly like {@link
+ * #SANCTIONED_STATEMENTS} — a DIFFERENTLY-NAMED future method in {@code
+ * PgVectorRepository.java} ITSELF that assembles SQL dynamically and calls
+ * the same private {@code rawVectorFetch(ctx, sql, binds)} wrapper is
+ * equally invisible to {@link #RAW_SQL_ASSEMBLY_SENTINELS}, which only ever
+ * inspects the bodies of methods that are already keys in its map — a
+ * caller that has not yet been named produces zero loop iterations, not a
+ * failing one. {@link #RAW_SQL_WRAPPER_METHODS} / {@link
+ * #scanWrapperCallSitesSentineled} INVERTS this failure mode: instead of
+ * trusting a fixed allowlist of caller names, it finds every actual CALL
+ * SITE of the registered wrapper method(s) by scanning the file for
+ * invocations of the wrapper's own name, and requires each call site to
+ * fall inside a method that already has a {@link #RAW_SQL_ASSEMBLY_SENTINELS}
+ * registration. A brand-new method added anywhere in the file that calls
+ * {@code rawVectorFetch} therefore FAILS the gate on sight — silent-miss
+ * becomes loud-add. See {@link #wrapperCallSites_newUnsentineledCaller_isFlagged}
+ * for the falsification proof and {@link
+ * #wrapperCallSites_realPgVectorRepository_allFiveCallSitesAreSentineled}
+ * for the non-overreach proof (the extension does not simply ban the
+ * wrapper — it passes cleanly on the real tree, where every one of the 5
+ * current call sites sits inside {@code searchWithTokens} or {@code
+ * hybridSearch}). This closes the same-file half of nexus-8emxy's P2 for
+ * {@code PgVectorRepository.java} specifically; a hypothetical brand-new
+ * private raw-SQL wrapper method appearing in some OTHER file still needs a
+ * conscious {@link #RAW_SQL_WRAPPER_METHODS} registration, AND that
+ * registration is NOT mechanically forced by anything else in this class
+ * (critic finding, nexus-8emxy review, 2026-08-21): {@link
+ * #SANCTIONED_STATEMENTS} and {@link #RAW_SQL_WRAPPER_METHODS} are
+ * INDEPENDENT maps checked by INDEPENDENT tests. Registering the new
+ * wrapper's own body in {@code SANCTIONED_STATEMENTS} (forced by {@link
+ * #RAW_EXECUTE} flagging its literal {@code .fetch(}/{@code .execute(}
+ * call) satisfies only that one test; {@code RAW_SQL_WRAPPER_METHODS}
+ * itself is never touched by that, and {@link #noUnsentineledRawSqlWrapperCallSites}
+ * would still run zero checks against the new wrapper's callers unless a
+ * human separately adds the entry. The honest claim is narrower: a new
+ * wrapper elsewhere is *likely* to be caught by a reviewer's attention
+ * (the maintainer is already editing this file for the first registration,
+ * a natural point to notice the second), not that it is *structurally*
+ * guaranteed the way same-file caller coverage now is.
+ *
+ * <p><b>KNOWN RESIDUAL — call shapes this gate does not scan at all</b>
+ * (nexus-8emxy critique, 2026-08-21). Two call shapes carry raw or
+ * caller-influenced SQL text and are invisible to every check in this
+ * class — {@link #RAW_EXECUTE}, {@link #RAW_SQL_ASSEMBLY_SENTINELS}, and
+ * {@link #RAW_SQL_WRAPPER_METHODS} alike — because none of them anchor on
+ * these shapes at all, the same "not excused, structurally no anchor"
+ * situation the class javadoc above describes for the wrapper problem:
+ * <ul>
+ *   <li><b>jOOQ's plain-SQL-template overloads</b> — {@code DSL.field("...",
+ *       Class, binds...)}, {@code DSL.condition("...", binds...)}, {@code
+ *       DSL.table("...", binds...)}, which parse a Java string as raw SQL
+ *       text with {@code {0}}/{@code {1}} bind placeholders. Verified by a
+ *       direct count against the live tree (2026-08-21): 67 call sites take
+ *       an immediate string-literal first argument to one of these three
+ *       methods, across 5 files ({@code CatalogRepository.java}, {@code
+ *       LadderRepository.java}, {@code PipelineRepository.java}, {@code
+ *       PgVectorRepository.java}, {@code RemapRepository.java}). Of those,
+ *       60 are fully static literal identifier references with no {@code
+ *       {n}} placeholder at all (e.g. {@code DSL.field("EXCLUDED.name",
+ *       String.class)} — the Postgres {@code ON CONFLICT} pseudo-table,
+ *       hardcoded, never runtime-varying); the remaining ~7 carry a genuine
+ *       bind-placeholder template, 5 of them real code (2 in {@code
+ *       PgVectorRepository.metadataCondition}, 3 in {@code
+ *       CatalogRepository}) and 2 merely comment mentions. Separately,
+ *       {@code StagingHandler.java} and {@code ChashCensus.java} use the
+ *       differently-shaped, properly-quoting {@code DSL.field(DSL.name(...),
+ *       Class)} / {@code DSL.table(DSL.name(...))} idiom to build genuinely
+ *       DYNAMIC (loop-driven) identifiers — jOOQ's own safe quoted-identifier
+ *       construction, not a raw-text template, but still a call shape this
+ *       gate never inspects. Checked the one instance that concatenates
+ *       non-constant text into a template rather than binding it —
+ *       {@code metadataCondition}'s {@code cmp} comparator, spliced
+ *       directly into {@code DSL.condition("metadata->>{0} " + cmp + "
+ *       {1}", ...)} — and confirmed it safe today: {@code cmp} is drawn
+ *       from a closed 4-branch {@code switch} over {@code $gte}/{@code
+ *       $lte}/{@code $gt}/{@code $lt}, never caller-supplied text
+ *       directly. No live defect exists today. Left unscanned deliberately
+ *       rather than chased: scanning this shape well enough to be
+ *       trustworthy (distinguishing a bind placeholder from a spliced
+ *       comparator, distinguishing a closed-switch value from genuinely
+ *       caller-derived text) is a materially different, larger mechanism
+ *       than the wrapper-call-site check above, and no known instance
+ *       needs it today — a bead for a mechanism verified safe with no
+ *       known instance is backlog padding, not a fix.</li>
+ *   <li><b>Method-reference call shapes.</b> {@link #wrapperCallSites}
+ *       matches direct invocations ({@code rawVectorFetch(...)}) via a
+ *       {@code \bname\s*\(} pattern; a method reference to the same wrapper
+ *       ({@code this::rawVectorFetch} or {@code
+ *       PgVectorRepository::rawVectorFetch} passed where a functional
+ *       interface is expected) has no {@code (} immediately following the
+ *       name and does not match at all. No such reference exists in the
+ *       codebase today (the 5 real call sites are all direct invocations);
+ *       if one is ever introduced, it would be exactly as invisible to
+ *       {@link #scanWrapperCallSitesSentineled} as the original bug this
+ *       bead closes.</li>
+ * </ul>
+ *
  * <p>Each sanctioned method's REGISTRATION (a key in {@link
  * #SANCTIONED_STATEMENTS}) still needs a {@code // SANCTIONED RAW
  * (nexus-mzuj9): <why>} comment at its definition site (auditable, not
@@ -1355,5 +1453,210 @@ class RawSqlGateTest {
             "    }",
             "}");
         assertThat(scanAssemblySentinels("SomeOtherClass.java", synthetic)).isEmpty();
+    }
+
+    // ── nexus-8emxy (comment, 2026-08-09): SAME-FILE evolution closure --
+    //    invert the failure mode. RAW_SQL_ASSEMBLY_SENTINELS is name-keyed
+    //    (it only inspects methods already registered as keys); this finds
+    //    every actual CALL SITE of the wrapper by name and requires its
+    //    enclosing method to already be registered, so an unnamed future
+    //    caller fails loud instead of producing zero signal ──
+
+    /** Private raw-SQL wrapper methods (by file) whose CALL SITES must each
+     * fall inside a method registered in {@link #RAW_SQL_ASSEMBLY_SENTINELS}
+     * for that same file. Unlike {@link #SANCTIONED_STATEMENTS} / {@link
+     * #RAW_SQL_ASSEMBLY_SENTINELS} (which enumerate TRUSTED caller method
+     * names — a list a new caller can simply not appear on), this registry
+     * enumerates WRAPPER method names — the dangerous thing whose every
+     * invocation must be found and checked, regardless of what calls it or
+     * what that caller happens to be named. Adding a private raw-SQL
+     * funnel method elsewhere already requires registering its own body in
+     * {@link #SANCTIONED_STATEMENTS} (its {@code .fetch(}/{@code .execute(}
+     * call is a literal {@link #RAW_EXECUTE} match); this map is the
+     * companion registration for treating it as a wrapper whose callers
+     * must all be accounted for. */
+    private static final Map<String, java.util.Set<String>> RAW_SQL_WRAPPER_METHODS =
+        Map.of("PgVectorRepository.java", java.util.Set.of("rawVectorFetch"));
+
+    /** Every CALL SITE start-offset of {@code name} in blanked source --
+     * i.e. every {@code \bname(} match that is NOT that name's own
+     * declaration. A declaration is distinguished from a call the same way
+     * {@link #sanctionedRegions} does it: not preceded by {@code .} or an
+     * identifier character, AND followed (after its parenthesized list is
+     * matched) by a method body's opening {@code {}. Everything else
+     * matching the name is an invocation -- including a receiver-qualified
+     * call ({@code this.rawVectorFetch(...)}), which is still counted as a
+     * call site, just not eligible to be misread as the declaration. */
+    static List<Integer> wrapperCallSites(String blanked, String name) {
+        List<Integer> sites = new ArrayList<>();
+        Matcher m = Pattern.compile("\\b" + Pattern.quote(name) + "\\s*\\(").matcher(blanked);
+        while (m.find()) {
+            int start = m.start();
+            int before = start - 1;
+            int open = blanked.indexOf('(', start);
+            int depth = 0;
+            int i = open;
+            while (i < blanked.length()) {
+                char c = blanked.charAt(i);
+                if (c == '(') {
+                    depth++;
+                } else if (c == ')') {
+                    depth--;
+                    if (depth == 0) {
+                        i++;
+                        break;
+                    }
+                }
+                i++;
+            }
+            int j = i;
+            while (j < blanked.length() && Character.isWhitespace(blanked.charAt(j))) {
+                j++;
+            }
+            boolean looksLikeDeclarationHead = before < 0
+                || !(blanked.charAt(before) == '.' || Character.isJavaIdentifierPart(blanked.charAt(before)));
+            boolean isDeclaration = looksLikeDeclarationHead
+                && j < blanked.length() && blanked.charAt(j) == '{';
+            if (!isDeclaration) {
+                sites.add(start);
+            }
+        }
+        return sites;
+    }
+
+    /** Per-file scan (nexus-8emxy, same-file closure): every call site of a
+     * {@link #RAW_SQL_WRAPPER_METHODS}-registered wrapper must fall inside
+     * a method that already has a {@link #RAW_SQL_ASSEMBLY_SENTINELS}
+     * registration for the SAME file. The check does not need to know the
+     * enclosing method's NAME to be correct -- it only needs to know
+     * whether the call site sits inside the UNION of regions belonging to
+     * already-registered methods; a call site outside that union is
+     * uncovered regardless of what its enclosing method is called. */
+    static List<String> scanWrapperCallSitesSentineled(String fileName, String rawSource) {
+        java.util.Set<String> wrapperNames = RAW_SQL_WRAPPER_METHODS.getOrDefault(fileName, java.util.Set.of());
+        if (wrapperNames.isEmpty()) {
+            return List.of();
+        }
+        String blanked = blank(rawSource);
+        java.util.Set<String> sentineledNames =
+            RAW_SQL_ASSEMBLY_SENTINELS.getOrDefault(fileName, Map.of()).keySet();
+        List<int[]> sentineledRegions = sanctionedRegions(blanked, sentineledNames);
+
+        List<String> violations = new ArrayList<>();
+        for (String wrapperName : wrapperNames) {
+            for (int at : wrapperCallSites(blanked, wrapperName)) {
+                boolean covered = false;
+                for (int[] r : sentineledRegions) {
+                    if (r[0] <= at && at < r[1]) {
+                        covered = true;
+                        break;
+                    }
+                }
+                if (!covered) {
+                    int line = 1 + (int) blanked.substring(0, at).chars()
+                        .filter(c -> c == '\n').count();
+                    violations.add(fileName + ":" + line + "  UNSENTINELED WRAPPER CALL SITE: a call "
+                        + "to " + wrapperName + "(...) was found in a method with no "
+                        + "RAW_SQL_ASSEMBLY_SENTINELS registration for " + fileName + " -- add the "
+                        + "enclosing method's whole-body canonical text to RAW_SQL_ASSEMBLY_SENTINELS "
+                        + "(see its own javadoc) before this raw-SQL-assembling caller can be assumed "
+                        + "reviewed");
+                }
+            }
+        }
+        return violations;
+    }
+
+    @Test
+    void noUnsentineledRawSqlWrapperCallSites() throws IOException {
+        Path root = Path.of("src", "main", "java");
+        assertThat(root).exists();
+
+        List<String> violations = new ArrayList<>();
+        try (Stream<Path> files = Files.walk(root)) {
+            files.filter(p -> p.toString().endsWith(".java")).forEach(p -> {
+                try {
+                    violations.addAll(scanWrapperCallSitesSentineled(
+                        p.getFileName().toString(), Files.readString(p)));
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+        }
+
+        assertThat(violations)
+            .as("a call to a RAW_SQL_WRAPPER_METHODS-registered wrapper (e.g. "
+                + "PgVectorRepository.rawVectorFetch) was found outside every method already "
+                + "registered in RAW_SQL_ASSEMBLY_SENTINELS -- either the new caller genuinely "
+                + "needs review (add its whole-body snapshot to RAW_SQL_ASSEMBLY_SENTINELS) or "
+                + "it should be refactored to route through an already-sentineled method")
+            .isEmpty();
+    }
+
+    /** THE non-vacuity proof: a brand-new, differently-named method added
+     * to {@code PgVectorRepository.java} that calls the wrapper must fail
+     * loud even though it is not, and could never have been, named in any
+     * allowlist ahead of time -- this is the falsification the bead
+     * demanded (an unnamed future caller must produce a FAILING signal,
+     * not zero signal). */
+    @Test
+    void wrapperCallSites_newUnsentineledCaller_isFlagged() {
+        String synthetic = String.join("\n",
+            "public final class PgVectorRepository {",
+            "    private static Result<Record> rawVectorFetch(DSLContext ctx, String sql, Object... binds) {",
+            "        return ctx.fetch(sql, binds);",
+            "    }",
+            "    List<Map<String, Object>> newExperimentalSearch(String tenant, String extraPredicate) {",
+            "        StringBuilder sql = new StringBuilder(\"SELECT 1\");",
+            "        sql.append(extraPredicate);",
+            "        return tenantScope.withTenant(tenant,",
+            "            ctx -> rawVectorFetch(ctx, sql.toString(), new Object[0]));",
+            "    }",
+            "}");
+        List<String> hits = scanWrapperCallSitesSentineled("PgVectorRepository.java", synthetic);
+        assertThat(hits)
+            .as("a new method calling rawVectorFetch that is not registered in "
+                + "RAW_SQL_ASSEMBLY_SENTINELS must fail loud -- under the pre-fix, purely "
+                + "name-keyed mechanism this produced ZERO violations")
+            .anySatisfy(h -> assertThat(h)
+                .contains("UNSENTINELED WRAPPER CALL SITE")
+                .contains("rawVectorFetch")
+                .contains("PgVectorRepository.java"));
+    }
+
+    /** THE non-overreach proof: the extension does not simply ban the
+     * wrapper outright -- every one of the 5 real call sites in the actual
+     * {@code PgVectorRepository.java} source sits inside {@code
+     * searchWithTokens} or {@code hybridSearch}, both already registered in
+     * {@link #RAW_SQL_ASSEMBLY_SENTINELS}, so the scan is clean on the real
+     * tree. Reads the real file directly (not the tree-walking {@link
+     * #noUnsentineledRawSqlWrapperCallSites} test) so this assertion is
+     * unambiguous even if some other file elsewhere in the walk were to
+     * fail. */
+    @Test
+    void wrapperCallSites_realPgVectorRepository_allFiveCallSitesAreSentineled() throws IOException {
+        Path path = Path.of("src", "main", "java", "dev", "nexus", "service", "vectors",
+            "PgVectorRepository.java");
+        assertThat(path).exists();
+        String source = Files.readString(path);
+
+        List<Integer> callSites = wrapperCallSites(blank(source), "rawVectorFetch");
+        assertThat(callSites)
+            .as("nexus-8emxy's own brace-matcher census found exactly 5 rawVectorFetch call "
+                + "sites (plus its declaration, which must NOT be counted as a call site) -- "
+                + "this pins that count so a silent drop in coverage (e.g. a regex regression "
+                + "that stops matching some call shape) would be caught even if it happened to "
+                + "leave the sentineled-coverage check green")
+            .hasSize(5);
+
+        assertThat(scanWrapperCallSitesSentineled("PgVectorRepository.java", source))
+            .as("every current rawVectorFetch call site is expected to sit inside "
+                + "searchWithTokens or hybridSearch, both registered in "
+                + "RAW_SQL_ASSEMBLY_SENTINELS (proving the extension does not simply ban the "
+                + "wrapper) -- a non-empty result here means a NEW method calling "
+                + "rawVectorFetch was added to PgVectorRepository.java: register that "
+                + "method's whole-body canonical text in RAW_SQL_ASSEMBLY_SENTINELS (see its "
+                + "own javadoc) before this can pass again")
+            .isEmpty();
     }
 }

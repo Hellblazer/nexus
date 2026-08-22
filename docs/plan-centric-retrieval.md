@@ -18,8 +18,17 @@ sequence:
 question
   │
   ▼
-[plan_match]  ─── T1 cosine (plans__session cache) ─► hit → Match(confidence≥min)
-  │           └── FTS5 fallback (when T1 empty) ────► hit → Match(confidence=None)
+[plan_match]
+  ├─ T1 cosine (plans__session cache, ≥min_confidence) ──────► hit → Match(confidence≥min)
+  │
+  ├─ (cosine scored nothing) category route: derive a verb from
+  │  the question (verb_infer — lexical/regex, not a model call;
+  │  a caller-pinned dimensions.verb always wins over the derived
+  │  one), reconsider ONLY same-verb builtin templates with the
+  │  cosine FLOOR — and only the floor — lifted, rank by raw
+  │  cosine inside that pool ─────────────────────────────────► hit → Match(confidence=None)
+  │
+  └─ FTS5 fallback (no T1 cache, or nothing above hit) ───────► hit → Match(confidence=None)
   │
   │  (no match)
   │
@@ -45,6 +54,53 @@ final text
 
 No step here is optional.  The record step runs even on plan-miss + planner-
 failure paths so every invocation leaves a trace.
+
+### Category route (dimension-routed builtin plans)
+
+Cosine similarity ranks plans by topical overlap with the question, but
+a category-level builtin template (tagged `builtin-template`) is
+topic-free by construction — it describes a *kind* of work, not a
+subject. Measured with zero competition, most builtin templates sat
+below the `min_confidence` floor against the very question shapes they
+were written for, so before this route existed a builtin had been
+selected by `nx_answer` exactly once in four months.
+
+The route in `src/nexus/plans/matcher.py::plan_match` only ever turns a
+**miss into a hit** — it never fires when the cosine path already
+produced a candidate, and it lifts the cosine **floor only**; every
+other correctness gate (dimension filter, unmet-typed-binding drop,
+scope conflict, always-failing skip) still applies to a routed
+candidate exactly as it does to a cosine hit. The verb it routes on
+comes from `dimensions["verb"]` when the caller pinned one (the five
+scenario skills always do), or otherwise from
+`nexus.plans.verb_infer.infer_verb` — a lexical/regex classifier, not a
+model call, since this runs ahead of every plan match including the
+ones that go on to hit the T1 cache in milliseconds. A wrong derived
+verb just selects a small wrong pool that stays below the floor
+anyway, so a miss here costs nothing beyond falling through to the
+inline planner exactly as before. Selection within the routed pool is
+by raw cosine, which keeps relative discriminating power inside a
+small same-verb pool (e.g. distinguishing a discovery-shaped question
+from a synthesis-shaped one) even though it had no absolute power
+across the whole library. The returned `Match` carries
+`confidence=None` — the same sentinel the FTS5 fallback uses, for the
+same reason: the cosine number is not what admitted it.
+
+### Typed binding derivation
+
+`nx_answer` binds only `intent` (plus `_nx_scope` when a scope was
+passed), so a plan whose `required_bindings` names a typed value —
+`content_type`, `author` — would otherwise be permanently unofferable.
+`nexus.plans.binding_infer.infer_typed_bindings` derives such bindings
+from the question text before the plan match runs, but only on an
+explicit, unambiguous mention: "papers by Grossberg" derives
+`author: "Grossberg"`; a question naming two content types derives
+neither. An ambiguous question derives nothing, which leaves the plan
+unofferable and falls through to the inline planner — deliberately the
+safe default, because a *wrong* typed filter produces a confident empty
+answer rather than an honest miss. See [Plan Authoring Guide §
+Typed bindings derived from the question](plan-authoring-guide.md#typed-bindings-derived-from-the-question-binding_infer)
+for the full contract.
 
 ### Operator bundling (v4.10.0)
 
@@ -95,7 +151,7 @@ Every plan in the library pins a **dimensional identity**:
 
 | Dimension | Required | Example values |
 |-----------|----------|----------------|
-| `verb` | yes | `research`, `review`, `analyze`, `debug`, `document`, `plan-author`, `plan-inspect`, `plan-promote` |
+| `verb` | yes | `research`, `review`, `analyze`, `debug`, `document`, `query`, `lookup`, `plan-author`, `plan-inspect`, `plan-promote` |
 | `scope` | yes | `global`, `project`, `rdr-<slug>`, `personal` |
 | `strategy` | default `"default"` | `default`, `security`, `performance`, `propose`, `dimensions` |
 | `object` | optional | `change-set`, `rdr`, `module`, `test-suite` |
@@ -103,16 +159,16 @@ Every plan in the library pins a **dimensional identity**:
 
 The `(project, dimensions)` pair is UNIQUE — two plans with the same
 dimensions in the same project will collide at seed time.  This is how
-the seed loader stays idempotent: a second run of `nx catalog setup` with
+the seed loader stays idempotent: a second run of `nx plan reseed` with
 unchanged templates produces zero inserts.
 
-## The 15 builtin scenario templates
+## The 12 builtin scenario templates
 
-This count (15, one per file in `conexus/plans/builtin/*.yml`) is
+This count (12, one per file in `conexus/plans/builtin/*.yml`) is
 canonical here — other docs should link to this section rather than
 restating the number.
 
-`nx catalog setup` seeds these from `conexus/plans/builtin/*.yml` as
+`nx plan reseed` seeds these from `conexus/plans/builtin/*.yml` as
 `scope:global` plans:
 
 | Template | Verb + strategy | What it does |
@@ -122,36 +178,45 @@ restating the number.
 | `analyze-default` | analyze / default | Gathers prose + code → walks `reference-chain` → ranks by criterion → summarises |
 | `debug-default` | debug / default | Resolves failing path to catalog → hydrates authoring RDRs → summarises design context |
 | `document-default` | document / default | Prose search + code search → walks `documentation-for` → compares doc-coverage |
-| `plan-author-default` | plan-author / default | Fetches authoring guide + dimension registry → surveys prior art → generates plan template |
-| `plan-inspect-default` | plan-inspect / default | Looks up plan metrics (use_count, match_count, success/failure) |
-| `plan-inspect-dimensions` | plan-inspect / dimensions | Enumerates the dimension registry + usage |
-| `plan-promote-propose` | plan-promote / propose | Ranks plans worth promoting from personal → project → global |
 | `find-by-author` | research / find-by-author | Catalog author-index lookup → hydrate → summarise an author's contribution surface |
 | `citation-traversal` | research / citation-traversal | Resolve seed → walk `reference-chain` both directions → hydrate → summarise |
 | `type-scoped-search` | research / type-scoped | Catalog content-type filter → semantic query within that bucket → summarise |
+| `document-discovery` | research / document-discovery | Single `query` step — returns the matching documents themselves (no synthesis). Fast path: `_nx_answer_classify_plan` routes a one-`query`-step plan straight to `query()`, skipping the ~80s `claude -p` synthesis floor. |
+| `corpus-coverage-check` | research / corpus-coverage-check | Single `query` step answering "does the corpus have anything on this at all" (yes/no coverage, not a document list). Same fast path as `document-discovery`. |
 | `hybrid-factual-lookup` | lookup / hybrid-factual-lookup | Vector recall + factual-evidence graph traversal → per-stream `limit_per_source` budgets → rank merge → generate. RDR-097. |
-| `traverse-then-generate` | lookup / traverse-then-generate | Explicit-seeds path: walk `factual-evidence` from caller-supplied tumblers → hydrate → generate. RDR-097 companion to `hybrid-factual-lookup`. |
 | `abstract-themes` | query / abstract-themes | CheapRAG community-summary pipeline: broad over-fetch (`mode: broad`) → `groupby` by BERTopic centroid label → per-group `aggregate` → `summarize` coalesce. Routes "main themes / overview / give a summary" question shapes. RDR-098. |
 
 The first 5 are the "verb" scenarios: they correspond to the 5
-RDR-078 verb skills (`/conexus:research`, `/conexus:review`, …). The next 4 are
-meta-seeds for the plan-library itself. Three (RDR-092 Phase 0a
-migrations) replace the legacy `_PLAN_TEMPLATES` array retired from
-`src/nexus/commands/catalog.py`; two further legacy shapes (provenance
-and cross-corpus compare) were retired as redundant with
-`research-default` and `analyze-default` respectively. The two
-`verb: lookup` plans ship RDR-097's hybrid retrieval pattern for
-factual QA; they share matcher space and disambiguate on `strategy`.
-Use `hybrid-factual-lookup` when the caller has a question and needs
-vector recall to find seeds; use `traverse-then-generate` when seed
-tumblers are already explicit inputs. The `abstract-themes` template
-(`verb: query, strategy: abstract-themes`) ships RDR-098's
-community-summary pattern: it uses RDR-070's BERTopic taxonomy as a
-substitute for GraphRAG-style community reports, partitioning
-search results by centroid label so per-theme summaries aggregate
-into a coalesced overview. v1 scope is single-collection abstract
-QA; cross-collection abstract retrieval is deferred (it would route
-through RDR-075's projection layer).
+RDR-078 verb skills (`/conexus:research`, `/conexus:review`, …).
+`find-by-author`, `citation-traversal`, and `type-scoped-search` are
+`research`-verb variants for narrower question shapes. `document-discovery`
+and `corpus-coverage-check` (nexus-h33x8.6) are single-`query`-step fast
+paths for "which documents mention X" and "does the corpus cover X"
+respectively — distinct templates rather than one, so the matcher has
+two separate description vectors to rank against the two phrasings.
+The two `verb: lookup` / `verb: query` plans, `hybrid-factual-lookup`
+and `abstract-themes`, ship RDR-097's hybrid retrieval pattern and
+RDR-098's community-summary pattern.
+
+Seven templates have been retired as unofferable or redundant
+(`RETIRED_TEMPLATE_DIMENSIONS` in `seed_loader.py`, nexus-77cct,
+commit af1b292bc). Four were plan-lifecycle meta-seeds
+(`plan-author-default`, `plan-inspect-default`, `plan-inspect-dimensions`,
+`plan-promote-propose`): each dispatched a `plan_match` MCP tool that has
+never existed on the server (it registers `plan_save` / `plan_search` /
+`plan_delete` only), so nothing ever invoked them successfully — and they
+were not merely inert, since their templates absorbed any question
+containing the word "plan" and outranked the plan a caller actually
+wanted. `traverse-then-generate` required caller-supplied catalog
+tumblers no question carries and no live caller could produce, with
+`hybrid-factual-lookup` already serving the question-only case in the
+same matcher space. Two earlier legacy shapes (provenance and
+cross-corpus compare) were retired previously as redundant with
+`research-default` and `analyze-default` respectively.
+`tests/test_builtin_plans.py` now fails CI on any template requiring a
+typed binding that is neither defaulted nor derivable (see
+[binding_infer](#typed-binding-derivation) below), so a shipped-but-
+unofferable template cannot recur silently.
 
 ## match_text synthesis
 
@@ -159,8 +224,14 @@ Both lanes of `plan_match` key off a single payload:
 
 - **T1 cosine:** the `plans__session` ChromaDB collection embeds each
   plan's `match_text` via the local ONNX MiniLM function.
-- **T2 FTS5:** the `plans_fts` virtual table indexes `match_text`,
-  `tags`, and `project`.
+- **T2 full-text search:** `nexus.plans.fts_vector`, a generated
+  `STORED` `TSVECTOR` column on the `nexus.plans` table, indexes
+  `match_text` (`to_tsvector('english', …)`, weight A), `tags`
+  (`to_tsvector('simple', …)`, weight B), and `project`
+  (`to_tsvector('simple', …)`, weight C), backed by a GIN index
+  (`idx_plans_fts`). PostgreSQL, not SQLite FTS5 — SQLite is retired
+  repo-wide (`plans-001-baseline.xml`, FTS parity contract
+  `docs/rdr/rdr-152-fts-parity-contract.md` Store 2).
 
 `match_text` is a hybrid string built from the plan's dimensional
 identity (RDR-092 Phase 1 + Phase 3):

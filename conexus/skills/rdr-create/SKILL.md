@@ -8,6 +8,8 @@ effort: medium
 
 ## When This Skill Activates
 
+Prose follows `resources/rdr/REGISTER.md`: written for a smart reader who may not know this project's jargon; simplified, never simplistic; jargon defined on first use. Each lifecycle stage has a named reader there; write the RDR for the create-stage reader.
+
 - User says "create an RDR", "new RDR", "start an RDR"
 - User invokes `/conexus:rdr-create`
 - User wants to think through a technical decision — before, during, or after building
@@ -55,6 +57,10 @@ If `$CLAUDE_PLUGIN_ROOT` is not available, use the templates inline (they are em
 
 > **Gap convention** (enforced at `/conexus:rdr-gate` Layer 1 and `/conexus:rdr-close` for post-65 RDRs): the `## Problem Statement` (or `## Problem`) section must contain one or more `#### Gap N: <title>` headings (regex: `^#{3,5} Gap \d+:`). Fill these in during drafting — the template scaffolds `Gap 1` and `Gap 2` placeholders. Replacing the Problem Statement with free-form prose and removing the gap headings will fail the gate at accept time, not just at close time. Authors can override with `/conexus:rdr-gate <id> --skip-gaps` when the gap structure truly does not fit (audit-trail escape only; prefer adding real gap headings).
 
+### Step 1b: Ensure the prose register is present (every invocation)
+
+If `$RDR_DIR/REGISTER.md` does not exist, copy it from `$CLAUDE_PLUGIN_ROOT/resources/rdr/REGISTER.md`. This runs on EVERY invocation, not only at bootstrap: repos onboarded before the register existed never re-run bootstrap, and the pointer lines across the rdr-* surfaces assume the file is there. Idempotent: present means untouched.
+
 ### Step 2: Assign ID
 
 Scan `$RDR_DIR/` for files matching `[0-9][0-9][0-9]-*.md`. Find the highest number. Next ID = max + 1, zero-padded to 3 digits. If no files exist, start at `001`.
@@ -91,6 +97,7 @@ git add $RDR_DIR/NNN-kebab-title.md $RDR_DIR/README.md
 ```
 
 If bootstrap ran, also stage: `$RDR_DIR/TEMPLATE.md`, `$RDR_DIR/post-mortem/TEMPLATE.md`
+If Step 1b copied the register, also stage: `$RDR_DIR/REGISTER.md`
 
 ### Output
 

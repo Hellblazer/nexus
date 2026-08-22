@@ -1036,7 +1036,14 @@ case "$MODE" in
         # pytest invocation (the documented busy-box seam); the real guard
         # still runs in the unit-suite stage of the battery.
         _gf_guard_dir="$(mktemp -d "${TMPDIR:-/tmp}/nx-greenfield-guard-XXXXXX")"
-        _gf_log="$(mktemp "${TMPDIR:-/tmp}/nx-greenfield-XXXXXX.log")"
+        # No `.log` suffix: BSD mktemp (macOS) only substitutes X's when they
+        # are TRAILING. With a suffix it takes the template literally, so the
+        # first run ever creates a real file named `nx-greenfield-XXXXXX.log`
+        # and EVERY later run dies `mktemp: ... File exists` at this step --
+        # step 5/11, i.e. after the repo index, both PDF indexes (including
+        # the cold MinerU download) and the RDR index. The sibling `mktemp -d`
+        # above was always fine because its X's already trail.
+        _gf_log="$(mktemp "${TMPDIR:-/tmp}/nx-greenfield-XXXXXX")"
         if (cd "$REPO_ROOT" && NX_REAL_CONFIG_DIR_FOR_GUARD_TEST="$_gf_guard_dir" \
                 uv run pytest -x -q --no-header -m integration \
                 tests/test_indexer_e2e.py::test_greenfield_index_writes_no_deprecated_keys \

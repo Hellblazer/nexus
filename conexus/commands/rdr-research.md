@@ -20,6 +20,8 @@ crash class).
 
 ## Action
 
+- Prose register (`{rdr_dir}/REGISTER.md` (fall back to `$CLAUDE_PLUGIN_ROOT/resources/rdr/REGISTER.md` if the repo copy is not there yet)): findings in plain terms a non-native-speaker expert can follow; say what is known and what is not; a dead end recorded plainly is a finding.
+
 All data is pre-loaded above — no additional tool calls needed.
 
 - RDR directory is shown above (from `.nexus.yml` `indexing.rdr_paths[0]`).

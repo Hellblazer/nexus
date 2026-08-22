@@ -804,7 +804,6 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse.sh:300",
         "tests/e2e/migration-rehearsal/rehearse.sh:301",
         "tests/e2e/migration-rehearsal/rehearse_acquire.sh:122",
-        "tests/e2e/migration-rehearsal/rehearse_acquire.sh:134",
         "tests/e2e/migration-rehearsal/rehearse_acquire.sh:80",
         "tests/e2e/migration-rehearsal/rehearse_cold.sh:113",
         "tests/e2e/migration-rehearsal/rehearse_cold.sh:77",
@@ -921,13 +920,27 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # retargeted 2026-08-21 after nexus-c00dw's lease wiring shifted the
         # file (+46 below the source point); the two version extractions had
         # been live hits before that edit and were never listed.
-        "tests/e2e/migration-rehearsal/run.sh:164",
-        "tests/e2e/migration-rehearsal/run.sh:177",
-        "tests/e2e/migration-rehearsal/run.sh:589",
-        "tests/e2e/migration-rehearsal/run.sh:620",
-        "tests/e2e/migration-rehearsal/run.sh:675",
-        "tests/e2e/migration-rehearsal/run.sh:692",
-        "tests/e2e/migration-rehearsal/run.sh:740",
+        # Retargeted again 2026-08-22 (7.15.0 cut): the PREV_RELEASE
+        # derivation gained an engine-comparison walk, shifting the five
+        # wheel picks +34 and the version extractions +4/+9. Two NEW sites
+        # came with that edit (:168, :187, :200) and are the same shape:
+        # :168 and :187 extract a
+        # version tuple inside `$()`, and :200 takes the
+        # lower of two versions via `sort -V | head -1` -- sort cannot emit
+        # anything until it has consumed all input, so head can never
+        # truncate a producer still doing work. This list is line-pinned, so
+        # ANY edit to run.sh restale-izes it; that fragility is the lint's
+        # own known shape, not a defect introduced here.
+        "tests/e2e/migration-rehearsal/run.sh:168",
+        "tests/e2e/migration-rehearsal/run.sh:186",
+        "tests/e2e/migration-rehearsal/run.sh:187",
+        "tests/e2e/migration-rehearsal/run.sh:200",
+        "tests/e2e/migration-rehearsal/run.sh:211",
+        "tests/e2e/migration-rehearsal/run.sh:623",
+        "tests/e2e/migration-rehearsal/run.sh:654",
+        "tests/e2e/migration-rehearsal/run.sh:709",
+        "tests/e2e/migration-rehearsal/run.sh:726",
+        "tests/e2e/migration-rehearsal/run.sh:774",
         # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.
@@ -1046,7 +1059,7 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
 # `head -1` site, deleted with the leg) removed entries wholesale:
 # 169 - 21 - 15 - 1 = 132. The remaining 5 run.sh sites were retargeted in
 # place, not counted as a change.
-_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 134
+_PIPEFAIL_EARLY_EXIT_EXEMPT_CEILING = 136
 
 
 def test_pipefail_early_exit_exempt_ratchet() -> None:

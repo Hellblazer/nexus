@@ -790,6 +790,50 @@ def _managed_onboarding(ctx: click.Context) -> None:
     click.echo("Indexing/search route to the managed service — no local stack to start.")
 
 
+def _seed_builtin_plans_best_effort() -> None:
+    """Idempotently seed the builtin plan-template library once the local
+    service is confirmed serving (nexus-e1ti4).
+
+    A virgin install previously left the global plan tier at zero rows:
+    ``nx init``/``nx init --service`` never called the seed loader — only
+    the manual ``nx plan reseed`` verb did
+    (:func:`nexus.commands.catalog._seed_plan_templates`). Consequences,
+    measured on a bare box: ``nx_answer``'s plan-match gate missed 100% of
+    the time (~53s / ~1.26 USD inline-planner tax per call, RDR-196
+    measurements) and the cost-ranked plan choice never had global-tier
+    candidates to rank. ``_seed_plan_templates`` is itself idempotent —
+    the loader dedups on the ``(project, dimensions)`` UNIQUE index and
+    skips existing rows (SC-14) — so calling this on every converged init
+    (repeat runs included) inserts only what is genuinely missing.
+
+    Best-effort, mirroring :func:`_converge_ladder_best_effort`'s sibling
+    contract (a seeding hiccup must not fail an otherwise-successful
+    init) — but FAIL LOUD: any failure is echoed to stderr and logged at
+    ERROR, never swallowed by a bare ``except: pass``. A silently
+    swallowed seed failure is exactly the bug this function exists to
+    close, with extra steps. ``nx doctor`` (default sweep) and the
+    standalone ``nx doctor --check-plan-library`` remain the durable,
+    always-visible signal if this best-effort call ever fails.
+    """
+    from nexus.commands.catalog import _seed_plan_templates  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps; matches `nx plan reseed`'s own import site
+
+    try:
+        seeded = _seed_plan_templates()
+    except Exception as exc:  # noqa: BLE001 — best-effort init step; see docstring — the failure is echoed and logged, never swallowed
+        click.echo(
+            f"\nWARNING: builtin plan-template seeding failed ({exc}). "
+            "`nx_answer` will pay the inline-planner tax on every call "
+            "until this is fixed. Run `nx plan reseed` once the service "
+            "is reachable, or `nx doctor --check-plan-library` for "
+            "diagnostics.",
+            err=True,
+        )
+        _log.error("init_plan_seed_failed", error=str(exc))
+        return
+    if seeded:
+        click.echo(f"Seeded {seeded} builtin plan template(s).")
+
+
 def _converge_ladder_best_effort() -> None:
     """Finish first-run setup with a converged upgrade ladder (nexus-9xfx5).
 
@@ -965,6 +1009,7 @@ def init_cmd(
             lease = _provision_and_autostart_service(embedder)
             if lease is not None:
                 _converge_ladder_best_effort()
+                _seed_builtin_plans_best_effort()
             return
         lease = provision_and_start_service(embedder)
     except StorageServiceStartError:
@@ -994,5 +1039,9 @@ def init_cmd(
     # first `nx doctor` on a fresh box is clean (no vacuous pending rung, no
     # missing diag view).
     _converge_ladder_best_effort()
+    # nexus-e1ti4: seed the builtin plan-template library now that the ladder
+    # has converged — a virgin box otherwise pays the inline-planner tax on
+    # every nx_answer call until someone runs `nx plan reseed` by hand.
+    _seed_builtin_plans_best_effort()
     # RDR-157 P4.1 / RDR-174 §3: one command left the user with a running backend.
     return

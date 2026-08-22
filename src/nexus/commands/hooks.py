@@ -50,10 +50,20 @@ fi
 # nexus-q3xrx: one stamped header per hook run — crash tracebacks (Python
 # default excepthook -> stderr -> this redirect) land RAW and undatable
 # without it; the header bounds every entry to a dated run window.
+# The dispatch below is DETACHED, so this redirect is the only sink its
+# stdout/stderr has -- it cannot be dropped. It also never rotated, and
+# reached 44MB / 725k lines over two months on a working box, which is how
+# 1528 aspect_source_path_uncanonical warnings and 49 manifest write
+# failures accumulated unread. Bound it here, at the only layer that sees
+# the whole process output: one generation, 4MiB.
+NX_INDEX_LOG="$HOME/.config/nexus/index.log"
+if [ -f "$NX_INDEX_LOG" ] && [ "$(wc -c < "$NX_INDEX_LOG" 2>/dev/null || echo 0)" -gt 4194304 ]; then
+  mv -f "$NX_INDEX_LOG" "$NX_INDEX_LOG.1" 2>/dev/null || :
+fi
 echo "=== nx index post-commit $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
-  >> "$HOME/.config/nexus/index.log"
+  >> "$NX_INDEX_LOG"
 nx index repo "$REPO_TOP" --on-locked=skip \\
-  >> "$HOME/.config/nexus/index.log" 2>&1 &
+  >> "$NX_INDEX_LOG" 2>&1 &
 disown
 {end}""".format(begin=SENTINEL_BEGIN, end=SENTINEL_END)
 

@@ -71,6 +71,17 @@ def _stub_ladder_convergence(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _stub_plan_seeding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """init seeds the builtin plan-template library post-provision
+    (nexus-e1ti4); the real seed does a live HTTP round-trip against the
+    plan-library service. Unit tests stub it. TestBuiltinPlanSeeding
+    overrides this stub with a recorder."""
+    monkeypatch.setattr(
+        "nexus.commands.init._seed_builtin_plans_best_effort", lambda: None
+    )
+
+
 
 # ── managed mode ──────────────────────────────────────────────────────────────
 
@@ -1465,6 +1476,141 @@ class TestLadderConvergence:
         _REAL_CONVERGE()  # must not raise
         err = capsys.readouterr().err
         assert "run `nx upgrade` to converge" in err
+
+
+# ── nexus-e1ti4: first-run builtin plan-template seeding ────────────────────
+
+# Captured at import time, BEFORE the autouse _stub_plan_seeding fixture
+# replaces the module attribute — the best-effort test needs the real helper.
+_REAL_SEED = _init_mod._seed_builtin_plans_best_effort
+
+
+class TestBuiltinPlanSeeding:
+    """A virgin install must not boot with an empty global-tier plan
+    library: init seeds the builtin templates once the backend is
+    serving, best-effort, mirroring TestLadderConvergence's wiring
+    contract for `_converge_ladder_best_effort`."""
+
+    def _record_seeding(self, monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+        calls: list[bool] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._seed_builtin_plans_best_effort",
+            lambda: calls.append(True),
+        )
+        return calls
+
+    def test_session_path_seeds_after_lease(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.setattr(
+            "nexus.commands.init.provision_and_start_service",
+            lambda embedder=None: _FAKE_LEASE,
+        )
+        calls = self._record_seeding(monkeypatch)
+        result = CliRunner().invoke(init_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert calls == [True], "serving session path must seed builtin plans"
+
+    def test_autostart_path_seeds_after_lease(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.setattr(
+            "nexus.commands.init._decide_autostart", lambda *a, **kw: True
+        )
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_and_autostart_service",
+            lambda embedder=None: _FAKE_LEASE,
+        )
+        calls = self._record_seeding(monkeypatch)
+        result = CliRunner().invoke(init_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert calls == [True], "serving autostart path must seed builtin plans"
+
+    def test_autostart_pending_lease_skips_seeding(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No lease (unit registered, service not yet up) → nothing to seed
+        against yet; the OS unit owns bring-up."""
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.setattr(
+            "nexus.commands.init._decide_autostart", lambda *a, **kw: True
+        )
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_and_autostart_service",
+            lambda embedder=None: None,
+        )
+        calls = self._record_seeding(monkeypatch)
+        result = CliRunner().invoke(init_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert calls == [], "no lease → no seeding attempt"
+
+    def test_seeding_runs_after_ladder_convergence(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ordering: seeding must run AFTER ladder convergence (the ladder
+        walk is what makes the plans schema/table reachable in the first
+        place), not interleaved or reordered by a future refactor."""
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.setattr(
+            "nexus.commands.init.provision_and_start_service",
+            lambda embedder=None: _FAKE_LEASE,
+        )
+        order: list[str] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._converge_ladder_best_effort",
+            lambda: order.append("converge"),
+        )
+        monkeypatch.setattr(
+            "nexus.commands.init._seed_builtin_plans_best_effort",
+            lambda: order.append("seed"),
+        )
+        result = CliRunner().invoke(init_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert order == ["converge", "seed"]
+
+    def test_helper_is_best_effort_on_seed_failure(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A failing seed call must not fail init — but it MUST be loud
+        (stderr warning + structured log), never a silent no-op (that is
+        exactly the bug this closes, with extra steps). Uses the REAL
+        helper (captured above, before the autouse stub patches the
+        module attr)."""
+
+        def _boom():
+            raise RuntimeError("plan-library service unreachable")
+
+        monkeypatch.setattr(
+            "nexus.commands.catalog._seed_plan_templates", _boom
+        )
+        _REAL_SEED()  # must not raise
+        err = capsys.readouterr().err
+        assert "builtin plan-template seeding failed" in err
+        assert "nx plan reseed" in err
+
+    def test_helper_reports_zero_seeded_quietly(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """Idempotent no-op (library already seeded) prints nothing extra —
+        matches `_seed_plan_templates`'s own idempotency contract."""
+        monkeypatch.setattr(
+            "nexus.commands.catalog._seed_plan_templates", lambda: 0
+        )
+        _REAL_SEED()
+        out = capsys.readouterr().out
+        assert "Seeded" not in out
+
+    def test_helper_reports_nonzero_seeded(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        monkeypatch.setattr(
+            "nexus.commands.catalog._seed_plan_templates", lambda: 9
+        )
+        _REAL_SEED()
+        out = capsys.readouterr().out
+        assert "Seeded 9 builtin plan template(s)." in out
 
 
 class TestProvisionStackModeOrdering:

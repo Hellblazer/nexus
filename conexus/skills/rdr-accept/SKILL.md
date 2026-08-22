@@ -37,7 +37,7 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
    - **If no:** Continue — no beads created
    - **If yes — execute the full chain (3 sequential dispatches + catalog enrichment, orchestrated by this skill):**
      1. Write T1 scratch entry tagged `rdr-planning-context`: mcp__plugin_conexus_nexus__scratch(action="put", content="RDR {id}: planning context for {title}. RDR file: {rdr_file}", tags="rdr-planning-context,rdr-{id}"
-     2. **Dispatch strategic-planner** (Agent tool) — create phased plan with beads. **Wait for completion.**
+     2. **Dispatch strategic-planner** (Agent tool) — create phased plan with beads. **Wait for completion.** The dispatch brief includes the prose register (`$RDR_DIR/REGISTER.md`, fallback `$CLAUDE_PLUGIN_ROOT/resources/rdr/REGISTER.md`): the plan is read by the people who execute it; each step says one thing; no step needs interpreting.
      3. **Call `mcp__plugin_conexus_nexus__nx_plan_audit`** — audit the plan against codebase. T1 scratch has rdr-planning-context tag.
      4. **Call `mcp__plugin_conexus_nexus__nx_enrich_beads`** — enrich beads with execution context (+ audit findings from T1), write epic bead ID to T2.
      5. **Catalog links** (if catalog initialized): Search for related RDRs and create `relates` links:

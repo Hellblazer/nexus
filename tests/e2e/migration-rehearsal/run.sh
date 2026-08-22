@@ -159,16 +159,50 @@ COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.85}"
 # the immediately-preceding release. Override either via the NEXUS_* env vars
 # (unchanged contract); a derivation that comes up empty fails loud rather
 # than falling back to a stale literal.
+# Reads REQUIRED_ENGINE_VERSION as a dotted tuple from a release tag's tree.
+# Empty (NOT fatal) when a tag predates the constant or cannot be read, so the
+# walk below skips such tags instead of aborting on the oldest history.
+_engine_tuple_at_release() {
+  git show "v$1:src/nexus/engine_version.py" 2>/dev/null \
+    | sed -n 's/^REQUIRED_ENGINE_VERSION[^(]*(\([0-9]*\), *\([0-9]*\), *\([0-9]*\)).*/\1.\2.\3/p' \
+    | head -1
+}
+# NOT ALWAYS THE IMMEDIATELY-PRECEDING RELEASE (2026-08-22). The unit is still
+# releases, but the selector is "the newest release that pinned a STRICTLY
+# OLDER engine than this tree does" — because a release that bumps NO floor is
+# a normal shape, and for one of those the immediately-preceding release pins
+# the SAME engine, leaving this leg with nothing to converge. That is not a
+# hypothetical: 7.14.0 and 7.15.0 both pin 0.1.85, as did 7.8.0/7.9.0 (0.1.79)
+# and 7.6.0/7.6.1 (0.1.71) before them. The staleness guard below caught it
+# correctly and its remedy text ("bump to the release immediately before this
+# floor bump") assumed a floor bump that does not exist in that shape.
+# Walking back to the newest genuinely-older pin keeps the hop REAL (a user on
+# that release upgrading to this one) and keeps the convergence assertion
+# non-vacuous, which is the whole point of the leg (nexus-cfgo9, GH #1402).
+# The skipped-engine-tag trap documented above is still impossible by
+# construction: only engines some release actually pinned are ever selectable.
 _derive_prev_release() {
-  local self_version prev
+  local self_version cur_engine rel tuple
   self_version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$(pwd)/pyproject.toml" | head -1)"
+  cur_engine="$(sed -n 's/^REQUIRED_ENGINE_VERSION[^(]*(\([0-9]*\), *\([0-9]*\), *\([0-9]*\)).*/\1.\2.\3/p' "$(pwd)/src/nexus/engine_version.py" | head -1)"
+  [ -n "$cur_engine" ] || { echo "FATAL: cannot read REQUIRED_ENGINE_VERSION from the working tree" >&2; exit 2; }
   # Anchored to canonical vX.Y.Z: an off-shape tag (rc/beta/typo) must never
   # be selectable as "the previous release" (substantive-critic, 2026-08-19).
-  prev="$(git tag -l 'v[0-9]*' \
-          | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' \
-          | grep -vx "$self_version" | sort -V | tail -1)"
-  [ -n "$prev" ] || { echo "FATAL: cannot derive PREV_RELEASE — no published v* tag older than $self_version" >&2; exit 2; }
-  printf '%s' "$prev"
+  # Newest-first via awk rather than `sort -Vr`: -r composed with -V is not
+  # portable across BSD/GNU sort and this runs on both.
+  for rel in $(git tag -l 'v[0-9]*' \
+               | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^v//' \
+               | grep -vx "$self_version" | sort -V \
+               | awk '{a[NR]=$0} END{for(i=NR;i>=1;i--) print a[i]}'); do
+    tuple="$(_engine_tuple_at_release "$rel")"
+    [ -n "$tuple" ] || continue
+    [ "$tuple" = "$cur_engine" ] && continue
+    if [ "$(printf '%s\n%s\n' "$tuple" "$cur_engine" | sort -V | head -1)" = "$tuple" ]; then
+      printf '%s' "$rel"; return 0
+    fi
+  done
+  echo "FATAL: cannot derive PREV_RELEASE — no published v* release pins an engine older than $cur_engine" >&2
+  exit 2
 }
 _derive_prev_engine_tag() {
   local rel tuple

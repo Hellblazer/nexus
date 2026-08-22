@@ -131,7 +131,7 @@ async def test_plan_miss_injects_few_shot_into_prompt(monkeypatch):
 
     captured: dict = {}
 
-    async def fake_dispatch(prompt, schema, timeout=300.0, model=None):
+    async def fake_dispatch(prompt, schema, timeout=300.0, model=None, **kw):
         captured["prompt"] = prompt
         return {"steps": [{"tool": "search", "args": {"query": "x"}}]}
 
@@ -166,7 +166,7 @@ async def test_plan_miss_zero_shot_when_no_matches(monkeypatch):
 
     captured: dict = {}
 
-    async def fake_dispatch(prompt, schema, timeout=300.0, model=None):
+    async def fake_dispatch(prompt, schema, timeout=300.0, model=None, **kw):
         captured["prompt"] = prompt
         return {"steps": [{"tool": "search", "args": {"query": "x"}}]}
 

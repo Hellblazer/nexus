@@ -32,6 +32,42 @@ HOOK_SCRIPT = (
 
 AGENT_ID = "aworker-x-6f59dab8bbb14864"
 
+#: nexus-3c92m perf-test constants (shared by the near-linear-scaling perf
+#: tests below). PR #1471 (7.14.0 release, run 32451880113, shard 4/4) hit
+#: two absolute-millisecond budgets on a loaded GitHub runner:
+#: `test_100kb_many_dollar_var_occurrences_scans_well_under_50ms` (52.567ms
+#: >= 50ms) and `test_100kb_and_1mb_perf`'s 1MB chained case (621ms >=
+#: 500ms) -- both well under 2x over, i.e. ordinary shared-runner
+#: contention, not a regression (tests/AGENTS.md's determinism rule: a test
+#: must not depend on machine speed). The replacement tests measure the
+#: SAME scan pipeline at two input sizes 10x apart, in-process, and assert
+#: near-linear scaling instead of a wall-clock number.
+#:
+#: _MAX_LINEAR_RATIO: a true O(n) algorithm costs ~10x for a 10x-larger
+#: input; this allows up to 2x that for per-call overhead and scheduler
+#: noise. The regression class these tests guard against (round 6/7's
+#: `_adjacent_letter_fragments` doing an O(start) slice on every match) is
+#: O(n^2), which costs ~100x for a 10x input -- five times past this
+#: threshold, so it still turns the tests red on any machine.
+_MAX_LINEAR_RATIO = 20
+#: Floor for the ratio's denominator so a sub-noise-floor small-size
+#: measurement can't produce a spuriously huge (or infinite) ratio.
+_RATIO_FLOOR_MS = 0.1
+#: Absolute ceiling on the larger measurement, SCALED to its input size so
+#: a uniform constant-factor slowdown is still caught (a pure ratio test is
+#: blind to one -- substantive-critic, T2 review-3c92m-perf-budget-redesign).
+#: 2000ms per MB is ~3.2x the worst LOADED-runner measurement on record
+#: (621ms for the 1MB chained shape, PR #1471 shard 4/4) and ~70x a quiet
+#: box (~25-29ms), so runner contention cannot reach it while a 3x+
+#: constant-factor regression or a hang does. The minimum keeps small
+#: inputs from getting a ceiling below scheduler noise.
+_CEILING_MS_PER_MB = 2_000
+_CEILING_MIN_MS = 250
+
+
+def _abs_ceiling_ms(n_bytes: int) -> float:
+    return max(float(_CEILING_MIN_MS), _CEILING_MS_PER_MB * n_bytes / 1_000_000)
+
 
 def _run(payload: dict, env_extra: dict[str, str] | None = None):
     env = os.environ.copy()
@@ -1164,19 +1200,62 @@ class TestNexus3c92mRound6SplicedExpansions:
         elapsed_ms = (time.perf_counter() - t0) * 1000
         assert elapsed_ms < 50, f"{elapsed_ms:.3f}ms >= 50ms budget"
 
-    def test_100kb_many_dollar_var_occurrences_scans_well_under_50ms(self):
+    def test_many_dollar_var_occurrences_scans_near_linearly(self):
         """Adversarial for the adjacency check specifically: many bare
-        `$VAR`-shaped constructs scattered through ~100KB."""
+        `$VAR`-shaped constructs scattered through the text.
+
+        Was an absolute-millisecond budget (`elapsed_ms < 50`); that flaked
+        on a loaded GitHub runner during the 7.14.0 release PR (#1471, run
+        32451880113, shard 4/4: 52.567ms >= 50ms on this exact, unmodified
+        input) -- a shared-runner contention shape, not a regression, per
+        the deterministic-tests rule in tests/AGENTS.md.
+
+        Redesigned to prove the COMPLEXITY property instead of a
+        machine-speed-dependent number: the same scan is timed at two input
+        sizes, back-to-back in this process, and the 10x-larger input must
+        cost no more than `_MAX_LINEAR_RATIO` times as long -- near-linear
+        with slack for scheduler noise. Each size is best-of-3 (the min
+        discards a transient GC/scheduler stall without needing the run to
+        be uniformly fast). What would still turn this red: a regression
+        that reintroduces the exact quadratic bug this guard already fixed
+        once (round 6/7 review: `_adjacent_letter_fragments` doing an
+        `O(start)` `text[:start]` slice on every match, measured at 2+
+        SECONDS on a ~45KB/6000-construct input) -- that class scales
+        ~O(n^2), so a 10x input inflates the ratio by ~100x, blowing past
+        `_MAX_LINEAR_RATIO` regardless of machine speed. The absolute
+        size-scaled `_abs_ceiling_ms` ceiling is deliberately loose -- it exists only
+        to catch an outright hang, not to re-litigate machine speed.
+        """
         spec = importlib.util.spec_from_file_location("_nx3c92m_guard4", str(HOOK_SCRIPT))
         guard = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(guard)
-        big = "git " + (chr(36) + "VAR " ) * 5000 + "checkout"
-        t0 = time.perf_counter()
-        normalized = guard._normalize_for_primary_scan(big)
-        guard._find_spliced_expansion(normalized)
-        guard._primary_match(normalized)
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-        assert elapsed_ms < 50, f"{elapsed_ms:.3f}ms >= 50ms budget"
+
+        def scan_ms(text: str) -> float:
+            best = float("inf")
+            for _ in range(3):
+                t0 = time.perf_counter()
+                normalized = guard._normalize_for_primary_scan(text)
+                guard._find_spliced_expansion(normalized)
+                guard._primary_match(normalized)
+                best = min(best, time.perf_counter() - t0)
+            return best * 1000
+
+        small = "git " + (chr(36) + "VAR ") * 5_000 + "checkout"
+        large = "git " + (chr(36) + "VAR ") * 50_000 + "checkout"  # 10x small
+        ms_small = scan_ms(small)
+        ms_large = scan_ms(large)
+
+        ceiling = _abs_ceiling_ms(len(large))
+        assert ms_large < ceiling, (
+            f"10x input ({len(large)} bytes): {ms_large:.3f}ms >= "
+            f"{ceiling:.0f}ms size-scaled ceiling"
+        )
+        ratio = ms_large / max(ms_small, _RATIO_FLOOR_MS)
+        assert ratio < _MAX_LINEAR_RATIO, (
+            f"non-linear scaling: {ms_small:.3f}ms -> {ms_large:.3f}ms is "
+            f"{ratio:.1f}x for a 10x input (expected near-linear, "
+            f"< {_MAX_LINEAR_RATIO}x)"
+        )
 
     def test_100kb_many_touching_letter_expansions_scans_well_under_50ms(self):
         """Round-7-specific adversarial case: THIS is the shape that
@@ -1574,27 +1653,75 @@ class TestNexus3c92mRound9ChainedExpansions:
         runs = guard._expansion_construct_runs(cmd)
         assert len(runs) == 2, runs
 
-    def test_100kb_and_1mb_perf(self):
+    def test_100kb_and_1mb_scan_near_linearly(self):
         """Round-8 review noted the shipped perf tests stopped at 100KB;
-        this adds the 1MB check the reviewer spot-checked manually."""
+        this covers the 1MB shape the reviewer spot-checked manually, for
+        both the plain-fill and chained-`${a}`-expansion adversarial inputs.
+
+        Was two absolute-millisecond budgets (`ms_1m < 500`,
+        `ms_1m_chain < 500`); the chained case flaked on a loaded GitHub
+        runner during the 7.14.0 release PR (#1471, run 32451880113, shard
+        4/4: 621ms >= 500ms on this exact, unmodified input) -- a
+        shared-runner contention shape, not a regression, per the
+        deterministic-tests rule in tests/AGENTS.md.
+
+        Redesigned the same way as
+        `test_many_dollar_var_occurrences_scans_near_linearly` above: for
+        each adversarial shape, the identical scan pipeline is timed
+        in-process at two sizes 10x apart, best-of-3 per size, and the
+        ratio must stay near-linear. A regression that reintroduces a
+        quadratic per-match cost (the exact bug class round 6/7 already
+        fixed once in `_adjacent_letter_fragments`) inflates a 10x input by
+        ~O(n^2) i.e. ~100x, which blows `_MAX_LINEAR_RATIO` regardless of
+        machine speed. `_abs_ceiling_ms` is a size-scaled absolute ceiling that
+        only catches an outright hang.
+        """
         spec = importlib.util.spec_from_file_location(
             "_nx3c92m_guard_perf_1mb", str(HOOK_SCRIPT),
         )
         guard = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(guard)
 
-        def timed(cmd):
-            t0 = time.perf_counter()
-            normalized = guard._normalize_for_primary_scan(cmd)
-            zero = guard._delete_all_expansions(normalized)
-            guard._find_spliced_expansion(normalized)
-            guard._primary_match(normalized)
-            guard._primary_match(zero)
-            return (time.perf_counter() - t0) * 1000
+        def timed(cmd: str) -> float:
+            best = float("inf")
+            for _ in range(3):
+                t0 = time.perf_counter()
+                normalized = guard._normalize_for_primary_scan(cmd)
+                zero = guard._delete_all_expansions(normalized)
+                guard._find_spliced_expansion(normalized)
+                guard._primary_match(normalized)
+                guard._primary_match(zero)
+                best = min(best, time.perf_counter() - t0)
+            return best * 1000
 
+        def assert_near_linear(
+            ms_small: float, ms_large: float, *, label: str, large_bytes: int
+        ) -> None:
+            ceiling = _abs_ceiling_ms(large_bytes)
+            assert ms_large < ceiling, (
+                f"{label}: {ms_large:.3f}ms >= {ceiling:.0f}ms size-scaled ceiling "
+                f"({large_bytes} bytes)"
+            )
+            ratio = ms_large / max(ms_small, _RATIO_FLOOR_MS)
+            assert ratio < _MAX_LINEAR_RATIO, (
+                f"{label}: non-linear scaling {ms_small:.3f}ms -> "
+                f"{ms_large:.3f}ms is {ratio:.1f}x for a 10x input "
+                f"(expected near-linear, < {_MAX_LINEAR_RATIO}x)"
+            )
+
+        fill_1m = "git " + ("x" * 1_000_000)
         ms_100k = timed("git " + ("x" * 100_000))
-        assert ms_100k < 50, f"100KB: {ms_100k:.3f}ms >= 50ms budget"
-        ms_1m = timed("git " + ("x" * 1_000_000))
-        assert ms_1m < 500, f"1MB: {ms_1m:.3f}ms >= 500ms budget"
-        ms_1m_chain = timed("git " + (chr(36) + "{a}") * 50_000 + "checkout")
-        assert ms_1m_chain < 500, f"1MB chained: {ms_1m_chain:.3f}ms >= 500ms budget"
+        ms_1m = timed(fill_1m)
+        assert_near_linear(
+            ms_100k, ms_1m, label="plain fill 100KB->1MB", large_bytes=len(fill_1m)
+        )
+
+        chain_1m = "git " + (chr(36) + "{a}") * 50_000 + "checkout"
+        ms_100k_chain = timed("git " + (chr(36) + "{a}") * 5_000 + "checkout")
+        ms_1m_chain = timed(chain_1m)
+        assert_near_linear(
+            ms_100k_chain,
+            ms_1m_chain,
+            label="chained ${a} 100KB->1MB",
+            large_bytes=len(chain_1m),
+        )

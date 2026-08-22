@@ -52,7 +52,7 @@ Every link carries `created_by` provenance, so you can always distinguish auto-g
 
 ### Append-only storage
 
-Nelson's docuverse was explicitly append-only; bytes are never truly deleted. Nexus follows this principle: both the document registry and link graph are stored as append-only JSONL files, with SQLite as a disposable query cache rebuilt from the JSONL truth. Git tracks the history, giving version control for free. Tombstones mark deletions without erasing the original record. This is why tumbler permanence works. Even after deletion and compaction, the append log preserves the fact that an address was once assigned.
+Nelson's docuverse was explicitly append-only; bytes are never truly deleted. Nexus follows this principle: tumblers are append-only — updating an entry preserves its tumbler, and deletion creates a tombstone rather than freeing the slot. The document registry and link graph are now service-owned, stored in the Java engine's Postgres tables and reached through `HttpCatalogClient` (the earlier append-only-JSONL-with-a-SQLite-query-cache design was deleted at RDR-158 P4; git no longer tracks catalog history directly). Tombstones still mark deletions without erasing the original record. This is why tumbler permanence works. Even after deletion and compaction, the tombstoned row preserves the fact that an address was once assigned.
 
 ### Span transclusion
 

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nexus.errors import UnextractableContentError
 from nexus.pdf_extractor import PDFExtractor, ExtractionResult, _normalize_whitespace_edge_cases
 
 
@@ -164,9 +165,13 @@ def test_extract_with_docling_boundary_positions(extractor, dummy_pdf):
 
 
 def test_extract_with_docling_raises_on_empty_output(extractor, dummy_pdf):
+    # nexus-deyd5: reclassified from a bare RuntimeError to
+    # UnextractableContentError (a nexus.errors.PER_RECORD_SURVIVABLE_
+    # EXCEPTIONS member) so a single unextractable file is skippable by
+    # run_file_loop instead of aborting the whole nx index repo run.
     mock_converter, mock_doc = _make_mock_docling(["", "", ""])
     extractor._converter_enriched = mock_converter
-    with pytest.raises(RuntimeError, match="empty output"):
+    with pytest.raises(UnextractableContentError, match="empty output"):
         extractor._extract_with_docling(dummy_pdf)
 
 
@@ -242,10 +247,13 @@ def test_extract_normalized_raises_on_empty_output(extractor, dummy_pdf):
     extraction failed page-by-page. Downstream the empty text
     produced 0 chunks and the indexer reported success with no
     chunks indexed (a silent failure mode). Symmetry with
-    _extract_with_docling: empty output is a hard error."""
+    _extract_with_docling: empty output is a hard error -- LOUD, per file
+    (nexus-aold's original intent), but nexus-deyd5 reclassified it from a
+    bare RuntimeError to UnextractableContentError so run_file_loop treats
+    it as a per-file skip rather than aborting the whole run."""
     mock_pymupdf = _mock_pymupdf_doc(["", "", ""])
     with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
-        with pytest.raises(RuntimeError, match="empty"):
+        with pytest.raises(UnextractableContentError, match="empty"):
             extractor._extract_normalized(dummy_pdf)
 
 

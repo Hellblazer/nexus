@@ -428,6 +428,26 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # orchestrating session -- independent of the pytest subprocess
     # under test.
     "t1_session_lease.",
+    # The per-session mint-or-borrow lock guarding
+    # `_lock_guarded_mint_or_borrow` (`db/t1.py:879`
+    # `_t1_session_mint_lock_path`), written by the live MCP server's
+    # `_t1_lifespan` (`mcp/core.py:1099`) -- the SAME call site whose
+    # success publishes the already-allowlisted `t1_session_lease.`
+    # above, and which is triggered by consuming the already-allowlisted
+    # `t1_handoff.` marker below. All three artifacts of one mechanism;
+    # this was the only one unlisted. ESTABLISHED 2026-08-22 on a clean
+    # full-suite run that reported `ADDED t1_mint_<this session uuid>
+    # .lock` as its ONLY finding (rc=1 against 14214 passed, 0 failed):
+    # the sibling `t1_session_lease.<same uuid>` (89 bytes, real token)
+    # appeared in the same minute with two live `nx-mcp` processes
+    # serving this session, and 485 such locks have accumulated at
+    # production cadence (267 Jul / 218 Aug), not clustered on suite
+    # runs. NOT a test leak: the path takes `config_dir` as a parameter,
+    # so a test under the suite-wide `_isolate_config_dir` autouse
+    # fixture writes its lock to tmp regardless of an inherited
+    # `CLAUDE_CODE_SESSION_ID`. Prefix kept narrow (`t1_mint_`, not
+    # `t1_`) to preserve reporting on other t1-shaped real-dir writes.
+    "t1_mint_",
     # `t1_addr.*` REMOVED round 2 (coordinator directive): the retired
     # RDR-149 P4 Chroma-lease format (nexus-8zfwv, 2026-08-07) -- every
     # remaining src/ reference is a comment/docstring noting readers were
@@ -2110,6 +2130,23 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # so no embedder is constructed and no credential is read — cloud_mode
     # would add a live-credential dependency to a fully patched test without
     # changing a single assertion.
+    #
+    # nexus-lgdel / RDR-145 Gap-2 — reason: "string-literal-as-name". The
+    # voyage token is one segment of a conformant RDR-103 collection name
+    # used as OPAQUE DATA: the test hands `_canonicalize_source_path` a fake
+    # catalog entry whose `physical_collection` differs from the queried
+    # collection and asserts the cross-collection hit is REFUSED (the
+    # absolute path is returned unchanged). `_Cat`/`_Entry` are local fakes
+    # and `_resolve_catalog_reader` is monkeypatched, so no embedder is
+    # constructed and no credential is read; the refusal is a string
+    # comparison. cloud_mode would change no assertion. The names mirror the
+    # MEASURED population the fix targets (1528 `aspect_source_path_
+    # uncanonical` warnings across real `rdr__*` voyage collections), which
+    # is why they are not swapped for a bge-768 pair to dodge the lint.
+    # Sibling tests in the file reach the same token through the module-level
+    # `COLLECTION` constant and are not offenders — `_scan_offenders` reads
+    # the test function's own body.
+    "tests/test_aspect_source_path_canonicalization.py::test_cross_collection_hit_is_REFUSED",
     "tests/test_catalog_rename_collection_tombstone_probe.py::test_rename_rejects_tombstoned_old_with_actionable_message",
     "tests/test_catalog_rename_collection_tombstone_probe.py::test_rename_rejects_tombstoned_new_as_not_free_to_claim",
     #

@@ -819,6 +819,7 @@ from nexus.errors import (  # noqa: E402 — grouped with this section's test-on
     IndexRunVerifyRefused,
     NexusError as _NexusError,
     UnchunkableContentError,
+    UnextractableContentError,
 )
 
 _MEMBER_KWARGS: dict[type, dict] = {
@@ -847,6 +848,35 @@ _MEMBER_KWARGS: dict[type, dict] = {
         "message": (
             "refusing to index empty.md: file is zero bytes — nothing "
             "to chunk, no catalog document registered"
+        ),
+    },
+    # nexus-deyd5: extraction completed but yielded zero usable text
+    # (pymupdf/docling both fail an image-only or damaged-text-layer
+    # PDF). Reachability differs by branch (verified against production
+    # call graphs, not assumed):
+    #   - FILE-BACKED branch: REAL production path. doc_indexer.index_pdf
+    #     -> _pdf_chunks -> PDFExtractor().extract() -- the exact call
+    #     chain ExtractionQualityError above already uses, one step
+    #     earlier (extraction dispatch, before the post-extraction
+    #     quality gate even runs). This test genuinely exercises a path
+    #     that can happen in production.
+    #   - DT-CONTENT branch: NOT reachable in production.
+    #     _index_dt_content_record (commands/dt.py) sources DT-extracted
+    #     TEXT and routes it through index_markdown -- it never touches
+    #     PDFExtractor at all, so neither this type nor
+    #     ExtractionQualityError (both PDFExtractor-only) can genuinely
+    #     arise there. That branch's coverage is dispatch-robustness only
+    #     (does the catch-and-continue logic around whatever
+    #     _index_dt_content_record raises survive this SHAPE), matching
+    #     how ExtractionQualityError is already treated here -- not a new
+    #     gap this entry introduces, the same pre-existing distinction
+    #     the section's own header comment describes ("handler-BODY
+    #     coverage the AST gates structurally cannot give").
+    UnextractableContentError: {
+        "message": (
+            "pymupdf produced empty output for scanned.pdf (page_count=3); "
+            "the PDF may be image-only or have a damaged text layer. Try "
+            "--extractor mineru or rerun OCR before indexing."
         ),
     },
 }

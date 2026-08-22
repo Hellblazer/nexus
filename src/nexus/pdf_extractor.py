@@ -31,7 +31,7 @@ import tempfile
 import httpx
 import structlog
 
-from nexus.errors import ExtractionQualityError
+from nexus.errors import ExtractionQualityError, UnextractableContentError
 
 try:
     from mineru.cli.common import do_parse
@@ -1069,7 +1069,14 @@ class PDFExtractor:
 
         text = "\n".join(page_texts)
         if not text.strip():
-            raise RuntimeError("docling produced empty output")
+            # nexus-deyd5: this file could not be extracted (zero text) --
+            # not a "something is wrong" condition. UnextractableContentError
+            # is per-record survivable: run_file_loop skips this file and
+            # continues, instead of aborting the whole nx index repo run.
+            # The broad `except Exception` in _extract_dispatch's docling
+            # branches still catches this and falls through to the PyMuPDF
+            # fallback exactly as it did for the old bare RuntimeError.
+            raise UnextractableContentError("docling produced empty output")
 
         # Collect TableItem regions and count formulas
         table_regions: list[dict] = []
@@ -2010,7 +2017,15 @@ class PDFExtractor:
             # guard in _extract_with_docling. The indexer's outer
             # error path will surface this as a non-zero exit with
             # a named failure mode (was: silent 0 chunks indexed).
-            raise RuntimeError(
+            # nexus-deyd5: reclassified from a bare RuntimeError. This is a
+            # per-file "cannot be extracted" condition, not a data-loss
+            # condition -- nothing was ever written for this file, so
+            # run_file_loop skips it (loud, counted, non-fatal) and
+            # continues the rest of the run instead of aborting it. Still a
+            # hard, LOUD failure for THIS file, per nexus-aold's original
+            # intent (no silent zero-chunk indexing) -- only the blast
+            # radius changed, not the visibility.
+            raise UnextractableContentError(
                 f"pymupdf produced empty output for {pdf_path.name} "
                 f"(page_count={page_count}); the PDF may be image-only "
                 "or have a damaged text layer. Try --extractor mineru "

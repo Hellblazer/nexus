@@ -143,6 +143,12 @@ if [[ "$STOP_ACTIVE" == "true" ]]; then
 fi
 [[ -n "$SESSION_ID" && -n "$AGENT_ID" && -n "$AGENT_TYPE" ]] || exit 0
 
+# nexus-4bqre.1: archive BEFORE the sweep, never after. expectations_sweep
+# reaps ledgers older than 7 days; archiving afterwards would only preserve
+# what survived the reap, which defeats the purpose. Ordering here is by
+# construction, which is why this rides the existing sweep site rather than
+# taking its own hook registration.
+expectations_archive
 expectations_sweep
 
 expectations_owes_report "$SESSION_ID" "$AGENT_ID" "$AGENT_TYPE" || exit 0

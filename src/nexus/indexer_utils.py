@@ -33,6 +33,77 @@ _log = structlog.get_logger(__name__)
 #: indexer._contain_transient_upsert).
 _FAILURE_DRAIN_TIMEOUT_S = 120.0
 
+#: Systemic-skip signal thresholds (nexus-deyd5; round 3 relocated the
+#: DECISION to a run-level verdict computed by ``nexus.indexer._run_index``
+#: after every run_file_loop category AND the batcher's drain complete —
+#: see :func:`skip_floor_breached`'s own docstring for why, and
+#: ``run_file_loop``'s docstring for what round 2's mid-loop-raise version
+#: got wrong). :func:`run_file_loop`'s per-file skip tolerance is only
+#: safe because ONE unextractable fixture is noise, not signal — a bad
+#: dependency version, a corrupt model, or a permissions problem can make
+#: EVERY file individually "survivable" the exact same way, and pre-
+#: nexus-deyd5 that shape aborted loudly on file 1. Two independent trip
+#: conditions:
+#:
+#: - TOTAL LOSS at any sample size: every file attempted was skipped.
+#:   Catches a systemic breakage on a small corpus (3 files, all 3 fail)
+#:   exactly as readily as a large one — a pure ratio threshold alone
+#:   would need to be near-100% to avoid false-positiving on small
+#:   samples, which would make it useless for the case that matters most.
+#:   Unambiguous: when literally nothing succeeded there is no completed
+#:   work a run-level check could put at risk by firing.
+#: - MAJORITY AT SCALE: the sample is large enough
+#:   (>= _SYSTEMIC_SKIP_MIN_ATTEMPTED) for a ratio to be statistically
+#:   meaningful rather than noise from a couple of legitimately-blank
+#:   fixtures, AND at least _SYSTEMIC_SKIP_RATIO_THRESHOLD of it skipped.
+#:   Catches, for example, a scanned-PDF archive indexed without OCR
+#:   (the default extractor never runs OCR; MinerU is opt-in) going
+#:   majority-unextractable — a real, non-anomalous corpus shape (code-
+#:   review finding, round 2) the coordinator explicitly wants surfaced
+#:   as an ACCURATE non-zero exit ("I indexed almost nothing"), not tuned
+#:   away with a PDF-specific threshold.
+#:
+#: A pure absolute count (e.g. "fail after 10 skips") was rejected: too
+#: permissive on a 3000-file repo (10 stray corrupt fixtures is normal
+#: noise) and too insensitive on a tiny repo (never fires on a 3-file
+#: repo that failed completely). A pure ratio alone was rejected too: on
+#: a 3-file repo, 1 legitimately-blank fixture is already 33% —
+#: indistinguishable from real breakage without the minimum-sample-size
+#: gate below it.
+_SYSTEMIC_SKIP_MIN_ATTEMPTED: int = 20
+_SYSTEMIC_SKIP_RATIO_THRESHOLD: float = 0.5
+
+
+def skip_floor_breached(skipped_n: int, attempted_n: int) -> bool:
+    """True when *skipped_n* of *attempted_n* files crosses the systemic-
+    skip signal thresholds (see the constants above). Pure function, no
+    side effects, no raise — the two trip conditions are independently
+    testable in isolation.
+
+    PUBLIC (not module-private) and deliberately NOT called by
+    :func:`run_file_loop` itself (nexus-deyd5 round 3, coordinator
+    directive): the caller is ``nexus.indexer._run_index``, which is the
+    only place with the RUN-level totals this needs — the sum of
+    *skipped*/*attempted* across all 4 run_file_loop categories (code/
+    prose/pdf/rdr), evaluated once after every category's loop AND the
+    batcher's drain AND post-processing have all completed normally.
+    Calling this per-category, mid-``_run_index`` (round 2's shape) let a
+    breach on ONE category raise before the other 3 categories or the
+    drain ever ran, discarding already-staged-but-unflushed chunks with
+    no ``__del__``/atexit to save them and surfacing as an uncaught
+    traceback instead of a clean CLI exit — see ``nexus.indexer.
+    _run_index``'s own comment at the point this is called for the full
+    account of why the verdict moved here.
+    """
+    if attempted_n == 0 or skipped_n == 0:
+        return False
+    if skipped_n == attempted_n:
+        return True
+    return (
+        attempted_n >= _SYSTEMIC_SKIP_MIN_ATTEMPTED
+        and skipped_n / attempted_n >= _SYSTEMIC_SKIP_RATIO_THRESHOLD
+    )
+
 # Patterns always ignored (mirrors indexer.DEFAULT_IGNORE).
 _DEFAULT_IGNORE: list[str] = [
     "node_modules", "vendor", ".venv", "__pycache__", "dist", "build", ".git",
@@ -1160,12 +1231,13 @@ def run_file_loop(
     concurrency: int,
     on_file: Callable[[Path, int, float], None] | None,
     on_stage_timers: Callable[[Path, object], None] | None,
+    on_skip: Callable[[Path, str], None] | None = None,
 ) -> int:
     """Drive one per-file indexing loop, sequentially or with a bounded pool.
 
     Returns the number of files that wrote at least one chunk this run
-    (``index_one`` returned > 0); staleness-skipped and failed files return 0
-    and are not counted (nexus-qgc4b).
+    (``index_one`` returned > 0); staleness-skipped, skipped (see below),
+    and failed files return 0 and are not counted (nexus-qgc4b).
 
     ``index_one(file, score, timers) -> chunk_count`` is the loop body
     (the ``_index_code_file`` / ``_index_prose_file`` / ``_index_pdf_file``
@@ -1180,15 +1252,79 @@ def run_file_loop(
       measured inside the worker, so durations stay truthful.
     - A per-file ``StageTimers`` is built only when ``on_stage_timers``
       is subscribed, mirroring the nexus-7niu short-circuit.
-    - Error semantics match the sequential loop: the first exception
-      cancels all not-yet-started files and re-raises. In-flight files
-      run to completion (callbacks included) before the raise — the
-      shakeout's count-based assertions are order-independent, so a few
-      extra completed files at failure time are indistinguishable from
-      the sequential "run died at file X" shape.
+
+    Error semantics — TWO tiers (nexus-deyd5; pre-fix this was a single
+    first-exception-cancels-all contract, so one unextractable PDF fixture
+    among 3160 files aborted the entire run's finalization at rc=1):
+
+    - **Per-record survivable** — caught EXPLICITLY BY NAME
+      (``nexus.errors.UnextractableContentError``), deliberately NOT the
+      broader ``nexus.errors.PER_RECORD_SURVIVABLE_EXCEPTIONS`` tuple
+      (code-review finding, nexus-deyd5 round 2): that tuple's other
+      members (``ChunkLandingUnverifiedError``, ``IndexRunVerifyRefused``,
+      ``ExtractionQualityError``, ``UnchunkableContentError``) are raised
+      solely from ``doc_indexer.py``'s fence-bracketed per-record command
+      path, never reachable from this loop's four ``index_one`` wrappers
+      today — and the ``tests/test_rlkgu_per_record_catch_tripwire.py``
+      audit that makes tuple membership safe for its ORIGINAL consumers
+      (``dt.py`` / ``commands/index.py``'s per-record loops) deliberately
+      does not scan this file, so catching the whole tuple here would be
+      an unguarded coupling: a future addition to the tuple (or a refactor
+      that wires RUNFENCE fencing — ``IndexRunVerifyRefused`` — into the
+      bulk crawl) would silently start being swallowed into a green
+      summary here with no mechanized gate to notice. Catching only the
+      one type this loop actually needs removes that coupling entirely.
+      Logged loudly (``index_file_skipped_unextractable``, naming the
+      file and the reason), reported via ``on_skip`` when given, the file
+      counted as 0 chunks written (identical to a staleness skip), and
+      the loop CONTINUES — this file's failure never cancels not-yet-
+      started files and never aborts the run. This is the "this file
+      cannot be extracted" bucket the bead calls out.
+    - **Everything else** is data-loss-class BY DEFAULT — the
+      conservative choice for any exception type not explicitly proven
+      safe (a store write failure, an auth failure, a substrate outage,
+      every OTHER PER_RECORD_SURVIVABLE_EXCEPTIONS member, or simply an
+      exception nobody has classified yet). The first such exception
+      cancels all not-yet-started files and re-raises, exactly as before.
+      In-flight files still run to completion (callbacks included) before
+      the raise — the shakeout's count-based assertions are order-
+      independent, so a few extra completed files at failure time are
+      indistinguishable from the sequential "run died at file X" shape.
+
+    A blanket ``except Exception: continue`` would satisfy the bead's
+    literal words while silently converting genuine data-loss failures
+    into green runs — deliberately NOT what this does. Only the one
+    positively-proven-reachable, positively-proven-safe type above is
+    treated as skippable; an unrecognized exception still fails loud.
+
+    Systemic-skip signal (nexus-deyd5 round 3, coordinator directive):
+    per-file survivability is only safe reasoning when failures are
+    independent noise — a bad dependency version, a corrupt model, or a
+    permissions problem can make every file individually "survivable" the
+    same way, and skipping everything with no further signal would be a
+    silent total failure. This function does NOT decide that on its own
+    and NEVER raises for it — an earlier version raised
+    mid-``_run_index`` (after only ONE of the 4 code/prose/pdf/rdr
+    categories), which discarded already-staged-but-unflushed chunks
+    (``ChunkBatcher`` has no ``__del__``/atexit; its drain never ran),
+    skipped the remaining categories and all post-processing, and
+    surfaced as an uncaught traceback — strictly worse than the bug being
+    fixed, and reachable on a routine corpus shape (a scanned-PDF archive
+    without OCR, since the default extractor never runs OCR and MinerU is
+    opt-in). The verdict is instead a RUN-LEVEL judgment made once, after
+    every category's loop AND the batcher's drain AND post-processing all
+    complete normally: see :func:`skip_floor_breached` (a pure function,
+    no side effects) and ``nexus.indexer._run_index`` / ``commands/index.
+    py``'s ``index_repo_cmd``, which compute the aggregate skipped/
+    attempted totals across all 4 calls to this function and convert a
+    breach into a clean ``click.ClickException`` — never a raise from
+    inside this loop, so a mid-run breach never costs already-completed
+    work.
     """
     import threading  # noqa: PLC0415 — leaf module keeps import surface minimal
     import time  # noqa: PLC0415 — leaf module keeps import surface minimal
+
+    from nexus.errors import UnextractableContentError  # noqa: PLC0415 — leaf module keeps import surface minimal
 
     cb_lock = threading.Lock()
 
@@ -1204,12 +1340,45 @@ def run_file_loop(
     # expensive post-index passes (taxonomy discover/kmeans/labeling) on this
     # count being non-zero, so an all-skip re-index costs only the scan.
     written = [0]
+    skipped = [0]
+
+    def _finish_ok() -> int:
+        """Called at every point run_file_loop would otherwise return
+        success. Logs the skip summary and returns — this function makes
+        NO systemic-skip judgment and never raises for one (nexus-deyd5
+        round 3): that verdict is a run-level decision made by the caller
+        once every category and the batcher's drain have completed, via
+        :func:`skip_floor_breached`. See this function's own docstring."""
+        total = len(files)
+        if skipped[0]:
+            _log.warning(
+                "index_file_loop_skip_summary",
+                skipped=skipped[0], total=total,
+            )
+        return written[0]
 
     def _process(score: float, file: Path) -> None:
         t0 = time.monotonic()
         timers = _make_timers()
-        chunks = index_one(file, score, timers)
+        skip_reason: str | None = None
+        try:
+            chunks = index_one(file, score, timers)
+        except UnextractableContentError as exc:
+            # nexus-deyd5: this file's own extraction failed in a way its
+            # exception type guarantees cost no durable data — log loudly,
+            # count it, and let the loop continue rather than cancelling
+            # every not-yet-started file behind it.
+            _log.error(
+                "index_file_skipped_unextractable",
+                file=str(file), error=str(exc), error_type=type(exc).__name__,
+            )
+            chunks = 0
+            skip_reason = str(exc)
         with cb_lock:
+            if skip_reason is not None:
+                skipped[0] += 1
+                if on_skip is not None:
+                    on_skip(file, skip_reason)
             if chunks > 0:
                 written[0] += 1
             if on_file:
@@ -1220,7 +1389,7 @@ def run_file_loop(
     if concurrency <= 1:
         for score, file in files:
             _process(score, file)
-        return written[0]
+        return _finish_ok()
 
     from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait  # noqa: PLC0415 — leaf module keeps import surface minimal
 
@@ -1230,7 +1399,7 @@ def run_file_loop(
         futures = [pool.submit(_process, score, file) for score, file in files]
         done, not_done = wait(futures, return_when=FIRST_EXCEPTION)
         if not not_done and not any(f.exception() for f in done):
-            return written[0]
+            return _finish_ok()
         # A failure (or spurious wake). Cancel everything not yet started,
         # let in-flight files finish, then harvest EVERY failure — a
         # concurrent secondary failure must be logged, never silently
@@ -1264,11 +1433,21 @@ def run_file_loop(
             if exc is not None:
                 failures.append((file, exc))
         if not failures:
-            return written[0]
+            return _finish_ok()
         # Deterministic "first": earliest in submission (frecency) order.
         for file, exc in failures[1:]:
             _log.warning(
                 "index_file_concurrent_failure_suppressed",
                 file=str(file), error=str(exc),
+            )
+        # nexus-deyd5 critique: still log the skip summary (informational,
+        # never raises) — the batch already fails via failures[0][1] below,
+        # so the floor breaker itself is redundant here, but the count is
+        # still worth a line since some files may have skipped before the
+        # data-loss-class failure hit.
+        if skipped[0]:
+            _log.warning(
+                "index_file_loop_skip_summary",
+                skipped=skipped[0], total=len(files),
             )
         raise failures[0][1]

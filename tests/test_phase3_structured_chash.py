@@ -159,7 +159,7 @@ class TestNxAnswerStructuredEnvelope:
         import nexus.operators.dispatch as _dispatch_mod
         from nexus.mcp.core import nx_answer
 
-        async def fake_dispatch(prompt, schema, timeout=60.0):
+        async def fake_dispatch(prompt, schema, timeout=60.0, **kw):
             return {"steps": [
                 {"tool": "search", "args": {"query": "$intent"}},
                 {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
@@ -237,7 +237,7 @@ class TestNxAnswerStructuredEnvelope:
         import nexus.operators.dispatch as _dispatch_mod
         from nexus.mcp.core import nx_answer
 
-        async def fake_dispatch(prompt, schema, timeout=60.0):
+        async def fake_dispatch(prompt, schema, timeout=60.0, **kw):
             return {"steps": [
                 {"tool": "search", "args": {"query": "$intent"}},
                 {"tool": "summarize", "args": {"inputs": "$step1.ids"}},

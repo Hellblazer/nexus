@@ -188,9 +188,9 @@ _DIR_ALLOWLIST: dict[str, str] = {
         "table_name labels (vectors-005) that name relations which no "
         "longer exist post-unify, on purpose, so the diagnostic surface "
         "stays legible across the migration boundary — "
-        "tests/db/test_du2dw_chash_conformance_report_engine.py and "
-        "tests/db/test_rdr182_mvv_no_content_read.py assert those labels "
-        "verbatim; do not 'fix' them without a wire-compat decision reversal. "
+        "tests/db/test_du2dw_chash_conformance_report_engine.py asserts "
+        "those labels verbatim; do not 'fix' them without a wire-compat "
+        "decision reversal. "
         "ZERO detection power for a NEW stale reference in a NEW changelog "
         "file (no per-file count tracked at directory grain) — accepted, "
         "not fixed: every SHIPPED changeset body is Liquibase-checksummed "
@@ -259,14 +259,10 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "(unified 'taxonomy_centroids' key with a legacy-per-dim-key sum "
         "fallback) — see that file's allowlist reason."
     ),
-    "src/nexus/remediation/playbook.py": (
-        3,
-        "The chash-poison forensics playbook's agent-facing prose literally "
-        "explains the pre-unify STRADDLE window to the diagnosing agent "
-        "('chunks_384/chunks_768/chunks_1024 still per-dim' — read the "
-        "legacy-era statements instead) so the identifiers must appear "
-        "verbatim in this live, rendered explanation text."
-    ),
+    # WAS src/nexus/remediation/playbook.py (3 hits) — the whole file was
+    # deleted at nexus-lgdel (the RDR-182 chash-poison forensics playbook
+    # its prose explained retired with it), so the entry retires too
+    # rather than pointing at a nonexistent path.
     # ── src/nexus: pure historical prose (javadoc/docstring/comment only,
     #    no live per-dim SQL target remains in the file) ──────────────────
     # nexus-ifgxr (2026-08-15): src/nexus/search_engine.py's sole hit
@@ -402,13 +398,10 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "engine — the exact assertion the changelog directory's allowlist "
         "reason names as the reason those labels must not be 'fixed'."
     ),
-    "tests/db/test_rdr182_mvv_no_content_read.py": (
-        5,
-        "_ALLOWED_READ_OBJECTS enumerates the legacy per-dim table names as "
-        "content-safe read targets for the straddle-window diagnostic "
-        "statement set (nexus-rpw6u) — the same legacy_chash_conformance_"
-        "statements() wire-compat literals as chash_tables.py."
-    ),
+    # WAS tests/db/test_rdr182_mvv_no_content_read.py (5 hits) — the whole
+    # file was deleted at nexus-lgdel (it tested the RDR-182 forensics
+    # playbook's diagnostic SQL, which retired with the playbook), so the
+    # entry retires too rather than pointing at a nonexistent path.
     "tests/db/test_admin_sql_env.py": (
         9,
         "Fixture ALTER TABLE ... VALIDATE CONSTRAINT statements for the "

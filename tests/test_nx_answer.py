@@ -408,6 +408,85 @@ class TestSingleQueryPlanBindingUnsatisfiable:
         )
 
 
+# ── Single-query unresolved $var (nexus-pucte, undefended-sibling-path fix) ─────
+
+
+class TestSingleQueryUnresolvedVar:
+    """nexus-pucte review-fix (critic Significant #3): the single_query
+    fast path bypasses plan_run (and its pre-dispatch _validate_var_refs
+    check) entirely by design -- resolve_step_bindings now runs the
+    identical check itself, so a $var with no default and no
+    caller-supplied value (and NOT covered by _autoalias_bindings, which
+    only fills names in required_bindings) is refused loudly instead of
+    reaching query() as the literal token string -- exactly the
+    nexus-nyry9.5 bug class, on its second entry point.
+
+    Uses ``question`` (review round 2, critic cosmetic item): the fast
+    path's ``query()`` call only ever consumes ``question``/``corpus``/
+    ``limit`` from ``step_args`` (core.py's Step 2 body) -- ``question``
+    is the field a real exploit of this bug would ride, matching the
+    ORIGINAL nexus-nyry9.5 failure mode exactly (a literal ``$question``
+    reaching ``query()`` as a garbage filter value, returning "No
+    results." with nothing surfaced). An earlier draft of this test used
+    an arbitrary ``topic`` field the fast path never reads at all, which
+    proved the validation MECHANISM fires but not a concretely reachable
+    scenario for this tool."""
+
+    @pytest.mark.asyncio
+    async def test_unaliased_question_refused_not_queried_as_literal(self, tmp_path):
+        import nexus.mcp_infra as _infra
+        from nexus.plans.match import Match
+
+        match = Match(
+            plan_id=1,
+            name="test-plan-unaliased-question",
+            description="test",
+            confidence=0.75,
+            dimensions={},
+            tags="",
+            plan_json=json.dumps({
+                "steps": [{
+                    "tool": "query",
+                    # "question" is neither in required_bindings (so
+                    # _autoalias_bindings never touches it) nor in
+                    # default_bindings -- nothing supplies it.
+                    "args": {"question": "$question", "corpus": "knowledge"},
+                }],
+            }),
+            required_bindings=[],
+            optional_bindings=[],
+            default_bindings={},
+            parent_dims=None,
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch("nexus.mcp.core.query") as query_spy,
+            patch("nexus.mcp.core._nx_answer_record_run") as record_run_spy,
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q")
+
+        assert "question" in result, (
+            f"expected the unresolved-var refusal naming the var, got: {result!r}"
+        )
+        assert not query_spy.called, (
+            "query() must never be called with the unresolved var reaching "
+            "it as the literal token '$question' -- the whole point of the "
+            "fix (and the exact nexus-nyry9.5 failure mode this closes on "
+            "the fast path's second entry point)"
+        )
+        assert record_run_spy.called, "the refusal must still be recorded"
+        assert record_run_spy.call_args.kwargs.get("step_count") == 0, (
+            "zero steps ran -- matches the sibling "
+            "PlanBindingUnsatisfiableError handling's step_count=0 convention"
+        )
+
+
 # ── Single-query limit clamp (review-fix) ───────────────────────────────────────
 
 
@@ -865,7 +944,7 @@ class TestPlanMissPlanner:
             ],
         }
 
-        async def fake_dispatch(prompt, schema, timeout=60.0, model=None):
+        async def fake_dispatch(prompt, schema, timeout=60.0, model=None, **kw):
             return fake_plan
 
         with patch.object(_dispatch_mod, "claude_dispatch", fake_dispatch):
@@ -882,7 +961,7 @@ class TestPlanMissPlanner:
         from nexus.mcp.core import _nx_answer_plan_miss
         import nexus.operators.dispatch as _dispatch_mod
 
-        async def fake_dispatch(prompt, schema, timeout=60.0, model=None):
+        async def fake_dispatch(prompt, schema, timeout=60.0, model=None, **kw):
             return {"steps": []}
 
         with patch.object(_dispatch_mod, "claude_dispatch", fake_dispatch):
@@ -895,7 +974,7 @@ class TestPlanMissPlanner:
         from nexus.mcp.core import _nx_answer_plan_miss
         import nexus.operators.dispatch as _dispatch_mod
 
-        async def fake_dispatch(prompt, schema, timeout=60.0, model=None):
+        async def fake_dispatch(prompt, schema, timeout=60.0, model=None, **kw):
             return {"steps": [
                 {"tool": "mcp__plugin_sn_serena__jet_brains_find_symbol", "args": {}},
             ]}
@@ -913,7 +992,7 @@ class TestPlanMissPlanner:
         from nexus.mcp.core import _nx_answer_plan_miss
         import nexus.operators.dispatch as _dispatch_mod
 
-        async def fake_dispatch(prompt, schema, timeout=60.0, model=None):
+        async def fake_dispatch(prompt, schema, timeout=60.0, model=None, **kw):
             return {"steps": [
                 {"tool": "Grep", "args": {}},
                 {"tool": "Read", "args": {}},
@@ -932,7 +1011,7 @@ class TestPlanMissPlanner:
         from nexus.mcp.core import _nx_answer_plan_miss
         import nexus.operators.dispatch as _dispatch_mod
 
-        async def fake_dispatch(prompt, schema, timeout=60.0, model=None):
+        async def fake_dispatch(prompt, schema, timeout=60.0, model=None, **kw):
             return {"steps": [
                 {"tool": "mcp__plugin_conexus_nexus__search", "args": {"query": "$intent"}},
                 {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
@@ -950,7 +1029,7 @@ class TestPlanMissPlanner:
         from nexus.mcp.core import _nx_answer_plan_miss
         import nexus.operators.dispatch as _dispatch_mod
 
-        async def fake_dispatch(prompt, schema, timeout=60.0, model=None):
+        async def fake_dispatch(prompt, schema, timeout=60.0, model=None, **kw):
             return {"steps": [
                 {"tool": "search", "args": {"query": "$intent"}},
                 {"tool": "totally_unknown_tool", "args": {}},
@@ -976,7 +1055,7 @@ class TestPlanMissPlanner:
 
         dispatch_calls = []
 
-        async def fake_dispatch(prompt, schema, timeout=60.0, model=None):
+        async def fake_dispatch(prompt, schema, timeout=60.0, model=None, **kw):
             dispatch_calls.append(prompt)
             return {"steps": [{"tool": "search", "args": {"query": "$intent"}}]}
 
@@ -1235,7 +1314,7 @@ class TestNxTidy:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import nx_tidy
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             return {"summary": "Consolidated.", "actions": []}
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
@@ -1250,7 +1329,7 @@ class TestNxTidy:
 
         captured = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured.append(prompt)
             return {"summary": "ok", "actions": []}
 
@@ -1266,7 +1345,7 @@ class TestNxTidy:
 
         dispatch_calls = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             dispatch_calls.append(prompt)
             return {"summary": "ok", "actions": []}
 
@@ -1286,7 +1365,7 @@ class TestNxTidy:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured["timeout"] = timeout
             return {"summary": "ok", "actions": []}
 
@@ -1607,7 +1686,7 @@ class TestOperatorTimeoutDefaults:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured["timeout"] = timeout
             return {"summary": "ok"}
 
@@ -1622,7 +1701,7 @@ class TestOperatorTimeoutDefaults:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured["timeout"] = timeout
             return {"extractions": []}
 
@@ -1637,7 +1716,7 @@ class TestOperatorTimeoutDefaults:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured["timeout"] = timeout
             return {"ranked": []}
 
@@ -1652,7 +1731,7 @@ class TestOperatorTimeoutDefaults:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured["timeout"] = timeout
             return {"comparison": "ok"}
 
@@ -1667,7 +1746,7 @@ class TestOperatorTimeoutDefaults:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured["timeout"] = timeout
             return {"output": "ok"}
 
@@ -1857,7 +1936,7 @@ class TestNxAnswerBindingAlias:
         run_result = PlanResult(steps=[{"text": "ok"}])
         captured: list[dict] = []
 
-        async def _spy(match, bindings):
+        async def _spy(match, bindings, **kwargs):
             captured.append(dict(bindings))
             return run_result
 
@@ -1898,7 +1977,7 @@ class TestNxAnswerBindingAlias:
         run_result = PlanResult(steps=[{"text": "ok"}])
         captured: list[dict] = []
 
-        async def _spy(match, bindings):
+        async def _spy(match, bindings, **kwargs):
             captured.append(dict(bindings))
             return run_result
 
@@ -1936,7 +2015,7 @@ class TestNxAnswerBindingAlias:
         run_result = PlanResult(steps=[{"text": "ok"}])
         captured: list[dict] = []
 
-        async def _spy(match, bindings):
+        async def _spy(match, bindings, **kwargs):
             captured.append(dict(bindings))
             return run_result
 
@@ -1978,7 +2057,7 @@ class TestNxAnswerBindingAlias:
         run_result = PlanResult(steps=[{"text": "ok"}])
         captured: list[dict] = []
 
-        async def _spy(match, bindings):
+        async def _spy(match, bindings, **kwargs):
             captured.append(dict(bindings))
             return run_result
 
@@ -2110,14 +2189,19 @@ class TestNxAnswerCostAccounting:
             assert seen["cost_usd"] is None
 
     def test_budget_usd_parameter_accepted_without_error(self, tmp_path):
-        """budget_usd is a no-op parameter — accepted but not enforced (P5 stub)."""
+        """budget_usd is accepted. RDR-196 .p3a (nexus-nyry9.19): the
+        unmeasured 0.25 literal is gone; the default is None = "resolve
+        to budget_default.DERIVED_BUDGET_USD". RDR-196 .p3c
+        (nexus-nyry9.21): enforcement is now ON -- see TestNxAnswerBudgetUsd
+        for the enforcement behavior itself."""
         import inspect
         from nexus.mcp.core import nx_answer
+        from nexus.plans.budget_default import BUDGET_ENFORCEMENT_ENABLED
 
         sig = inspect.signature(nx_answer)
         assert "budget_usd" in sig.parameters, "budget_usd must remain in signature"
-        # Default must be present (contract stability)
-        assert sig.parameters["budget_usd"].default == 0.25
+        assert sig.parameters["budget_usd"].default is None
+        assert BUDGET_ENFORCEMENT_ENABLED is True
 
 
 class TestNxAnswerLatencyProxy:
@@ -2721,7 +2805,7 @@ class TestNxAnswerBudgetSeconds:
             result = await nx_answer("q", budget_seconds=20.0)
 
         assert isinstance(result, str)
-        assert "[budget exhausted after step 2 of 2 — partial answer]" in result
+        assert "[budget exhausted (time) after step 2 of 2 — partial answer]" in result
         assert "a" in result and "b" in result  # retrieved chunk ids surfaced
 
     @pytest.mark.asyncio
@@ -2787,7 +2871,7 @@ class TestNxAnswerBudgetSeconds:
 
         assert isinstance(result, dict)
         assert result["budget_exhausted_at_step"] == 2
-        assert "[budget exhausted after step 2 of 2" in result["final_text"]
+        assert "[budget exhausted (time) after step 2 of 2" in result["final_text"]
 
     @pytest.mark.asyncio
     async def test_budget_exhausted_marker_uses_plan_result_total_planned_steps_field(
@@ -2823,7 +2907,7 @@ class TestNxAnswerBudgetSeconds:
             from nexus.mcp.core import nx_answer
             result = await nx_answer("q", budget_seconds=20.0)
 
-        assert "[budget exhausted after step 2 of 5 — partial answer]" in result, (
+        assert "[budget exhausted (time) after step 2 of 5 — partial answer]" in result, (
             f"expected total_planned_steps=5 (from PlanResult) in the marker, "
             f"got: {result!r}"
         )
@@ -2875,7 +2959,7 @@ class TestNxAnswerBudgetSeconds:
         from nexus.mcp.core import _NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN
         assert isinstance(result, str)
         assert (
-            f"[budget exhausted after step {_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN} "
+            f"[budget exhausted (time) after step {_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN} "
             "of 2 — partial answer]"
         ) in result
 
@@ -2922,7 +3006,7 @@ class TestNxAnswerBudgetSeconds:
         assert isinstance(result, dict)
         assert result["budget_exhausted_at_step"] == _NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN
         assert (
-            f"[budget exhausted after step {_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN} "
+            f"[budget exhausted (time) after step {_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN} "
             "of 2"
         ) in result["final_text"]
 
@@ -2960,7 +3044,7 @@ class TestNxAnswerBudgetSeconds:
         plan_run_mock.assert_not_called()
         assert isinstance(result, str)
         assert (
-            f"[budget exhausted after step {_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN} "
+            f"[budget exhausted (time) after step {_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN} "
             "of 0 — partial answer]"
         ) in result
 
@@ -3096,6 +3180,632 @@ class TestNxAnswerBudgetSeconds:
             await nx_answer("q", budget_seconds=20.0)
 
         record_outcome.assert_called_once_with(42, success=False)
+
+
+# ── RDR-196 .p3c (nexus-nyry9.21): USD budget enforcement ───────────────────
+#
+# D1: BUDGET_ENFORCEMENT_ENABLED (nexus.plans.budget_default) gates ALL of
+# the below -- an explicit caller budget_usd and the derived default alike.
+# D2: mid-run stop is checked BEFORE dispatching each segment (a stop-line,
+# not a hard ceiling -- see plan_run's own docstring). D3: the USD budget
+# REUSES the exact marker budget_seconds already produces, with "(cost)" in
+# place of "(time)" -- one emitter, never a second shape. D4: the pre-flight
+# PRICE CHECK on an over-estimate is a WARNING (round 2, Sam's decision on
+# the critic's CRITICAL, T2 p3c-critique-2026-08-21: the step-shape
+# estimator has no per-plan discriminating power in the live population, so
+# a hard refusal was a step function that refused real runs deterministically
+# and wrongly); a genuinely unpriceable plan ALSO warns and runs, never
+# refuses -- both kinds share ONE emitter (_emit_budget_warning). D5: the
+# inline planner's own dispatch cost is seeded into the running spend before
+# Step 4. Round 2 also added an "unknown-cost" warning kind through the same
+# emitter (critic Significant 1): a step with no captured cost_usd is a
+# blind spot for the mid-run stop-line and must say so, once per run.
+
+
+class TestNxAnswerBudgetUsdEnforcement:
+
+    @pytest.mark.asyncio
+    async def test_over_cap_warns_and_runs_zero_planner_spend(self, tmp_path):
+        """A plan whose predicted cost exceeds the cap must WARN and
+        still RUN (never refuse) -- both numbers (estimate, cap) in
+        the warning text, both shapes, and plan_run genuinely called."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)  # search + operator_summarize
+        run_result = PlanResult(steps=[{"text": "the real answer"}])
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            # operator_summarize prices at the $0.23 static fallback
+            # (empty telemetry in this fixture's fresh T2Database) --
+            # comfortably above a $0.05 cap. Zero planner spend (a
+            # plan-match HIT never dispatches the inline planner), so
+            # remaining == the full cap here -- the nonzero-spend
+            # arithmetic case is covered separately below.
+            text_result = await nx_answer("q", budget_usd=0.05)
+            struct_result = await nx_answer("q", budget_usd=0.05, structured=True)
+
+        assert isinstance(text_result, str)
+        assert "Refused" not in text_result, "over-cap must WARN, never refuse"
+        assert "budget warning (over-cap)" in text_result
+        assert "0.2300" in text_result, f"estimate not in warning text: {text_result!r}"
+        assert "0.0500" in text_result, f"cap/remaining not in warning text: {text_result!r}"
+        assert "the real answer" in text_result, (
+            "the plan must still RUN and its real answer must still "
+            "surface -- a warning is not a refusal"
+        )
+
+        assert isinstance(struct_result, dict)
+        over_cap_entries = [
+            w for w in struct_result["budget_warnings"] if w["kind"] == "over-cap"
+        ]
+        assert len(over_cap_entries) == 1
+        assert "the real answer" in struct_result["final_text"]
+
+    @pytest.mark.asyncio
+    async def test_over_cap_warning_names_remaining_cap_and_spent_when_nonzero(
+        self, tmp_path,
+    ):
+        """code-review Medium 1 (T2 p3c-code-review-2026-08-21): the
+        warning must name the REMAINING budget (the actual comparison
+        operand), the FULL cap, and the already-spent amount -- not
+        label the full cap as what was compared against, which reads
+        as numerically false whenever D5's planner spend is nonzero.
+        Uses the plan-miss path so the inline planner's own dispatch
+        cost (captured via the ambient sink) is genuinely nonzero."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.operators.dispatch import DispatchUsage
+        from nexus.plans.runner import PlanResult
+
+        # 3 NON-contiguous operator steps (interleaved with retrieval
+        # steps so they never bundle) -> estimate = 3 x $0.23 = $0.69,
+        # via the same empty-telemetry static-fallback pricing every
+        # other test in this class relies on.
+        grown_match = _make_match(
+            plan_id=0, confidence=None,
+            plan_json=json.dumps({"steps": [
+                {"tool": "search", "args": {"query": "$intent"}},
+                {"tool": "extract", "args": {"fields": "a", "inputs": "[]"}},
+                {"tool": "search", "args": {"query": "$intent"}},
+                {"tool": "rank", "args": {"items": "[]", "criterion": "x"}},
+                {"tool": "search", "args": {"query": "$intent"}},
+                {"tool": "summarize", "args": {"content": "x"}},
+            ]}),
+        )
+        run_result = PlanResult(steps=[{"text": "the real answer"}])
+
+        async def fake_plan_miss_direct(question, scope="", max_steps=6, **kwargs):
+            import nexus.operators.dispatch as _dispatch_mod
+
+            sink = _dispatch_mod._ambient_usage_sink.get()
+            assert sink is not None
+            sink.append(DispatchUsage(
+                model="claude-opus-5", cost_usd=0.50, input_tokens=100,
+                output_tokens=50, cache_creation_input_tokens=0,
+                cache_read_input_tokens=0, duration_ms=1000,
+                duration_api_ms=900, num_turns=1,
+            ))
+            return grown_match
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[]),  # forced miss
+            patch("nexus.mcp.core._nx_answer_plan_miss",
+                  AsyncMock(side_effect=fake_plan_miss_direct)),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            # cap $1.0530 (derived default), planner spend $0.50 ->
+            # remaining $0.5530; estimate $0.69 > remaining, but
+            # $0.69 < the full cap $1.0530 -- exactly the scenario the
+            # prior text got numerically backwards.
+            result = await nx_answer("q")
+
+        assert isinstance(result, str)
+        assert "Refused" not in result
+        assert "the real answer" in result, "must still run, not refuse"
+        assert "0.6900" in result, f"estimate missing: {result!r}"
+        assert "0.5530" in result, f"remaining (the real comparison operand) missing: {result!r}"
+        assert "1.0530" in result, f"full cap missing: {result!r}"
+        assert "0.5000" in result, f"already-spent amount missing: {result!r}"
+
+    @pytest.mark.asyncio
+    async def test_mid_run_stop_emits_both_shapes_cost_kind(self, tmp_path):
+        """A PlanResult reporting a cost-axis exhaustion must produce
+        the SAME marker budget_seconds produces, with (cost) in place
+        of (time) -- text-mode leading line AND the structured
+        budget_exhausted_at_step field, per D3's one-emitter rule."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(
+            steps=[{"ids": ["a"], "tumblers": [], "distances": [0.1],
+                    "collections": ["knowledge"]}],
+            budget_exhausted_at_step=2,
+            budget_exhausted_kind="cost",
+            total_planned_steps=2,
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            text_result = await nx_answer("q")
+            struct_result = await nx_answer("q", structured=True)
+
+        assert isinstance(text_result, str)
+        assert "[budget exhausted (cost) after step 2 of 2 — partial answer]" in text_result
+
+        assert isinstance(struct_result, dict)
+        assert struct_result["budget_exhausted_at_step"] == 2
+        assert "[budget exhausted (cost) after step 2 of 2" in struct_result["final_text"]
+
+    @pytest.mark.asyncio
+    async def test_under_budget_completion_emits_no_marker(self, tmp_path):
+        """False-positive guard: a normal completion well under the
+        cap must carry no exhaustion marker of any kind."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(steps=[{"text": "a normal completed answer"}])
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q")
+
+        assert isinstance(result, str)
+        assert "[budget exhausted" not in result
+        assert "Refused" not in result
+        assert "[budget warning" not in result, (
+            "a normal completion well under the cap, fully priced and "
+            "fully measured, must carry no warning of any kind either"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_estimate_path_warns_and_runs(self, tmp_path):
+        """A plan naming a tool the price table has never heard of is
+        UNPRICEABLE -- estimate.usd is None -- and must WARN, never
+        refuse: the run still completes with the normal answer text
+        plus a leading warning line / structured field."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        unpriceable_match = _make_match(
+            confidence=0.75,
+            plan_json=json.dumps({
+                "steps": [{"tool": "totally_unknown_tool_xyz", "args": {}}],
+            }),
+        )
+        run_result = PlanResult(steps=[{"text": "an actual answer"}])
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[unpriceable_match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            text_result = await nx_answer("q")
+            struct_result = await nx_answer("q", structured=True)
+
+        assert isinstance(text_result, str)
+        assert "budget warning (no-estimate)" in text_result
+        assert "an actual answer" in text_result, (
+            "the plan must still RUN and its real answer must still "
+            "surface -- a warning is not a refusal"
+        )
+
+        assert isinstance(struct_result, dict)
+        no_estimate_entries = [
+            w for w in struct_result["budget_warnings"] if w["kind"] == "no-estimate"
+        ]
+        assert len(no_estimate_entries) == 1
+        assert "an actual answer" in struct_result["final_text"]
+
+    @pytest.mark.asyncio
+    async def test_inline_planner_cost_included_in_running_sum(self, tmp_path):
+        """The inline planner's own claude_dispatch cost, captured via
+        the ambient usage sink, must be seeded into the running spend
+        BEFORE Step 4 -- a planner dispatch alone big enough to exhaust
+        the whole cap must stop the run via the pre-plan cost sentinel,
+        WITHOUT plan_run ever being called, mirroring the shipped
+        budget_seconds pre-plan-exhaustion contract on the cost axis."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.operators.dispatch import DispatchUsage
+
+        grown_match = _make_match(
+            plan_id=0, confidence=None,
+            plan_json=json.dumps({"steps": [{"tool": "search", "args": {"query": "$intent"}}]}),
+        )
+
+        # Simulate a real claude_dispatch call landing its usage in
+        # whatever ambient sink nx_answer wraps around the plan-miss
+        # dispatch -- exactly what the real inline planner's own
+        # claude_dispatch call does internally.
+        async def fake_plan_miss_direct(question, scope="", max_steps=6, **kwargs):
+            import nexus.operators.dispatch as _dispatch_mod
+
+            sink = _dispatch_mod._ambient_usage_sink.get()
+            assert sink is not None, (
+                "nx_answer must wrap the plan-miss dispatch in "
+                "ambient_usage_sink for D5 to have anything to capture"
+            )
+            sink.append(DispatchUsage(
+                model="claude-opus-5", cost_usd=2.00, input_tokens=100,
+                output_tokens=50, cache_creation_input_tokens=0,
+                cache_read_input_tokens=0, duration_ms=1000,
+                duration_api_ms=900, num_turns=1,
+            ))
+            return grown_match
+
+        plan_run_mock = AsyncMock()
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[]),  # forced miss
+            patch("nexus.mcp.core._nx_answer_plan_miss",
+                  AsyncMock(side_effect=fake_plan_miss_direct)),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", plan_run_mock),
+        ):
+            from nexus.mcp.core import nx_answer
+            # $2.00 planner spend alone exceeds the derived $1.0530 cap.
+            result = await nx_answer("q")
+
+        plan_run_mock.assert_not_called()
+        assert isinstance(result, str)
+        from nexus.mcp.core import _NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN
+        assert (
+            f"[budget exhausted (cost) after step {_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN} "
+            "of 1"
+        ) in result
+
+    @pytest.mark.asyncio
+    async def test_budget_usd_non_positive_is_loud_error(self, tmp_path):
+        """budget_usd <= 0 must be a loud bounds error, before any
+        dispatch -- 0 must never mean 'unlimited'."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+
+        match = _make_match(confidence=0.75)
+        plan_match_mock = MagicMock(return_value=[match])
+        plan_run_mock = AsyncMock()
+
+        with (
+            patch("nexus.plans.matcher.plan_match", plan_match_mock),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", plan_run_mock),
+        ):
+            from nexus.mcp.core import nx_answer
+            zero_result = await nx_answer("q", budget_usd=0)
+            negative_result = await nx_answer("q", budget_usd=-1.5)
+
+        plan_match_mock.assert_not_called()
+        plan_run_mock.assert_not_called()
+        assert "budget_usd must be > 0" in zero_result
+        assert "budget_usd must be > 0" in negative_result
+
+    @pytest.mark.asyncio
+    async def test_enforcement_off_restores_pre_p3c_behavior(self, tmp_path, monkeypatch):
+        """Flipping BUDGET_ENFORCEMENT_ENABLED back False must restore
+        pre-.p3c behavior on every path this class exercises: a
+        non-positive budget_usd no longer errors, an over-estimate
+        no longer refuses, and plan_run never receives
+        budget_usd_remaining."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        import nexus.plans.budget_default as _bd
+        from nexus.plans.runner import PlanResult
+
+        monkeypatch.setattr(_bd, "BUDGET_ENFORCEMENT_ENABLED", False)
+
+        match = _make_match(confidence=0.75)  # would price at $0.23
+        run_result = PlanResult(steps=[{"text": "a normal completed answer"}])
+        captured: dict = {}
+
+        async def _spy(match, bindings, **kwargs):
+            captured.update(kwargs)
+            return run_result
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(side_effect=_spy)),
+        ):
+            from nexus.mcp.core import nx_answer
+            # A cap far below the plan's real static-fallback estimate
+            # ($0.23) AND non-positive -- neither must matter when
+            # enforcement is off.
+            zero_result = await nx_answer("q", budget_usd=0)
+            low_result = await nx_answer("q", budget_usd=0.001)
+
+        assert "budget_usd must be > 0" not in zero_result
+        assert "Refused" not in low_result
+        assert "budget_usd_remaining" not in captured, (
+            "plan_run must not receive budget_usd_remaining when "
+            "enforcement is off"
+        )
+        assert "a normal completed answer" in low_result
+
+    @pytest.mark.asyncio
+    async def test_unknown_cost_steps_surface_the_blind_spot_warning(self, tmp_path):
+        """critic Significant 1 (T2 p3c-critique-2026-08-21): a run
+        whose executed steps carry no cost_usd is a blind spot for the
+        mid-run stop-line -- ``test_budget_usd_remaining_unknown_cost_
+        steps_never_trip`` (tests/test_plan_run.py) already proves the
+        blind spot EXISTS at the runner level (dispatch continues,
+        cost_usd stays None, never fabricated to 0); this test proves
+        the SIGNAL now fires at the nx_answer level, once per run, in
+        both shapes, without turning into a refusal or an exhaustion
+        marker.
+
+        code-review Medium (round 3, T2 p3c-code-review round 3): a
+        SINGLE unknown-cost record among two cannot distinguish a
+        correct single-emit implementation from a hypothetical
+        per-step-loop regression -- both would produce the identical
+        "fires once" observation. Uses THREE unknown-cost records among
+        FIVE so a per-step-loop bug (which would fire 3 times, or name
+        the wrong count) is genuinely falsifiable: asserts the warning
+        substring's COUNT is exactly 1 (never once per step) AND that
+        it names the real "3 of 5", not "1 of 5" or "1 of 2"."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult, StepRecord
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(
+            steps=[{"text": "an answer despite unknown cost"}],
+            step_records=[
+                StepRecord(step_index=0, operator="search", source="sql",
+                           cost_usd=0.0, ok=True),
+                StepRecord(step_index=1, operator="extract", source="llm",
+                           cost_usd=None, ok=True),
+                StepRecord(step_index=2, operator="rank", source="llm",
+                           cost_usd=None, ok=True),
+                StepRecord(step_index=3, operator="filter", source="sql",
+                           cost_usd=0.0, ok=True),
+                StepRecord(step_index=4, operator="summarize", source="llm",
+                           cost_usd=None, ok=True),
+            ],
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            text_result = await nx_answer("q")
+            struct_result = await nx_answer("q", structured=True)
+
+        assert isinstance(text_result, str)
+        assert text_result.count("budget warning (unknown-cost)") == 1, (
+            f"must fire exactly ONCE per run, never once per unknown-cost "
+            f"step: {text_result!r}"
+        )
+        assert "3 of 5" in text_result, (
+            f"expected the real per-run count of unknown-cost steps "
+            f"(3 of the 5 executed): {text_result!r}"
+        )
+        assert "an answer despite unknown cost" in text_result
+        assert "[budget exhausted" not in text_result, (
+            "an unknown-cost step is a coverage gap, not itself an "
+            "exhaustion -- must not fabricate a stop"
+        )
+        assert "Refused" not in text_result
+
+        assert isinstance(struct_result, dict)
+        assert struct_result["budget_exhausted_at_step"] is None
+        assert "an answer despite unknown cost" in struct_result["final_text"]
+
+        # ITEM B (round 3, critic Significant) / round 4 (the
+        # machine-readable field is the ONLY structured shape now --
+        # the redundant joined-prose `budget_estimate_warning` field
+        # was deleted, never having shipped). Exactly one
+        # "unknown-cost" entry, with the real per-run count in its
+        # detail text -- derived from the SAME accumulator as the
+        # human leading text line asserted above, not a second shape.
+        unknown_cost_entries = [
+            w for w in struct_result["budget_warnings"] if w["kind"] == "unknown-cost"
+        ]
+        assert len(unknown_cost_entries) == 1
+        assert "3 of 5" in unknown_cost_entries[0]["detail"]
+
+    @pytest.mark.asyncio
+    async def test_fully_measured_steps_never_trigger_unknown_cost_warning(
+        self, tmp_path,
+    ):
+        """False-positive guard for the new signal: every step
+        carrying a real (even zero) cost_usd must never emit the
+        unknown-cost warning."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult, StepRecord
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(
+            steps=[{"text": "a fully measured answer"}],
+            step_records=[
+                StepRecord(step_index=0, operator="search", source="sql",
+                           cost_usd=0.0, ok=True),
+                StepRecord(step_index=1, operator="summarize", source="llm",
+                           cost_usd=0.05, ok=True),
+            ],
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q")
+
+        assert "budget warning (unknown-cost)" not in result
+
+    @pytest.mark.asyncio
+    async def test_warning_and_exhaustion_marker_co_occur_marker_leads(
+        self, tmp_path,
+    ):
+        """code review Medium (round 3, T2 p3c-code-review round 3):
+        a warning co-occurring with an exhaustion marker is materially
+        more likely now that a warned run PROCEEDS to execute instead
+        of being refused. Construct a run carrying BOTH an unknown-cost
+        step AND a set budget_exhausted_at_step; both the warning line
+        and the exhaustion marker must reach a structured=False caller
+        in the SAME output, with the marker still LEADING -- this is
+        load-bearing, not cosmetic: commands/answer_runs.py's
+        `_row_is_failed` keys on
+        ``final_text.startswith(NX_ANSWER_BUDGET_EXHAUSTED_MARKER_
+        PREFIX)``, which an unconditional warning-first prepend would
+        silently break the moment the two co-occur."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult, StepRecord
+
+        match = _make_match(confidence=0.75)  # 2-step plan: search, operator_summarize
+        run_result = PlanResult(
+            steps=[{"ids": ["a"], "tumblers": [], "distances": [0.1],
+                    "collections": ["knowledge"]}],
+            budget_exhausted_at_step=2,
+            budget_exhausted_kind="cost",
+            total_planned_steps=2,
+            step_records=[
+                StepRecord(step_index=0, operator="search", source="sql",
+                           cost_usd=0.0, ok=True),
+                StepRecord(step_index=1, operator="summarize", source="llm",
+                           cost_usd=None, ok=False),
+            ],
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX, nx_answer
+            result = await nx_answer("q")
+
+        assert isinstance(result, str)
+        marker_idx = result.find("[budget exhausted (cost) after step 2 of 2")
+        warning_idx = result.find("[budget warning (unknown-cost)")
+        assert marker_idx != -1, f"exhaustion marker missing: {result!r}"
+        assert warning_idx != -1, f"unknown-cost warning missing: {result!r}"
+        assert marker_idx < warning_idx, (
+            f"the exhaustion marker must LEAD the warning, not the other "
+            f"way around: {result!r}"
+        )
+        assert result.startswith(NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX), (
+            "commands/answer_runs.py's _row_is_failed depends on this "
+            "startswith contract -- a warning co-occurring with an "
+            "exhaustion marker must never break it"
+        )
+
+    @pytest.mark.asyncio
+    async def test_exhausted_warned_and_oversized_keeps_warning_and_marker(
+        self, tmp_path, monkeypatch,
+    ):
+        """nexus-2xjge fold-in (critique [23267] Significant 2): with the
+        result-size cap in play, the triple co-occurrence (exhaustion
+        marker + warning + oversized final text) must keep BOTH signals:
+        the cap is applied to the raw text BEFORE warning composition,
+        so the end-appended warning can never be sliced off. The marker
+        still leads; the cap marker sits inside, before the warning."""
+        import nexus.mcp.core as _core
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult, StepRecord
+
+        monkeypatch.setattr(_core, "_TEXT_RESULT_CAP_CHARS", 2_000)
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(
+            steps=[{"ids": ["a"], "tumblers": [], "distances": [0.1],
+                    "collections": ["knowledge"]},
+                   {"partial_text": "x" * 10_000}],
+            budget_exhausted_at_step=2,
+            budget_exhausted_kind="cost",
+            total_planned_steps=2,
+            step_records=[
+                StepRecord(step_index=0, operator="search", source="sql",
+                           cost_usd=0.0, ok=True),
+                StepRecord(step_index=1, operator="summarize", source="llm",
+                           cost_usd=None, ok=False),
+            ],
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX, nx_answer
+            result = await nx_answer("q")
+
+        assert isinstance(result, str)
+        assert result.startswith(NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX)
+        warning_idx = result.find("[budget warning (unknown-cost)")
+        assert warning_idx != -1, (
+            f"warning sliced off by the result-size cap: ...{result[-200:]!r}"
+        )
+        cap_idx = result.find("result capped at")
+        assert cap_idx != -1, f"cap marker missing: ...{result[-200:]!r}"
+        assert cap_idx < warning_idx, (
+            "cap must be applied to the raw text BEFORE the warning is "
+            "composed, so the warning survives capping"
+        )
 
 
 class TestNxAnswerClassifyPlanPrefixedOperatorNames:

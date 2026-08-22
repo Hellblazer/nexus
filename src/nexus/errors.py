@@ -43,6 +43,44 @@ class CredentialsMissingError(NexusError):
     """A required API key or credential is absent."""
 
 
+class UnextractableContentError(NexusError):
+    """A source file was opened and read successfully by an extractor but
+    produced ZERO usable text (nexus-deyd5) — e.g. an image-only PDF, a
+    deliberately blank test fixture, or a PDF whose text layer is damaged
+    (``PDFExtractor._extract_normalized`` / ``_extract_with_docling``,
+    the "produced empty output" hard error nexus-aold added so this never
+    regresses to silent zero-chunk indexing).
+
+    Distinct from two neighboring types, deliberately:
+
+    - :class:`ExtractionQualityError` — text IS present but reads as
+      garbage (the nexus-wi1uv post-extraction quality gate). That gate's
+      failures still fail the whole ``nx index repo`` run by an existing,
+      separate, accepted CLI policy (``pdf_quality_gate_failed`` in
+      ``commands/index.py``) — reusing that type here would silently
+      inherit a non-zero exit this bead explicitly says must NOT happen.
+    - :class:`UnchunkableContentError` — the file is zero-byte or binary
+      BEFORE any extractor even runs (a cheaper, earlier guard).
+
+    This is the "extractor ran to completion; the content simply is not
+    there" case. Two independent, deliberately separate consumers:
+
+    - A per-record-raisable member of
+      :data:`PER_RECORD_SURVIVABLE_EXCEPTIONS` below (the ``dt.py`` /
+      ``commands/index.py`` per-record loops).
+    - Caught EXPLICITLY BY NAME (not via that tuple) by
+      ``nexus.indexer_utils.run_file_loop`` — unlike the quality gate, no
+      data was ever durably written for a file that fails at extraction,
+      so skipping it costs nothing and the loop continues to the next
+      file instead of cancelling the rest of the run. See run_file_loop's
+      own docstring for why it names this type directly rather than
+      catching the whole tuple.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
 class CollectionNotFoundError(NexusError):
     """The requested vector collection does not exist.
 
@@ -432,6 +470,24 @@ class CombinedWriteEmbedTimeoutError(NexusError):
         )
 
 
+# SystemicExtractionFailureError DELETED (nexus-deyd5 round 3, coordinator
+# directive, 2026-08-21). Round 2 added this type for run_file_loop to
+# raise on a systemic-skip breach; a code-review HIGH finding traced that
+# raising mid-``_run_index`` (after only one of 4 categories) skipped the
+# batcher's drain and the remaining categories, discarding already-staged-
+# but-unflushed chunks and surfacing as an uncaught traceback. The fix
+# moved the verdict to a run-level check made AFTER everything (drain, RDR
+# loop, post-processing) completes -- see ``nexus.indexer_utils.skip_
+# floor_breached`` (a plain bool-returning function) and ``nexus.indexer.
+# _run_index``'s ``systemic_extraction_failure`` stats key, converted to a
+# ``click.ClickException`` directly by ``commands/index.py``'s
+# ``index_repo_cmd`` -- the SAME shape ``pdf_quality_gate_failed`` and
+# ``chunk_flush_failed_files`` already use, with no dedicated exception
+# type at all. Recover this class from git history if a future caller
+# genuinely needs an exception-based (rather than stats-dict-based)
+# signal for this condition.
+
+
 #: NexusError subclasses that a per-record/per-file BATCH loop (``nx dt
 #: index``, ``nx index pdf --dir``) must catch, log, and continue past —
 #: never let escape and abort the whole batch (nexus-rlkgu; recurrence-
@@ -439,6 +495,18 @@ class CombinedWriteEmbedTimeoutError(NexusError):
 #: class of bug: a per-record ingest loop's narrow except tuple let a
 #: newly-introduced NexusError subclass propagate uncaught, killing the
 #: rest of the batch instead of just the offending record).
+#:
+#: NOT read by ``nexus.indexer_utils.run_file_loop`` (nexus-deyd5 round 2,
+#: code-review finding): that bulk per-file loop behind ``nx index
+#: repo``'s code/prose/PDF/RDR walks catches ONLY
+#: ``UnextractableContentError`` by name, deliberately narrower than this
+#: tuple — see run_file_loop's own docstring for why (the loop-coverage
+#: audit below scans ``dt.py``/``commands/index.py`` only, so this tuple's
+#: membership is NOT independently guarded for a run_file_loop consumer;
+#: widening run_file_loop's catch back to the whole tuple would silently
+#: re-couple it to that gap). A member added here is authorizing ONLY the
+#: two per-record consequences documented below, nothing in the bulk
+#: crawl.
 #:
 #: This is the ONE place a per-record-raisable NexusError subclass is
 #: added; every per-record loop catch site references this tuple by name
@@ -479,4 +547,5 @@ PER_RECORD_SURVIVABLE_EXCEPTIONS: tuple[type[NexusError], ...] = (
     IndexRunVerifyRefused,
     ExtractionQualityError,
     UnchunkableContentError,
+    UnextractableContentError,
 )

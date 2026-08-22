@@ -1,5 +1,9 @@
 # Post-Mortem: RDR-[NUMBER] [TITLE]
 
+> Prose: see REGISTER.md in the parent directory. The reader is the next person
+> about to make the same mistake: what we expected, what happened, what to
+> check first next time.
+
 ## RDR Summary
 
 [2-3 sentence summary of what the RDR proposed to solve

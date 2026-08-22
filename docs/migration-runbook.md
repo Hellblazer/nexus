@@ -1,751 +1,131 @@
-# Migration-Window Operations Runbook (SQLite/Chroma to Postgres)
+# Upgrading nexus
 
-Operational narrative for the operator running the next T2 + T3 migration
-onto the PG17 + pgvector + nexus-service stack (RDR-152/153/155). The flag
-reference lives in [`docs/cli-reference.md` § Internal upgrade primitives](cli-reference.md#internal-upgrade-primitives)
-(the `nx storage migrate` verb group itself was deleted by RDR-155 P4b — see
-§0 below); this document is the order of operations, the failure playbook, and how to
-read the artifacts. Precedent: the 2026-06-10 production run (115,716
-chunks, ~10:46 to 15:05 PT, zero lost, est. $4-6 Voyage; permanent record:
-T2 `nexus_rdr/155-production-migration-complete`).
+`nx upgrade` is the upgrade. There is no order of operations to hold, no
+window to schedule, and nothing to drive by hand.
 
-## 0. The user path is `nx upgrade`. This runbook is not it.
+This file used to be the operator's manual for the one-time SQLite/Chroma to
+Postgres migration (RDR-152/153/155). That migration cannot be performed by
+this release at all — the Chroma read path, the `nx storage migrate` verb
+group, `nx guided-upgrade`, and `nx migrate-to-service` were deleted by
+RDR-155 P4b, and the ladder has been rung-less since nexus-lgdel.l1. The
+narrative, the failure playbooks, and the rollback procedures for that window
+are in git history and in the 6.18.1 release, which is where they still apply.
+What is left here is what a normal upgrade needs.
 
-> **Status (RDR-185).** The user-facing migration is `nx upgrade` — one
-> trigger that converges the provisioning precondition and then walks the
-> substrate rung, with no order of operations to hold. It is documented in
-> one paragraph at [`cli-reference.md` § nx upgrade](cli-reference.md#nx-upgrade);
-> that paragraph, not this file, is what you hand a user.
->
-> **This runbook is the OPERATOR's document**: the manual order of
-> operations, the mid-run failure playbook, and how to read the artifacts.
-> Sections 1-7 below stay authoritative for that job — they are what the
-> rung sequences internally, what `nx forensics` / `nx remediate` reference
-> when a store needs hands-on recovery, and what you work from when a
-> migration window needs to be driven or diagnosed step by step. Reach for
-> them when `nx upgrade` has blocked or something needs surgery, not to
-> perform a routine upgrade.
+## The normal path
 
-**On 7.x the Chroma-migration rung no longer exists.** RDR-155 P4b removed
-the substrate-ETL rung with the migration machinery — the ladder's sole data
-rung on this release is the RDR-180 chash rekey
-(`upgrade_ladder/registry.py`), and a pre-PG install is DETECTED and refused
-with the two-hop redirect: install `conexus==6.18.1` (the pinned last
-migration-capable release, `nexus.stranded_install.LAST_MIGRATION_CAPABLE`),
-run `nx upgrade` there, then return to 7.x.
-
-Everything the paragraph below describes is what that pinned 6.18.1 rung
-does — kept here because this runbook is what you work from *on that
-install* when the migration window needs to be driven or diagnosed: it
-detects the pre-RDR-160 Chroma footprint (a fresh user plans zero legs,
-without provisioning), provisions and verifies the service stack as a
-precondition (health-gate + version-pin; a not-ready or wrong-version
-service hard-fails and NEVER migrates), runs the voyage-capability gate
-(refuses to migrate GENUINE voyage-model collections onto a bge-only
-service; a voyage-*named* collection whose vectors MEASURE as bge-768 is
-auto-remapped locally, nexus-nb7hr/nexus-119p9), then carries each
-collection's chunks: sentinel set (reads degraded-LOUD), background indexing
-quiesced, per-collection model support pre-gated, T2 `migrate all` then T3
-vectors, validation (taxonomy + counts + manifest orphans), unlock on a
-clean verdict. Legacy chunk ids converge as an in-flight wire transform
-(RDR-185); on a validation block it leaves the migrated copy in place and
-OFFERS `nx storage migrate vectors --rollback` (§6); the Chroma source is
-untouched throughout (RDR-176 immutable source).
-
-The lower-level verbs this runbook's history refers to — `nx guided-upgrade`,
-`nx migrate-to-service` — were demoted internal primitives as of RDR-185, then
-**deleted outright** by RDR-155 P4b along with the rest of the Chroma read
-path: they are not present in this release. On 7.x, an install still carrying
-pre-PG data is DETECTED at every entry point and refused with the two-hop
-redirect — install `conexus==6.18.1`, run `nx upgrade` there (the shipped
-remedy — `src/nexus/stranded_install.py` — names `nx upgrade`, not the
-hidden `nx guided-upgrade`: a user-facing message must name a verb the user
-can find in `--help`), then return to 7.x. The demoted-not-deleted survivors
-of the old upgrade graph are
-`nx migration`, `nx collection backfill-hash`, and `nx hooks update-all`. See
-[`cli-reference.md` § Internal upgrade primitives](cli-reference.md#internal-upgrade-primitives).
-
-## 0.1 The two-release deprecation window (release cadence)
-
-ChromaDB is retired across **two** releases, never one. The ordering is an
-invariant, not a preference: the release that *deletes* the Chroma read path
-can only ship *after* a release that gives users a way off Chroma.
-
-Release N (migration-capable) is **conexus 6.0.0** — the major bump that retires
-Chroma *serving* (RDR-155) while keeping the Chroma read path as the migration
-source. Release N+1 (the Chroma deletion, RDR-155 P4b) is a later release that
-must follow 6.0.0, never collapse into it.
-
-| | **Release N** (migration-capable) | **Release N+1** (Chroma deletion) |
-|---|---|---|
-| Upgrade paths | BOTH ship: cloud/Voyage (1024-dim) and local-only/ONNX (384-dim) | (already migrated) |
-| Migration tool | the substrate rung `nx upgrade` walks (and the demoted primitives beneath it) ship | **deleted** with the Chroma read path |
-| Chroma read path | present (rollback target, immutable) | **deleted** (RDR-155 P4b, bead `nexus-g37fr`) |
-| User action | run `nx upgrade` any time in the window | none (must already be on the service) |
-
-**Why the order is load-bearing.** RDR-155 P4b deletes
-`src/nexus/migration/vector_etl.py` (and the rest of the Chroma read path)
-wholesale. The migration tool *reads from Chroma* to copy chunks into pgvector,
-so **deleting the Chroma read path deletes the migration tool itself.** A
-release that deleted Chroma without a prior migration-capable release would
-strand every not-yet-migrated user with no upgrade path and no rollback target.
-Hence: ship the tool in N, delete it in N+1, and never collapse the two.
-
-**The window between N and N+1** is the user's migration runway. Throughout it
-the Chroma sources (local and ChromaCloud) stay **immutable** (copy-not-move,
-RF-5, never modifies the source), so a blocked or regretted migration is fully
-recoverable via `nx storage migrate vectors --rollback` (§6). Once N+1 ships and
-the Chroma read path is gone, rollback is gone with it; that is the whole point
-of giving the window first. The window must be long enough for the user base to
-actually migrate before N+1 removes the escape hatch.
-
-**Gating the lift of `nexus-luxe6`** (the standing release blocker: develop is
-unreleasable until the service-stack install + user-migration story ships). The
-blocker lifts only when ALL of the following hold; do not close it on RDR-159
-completion alone.
-
-**RDR-159 phase deliverables** (satisfied when Phase 4 closes; verify the
-artifacts exist, not merely that the beads are marked done):
-
-1. The RDR-159 E2E oracle (bead `nexus-ue6g7.28`) is green across all five
-   scenarios: cloud/Voyage, local-only/ONNX, the unsupported-model block, the
-   forced-failure rollback, AND the two-leg-simultaneous run (local + cloud
-   migrated in one invocation, validation counting both legs via the composite
-   read client). The fifth scenario closes the only known integration gap in
-   the multi-leg path (unit-covered by `test_two_leg_composes_collections_and_dims`,
-   no E2E exercise until `.28` adds it).
-2. This runbook (bead `nexus-ue6g7.26`) is in place: the operator narrative and
-   this cadence. This is the act of authoring the document you are reading; it
-   is a phase prerequisite, not an independently re-checkable runtime gate.
-
-**External gates** (NOT engine code; not satisfied by merging RDR-159; must be
-true in the world and surfaced explicitly at closure):
-
-3. conexus `xr7.8.9` production-scale recall / hybrid-parity go-live. The served
-   backend must be proven at production scale.
-4. The deprecation-window cadence is actually running, i.e. a migration-capable
-   release N has shipped and the window is open, so N+1 (the Chroma deletion)
-   has a release-N predecessor to follow.
-
-> **Do not start RDR-155 P4b (the Chroma deletion) until release N has shipped
-> and the window has opened.** P4b is release N+1 by construction. Starting it
-> early deletes the migration tool before users can run it.
-
-## 0.2 The migration sentinel and `nx migration --clear-state`
-
-The guided command writes a single `~/.config/nexus/migration.state` sentinel
-that every long-lived reader polls (degrade-LOUD banner while a migration is in
-flight). Its state machine:
-
-```
-not-migrating ──begin_migration──▶ migrating ──mark_migrated──▶ migrated ──clear_state(UNLOCK)──▶ not-migrating
-                                      │  ▲                                                          (serve normal)
-                          mark_failed │  │ begin_migration
-                                      ▼  │ (RESUME: done reset, failure dropped)
-                                 migrated-failed
+```bash
+nx upgrade
 ```
 
-- `migrating` is set FIRST (before any data moves) so every poller degrades
-  before the corpus is partial; `migrated` is the brief transient between the
-  T3 copy completing and the UNLOCK clear.
-- The **`migrated-failed → migrating` RESUME edge is load-bearing**: a failed run
-  is NOT a dead end. Re-running `nx migrate-to-service` calls `begin_migration`,
-  which transitions the sentinel back to `migrating` and recomputes progress from
-  live counts (idempotent on `(tenant, collection, chash)`).
+It converges a set of PRECONDITIONS and then walks the data ladder.
+`RUNG_ORDER` is deliberately EMPTY (`src/nexus/upgrade_ladder/registry.py`) —
+the ladder is rung-less until some future data transition needs one, so on
+this release `nx upgrade` is entirely precondition work:
 
-**`nx migration`** prints the current sentinel read-only (`not-migrating`,
-`migrating`, `migrated`, or `migrated-failed`). **`nx migration --clear-state`**
-is the named escape hatch for a sentinel STRANDED by a CLI crash between a clean
-copy and the UNLOCK clear (it would otherwise banner-wrap every read surface
-forever). Clearing is safe for the same idempotent-recompute reason. Clearing a
-`migrated-failed` sentinel is unambiguous (its writer is dead); clearing a
-`migrating` sentinel requires `--force` (it MAY be a live migration in another
-process — clearing drops the banner mid-migration; only do it if the migration
-process actually crashed).
+| Precondition | Converges |
+|---|---|
+| `package` | the installed `conexus` distribution |
+| `engine` | the engine binary to `REQUIRED_ENGINE_VERSION` |
+| `provisioning` | the PG roles, schema, and grants the service needs |
+| `process` | the running service, restarted onto the new binary |
+| `plugin-lockstep` | the Claude Code plugin against the installed package |
+| `plan-library` | the builtin plan templates, reconciled against disk |
 
-## 1. Before you start: the quiescent window
+Each is idempotent and safe to re-run. An upgrade that reports nothing to do
+has nothing to do.
 
-> **Every `nx storage migrate ...` / `nx migrate-to-service` command block in
-> sections 1-8 below (including §8.1's rollback branch) runs only on the
-> pinned `conexus==6.18.1` migration hop** (§0 above). RDR-155 P4b deleted
-> the `nx storage` migrate group and `nx migrate-to-service` from this
-> release outright — on 7.x an operator reaches this playbook via the
-> stranded-install redirect, drives it from the 6.18.1 install, then returns
-> to current. Do not run these commands against a 7.x checkout; `Error: No
-> such command` is the expected result there. (§8's `nx upgrade` / `nx index
-> repo` / `nx doctor` commands are the exception — those run on the CURRENT
-> release, not the pin; only §8.1's rollback branch reverts to the pinned
-> `nx storage migrate vectors --rollback`.)
+## Verifying
 
-The vector ETL's post-write verification compares an exact source count
-against an exact target count per collection
-(`src/nexus/migration/vector_etl.py`, `migrate_collections`): "concurrent
-serving writes into the same collection during the ETL would inflate the
-target count and read as a (conservative) failure." A mismatch is a
-`failed` migration, never a green one. Rollback runs the same comparison
-arithmetic, so the whole window (migrate, validate, and any rollback) must
-be quiescent.
-
-Stop everything that writes: other Claude Code sessions (every session
-hosts an `nx-mcp` process with an in-process aspect worker writing T2, and
-MCP `store_put` writes T3), any `nx index` runs ("Run the migration with
-indexing paused", per the docstring), and anything else driving the
-service's vector upsert path. On the T2 side, copy-not-move means rows
-written to the SQLite source after the ETL's read pass simply are not
-migrated: stop the writers so the snapshot is complete.
-
-Then verify the stack is healthy:
-
-```
-nx daemon service start        # if not already running
-nx daemon service status
+```bash
+nx doctor
 ```
 
-`status` is the single is-the-stack-healthy surface
-([cli-reference § nx daemon service](cli-reference.md#nx-daemon-service-start--stop--status)).
-Check, in order:
+Zero `✗` is the bar. Warnings are worth reading rather than clearing
+reflexively — each one names its own remedy.
 
-- The lease (host, port, JAR pid, generation) and a passing live `/health`
-  probe (`{"status":"ok","db":"up"}`).
-- The PG cluster block: up, pgvector version installed, `pg_credentials`
-  path resolvable.
-- The `/version` handshake: `app_version`, `schema_latest_id`,
-  `schema_changeset_count`, and critically `embedding_mode`: it must say
-  `voyage`. In `onnx-local` mode the service refuses every `voyage-*`
-  collection with HTTP 422 (nexus-pebfx.2 fail-loud dispatch), so a
-  migration started in the wrong mode fails loudly per batch instead of
-  silently embedding the wrong model. If the key did not resolve the
-  supervisor logs a WARN naming the consequence; fix with
-  `nx config set voyage_api_key` (chain: explicit env > `VOYAGE_API_KEY` >
-  `config.yml` credentials).
-- No stale-binary warning (running binary differs from the installed
-  provenance sidecar). Install the intended binary first via
-  `nx daemon service install-binary <engine-service-vX.Y.Z>` (RDR-161: the
-  cosign-verified native binary is the production launch artifact). For local
-  dev/test on a host without a native binary, set `NEXUS_SERVICE_JAR` to a
-  built `nexus-service-*.jar` — an explicit, never-auto-discovered opt-in that
-  launches the JVM and is logged as UNVERIFIED (RDR-161 amendment, 2026-06-20).
+## Installs that predate Postgres
 
-The T2 ladder commands read the service endpoint from the environment
-(`NX_SERVICE_PORT` + `NX_SERVICE_TOKEN` are required; the per-store
-commands error with "NX_SERVICE_TOKEN is required for storage migrate
-memory" when unset, see `src/nexus/db/t2/http_memory_store.py`
-`_resolve_config`). The vectors command needs neither: it resolves
-`{url, token}` from the supervisor's ServiceRegistry lease, env as
-override (nexus-pebfx.1; addr file `~/.config/nexus/storage_service_addr.<uid>`).
-Full env-var reference (including `VOYAGE_API_KEY` and the credential
-resolution chain) lives in
-[`docs/configuration.md` § Daemon environment variables](configuration.md#daemon-environment-variables).
+A pre-PG install is DETECTED and refused with a two-hop redirect, because the
+machinery that performed that migration no longer ships:
 
-If you are running this migration from inside a dev container (rather
-than directly on the host running the daemon/service), see
-[`docs/container-integration.md`](container-integration.md) first —
-T1/T2/T3 discovery across the container boundary needs one of its
-documented forwarding paths before any of the commands below can reach
-the host-side daemon.
+1. `uv tool install conexus==6.18.1` — the pinned last migration-capable
+   release (`nexus.stranded_install.LAST_MIGRATION_CAPABLE`)
+2. `nx upgrade` there, which performs the Chroma to PG copy (copy-not-move;
+   the Chroma directory is left intact as a rollback artifact)
+3. upgrade to current normally
 
-## 2. The two migrations
+Frozen Chroma directories on disk are untouched rollback artifacts. They are
+not a live source, and nothing in this release reads them.
 
-Two independent ETL families land in disjoint Postgres tables. Run the T2
-ladder first: the cutover validation in section 5 joins manifest rows
-(written by the catalog ETL) against chunk rows (written by the vector
-ETL), and the 2026-06-10 production run proved that running it with empty
-catalog tables produces a vacuous pass.
+## A stranded migration banner
 
-### T2 ladder
+`~/.config/nexus/migration.state` is a sentinel that long-lived readers poll,
+banner-wrapping every read surface while a migration is in flight. Nothing in
+this release writes it — its writers were deleted — so a sentinel you find
+today is stranded from an older install and will otherwise banner forever.
 
-```
-nx storage migrate all [--report PATH]
+```bash
+nx migration                  # print the sentinel, read-only
+nx migration --clear-state    # clear it
 ```
 
-Runs all seven store ETLs in the RDR-152 ladder order
-(`LADDER_ORDER` in `src/nexus/migration/etl_registry.py`):
-`memory, plans, telemetry, taxonomy, aspects, catalog,
-aspects_queue`. (The former `chash` leg was retired by RDR-187 — the
-router table is dropped; chash registration rides the chunk store, so
-migrating content registers every chash.) Memory is first (smallest, fastest validation); catalog
-is second-to-last because it is graph-heavy: every other store's FK
-targets must exist before its links land. `aspects_queue` runs AFTER
-catalog: `fk_aspect_queue_catalog_doc` requires `catalog_documents`
-populated first (first-run FK safety, nexus-iy5se). A store-level crash
-is recorded as a `failed` issue and the run continues, so the report
-covers every store it attempted.
+Clearing a `migrated-failed` sentinel is unambiguous: its writer is dead.
+Clearing a `migrating` sentinel needs `--force`, since it may belong to a live
+process; only do that once you know the process actually crashed.
 
-One shared `IssueCollector` spans the run and emits ONE
-`migration-report.json` (default
-`~/.config/nexus/migration-reports/migration-<id>.json`; a run always
-produces an artifact, even on a mid-run crash). The gate predicate is
-`summary.total_failed == 0`. Post-run count verification (pg_count >=
-report written, via psql against the local nx-managed cluster) is recorded
-in the artifact as `"verification"`: `verified`, `mismatch`, or a loud
-`VERIFICATION INDETERMINATE` warning when psql/credentials cannot resolve
-(never a silent skip).
+## If the service will not start
 
-Note: `aspects` has no standalone command; it runs only via `migrate all`.
-
-### T3 vectors
-
-```
-nx storage migrate vectors --dry-run            # local leg, count only (no service needed)
-nx storage migrate vectors                      # local leg (product default: ~/.local/share/nexus/chroma)
-nx storage migrate vectors --cloud --dry-run    # cloud leg, count only
-nx storage migrate vectors --cloud              # ChromaCloud leg
-```
-
-> **The `--cloud` leg is retired history (2026-07-17).** Chroma *Cloud* as a
-> migration origin has no remaining population — the sole install that ever had
-> one completed its migration in 2026-06. The commands stay documented because
-> this runbook records how that migration was run; do not treat them as live
-> guidance. New migrations have exactly one leg: the local store.
-
-Run BOTH legs, separately: "an ETL with only one leg is a silent
-half-migration" (`vector_etl.py` module docstring). Chunk text, chash, and
-metadata transfer byte-verbatim; the service re-embeds server-side
-(vector-identity decision (a), bead nexus-unp61); collection names are
-preserved verbatim so `topic_assignments.source_collection` references
-stay valid. Per-collection progress lines are flushed live; a
-failures-first summary table closes the run. `--collections A,B` pins a
-subset; `--dry-run` only counts source chunks and never touches the
-service.
-
-## 3. Mid-run failure: Voyage 429 / outage
-
-A batch-level failure (rate limit, timeout, service outage) shows up as a
-per-collection `failed` line and the run continues to the next collection:
-
-```
-failed        docs__1-16__voyage-context-3__v1: source=812 written=600 (94.2s) — upsert failed after 600 chunks: ...
-```
-
-(structlog event `vector_etl_upsert_failed`). The summary table sorts
-failures first, and the command exits non-zero:
-
-```
-Error: migration is NOT clean — fix the failed/skipped collections above and re-run (idempotent).
-```
-
-Re-running is safe, twice over: the server upserts on
-`(tenant, collection, chash)` so already-landed chunks are converged, not
-duplicated, and copy-not-move means the Chroma source was never modified,
-so the re-read sees exactly the same data. The exact re-run is the same
-command, optionally pinned:
-
-```
-nx storage migrate vectors --cloud --collections docs__1-16__voyage-context-3__v1
-```
-
-Production precedent: 46 of 49 cloud collections were clean on the first
-full run; 3 failed deterministically (two on a 120s client timeout against
-slow CCE batches, fixed by a 600s per-op upsert timeout; one on 62
-NUL-bearing chunks, fixed by service-side sanitization, PR #1152) and were
-re-run to a clean 49/49, EXIT=0. NUL delta: the service strips 0x00 bytes
-before embed+bind (event `upsert_nul_sanitized`), so for exactly those
-rows `sha256(stored_text)[:32] != chash` (pre-RDR-180 `[:32]`-era widths —
-historical record of that migration); the chash is carried source
-identity, never recomputed, so manifest joins, rollback, dedup, and
-re-migration are unaffected (affected-chash list: T2
-`nexus_rdr/155-nul-sanitization-delta`).
-
-The T2 ladder is equally idempotent ("ON CONFLICT DO NOTHING" per the
-`migration-report show` failure hint): repair the cause, re-run
-`nx storage migrate all`, and a fresh report supersedes the red one.
-
-## 4. Reading the outcome
-
-T2 report issues carry two enums, never mixed
-(`src/nexus/migration/migration_report.py`): `class` (what is wrong:
-`orphan_parent`, `identity_mismatch`, `format_anomaly`, `soft_dangler`,
-`unexpected`) and `action` (what the ETL did). Severity is a function of
-action:
-
-| action | severity | meaning |
-|---|---|---|
-| `failed` | 4 | gate-blocking, data not migrated and the run is red |
-| `skipped` | 3 | data not migrated |
-| `flagged` | 2 | imported with advisory |
-| `handled` | 1 | normalized on the way through |
-| `schema_corrected` | 0 | schema fixed; data correct |
-
-`summary.by_action` is the gate-facing rollup; `summary.total_failed == 0`
-is the gate predicate (also the RDR-152 Phase-4 SQLite-deletion gate). The
-triage surface is:
-
-```
-nx storage migration-report show <path>
-```
-
-It prints the migration window, the recorded verification verdict,
-`max_severity`, the by-action rollup, per-issue lines severity-descending
-(class/action/count/sample/reason), and `GATE: PASS` or `GATE: FAIL` with
-a non-zero exit (scriptable).
-
-Vector legs use per-collection statuses instead (no JSON artifact; the
-summary table plus exit code is the record):
-
-| status | red? | meaning |
-|---|---|---|
-| `migrated` | no | copied and count-verified exactly |
-| `dry-run` | no | counted only |
-| `skipped-empty` | no | non-conformant name AND 0 source chunks: nothing can be lost (nexus-pebfx.3) |
-| `excluded` | no | `tuples__*` prefix: session-ephemeral, dies with Chroma at P4b; excluded from default enumeration, reported never silent; naming it via `--collections` still acts on it |
-| `skipped` | yes | non-conformant name WITH data: partial-migration-never-green |
-| `failed` | yes | unreadable source, upsert failure, or post-write count mismatch |
-
-A red exit from either command means the run is not clean and must be
-re-run after triage; it never means data was destroyed (both ETLs are
-copy-not-move).
-
-## 5. Cutover validation
-
-**RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: `nexus.manifest_backfill()`
-and `nexus.manifest_orphans(dim)` — the two stored functions this section's
-psql commands call — are DROPPED from every engine tag cut after
-`catalog-030-retire-manifest-verify.xml` shipped.** The manifest-chunk FK
-(`catalog_document_chunks -> nexus.chunks`, RDR-191 Phase 5, VALIDATEd)
-now REJECTS a dangling manifest row at write time, making the orphan class
-these functions detected unreachable by construction — there is no
-equivalent live check to substitute; the guarantee is now structural, not
-something a validation step needs to run.
-
-**This section remains valid ONLY within its documented historical
-context — §0 above.** These commands run against whatever engine tag was
-current when `conexus==6.18.1` (`LAST_MIGRATION_CAPABLE`) was cut, which
-predates catalog-030 by many releases; that pinned install's own engine
-still carries both functions and always will (an already-published engine
-binary is never retroactively edited). This section is NOT valid against
-any engine tag cut after catalog-030 — do not run these commands against a
-current/`develop`-tip engine, and do not expect them to exist once the
-6.18.1-pinned leg of the two-hop migration completes and the install
-returns to 7.x.
-
-After BOTH the catalog ETL and both vector legs are clean, run the
-manifest checks. These are direct SQL by design (P2.1 constraint, recorded
-on nexus-unp61): never `PgVectorRepository.fetchDocumentChunks`, which
-fails loud on partially-migrated documents.
-
-The checks are now **stored functions** in the `nexus` schema (catalog-004,
-RDR-156 P2, bead nexus-70r3c.9), callable directly via psql — on the
-6.18.1-pinned engine tag ONLY, see above. Connection
-details come from `~/.config/nexus/pg_credentials`; the port is also shown
-by `nx daemon service status`.
-
-The role behind `<admin>` below is the real, fixed name **`nexus_admin`**
-(schema owner, NOSUPERUSER — see
-[configuration.md § Storage Service (Postgres) Prerequisites](configuration.md#storage-service-postgres-prerequisites)
-for the full provisioning story); `<PG_PORT>` is whatever `nx daemon service
-status` reports for the PG cluster block (§1 above), not a fixed default.
-From here on this doc uses `$ADMIN`/`$PG_PORT` as shell-variable
-placeholders for those two values — export them once
-(`ADMIN=nexus_admin`, `PG_PORT=<value from status>`) and every command
-below is copy-pasteable as written.
-
-Sequence (backfill first: orphan rows with `collection IS NULL` are
-pre-backfill state, not orphans):
-
-```
-psql -h 127.0.0.1 -p $PG_PORT -U $ADMIN -d nexus \
-  -c "SELECT nexus.manifest_backfill();"
-
-psql -h 127.0.0.1 -p $PG_PORT -U $ADMIN -d nexus \
-  -c "SELECT count(*) FROM nexus.manifest_orphans(384);"
-
-psql -h 127.0.0.1 -p $PG_PORT -U $ADMIN -d nexus \
-  -c "SELECT count(*) FROM nexus.manifest_orphans(768);"
-
-psql -h 127.0.0.1 -p $PG_PORT -U $ADMIN -d nexus \
-  -c "SELECT count(*) FROM nexus.manifest_orphans(1024);"
-```
-
-Or in a single session (use a transaction to avoid schema-state side effects):
-
-```
-psql -h 127.0.0.1 -p $PG_PORT -U $ADMIN -d nexus <<'SQL'
-SELECT nexus.manifest_backfill();
-SELECT count(*) AS orphans_384  FROM nexus.manifest_orphans(384);
-SELECT count(*) AS orphans_768  FROM nexus.manifest_orphans(768);
-SELECT count(*) AS orphans_1024 FROM nexus.manifest_orphans(1024);
-SQL
-```
-
-Expected: the backfill touches only `collection IS NULL` rows (idempotent
-re-run returns 0), and each orphan query returns ZERO rows. An orphan row
-is a manifest entry that does not resolve to a migrated chunk. Caveat
-repeated on purpose: zero rows against empty catalog tables is a vacuous
-pass; run this only after the T2 ladder's catalog leg.
-
-**Legacy note**: the Python-generated equivalents `manifest_backfill_sql()`
-and `manifest_orphan_sql(dim)` lived in `src/nexus/migration/vector_etl.py`,
-deprecated superseded-by-stored-function shims; the module itself was
-deleted wholesale by RDR-155 P4b (bead nexus-g37fr, closed). Use the
-stored functions above — there is no Python-generated equivalent anymore.
-
-Per-collection chunk counts (eyeballing a migration or comparing against a
-source inventory) come from the `nexus.collection_vector_stats` view
-(catalog-005, RDR-156 P3, bead nexus-70r3c.12) — NOT hand-assembled
-`count(*)` over `nexus.chunks` grouped by which `embedding_<dim>` column is
-populated (the unified single-table shape since RDR-191 Phase 4; formerly
-three separate `chunks_<dim>` tables):
-
-```
-psql -h 127.0.0.1 -p $PG_PORT -U $ADMIN -d nexus \
-  -c "SELECT * FROM nexus.collection_vector_stats ORDER BY tenant_id, collection;"
-```
-
-One row per `(tenant_id, collection, dim)` with `chunk_count` and
-`last_write` (max `created_at`). Caveat for migration parity: the view is
-TOMBSTONE-FILTERED (live chunks only). On a freshly migrated cluster with
-no trashed documents it equals the raw count; if documents have been
-trashed since, an exact source-vs-target comparison must use the ETL's own
-verification (raw counts) — the divergence is the view's purpose, not a
-bug. The same data is served to clients at `GET /v1/vectors/stats` and is
-what `nx collection list` prints.
-
-Optional check (`verify_taxonomy_consistency`, same module): every
-`topic_assignments.source_collection` must resolve to a migrated
-collection. Production returned 28 unresolved values, all verified as
-pre-existing T2 drift (absent from the Chroma source too, the RDR-108
-string-copy-orphan class), not migration loss.
-
-**Triage recipe for a nonzero orphan count** (either `manifest_orphans(dim)`
-above or an unresolved `source_collection` from `verify_taxonomy_consistency`).
-A nonzero count is not automatically a migration bug — the 2026-06-10
-production run's 28 unresolved rows turned out to be pre-existing drift, not
-loss — but it must be *proven* pre-existing, never assumed:
-
-1. **Pull the offending IDs, not just the count.** Re-run the same query
-   without `count(*)` to get the actual `chash`/`source_collection` values:
-   ```
-   psql -h 127.0.0.1 -p $PG_PORT -U $ADMIN -d nexus \
-     -c "SELECT * FROM nexus.manifest_orphans(<dim>);"
-   ```
-2. **Cross-reference each ID against the pre-migration Chroma source**, the
-   same source the ETL read from and that copy-not-move left untouched
-   (§0.1, §6). Use `nx collection list` / a direct Chroma `get(ids=[...])`
-   against the local (default `~/.local/share/nexus/chroma`) or ChromaCloud collection
-   named in the orphan row:
-   - **Absent from Chroma too** -> the orphan predates this migration
-     entirely (catalog/topic-assignment drift the RDR-108 string-copy-orphan
-     class describes). Expected drift: record it (bead or T2 note) and move
-     on — it is not this run's responsibility to fix, only to not paper over.
-   - **Present in Chroma but missing from the migrated target** -> the
-     vector ETL for that collection actually dropped data. Treat this as a
-     `failed`/`skipped` migration for that collection (§4 table): re-run
-     `nx storage migrate vectors [--cloud] --collections <name>` (§3) rather
-     than clearing the orphan by hand.
-3. **Cross-check against the T2 ladder's own report** for the same run
-   (`nx storage migration-report show <path>`, §4): if the catalog leg
-   logged a `failed`/`skipped` issue for the same collection or document,
-   the orphan is a downstream symptom of that already-flagged failure, not
-   a new problem — fix the root issue and the orphan clears on the next
-   validation pass.
-4. **Never clear an orphan by deleting the manifest row.** The manifest is
-   catalog-owned graph state (RDR-108); the only sanctioned remediation
-   paths are (a) re-running the ETL so the row resolves, or (b) confirming
-   pre-existing drift and leaving it, exactly as production did.
-
-## 6. Rollback
-
-```
-nx storage migrate vectors --rollback [--cloud] [--collections A,B]
-```
-
-`rollback_collections` deletes from pgvector exactly the chashes present
-in the source Chroma collections, nothing else. The source IS the rollback
-manifest: copy-not-move keeps it immutable, so the id set at rollback time
-equals the id set at migration time, and the source itself is never
-modified. Two fail-loud guards refuse to lie:
-
-1. Zero-resolution guard: if the target holds chunks and the source has
-   chashes but not a single lookup resolved, the lookup layer may have
-   swallowed transport errors; it raises rather than reporting a clean
-   "deleted 0".
-2. Post-delete count guard: the target count must move by exactly the
-   number deleted; if deletes were swallowed by the transport layer, it
-   raises.
-
-Both error messages say it explicitly: verify the service and re-run,
-rollback is idempotent. The standing fact (T2
-`nexus/release-boundary-since-p4a`): the Chroma sources (local and
-ChromaCloud) are untouched and remain a free rollback target until RDR-155
-P4b deletes the Chroma read path, which ships only in the second release
-of the deprecation window.
-
-## 7. If the stack dies mid-run
-
-The stack never dies silently; the evidence lives in the persistent logs
+The stack never dies silently. The evidence is in the persistent logs
 documented in
-[cli-reference § nx daemon service, "Observability"](cli-reference.md#nx-daemon-service-start--stop--status)
-(under `~/.config/nexus/` unless noted): `logs/storage_service.log`
-(supervisor lifecycle: start/exit breadcrumbs, jar exit codes, restart
-attempts, PG recoveries), `logs/storage_service_jar.log` (the Java
-service's stdout/stderr), `logs/storage_service.crash.log` (pre-startup
-failures of the detached supervisor), and `<pg_data>/pg.log` (the
-nx-managed Postgres cluster).
+[cli-reference § nx daemon service, "Observability"](cli-reference.md#nx-daemon-service-start--stop--status),
+under `~/.config/nexus/` unless noted:
 
-The absence convention: a supervisor death WITHOUT a
-`storage_service_supervisor_exit` breadcrumb in `storage_service.log`
-means it was killed, not that it chose to exit; check the jar log tail and
-`pg.log` next. Once `nx daemon service status` is green again, re-run the
-interrupted command: both ETL families are idempotent, and a collection
-interrupted mid-upsert re-converges on `(tenant, collection, chash)`.
+- `logs/storage_service.log` — supervisor lifecycle: start/exit breadcrumbs,
+  jar exit codes, restart attempts, PG recoveries
+- `logs/storage_service_jar.log` — the Java service's stdout/stderr
+- `logs/storage_service.crash.log` — pre-startup failures of the detached
+  supervisor
+- `<pg_data>/pg.log` — the nx-managed Postgres cluster
 
-## 7.1 Restoring a `pg_dump` into a scratch cluster — GH #1419
+**The absence convention**: a supervisor death WITHOUT a
+`storage_service_supervisor_exit` breadcrumb in `storage_service.log` means it
+was killed, not that it chose to exit. Check the jar log tail and `pg.log`
+next. Once `nx daemon service status` is green, re-run whatever was
+interrupted — the ETL paths are idempotent and re-converge on
+`(tenant, collection, chash)`.
+
+## Restoring a `pg_dump` into a scratch cluster
 
 Two things bite on the way to a read-only forensic restore. Both were hit
-during a real recovery (GH #1419 issues 5 and 6) and neither is obvious from
-the error text.
+during a real recovery (GH #1419) and neither is obvious from the error text.
 
-**Always restore with `--no-privileges`.** The dump carries `GRANT`
-statements naming the nx service roles (`nexus_svc`, `nexus_diag`), which do
-not exist in a scratch cluster you just `initdb`'d. Without the flag
-`pg_restore` emits one `role "nexus_svc" does not exist` error per grant —
-176 of them in the reported case — none of which matter and all of which
-bury the errors that do:
+**Always restore with `--no-privileges`.** The dump carries `GRANT` statements
+naming the nx service roles (`nexus_svc`, `nexus_diag`), which do not exist in
+a scratch cluster you just `initdb`'d. Without the flag `pg_restore` emits one
+`role "nexus_svc" does not exist` error per grant — 176 of them in the
+reported case — none of which matter and all of which bury the errors that do:
 
 ```bash
 pg_restore --no-privileges --no-owner -d nexus_scratch dump.pgdump
 ```
 
-`--no-owner` is the companion flag for the same reason (object ownership
-also references roles that are absent). You are reading data, not
-reproducing an access-control model, so dropping both is correct rather
-than merely convenient.
+`--no-owner` is the companion flag for the same reason: object ownership also
+references roles that are absent. You are reading data, not reproducing an
+access-control model, so dropping both is correct rather than merely
+convenient.
 
 **Keep the scratch socket directory short.** macOS caps `AF_UNIX` paths at
-**103 bytes**, and Postgres puts its socket in the data directory by
-default. A cluster created under a long project-scoped path — a checkout
-nested a few levels down, or anything under a sandboxed `TMPDIR` — fails to
-start with a socket-path error that does not name the length limit as the
-cause. Point the socket somewhere short:
+**103 bytes**, and Postgres puts its socket in the data directory by default.
+A cluster created under a long project-scoped path — a checkout nested a few
+levels down, or anything under a sandboxed `TMPDIR` — fails to start with a
+socket-path error that does not name the length limit as the cause. Point the
+socket somewhere short:
 
 ```bash
 pg_ctl -D "$SCRATCH_PGDATA" -o "-k /tmp/nxr" start
 psql -h /tmp/nxr -d nexus_scratch          # clients need the same -h
 ```
 
-Any short directory works; `/tmp/nxr` is arbitrary. The data directory
-itself can stay wherever it is — only the socket path is length-bound.
-
-## 8. Legacy chunk ids (pre-RDR-108 stores) — GH #1390 / GH #1414
-
-The pgvector chash identity is the **full `sha256(chunk_text)` hexdigest** —
-64 hex characters on the wire, 32 raw bytes in storage (`bytea`,
-`octet_length(chash) = 32`; RDR-180). Two legacy id classes predate it:
-**16/18-char chunk ids** from pre-RDR-108-era releases, and **32-char
-`[:32]`-prefix ids** from the RDR-108 era (conformant until RDR-180 widened
-the identity).
-
-**For the 16/18-char class, `nx upgrade` converges automatically — no user
-action.** The substrate rung recomputes the correct id ON THE WIRE from the
-chunk text it is already carrying (RDR-185): the id is a pure function of
-that text, so no re-index and no source file is required, including for
-`store_put`-only notes that have neither. The old→new mapping is persisted
-as a migration artifact and cascaded across every chash-bearing store
-(catalog manifests, chash-span links, chash-keyed aspects, topic
-assignments), and rollback resolves through that map rather than by raw id
-equality. The Chroma source stays byte-untouched (RDR-176), so it remains a
-valid rollback target throughout.
-
-**For the 32-char RDR-108-era class, re-index FIRST** (verified GH #1414:
-the wire re-id deliberately fires only for ids it can classify as legacy —
-width outside {32, 64} — so a 32-char id reaches the strict full-width ETL
-guard and the run refuses with "migration will NOT guess ids" rather than
-guessing). The recovery is §8.1's ladder-first sequence: re-index the
-file-backed collections, then `nx upgrade` — the chash-rekey rung recomputes
-conformant ids from stored chunk text for everything else, `store_put`-only
-notes included (the same machinery that rekeyed 254,846 production rows on
-2026-07-20 with zero loss).
-
-> **This retires a rule that was true until RDR-185.** The old rationale —
-> "the migration NEVER rewrites ids", because rewriting would sever the
-> catalog-manifest chash join and break rollback's source-chash-set matching
-> — was correct for the pre-ladder ETL, which had neither a persisted mapping
-> nor a remap cascade. RDR-185 builds both, which is what makes the rewrite
-> safe. If you find prose (or a docstring) still asserting the old rule, it
-> predates RDR-185. **GH #1390 is untouched by this**: destination constraints
-> are never weakened — wire re-id computes the CORRECT address for existing
-> content, it does not force a wrong id through.
-
-**On the demoted primitive path** (`nx migrate-to-service` /
-`nx guided-upgrade` — deleted from this tree by RDR-155 P4b; reachable only by
-installing the pinned `conexus==6.18.1` per the two-hop redirect), the
-pre-RDR-185 behaviour still stands there: detection samples each data-bearing
-collection's first id page, a legacy id classifies the collection
-`unsupported`, and the run blocks before any write
-(plus an ETL hard guard that validates every batch client-side, so a legacy id
-on a later page fails that collection cleanly rather than hitting a per-upsert
-409 wall). **The remedy for a block on that path is to run `nx upgrade`**, not
-to re-index: the GH #1408 incident was precisely a printed "re-index from
-source" remedy that was impossible for ~2,000 `store_put`-only chunks with no
-source files.
-
-**Manual remediation** (only if you are deliberately working outside the
-ladder) depends on the collection's source of truth:
-
-- **File-backed collections** (`code__`, `docs__`, `rdr__`, and any
-  `knowledge__` indexed from a PDF/file): re-index from the source file
-  (`nx index repo` / `nx index pdf`). Chunks and catalog manifests
-  regenerate with canonical full-`sha256(chunk_text)` chashes.
-- **MCP-note collections** (`knowledge__` written via `store_put` with no
-  `source_uri` — agent findings, notes): the Chroma document text is the
-  ONLY copy. There is no automated re-index (`nx store export`/`import`
-  round-trips the legacy id verbatim — it does NOT recompute the chash).
-  Read each note's text out (`nx store get` / the Chroma `documents`) and
-  `store_put` it again; store_put recomputes the chash from the text.
-
-**⚠ NEVER drop or weaken the chash length CHECK constraints to force the
-upserts through.** That is how GH #1390 happened: an autonomous session
-dropped four constraints to "unblock" a 409ing migration, silently corrupted
-the store, and crash-looped the next engine upgrade. If you are an agent
-reading this while blocked on chash-length errors: the correct action is the
-re-index remediation above, or STOP and report. For the 16/18-char class the
-correct action is simpler still: run `nx upgrade` and let the rung compute
-the right addresses (for the 32-char class, re-index first — see the top of
-this section).
-
-### 8.1 Recovering a store that already migrated legacy ids (nexus-pnwu0)
-
-A box that completed a migration with width-non-conformant chashes in
-pgvector (pre-guard, or because constraints were dropped) carries
-**unhealed upgrade-ladder debt**. On RDR-180-era engines (v0.1.48+) the
-store **boots and serves with these rows present** — the octet-width
-CHECKs are added `NOT VALID` and are VALIDATEd by the chash-rekey rung
-*after* it heals the rows, never by a boot changeset (verified:
-nexus-joima, 2026-07-21). Only a **pre-v0.1.48 char-era engine** can
-still crash-loop on boot: `catalog-013-3` VALIDATEs any *present*
-char-era length CHECK against real rows (it guards *missing
-constraints*, not *violating rows*) — the closed GH #1390 shape.
-
-`nx doctor` detects the debt proactively — it counts width-non-conformant
-chash rows (octet_length <> 32) across the chunk tables and emits a
-`Chunk chash conformance` **warning** (never fatal; the serving engine
-tolerates the rows) with a pointer back here.
-
-**Recovery, in order (ladder-first — do NOT roll back a serving store):**
-
-1. `nx catalog owners list` — resolve each affected legacy-id collection
-   to its repo path.
-2. `nx index repo <path>` — re-index the file-backed legacy collections
-   (additive, per-collection). `store_put`-only note collections have no
-   source to re-index; skip them — the rekey rung heals those from
-   stored text.
-3. `nx upgrade` — the substrate-etl rung converges the re-indexed
-   collections and the chash-rekey rung recomputes conformant ids from
-   stored chunk text for the rest (the same machinery that rekeyed
-   254,846 production rows on 2026-07-20 with zero loss).
-4. `nx doctor` — confirm the `Chunk chash conformance` warning has
-   cleared. Then upgrade the engine freely.
-
-**Rollback branch — ONLY if the service will not boot** (Liquibase
-crash-loop at startup on a pre-v0.1.48 char-era engine, the closed
-GH #1390 shape): `nx storage migrate vectors --rollback [--cloud]`
-deletes from pgvector exactly the chashes present in the Chroma source;
-because the poisoned rows were copied verbatim, this removes them and
-returns serving to the intact Chroma source (copy-not-move). Then
-re-index and re-run `nx upgrade` as above. If chash CHECK constraints
-were manually dropped on the old target, they stay absent (the MARK_RAN
-freeze, nexus-4m6i0.12) — re-adding them is a deliberate operator step
-using the current (bytea-era) constraint form:
-`ALTER TABLE nexus.<t> ADD CONSTRAINT <t>_chash_octet_check
-CHECK (octet_length(chash) = 32) NOT VALID;` followed by
-`VALIDATE CONSTRAINT` once the data is proven clean.
+Any short directory works; `/tmp/nxr` is arbitrary. The data directory itself
+can stay wherever it is — only the socket path is length-bound.
