@@ -109,9 +109,8 @@ mechanize, it matters enough to ship.
   behaviour, while a WRONG typed filter yields a confident empty answer
   (schema.py records plan 14 returning zero results on a bad
   content_type). An explicit caller binding always wins.
-- `conexus/hooks/scripts/routing/git_add_all_redirects_to_explicit_paths.py`
-  (DELETED), `conexus/hooks/hooks.json`, `conexus/hooks/scripts/routing/registry.yaml`:
-  Sam's decision, 2026-08-22 — the push-time review-coverage gate
+- `conexus/hooks/scripts/routing/git_add_all_redirects_to_explicit_paths.py`, `conexus/hooks/hooks.json`, `conexus/hooks/scripts/routing/registry.yaml`, `conexus/hooks/scripts/routing/README.md`:
+  the first path is DELETED. Sam's decision, 2026-08-22 — the push-time review-coverage gate
   (nexus-4av2n) is removed outright, not modified. Measured one true
   positive in its life (denying correct, already-reviewed pushes), it is
   self-attested (the same agent writes the markers it is checked
