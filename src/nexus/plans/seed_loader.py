@@ -57,11 +57,11 @@ SC-6, SC-14.
 from __future__ import annotations
 
 import json
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import structlog
 import yaml
 
 from typing import TYPE_CHECKING
@@ -87,7 +87,7 @@ __all__ = [
     "load_seed_directory",
 ]
 
-_log = logging.getLogger(__name__)
+_log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -356,10 +356,7 @@ def load_seed_directory(
     # Per-run, per-project query index; built lazily on the first write.
     query_index: dict[str, _QueryIndex] = {}
     if not directory.exists():
-        # stdlib logging, not structlog: keyword fields would raise TypeError
-        # here, turning "the seed dir is absent" into a crash on the one path
-        # that is supposed to degrade quietly.
-        _log.info("seed_directory_missing: path=%r", str(directory))
+        _log.info("seed_directory_missing", path=str(directory))
         return result
 
     template_loader = PlanTemplateLoader(
