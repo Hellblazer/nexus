@@ -1354,3 +1354,85 @@ class TestMintTokenResolutionSeam:
             assert _MINT_CALLS == 1
         finally:
             self._reset_manager()
+
+
+class TestSharedSSLContext:
+    """Latency fix (2026-08-21, direct instruction, not a bead): every
+    ``httpx.Client()`` this mixin constructs eagerly builds its OWN
+    ``ssl.SSLContext`` at construction time (``HTTPTransport.__init__`` ->
+    ``httpx.create_ssl_context()`` -> ``ssl.create_default_context()``),
+    UNCONDITIONALLY -- even for a plain ``http://`` ``base_url`` where TLS
+    is never used. Measured before this fix: ``nx_answer`` builds 8 T2
+    domain stores x 5 separate ``T2Database`` constructions = 40
+    ``httpx.Client()``s per call, and ~90% of a ~0.4s steady-state call was
+    this redundant SSL-context construction (40 raw
+    ``ssl.create_default_context()`` calls measured at 0.347s; 40
+    ``httpx.Client()`` constructions at 0.410s; the same 40 constructions
+    sharing one pre-built context measured at 0.025s).
+
+    Property under test: the underlying SSL context is built EXACTLY ONCE
+    PER PROCESS, shared across every ``RefreshableHttpStoreMixin``-backed
+    store -- not a timing number (this codebase already has one flaky
+    timing assertion causing trouble;
+    ``test_orchestration_has_no_blocking_calls`` in
+    ``tests/test_nx_answer.py`` is explicitly out of scope for this fix).
+    """
+
+    def test_ssl_context_built_once_across_many_stores(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import ssl as ssl_module
+
+        from nexus.db.t2 import _refreshable_client
+
+        # Cold-cache state -- deterministic regardless of test order or
+        # this module's own import history (the cache is process/module
+        # -global by design, so a prior test in the same session must not
+        # leave this test seeing a pre-warmed cache).
+        monkeypatch.setattr(_refreshable_client, "_shared_ssl_context", None, raising=False)
+        # Pin the exact branch create_ssl_context() takes (the
+        # cafile=certifi.where() default) so this test is not
+        # order-dependent on whatever the ambient env happens to hold.
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+        monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+
+        calls: list[tuple[Any, Any]] = []
+        real_create_default_context = ssl_module.create_default_context
+
+        def _counting_create_default_context(*args: Any, **kwargs: Any) -> ssl.SSLContext:
+            calls.append((args, kwargs))
+            return real_create_default_context(*args, **kwargs)
+
+        monkeypatch.setattr(ssl_module, "create_default_context", _counting_create_default_context)
+
+        for _ in range(5):
+            _make_echo_store(base_url="http://127.0.0.1:1", _token="tok")
+
+        assert len(calls) == 1, (
+            f"expected ssl.create_default_context() to run exactly once "
+            f"across 5 RefreshableHttpStoreMixin-backed store constructions "
+            f"(one shared, process-wide SSL context); it ran {len(calls)} "
+            f"times -- each store is still building its own"
+        )
+
+    def test_shared_context_is_the_same_object_across_stores(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stronger than the call-count assertion above: every store's
+        underlying ``httpx.Client`` must be handed the IDENTICAL
+        ``ssl.SSLContext`` object (``is``, not just equal config) -- this
+        is what actually eliminates the redundant construction cost, and
+        it is the concurrency-relevant property (one immutable object read
+        by many clients, never rebuilt or mutated per-store)."""
+        from nexus.db.t2 import _refreshable_client
+
+        monkeypatch.setattr(_refreshable_client, "_shared_ssl_context", None, raising=False)
+
+        stores = [_make_echo_store(base_url="http://127.0.0.1:1", _token="tok") for _ in range(3)]
+
+        contexts = {id(store._client._transport._pool._ssl_context) for store in stores}
+        assert len(contexts) == 1, (
+            "expected every store's httpx.Client to share the identical "
+            "ssl.SSLContext object; found "
+            f"{len(contexts)} distinct objects across {len(stores)} stores"
+        )
