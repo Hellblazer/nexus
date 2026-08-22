@@ -263,6 +263,7 @@ def check_preconditions(
     _provisioned_fn: Callable[[], bool] | None = None,
     _plugin_version_fn: Callable[[], str | None] | None = None,
     _lockstep_marker_fn: Callable[[], str | None] | None = None,
+    _plan_library_fn: Callable[[], tuple[int, int]] | None = None,
 ) -> list[PreconditionReport]:
     """READ-ONLY live verdicts for every precondition axis.
 
@@ -307,6 +308,62 @@ def check_preconditions(
     ]
 
 
+def _plan_library_report(
+    converge_fn: Callable[[], tuple[int, int]] | None = None,
+) -> PreconditionReport:
+    """Converge the plan library against the templates this build ships.
+
+    A STATELESS axis, which is why it belongs here and not on the ladder:
+    the ladder records a rung complete forever, but plan-library drift
+    RECURS — every release that edits a template re-opens it. Re-deriving
+    each upgrade is exactly right.
+
+    This exists because the drift was invisible and the remedy was opt-in.
+    The seed loader was insert-only, so an install that had ever been
+    seeded could never receive a corrected template; on this project's own
+    box that meant two templates missing and nine rows drifted since April
+    2026, with nx_answer's single-query fast path unreachable in production
+    the whole time (nexus-f1mbo). Making the user run a command to get a
+    correct library only helps users who already know theirs is wrong.
+
+    Failure is non-fatal and reported: a stale plan library degrades
+    retrieval, it does not break the install, and an upgrade must not be
+    blocked by it.
+    """
+    if converge_fn is None:
+        def converge_fn() -> tuple[int, int]:  # noqa: WPS440 — local default
+            from nexus.commands.catalog import seed_plan_templates  # noqa: PLC0415 — deferred to avoid import cost
+
+            summary = seed_plan_templates(reconcile=True)
+            return summary.inserted, summary.updated
+
+    try:
+        inserted, updated = converge_fn()
+    except Exception as exc:  # noqa: BLE001 — non-fatal axis; reported, never blocks the upgrade
+        _log.warning("precondition_plan_library_failed", error=str(exc))
+        return PreconditionReport(
+            name="plan-library",
+            applicable=True,
+            current=False,
+            detail=f"could not reconcile ({exc}); run `nx plan reseed`",
+        )
+
+    if not inserted and not updated:
+        return PreconditionReport(
+            name="plan-library",
+            applicable=True,
+            current=True,
+            detail="templates match the shipped set",
+        )
+    return PreconditionReport(
+        name="plan-library",
+        applicable=True,
+        current=True,
+        detail=f"reconciled ({inserted} inserted, {updated} rewritten)",
+        actions=(f"reconciled plan library: {inserted} inserted, {updated} rewritten",),
+    )
+
+
 def converge_preconditions(
     *,
     config_dir: Path,
@@ -320,6 +377,7 @@ def converge_preconditions(
     _provisioned_fn: Callable[[], bool] | None = None,
     _plugin_version_fn: Callable[[], str | None] | None = None,
     _lockstep_marker_fn: Callable[[], str | None] | None = None,
+    _plan_library_fn: Callable[[], tuple[int, int]] | None = None,
 ) -> list[PreconditionReport]:
     """Converge stale axes in order: package (report-only) → engine →
     process (re-derived AFTER the engine step; see module docstring for
@@ -414,4 +472,8 @@ def converge_preconditions(
         _lockstep_marker_fn if _lockstep_marker_fn is not None else _default_lockstep_marker
     )
     reports.append(_lockstep_report(plugin_fn(), marker_fn()))
+
+    # Plan library: converged LAST, after the engine and process axes, since
+    # reconciling needs a live service to talk to.
+    reports.append(_plan_library_report(_plan_library_fn))
     return reports

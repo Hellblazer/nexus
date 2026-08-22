@@ -354,15 +354,20 @@ def _stub_seed(monkeypatch, summary):
     return seen
 
 
-def test_plan_reseed_force_reconciles(runner, monkeypatch):
-    """--force is the reconcile leg now (nexus-f1mbo). It used to refuse
-    unconditionally — its raw-SQL purge died with the SQLite plan library
-    (nexus-i711w Stage 2 sub-stage A3) and was never replaced, which is
-    how an edited template lost its only route into an existing library."""
+def test_plan_reseed_reconciles_by_default(runner, monkeypatch):
+    """Reconcile is the DEFAULT now.
+
+    It used to sit behind --force, which meant an install could only be
+    made correct by someone who already knew it was wrong. Every install
+    that never ran the flag kept its April 2026 snapshot — on this
+    project's own box, two templates missing and nine rows drifted, with
+    nx_answer's single-query fast path unreachable the whole time. A flag
+    guarding the CORRECT behaviour is friction, not safety.
+    """
     from nexus.commands.catalog import _SeedSummary
 
     seen = _stub_seed(monkeypatch, _SeedSummary(inserted=1, updated=3, protected=[]))
-    result = runner.invoke(main, ["plan", "reseed", "--force"])
+    result = runner.invoke(main, ["plan", "reseed"])
 
     assert result.exit_code == 0, result.output
     assert seen["reconcile"] is True
@@ -370,14 +375,23 @@ def test_plan_reseed_force_reconciles(runner, monkeypatch):
     assert "Reconciled 3 drifted row(s)." in result.output
 
 
-def test_plan_reseed_without_force_stays_insert_only(runner, monkeypatch):
-    """And says so when it inserted nothing — the silent 'Seeded 0' is what
-    made the frozen library look healthy."""
+def test_plan_reseed_force_still_accepted_and_redundant(runner, monkeypatch):
+    """--force kept so an existing script or habit does not break."""
+    from nexus.commands.catalog import _SeedSummary
+
+    seen = _stub_seed(monkeypatch, _SeedSummary(inserted=0, updated=2, protected=[]))
+    result = runner.invoke(main, ["plan", "reseed", "--force"])
+
+    assert result.exit_code == 0, result.output
+    assert seen["reconcile"] is True
+
+
+def test_plan_reseed_insert_only_opts_out(runner, monkeypatch):
     from nexus.commands.catalog import _SeedSummary
 
     seen = _stub_seed(monkeypatch, _SeedSummary(inserted=0, updated=0, protected=[]))
-    result = runner.invoke(main, ["plan", "reseed"])
+    result = runner.invoke(main, ["plan", "reseed", "--insert-only"])
 
     assert result.exit_code == 0, result.output
     assert seen["reconcile"] is False
-    assert "--force" in result.output
+    assert "--insert-only" in result.output

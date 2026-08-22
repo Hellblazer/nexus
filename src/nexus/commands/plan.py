@@ -570,32 +570,39 @@ def set_scope_cmd(plan_id: int, tags: str, from_project: bool) -> None:
 @plan.command("reseed")
 @click.option(
     "--force",
-    "reconcile",
+    "force",
     is_flag=True,
-    help="Also rewrite rows whose stored content has drifted from the "
-    "template on disk. Without it the loader only inserts missing rows, "
-    "so an edited description or plan_json never reaches an existing "
-    "library.",
+    help="Accepted for compatibility and redundant: reconcile is the "
+    "default. Kept so an existing script or habit does not break.",
 )
-def reseed_cmd(reconcile: bool) -> None:
+@click.option(
+    "--insert-only",
+    is_flag=True,
+    help="Skip the update leg — insert missing templates and leave "
+    "drifted rows alone. The pre-nexus-f1mbo behaviour; there is rarely "
+    "a reason to want it.",
+)
+def reseed_cmd(force: bool, insert_only: bool) -> None:
     """Re-run the four-tier plan-library seed loader.
 
     \b
-    By default this is insert-only: previously-missing templates land,
-    everything else is skipped. That is idempotent but also inert — the
-    deduper keys on canonical dimensions, so an edited description or a
-    replaced plan_json on an existing dimension is invisible to it, and
-    a library seeded once stays frozen at whatever it first received
-    (nexus-f1mbo).
+    RECONCILES BY DEFAULT: each template is compared against its stored
+    row and rewritten when they differ, and missing templates are
+    inserted. Reconcile used to be behind ``--force``, which meant an
+    install could only be made correct by a user who already knew the
+    library was wrong — every install that did not run it silently kept
+    an April 2026 snapshot with two templates missing and nine rows
+    drifted (nexus-f1mbo). A flag guarding the CORRECT behaviour is
+    friction, not safety.
 
     \b
-    ``--force`` adds the update leg: each template is compared against
-    its stored row and rewritten when they differ. A rewritten row is
-    re-created, so its match/use counters reset — correct, since those
-    counters described the superseded text. Rows tagged grown/ad-hoc
-    are never rewritten, and library rows with no template on disk are
-    left alone; both cases are reported rather than acted on.
+    A rewritten row is re-created, so its match/use counters reset —
+    correct, since those counters described the superseded text. Rows
+    tagged grown/ad-hoc are never rewritten, and library rows with no
+    template on disk are left alone; both cases are reported rather than
+    acted on.
     """
+    reconcile = not insert_only
     # seed_plan_templates writes through T2Database.plans, which is
     # facade-routed (HttpPlanLibrary in service mode) — the seed half of
     # this verb is backend-correct in both modes.
@@ -606,6 +613,6 @@ def reseed_cmd(reconcile: bool) -> None:
         click.echo(f"Reconciled {summary.updated} drifted row(s).")
     elif summary.inserted == 0:
         click.echo(
-            "Nothing inserted. If you edited a template, rerun with "
-            "--force — the insert-only pass cannot see content drift."
+            "Nothing inserted, and --insert-only cannot see content "
+            "drift. Drop the flag to reconcile."
         )
