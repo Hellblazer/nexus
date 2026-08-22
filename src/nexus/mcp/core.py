@@ -6989,6 +6989,7 @@ async def nx_answer(
     )
     from nexus.plans.matcher import plan_match as _plan_match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.plans.runner import plan_run as _plan_run  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+    from nexus.plans.verb_infer import infer_verb as _infer_verb  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
     _log = _slog.get_logger()
     start = time.monotonic()
@@ -7434,6 +7435,22 @@ async def nx_answer(
         )
         matches: list = []
     else:
+        # Category route (T2 design-dimension-routed-category-plans-
+        # 2026-08-21). A caller-pinned verb always wins — the five
+        # scenario skills pass dimensions={"verb": ...} and must keep
+        # selecting their own verb's plans. Otherwise derive one from
+        # the question, which is what lets an unscoped nx_answer call
+        # reach a builtin at all: builtins have been selected once in
+        # four months, and every one of those misses came in through
+        # this path with no verb attached.
+        #
+        # This travels as its OWN argument. Merging it into `dimensions`
+        # would make it a hard filter over every candidate including
+        # grown plans, whose verbs are only ever research/analyze, so a
+        # derived debug/document verb would drop the entire live hit
+        # rate.
+        _pinned_verb = (dimensions or {}).get("verb")
+        _category_verb = _pinned_verb or _infer_verb(question)
         try:
             with _t2_ctx() as db:
                 cache = get_t1_plan_cache(populate_from=db.plans)
@@ -7453,6 +7470,7 @@ async def nx_answer(
                     # free-text binding is aliased from the question, so
                     # only typed bindings can make a plan unrunnable.
                     available_bindings=_caller_available,
+                    category_verb=_category_verb,
                 )
         except Exception as exc:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             return _result(f"Error during plan match: {exc}")

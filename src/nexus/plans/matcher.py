@@ -30,6 +30,7 @@ from typing import Any, Protocol
 
 import structlog
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -38,7 +39,7 @@ if TYPE_CHECKING:
     # plan library left after nexus-i711w Stage 2 sub-stage A3 deleted
     # the SQLite PlanLibrary.
     from nexus.db.t2.http_plan_library import HttpPlanLibrary
-from nexus.plans.match import Match
+from nexus.plans.match import Match, _decode_json_dict
 from nexus.plans.schema import unsatisfiable_typed_binding
 from nexus.plans.scope import _SCOPE_AGNOSTIC_SENTINELS, _normalize_scope_string
 
@@ -120,6 +121,42 @@ def _is_always_failing(row: dict) -> bool:
     except (TypeError, ValueError):
         return False
     return successes == 0 and failures >= _ALWAYS_FAILING_MIN_FAILURES
+
+
+#: Comma-token that marks a plan as CATEGORY-level: a hand-authored
+#: template describing a kind of work ("research any concept"), as
+#: opposed to an INSTANCE-level grown plan that memoizes one question.
+#:
+#: Matched as a comma token, like :func:`_is_grown_plan_tags`, not as a
+#: naive substring. Deliberately NOT keyed on ``scope == "global"``:
+#: plenty of test fixtures and user plans are global without being
+#: templates, and a scope predicate would silently start firing inside
+#: existing below-floor assertions.
+#:
+#: This is the best discriminator available today. When a durable
+#: ``origin`` column lands (nexus-7bwe), this predicate moves to it.
+_CATEGORY_PLAN_TAG = "builtin-template"
+
+
+def _is_category_plan(tags: str | None) -> bool:
+    """True when *tags* marks a category-level (builtin template) plan."""
+    if not tags:
+        return False
+    return _CATEGORY_PLAN_TAG in [t.strip() for t in tags.split(",")]
+
+
+def _plan_verb(row: dict) -> Any:
+    """The plan's verb, preferring the canonical ``dimensions`` map.
+
+    The ``verb`` column is a denormalised copy the library writes
+    alongside ``dimensions``. Every other verb comparison in this module
+    reads the dimensions map (via ``Match.dimensions``), so this reads it
+    too and falls back to the column only when the map has no verb —
+    otherwise a row whose copies had drifted would route on one verb and
+    be dimension-filtered on the other.
+    """
+    dims = _decode_json_dict(row.get("dimensions"))
+    return dims.get("verb") or row.get("verb")
 
 
 def _is_grown_plan_tags(tags: str | None) -> bool:
@@ -212,6 +249,27 @@ def _log_t1_drops(
             dropped=always_failing_drops,
             remedy="nx plan hygiene --apply retires these durably",
         )
+
+
+def _log_category_route(
+    match: Match, *, raw_confidence: float, verb: str | None,
+) -> None:
+    """Record that a plan was admitted by dimension rather than by cosine.
+
+    INFO for the same reason as the sibling drop records: the CLI
+    defaults to WARNING and MCP to INFO, so DEBUG would be unobservable
+    exactly where it matters. This is the one line that distinguishes
+    "nx_answer matched a builtin" from "nx_answer matched anything", and
+    with builtins having been selected once in four months, the
+    difference is worth a log line.
+    """
+    _log.info(
+        "plan_match_category_routed",
+        plan_id=match.plan_id,
+        name=match.name,
+        verb=verb,
+        raw_confidence=round(raw_confidence, 4),
+    )
 
 
 def _log_binding_drops(drops: list[tuple[int, str]]) -> None:
@@ -403,6 +461,7 @@ def plan_match(
     n: int = 5,
     project: str = "",
     available_bindings: frozenset[str] | None = None,
+    category_verb: str | None = None,
 ) -> list[Match]:
     """Return plans ranked for *intent*.
 
@@ -439,6 +498,37 @@ def plan_match(
     its string output. Callers MUST treat ``confidence=None`` (or the
     rendered ``fts5`` string) as a match that clears the gate — the
     ``min_confidence`` parameter does not apply to FTS5 hits.
+
+    ``category_verb`` enables the CATEGORY ROUTE (T2
+    design-dimension-routed-category-plans-2026-08-21). Cosine ranks
+    plans by topical overlap, but a category-level plan is topic-free by
+    construction, so it cannot clear an absolute floor against a
+    topic-bearing question — measured with zero competition, 3 of 5
+    verb-shaped probes put the intended builtin below 0.40 and
+    ``debug-default`` died at RANK 1. No floor setting and no
+    description rewrite fixes that; both were tried and measured.
+
+    When *category_verb* is supplied and the cosine path scores nothing,
+    the builtin templates whose verb is compatible with it are
+    reconsidered with the floor — and only the floor — lifted. Every
+    correctness gate still applies. Selection within that pool is by raw
+    cosine, which retains RELATIVE discriminating power inside a small
+    same-verb pool even though it has no ABSOLUTE power across the
+    library; that is what lets a discovery-shaped question reach
+    ``document-discovery`` rather than ``research-default``.
+
+    The route can only turn a MISS into a hit. It never fires when the
+    cosine path produced a candidate, so it cannot change any call that
+    already matched. The returned Match carries ``confidence=None`` —
+    the same sentinel the FTS path uses, and for the same reason: the
+    cosine number is not what admitted it.
+
+    *category_verb* is deliberately a separate parameter rather than a
+    ``dimensions["verb"]`` entry. ``dimensions`` is a hard filter over
+    ALL candidates including grown plans, whose verbs only ever come out
+    as ``research`` or ``analyze``; routing a derived ``debug`` through
+    it would drop every grown plan, and grown plans are currently the
+    entire live hit rate.
     """
     filter_dims = dimensions or {}
     # nexus-h33x8.6 a2: precompute once — every candidate on the T1 path
@@ -469,6 +559,10 @@ def plan_match(
         hits = cache.query(intent, _over)
         # Gather all admissible candidates with (adjusted_score, specificity).
         scored: list[tuple[float, int, Match]] = []
+        # Category-route candidates: (raw_cosine, is_default, plan_id, match).
+        # Populated only when `category_verb` is set; consumed after the
+        # cosine path has been given its chance and produced nothing.
+        category_pool: list[tuple[float, bool, int, Match]] = []
         scope_conflict_drops = 0
         always_failing_drops = 0
         # nexus-h33x8.6 a2 fix-pass (substantive-critic SIGNIFICANT #2,
@@ -518,7 +612,19 @@ def plan_match(
             # special-case either.
             if _is_verbatim_repeat(row, normalized_intent):
                 confidence = 1.0
-            if confidence < min_confidence:
+            # The category route (see docstring) lifts the floor, and ONLY
+            # the floor, for builtin templates whose verb the caller
+            # derived. Such a candidate keeps walking every gate below;
+            # it is diverted into category_pool at the end rather than
+            # into `scored`, so it can never outrank a real cosine hit.
+            below_floor = confidence < min_confidence
+            routable = (
+                below_floor
+                and category_verb is not None
+                and _is_category_plan(row.get("tags"))
+                and _verbs_compatible(_plan_verb(row), category_verb)
+            )
+            if below_floor and not routable:
                 continue
             if _is_always_failing(row):
                 # nexus-vtp8h: every recorded run failed — skip rather than
@@ -562,6 +668,14 @@ def plan_match(
             if unmet is not None:
                 binding_drops.append((m.plan_id, unmet))
                 continue
+            if routable:
+                # Below the floor, but a category plan the caller's verb
+                # asked for. Held aside — never mixed into `scored`, so it
+                # cannot displace or outrank a genuine cosine hit.
+                category_pool.append(
+                    (confidence, m.name == "default", m.plan_id, m)
+                )
+                continue
             adjusted = confidence * (1.0 + _SCOPE_FIT_WEIGHT * fit)
             scored.append((adjusted, _specificity(m.scope_tags), m))
 
@@ -596,6 +710,29 @@ def plan_match(
                     confidence=raw_confidence_by_plan_id.get(m.plan_id, m.confidence),
                 )
             return matches
+
+        if category_pool:
+            # Cosine scored nothing. Route by dimension instead: among the
+            # builtin templates the caller's verb selects, take the best
+            # RELATIVE cosine. Absolute cosine is meaningless here — the
+            # whole pool sits below the floor by construction — but the
+            # ordering inside a same-verb pool still tracks which template
+            # fits the question, which is what separates a discovery-shaped
+            # question from a synthesis-shaped one.
+            category_pool.sort(reverse=True)
+            raw, _, _, best = category_pool[0]
+            routed = replace(best, confidence=None)
+            # confidence=None is the existing "admitted, but not by a cosine
+            # score" sentinel (the FTS path sets it for the same reason).
+            # Downstream, _nx_answer_match_is_hit passes None unconditionally
+            # and choose_within_band returns matches[0] unchanged.
+            _log_category_route(routed, raw_confidence=raw, verb=category_verb)
+            # Record the RAW cosine, never the sentinel — match_conf_sum is a
+            # permanent aggregate and must keep measuring embedding quality,
+            # not gating decisions (the same rule the verbatim-repeat
+            # override follows).
+            library.increment_match_metrics(routed.plan_id, confidence=raw)
+            return [routed]
 
     # FTS5 fallback: either cache unavailable or T1 returned no hits.
     # Over-fetch so the dimension post-filter doesn't starve the caller.

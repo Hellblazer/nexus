@@ -57,6 +57,37 @@ def test_builtin_template_required_dimensions(path: Path) -> None:
     not _BUILTIN_DIR.exists() or not _YAML_FILES,
     reason="conexus/plans/builtin/ dir is empty - defensive skip; expected to be populated",
 )
+@pytest.mark.parametrize("path", _YAML_FILES, ids=[p.name for p in _YAML_FILES])
+def test_builtin_template_verb_is_reachable_by_the_category_route(path: Path) -> None:
+    """Every builtin must carry a verb some question can actually derive.
+
+    The category route selects builtins by verb, so a template whose verb
+    no classifier output reaches is unroutable by construction — it would
+    sit in the library looking healthy and never be offered, which is the
+    failure mode the route exists to end.
+
+    The schema validator checks dimension KEYS only, never VALUES, and
+    conexus/plans/dimensions.yml's enumeration is prose and already stale
+    (it omits `query` and `lookup`, which three shipped templates use), so
+    nothing else in the tree would catch a typo'd verb.
+    """
+    from nexus.plans.matcher import _verbs_compatible
+    from nexus.plans.verb_infer import _VERB_PATTERNS
+
+    verb = (yaml.safe_load(path.read_text()).get("dimensions") or {}).get("verb")
+    derivable = [v for v, _ in _VERB_PATTERNS]
+    assert any(_verbs_compatible(verb, d) for d in derivable), (
+        f"{path.name}: verb {verb!r} is not reachable from any verb the "
+        f"classifier can derive ({derivable}) — the template can never be "
+        f"routed. Either fix the verb or teach nexus.plans.verb_infer to "
+        f"emit one compatible with it."
+    )
+
+
+@pytest.mark.skipif(
+    not _BUILTIN_DIR.exists() or not _YAML_FILES,
+    reason="conexus/plans/builtin/ dir is empty - defensive skip; expected to be populated",
+)
 def test_builtin_templates_no_dimension_collisions() -> None:
     """No two builtin templates may have the same canonical dimensions.
 
