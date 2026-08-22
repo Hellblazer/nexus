@@ -4362,7 +4362,7 @@ def _run_index(
     # inside run_file_loop; hook chains are serialized via
     # LockedHookRegistry so the manifest/chash/taxonomy/aspect writes
     # never interleave.
-    from nexus.indexer_utils import resolve_index_concurrency, run_file_loop  # noqa: PLC0415  — circular-dep avoidance (nexus.indexer_utils)
+    from nexus.indexer_utils import resolve_index_concurrency, run_file_loop, skip_floor_breached  # noqa: PLC0415  — circular-dep avoidance (nexus.indexer_utils)
     _concurrency = resolve_index_concurrency()
     if _concurrency > 1 and hooks is not None:
         # hooks may be None at direct test call sites; wrapping None would
@@ -4787,6 +4787,24 @@ def _run_index(
         )
         _log.info("index_chunk_batching_enabled")
 
+    # nexus-deyd5: files SKIPPED because a per-file extraction failure hit
+    # them (nexus.errors.UnextractableContentError, caught directly by
+    # run_file_loop — never raises). Nothing was ever written for a
+    # skipped file, so skipping ONE file costs no data. Collected across
+    # all 4 run_file_loop categories (code/prose/pdf/rdr) via the shared
+    # on_skip callback so the run's summary can report them by path +
+    # reason. A single skip stays informational (never a non-zero exit —
+    # contrast pdf_quality_gate_failed, an intentionally separate policy);
+    # round 3 added a run-level "too many of them" verdict computed AFTER
+    # everything below (drain, RDR loop, post-processing) completes — see
+    # "systemic_extraction_failure" at the return dict.
+    # Declared before the FIRST run_file_loop call (code files) since all
+    # four loops below share this one collector.
+    _skipped_files: list[tuple[str, str]] = []
+
+    def _on_skip(file: Path, reason: str) -> None:
+        _skipped_files.append((str(file), reason))
+
     # Index code files → code__ (voyage-code-3, AST chunking)
     # NOTE: calls _index_code_file (the module-level wrapper) so that tests
     # patching nexus.indexer._index_code_file continue to intercept correctly.
@@ -4826,6 +4844,7 @@ def _run_index(
     _code_written = run_file_loop(
         code_files, _index_one_code, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
+        on_skip=_on_skip,
     )
     _files_written = _code_written
 
@@ -4874,6 +4893,7 @@ def _run_index(
     _prose_written = run_file_loop(
         prose_files, _index_one_prose, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
+        on_skip=_on_skip,
     )
     _files_written += _prose_written
 
@@ -4911,6 +4931,7 @@ def _run_index(
     _pdf_written = run_file_loop(
         pdf_files, _index_one_pdf, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
+        on_skip=_on_skip,
     )
     _files_written += _pdf_written
     if _quality_gate_failed:
@@ -4978,6 +4999,7 @@ def _run_index(
     _rdr_written = run_file_loop(
         rdr_md_paths, _index_one_rdr, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
+        on_skip=_on_skip,
     )
     _files_written += _rdr_written
     rdr_indexed = _rdr_written
@@ -4993,6 +5015,26 @@ def _run_index(
             f"RDR indexing done — {rdr_indexed} indexed, {rdr_current} current, "
             f"{rdr_failed} failed ({time.monotonic() - _rdr_t0:.1f}s)"
         )
+
+    # nexus-deyd5: report every file skipped this run (across all 4
+    # run_file_loop categories) — loud and counted, never silent. This
+    # per-file event alone never fails the run (no chunk was ever written
+    # for a skipped file, so nothing was lost); whether the AGGREGATE
+    # crosses the run-level systemic-skip verdict is decided separately,
+    # below "systemic_extraction_failure" — this block does not know or
+    # care about that verdict, it only reports the raw population.
+    if _skipped_files:
+        _log.error(
+            "index_files_skipped_unextractable",
+            count=len(_skipped_files),
+            files=sorted(f for f, _ in _skipped_files)[:20],
+        )
+        if on_phase is not None:
+            on_phase(
+                f"NOTE: {len(_skipped_files)} file(s) could not be extracted "
+                f"and were skipped (nexus-deyd5, see logs for path + reason) "
+                f"— every other file still indexed normally."
+            )
 
     # duoak 2C: flush remaining staged chunks and surface per-file upload
     # failures (containment: a failed batch fails its contributing files,
@@ -5279,6 +5321,45 @@ def _run_index(
         suffix = f" (interrupted: {type(post_error).__name__})" if post_error else ""
         _phase(f"Post-processing complete ({time.monotonic() - post_t0:.1f}s){suffix}")
 
+    # nexus-deyd5 round 3 (coordinator directive, closing the round-2 HIGH
+    # finding): the systemic-skip VERDICT is computed HERE — after every
+    # run_file_loop category, the batcher's drain, and post-processing have
+    # ALL completed normally — never as a raise from inside a loop. Round
+    # 2's mid-loop raise fired after only ONE category (whichever hit the
+    # floor first), before the drain or the remaining categories ran,
+    # discarding already-staged-but-unflushed chunks (ChunkBatcher has no
+    # __del__/atexit) and surfacing as an uncaught traceback instead of a
+    # clean CLI exit — reachable on a routine corpus shape (a scanned-PDF
+    # archive: the default extractor never runs OCR, MinerU is opt-in).
+    # "Attempted" is the aggregate across all 4 categories, not just PDF —
+    # a run-level verdict, matching how the skip count itself is already
+    # aggregated via the shared _on_skip callback.
+    #
+    # AGGREGATE, not per-category — a DELIBERATE trade-off (coordinator
+    # decision, round 3), recorded here so it stays visible rather than an
+    # invisible choice a future reader has to rediscover. Round 2 (before
+    # the mid-loop-raise regression) evaluated the floor separately for
+    # each of the 4 categories; round 3 sums them into one run-level
+    # check instead. Cost of that choice, named explicitly: a code/prose-
+    # dominant repo whose PDF subset is COMPLETELY unextractable now
+    # dilutes below the ratio against the much larger code/prose
+    # denominator and gets only the informational
+    # "skipped_unextractable_files" note, never the non-zero exit — a
+    # per-category version would have hard-failed that PDF subset on its
+    # own. A PDF-DOMINANT corpus (the original round-2 finding's actual
+    # scenario — a scanned-PDF archive) is still caught either way, since
+    # there PDFs already dominate the denominator. Accepted deliberately,
+    # not overlooked: per-category re-introduces exactly the "which
+    # category's breach fires first, before the others run" shape this
+    # round's fix moved away from, for a narrower benefit (catching a
+    # small broken subcategory inside an otherwise-healthy large repo).
+    _files_attempted_total = (
+        len(code_files) + len(prose_files) + len(pdf_files) + len(rdr_md_paths)
+    )
+    _systemic_extraction_failure = skip_floor_breached(
+        len(_skipped_files), _files_attempted_total,
+    )
+
     # nexus-qgc4b: files_changed drives the caller's post-index gate. RDR
     # (re)indexing is a content change too, so an RDR-only run still triggers
     # taxonomy discovery. nexus-3lswy: RDR files are now folded into
@@ -5302,6 +5383,25 @@ def _run_index(
         # exit after the rest of the run completes, so a total-write-path
         # failure is never reported as a clean "Done." at rc=0.
         "chunk_flush_failed_files": len(_batch_failures),
+        # nexus-deyd5: files skipped this run because they could not be
+        # extracted (nexus.errors.UnextractableContentError, caught by
+        # run_file_loop). Deliberately NOT wired into a non-zero exit on
+        # its own — unlike pdf_quality_gate_failed / chunk_flush_failed_
+        # files, no data was lost by skipping ONE file. index_repo_cmd
+        # reports this count informationally UNLESS
+        # systemic_extraction_failure is also True (see below).
+        "skipped_unextractable_files": len(_skipped_files),
+        # nexus-deyd5 round 3: the denominator for the ratio above, and
+        # for index_repo_cmd's "attempted N, skipped M" message.
+        "files_attempted_total": _files_attempted_total,
+        # nexus-deyd5 round 3: the run-level systemic-skip verdict (see
+        # nexus.indexer_utils.skip_floor_breached). True means the skip
+        # population is no longer plausible per-file noise — index_repo_
+        # cmd converts this into a non-zero exit AFTER everything above
+        # (drain, RDR loop, post-processing) has already completed and
+        # been committed; nothing successful is discarded by this flag
+        # being True.
+        "systemic_extraction_failure": _systemic_extraction_failure,
         # nexus-tevzq: per-collection-kind attribution for the caller's
         # discover gate. Keys match the collection-name content_type prefix
         # (RDR-103 shape). prose+pdf both land in docs__.

@@ -966,6 +966,35 @@ def index_repo_cmd(
         # of the run's useful work still completes before the non-zero
         # exit.
         pdf_quality_gate_failed = (stats or {}).get("pdf_quality_gate_failed", 0)
+        # nexus-deyd5: files skipped because they could not be extracted
+        # (nexus.errors.UnextractableContentError, caught per-file by
+        # indexer_utils.run_file_loop — never raises). Reported
+        # informationally by default — a SINGLE skip costs no data
+        # (nothing was ever written for that file), so the run stays
+        # rc=0 for it alone. The file+reason detail lives in the
+        # index_files_skipped_unextractable log line indexer.py emits.
+        # round 3: when the AGGREGATE crosses the run-level systemic-skip
+        # verdict (systemic_extraction_failure below), this stays
+        # informational and a SEPARATE, clean ClickException fires —
+        # every step above (drain, RDR loop, post-processing) has already
+        # completed and committed by the time either check runs, so
+        # nothing successful is discarded by either outcome.
+        skipped_unextractable_files = (stats or {}).get("skipped_unextractable_files", 0)
+        if skipped_unextractable_files:
+            # nexus-deyd5 round 2 (code-review finding): stderr, not
+            # stdout — the WARNING/ERROR log line(s) this note points at
+            # are stderr-only (mode="cli" logging is stderr-only, see
+            # logging_setup.py). A plain click.echo() here would land the
+            # pointer on stdout while its target stays on stderr, so
+            # `nx index repo path/ > report.txt` would capture a note
+            # referencing detail that is not in the file at all.
+            click.echo(
+                f"Note: {skipped_unextractable_files} file(s) could not be "
+                f"extracted and were skipped (nexus-deyd5) — every other "
+                f"file indexed normally. See the WARNING/ERROR log line(s) "
+                f"above for the affected path(s) and reason(s).",
+                err=True,
+            )
         if manifest_problems_detected:
             from nexus.commands._helpers import raise_identity_drop_exception  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
             raise_identity_drop_exception(subject="document")
@@ -977,6 +1006,32 @@ def index_repo_cmd(
                 f"'nx index pdf --allow-degraded-extraction <file>' to accept "
                 f"the extraction deliberately, or 'nx index pdf <file>' after "
                 f"fixing the underlying extraction (e.g. --extractor mineru)."
+            )
+        # nexus-deyd5 round 3 (coordinator directive, closing the round-2
+        # HIGH finding): the run-level systemic-skip verdict. Checked HERE
+        # — after drain/RDR-loop/post-processing have all already run and
+        # committed (see indexer._run_index's own comment at
+        # "systemic_extraction_failure") — never as a mid-run raise, so a
+        # breach never costs already-completed work; it only decides the
+        # EXIT CODE for a run that is otherwise already finished. Distinct
+        # from pdf_quality_gate_failed above: this fires on the AGGREGATE
+        # population across every category, not a single file's quality.
+        # The message names the numbers per the coordinator's explicit
+        # ask, plus the most likely legitimate cause traced by code review
+        # (round 2): scanned/image-only PDFs, since the default extractor
+        # never runs OCR and MinerU is opt-in.
+        if (stats or {}).get("systemic_extraction_failure", False):
+            _attempted = (stats or {}).get("files_attempted_total", 0)
+            _pct = f"{skipped_unextractable_files / _attempted:.0%}" if _attempted else "?"
+            raise click.ClickException(
+                f"skipped {skipped_unextractable_files} of {_attempted} files "
+                f"({_pct}) — extraction may be broken (nexus-deyd5). If this "
+                f"corpus contains scanned/image-only PDFs, the default "
+                f"extractor does not run OCR — retry the PDF-heavy portion "
+                f"with 'nx index pdf --dir <path> --extractor mineru' "
+                f"(OCR-capable), or set 'pdf.extractor: mineru' in .nexus.yml "
+                f"for future runs. See the WARNING/ERROR log line(s) above "
+                f"for the affected path(s) and reason(s)."
             )
         # nexus-4s1ww / GH #1432: when every (or some) file's chunk-batch
         # flush permanently fails (post bisect-retry — ChunkBatcher.

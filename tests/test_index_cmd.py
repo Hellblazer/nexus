@@ -123,6 +123,101 @@ def test_index_repo_pdf_quality_gate_key_absent_exit_zero(runner, repo_dir, mock
     assert result.exit_code == 0, result.output
 
 
+def test_index_repo_skipped_unextractable_files_reported_on_stderr(runner, repo_dir, mock_reg):
+    """nexus-deyd5 round 2 (code-review finding): the skip-count note must
+    land on STDERR, alongside the WARNING/ERROR log line(s) it points at
+    ('see the WARNING/ERROR log line(s) above') -- those are stderr-only
+    (mode="cli" logging, logging_setup.py). A plain stdout click.echo would
+    let `nx index repo path/ > report.txt` capture a note referencing
+    detail that never lands in the file. This is informational, not fatal
+    -- exit_code stays 0."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={"files_changed": 3159, "skipped_unextractable_files": 1},
+    )
+    assert result.exit_code == 0, result.output
+    assert "1 file(s) could not be extracted and were skipped" in result.stderr
+    assert "1 file(s) could not be extracted and were skipped" not in result.stdout
+
+
+def test_index_repo_systemic_extraction_failure_exits_nonzero_with_clean_message(
+    runner, repo_dir, mock_reg,
+):
+    """nexus-deyd5 round 3 (coordinator directive, closing the round-2
+    HIGH finding): a run-level systemic-skip breach must exit non-zero
+    with a CLEAN click.ClickException message -- never an uncaught
+    traceback -- naming the numbers and the most likely legitimate cause
+    (scanned PDFs without OCR). This is a run-LEVEL decision distinct
+    from pdf_quality_gate_failed; both can be present simultaneously
+    without interfering."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={
+            "files_changed": 12,
+            "skipped_unextractable_files": 13,
+            "files_attempted_total": 25,
+            "systemic_extraction_failure": True,
+        },
+    )
+    assert result.exit_code != 0, result.output
+    # No standalone "not a traceback" assertion here (round 3 code review):
+    # CliRunner(catch_exceptions=True) leaves result.output EMPTY for BOTH
+    # a raw uncaught exception and a clean click.ClickException, so a
+    # `"Traceback" not in result.output` check cannot structurally
+    # distinguish the two -- it would pass either way, proving nothing.
+    # The message-content assertions below ARE the real proof: they
+    # require actual text to have reached result.output, which only a
+    # click.ClickException (caught and formatted by Click's own error
+    # handling) produces -- a raw unhandled exception leaves this content
+    # absent and these assertions would fail.
+    assert "skipped 13 of 25 files" in result.output
+    assert "52%" in result.output
+    assert "extraction may be broken" in result.output
+    assert "mineru" in result.output
+    # "Done." (the rest of the run, incl. drain/RDR-loop/post-processing)
+    # still printed -- the exception fires LAST, after useful work
+    # completes and is committed; nothing successful is discarded.
+    assert "Done." in result.output
+
+
+def test_index_repo_no_systemic_extraction_failure_exit_zero(runner, repo_dir, mock_reg):
+    """Regression: the new stats key must not itself flip a clean run
+    non-zero when False -- and a nonzero skip count alone (with the flag
+    False) stays informational, matching the coordinator's "one bad
+    fixture among many still exits 0" requirement at the CLI boundary."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={
+            "files_changed": 3159,
+            "skipped_unextractable_files": 1,
+            "files_attempted_total": 3160,
+            "systemic_extraction_failure": False,
+        },
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_index_repo_systemic_extraction_failure_key_absent_exit_zero(runner, repo_dir, mock_reg):
+    """Backward compat: an older/mocked index_repository return dict with
+    no systemic_extraction_failure key at all must not be treated as a
+    failure (.get default of False)."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={"files_changed": 3},
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_index_repo_no_skipped_unextractable_files_no_note(runner, repo_dir, mock_reg):
+    """Regression: zero (or an absent key, back-compat) prints nothing."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={"files_changed": 3},
+    )
+    assert result.exit_code == 0, result.output
+    assert "could not be extracted and were skipped" not in result.output
+
+
 def test_index_repo_idempotent_when_already_registered(runner, repo_dir, mock_reg):
     result, mock_idx = _invoke_repo(runner, [str(repo_dir)], mock_reg)
     assert result.exit_code == 0
