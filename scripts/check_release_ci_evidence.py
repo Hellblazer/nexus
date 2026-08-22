@@ -122,11 +122,17 @@ conclusion, and "no check run found under this name for this SHA" is a
 FAILURE, never a silent pass -- that absence-is-success shape is exactly the
 bug class this script exists to close (nexus-moht0).
 
-:data:`REQUIRED_CHECK_CONTEXTS` mirrors this repo's live branch-protection
-required contexts for ``main`` (currently exactly ``("pytest-gate",)`` --
-verified live via
+:data:`REQUIRED_CHECK_CONTEXTS` is the subset of this repo's live
+branch-protection required contexts for ``main`` that this script can
+actually treat as EVIDENCE. As of 2026-08-22 ``main`` requires three
+contexts -- ``pytest-gate``, ``service change detection`` and ``Java tests
++ jOOQ codegen drift guard`` -- verified live via
 ``gh api repos/Hellblazer/nexus/branches/main/protection --jq
-'.required_status_checks.contexts'``, 2026-08-12). It is a hand-maintained
+'.required_status_checks.contexts'``. Only the first is evidence-checkable;
+the other two are enumerated in :data:`DEFERRED_REQUIRED_CONTEXTS` with the
+reason. Together the two constants must equal the live set, which
+``test_required_check_contexts_matches_live_branch_protection`` asserts.
+It is a hand-maintained
 constant, not a live query: reading branch protection needs
 ``administration:read``, which the default ``GITHUB_TOKEN`` in
 ``release.yml`` is not granted (and should not be, to keep the publish job's
@@ -170,6 +176,42 @@ from typing import Callable
 #: every release tag's merge commit lands on). See the module docstring for
 #: how this was verified and why it is a constant, not a live API query.
 REQUIRED_CHECK_CONTEXTS: tuple[str, ...] = ("pytest-gate",)
+
+#: Contexts that ``main``'s branch protection REQUIRES but this script
+#: deliberately does NOT treat as evidence. Enumerated, not silently omitted:
+#: :data:`REQUIRED_CHECK_CONTEXTS` + this tuple must equal the live required
+#: set, so protection changing in either direction reds the drift test rather
+#: than passing quietly.
+#:
+#: Both live in ``.github/workflows/service-ci.yml`` and both are unusable as
+#: publish-time evidence, for two INDEPENDENT reasons -- either alone is
+#: disqualifying:
+#:
+#: 1. ABSENCE on the merge commit. That workflow's ``push`` trigger keeps a
+#:    ``paths: service/**`` filter (deliberately -- pushes gate nothing, so
+#:    filtering there is pure cost saving). A release that touches no
+#:    ``service/`` file therefore produces NO service-ci run on the merge
+#:    commit at all, and :func:`evaluate` counts absence as a hard failure.
+#: 2. ``skipped`` conclusion. ``Java tests + jOOQ codegen drift guard`` is
+#:    ``if: needs.changes.outputs.service == 'true'``. Branch protection
+#:    treats a job skipped via ``if:`` as SUCCESS; :func:`evaluate` treats
+#:    every conclusion other than ``success`` -- ``skipped`` named
+#:    explicitly -- as a problem. That asymmetry is intentional on both
+#:    sides and is not a bug in either.
+#:
+#: So requiring these here would red the publish gate on every release that
+#: does not touch the engine, which is most of them. Closing the gap properly
+#: needs a per-context PR-head fallback plus a skipped-is-acceptable rule
+#: bounded to conditionally-skipped jobs; that is a deliberate design change
+#: to release-critical machinery, not a constant edit, and is NOT done here.
+#: What IS closed here: the constant no longer claims main requires only
+#: ``pytest-gate``, which was false from the moment service-ci became
+#: required (Hal directive 2026-07-31) and went undetected because the only
+#: check against live protection runs solely under an admin-scoped token.
+DEFERRED_REQUIRED_CONTEXTS: tuple[str, ...] = (
+    "service change detection",
+    "Java tests + jOOQ codegen drift guard",
+)
 
 _REMEDY = (
     "Remedy: this SHA has no evidence of a green required check. If it is a "

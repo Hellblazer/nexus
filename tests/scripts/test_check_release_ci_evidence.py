@@ -731,11 +731,24 @@ def test_required_check_contexts_matches_live_branch_protection():
             "every contributor's token carries."
         )
     live_contexts = set(json.loads(proc.stdout))
-    assert set(gate.REQUIRED_CHECK_CONTEXTS) == live_contexts, (
-        f"REQUIRED_CHECK_CONTEXTS {gate.REQUIRED_CHECK_CONTEXTS} has drifted "
-        f"from main's live required contexts {sorted(live_contexts)} -- "
-        "update the constant (and its module-docstring justification) in "
-        "scripts/check_release_ci_evidence.py"
+    accounted = set(gate.REQUIRED_CHECK_CONTEXTS) | set(
+        gate.DEFERRED_REQUIRED_CONTEXTS
+    )
+    assert accounted == live_contexts, (
+        f"REQUIRED_CHECK_CONTEXTS {gate.REQUIRED_CHECK_CONTEXTS} + "
+        f"DEFERRED_REQUIRED_CONTEXTS {gate.DEFERRED_REQUIRED_CONTEXTS} "
+        f"account for {sorted(accounted)}, but main's live required contexts "
+        f"are {sorted(live_contexts)}.\n\n"
+        "Do NOT reflexively move the difference into REQUIRED_CHECK_CONTEXTS: "
+        "a context is only usable as publish-time evidence if it is present "
+        "on the evidence commit for EVERY release shape AND concludes "
+        "`success` there. A job gated by `if:` concludes `skipped` (which "
+        "branch protection counts as success and `evaluate` counts as a "
+        "failure), and a workflow whose `push` trigger carries a `paths:` "
+        "filter emits no check-run at all on an unrelated merge commit. "
+        "Either property makes it DEFERRED, not required -- see "
+        "DEFERRED_REQUIRED_CONTEXTS' own rationale in "
+        "scripts/check_release_ci_evidence.py."
     )
 
 
@@ -781,4 +794,40 @@ def test_required_check_contexts_matches_ci_workflow_job_names():
         f"found: {sorted(job_names)}) -- either the ci.yml job was renamed/"
         "removed (fix the workflow or the constant) or the required-check "
         "list in scripts/check_release_ci_evidence.py has drifted"
+    )
+
+
+def test_deferred_required_contexts_match_service_ci_job_names():
+    """Offline liveness leg for DEFERRED_REQUIRED_CONTEXTS.
+
+    Same failure class the ci.yml leg above closes for the required set: a
+    deferred entry that names no real job is a stale exclusion, and a stale
+    exclusion silently shrinks what the union drift check accounts for. Both
+    deferred contexts live in service-ci.yml (not ci.yml, which is why the
+    leg above cannot cover them).
+
+    Non-vacuity: deliberately unmarked, so it runs under the DEFAULT marker
+    selection rather than only in an opt-in leg -- the drift test it backs
+    skip-passes without an admin-scoped token, which is exactly how the
+    stale constant survived from 2026-07-31 to 2026-08-22.
+    """
+    import yaml
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    svc_yml_path = repo_root / ".github" / "workflows" / "service-ci.yml"
+    svc_workflow = yaml.safe_load(svc_yml_path.read_text(encoding="utf-8"))
+
+    jobs = svc_workflow.get("jobs", {})
+    assert jobs, f"{svc_yml_path} parsed with no jobs -- parser or file is broken"
+
+    job_names = {job.get("name") for job in jobs.values() if job.get("name")}
+    missing = [
+        ctx for ctx in gate.DEFERRED_REQUIRED_CONTEXTS if ctx not in job_names
+    ]
+    assert not missing, (
+        f"DEFERRED_REQUIRED_CONTEXTS {gate.DEFERRED_REQUIRED_CONTEXTS} names "
+        f"{missing}, which is not a job 'name:' in {svc_yml_path} (job names "
+        f"found: {sorted(job_names)}) -- retarget the entry if the job was "
+        "renamed, or drop it if the job is gone and branch protection no "
+        "longer requires it."
     )
