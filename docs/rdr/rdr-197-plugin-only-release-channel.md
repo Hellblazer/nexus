@@ -199,6 +199,11 @@ documentation), verify it once end to end, and then leave it dormant.
   carries a mechanized guard inert for more than seven days with no client
   release scheduled, or release cadence drops below monthly, re-open the
   routine-use question with that evidence.
+- **Sunset trigger** (the symmetric case, gate warn 2026-08-22): if two
+  years pass with zero emergency cuts, decommission the channel (delete
+  the workflow, the counter, the parity OR-branch, and the cut script)
+  rather than paying its maintenance forever; the RDR record keeps the
+  design recoverable if the need returns.
 
 ### Technical Design
 
@@ -386,6 +391,8 @@ Not yet run. Gate after Sam's review of this draft.
 ## Revision History
 
 - 2026-08-22: first draft from the audited memo.
+- 2026-08-22 (gate): finalization gate PASSED, all six criteria; sunset
+  trigger added per the gate's one warn.
 - 2026-08-22 (same day): full battery on the draft; repositioned from
   routine channel to dormant emergency path; tag scheme anchored to the
   client release (collision fix); `docs/` removed from the allowlist;
