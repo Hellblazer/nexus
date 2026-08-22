@@ -15,6 +15,9 @@ related_issues: []
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
+> Prose: see REGISTER.md beside this template. Write for a smart reader who
+> may not know the jargon; define terms on first use; simplified, never
+> simplistic.
 
 ## Problem Statement
 

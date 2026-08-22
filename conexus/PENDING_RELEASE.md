@@ -49,3 +49,25 @@ mechanize, it matters enough to ship.
   the census can see; internal reasoning is not" — moves here, and
   CLAUDE.md reduces to a pointer. Docs-only drift: a session on the
   pinned v7.14.0 plugin still reads the skill without that sentence.
+- `conexus/resources/rdr/REGISTER.md`: nexus-3fab5 NEW prose register for
+  the RDR lifecycle (named reader per stage, define-jargon-on-first-use,
+  simplified-never-simplistic); copied to $RDR_DIR at rdr-create bootstrap.
+- `conexus/skills/rdr-create/SKILL.md`: nexus-3fab5 register pointer +
+  bootstrap copies REGISTER.md.
+- `conexus/skills/rdr-gate/SKILL.md`: nexus-3fab5 Layer 3 critic brief gains
+  the register question (jargon-free-reader comprehension, warn-class on
+  failure, never blocks) and the critique-register line.
+- `conexus/commands/rdr-create.md`: nexus-3fab5 register pointer.
+- `conexus/commands/rdr-research.md`: nexus-3fab5 register pointer.
+- `conexus/commands/rdr-gate.md`: nexus-3fab5 Layer 3 register question.
+- `conexus/commands/rdr-accept.md`: nexus-3fab5 register pointer.
+- `conexus/commands/rdr-close.md`: nexus-3fab5 post-mortem register pointer.
+- `conexus/resources/rdr/TEMPLATE.md`: nexus-3fab5 register blockquote line.
+- `conexus/resources/rdr/post-mortem/TEMPLATE.md`: nexus-3fab5 register
+  blockquote line.
+- `conexus/skills/rdr-close/SKILL.md`: nexus-3fab5 post-mortem register
+  pointer + closing check (review round: close stage had no check).
+- `conexus/skills/rdr-research/SKILL.md`: nexus-3fab5 register pointer at
+  the findings-append step.
+- `conexus/skills/rdr-accept/SKILL.md`: nexus-3fab5 register line in the
+  strategic-planner dispatch brief.
