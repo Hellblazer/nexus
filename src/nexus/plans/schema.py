@@ -68,22 +68,84 @@ TYPED_BINDING_DOMAINS: dict[str, str] = {
 }
 
 
+#: Step-argument slots that consume a typed value even though the slot
+#: name is not itself a binding name. ``seeds`` takes catalog tumblers;
+#: prose aliased into it matches nothing, exactly like ``subtree``.
+_TYPED_ARG_SLOTS: frozenset[str] = TYPED_FILTER_BINDINGS | frozenset({"seeds"})
+
+
+def typed_by_usage(plan_json: str | dict[str, Any] | None) -> frozenset[str]:
+    """Bindings a plan feeds into a TYPED argument slot, whatever their name.
+
+    A binding is typed because of what it DOES, not what it is called, and
+    keying the gate on the name alone let the check be bypassed by
+    choosing a free-text-sounding one (nexus-7y4v0). ``debug-default``
+    declares ``failing_path`` and passes it as ``subtree: $failing_path``;
+    ``review-default`` declares ``changed_paths`` and does the same.
+    Neither name is in :data:`TYPED_FILTER_BINDINGS`, so the gate passed
+    them, ``nx_answer`` aliased the raw question into the slot, and the
+    plan ran with a ``subtree`` filter that can match no tumbler — an
+    empty result presented as an answer.
+
+    That is the identical failure this module's own docstring records for
+    ``content_type`` on plan 14 (zero results, 2026-07-25); the only new
+    thing here is that a free-text-looking name hid it from the gate.
+
+    Only bare ``$name`` references count. ``$stepN.field`` is a step
+    reference, not a binding, and is resolved by the runner.
+    """
+    if not plan_json:
+        return frozenset()
+    if isinstance(plan_json, str):
+        try:
+            plan = json.loads(plan_json)
+        except (TypeError, ValueError):
+            return frozenset()
+    else:
+        plan = plan_json
+    if not isinstance(plan, dict):
+        return frozenset()
+
+    found: set[str] = set()
+    for step in plan.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        for slot, value in (step.get("args") or {}).items():
+            if slot not in _TYPED_ARG_SLOTS:
+                continue
+            if not isinstance(value, str) or not value.startswith("$"):
+                continue
+            ref = value[1:]
+            if "." in ref:
+                continue  # $stepN.field — a step reference, not a binding
+            found.add(ref)
+    return frozenset(found)
+
+
 def unsatisfiable_typed_binding(
     *,
     required: list[str],
     defaults: dict[str, Any] | None,
     available: frozenset[str],
+    plan_json: str | dict[str, Any] | None = None,
 ) -> str | None:
     """Return the first typed binding nothing can supply, else ``None``.
 
     A binding is satisfiable when the caller supplies it or the plan
     carries a default for it. Free-text bindings are always satisfiable —
-    ``nx_answer`` aliases them from the question text — so only members of
-    :data:`TYPED_FILTER_BINDINGS` can make a plan unrunnable.
+    ``nx_answer`` aliases them from the question text — so only TYPED
+    bindings can make a plan unrunnable.
+
+    Typed means either a name in :data:`TYPED_FILTER_BINDINGS` or, when
+    *plan_json* is supplied, a binding the plan feeds into a typed
+    argument slot (see :func:`typed_by_usage`). *plan_json* is optional
+    so pre-existing callers keep working, but omitting it re-opens the
+    hole: pass it wherever the plan is available.
     """
     have = defaults or {}
+    typed = TYPED_FILTER_BINDINGS | typed_by_usage(plan_json)
     for req in required:
-        if req in TYPED_FILTER_BINDINGS and req not in available and req not in have:
+        if req in typed and req not in available and req not in have:
             return req
     return None
 

@@ -211,6 +211,9 @@ def _unmet_typed_binding(
         required=m.required_bindings,
         defaults=m.default_bindings,
         available=available,
+        # nexus-7y4v0: pass the plan so a binding that FLOWS INTO a typed
+        # slot counts as typed even when its name does not look it.
+        plan_json=m.plan_json,
     )
 
 

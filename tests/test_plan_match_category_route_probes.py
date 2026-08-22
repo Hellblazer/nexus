@@ -24,6 +24,7 @@ noise, these probes would land on arbitrary members of their verb pool.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -34,55 +35,79 @@ from nexus.plans.verb_infer import infer_verb
 
 _BUILTIN_DIR = Path(__file__).parent.parent / "conexus" / "plans" / "builtin"
 
-#: (question, expected plan name, what the cosine path did BEFORE the
-#: route). Expectations are the template each question is FOR, decided by
-#: reading the templates — not by running the code and writing down what
-#: came out.
+#: What nx_answer can actually bind with no caller-supplied bindings.
+#: Passing this is what makes the probes faithful — omitting it disables
+#: the binding gate entirely and flatters the result.
+_NX_ANSWER_BINDINGS = frozenset({"intent"})
+
+#: (question, outcome-class). Each row records what the pipeline
+#: MEASURABLY does, with nx_answer's real bindings in play. Written from
+#: measurement, after two earlier versions of this table were written
+#: from expectation and turned out to be wrong.
 #:
-#: The `before` column is measured, and it is the honest picture rather
-#: than the flattering one. The route fixes the two questions that
-#: previously matched NOTHING. It does not fix "Research how the plan
-#: matcher decides..." — that one already matches the WRONG plan above
-#: the floor (plan-inspect/default at 0.429, while the correct
-#: research/default sits at 0.258, rank 5), and the route deliberately
-#: never fires when cosine scored something. That is the memo's stated
-#: known limitation, recorded here against a concrete case so it cannot
-#: quietly become folklore that the route fixed everything.
-#:
-#: The cause of that miss is the meta plans (plan-author, plan-inspect,
-#: plan-promote) absorbing any question containing the word "plan" —
-#: and those four templates have no live invocation surface at all,
-#: because plan_match is not an MCP tool (nexus-77cct). Retiring them
-#: would fix this case as a side effect.
+#: - "routed": matched nothing before, reaches its template now. The
+#:   route's actual win.
+#: - "gate-fixed": matched a template before that could not run —
+#:   review-default requires `changed_paths`, which it passes as a
+#:   `subtree:` filter, so nx_answer aliased raw question prose into a
+#:   tumbler filter and the plan returned no evidence at all. That was
+#:   LIVE in production, independent of this route, and reads as a
+#:   confident answer. The binding gate now drops it and the route sends
+#:   the question to the other member of its verb class.
+#: - "blocked-upstream": cosine returns a WRONG plan above the floor, so
+#:   the route correctly declines to override it. The meta plans absorb
+#:   any question containing "plan" (nexus-77cct: those four templates
+#:   have no live invocation surface at all, so retiring them fixes this
+#:   as a side effect).
+#: - "declines": the verb derives, but every template in its pool is
+#:   unrunnable, so nothing is offered and the caller falls through to
+#:   the inline planner. debug-default is the sole debug template and it
+#:   requires `failing_path` as a `subtree:` filter. Declining is the
+#:   correct outcome — the alternative is running a plan whose evidence
+#:   step cannot match anything — but it means the route does NOT help
+#:   debug traffic until that template is fixed (nexus-7y4v0).
 _PROBES = [
     ("Review the changes on this branch for correctness",
-     "default", "review", "matched-correctly"),
+     "default", "analyze", "gate-fixed"),
     ("Research how the plan matcher decides which plan wins",
-     "default", "research", "matched-wrong"),
+     "default", "research", "blocked-upstream"),
     ("Debug why the T1 scratch store returns nothing",
-     "default", "debug", "matched-nothing"),
+     "default", "debug", "declines"),
     ("Which papers discuss membership churn?",
-     "document-discovery", "research", "matched-nothing"),
+     "document-discovery", "research", "routed"),
     ("Does the corpus have anything about tumblers at all?",
-     "corpus-coverage-check", "research", "matched-nothing"),
+     "corpus-coverage-check", "research", "routed"),
 ]
 
 
 def _templates() -> list[dict]:
+    """Rows exactly as the seed loader would store them.
+
+    plan_json goes through `desired_row_for_template` rather than being
+    stubbed: required_bindings round-trip INSIDE plan_json, so a stubbed
+    "{}" silently empties them and every binding gate becomes vacuous.
+    An earlier version of this fixture did stub it, and hid the very
+    defect these probes were written to catch (nexus-7y4v0).
+    """
+    from nexus.plans.seed_loader import desired_row_for_template
+
     rows = []
     for i, path in enumerate(sorted(_BUILTIN_DIR.glob("*.yml")), start=1):
-        t = yaml.safe_load(path.read_text())
+        t = dict(yaml.safe_load(path.read_text()))
         dims = dict(t["dimensions"])
         dims["scope"] = "global"
+        t["dimensions"] = dims
+        desired = desired_row_for_template(t)
         rows.append({
             "id": i,
-            "name": t.get("name"),
-            "query": t["description"],
-            "plan_json": "{}",
-            "tags": t.get("tags", ""),
-            "verb": dims.get("verb"),
+            "name": desired.name,
+            "query": desired.query,
+            "plan_json": desired.plan_json,
+            "tags": desired.tags,
+            "verb": desired.verb,
             "scope": "global",
-            "dimensions": __import__("json").dumps(dims, sort_keys=True),
+            "dimensions": json.dumps(dims, sort_keys=True),
+            "default_bindings": desired.default_bindings,
             "scope_tags": "",
             "project": "",
             "success_count": 1,
@@ -169,36 +194,40 @@ def cache(rows):
 
 
 @pytest.mark.parametrize(
-    ("question", "expected_name", "expected_verb", "before"),
+    ("question", "expected_name", "expected_verb", "outcome"),
     _PROBES,
     ids=[p[0][:40] for p in _PROBES],
 )
-def test_probe_reaches_its_intended_template(
-    rows, cache, question, expected_name, expected_verb, before,
+def test_probe_outcome_with_the_route(
+    rows, cache, question, expected_name, expected_verb, outcome,
 ):
-    """With the route on, each probe reaches the template written for it.
-
-    The one exception is recorded as data rather than skipped: the
-    "matched-wrong" probe is blocked upstream by a cosine hit the route is
-    designed never to override, and asserting that explicitly is what
-    keeps the limitation visible.
-    """
+    """What each probe does with the route on, by outcome class."""
     verb = infer_verb(question)
     assert verb is not None, f"{question!r} derived no verb — the route cannot fire"
 
     matches = plan_match(
         question, library=_Library(rows), cache=cache,
-        category_verb=verb, n=5,
+        category_verb=verb, n=5, available_bindings=_NX_ANSWER_BINDINGS,
     )
-    assert matches, f"{question!r} still matches nothing"
+
+    if outcome == "declines":
+        assert matches == [], (
+            "every template in this verb pool is unrunnable, so the route "
+            "must offer nothing rather than a plan whose evidence step "
+            "cannot match. If this now returns a match, check the pool's "
+            "bindings actually became satisfiable (nexus-7y4v0)."
+        )
+        return
+
+    assert matches, f"{question!r} matches nothing"
     got = _identify(rows, matches[0])
 
-    if before == "matched-wrong":
+    if outcome == "blocked-upstream":
         assert got != (expected_name, expected_verb), (
-            "this probe is pinned as a KNOWN MISS: cosine returns a wrong "
-            "plan above the floor and the route must not override it. If "
-            "this now passes, the upstream cause was fixed — update the "
-            "probe table and the design memo's known-limitation section."
+            "pinned as a KNOWN MISS: cosine returns a wrong plan above the "
+            "floor and the route must not override it. If this now passes, "
+            "the upstream cause was fixed — update this table and the "
+            "design memo's known-limitation section."
         )
         return
 
@@ -209,31 +238,33 @@ def test_probe_reaches_its_intended_template(
 
 
 @pytest.mark.parametrize(
-    ("question", "expected_name", "expected_verb", "before"),
+    ("question", "expected_name", "expected_verb", "outcome"),
     _PROBES,
     ids=[p[0][:40] for p in _PROBES],
 )
-def test_probe_baseline_without_the_route_is_what_the_memo_claims(
-    rows, cache, question, expected_name, expected_verb, before,
+def test_probe_baseline_without_the_route(
+    rows, cache, question, expected_name, expected_verb, outcome,
 ):
-    """Pin the BEFORE picture, because the design rests on it.
+    """The BEFORE picture the design rests on, pinned so it cannot drift.
 
-    Three of these matched nothing at all — four months of paying the
-    inline planner for questions the library had a template for. One
-    matched correctly already. One matched the wrong plan. A future change
+    Three of these matched nothing at all — months of paying the inline
+    planner for questions the library had a template for. A future change
     that makes the cosine path work on its own should surface here as a
     failure to investigate, not as silence.
     """
-    baseline = plan_match(question, library=_Library(rows), cache=cache)
+    baseline = plan_match(
+        question, library=_Library(rows), cache=cache,
+        available_bindings=_NX_ANSWER_BINDINGS,
+    )
 
-    if before == "matched-nothing":
+    if outcome == "blocked-upstream":
+        assert baseline
+        assert _identify(rows, baseline[0]) != (expected_name, expected_verb)
+    else:
+        # "gate-fixed" included: review-default used to win this one and
+        # run without evidence; the binding gate now drops it before the
+        # route ever looks.
         assert baseline == [], (
             f"{question!r} now matches without the route — if the cosine "
             f"path improved, the route may no longer be needed for it"
         )
-    elif before == "matched-correctly":
-        assert baseline
-        assert _identify(rows, baseline[0]) == (expected_name, expected_verb)
-    else:  # matched-wrong
-        assert baseline
-        assert _identify(rows, baseline[0]) != (expected_name, expected_verb)
