@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 __all__ = [
@@ -74,6 +75,45 @@ TYPED_BINDING_DOMAINS: dict[str, str] = {
 _TYPED_ARG_SLOTS: frozenset[str] = TYPED_FILTER_BINDINGS | frozenset({"seeds"})
 
 
+#: ``$name`` anywhere in a string. Anchoring to the start would miss an
+#: interpolated reference like ``"repo/$area"``, which reaches the typed
+#: slot just as completely as a bare one.
+_BINDING_REF_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _binding_refs(value: Any) -> set[str]:
+    """Binding names *value* feeds into whatever slot holds it.
+
+    Recurses through lists and dicts, and scans within strings rather
+    than requiring the whole value to be one reference. The first version
+    checked ``isinstance(value, str) and value.startswith("$")`` with no
+    recursion, which review found blind to two real shapes — a
+    list-valued slot (``ids: [$a, $b]``) and an interpolated one
+    (``subtree: "prefix/$area"``). Either would have let a template
+    requiring an underivable typed binding pass the offerability gate
+    silently, which is the gate failing at exactly its job.
+
+    ``$stepN.field`` is a step reference the runner resolves, not a
+    binding, so a name followed by a dot is skipped.
+    """
+    if isinstance(value, str):
+        return {
+            m.group(1) for m in _BINDING_REF_RE.finditer(value)
+            if not value[m.end():m.end() + 1] == "."
+        }
+    if isinstance(value, list):
+        out: set[str] = set()
+        for item in value:
+            out |= _binding_refs(item)
+        return out
+    if isinstance(value, dict):
+        out = set()
+        for item in value.values():
+            out |= _binding_refs(item)
+        return out
+    return set()
+
+
 def typed_by_usage(plan_json: str | dict[str, Any] | None) -> frozenset[str]:
     """Bindings a plan feeds into a TYPED argument slot, whatever their name.
 
@@ -91,8 +131,10 @@ def typed_by_usage(plan_json: str | dict[str, Any] | None) -> frozenset[str]:
     ``content_type`` on plan 14 (zero results, 2026-07-25); the only new
     thing here is that a free-text-looking name hid it from the gate.
 
-    Only bare ``$name`` references count. ``$stepN.field`` is a step
-    reference, not a binding, and is resolved by the runner.
+    Reference extraction is delegated to :func:`_binding_refs`, which
+    recurses through lists and dicts and scans within strings.
+    ``$stepN.field`` is a step reference the runner resolves, not a
+    binding, and is skipped.
     """
     if not plan_json:
         return frozenset()
@@ -111,14 +153,8 @@ def typed_by_usage(plan_json: str | dict[str, Any] | None) -> frozenset[str]:
         if not isinstance(step, dict):
             continue
         for slot, value in (step.get("args") or {}).items():
-            if slot not in _TYPED_ARG_SLOTS:
-                continue
-            if not isinstance(value, str) or not value.startswith("$"):
-                continue
-            ref = value[1:]
-            if "." in ref:
-                continue  # $stepN.field — a step reference, not a binding
-            found.add(ref)
+            if slot in _TYPED_ARG_SLOTS:
+                found.update(_binding_refs(value))
     return frozenset(found)
 
 

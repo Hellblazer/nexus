@@ -71,9 +71,8 @@ mechanize, it matters enough to ship.
   the findings-append step.
 - `conexus/skills/rdr-accept/SKILL.md`: nexus-3fab5 register line in the
   strategic-planner dispatch brief.
-- `conexus/plans/builtin/{plan-author-default,plan-inspect-default,plan-inspect-dimensions,plan-promote-propose}.yml`,
-  `conexus/skills/plan-{author,inspect,promote}/`, `conexus/registry.yaml`,
-  `conexus/README.md`, `conexus/plans/dimensions.yml`: nexus-77cct RETIRED
+- `conexus/skills/plan-author/SKILL.md`, `conexus/skills/plan-inspect/SKILL.md`, `conexus/skills/plan-promote/SKILL.md`, `conexus/plans/builtin/plan-author-default.yml`, `conexus/plans/builtin/plan-inspect-default.yml`, `conexus/plans/builtin/plan-inspect-dimensions.yml`, `conexus/plans/builtin/plan-promote-propose.yml`, `conexus/registry.yaml`, `conexus/README.md`, `conexus/plans/dimensions.yml`:
+  nexus-77cct RETIRED
   the three plan-meta skills and their four templates. They dispatched a
   `plan_match` MCP tool that has never existed (the server registers
   plan_save / plan_search / plan_delete only), so nothing ever invoked

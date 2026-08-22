@@ -1008,7 +1008,7 @@ See `src/nexus/db/t2/__init__.py` for the facade source and
 
 ### Builtin plan templates
 
-The plan-centric retrieval stack ships fifteen builtin templates under `conexus/plans/builtin/`. The seed loader (`nexus.plans.seed_loader.load_seed_directory`) upserts them into `PlanLibrary` on first run; idempotent thereafter. Each template pins a `verb` dimension (and usually `scope: global`); the matcher uses verb to filter candidates before cosine ranking.
+The plan-centric retrieval stack ships twelve builtin templates under `conexus/plans/builtin/`. The seed loader (`nexus.plans.seed_loader.load_seed_directory`) upserts them into `PlanLibrary` on first run; idempotent thereafter. Each template pins a `verb` dimension (and usually `scope: global`); the matcher uses verb to filter candidates before cosine ranking.
 
 Grouped by verb:
 
@@ -1029,13 +1029,10 @@ Grouped by verb:
   - `review-default`: Change-set critique. Resolves changed files to catalog entries, walks decision-evolution history (RDRs superseded or cited), hydrates the RDR context.
 - **verb=debug**
   - `debug-default`: Dev work from a concrete failure. Catalog per-file lookup as the primary link walk; multi-hop graph traversal is delegated to Serena.
-- **verb=plan-author**
-  - `plan-author-default`: Authoring a new plan template. Fetches the authoring guide and dimension registry, surveys prior art for the target verb, drafts a candidate `plan_json`.
-- **verb=plan-inspect**
-  - `plan-inspect-default`: Single-plan runtime metrics and match history (`use_count`, `match_count`, `match_conf_sum`, success/failure counts).
-  - `plan-inspect-dimensions`: Enumerate registered dimensions and count plans per axis. Surfaces the dimension registry to authoring agents.
-- **verb=plan-promote**
-  - `plan-promote-propose`: Rank promotion candidates from runtime metrics against the configured thresholds.
+
+The plan-author / plan-inspect / plan-promote templates and their skills were RETIRED at nexus-77cct. They dispatched a `plan_match` MCP tool that has never existed (the server registers `plan_save`, `plan_search` and `plan_delete` only), so nothing ever invoked them successfully — and they were not inert, since their descriptions absorbed any question containing the word "plan" and outranked the plan a caller actually wanted. What they described is `nx plan list` / `nx plan show` / `nx plan hygiene`, which work. `traverse-then-generate` was retired in the same change: it required caller-supplied catalog tumblers, which no question carries.
+
+Every shipped template must be *offerable* — reachable by some question. A template requiring a typed binding that is neither defaulted nor derivable from a question (`nexus.plans.binding_infer`) fails CI in `tests/test_builtin_plans.py`.
 
 ## Design Decisions
 

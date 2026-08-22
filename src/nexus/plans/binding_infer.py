@@ -44,20 +44,45 @@ _CONTENT_TYPE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("knowledge", re.compile(r"\bknowledge\s+(notes?|entry|entries|base)\b")),
 )
 
-#: "by Grossberg", "authored by Van Renesse", "written by K. Birman".
-#: Capitalisation is required and is what separates an author from "by
-#: default" or "by the way"; the question is matched in its ORIGINAL case
-#: for exactly that reason.
+#: Authorship phrasing. Two positive forms only:
+#:
+#:   * an explicit authorship verb — "authored by X", "written by X";
+#:   * a bibliographic noun immediately before the "by" — "papers by X",
+#:     "work by X", "the RDR by X".
+#:
+#: Bare "by X" is NOT enough, and the first version of this rule learned
+#: that the expensive way. It accepted any Capitalised word after "by",
+#: defended by a blocklist of prose words — which is unbounded by
+#: construction, so review found four false positives immediately:
+#: "results sorted by Relevance", "search by Author", "papers grouped by
+#: Category", "RDRs blocked by Dependency". Every one would have put a
+#: nonsense name into an author filter and returned an empty answer that
+#: reads like a real one. A blocklist can only exclude the prose someone
+#: thought of; an allowlist of authorship CONTEXTS excludes everything
+#: nobody vouched for, which is the right default when being wrong is
+#: worse than being silent.
+_BIBLIOGRAPHIC_NOUNS = (
+    r"papers?|articles?|publications?|books?|works?|writings?|notes?"
+    r"|documents?|docs?|rdrs?|preprints?|theses|thesis"
+)
 _AUTHOR_RE = re.compile(
-    r"\b(?:authored\s+by|written\s+by|by)\s+"
+    r"\b(?:"
+    r"(?:authored|written|published|co-authored)\s+by"
+    # Case-insensitive on the NOUN only ("the RDR by X" is the same
+    # question as "the rdr by X"), while the NAME stays case-sensitive.
+    # No filler word is allowed between noun and "by": "papers cited by
+    # Lamport" is a citation relation, not authorship, and "papers
+    # written by X" is already covered by the verb branch above.
+    rf"|(?i:{_BIBLIOGRAPHIC_NOUNS})\s+by"
+    r")\s+"
     r"([A-Z][A-Za-z.'\-]*(?:\s+[A-Z][A-Za-z.'\-]*){0,2})"
 )
 
-#: Words that follow "by" in ordinary prose and are not people.
+#: Capitalised words that follow an authorship context but are not names.
+#: A short backstop, NOT the primary defence — the allowlist above is.
 _AUTHOR_STOPWORDS: frozenset[str] = frozenset({
     "The", "This", "That", "A", "An", "It", "Its", "I", "We", "You",
-    "Default", "Design", "Contrast", "Comparison", "Hand", "Now", "Then",
-    "Way", "Far", "Definition", "Convention", "Construction",
+    "Anyone", "Someone", "Whom", "Who", "Hand", "Default",
 })
 
 
@@ -75,8 +100,9 @@ def _infer_content_type(text: str) -> str | None:
 def _infer_author(question: str) -> str | None:
     """The author the question names, or ``None``.
 
-    Matched against the ORIGINAL casing — capitalisation is the whole
-    signal separating "by Grossberg" from "by default".
+    Matched against the ORIGINAL casing: capitalisation is necessary
+    (a lowercase word after "by" is never a name) but, as
+    :data:`_AUTHOR_RE` records, nowhere near sufficient on its own.
     """
     match = _AUTHOR_RE.search(question)
     if match is None:

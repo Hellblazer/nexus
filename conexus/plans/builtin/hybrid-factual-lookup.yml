@@ -40,11 +40,12 @@
 # downstream filter. Tracked as a systemic fix in nexus-h3e2;
 # hard-coded here until that lands.
 #
-# (Its companion traverse-then-generate.yml was RETIRED at nexus-77cct:
-# it required caller-supplied seed tumblers, which no live caller can
-# produce, so this plan now serves that shape too.)
-# (``verb: lookup``) and disambiguates on ``strategy``. Use
-# tumblers; use this plan when the caller has a question.
+# Its companion traverse-then-generate.yml was RETIRED at nexus-77cct.
+# That plan shared this matcher space (``verb: lookup``, disambiguating
+# on ``strategy``) and skipped vector recall when the caller already held
+# seed tumblers — but no live caller can produce tumblers, so it was
+# unreachable by construction. This plan, which finds the seeds from the
+# question itself, now serves that shape too.
 
 name: hybrid-factual-lookup
 description: >-

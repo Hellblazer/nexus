@@ -446,8 +446,11 @@ def load_seed_directory(
     # Per-run, per-project query index; built lazily on the first write.
     query_index: dict[str, _QueryIndex] = {}
     if reconcile:
-        # Retired templates are a GLOBAL-tier statement, so this runs once
-        # per reconcile regardless of which tier directory is being loaded.
+        # Retired templates are a GLOBAL-tier statement, so this runs on
+        # EVERY reconcile call — once per tier directory, not once per
+        # `nx plan reseed`. Idempotent by construction (a reaped row is
+        # gone, and a second pass finds nothing), so the repetition costs
+        # a lookup per retired dimension and nothing else.
         _reap_retired(library, result)
     if not directory.exists():
         _log.info("seed_directory_missing", path=str(directory))

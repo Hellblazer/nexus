@@ -77,10 +77,11 @@ def _nx_answer_bindings(question: str) -> frozenset[str]:
 #: No probe is in a "declines" class any more. debug-default used to be
 #: there — sole member of its verb pool and unrunnable, so debug traffic
 #: got nothing — until nexus-7y4v0 took the `subtree:` scoping off it.
-#: Three templates are still correctly unofferable to a bare question
-#: (find-by-author needs an author, type-scoped-search a content_type,
-#: traverse-then-generate seed tumblers), and that is right: each needs a
-#: typed value no question carries.
+#: There are no unofferable templates left. find-by-author and
+#: type-scoped-search became reachable once nx_answer learned to derive
+#: content_type and author from the question; traverse-then-generate,
+#: which needed catalog tumblers no question can carry, was retired.
+#: tests/test_builtin_plans.py gates the invariant.
 _PROBES = [
     ("Review the changes on this branch for correctness",
      "default", "review", "matched-correctly"),

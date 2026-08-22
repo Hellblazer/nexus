@@ -58,16 +58,39 @@ class TestAuthor:
         assert infer_typed_bindings(question)["author"] == expected
 
     @pytest.mark.parametrize("question", [
-        # "by" in ordinary prose. Capitalisation is the whole signal, and
-        # these are the cases that would slip past a naive one.
+        # Lowercase "by" phrases.
         "Sort the results by default",
         "Explain it by contrast with the old design",
         "Fix it by hand",
         "How is the catalog searched by the matcher?",
         "What happens by the way?",
+        # CAPITALISED nouns after "by" — the class that broke the first
+        # version of this rule. It accepted any capitalised word after
+        # "by", defended by a blocklist of prose words, and review found
+        # all four of these immediately. A blocklist can only exclude the
+        # prose someone thought of, so the rule now requires a positive
+        # authorship context instead.
+        "results sorted by Relevance",
+        "search by Author",
+        "which papers are grouped by Category",
+        "list RDRs blocked by Dependency",
+        "entries ordered by Score",
+        "rows filtered by Type",
+        # Authorship-adjacent but NOT authorship: a citation relation.
+        "Which papers cited by Lamport matter?",
     ])
     def test_prose_by_is_not_an_author(self, question):
         assert "author" not in infer_typed_bindings(question), question
+
+    @pytest.mark.parametrize(("question", "expected"), [
+        # A bibliographic noun immediately before "by" is the positive
+        # signal that makes bare "by" safe.
+        ("papers by Grossberg", "Grossberg"),
+        ("the RDR by Hildebrand", "Hildebrand"),
+        ("documents by Van Renesse", "Van Renesse"),
+    ])
+    def test_bibliographic_noun_before_by_is_authorship(self, question, expected):
+        assert infer_typed_bindings(question)["author"] == expected
 
 
 class TestWiredIntoNxAnswer:
