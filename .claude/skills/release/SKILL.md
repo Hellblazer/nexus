@@ -78,6 +78,46 @@ uv run python scripts/check_remediation_commits_ride_release.py --write-snapshot
 
 Stage `.release-gates/remediation-snapshot.json` into Step 7's release-branch commit (alongside the seven version-bump manifests). `release.yml` reruns the gate against that exact committed file at tag-publish time via `--verify-snapshot`, which fails the release closed if the file is missing (the pre-tag step didn't run), present but not committed on the tagged ref, or stale (its newest bead `updated_at` predates the commit immediately preceding this release). A stale/missing snapshot from a prior release does NOT carry forward — write a fresh one every release.
 
+### 0c. PREFLIGHT — run the cheap blockers FIRST, all of them (32s)
+
+```bash
+./tests/e2e/release-preflight.sh
+```
+
+Run this BEFORE step 1 and before any expensive leg. It evaluates every
+seconds-scale, deterministic, release-BLOCKING check in one pass and does NOT
+abort on the first red -- it reports every failure it finds, so one cycle
+surfaces the whole fix list.
+
+WHY (the 7.15.0 cut, 2026-08-22). The battery was ordered expensive-first and
+abort-on-first-red. Two blockers that day were each sub-second assertions:
+`REQUIRED_CHECK_CONTEXTS` drift against main's live branch protection (found
+13.5 minutes into `local-service-gate.sh`, at the very end of its run) and the
+`--package-upgrade` `PREV_ENGINE_TAG` staleness guard (a guard clause in the
+first seconds of `run.sh`, but only reached after ~20 minutes of smoke +
+shakeout + LSG + fresh-install-mvv). Each was a one-line fix behind an hour of
+waiting, and each masked the other. Sequential abort-on-red turns N cheap
+blockers into N hours.
+
+Exit codes: `0` PREFLIGHT PASSED, `1` PREFLIGHT FAILED (fix everything listed,
+then re-run -- it is 32 seconds, so re-running costs nothing), `2` PREFLIGHT
+UNVERIFIED (a dependency such as Docker was absent; "could not check" is never
+"fine").
+
+Covered: engine-release-floor, wire-contract ledger (`--ledger-only`, which is
+MERGE-BLOCKING on every PR to main, not just at tag time), remediation-commits,
+the remediation-snapshot replay against the base a merge commit really has
+(`--release-base-ref origin/main`, NOT the local `HEAD^`), the seven version
+surfaces + both `source.ref` fields + the emptied ledger, the ci-evidence
+required-context drift tests run with `-m ""` so the integration-marked live
+check actually executes, the `--package-upgrade` staleness predicate evaluated
+without provisioning anything, and Docker availability.
+
+Do not let this file grow into a second battery. Admission requires all three:
+seconds-scale, deterministic (no Docker/service/sandbox/network install), and
+genuinely release-blocking. Its whole value is that it finishes before you look
+away.
+
 ### 1. Run unit + integration suite
 
 ```bash
