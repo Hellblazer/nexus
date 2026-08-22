@@ -1151,6 +1151,47 @@ expectations_last_terminal() {
 # then degrades fail-OPEN for that dispatch (never blocks, never breaks).
 # Accepted: 7 days is generous vs teammate lifespans; flagged for the .16
 # retro audit rather than complicated here.
+# _expectations_archive_dir — durable home for archived ledgers, sibling of
+# the live directory. nexus-4bqre.1: the census joins agent ids to START
+# rows for agent-type attribution, and expectations_sweep deletes ledgers
+# older than 7 days, so an un-archived ledger takes its lifecycle rows with
+# it. (Agent TYPE itself is recoverable without this — agent-<id>.meta.json
+# carries agentType at 99 pct coverage and is never swept — so the archive
+# is belt-and-braces for the census and the sole source only for EXPECT and
+# CONSUMED lifecycle rows, which meta.json does not carry.)
+_expectations_archive_dir() {
+    local dir="${XDG_STATE_HOME:-$HOME/.local/state}/nexus/orchestration-archive"
+    mkdir -p "$dir" 2>/dev/null
+    chmod 700 "$dir" 2>/dev/null
+    printf '%s\n' "$dir"
+}
+
+# expectations_archive — copy live ledgers into the archive before the sweep
+# can reap them. Idempotent and append-only: a file is copied when it is
+# absent from the archive or when the live copy is NEWER (ledgers grow by
+# append, so a same-session re-run must refresh rather than skip). Archived
+# files are never deleted or truncated here, so a ledger that has already
+# been swept upstream stays put. Never fails the caller — this runs on a
+# hook path and an archive failure must not break a subagent stop.
+#
+# MUST be called BEFORE expectations_sweep in any entry point that sweeps;
+# calling it after would archive whatever survived the reap, which is the
+# one thing the archive exists to prevent.
+expectations_archive() {
+    local src dst f base
+    src="$(_expectations_dir)"
+    dst="$(_expectations_archive_dir)"
+    [[ -d "$src" && -d "$dst" ]] || return 0
+    for f in "$src"/*.expectations; do
+        [[ -f "$f" ]] || continue
+        base="${f##*/}"
+        if [[ ! -e "$dst/$base" || "$f" -nt "$dst/$base" ]]; then
+            cp -p "$f" "$dst/$base" 2>/dev/null || true
+        fi
+    done
+    return 0
+}
+
 expectations_sweep() {
     local dir
     dir="$(_expectations_dir)"

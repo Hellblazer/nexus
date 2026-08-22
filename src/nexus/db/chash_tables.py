@@ -3,12 +3,13 @@
 """The canonical set of chash-bearing tables (single source of truth).
 
 Both the pre-upgrade poison probe (``nexus.health._check_migration_state``)
-and the RDR-182 ``chash-poison`` forensics topic
-(``nexus.remediation.playbook``) count non-32-char chash rows across these
-tables. Keeping ONE list here means the operator's ``nx doctor`` warning, the
-``install-binary`` gate, and the agent-facing forensics diagnostic can never
-drift to checking different tables (which would let a poisoned table slip past
-one surface but not another).
+and the ``install-binary`` gate's guidance
+(``nexus.upgrade_finish._ChashPoisonGuidance`` — the RDR-182 forensics
+topic that used to share this table set was deleted at nexus-lgdel) count
+non-32-char chash rows across these tables. Keeping ONE list here means the
+operator's ``nx doctor`` warning and the ``install-binary`` gate can never
+drift to checking different tables (which would let a poisoned table slip
+past one surface but not another).
 
 RDR-191 (nexus-o8dil.19): ``chunks_384`` / ``chunks_768`` / ``chunks_1024``
 unify into ONE physical relation, :data:`CHUNKS_TABLE` (three mutually

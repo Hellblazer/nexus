@@ -1096,6 +1096,201 @@ def test_memory_search_pagination_offset_beyond_end(t2_path):
     assert "No results at offset 100" in memory_search(query="offsets", limit=10, offset=100)
 
 
+# ── Result size cap (nexus-2xjge) ───────────────────────────────────────────
+#
+# None of these tools clamp a caller-supplied ``limit`` (nor, for
+# store_list(docs=True)/memory_search/plan_search, is the underlying fetch
+# paginated at all before Python does its own slicing) -- see
+# nexus.mcp.core._TEXT_RESULT_CAP_CHARS's docstring for the full audit.
+# Each pair below monkeypatches the cap down to a small value so a handful
+# of real fixture entries is enough to exceed it, then asserts (a) the
+# trailing marker fires with the expected tool name and (b) an ordinary,
+# far-under-cap result is untouched -- byte-identical to every other
+# assertion in this file that already exercises these tools' normal path.
+
+def test_search_caps_oversized_result(monkeypatch):
+    from nexus.mcp import core as mcp_core
+
+    monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
+    _mock_t3([{"name": "code__test", "count": 20}])
+    results = [
+        SearchResult(id=f"r{i}", content=f"padding content number {i} " * 10,
+                     distance=0.1, collection="code__test", metadata={})
+        for i in range(20)
+    ]
+    with patch("nexus.search_engine.search_cross_corpus", lambda *a, **kw: results), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = search(query="padding", corpus="code__test", limit=20)
+    assert "[search: result capped at 100 chars" in out
+    assert out.endswith("narrow the query, lower limit, or page with offset=...]")
+
+
+def test_search_under_cap_is_unaffected():
+    _mock_t3([{"name": "code__test", "count": 1}])
+    with patch("nexus.search_engine.search_cross_corpus",
+               lambda *a, **kw: [SearchResult(id="r1", content="small", distance=0.1,
+                                              collection="code__test", metadata={})]), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = search(query="small", corpus="code__test")
+    assert "result capped" not in out
+
+
+def test_scoped_search_tools_cap_oversized_results(monkeypatch):
+    """Critique [23267] Significant 1: search_metadata_scoped,
+    search_topic_scoped and search_graph_hop share the unbounded
+    limit+content shape of search()/query() and were missed by the
+    first cap sweep. One test per tool, same monkeypatched-cap idiom."""
+    from nexus.mcp import core as mcp_core
+
+    monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
+    _mock_t3([{"name": "knowledge__k", "count": 20}])
+    rows = [
+        {"id": f"1.1.{i}", "collection": "knowledge__k", "distance": 0.1,
+         "content": f"padding content number {i} " * 10, "chash": ""}
+        for i in range(20)
+    ]
+    with patch("nexus.db.http_vector_client.is_service_backed", return_value=True), \
+         patch.object(mcp_core, "_grouped_combined_query", return_value=list(rows)):
+        out = mcp_core.search_metadata_scoped(query="padding", corpus="knowledge__k")
+        assert "[search_metadata_scoped: result capped at 100 chars" in out
+        out = mcp_core.search_graph_hop(query="padding", seeds=["1.1"],
+                                        corpus="knowledge__k")
+        assert "[search_graph_hop: result capped at 100 chars" in out
+
+
+def test_query_caps_oversized_result(monkeypatch):
+    from nexus.mcp import core as mcp_core
+
+    monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
+    _mock_t3([{"name": "code__test", "count": 20}])
+    results = [
+        SearchResult(id=f"r{i}", content=f"padding content number {i} " * 10,
+                     distance=0.1, collection="code__test",
+                     metadata={"title": f"doc{i}"})
+        for i in range(20)
+    ]
+    with patch("nexus.search_engine.search_cross_corpus", lambda *a, **kw: results), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="padding", corpus="code__test", limit=20)
+    assert "[query: result capped at 100 chars" in out
+    assert out.endswith("narrow the query, lower limit, or page with offset=...]")
+
+
+def test_query_under_cap_is_unaffected():
+    _mock_t3([{"name": "code__test", "count": 1}])
+    with patch("nexus.search_engine.search_cross_corpus",
+               lambda *a, **kw: [SearchResult(id="r1", content="small", distance=0.1,
+                                              collection="code__test",
+                                              metadata={"title": "solo"})]), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = query(question="small", corpus="code__test")
+    assert "result capped" not in out
+
+
+def test_store_list_caps_oversized_result(t3, monkeypatch):
+    from nexus.mcp import core as mcp_core
+
+    monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
+    for i in range(10):
+        store_put(content=f"entry {i}", collection="knowledge__capstore", title=f"cap-test-{i}")
+    out = store_list(collection="knowledge__capstore", limit=10)
+    assert "[store_list: result capped at 100 chars" in out
+    assert out.endswith("narrow the query, lower limit, or page with offset=...]")
+
+
+def test_store_list_under_cap_is_unaffected(t3):
+    store_put(content="solo entry", collection="knowledge__nocapstore", title="one")
+    out = store_list(collection="knowledge__nocapstore", limit=10)
+    assert "result capped" not in out
+
+
+def test_store_list_docs_caps_oversized_result(t3, monkeypatch):
+    # docs=True EXPLICITLY ignores limit/offset and scans the full
+    # collection (nexus-2xjge audit's clearest unbounded case).
+    from nexus.mcp import core as mcp_core
+
+    monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
+    for i in range(10):
+        store_put(content=f"docs-entry {i}", collection="knowledge__capdocs", title=f"cap-doc-{i}")
+    out = store_list(collection="knowledge__capdocs", docs=True)
+    assert "[store_list: result capped at 100 chars" in out
+
+
+def test_memory_search_caps_oversized_result(t2_path, monkeypatch):
+    from nexus.mcp import core as mcp_core
+
+    monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
+    for i in range(10):
+        memory_put(content=f"finding about capping topic {i}", project="capproj", title=f"cap{i}.md")
+    out = memory_search(query="capping", limit=10)
+    assert "[memory_search: result capped at 100 chars" in out
+    assert out.endswith("narrow the query, lower limit, or page with offset=...]")
+
+
+def test_memory_search_under_cap_is_unaffected(t2_path):
+    memory_put(content="a small finding", project="nocapproj", title="one.md")
+    out = memory_search(query="small", limit=10)
+    assert "result capped" not in out
+
+
+def test_plan_search_caps_oversized_result(t2_path, monkeypatch):
+    from nexus.mcp import core as mcp_core
+
+    monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
+    for i in range(10):
+        plan_save(
+            query=f"capping plan query {i}",
+            plan_json='{"steps": [{"tool": "search", "args": {"query": "$input"}}]}',
+            verb="analyze", project="capplanproj", tags="cap",
+        )
+    out = plan_search(query="capping plan", project="capplanproj", limit=10)
+    assert "[plan_search: result capped at 100 chars" in out
+    assert out.endswith("narrow the query, lower limit, or page with offset=...]")
+
+
+def test_plan_search_under_cap_is_unaffected(t2_path):
+    plan_save(
+        query="a small plan", plan_json='{"steps": []}',
+        verb="analyze", project="nocapplanproj",
+    )
+    out = plan_search(query="small plan", project="nocapplanproj")
+    assert "result capped" not in out
+
+
+def test_scratch_search_caps_oversized_result(t1, monkeypatch):
+    from nexus.mcp import core as mcp_core
+
+    monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
+    for i in range(10):
+        scratch(action="put", content=f"capping scratch note number {i}")
+    out = scratch(action="search", query="capping scratch", limit=10)
+    assert "[scratch: result capped at 100 chars" in out
+    assert out.endswith("narrow the query, lower limit, or page with offset=...]")
+
+
+def test_scratch_search_under_cap_is_unaffected(t1):
+    scratch(action="put", content="a small note")
+    out = scratch(action="search", query="small")
+    assert "result capped" not in out
+
+
+def test_scratch_list_caps_oversized_result(t1, monkeypatch):
+    from nexus.mcp import core as mcp_core
+
+    monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
+    for i in range(10):
+        scratch(action="put", content=f"listed capping item number {i}")
+    out = scratch(action="list", limit=10)
+    assert "[scratch: result capped at 100 chars" in out
+    assert out.endswith("narrow the query, lower limit, or page with offset=...]")
+
+
+def test_scratch_list_under_cap_is_unaffected(t1):
+    scratch(action="put", content="a small listed item")
+    out = scratch(action="list")
+    assert "result capped" not in out
+
+
 # ── Plans ────────────────────────────────────────────────────────────────────
 
 def test_plan_save_and_search(t2_path):

@@ -2,16 +2,17 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-38 registered tools + 3 demoted (plain functions, no @mcp.tool()); two of the
-38 are the RDR-182 consent-gated ``forensics``/``remediate`` pair
-(nexus-ykzbj.10/.11, which replaced the throwaway A4 spike).
+36 registered tools + 3 demoted (plain functions, no @mcp.tool()). The
+RDR-182 consent-gated ``forensics``/``remediate`` pair (nexus-ykzbj.10/.11)
+was deleted at nexus-lgdel — the chash-rekey upgrade rung it steered
+operators toward no longer exists.
 """
 from __future__ import annotations
 
 import json
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import structlog
@@ -120,6 +121,55 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
             "running with `nx doctor` (and `nx daemon service status`)."
         )
     return f"Error: {text}"
+
+
+#: Generous backstop for an assembled MCP text result (nexus-2xjge audit).
+#: Claude Code 2.1.91's harness-side ``_meta.maxResultSizeChars`` truncates
+#: SILENTLY (no marker, house doctrine forbids that — see the bead), so this
+#: module caps explicitly instead, with a visible trailing marker.
+#:
+#: Basis: none of this module's paginated text tools clamp the caller-
+#: supplied ``limit`` (or, for ``store_list(docs=True)``/``memory_search``/
+#: ``plan_search``, some fetch the FULL matching set before any pagination
+#: at all) — and the audit found the backing pgvector engine does not
+#: either: ``PgVectorRepository#searchWithTokens``'s own javadoc states "No
+#: upper bound is applied to nResults by design: the result-size caps the
+#: Chroma path enforces ... fall away with pgvector." So ``MAX_QUERY_
+#: RESULTS`` (300) — the value CLAUDE.md and this module's own comments
+#: elsewhere document as the paging ceiling — is a ChromaDB-era quota that
+#: no longer reaches the live query path; a caller-supplied ``limit`` can
+#: scale a response arbitrarily. Value: a 300-row conceptual page x ~500
+#: chars/row (the largest observed per-row shape, ``query()``'s bib-
+#: enriched document block) ~= 150_000 chars; rounded up with real headroom
+#: to 250_000 so no realistic paged response is ever touched.
+_TEXT_RESULT_CAP_CHARS = 250_000
+
+
+def _cap_text_result(text: str, tool: str, cap: "int | None" = None) -> str:
+    """Truncate an assembled MCP text result WITH a visible trailing marker.
+
+    House doctrine forbids silent truncation (nexus-2xjge): never returns
+    something that merely LOOKS complete. The marker is unconditionally the
+    last thing in the returned string — never prepended — so it can never
+    be mistaken for part of the result and never collides with a leading-
+    marker contract elsewhere (e.g. ``nx_answer``'s budget-exhaustion
+    prefix, which callers key on via ``str.startswith``).
+
+    ``cap`` defaults to ``None`` and is resolved against the *module*
+    global ``_TEXT_RESULT_CAP_CHARS`` INSIDE the function body (not as a
+    bound default parameter) so a test can ``monkeypatch.setattr(core,
+    "_TEXT_RESULT_CAP_CHARS", N)`` and have it take effect immediately.
+    """
+    if cap is None:
+        cap = _TEXT_RESULT_CAP_CHARS
+    if len(text) <= cap:
+        return text
+    dropped = len(text) - cap
+    return (
+        f"{text[:cap]}"
+        f"\n\n[{tool}: result capped at {cap} chars; {dropped} chars "
+        f"dropped — narrow the query, lower limit, or page with offset=...]"
+    )
 
 
 #: Process-local HookRegistry constructed at MCP-server startup.
@@ -1624,25 +1674,6 @@ def _no_results_message(diagnostics: list, *, base: str = "No results.") -> str:
 # Note: catalog server also registers a "search" tool. No collision — Claude Code
 # disambiguates by server prefix (mcp__plugin_conexus_nexus__search vs
 # mcp__plugin_conexus_nexus-catalog__search).
-def _is_missing_route_error(exc: BaseException) -> bool:
-    """True when *exc* says the ENGINE lacks the route, not that the write failed.
-
-    nexus-huaef. Distinguishes a version-skew engine (404 / 405 on a route that
-    a newer build serves) from a genuine audit-store failure, so the operator
-    is told to upgrade rather than to go fix a healthy store.
-
-    Deliberately narrow: only 404/405 count. A 500 from the consents route is a
-    real write failure and must keep the generic message. Both paths REFUSE —
-    this only chooses which explanation the operator is given, so a
-    misclassification here can never release the playbook unaudited.
-    """
-    import httpx  # noqa: PLC0415 — deferred, startup cost
-
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code in (404, 405)
-    return False
-
-
 @mcp.tool(
     title="Semantic Search",
     annotations={"readOnlyHint": True},
@@ -1899,7 +1930,7 @@ def search(
         else:
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
 
-        return "\n\n".join(lines)
+        return _cap_text_result("\n\n".join(lines), "search")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("search", e)
 
@@ -2252,11 +2283,11 @@ def search_metadata_scoped(
             }
         if not rows:
             return "No documents found."
-        return "\n\n".join(
+        return _cap_text_result("\n\n".join(
             f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
             f"\n{r.get('content', '')}"
             for r in rows
-        )
+        ), "search_metadata_scoped")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("search_metadata_scoped", e)
 
@@ -2322,11 +2353,11 @@ def search_topic_scoped(
             }
         if not merged:
             return f"No chunks found for topic {topic!r}."
-        return "\n\n".join(
+        return _cap_text_result("\n\n".join(
             f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
             f"\n{r.get('content', '')}"
             for r in merged
-        )
+        ), "search_topic_scoped")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("search_topic_scoped", e)
 
@@ -2454,11 +2485,11 @@ def search_graph_hop(
             }
         if not rows:
             return "No documents found."
-        return "\n\n".join(
+        return _cap_text_result("\n\n".join(
             f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
             f"\n{r.get('content', '')}"
             for r in rows
-        )
+        ), "search_graph_hop")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("search_graph_hop", e)
 
@@ -2886,7 +2917,7 @@ def query(
                     f"\n--- showing 1-{len(rows)} of {len(deduped_svc)} documents. "
                     f"Results are capped at limit={limit}."
                 )
-            return "\n".join(lines_svc)
+            return _cap_text_result("\n".join(lines_svc), "query")
 
         # routing_note stays "" — RDR-156 P4.2c (nexus-2bqpn) deleted the
         # only branch that ever set it (the catalog_collections-driven
@@ -3148,7 +3179,7 @@ def query(
         if total > limit:
             lines.append(f"\n--- showing 1-{len(sorted_docs)} of {total} documents. Results are capped at limit={limit}.")
 
-        return "\n".join(lines)
+        return _cap_text_result("\n".join(lines), "query")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("query", e)
 
@@ -3531,6 +3562,127 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
         return _mcp_tool_error("store_get", e)
 
 
+def _unique_preserve_order(ids: Iterable[str]) -> list[str]:
+    """Dedupe an id sequence while keeping first-seen order.
+
+    ``store_get_many``'s batched fan-out fix groups ids per candidate
+    collection before issuing one batched fetch; a caller-supplied id
+    list may repeat the same id at multiple positions (e.g. duplicate
+    references in a single hydration request), and fetching it twice in
+    the same batch would be wasted round-trip payload for no semantic
+    gain — the result is looked up back out of a dict, so duplicates
+    resolve identically either way.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for doc_id in ids:
+        if doc_id not in seen:
+            seen.add(doc_id)
+            out.append(doc_id)
+    return out
+
+
+def _batched_get_by_ids(t3: Any, col_name: str, ids: list[str]) -> dict[str, dict]:
+    """Batch-fetch ``ids`` from ``col_name`` in one (paged) round trip.
+
+    Delegates to ``_ServiceCollectionStub.get(ids=...)``, which already
+    pages internally at ``QUOTAS.MAX_RECORDS_PER_WRITE`` (300 — smaller
+    than the ``/v1/vectors/store-get`` route's own ``MAX_BATCH_IDS=1000``
+    ceiling, nexus-hdx2u) and fails loud on an engine-reported truncation.
+    Reshapes the Chroma-style ``{ids, documents, metadatas}`` response into
+    the same flat ``{id, content, **meta}`` shape ``HttpVectorClient.get_by_id``
+    returns, keyed by id, so callers can do the same ``entry.get("content")``
+    lookups as the single-id path.
+
+    BLAST RADIUS (code review T2 nexus/store-get-many-code-review-2026-08-21
+    [23303] Item 1): this is NOT equivalent in failure profile to the prior
+    per-id loop's ``except Exception: entry = None``, even though the
+    OUTCOME SHAPE (a caught exception degrades to "not found", never raises)
+    matches. Pre-fix, a transient failure cost exactly one id. Here, a
+    single failed request can blank up to ``QUOTAS.MAX_RECORDS_PER_WRITE``
+    (300) ids as missing in one shot — ``_post`` has no retry, and
+    ``_ServiceCollectionStub.get``'s per-page loop discards already-fetched
+    pages when a later page in the same call raises. Two mitigations:
+      1. The failure is logged LOUD (below) naming the collection and the
+         id count, so "these documents don't exist" and "the batch call to
+         fetch them failed" are distinguishable in the log — the pre-fix
+         silent-degrade-to-None-per-id was already indistinguishable in
+         THIS respect (a single missing id looked the same either way), but
+         silently blanking up to 300 at once without any signal is exactly
+         the silent-fallback-for-a-correctness-problem shape this repo bans.
+      2. A batch failure falls back to a per-id retry
+         (:func:`_fallback_get_by_ids_individually`, reusing
+         ``HttpVectorClient.get_by_id`` directly) rather than giving up on
+         the whole batch — this restores the OLD blast radius (a genuinely
+         transient blip now costs one id again, since the retry is a fresh
+         request per id) for exactly the failure path; the happy path stays
+         batched.
+
+    Uses ``get_or_create_collection`` rather than ``get_collection`` on
+    purpose: the latter does its own existence pre-check via a full
+    ``list_collections()`` round trip before returning the stub, which
+    would tax exactly the fan-out this fix removes (one extra call per
+    candidate collection per hydration request). ``get_by_id``, the path
+    this replaces on the happy path, never pre-checked existence either —
+    it POSTed directly and let a missing/unreachable collection surface as
+    a caught exception, which is the behaviour preserved here (now via the
+    per-id fallback rather than a blanket "nothing found here").
+    """
+    if not ids:
+        return {}
+    try:
+        result = t3.get_or_create_collection(col_name).get(ids=ids)
+    except Exception as exc:  # noqa: BLE001 — batch-level failure; falls back to per-id retry below, never raises to the caller
+        _log.error(
+            "store_get_many_batch_fetch_failed",
+            collection=col_name,
+            id_count=len(ids),
+            error=str(exc),
+        )
+        return _fallback_get_by_ids_individually(t3, col_name, ids)
+
+    out_ids = result.get("ids") or []
+    docs = result.get("documents") or []
+    metas = result.get("metadatas") or []
+    id_to_entry: dict[str, dict] = {}
+    for i, rid in enumerate(out_ids):
+        meta = metas[i] if i < len(metas) else {}
+        entry: dict[str, Any] = {
+            "id": rid,
+            "content": docs[i] if i < len(docs) else "",
+        }
+        if isinstance(meta, dict):
+            entry.update(meta)
+        id_to_entry[rid] = entry
+    return id_to_entry
+
+
+def _fallback_get_by_ids_individually(
+    t3: Any, col_name: str, ids: list[str],
+) -> dict[str, dict]:
+    """Per-id retry after a whole-batch fetch failure.
+
+    Deliberately NOT a general retry framework — no backoff, no attempt
+    cap beyond "try once per id," reuses the existing single-id
+    ``HttpVectorClient.get_by_id`` path verbatim. Its only job is to
+    restore the pre-fix blast radius for the failure case: one bad id
+    costs one id again, instead of the whole (up to 300-id) batch going
+    missing on one flaky request. If the underlying failure is systemic
+    (the service is actually down) every one of these calls fails too and
+    the ids end up missing anyway — no worse than the batch path, and the
+    per-id calls fail fast (connection-level errors, not slow timeouts).
+    """
+    id_to_entry: dict[str, dict] = {}
+    for doc_id in ids:
+        try:
+            entry = t3.get_by_id(col_name, doc_id)
+        except Exception:  # noqa: BLE001 — per-id graceful degradation, mirrors the pre-fix loop exactly
+            entry = None
+        if entry is not None:
+            id_to_entry[doc_id] = entry
+    return id_to_entry
+
+
 @mcp.tool(
     title="Batch-Retrieve Documents",
     annotations={"readOnlyHint": True},
@@ -3676,22 +3828,74 @@ def store_get_many(
         contents: list[str] = []
         missing: list[str] = []
 
-        for idx, doc_id in enumerate(id_list):
-            if len(coll_list) == len(id_list):
-                candidates = [coll_list[idx]]
-            else:
-                candidates = coll_list
+        # nexus fan-out fix: batch the per-collection lookups instead of one
+        # HTTP round trip per (id, candidate-collection) pair — the prior
+        # loop called ``t3.get_by_id`` (single-id POST to
+        # ``/v1/vectors/store-get``) once per id per candidate collection,
+        # even though that route accepts batches (MAX_BATCH_IDS=1000,
+        # nexus-hdx2u) and ``_ServiceCollectionStub.get(ids=...)`` already
+        # pages a batch internally at ``QUOTAS.MAX_RECORDS_PER_WRITE``
+        # (300 — the smaller of the two ceilings). This is on the
+        # ``nx_answer`` hot path (``plans/runner.py``'s auto-hydration runs
+        # it on every operator step that carries ids).
+        #
+        # Semantics preserved exactly:
+        #   * per-id routing (``len(coll_list) == len(id_list)``): each id
+        #     is looked up in exactly its assigned collection — batched by
+        #     grouping ids per collection.
+        #   * broadcast routing (the else branch): each id is tried against
+        #     every candidate collection in order, first match wins — batched
+        #     by resolving the STILL-UNRESOLVED ids per candidate collection,
+        #     one batch call per collection instead of one call per
+        #     (id, collection) pair.
+        #   * a per-collection batch call failing outright (network error,
+        #     unknown collection, ...) NEVER crashes the caller — but is
+        #     NOT the same blast radius as the old per-id
+        #     ``except Exception: entry = None``. Pre-fix, one failure cost
+        #     one id. Here a single failed request could otherwise blank up
+        #     to 300 ids as "missing" in one shot (a whole
+        #     ``QUOTAS.MAX_RECORDS_PER_WRITE`` page), indistinguishable from
+        #     genuine absence. ``_batched_get_by_ids`` closes that gap: it
+        #     logs the failure loud (collection + id count) and falls back
+        #     to a per-id retry, restoring the old one-id blast radius for
+        #     the failure path specifically — see that function's docstring
+        #     for the full rationale (nexus/store-get-many-code-review-
+        #     2026-08-21 [23303] Item 1).
+        #   * result order and per-doc truncation are unchanged.
+        per_id_routing = len(coll_list) == len(id_list)
+        entries: list[dict | None] = [None] * len(id_list)
 
-            entry = None
-            for cand in candidates:
+        if per_id_routing:
+            idxs_by_collection: dict[str, list[int]] = {}
+            for idx, cand in enumerate(coll_list):
                 col_name = t3_collection_name(cand, t3=t3)
-                try:
-                    entry = t3.get_by_id(col_name, doc_id)
-                except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-                    entry = None
-                if entry is not None:
-                    break
+                idxs_by_collection.setdefault(col_name, []).append(idx)
 
+            for col_name, idxs in idxs_by_collection.items():
+                batch_ids = _unique_preserve_order(id_list[idx] for idx in idxs)
+                id_to_entry = _batched_get_by_ids(t3, col_name, batch_ids)
+                for idx in idxs:
+                    entries[idx] = id_to_entry.get(id_list[idx])
+        else:
+            remaining_idxs = list(range(len(id_list)))
+            for cand in coll_list:
+                if not remaining_idxs:
+                    break
+                col_name = t3_collection_name(cand, t3=t3)
+                batch_ids = _unique_preserve_order(
+                    id_list[idx] for idx in remaining_idxs
+                )
+                id_to_entry = _batched_get_by_ids(t3, col_name, batch_ids)
+                still_remaining: list[int] = []
+                for idx in remaining_idxs:
+                    found = id_to_entry.get(id_list[idx])
+                    if found is not None:
+                        entries[idx] = found
+                    else:
+                        still_remaining.append(idx)
+                remaining_idxs = still_remaining
+
+        for doc_id, entry in zip(id_list, entries):
             if entry is None:
                 missing.append(doc_id)
                 contents.append("")
@@ -3782,7 +3986,7 @@ def store_list(
             lines.append(f"--- showing {offset + 1}-{shown_end} of {total}. next: offset={shown_end}")
         else:
             lines.append(f"--- showing {offset + 1}-{shown_end} of {total} (end)")
-        return "\n".join(lines)
+        return _cap_text_result("\n".join(lines), "store_list")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("store_list", e)
 
@@ -3828,7 +4032,7 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
         chunks = chunks_by_hash.get(h, "?")
         indexed = (d.get("indexed_at") or "")[:10]
         lines.append(f"  {i:3d}. {doc_id}  {title:<50}  {chunks:>4} chunks  {indexed}")
-    return "\n".join(lines)
+    return _cap_text_result("\n".join(lines), "store_list")
 
 
 @mcp.tool(
@@ -4035,7 +4239,7 @@ def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total}. next: offset={shown_end}")
         else:
             lines.append(f"\n--- showing {offset + 1}-{shown_end} of {total} (end)")
-        return "\n\n".join(lines)
+        return _cap_text_result("\n\n".join(lines), "memory_search")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("memory_search", e)
 
@@ -4203,7 +4407,7 @@ def scratch(
                 lines.append(f"{prefix}[{r['id'][:8]}] {snippet}")
             if len(results) >= limit:
                 lines.append(f"\n--- showing {len(results)} results (limit={limit}). Increase limit to see more.")
-            return "\n".join(lines)
+            return _cap_text_result("\n".join(lines), "scratch")
 
         elif action == "list":
             entries = t1.list_entries()
@@ -4218,7 +4422,7 @@ def scratch(
                 lines.append(f"{prefix}[{e['id'][:8]}] {snippet}{tags_str}")
             if total > limit:
                 lines.append(f"\n--- showing {limit} of {total} entries. Increase limit to see all.")
-            return "\n".join(lines)
+            return _cap_text_result("\n".join(lines), "scratch")
 
         elif action == "get":
             if not entry_id:
@@ -4462,7 +4666,7 @@ def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) 
         shown_end = offset + len(results)
         if has_more:
             lines.append(f"\n--- showing {offset + 1}-{shown_end}. may have more: offset={shown_end}")
-        return "\n\n".join(lines)
+        return _cap_text_result("\n\n".join(lines), "plan_search")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("plan_search", e)
 
@@ -4650,6 +4854,26 @@ def collection_verify(name: str) -> str:
 # ── Operator tools ───────────────────────────────────────────────────────────
 
 
+def _pin_default_model(model: "str | None") -> "str | None":
+    """nexus-ek8tr (critic Critical, T2 [23233]): a DIRECT tool call with
+    no ``model=`` — an MCP client invoking an operator, or the nx_tidy /
+    nx_plan_audit / nx_enrich_beads heavy tools — must still dispatch at
+    the EXPLICIT strong pin, never inherit the box CLI default bare.
+    Caller-supplied models always win; the ``=0`` kill switch restores
+    bare dispatch everywhere. Plan-routed dispatches arrive with an
+    explicit model from the runner, so this never fires on that path.
+    Note the direct-call contract is unchanged in tier terms: direct
+    operator calls were always "strong by default" — this makes the
+    strong identity explicit instead of inherited."""
+    import os as _os  # noqa: PLC0415 — trivial stdlib; keeps helper self-contained
+
+    if model is not None or _os.environ.get("NX_OPERATOR_MODEL_TIERING") == "0":
+        return model
+    from nexus.operators.model_tiers import STRONG_DEFAULT_ALIAS  # noqa: PLC0415 — default-path pin (nexus-ek8tr)
+
+    return STRONG_DEFAULT_ALIAS
+
+
 @mcp.tool(
     title="Extract Structured Fields",
     annotations={"readOnlyHint": True},
@@ -4685,7 +4909,10 @@ async def operator_extract(
             }
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_extract",
+    )
 
 
 @mcp.tool(
@@ -4719,7 +4946,10 @@ async def operator_rank(
             "ranked": {"type": "array", "items": {"type": "string"}},
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_rank",
+    )
 
 
 @mcp.tool(
@@ -4735,6 +4965,7 @@ async def operator_compare(
     items_b: str = "",
     label_a: str = "A",
     label_b: str = "B",
+    model: str | None = None,
 ) -> dict:
     """Compare items and return a structured comparison using claude -p.
 
@@ -4808,7 +5039,10 @@ async def operator_compare(
             "comparison": {"type": "string"},
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_compare",
+    )
 
 
 @mcp.tool(
@@ -4819,6 +5053,7 @@ async def operator_summarize(
     content: str,
     cited: bool = False,
     timeout: float = 300.0,
+    model: str | None = None,
 ) -> dict:
     """Summarize content using claude -p, optionally with citations.
 
@@ -4839,7 +5074,10 @@ async def operator_summarize(
             "citations": {"type": "array", "items": {"type": "string"}},
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_summarize",
+    )
 
 
 @mcp.tool(
@@ -4851,6 +5089,7 @@ async def operator_generate(
     context: str,
     cited: bool = False,
     timeout: float = 300.0,
+    model: str | None = None,
 ) -> dict:
     """Generate output from a template and context using claude -p.
 
@@ -4875,7 +5114,10 @@ async def operator_generate(
             "citations": {"type": "array", "items": {"type": "string"}},
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_generate",
+    )
 
 
 #: Shared evidence-item schema for ``operator_check`` (RDR-088 Phase 2).
@@ -5004,7 +5246,10 @@ async def operator_filter(
             },
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_filter",
+    )
 
 
 @mcp.tool(
@@ -5015,6 +5260,7 @@ async def operator_check(
     items: str,
     check_instruction: str,
     timeout: float = 300.0,
+    model: str | None = None,
 ) -> dict:
     """Check a claim's consistency across peer items using claude -p.
 
@@ -5037,6 +5283,11 @@ async def operator_check(
             question to evaluate across the items (e.g. "do all papers
             agree on the baseline numbers?").
         timeout: Seconds before the subprocess is killed. Default 300s.
+        model: Opt-in ``--model`` override (nexus-3mea3, the 2026-08-21
+            check/verify default flip), pass-through to ``claude_dispatch``
+            exactly as on ``operator_filter``. ``None`` (default) is a
+            no-op — argv unchanged; the plan runner's tiering branch is
+            what supplies the cheap alias on the default path.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -5061,7 +5312,10 @@ async def operator_check(
             },
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_check",
+    )
 
 
 @mcp.tool(
@@ -5072,6 +5326,7 @@ async def operator_verify(
     claim: str,
     evidence: str,
     timeout: float = 300.0,
+    model: str | None = None,
 ) -> dict:
     """Verify a single claim against a single evidence source using claude -p.
 
@@ -5090,6 +5345,9 @@ async def operator_verify(
             Typically a section text, extracted passage, or document
             body. Not a collection of items.
         timeout: Seconds before the subprocess is killed. Default 300s.
+        model: Opt-in ``--model`` override (nexus-3mea3, the 2026-08-21
+            check/verify default flip) — same pass-through contract as
+            ``operator_check``'s ``model``.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -5116,7 +5374,10 @@ async def operator_verify(
             },
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_verify",
+    )
 
 
 @mcp.tool(
@@ -5241,7 +5502,10 @@ async def operator_groupby(
             },
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout, model=model)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_groupby",
+    )
 
 
 @mcp.tool(
@@ -5254,6 +5518,7 @@ async def operator_aggregate(
     timeout: float = 300.0,
     source: str = "auto",
     aspect_field: str = "",
+    model: str | None = None,
 ) -> dict:
     """Reduce each group of items to a per-group summary.
 
@@ -5344,7 +5609,10 @@ async def operator_aggregate(
             },
         },
     }
-    return await claude_dispatch(prompt, schema, timeout=timeout)
+    return await claude_dispatch(
+        prompt, schema, timeout=timeout, model=_pin_default_model(model),
+        operator="operator_aggregate",
+    )
 
 
 # ── traverse (RDR-078 P3) ─────────────────────────────────────────────────────
@@ -6006,9 +6274,26 @@ def _nx_answer_caller_bindings(
     would reopen the offer-a-plan-that-cannot-run hole from the other
     side.
     """
-    run: dict[str, Any] = {
+    # Typed bindings the question itself supplies, derived FIRST so an
+    # explicit caller value always overrides one that was inferred
+    # (nexus-7y4v0 follow-through). Without this, a plan requiring a typed
+    # value is permanently unofferable to nx_answer, which binds only
+    # `intent` — and the two templates in that state, find-by-author and
+    # type-scoped-search, were written for question shapes that CARRY the
+    # value they need. A template unreachable for the question it exists
+    # to serve is an unreachable feature, not a safe default.
+    #
+    # Derivation is deliberately stubborn: an ambiguous question derives
+    # nothing and the plan stays unofferable, which is today's behaviour.
+    # A WRONG typed filter is the harmful outcome — schema.py records
+    # plan 14 returning zero results on a bad content_type while the same
+    # query without it returned the right paper first.
+    from nexus.plans.binding_infer import infer_typed_bindings  # noqa: PLC0415 — deferred; matches this module's convention
+
+    run: dict[str, Any] = dict(infer_typed_bindings(question))
+    run.update({
         k: v for k, v in (bindings or {}).items() if v is not None
-    }
+    })
     run["intent"] = question
     if scope:
         run["_nx_scope"] = scope
@@ -6023,6 +6308,7 @@ def _autoalias_bindings(
     question: str,
     plan_id: int,
     plan_name: str,
+    plan_json: str | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fill unsupplied required bindings from *question*; refuse typed ones.
 
@@ -6033,23 +6319,33 @@ def _autoalias_bindings(
     fallback, whose constructed plans get every binding filled from the
     question text. That remains correct for free text.
 
-    A binding in :data:`nexus.plans.schema.TYPED_FILTER_BINDINGS`
-    cannot be derived from a
-    question, so an unsatisfied one raises
+    A TYPED binding cannot be derived from a question, so an unsatisfied
+    one raises
     :class:`PlanBindingUnsatisfiableError` rather than being guessed. The
     raise happens before any binding is handed to the runner, so a plan
     never executes half-bound.
 
     Caller-supplied values and plan defaults are never overwritten, and
     either one satisfies a typed binding.
-    """
-    from nexus.plans.schema import TYPED_FILTER_BINDINGS  # noqa: PLC0415 — deferred; matches this module's convention
 
+    "Typed" must mean the same thing here as it does in the matcher's own
+    gate, or a plan the matcher would refuse to offer gets its structural
+    filter stuffed with prose the moment something else offers it. Since
+    nexus-7y4v0 that means BOTH the name test and the usage test: a
+    binding a plan feeds into a typed argument slot is typed whatever it
+    is called (``debug-default`` declares ``failing_path`` and passes it
+    as ``subtree: $failing_path``). *plan_json* is optional only so a
+    caller without the plan text still gets the name test; omitting it
+    re-opens exactly the hole nexus-7y4v0 closed.
+    """
+    from nexus.plans.schema import TYPED_FILTER_BINDINGS, typed_by_usage  # noqa: PLC0415 — deferred; matches this module's convention
+
+    typed = TYPED_FILTER_BINDINGS | typed_by_usage(plan_json)
     out = dict(run_bindings)
     for req in required:
         if req in out or req in defaults:
             continue
-        if req in TYPED_FILTER_BINDINGS:
+        if req in typed:
             raise PlanBindingUnsatisfiableError(
                 binding=req, plan_id=plan_id, plan_name=plan_name,
             )
@@ -6248,20 +6544,29 @@ async def _nx_answer_plan_miss(
     # appends no ``--model`` flag, byte-identical to every pre-.p2c call.
     #
     # RDR-196 .p2d (nexus-nyry9.17): the planner is UNMEASURED, not HOLD-
-    # by-decision — the .p2c candidate arm never ran (budget exhausted
-    # before the 4th dispatch, see T2 nexus_rdr/196-phase2-ab-measurement).
-    # NO code change here: the planner does NOT join .p2d's default-on
-    # flip (``model_tiers.FLIPPED_OPERATORS`` is operator-tool-only) —
-    # it stays gated on ``== "1"`` exactly as .p2c left it, so the
-    # default path (env unset) and the kill switch (``== "0"``) both
-    # leave ``_planner_model`` at ``None``, unchanged. A future bead can
-    # spend a small dedicated top-up (~3 cheap-tier planner dispatches,
-    # per .p2d's dev notes) to resolve UNMEASURED into a real verdict.
+    # by-decision — the .p2c candidate arm never ran. It does NOT join the
+    # cheap flip. UPDATED by nexus-ek8tr (2026-08-21, superseding the
+    # "default path leaves _planner_model at None" wording that used to
+    # sit here): the default path now pins STRONG_DEFAULT_ALIAS
+    # explicitly (see the branch below); only the ``== "0"`` kill switch
+    # leaves the dispatch bare. The TIER question stays open
+    # (nexus-i8to5) — the pin names the incumbent, it does not choose a
+    # tier.
+    # nexus-ek8tr (2026-08-21): the default path now pins the planner to
+    # STRONG_DEFAULT_ALIAS explicitly instead of inheriting the box CLI
+    # default bare — same dispatch, same model in practice, no longer an
+    # accident. Kill switch "0" restores the bare pre-tiering dispatch.
+    # The planner's TIER remains UNMEASURED (Sam decision, nexus-i8to5);
+    # this pins the incumbent, it does not change it.
     _planner_model: str | None = None
     if _os.environ.get("NX_OPERATOR_MODEL_TIERING") == "1":
         from nexus.operators.model_tiers import resolve_model_for_tier  # noqa: PLC0415 — rare/branch-local path; measurement-only opt-in
 
         _planner_model = resolve_model_for_tier("cheap")
+    elif _os.environ.get("NX_OPERATOR_MODEL_TIERING") != "0":
+        from nexus.operators.model_tiers import STRONG_DEFAULT_ALIAS  # noqa: PLC0415 — rare/branch-local path; default-path pin (nexus-ek8tr)
+
+        _planner_model = STRONG_DEFAULT_ALIAS
     payload = None
     last_output_error: _OpOutputError | None = None
     for attempt in range(2):
@@ -6269,7 +6574,7 @@ async def _nx_answer_plan_miss(
         try:
             payload = await claude_dispatch(
                 prompt, _PLANNER_SCHEMA, timeout=attempt_timeout,
-                model=_planner_model,
+                model=_planner_model, operator="planner",
             )
             break
         except _OpOutputError as exc:
@@ -6417,10 +6722,12 @@ _NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN: int = 0
 #: the STABLE PREFIX of the budget-exhausted partial-answer marker text
 #: -- the single emitter below (``_budget_exhausted_response``) builds
 #: the full marker as
-#: ``f"{NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX} after step {N} of
-#: {M} — partial answer]"``; only this prefix is a stable, shared
-#: contract (N/M vary per run, so the full string is never itself a
-#: constant). ``commands/answer_runs.py``'s ``_row_is_failed`` imports
+#: ``f"{NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX} ({kind}) after step
+#: {N} of {M} — partial answer]"`` (``kind`` is ``"time"`` or ``"cost"``
+#: -- RDR-196 .p3c, nexus-nyry9.21: the USD budget reuses this exact
+#: marker rather than a second shape); only this prefix is a stable,
+#: shared contract (kind/N/M vary per run, so the full string is never
+#: itself a constant). ``commands/answer_runs.py``'s ``_row_is_failed`` imports
 #: THIS constant to recognize a budget-exhausted row's ``final_text``
 #: rather than retyping the literal -- a second hand-typed copy would
 #: silently drift the moment either side's wording changed (exactly the
@@ -6440,7 +6747,7 @@ async def nx_answer(
     scope: str = "",
     context: str = "",
     max_steps: int = 6,
-    budget_usd: float = 0.25,
+    budget_usd: float | None = None,
     budget_seconds: float | None = _NX_ANSWER_DEFAULT_BUDGET_SECONDS,
     trace: bool = True,
     dimensions: dict[str, Any] | None = None,
@@ -6512,7 +6819,71 @@ async def nx_answer(
         scope: Catalog subtree or corpus filter (e.g. ``"1.2"`` or ``"knowledge"``).
         context: Supplementary caller-supplied context for the plan matcher.
         max_steps: Cap on plan DAG size (passed to inline planner on miss).
-        budget_usd: Per-invocation cost cap (reserved for future enforcement).
+        budget_usd: Soft per-invocation cost GUIDANCE in USD, not a hard
+            limit -- an over-estimate warns rather than refuses, and the
+            mid-run stop can overshoot by up to one segment's cost (see
+            below). ``None`` (the default)
+            means "use the derived default",
+            :data:`nexus.plans.budget_default.DERIVED_BUDGET_USD` --
+            1.0530 since 2026-08-21 (RDR-196 .p3a: p90 of n=30 config-conformant
+            runs, ``nx answer-runs --derive-budget``; provenance on the
+            constant). The former ``0.25`` literal predated any
+            measurement and is gone (RDR-196 § Risks). ENFORCED as of
+            RDR-196 .p3c (nexus-nyry9.21) whenever
+            :data:`nexus.plans.budget_default.BUDGET_ENFORCEMENT_ENABLED`
+            is True (the single gate for everything below -- setting it
+            back False is a true rollback):
+
+            - A non-positive ``budget_usd`` (``<= 0``) is a loud bounds
+              error, returned immediately, before any dispatch. ``0``
+              does NOT mean "unlimited".
+            - PRE-FLIGHT PRICE CHECK, a WARNING not a refusal (round-2
+              deviation from the accepted RDR text, Sam's decision —
+              see ``docs/rdr/rdr-196-cost-aware-nx-answer.md`` § Phase 3
+              for the dated note): once Step 1 resolves a plan (matched
+              or inline-planner-grown), its predicted cost
+              (:func:`nexus.plans.cost_estimate.estimate_plan_cost`,
+              the SAME step-shape estimate the .p3b plan-choice logic
+              already computes) is compared against the REMAINING
+              budget (the cap minus whatever the inline planner's own
+              dispatch already spent — the .r2 gap, closed on this
+              axis by nexus-nyry9.21 D5). This estimate has NO per-plan
+              discriminating power in the live population (a same-day
+              20-run measurement found every live plan predicting the
+              IDENTICAL bundle-dominant ceiling, median actual/predicted
+              ratio 0.805, worst overestimate 11.2x) — so exceeding the
+              remaining budget now WARNS and RUNS rather than refusing,
+              naming the estimate, the remaining budget, the full cap,
+              and any already-spent amount. A plan with NO estimate (an
+              operator this table has never priced) gets the same
+              treatment — it always ran, never refused on that basis
+              alone. Both cases surface via the SAME single warning
+              emitter: a leading warning line (text mode) / a
+              ``budget_warnings`` field (structured mode).
+              nexus-nyry9.21 round 2 also added an ``"unknown-cost"``
+              warning kind through the identical emitter: when one or
+              more executed steps report no ``cost_usd``, the mid-run
+              running sum could not include them and the check below
+              may have been blind for part of the run — surfaced once
+              per run, never silently.
+            - MID-RUN STOP-LINE, not a hard ceiling, and the REAL
+              enforcement (it sums MEASURED ``StepRecord`` costs, not a
+              step-shape guess): the remaining
+              budget is threaded into ``plan_run`` as
+              ``budget_usd_remaining``, checked BEFORE dispatching each
+              segment against the sum of already-completed steps'
+              known cost (see ``plan_run``'s own docstring for why a
+              dispatch's real cost can only ever be known AFTER it
+              returns). The segment that pushes the running sum over
+              the cap still finishes; only the segment AFTER it is
+              stopped. The run total can therefore end up above
+              ``budget_usd`` by up to that final segment's own cost —
+              this is the documented contract, not a bug. When it
+              trips, ``nx_answer`` returns the SAME
+              ``[budget exhausted ...]`` marker ``budget_seconds``
+              already produces (see below), with ``(cost)`` in place of
+              ``(time)`` — one emitter, parameterized by which budget
+              axis tripped, never a second marker shape.
         budget_seconds: nexus-h33x8.6 a4 — an OPTIONAL hard wall-clock
             budget for the plan-EXECUTION phase ONLY (Step 4 below,
             the ``plan_run`` call), measured from this call's own
@@ -6524,11 +6895,13 @@ async def nx_answer(
             retrieved results plus any reconstructed partial operator
             text are returned instead of raising or blocking further —
             "here are the retrieved chunks; synthesis skipped, budget
-            exceeded". Marked with a leading ``[budget exhausted after
-            step N of M — partial answer]`` line (text mode) or a
+            exceeded". Marked with a leading ``[budget exhausted (time)
+            after step N of M — partial answer]`` line (text mode) or a
             top-level ``budget_exhausted_at_step`` field (structured
-            mode; converges with RDR-196 §Approach's marker convention
-            for the later USD-budget work).
+            mode). RDR-196 .p3c (nexus-nyry9.21): the USD budget
+            (``budget_usd`` above) reuses this exact marker with
+            ``(cost)`` in place of ``(time)`` — one emitter, never a
+            second shape.
 
             **CORRECTED (nexus-nyry9.2, RDR-196 .r2):** the plan-MISS
             inline-planner phase (``_nx_answer_plan_miss``, its own
@@ -6570,6 +6943,10 @@ async def nx_answer(
             without a second fetch. The single-step guard path produces
             the same envelope shape — the guard logic itself is unchanged.
             On pure-generate plans or retrieval misses, ``chunks`` is ``[]``.
+            ``truncated_chars`` (nexus-2xjge): ``None`` unless ``final_text``
+            was capped (a trailing ``[nx_answer: result capped at ...]``
+            marker is appended in text mode too), in which case it is the
+            count of characters dropped.
         min_confidence: Per-call plan-match floor override (RDR-092 Phase
             2 Option A). ``None`` (default) uses the global
             :data:`_PLAN_MATCH_MIN_CONFIDENCE` (0.40, per RDR-079 P5).
@@ -6609,13 +6986,20 @@ async def nx_answer(
     from types import SimpleNamespace  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site (nexus-nyry9.2 pre-Step-2 budget stand-in)
 
     from nexus.mcp_infra import get_t1_plan_cache  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
+    from nexus.plans.budget_default import (  # noqa: PLC0415 — deferred for startup cost; call-time import so a test's monkeypatch on the module attribute is honored every call (RDR-196 .p3c, nexus-nyry9.21)
+        BUDGET_ENFORCEMENT_ENABLED as _budget_enforcement_enabled,
+        DERIVED_BUDGET_USD as _derived_budget_usd,
+    )
     from nexus.plans.cost_estimate import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
         PLAN_CHOICE_CONFIDENCE_BAND,
+        PlanCostEstimate,
         choose_within_band,
+        estimate_plan_cost,
         get_cached_price_table,
     )
     from nexus.plans.matcher import plan_match as _plan_match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.plans.runner import plan_run as _plan_run  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+    from nexus.plans.verb_infer import infer_verb as _infer_verb  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
     _log = _slog.get_logger()
     start = time.monotonic()
@@ -6636,6 +7020,54 @@ async def nx_answer(
     # deadline exemption a prior classify_plan bucket used to carry was
     # deleted — see that function's own docstring).
     deadline = start + budget_seconds if budget_seconds is not None else None
+
+    # RDR-196 .p3c (nexus-nyry9.21): USD budget enforcement state, all
+    # declared here (bound to inert defaults) for the same reason
+    # `_plan_choice_info` is above -- every `_result(...)` call site,
+    # including ones on paths that resolve before pricing ever runs,
+    # must see a defined value. `effective_budget_usd` is computed just
+    # before Step 1 below (after `_result` is defined, alongside the
+    # `min_confidence` bounds check) -- the caller's `budget_usd` when
+    # supplied, else the derived default, but ONLY when
+    # `BUDGET_ENFORCEMENT_ENABLED` -- the single gate for ALL
+    # enforcement (bounds check, pre-flight refusal, mid-run stop).
+    effective_budget_usd: "float | None" = None
+    #: Captures the inline planner's own claude_dispatch cost (D5 /
+    #: nexus-nyry9.21, closing the .r2 gap for the USD axis) via the
+    #: ambient sink wrapped around the Step 1 miss-path dispatch below.
+    #: Stays empty (spend 0.0) on a plan-match HIT — no planner dispatch
+    #: happens on that path.
+    _planner_usage_sink: list = []
+    #: Set once, in the pre-Step-2 budget check below, to
+    #: `effective_budget_usd` minus whatever the planner already spent.
+    #: Threaded into `plan_run` at Step 4 as `budget_usd_remaining`.
+    #: `None` whenever enforcement is inactive for this call -- mirrors
+    #: `deadline`'s own "only pass the kwarg when set" discipline.
+    _budget_remaining_usd: "float | None" = None
+    #: RDR-196 .p3c round-2 (Sam's decision on the critic's CRITICAL, T2
+    #: p3c-critique-2026-08-21) / round-3 (critic Significant, T2
+    #: p3c-critique round 3): the ONE accumulator for every budget
+    #: WARNING this call can produce -- D4's no-estimate case, the
+    #: demoted over-cap pre-flight (was a hard refusal; the step-shape
+    #: estimator has no per-plan discriminating power in the live
+    #: population, see `_emit_budget_warning`'s own docstring below),
+    #: and the mid-run unknown-cost blind-spot signal (critic
+    #: Significant 1). Each entry is a ``{"kind": ..., "detail": ...}``
+    #: dict, not a formatted string -- round 3 made this
+    #: MACHINE-READABLE (critic Significant: "over-cap fires on every
+    #: tight-budget call; no-estimate/unknown-cost are rare
+    #: cost-tracking-quality anomalies" -- a caller/`.22` needs to tell
+    #: those apart without grepping prose) so `_result`'s closure below
+    #: can derive BOTH the human leading text line(s) AND a structured
+    #: `budget_warnings` list from the SAME data, never two
+    #: independently-maintained shapes. A list, not a single dict:
+    #: independent warning kinds can co-occur in one call (e.g. a
+    #: no-estimate pre-flight warning AND an unknown-cost blind spot
+    #: found during execution) and must not silently overwrite each
+    #: other. Read by `_result`'s closure so EVERY exit path this call
+    #: can take after a warning is emitted carries all of them, in both
+    #: shapes.
+    _budget_warning_entries: "list[dict[str, str]]" = []
 
     # RDR-137 followup (nexus-n1908): normalize a malformed comma-list
     # scope to broad search (with a warning) so it doesn't filter
@@ -6662,8 +7094,61 @@ async def nx_answer(
                 chunks: "list | None" = None,
                 budget_exhausted_at_step: "int | None" = None,
                 step_records: "list | None" = None) -> "str | dict":
+        # RDR-196 .p3c (nexus-nyry9.21), extended round 2 / round 3:
+        # single emitter for every budget WARNING, both shapes. Reads
+        # the closure list `_budget_warning_entries` (declared near the
+        # top of this function, appended to by `_emit_budget_warning`,
+        # never overwritten) so EVERY exit path this call can take
+        # after ANY warning is emitted — success, a later error, the
+        # exhaustion marker itself — carries all of them, never
+        # silently dropped for a structured=False caller. The human
+        # text line shape is UNCHANGED from round 2:
+        # ``[budget warning (kind): detail]``, one per entry, joined.
+        _budget_warning_text = (
+            "\n".join(
+                f"[budget warning ({e['kind']}): {e['detail']}]"
+                for e in _budget_warning_entries
+            )
+            if _budget_warning_entries else None
+        )
+        # RDR-196 .p3c round 3 (code review Medium, co-occurrence bug
+        # found via the new test): when the exhaustion marker is ALSO
+        # present, it must stay the LEADING line — commands/answer_runs.
+        # py's `_row_is_failed` keys on
+        # ``final_text.startswith(NX_ANSWER_BUDGET_EXHAUSTED_MARKER_
+        # PREFIX)``, which an unconditional warning-first prepend would
+        # break the moment a warning and an exhaustion co-occur (now a
+        # real possibility since a warned run PROCEEDS to execute
+        # instead of being refused). Prepend in the normal case
+        # (unchanged from round 2); append after the marker when one is
+        # present, so the marker's prefix contract always holds.
+        # nexus-2xjge: final_text is the last plan step's raw output —
+        # unbounded when that step is e.g. operator_generate (an LLM call
+        # with no code-level output cap) or a custom-grown plan whose
+        # final tool is not one of the ones _cap_text_result already
+        # guards. Cap here too, defense in depth. The cap is applied to
+        # the RAW text BEFORE warning composition (critique finding,
+        # review-2g8y7-2xjge-critique [23267]): capping the composed
+        # string could slice an end-appended warning off in the
+        # exhausted+warned+oversized co-occurrence, silently dropping it
+        # for a structured=False caller — the exact contract round 3
+        # exists to keep. The composed result may therefore exceed the
+        # cap by the warning text's length; warnings are line-sized and
+        # the never-dropped contract outranks the cap's exactness.
+        _pre_cap_chars = len(text)
+        text = _cap_text_result(text, "nx_answer")
+        truncated_chars = (
+            _pre_cap_chars - _TEXT_RESULT_CAP_CHARS
+            if _pre_cap_chars > _TEXT_RESULT_CAP_CHARS else None
+        )
+        if not _budget_warning_text:
+            _text = text
+        elif text.startswith(NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX):
+            _text = f"{text}\n{_budget_warning_text}"
+        else:
+            _text = f"{_budget_warning_text}\n{text}"
         if not structured:
-            return text
+            return _text
         # RDR-196 .p1e (nexus-nyry9.11): per-step breakdown in the
         # structured envelope, same field names as the wire (reuses
         # _step_record_to_wire — the exact dict TelemetryHandler's
@@ -6680,7 +7165,7 @@ async def nx_answer(
         ]
         cost_usd = sum(_known_costs) if _known_costs else None
         return {
-            "final_text": text,
+            "final_text": _text,
             "chunks": chunks if chunks is not None else [],
             "plan_id": plan_id,
             "step_count": step_count,
@@ -6690,6 +7175,30 @@ async def nx_answer(
             "budget_exhausted_at_step": budget_exhausted_at_step,
             "steps": [_step_record_to_wire(s) for s in _steps],
             "cost_usd": cost_usd,
+            # nexus-2xjge: always present (None when final_text was not
+            # capped), same "always present" convention as
+            # budget_exhausted_at_step above — a caller relies on the key,
+            # never membership-checks it.
+            "truncated_chars": truncated_chars,
+            # RDR-196 .p3c round 3 (critic Significant, T2 p3c-critique
+            # round 3) / round 4 (a THIRD shape carrying the same
+            # information — the joined-prose `budget_estimate_warning`
+            # field this diff shipped in round 3 — was itself the exact
+            # defect class this bead's marker-convergence rule exists to
+            # prevent, caught before it ever landed; deleted, not kept
+            # for "back-compat" that never existed since the field never
+            # shipped). MACHINE-READABLE: over-cap fires chronically on
+            # any tight-budget call and is fundamentally different from
+            # the rare no-estimate / unknown-cost cost-tracking-quality
+            # anomalies; a caller (`.22`, `nx answer-runs`) needs to tell
+            # them apart by `kind` without parsing prose. Derived from
+            # `_budget_warning_entries` (the SAME accumulator the leading
+            # text line above is also built from — exactly two shapes,
+            # never three). Always present, ``[]`` (not None) when
+            # empty, same "always present" convention as
+            # `budget_exhausted_at_step` above and the same empty-list
+            # convention as `chunks`.
+            "budget_warnings": list(_budget_warning_entries),
             # RDR-196 Phase 3 Step 1 (nexus-nyry9.20): the Step 1 plan-
             # choice decision, when it ran (None on force_dynamic, a
             # plan-miss, or any error path before Step 1's hit branch —
@@ -6721,6 +7230,17 @@ async def nx_answer(
         _budget_step = getattr(result, "budget_exhausted_at_step", None)
         if not isinstance(_budget_step, int):
             return None
+        # RDR-196 .p3c (nexus-nyry9.21) D3: which budget axis tripped --
+        # "time" (the shipped budget_seconds mechanism) or "cost" (this
+        # bead's budget_usd mechanism), reusing this SAME emitter rather
+        # than adding a second marker shape. Defaults to "time" for any
+        # PlanResult / stand-in that predates this field (every real
+        # caller from before .p3c only ever exhausted on time) or a test
+        # double that doesn't set it -- never raises on a missing/odd
+        # attribute, same defensive posture as `_budget_step` above.
+        _budget_kind = getattr(result, "budget_exhausted_kind", None)
+        if _budget_kind not in ("time", "cost"):
+            _budget_kind = "time"
         # code-review Important (T2 code-review-nexus-h33x8.6-a4-a2-
         # 2026-08-19): use PlanResult.total_planned_steps -- the field
         # a4 added to runner.py specifically so callers don't re-parse
@@ -6743,7 +7263,7 @@ async def nx_answer(
         except (json.JSONDecodeError, TypeError):
             total_planned = 0
         marker = (
-            f"{NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX} after step "
+            f"{NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX} ({_budget_kind}) after step "
             f"{_budget_step} of {total_planned} — partial answer]"
         )
         # Harvest retrieved chunks the same way Step 5's structured path
@@ -6806,6 +7326,7 @@ async def nx_answer(
             "nx_answer_budget_partial_result",
             plan_id=best.plan_id,
             budget_exhausted_at_step=_budget_step,
+            budget_exhausted_kind=_budget_kind,
             total_planned_steps=total_planned,
             chunk_count=len(partial_chunks),
             has_partial_operator_text=bool(partial_operator_text),
@@ -6843,6 +7364,52 @@ async def nx_answer(
             step_records=_step_records,
         )
 
+    def _emit_budget_warning(kind: str, detail: str) -> None:
+        """RDR-196 .p3c round 2 (Sam's decision on the critic's CRITICAL,
+        T2 p3c-critique-2026-08-21): single emitter for every budget
+        WARNING this call can produce, parameterized by `kind` — the
+        same convergence discipline `_budget_exhausted_response` above
+        already applies to the exhaustion marker via ITS `kind`. Never
+        grow a second, parallel warning mechanism; every new warning
+        class calls this with a new `kind` string.
+
+        Known kinds (as of this round): ``"no-estimate"`` (D4's
+        original no-history/unpriceable path), ``"over-cap"`` (the
+        pre-flight check DEMOTED from a hard refusal — .p3b's
+        step-shape estimator has no per-plan discriminating power in
+        the live population: a same-day 20-run measurement found all 4
+        live plans predicting the IDENTICAL $0.90433 because
+        bundle-dominant pricing always resolves to the same
+        generate@opus ceiling, median actual/predicted 0.805, worst
+        overestimate 11.2x — so a hard refusal at that number is a
+        step function, not a per-plan judgement, and would wrongly
+        refuse real runs costing a fraction of the estimate),
+        ``"unknown-cost"`` (critic Significant 1: the mid-run running
+        sum could not accumulate for one or more steps, so the cost
+        check may have been blind for part of this run — the mid-run
+        stop-line itself is UNCHANGED and still enforces on every
+        MEASURED StepRecord cost; only the coverage gap needs
+        surfacing, once per run).
+
+        Appends rather than overwrites: independent kinds can co-occur
+        in one call (e.g. a `"no-estimate"` pre-flight warning and an
+        `"unknown-cost"` blind spot found during execution) and must
+        not silently replace each other — `_result`'s closure derives
+        BOTH the joined human text (unchanged shape from round 2) AND
+        the round-3 machine-readable ``budget_warnings`` structured
+        field from this SAME accumulator, never two independently
+        maintained shapes.
+
+        Stores a ``{"kind": kind, "detail": detail}`` dict (round 3,
+        critic Significant: the joined-prose-only shape gave a caller
+        no way to tell "over-cap fired again, as it does on every
+        tight-budget call" apart from the rare no-estimate/unknown-cost
+        cost-tracking-quality anomalies without grepping text) rather
+        than a pre-formatted string — the ONE accumulator, not a
+        parallel one.
+        """
+        _budget_warning_entries.append({"kind": kind, "detail": detail})
+
     # ── Step 1: plan-match gate ──────────────────────────────────────────
     # RDR-092 Phase 2 Option A: effective floor is the caller's override
     # when supplied, otherwise the RDR-079 P5 default (0.40). Bounds-
@@ -6857,6 +7424,18 @@ async def nx_answer(
         min_confidence if min_confidence is not None
         else _PLAN_MATCH_MIN_CONFIDENCE
     )
+
+    # RDR-196 .p3c (nexus-nyry9.21) D1: BUDGET_ENFORCEMENT_ENABLED gates
+    # ALL budget_usd enforcement -- an explicit caller-supplied cap and
+    # the derived default alike -- so flipping it back False is a true
+    # rollback. Checked here (mirrors the min_confidence bounds check
+    # immediately above) so a degenerate cap fails loudly, before any
+    # dispatch, exactly like a degenerate min_confidence.
+    if _budget_enforcement_enabled:
+        if budget_usd is not None and budget_usd <= 0:
+            return _result(f"budget_usd must be > 0, got {budget_usd!r}")
+        effective_budget_usd = budget_usd if budget_usd is not None else _derived_budget_usd
+
     if force_dynamic:
         # RDR-090 P1.1: skip the plan-match gate entirely. The
         # dynamic-planner path below picks up matches=[].
@@ -6866,6 +7445,22 @@ async def nx_answer(
         )
         matches: list = []
     else:
+        # Category route (T2 design-dimension-routed-category-plans-
+        # 2026-08-21). A caller-pinned verb always wins — the five
+        # scenario skills pass dimensions={"verb": ...} and must keep
+        # selecting their own verb's plans. Otherwise derive one from
+        # the question, which is what lets an unscoped nx_answer call
+        # reach a builtin at all: builtins have been selected once in
+        # four months, and every one of those misses came in through
+        # this path with no verb attached.
+        #
+        # This travels as its OWN argument. Merging it into `dimensions`
+        # would make it a hard filter over every candidate including
+        # grown plans, whose verbs are only ever research/analyze, so a
+        # derived debug/document verb would drop the entire live hit
+        # rate.
+        _pinned_verb = (dimensions or {}).get("verb")
+        _category_verb = _pinned_verb or _infer_verb(question)
         try:
             with _t2_ctx() as db:
                 cache = get_t1_plan_cache(populate_from=db.plans)
@@ -6885,6 +7480,7 @@ async def nx_answer(
                     # free-text binding is aliased from the question, so
                     # only typed bindings can make a plan unrunnable.
                     available_bindings=_caller_available,
+                    category_verb=_category_verb,
                 )
         except Exception as exc:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             return _result(f"Error during plan match: {exc}")
@@ -6898,10 +7494,21 @@ async def nx_answer(
             question=question[:100] if trace else "[redacted]",
         )
         try:
-            best = await _nx_answer_plan_miss(
-                question, scope=scope, max_steps=max_steps,
-                few_shot_matches=matches,
+            # RDR-196 .p3c (nexus-nyry9.21) D5: capture the planner's own
+            # claude_dispatch cost via the ambient sink so it can be
+            # seeded into the running USD spend below (.r2's gap on the
+            # cost axis — the planner phase already charges against
+            # budget_seconds via the deadline check further down).
+            # Wrapped unconditionally (cheap contextvar set/reset); only
+            # CONSUMED when budget enforcement is active.
+            from nexus.operators.dispatch import (  # noqa: PLC0415 — deferred; matches this function's convention
+                ambient_usage_sink as _ambient_usage_sink,
             )
+            with _ambient_usage_sink(_planner_usage_sink):
+                best = await _nx_answer_plan_miss(
+                    question, scope=scope, max_steps=max_steps,
+                    few_shot_matches=matches,
+                )
         except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
             elapsed_ms = int((time.monotonic() - start) * 1000)
             _log.warning("nx_answer_planner_failed", error=str(exc))
@@ -7036,6 +7643,7 @@ async def nx_answer(
             total_planned = 0
         _pre_plan_stub = SimpleNamespace(
             budget_exhausted_at_step=_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN,
+            budget_exhausted_kind="time",
             steps=[],
             total_planned_steps=total_planned,
         )
@@ -7043,12 +7651,121 @@ async def nx_answer(
         if _budget_response is not None:
             return _budget_response
 
+    # ── Pre-Step-2 USD budget check (nexus-nyry9.21, RDR-196 .p3c) ────────
+    # D5: the planner's own dispatch cost (captured above via the ambient
+    # sink around Step 1's miss path; empty/0.0 on a plan-match HIT,
+    # which never dispatches a planner) is seeded into the running spend
+    # BEFORE the remaining budget is computed — closes the same .r2-class
+    # gap on the cost axis that the time check above already closed on
+    # the wall-clock axis.
+    if effective_budget_usd is not None:
+        _planner_spent_usd = sum(
+            u.cost_usd for u in _planner_usage_sink if getattr(u, "cost_usd", None) is not None
+        )
+        _budget_remaining_usd = effective_budget_usd - _planner_spent_usd
+        if _budget_remaining_usd <= 0:
+            # D5: reuse the EXISTING pre-plan sentinel path rather than
+            # inventing a new one — same stand-in shape as the time
+            # check above, kind="cost" is the only difference.
+            try:
+                total_planned = len(json.loads(best.plan_json).get("steps") or [])
+            except (json.JSONDecodeError, TypeError):
+                total_planned = 0
+            _pre_plan_stub = SimpleNamespace(
+                budget_exhausted_at_step=_NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN,
+                budget_exhausted_kind="cost",
+                steps=[],
+                total_planned_steps=total_planned,
+            )
+            _budget_response = _budget_exhausted_response(_pre_plan_stub)
+            if _budget_response is not None:
+                return _budget_response
+        else:
+            # D4: pre-flight PRICE CHECK on the chosen/grown plan. Reuse
+            # the PlanCostEstimate the .p3b plan-choice path already
+            # computed for `best` on a plan-match HIT
+            # (`_plan_choice_info["predicted_cost_usd"]`/`["basis"]` —
+            # `best` IS `_chosen`, so these values are exactly what a
+            # fresh `estimate_plan_cost(best.plan_json, ...)` call would
+            # produce); price the grown plan fresh, with the same price
+            # table, on a plan-miss / force_dynamic run, where no such
+            # candidate estimate exists.
+            if _plan_choice_info is not None:
+                _plan_estimate_usd = _plan_choice_info.get("predicted_cost_usd")
+                _plan_estimate_basis = _plan_choice_info.get("basis") or ""
+            else:
+                try:
+                    with _t2_ctx() as _cost_db2:
+                        _price_table2 = get_cached_price_table(_cost_db2.telemetry)
+                    _estimate = estimate_plan_cost(best.plan_json, _price_table2)
+                except Exception:  # noqa: BLE001 — boundary catch; degrade to "no estimate", must not crash caller
+                    _estimate = PlanCostEstimate(usd=None, ms=None, basis="pricing-unavailable")
+                _plan_estimate_usd = _estimate.usd
+                _plan_estimate_basis = _estimate.basis
+            # RDR-196 .p3c round 2 (Sam's decision on the critic's
+            # CRITICAL, T2 p3c-critique-2026-08-21): DEMOTED from a hard
+            # refusal to a WARNING. The bundle-dominant step-shape
+            # estimator has NO per-plan discriminating power in the live
+            # population — a same-day 20-run measurement found all 4
+            # live plans predicting the IDENTICAL $0.90433 (bundle
+            # pricing always resolves to the generate@opus ceiling),
+            # median actual/predicted ratio 0.805 (systematic
+            # over-estimate), worst overestimate 11.2x, only 3/20
+            # under-predicted. A hard refusal at that number is a STEP
+            # FUNCTION at $0.90433, not a per-plan judgement: under the
+            # derived default cap (1.0530) it never fires; under any
+            # caller-supplied budget_usd near real median spend
+            # (~$0.70-0.80) it refused every real run deterministically
+            # and wrongly, including runs that would truly land under
+            # the cap. The mid-run stop-line below is UNCHANGED and
+            # remains the real enforcement mechanism — it sums MEASURED
+            # StepRecord costs rather than a step-shape guess, which is
+            # exactly why it survives review while this predicted-cost
+            # half does not. Re-enabling a hard refusal here is gated on
+            # the estimator gaining real per-plan discrimination.
+            if _plan_estimate_usd is not None and _plan_estimate_usd > _budget_remaining_usd:
+                # code-review Medium 1 (T2 p3c-code-review-2026-08-21):
+                # name BOTH the actual comparison operand (remaining,
+                # which is what "exceeds" is checked against) and the
+                # full original cap, plus the already-spent amount when
+                # nonzero — the prior text labelled the full cap as
+                # "the budget cap" while comparing against the smaller
+                # remaining, so the headline clause could read as
+                # numerically false whenever D5's planner spend was
+                # nonzero (e.g. remaining $0.45 < estimate $0.50 <
+                # full cap $1.0530 — "$0.50 exceeds $1.0530" is false
+                # as literally stated).
+                _emit_budget_warning(
+                    "over-cap",
+                    f"estimated plan cost ${_plan_estimate_usd:.4f} exceeds the "
+                    f"remaining budget ${_budget_remaining_usd:.4f} "
+                    f"(full cap ${effective_budget_usd:.4f}"
+                    + (
+                        f", ${_planner_spent_usd:.4f} already spent before plan execution)"
+                        if _planner_spent_usd > 0 else ")"
+                    )
+                    + f". basis: {_plan_estimate_basis}. Running anyway — the "
+                    "step-shape estimate has no per-plan discriminating power "
+                    "in the live population; the mid-run cost check (measured, "
+                    "not predicted) is the real enforcement.",
+                )
+            if _plan_estimate_usd is None:
+                # D4: no-history / unpriceable plan — WARN, never refuse.
+                _emit_budget_warning(
+                    "no-estimate",
+                    f"({_plan_estimate_basis}) — running without a pre-flight "
+                    "cost check",
+                )
+
     # ── Step 2: single-step guard ────────────────────────────────────────
     if plan_class == "single_query":
         _log.info("nx_answer_single_step_guard", plan_id=best.plan_id, confidence=conf_str)
         try:
             from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred; matches this module's convention
-            from nexus.plans.runner import resolve_step_bindings  # noqa: PLC0415 — deferred; matches this module's convention
+            from nexus.plans.runner import (  # noqa: PLC0415 — deferred; matches this module's convention
+                PlanRunUnresolvedVarError,
+                resolve_step_bindings,
+            )
 
             plan = json.loads(best.plan_json)
             raw_args = plan["steps"][0].get("args", {})
@@ -7084,6 +7801,7 @@ async def nx_answer(
                     question=question,
                     plan_id=best.plan_id,
                     plan_name=best.name or "",
+                    plan_json=best.plan_json,
                 )
             except PlanBindingUnsatisfiableError as exc:
                 elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -7112,11 +7830,38 @@ async def nx_answer(
             # (nexus-nyry9.5 review-fix, code-review SIGNIFICANT) so this
             # formula lives in exactly one place instead of two
             # independently-maintained copies.
-            step_args = resolve_step_bindings(
-                raw_args,
-                default_bindings=best.default_bindings or {},
-                caller_bindings=step_bindings,
-            )
+            try:
+                step_args = resolve_step_bindings(
+                    raw_args,
+                    default_bindings=best.default_bindings or {},
+                    caller_bindings=step_bindings,
+                )
+            except PlanRunUnresolvedVarError as exc:
+                # nexus-pucte: this fast path bypasses plan_run (and its
+                # pre-dispatch _validate_var_refs check) entirely by
+                # design; resolve_step_bindings now runs the same check
+                # itself. Mirrors the PlanBindingUnsatisfiableError
+                # handling immediately above — refuse loudly rather than
+                # let a $var with no default and no caller value reach
+                # query() as a literal token string.
+                elapsed_ms = int((time.monotonic() - start) * 1000)
+                _log.warning(
+                    "nx_answer_single_query_unresolved_var",
+                    plan_id=best.plan_id, plan_name=best.name,
+                    var_name=exc.var_name, confidence=best.confidence,
+                )
+                try:
+                    with _t2_ctx() as db:
+                        _nx_answer_record_run(
+                            db.telemetry, question=question, plan_id=best.plan_id,
+                            matched_confidence=best.confidence, step_count=0,
+                            final_text=f"Error: {exc}", step_records=[],
+                            duration_ms=elapsed_ms, trace=trace,
+                        )
+                except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
+                    pass
+                _nx_answer_record_outcome(best.plan_id, success=False)
+                return _result(str(exc), plan_id=best.plan_id, step_count=0)
             q = step_args.get("question", question)
             corpus = step_args.get("corpus", "knowledge")
             try:
@@ -7270,6 +8015,7 @@ async def nx_answer(
             question=question,
             plan_id=best.plan_id,
             plan_name=best.name or "",
+            plan_json=best.plan_json,
         )
     except PlanBindingUnsatisfiableError as exc:
         elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -7309,6 +8055,13 @@ async def nx_answer(
     _plan_run_kwargs: dict[str, Any] = {}
     if deadline is not None:
         _plan_run_kwargs["deadline"] = deadline
+    # RDR-196 .p3c (nexus-nyry9.21) D5: same "only pass when set"
+    # discipline as deadline above -- None whenever enforcement is
+    # inactive for this call, so a caller/test double with a fixed
+    # (match, bindings) signature and no budget_usd/enforcement in play
+    # sees byte-identical behavior.
+    if _budget_remaining_usd is not None:
+        _plan_run_kwargs["budget_usd_remaining"] = _budget_remaining_usd
 
     try:
         result = await _plan_run(best, run_bindings, **_plan_run_kwargs)
@@ -7352,6 +8105,37 @@ async def nx_answer(
     # already knows the run produced nothing. It could not have been right: at
     # this point the outcome is literally not yet computed. Moved to the two
     # branches that DO know, further down.
+
+    # RDR-196 .p3c round 2 (critic Significant 1, T2 p3c-critique-2026-08-21):
+    # unknown-cost blind-spot signal. "Never fabricate a 0 for an unknown
+    # cost_usd" is correct (StepRecord's own doctrine), but its corollary
+    # is silent: the mid-run running sum cannot accumulate for a step
+    # whose real cost was never captured, so `budget_usd_remaining`'s
+    # check may have been blind for part of this run. Fail loud, per the
+    # repo's own no-silent-fallbacks-for-correctness rule — once per
+    # RUN, not once per step, through the single warning emitter. Only
+    # meaningful when enforcement was actually active for this call
+    # (`_budget_remaining_usd is not None`); an unenforced run was never
+    # promising a cost guarantee to begin with. Checked BEFORE the
+    # exhaustion-marker early-return below so the signal still surfaces
+    # even on a run that also hit the exhaustion marker — the two are
+    # independent observations (a run can be BOTH "stopped early on
+    # measured cost" and "some earlier step's cost was never measured").
+    if _budget_remaining_usd is not None:
+        _unknown_cost_step_records = getattr(result, "step_records", None)
+        if not isinstance(_unknown_cost_step_records, list):
+            _unknown_cost_step_records = []
+        _unknown_cost_count = sum(
+            1 for r in _unknown_cost_step_records if getattr(r, "cost_usd", None) is None
+        )
+        if _unknown_cost_count:
+            _emit_budget_warning(
+                "unknown-cost",
+                f"{_unknown_cost_count} of {len(_unknown_cost_step_records)} "
+                "executed step(s) reported no cost_usd — the running spend "
+                "could not include them, so the budget_usd_remaining check "
+                "may not have caught an overrun for this run",
+            )
 
     # ── nexus-h33x8.6 a4: budget-exhausted partial-result path ────────────
     # Runs BEFORE Step 5's normal extraction — a budget cutoff bypasses
@@ -7671,7 +8455,7 @@ async def nx_tidy(
         f"'{collection}'."
         f"{entries_section}"
     )
-    payload = await claude_dispatch(prompt, schema, timeout=timeout)
+    payload = await claude_dispatch(prompt, schema, timeout=timeout, model=_pin_default_model(None))
 
     summary = payload.get("summary", "") if isinstance(payload, dict) else str(payload)
     actions = payload.get("actions", []) if isinstance(payload, dict) else []
@@ -7746,6 +8530,7 @@ async def nx_enrich_beads(
     payload = await claude_dispatch(
         prompt, schema, timeout=timeout,
         mcp_servers=mcp_servers, allowed_tools=allowed_tools,
+        model=_pin_default_model(None),
     )
     return (
         payload.get("enriched_description", "")
@@ -7811,6 +8596,7 @@ async def nx_plan_audit(
     payload = await claude_dispatch(
         prompt, schema, timeout=timeout,
         mcp_servers=mcp_servers, allowed_tools=allowed_tools,
+        model=_pin_default_model(None),
     )
     if isinstance(payload, dict):
         verdict = payload.get("verdict", "unknown")
@@ -7861,250 +8647,6 @@ def daemon_uninstall(confirm: bool = False, remove_data: bool = False) -> str:
         lines.append("Warnings:")
         lines.extend(f"  - {w}" for w in report.warnings)
     return "\n".join(lines)
-
-
-# ── RDR-182 consent-gated remediation surface (A4 spike nexus-ykzbj.1 →
-# real tools from P3, nexus-ykzbj.10+).
-#
-# Critical Assumption A4 (verified by the spike, enforced here for real):
-# unlike a CLI command (a human typed it — an implicit consent gesture), an
-# @mcp.tool() is autonomously agent-invocable, so the durable opt-in MUST be
-# enforced at the tool boundary itself: the FIRST statement of every gated
-# tool reads the flag and refuses BEFORE any diagnostic work happens. Gate
-# shape + carried-forward limitations: T2 nexus/rdr182-a4-spike-gate-shape.md.
-
-#: The refusal every RDR-182 tool returns when the capability is disabled.
-#: Names the EXACT enable command (tests lock the coupling). Module-level so
-#: forensics/remediate/tests share one string and cannot drift.
-_REMEDIATION_REFUSAL = (
-    "Claude-assisted remediation is not enabled — this capability is opt-in "
-    "and default-off. To enable it, run:\n"
-    "  nx config set claude_assisted_remediation.enabled true\n"
-    "(durable; revoke with `nx config set claude_assisted_remediation.enabled "
-    "false`). No diagnostic content has been emitted. See RDR-182."
-)
-
-
-def _remediation_opt_in() -> bool:
-    """The RDR-182 durable opt-in gate — global-config-only, strict, fail-closed.
-
-    Single source of truth in :mod:`nexus.remediation.consent` (shared with
-    the CLI's live-diagnostics leg so the two surfaces cannot drift). Kept as
-    a module-local name so tests that monkeypatch ``core._remediation_opt_in``
-    and the gate-shape record's references still resolve here.
-    """
-    from nexus.remediation.consent import remediation_opt_in  # noqa: PLC0415 — deferred, startup cost
-
-    return remediation_opt_in()
-
-
-def _diag_resolve(creds_path=None):  # noqa: ANN001, ANN202 — thin indirection, monkeypatch seam
-    """Indirection over :func:`nexus.db.diag_connection.resolve_diag_credentials`
-    so tests can prove mechanically that a REFUSED call never touches the
-    diagnostic path (the P0 spike's zero-emission guarantee, kept on the real
-    tool)."""
-    from nexus.db.diag_connection import resolve_diag_credentials  # noqa: PLC0415 — deferred, startup cost
-
-    return resolve_diag_credentials(creds_path)
-
-
-def _diag_run(statements, creds, **kwargs):  # noqa: ANN001, ANN202 — thin indirection, monkeypatch seam
-    from nexus.db.diag_connection import run_diagnostic_sql  # noqa: PLC0415 — deferred, startup cost
-
-    return run_diagnostic_sql(statements, creds, **kwargs)
-
-
-@mcp.tool(
-    title="Upgrade Forensics Playbook (read-only, opt-in)",
-    annotations={"readOnlyHint": True, "idempotentHint": True},
-)
-def forensics(topic: str = "chash-poison") -> str:
-    """Emit a read-only diagnostic playbook for an upgrade-edge *topic*,
-    with LIVE store state when the diagnostic path is available (RDR-182
-    P3.1, nexus-ykzbj.10).
-
-    OPT-IN GATED: this tool is autonomously agent-invocable, so the first
-    statement enforces the durable consent flag — when
-    ``claude_assisted_remediation.enabled`` is false (the default) it
-    returns a refusal naming the enable command and does ZERO diagnostic
-    work. When enabled: the topic's lint-verified aggregate SQL runs through
-    the sanctioned ``nexus_diag`` choke point (read-only session, BYPASSRLS
-    so integrity counts see every tenant's rows — nexus-vounk) and the
-    results are embedded in the returned playbook. Diagnostics unavailable
-    (pre-P2.1 install, PG down) degrades to an explicit unavailable note —
-    never a silent all-clean, never a crash. No outbound HTTP; the payload
-    is this return string (the RDR-126 Desktop channel).
-
-    Args:
-        topic: The diagnostic topic. Currently: ``chash-poison`` (the
-            GH #1414 / nexus-pnwu0 width-non-conformant class; GH #1390
-            was the original, closed incident). Unknown topics list the
-            known set.
-    """
-    if not _remediation_opt_in():
-        return _REMEDIATION_REFUSAL
-
-    from nexus.remediation import StoreState, emit_forensics_playbook  # noqa: PLC0415 — deferred, startup cost
-
-    # Build once with a placeholder to resolve the topic (loud on unknown)
-    # and obtain the topic's diagnostic SQL.
-    try:
-        probe = emit_forensics_playbook(topic, StoreState(detail=""))
-    except KeyError as exc:
-        return str(exc)
-
-    detail = _live_store_detail(probe.diagnostic_sql)
-    return emit_forensics_playbook(topic, StoreState(detail=detail)).tool_return()
-
-
-def _live_store_detail(diagnostic_sql) -> str:  # noqa: ANN001, ANN202 — shared by forensics/remediate
-    """Delegate to the canonical :func:`nexus.db.diag_connection
-    .live_store_detail`, threading this module's monkeypatchable seams
-    (``_diag_resolve``/``_diag_run``) so the zero-work-on-refusal and
-    degrade-path tests keep their hooks."""
-    from nexus.db.diag_connection import live_store_detail  # noqa: PLC0415 — deferred, startup cost
-
-    return live_store_detail(diagnostic_sql, resolve=_diag_resolve, run=_diag_run)
-
-
-@mcp.tool(
-    title="Guided Remediation Playbook (consented, audited)",
-    # No idempotentHint (review-p3 M2): every confirm=True call appends a NEW
-    # consent-audit row by design (append-only trail) — a client retrying a
-    # timed-out call on an idempotency promise would multiply consent rows.
-    annotations={"destructiveHint": True},
-)
-
-
-def remediate(topic: str = "chash-poison", confirm: bool = False) -> str:
-    """Consent-gated guided-recovery playbook for an upgrade-edge *topic*
-    (RDR-182 P3.2, nexus-ykzbj.11).
-
-    THE FIVE-LAYER CONTRACT, in order — the opt-in check NEVER collapses
-    into the confirm flag (``daemon_uninstall``'s describe-then-confirm is a
-    shape template only, not a consent model):
-
-    1. OPT-IN GATE (first statement): ``claude_assisted_remediation.enabled``
-       false → refusal naming the enable command, zero work, REGARDLESS of
-       ``confirm``.
-    2. DESCRIBE (``confirm=False``, the default): states what consent would
-       authorize — hard do-NOTs, deliverable, runbook — but WITHHOLDS the
-       ordered recovery steps. Records no consent, mutates nothing (it DOES
-       run the topic's lint-verified read-only diagnostics for live store
-       state, same as ``forensics``).
-    3. CONFIRM (``confirm=True``): the explicit consent gesture.
-    4. MUTATE: the consented release of the full recovery playbook. Per the
-       RDR-182 §5 trust boundary the product itself never runs the mutation —
-       the playbook's steps are executed by the USER'S OWN agent with the
-       user's credentials; this release is the mutation-authorizing event.
-    5. AUDIT-RECORD: ``Telemetry.record_consent(scope="remediate:<topic>")``.
-       Written FAIL-CLOSED, before the release leaves this function: if the
-       consent audit cannot be written (e.g. a pre-nexus-ng2sy engine
-       without the consents route), the release is REFUSED — THIS
-       TOOL never hands out its recovery playbook unaudited.
-
-    THREAT-MODEL HONESTY (review-p3 H1): the consent layer audits the
-    PRODUCT'S guided handoff — it is NOT an information-access control. The
-    recovery knowledge also lives in the public migration runbook (public
-    documentation by design, Gap 2: remediation knowledge in-product and
-    linked), so a network-capable agent could read the same steps without
-    ever consenting here. What this contract guarantees is that the safe,
-    guided, store-state-aware path — the one the product steers agents onto
-    — is consented and audited; it makes the safe path the easy path (Gap 1),
-    it does not make the unsafe path impossible.
-
-    Live store state (the forensics counts) is embedded when the diagnostic
-    path is available, so the recovery playbook reflects the actual store.
-
-    Args:
-        topic: The remediation topic. Currently: ``chash-poison``.
-        confirm: False (default) describes; True consents, audits, and
-            releases the recovery playbook.
-    """
-    if not _remediation_opt_in():
-        return _REMEDIATION_REFUSAL
-
-    from nexus.remediation import (  # noqa: PLC0415 — deferred, startup cost
-        StoreState,
-        consent_scope,
-        emit_forensics_playbook,
-        emit_playbook,
-        forensics_topics,
-        remediate_topics,
-    )
-
-    # Validate the REMEDIATE topic FIRST (review-p3 L1): an unknown topic
-    # must fail loud before any live DB query runs — a forensics-only topic
-    # would otherwise burn a diagnostic round-trip just to be rejected.
-    if topic not in remediate_topics():
-        return (
-            f"unknown remediate playbook topic {topic!r} — known topics: "
-            f"{list(remediate_topics())}"
-        )
-
-    # Live store state: reuse the FORENSICS topic's linted diagnostic SQL
-    # when the subject has one (same degrade semantics as forensics()).
-    # Membership check, NOT try/except KeyError — a KeyError from inside a
-    # builder is a bug that must propagate, not read as "no diagnostics"
-    # (critic-p3 Low).
-    if topic in forensics_topics():
-        diag_probe = emit_forensics_playbook(topic, StoreState(detail=""))
-        detail = _live_store_detail(diag_probe.diagnostic_sql)
-    else:
-        detail = "no live diagnostics defined for this topic"
-
-    playbook = emit_playbook(topic, StoreState(detail=detail))
-
-    if not confirm:
-        return playbook.describe()
-
-    # Consented: audit-record BEFORE the release leaves this function —
-    # fail-closed, so a release without a consent row is impossible. (The
-    # contract's 4→5 numbering describes the operator-visible sequence; the
-    # audit write preceding the return is what makes it unfalsifiable.)
-    # ANY audit failure refuses the release (critic-p3 High: not just the
-    # service-mode AttributeError — a locked SQLite, disk-full, or migration
-    # bug must produce the contract's refusal, never a raw traceback and
-    # never an unaudited release).
-    from datetime import datetime, timezone  # noqa: PLC0415 — deferred, startup cost
-
-    try:
-        with _t2_ctx() as _db:
-            # nexus-huaef: this was `if not hasattr(_db.telemetry,
-            # "record_consent")`, which could NEVER fire — record_consent is
-            # present on BOTH Telemetry and HttpTelemetryStore, so the
-            # version-skew branch was structurally unreachable and its
-            # actionable "upgrade the engine" message was dead.
-            #
-            # The fail-closed CONTRACT was never at risk: HttpTelemetryStore
-            # .record_consent posts and _raise_for_status raises
-            # httpx.HTTPStatusError on any non-2xx, so an engine lacking the
-            # consents route lands in the generic refusal below. What was lost
-            # was the DIAGNOSIS — the operator got a bare 404 instead of being
-            # told to upgrade. So the skew check moves to a condition that can
-            # actually occur: the route reporting itself absent.
-            _db.telemetry.record_consent(
-                scope=consent_scope("remediate", topic),
-                ts=datetime.now(timezone.utc).isoformat(),
-                granted=True,
-            )
-    except Exception as exc:  # noqa: BLE001 — fail-closed auditing: no unaudited release, ever
-        if _is_missing_route_error(exc):
-            return (
-                "Cannot record the consent audit in this deployment "
-                "(this engine build lacks the consent-audit route — upgrade the "
-                "engine to one with nexus-ng2sy) "
-                "— REFUSING to release the recovery playbook unaudited. "
-                "Run the CLI path on the local install, or wait for the "
-                "engine-side consent-audit parity."
-            )
-        return (
-            f"Consent audit write FAILED ({exc}) — REFUSING to release the "
-            "recovery playbook unaudited. Fix the audit store (T2 memory.db) "
-            "and re-invoke with confirm=true."
-        )
-
-    return playbook.tool_return()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

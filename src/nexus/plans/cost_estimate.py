@@ -27,7 +27,8 @@ NOT COUPLED TO PHASE 2 MODEL TIERING: this module deliberately does NOT
 import ``nexus.operators.model_tiers`` / ``OPERATOR_MODEL_TIER`` /
 ``FLIPPED_OPERATORS``. UPDATED (RDR-196 .p2d, nexus-nyry9.17, landed
 2026-08-21): model-tier routing is now ON by default for 4 operators
-(filter/groupby/extract/rank route to cheap-tier automatically; see
+(filter/groupby/extract/rank, + check/verify since nexus-3mea3
+2026-08-21, route to cheap-tier automatically; see
 ``model_tiers.FLIPPED_OPERATORS``) -- but this module still prices every
 non-sql-fast-path LLM operator uniformly via the SAME static fallback
 (below) and the SAME history path, deliberately NOT importing the tier
@@ -135,7 +136,8 @@ PLAN_CHOICE_CONFIDENCE_BAND: Final[float] = 0.05
 # RESOLVED (RDR-196 .p2d, nexus-nyry9.17, 2026-08-21): the forward-link
 # above predicted operators "extract/filter/groupby/aggregate/rank/
 # summarize" would flip -- .p2d's actual decision (T2 nexus_rdr/
-# 196-phase2-ab-measurement) flipped only 4: filter/groupby/extract/rank.
+# 196-phase2-ab-measurement) flipped 4 (filter/groupby/extract/rank);
+# nexus-3mea3 (2026-08-21) added check/verify on three-arm evidence.
 # aggregate/summarize stayed "strong" (no .p2a quality proxy exists for
 # either; see model_tiers.OPERATOR_MODEL_TIER's own comment) -- the
 # forward-link's operator list was a pre-decision guess, now superseded.

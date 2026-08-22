@@ -153,6 +153,7 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "scope_tags":       stored_scope_tags,
             "match_text":       match_text,
         }
+        _refuse_test_fixture_write_to_production(tags or "")
         resp = self._post("/v1/plans/save", payload)
         return int(resp["id"])
 
@@ -487,3 +488,42 @@ def _normalize(row: dict[str, Any] | None) -> dict[str, Any] | None:
             row[nullable_field] = None
 
     return row
+
+
+#: Tag that marks a row as belonging to a test fixture. A row carrying it
+#: must never reach a real install's library.
+_TEST_FIXTURE_TAG = "test-fixture"
+
+
+def _refuse_test_fixture_write_to_production(tags: str) -> None:
+    """Refuse a fixture-tagged write when the endpoint is a live install.
+
+    A bare ``HttpPlanLibrary()`` resolves the machine's own service lease,
+    so a script run from the source checkout writes to the DEVELOPER'S
+    REAL LIBRARY. That is not hypothetical: on 2026-08-21 a reproduction
+    script for a seed-collision bug created two fixture rows in the live
+    library and the bug under reproduction destroyed one of them. The
+    survivor was found only because the new disk-vs-live parity check
+    reported it as an orphan.
+
+    pytest is already safe — the autouse substrate fixture points every
+    test at a hermetic engine with a per-test tenant via NX_SERVICE_URL.
+    The hole is everything that is NOT pytest, which is exactly where
+    ad-hoc reproduction scripts live. Absence of NX_SERVICE_URL therefore
+    means "this is a real install's lease", and a fixture-tagged row has
+    no business there.
+    """
+    import os  # noqa: PLC0415 — deferred; guard is off the hot path
+
+    if _TEST_FIXTURE_TAG not in [t.strip() for t in tags.split(",")]:
+        return
+    if os.environ.get("NX_SERVICE_URL"):
+        return  # explicitly pointed at a substrate — the test path
+    raise RuntimeError(
+        "Refusing to write a plan tagged 'test-fixture' to a live plan "
+        "library. NX_SERVICE_URL is unset, so this resolved the machine's "
+        "own service lease — the real library, not a test substrate. "
+        "Run fixture code under pytest (the autouse substrate fixture "
+        "mints a per-test tenant), or set NX_SERVICE_URL to a substrate "
+        "endpoint explicitly."
+    )

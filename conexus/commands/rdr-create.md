@@ -13,6 +13,8 @@ $ARGUMENTS
 
 ## Action
 
+- Prose register: the RDR is written for the reader named in `{rdr_dir}/REGISTER.md` (fall back to `$CLAUDE_PLUGIN_ROOT/resources/rdr/REGISTER.md` if the repo copy is not there yet) (a smart future engineer who may not know the jargon; define terms on first use; simplified, never simplistic).
+
 All data is pre-loaded above — no additional tool calls needed.
 
 - RDR directory is shown above (from `.nexus.yml` `indexing.rdr_paths[0]`).

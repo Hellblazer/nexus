@@ -176,7 +176,7 @@ def test_enqueue_hook_service_mode_reaches_daemon_spawn(tmp_path, monkeypatch) -
     monkeypatch.setattr("nexus.mcp_infra.t2_index_write", lambda fn: None)
     monkeypatch.setattr(awd, "ensure_aspect_worker_daemon",
                         lambda **k: _FakePopen(["spawned"], tenant=k.get("tenant")))
-    monkeypatch.setattr(aw, "nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
     aw.aspect_extraction_enqueue_hook("/p/doc.pdf", "knowledge__o__m__v1", "content")
     assert len(_FakePopen.calls) == 1   # the hook chain reached the daemon-spawn path

@@ -19,9 +19,13 @@ Every file is classified into one of four categories:
   that receive line-based chunking
 - **PDF**: `.pdf` files are extracted and chunked separately, then stored in `docs__`.
 - **PROSE**: `.md`, `.markdown`, and any extension not in CODE, PDF, or SKIP.
-- **SKIP** (23 extensions — not indexed): `.xml`, `.json`, `.yml`, `.yaml`, `.toml`,
+- **SKIP** (not indexed): `_SKIP_EXTENSIONS` in `src/nexus/classifier.py` names 23
+  known-noise config/data extensions — `.xml`, `.json`, `.yml`, `.yaml`, `.toml`,
   `.properties`, `.ini`, `.cfg`, `.conf`, `.gradle`, `.html`, `.htm`, `.css`, `.svg`,
-  `.cmd`, `.bat`, `.ps1`, `.lock`, `.txt`, `.csv`, `.tsv`, `.dat`, `.log`
+  `.cmd`, `.bat`, `.ps1`, `.lock`, `.txt`, `.csv`, `.tsv`, `.dat`, `.log` — plus a
+  separate `_BINARY_EXTENSIONS` set of 66 binary-asset extensions (images, audio,
+  video, fonts, archives, compiled objects, Office documents, embedded databases)
+  that are also classified SKIP. 89 extensions total route to SKIP.
 
 **Extensionless files** (e.g., `Makefile`, `LICENSE`): if the first two bytes are `#!`
 (shebang), the file is classified as CODE; otherwise SKIP.

@@ -36,8 +36,21 @@ def _builtin_rows(n: int) -> list[dict]:
 
 
 def _run() -> tuple[str, int | None]:
+    """Drive the check with the disk-vs-live parity assert stubbed out.
+
+    These rows are synthetic census fixtures (``dimensions="d0"``...), so
+    the parity assert added at nexus-f1mbo would correctly report every
+    shipped template as missing and drown the census this file is about.
+    Parity has its own non-vacuity suite in
+    ``tests/test_plan_seed_reconcile.py``; here it is deliberately silent.
+    """
+    from nexus.commands.doctor import _ParityReport
+
     runner = CliRunner()
-    with runner.isolation() as (out, err, _):
+    with runner.isolation() as (out, err, _), patch(
+        "nexus.commands.doctor._plan_library_parity",
+        return_value=_ParityReport([], [], []),
+    ):
         exit_code: int | None = None
         try:
             _run_check_plan_library()

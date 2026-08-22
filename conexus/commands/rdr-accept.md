@@ -18,6 +18,8 @@ apostrophes/quotes breaks the quoting (nexus-ybvyo).
 
 ## Action
 
+- Prose register (`{rdr_dir}/REGISTER.md` (fall back to `$CLAUDE_PLUGIN_ROOT/resources/rdr/REGISTER.md` if the repo copy is not there yet)): the accepted plan is read by the people who execute it; each step says one thing, no step needs interpreting.
+
 > **PROHIBITION — PLANNING CHAIN INTEGRITY**
 > You MUST NOT create beads, write plans, enrich beads, or perform any planning/enrichment work yourself.
 > You are the **caller only**. Running `bd create`, `bd dep add`, `bd update --description`,

@@ -458,6 +458,23 @@ def _add_predicted_costs(by_plan: dict[str, dict[str, Any]], telemetry_store: An
     ),
 )
 @click.option(
+    "--derive-budget", "derive_budget", is_flag=True, default=False,
+    help=(
+        "RDR-196 Phase 3 Step 0 (nexus-nyry9.19): derive the default "
+        "budget_usd from recorded POST-FLIP run history. Scans executed-ok "
+        "runs (implies --steps), keeps only runs whose flipped-operator "
+        "steps recorded a cheap-tier canonical model (pre-flip strong-tier "
+        "rows are a different population and are counted, not pooled), "
+        "and prints per-run cost percentiles with the fraction of runs "
+        "each would have refused. Names NO value below the non-vacuity "
+        "floor. Replaces the rest of the report. Honors --since; --limit "
+        "is raised to at least 300 (the telemetry page cap) because the "
+        "derivation needs every row it can see, not a display page; "
+        "--steps is implied and --include-failed is ignored (failed runs "
+        "never enter a budget derivation)."
+    ),
+)
+@click.option(
     "--json", "json_out", is_flag=True, default=False,
     help="Emit structured JSON instead of the human table.",
 )
@@ -466,6 +483,7 @@ def answer_runs_cmd(
     limit: int,
     want_steps: bool,
     include_failed: bool,
+    derive_budget: bool,
     json_out: bool,
 ) -> None:
     """Read nx_answer_runs: recent runs plus exact aggregates (nexus-eho3u).
@@ -496,6 +514,14 @@ def answer_runs_cmd(
         from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
 
         store = HttpTelemetryStore()
+        if derive_budget:
+            from nexus.plans.budget_default import derive_budget_default  # noqa: PLC0415 - deferred: only on this flag
+
+            _emit_budget_derivation(
+                derive_budget_default(store, limit=max(limit, 300), since=since),
+                json_out=json_out,
+            )
+            return
         result = store.query_nx_answer_runs(since=since, limit=limit, include_steps=want_steps)
     except Exception as exc:  # noqa: BLE001 — degrade to the honest failure-shaped message, never a silent 0
         _log.debug("answer_runs_service_read_failed", exc_info=True)
@@ -511,6 +537,38 @@ def answer_runs_cmd(
         result, since=since, limit=limit, json_out=json_out,
         want_steps=want_steps, include_failed=include_failed,
         telemetry_store=store,
+    )
+
+
+def _emit_budget_derivation(derivation: Any, *, json_out: bool) -> None:
+    """Render a :class:`nexus.plans.budget_default.BudgetDerivation`."""
+    if json_out:
+        click.echo(_json.dumps(derivation.as_dict(), indent=2))
+        return
+    from nexus.plans.budget_default import MIN_DERIVATION_RUNS  # noqa: PLC0415 - deferred: only on this flag
+
+    d = derivation
+    click.echo("budget_usd derivation (RDR-196 .p3a, post-flip executed-ok runs):")
+    click.echo(f"  tier config: {d.tier_config}")
+    click.echo(f"  rows scanned: {d.n_rows_scanned}   executed-ok: {d.n_executed_ok}")
+    click.echo(
+        f"  excluded: no step records {d.n_excluded_no_steps}, "
+        f"pre-flip {d.n_excluded_pre_flip}, unknown cost {d.n_excluded_unknown_cost}"
+    )
+    if d.flipped_step_models:
+        seen = ", ".join(f"{m} ({n})" for m, n in sorted(d.flipped_step_models.items()))
+        click.echo(f"  flipped-operator steps recorded model: {seen}")
+    click.echo(f"  qualifying post-flip runs: n={d.n_runs} (floor {MIN_DERIVATION_RUNS})")
+    if not d.sufficient:
+        click.echo("  INSUFFICIENT: no value named (n below the non-vacuity floor)")
+    else:
+        for p, value in d.percentiles.items():
+            click.echo(
+                f"  p{p}: {value:.4f} USD   would refuse {d.would_refuse[p]:.1%} of these runs"
+            )
+    click.echo(
+        f"  current DERIVED_BUDGET_USD: {d.as_dict()['derived_budget_usd']}   "
+        f"enforcement: {'ON' if d.as_dict()['enforcement_enabled'] else 'OFF'}"
     )
 
 

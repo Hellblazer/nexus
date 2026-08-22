@@ -338,7 +338,7 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 59
 # client-side naming decision identically; Popen is mocked in both, no
 # real embedder or cloud call is made. Rationale in conftest.py beside
 # the entries.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 47
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 48
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

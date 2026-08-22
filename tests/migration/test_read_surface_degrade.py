@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -190,7 +191,13 @@ def test_store_get_many_surface_degrades_loud_structured() -> None:
     from nexus.mcp.core import store_get_many
 
     mock_t3 = MagicMock()
-    mock_t3.get_by_id = lambda col, doc_id: {"content": "landed body"}
+    mock_t3.get_or_create_collection = lambda name: SimpleNamespace(
+        get=lambda ids=None, **kw: {
+            "ids": list(ids or []),
+            "documents": ["landed body" for _ in (ids or [])],
+            "metadatas": [{} for _ in (ids or [])],
+        }
+    )
 
     with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
         _set_migrating(done=1, total=2)
@@ -200,6 +207,7 @@ def test_store_get_many_surface_degrades_loud_structured() -> None:
     assert "1/2" in out["migration_warning"]
     # Landed content preserved — never a bare-empty result.
     assert len(out["contents"]) == 1
+    assert out["contents"][0] == "landed body"
 
 
 # --------------------------------------------------------------------------

@@ -310,6 +310,15 @@ _RECORD_LEVEL: frozenset[str] = frozenset({
     # One unchunkable file must fail that record only; single-file
     # commands translate it to ClickException at the wrapper boundary.
     "UnchunkableContentError",
+    # nexus-deyd5: fires from PDFExtractor._extract_normalized (pymupdf)
+    # and _extract_with_docling when extraction completes but yields zero
+    # usable text (an image-only PDF, a deliberately blank fixture, a
+    # damaged text layer). Reachable from the same dt.py/index.py
+    # per-record loops as ExtractionQualityError; also recognized
+    # directly by nexus.indexer_utils.run_file_loop so the bulk
+    # `nx index repo` walk skips this one file instead of aborting the
+    # whole run.
+    "UnextractableContentError",
 })
 
 #: Command-level: every OTHER NexusError subclass, with a specific,

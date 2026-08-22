@@ -1063,22 +1063,6 @@ _DEFAULTS: dict[str, Any] = {
         "enabled": False,
         "weight": 0.025,
     },
-    # RDR-182: Claude-assisted upgrade forensics / remediation. DEFAULT-OFF —
-    # the MCP surface is autonomously agent-invocable, so the durable opt-in
-    # is enforced at the tool boundary itself (the tool refuses before
-    # emitting content when this is false). Enable:
-    #   nx config set claude_assisted_remediation.enabled true
-    # NOTE: that write path stores the STRING "true"; consumers must parse
-    # strictly (see nexus.mcp.core._remediation_opt_in), never truthiness.
-    # CONSENT-PROVENANCE EXCEPTION (critic-p3 Critical, 2026-07-12): unlike
-    # every other flag, the gate does NOT honor this key from the merged
-    # load_config() view — a repo-local .nexus.yml (which arrives via git
-    # pull) is not a human consent gesture. _remediation_opt_in reads the
-    # GLOBAL config.yml only; this default exists for documentation and
-    # `nx config list` visibility.
-    "claude_assisted_remediation": {
-        "enabled": False,
-    },
     # RDR-087: search-observability opt-outs. Default-on.
     "telemetry": {
         "search_enabled": True,       # Phase 2.2 hot-path INSERT OR IGNORE.
@@ -1180,11 +1164,10 @@ def set_config_value(dotted_key: str, value: str) -> None:
           extractor: mineru
 
     A non-dict value at an intermediate key (e.g. a hand-written flat
-    ``claude_assisted_remediation: true`` when setting
-    ``claude_assisted_remediation.enabled``) is REPLACED by the nested form —
-    the dotted command expresses explicit intent for the section shape, and the
-    RDR-182 refusal text names this command as the remedy for exactly that flat
-    shape (nexus-s4a98). The replacement is logged with the discarded value.
+    ``pdf: mineru`` when setting ``pdf.extractor``) is REPLACED by the
+    nested form — the dotted command expresses explicit intent for the
+    section shape (nexus-s4a98). The replacement is logged with the
+    discarded value.
     """
     path = _global_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)

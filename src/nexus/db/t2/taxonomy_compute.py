@@ -35,7 +35,28 @@ import structlog
 
 # RDR-070 (nexus-9k5): scikit-learn>=1.3 is a core dep. HDBSCAN for topic
 # discovery with c-TF-IDF labels via CountVectorizer.
-from sklearn.cluster import HDBSCAN as SklearnHDBSCAN
+#
+# HDBSCAN itself is NOT imported here -- deferred to call time inside
+# _cluster() (latency fix, 2026-08-21), matching this file's own
+# established pattern: the 4 sibling sklearn.cluster/.metrics imports below
+# (MiniBatchKMeans, cosine_similarity x2, KMeans) are already deferred with
+# the identical `# noqa: PLC0415` convention, so a module-level HDBSCAN
+# import was the one outlier, not a new pattern. This module is imported at
+# every FIRST T2Database construction (http_taxonomy_store.py imports it at
+# module level, and HttpTaxonomyStore is constructed eagerly and
+# unconditionally by T2Database.__init__), so deferring HDBSCAN's import
+# cost previously landed on the first T2Database of every process, not
+# just processes that actually cluster.
+#
+# Measured saving: ~0.14-0.15s on first T2Database construction (alternating
+# fresh-subprocess A/B; independently reconfirmed by a 3-trial subprocess
+# A/B and by fresh-interpreter timing, both landing at the same ~0.14s /
+# ~20% figure) -- NOT the ~0.9s a bare `import sklearn.cluster` costs in an
+# otherwise-cold process. The gap is CountVectorizer/TfidfTransformer
+# (imported below, deliberately left module-level -- out of scope for this
+# fix): they already trigger sklearn's dominant shared package-init cost,
+# so by the time HDBSCAN would be imported, most of that cost is already
+# paid and deferring HDBSCAN alone only recovers its own marginal share.
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 
 _log = structlog.get_logger()
@@ -173,6 +194,8 @@ def _cluster(
     without a ``CatalogTaxonomy`` instance.
     """
     if n <= LARGE_COLLECTION_THRESHOLD:
+        from sklearn.cluster import HDBSCAN as SklearnHDBSCAN  # noqa: PLC0415 — heavy/optional dependency deferred to call time
+
         _log.info("clustering_hdbscan", n=n, collection=collection_name)
         clusterer = SklearnHDBSCAN(
             min_cluster_size=5,

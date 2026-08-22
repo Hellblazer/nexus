@@ -737,6 +737,7 @@ async def dispatch_bundle(
     *,
     timeout: float = 300.0,
     usage_sink: list["DispatchUsage"] | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Issue a single claude_dispatch for the whole bundle.
 
@@ -756,4 +757,5 @@ async def dispatch_bundle(
     prompt, schema = compose_bundle_prompt(bundle)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, usage_sink=usage_sink,
+        model=model,
     )

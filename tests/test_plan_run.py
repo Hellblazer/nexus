@@ -122,6 +122,208 @@ async def test_run_rejects_missing_required_binding() -> None:
     assert sorted(exc.value.missing) == ["subtree"]
 
 
+# ── Unresolved $var — nexus-pucte ───────────────────────────────────────────
+#
+# ``$stepN.<field>`` refs already raised ``PlanRunStepRefError`` on an
+# unresolved reference. ``$var`` refs had no equivalent: ``_validate_bindings``
+# only checks ``match.required_bindings`` NAMES, never what a step's args
+# actually reference, so an optional (or simply undeclared) var with no
+# default and no caller value silently reached the dispatched tool as the
+# literal string ``'$var'``. These tests cover the fix: fail loud at
+# validation, before any dispatch, naming the step index and the var.
+
+
+@pytest.mark.asyncio
+async def test_run_raises_on_unresolved_optional_var() -> None:
+    """An optional $var with no default and no caller value must be
+    rejected at validation — never reach the tool as the literal token."""
+    from nexus.plans.runner import PlanRunUnresolvedVarError, plan_run
+
+    plan = {
+        "steps": [{"tool": "search", "args": {"query": "$topic"}}],
+        "optional_bindings": ["topic"],
+    }
+    disp = _FakeDispatcher()
+    with pytest.raises(PlanRunUnresolvedVarError) as exc:
+        await plan_run(_match(plan), {}, dispatcher=disp)
+    assert exc.value.step_index == 0
+    assert exc.value.var_name == "topic"
+    # Validated before the first dispatch — nothing ever ran.
+    assert disp.calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_raises_naming_the_step_index_of_a_later_step() -> None:
+    """The unresolved var can be in any step — the whole plan is
+    validated up front, before step 0 (or any step) dispatches."""
+    from nexus.plans.runner import PlanRunUnresolvedVarError, plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "literal"}},
+            {"tool": "summarize", "args": {"content": "$missing"}},
+        ],
+    }
+    disp = _FakeDispatcher()
+    with pytest.raises(PlanRunUnresolvedVarError) as exc:
+        await plan_run(_match(plan), {}, dispatcher=disp)
+    assert exc.value.step_index == 1
+    assert exc.value.var_name == "missing"
+    assert disp.calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_raises_on_unresolved_var_inside_a_list_arg() -> None:
+    """``_resolve_value`` recurses element-wise into list args; the
+    validator must scan the same shape."""
+    from nexus.plans.runner import PlanRunUnresolvedVarError, plan_run
+
+    plan = {
+        "steps": [{"tool": "traverse", "args": {"seeds": ["fixed", "$missing_seed"]}}],
+    }
+    with pytest.raises(PlanRunUnresolvedVarError) as exc:
+        await plan_run(_match(plan), {}, dispatcher=_FakeDispatcher())
+    assert exc.value.step_index == 0
+    assert exc.value.var_name == "missing_seed"
+
+
+@pytest.mark.asyncio
+async def test_run_raises_on_unresolved_var_in_scope_topic() -> None:
+    """``scope.topic: $var`` (e.g. analyze-default, research-default) is
+    resolved through the same ``$var`` branch as args, via
+    ``_apply_scope_to_args``, and forwarded into the dispatched call —
+    an unresolved var there must be caught too, not just in ``args``."""
+    from nexus.plans.runner import PlanRunUnresolvedVarError, plan_run
+
+    plan = {
+        "steps": [{
+            "tool": "search",
+            "args": {"query": "literal"},
+            "scope": {"topic": "$missing_topic"},
+        }],
+    }
+    with pytest.raises(PlanRunUnresolvedVarError) as exc:
+        await plan_run(_match(plan), {}, dispatcher=_FakeDispatcher())
+    assert exc.value.step_index == 0
+    assert exc.value.var_name == "missing_topic"
+
+
+@pytest.mark.asyncio
+async def test_run_scope_topic_dead_when_args_already_sets_topic() -> None:
+    """``_apply_scope_to_args`` only resolves ``scope.topic`` when the
+    step's own ``args`` has NOT already set ``"topic"`` — a caller-set
+    ``args["topic"]`` wins outright and ``scope.topic`` is never touched
+    by ``_resolve_value`` at all. This is a VALID plan and must NOT
+    raise, even though ``scope.topic`` names an unresolved $var (review
+    finding, code-review MEDIUM)."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [{
+            "tool": "search",
+            "args": {"topic": "explicit", "query": "literal"},
+            "scope": {"topic": "$unset_var"},
+        }],
+    }
+    disp = _FakeDispatcher()
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    assert disp.calls[0][1] == {"topic": "explicit", "query": "literal"}
+
+
+@pytest.mark.asyncio
+async def test_run_raises_named_error_on_non_dict_args() -> None:
+    """A malformed step whose ``args`` isn't a dict must raise a named
+    PlanRun*Error with the step index — not a bare AttributeError from
+    ``.values()`` (critic Significant #2)."""
+    from nexus.plans.runner import PlanRunToolNotFoundError, plan_run
+
+    plan = {
+        "steps": [{"tool": "traverse", "args": ["not", "a", "dict"]}],
+    }
+    disp = _FakeDispatcher()
+    with pytest.raises(PlanRunToolNotFoundError) as exc:
+        await plan_run(_match(plan), {}, dispatcher=disp)
+    assert "steps[0]" in str(exc.value)
+    assert "non-dict args" in str(exc.value)
+    assert disp.calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_validates_whole_plan_before_a_past_deadline_stops_it() -> None:
+    """Eager whole-plan validation runs BEFORE the deadline pre-segment
+    check — a $var problem in a late step still hard-fails the call even
+    when a tight deadline would otherwise have stopped the run before
+    ever reaching that step (critic Significant #1; contract now
+    documented in plan_run's own docstring)."""
+    import time
+
+    from nexus.plans.runner import PlanRunUnresolvedVarError, plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "literal"}},
+            {"tool": "summarize", "args": {"content": "$missing"}},
+        ],
+    }
+    disp = _FakeDispatcher()
+    with pytest.raises(PlanRunUnresolvedVarError) as exc:
+        await plan_run(
+            _match(plan), {}, dispatcher=disp,
+            deadline=time.monotonic() - 1.0,  # already expired
+        )
+    assert exc.value.step_index == 1
+    assert exc.value.var_name == "missing"
+    # Not a silent budget_exhausted early-stop -- the run never got that
+    # far because validation happens first, and nothing dispatched.
+    assert disp.calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_optional_var_with_default_still_resolves() -> None:
+    """An optional (non-required) $var backed by a plan default resolves
+    normally — the new validation must not regress the default-fallback
+    path."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [{"tool": "search", "args": {"query": "$topic"}}],
+        "optional_bindings": ["topic"],
+    }
+    match = _match(plan, default_bindings={"topic": "from-default"})
+    disp = _FakeDispatcher()
+    await plan_run(match, {}, dispatcher=disp)
+    assert disp.calls[0][1] == {"query": "from-default"}
+
+
+@pytest.mark.asyncio
+async def test_run_optional_var_caller_supplied_still_wins() -> None:
+    """A caller-supplied value resolves an optional $var with no plan
+    default at all."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [{"tool": "search", "args": {"query": "$topic"}}],
+        "optional_bindings": ["topic"],
+    }
+    disp = _FakeDispatcher()
+    await plan_run(_match(plan), {"topic": "caller-value"}, dispatcher=disp)
+    assert disp.calls[0][1] == {"query": "caller-value"}
+
+
+@pytest.mark.asyncio
+async def test_run_plan_with_no_var_refs_is_unaffected() -> None:
+    """False-positive guard: a plan with zero $var tokens must run
+    exactly as before — the new scan must never fire on plain literals."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [{"tool": "search", "args": {"query": "literal query", "limit": 5}}],
+    }
+    disp = _FakeDispatcher()
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    assert disp.calls[0] == ("search", {"query": "literal query", "limit": 5})
+
+
 # ── $stepN.<field> reference ───────────────────────────────────────────────
 
 
@@ -2092,6 +2294,161 @@ async def test_bundle_receives_remaining_budget_as_timeout_kwarg_on_success() ->
     assert result.budget_exhausted_at_step is None
     _, kwargs = fake_bundle.call_args
     assert kwargs["timeout"] == pytest.approx(12.5, abs=2.0)
+
+
+# ── RDR-196 .p3c (nexus-nyry9.21): USD cost check ───────────────────────────
+#
+# Mirrors the deadline check's pre-segment placement exactly:
+# ``budget_usd_remaining`` is compared against the running sum of already-
+# completed steps' non-None cost_usd BEFORE dispatching the next segment.
+# Unlike the deadline, there is no mid-dispatch cost cut (a dispatch's real
+# cost is unknowable until it returns) -- so this is a stop-line, not a
+# hard ceiling: the segment that pushes the sum over the cap still runs to
+# completion.
+
+
+@pytest.mark.asyncio
+async def test_budget_usd_remaining_stops_before_next_segment() -> None:
+    """A bundle dispatch costing more than budget_usd_remaining must be
+    allowed to finish (cost is unknowable before it returns), but the
+    NEXT segment must not be dispatched -- pre-segment stop-line, not a
+    mid-dispatch cut."""
+    from unittest.mock import AsyncMock, patch
+
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "extract", "args": {"fields": "a", "inputs": "[]"}},
+            {"tool": "summarize", "args": {"cited": False, "content": "$step1.extractions"}},
+            {"tool": "search", "args": {"query": "x"}},
+        ],
+    }
+    bundle_usage = _usage(cost_usd=0.60)
+
+    async def fake_bundle(bundle, *, usage_sink=None, **kwargs):
+        if usage_sink is not None:
+            usage_sink.append(bundle_usage)
+        return {"summary": "synthesis"}
+
+    search_calls: list[str] = []
+
+    async def stub_search(**kwargs):
+        search_calls.append("search")
+        return {"ids": ["a"], "tumblers": [], "distances": [], "collections": []}
+
+    from nexus.mcp import core as mcp_core
+
+    with patch.object(mcp_core, "search", stub_search), \
+         patch("nexus.plans.bundle.dispatch_bundle", fake_bundle):
+        result = await plan_run(_match(plan), {}, budget_usd_remaining=0.5)
+
+    assert search_calls == [], "the retrieval step must not have dispatched"
+    assert len(result.step_records) == 1
+    assert result.step_records[0].cost_usd == pytest.approx(0.60)
+    assert result.budget_exhausted_at_step == 3  # 1-indexed: the search step
+    assert result.budget_exhausted_kind == "cost"
+
+
+@pytest.mark.asyncio
+async def test_budget_usd_remaining_generous_cap_runs_to_completion() -> None:
+    """A cap comfortably above the total spend must let every segment
+    run -- no exhaustion field set, mirroring the deadline check's own
+    'no-op when not exceeded' behavior."""
+    from unittest.mock import AsyncMock, patch
+
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "extract", "args": {"fields": "a", "inputs": "[]"}},
+            {"tool": "summarize", "args": {"cited": False, "content": "$step1.extractions"}},
+            {"tool": "search", "args": {"query": "x"}},
+        ],
+    }
+    bundle_usage = _usage(cost_usd=0.60)
+
+    async def fake_bundle(bundle, *, usage_sink=None, **kwargs):
+        if usage_sink is not None:
+            usage_sink.append(bundle_usage)
+        return {"summary": "synthesis"}
+
+    async def stub_search(**kwargs):
+        return {"ids": ["a"], "tumblers": [], "distances": [], "collections": []}
+
+    from nexus.mcp import core as mcp_core
+
+    with patch.object(mcp_core, "search", stub_search), \
+         patch("nexus.plans.bundle.dispatch_bundle", fake_bundle):
+        result = await plan_run(_match(plan), {}, budget_usd_remaining=100.0)
+
+    assert len(result.step_records) == 2  # bundle + search, both dispatched
+    assert result.budget_exhausted_at_step is None
+    assert result.budget_exhausted_kind is None
+
+
+@pytest.mark.asyncio
+async def test_budget_usd_remaining_none_preserves_default_fields() -> None:
+    """``budget_usd_remaining=None`` (the default) must leave the new
+    PlanResult fields at their inert defaults -- proves the .p3c param
+    does not silently change behavior when unset."""
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+    disp = _FakeDispatcher(outputs=[{"ids": [], "tumblers": []}])
+    result = await plan_run(_match(plan), {}, dispatcher=disp)
+
+    assert result.budget_exhausted_at_step is None
+    assert result.budget_exhausted_kind is None
+
+
+@pytest.mark.asyncio
+async def test_budget_usd_remaining_unknown_cost_steps_never_trip() -> None:
+    """An isolated LLM-tool step whose dispatch produces no captured
+    DispatchUsage records cost_usd=None (genuinely unknown, never a
+    fabricated 0 -- see StepRecord's own docstring). A tiny
+    budget_usd_remaining must NOT stop a run built entirely of such
+    steps: an unknown cost contributes nothing to the running sum and
+    therefore can never trip the check on its own.
+
+    This proves the BLIND SPOT exists at the runner level (dispatch
+    continues, nothing accumulates, nothing trips). RDR-196 .p3c round
+    2 (critic Significant 1, T2 p3c-critique-2026-08-21) surfaces this
+    to the caller as a WARNING one layer up -- see
+    ``TestNxAnswerBudgetUsdEnforcement::
+    test_unknown_cost_steps_surface_the_blind_spot_warning`` in
+    tests/test_nx_answer.py, which proves the SIGNAL now fires."""
+    from unittest.mock import patch
+
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "extract", "args": {"fields": "a", "inputs": "[]"}},
+            {"tool": "extract", "args": {"fields": "b", "inputs": "[]"}},
+            {"tool": "extract", "args": {"fields": "c", "inputs": "[]"}},
+        ],
+    }
+    calls: list[str] = []
+
+    async def stub_extract(**kwargs):
+        calls.append("extract")
+        return {"extractions": []}
+
+    from nexus.mcp import core as mcp_core
+
+    with patch.object(mcp_core, "operator_extract", stub_extract):
+        result = await plan_run(
+            _match(plan), {}, budget_usd_remaining=0.01, bundle_operators=False,
+        )
+
+    assert calls == ["extract", "extract", "extract"], (
+        "every step must have run -- unknown (None) per-step cost must "
+        "never be treated as a fabricated 0 that would trip the check"
+    )
+    assert result.budget_exhausted_at_step is None
+    assert result.budget_exhausted_kind is None
+    assert all(r.cost_usd is None for r in result.step_records)
 
 
 # ── StepRecord (RDR-196 .p1b, nexus-nyry9.8) ────────────────────────────────

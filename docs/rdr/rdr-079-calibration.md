@@ -10,6 +10,12 @@ note: |
   Calibration artifact — a one-shot ROC measurement that established
   min_confidence=0.40 as the plan-matcher threshold (see ROC table).
   The measurement is complete; the threshold was adopted.
+  2026-08-22: the voyage-context-3 follow-up this document proposed is
+  RETIRED (Sam's decision; see "Alternative considered and RETIRED").
+  The plan cache stays on the bundled MiniLM. The population this
+  calibration measured — category-level templates — no longer uses the
+  cosine path at all, so the 0.40 floor now governs only instance-level
+  grown plans.
   rdr-close skill gap-replay gate does not apply to calibration
   artifacts (no Problem Statement gap headings by design).
 ---
@@ -109,13 +115,35 @@ behavior override explicitly:
 plan_match(intent, library=lib, cache=cache, min_confidence=0.50)
 ```
 
-Alternative (not shipped in this bead): migrate the T1 cache to
-`voyage-context-3` (the same embedder T3 uses for docs/rdr/knowledge
-collections). `voyage-context-3` is CCE-capable and should score
-plan-description paraphrases substantially higher. Tracked as a
-follow-up — switching requires wiring the per-session `VoyageAIEF`
-into `PlanSessionCache` and paying the per-SessionStart embedding
-cost against the Voyage rate budget.
+### Alternative considered and RETIRED 2026-08-22
+
+This document originally proposed migrating the T1 plan cache to
+`voyage-context-3` and tracked it as a follow-up. **That prescription is
+retired: the plan cache stays on the bundled MiniLM.**
+
+Retired by Sam's decision ("we are not substituting voyage embeddings,
+that is unworkable"), and the technical case for it had already weakened.
+The swap would have paid a per-SessionStart embedding cost against the
+Voyage rate budget, on the hot path ahead of every plan match — including
+the cache hits that finish in milliseconds — to improve a similarity
+score that, for the largest class of plan, cannot help.
+
+Measured 2026-08-21: a category-level plan is TOPIC-FREE by construction
+("research any concept") while a real question is topic-bearing, so it
+loses a topical-similarity contest no matter how good the embedder is. On
+one probe all 17 shipped templates sat inside a 0.12-wide cosine band —
+that is an absence of signal, not the phrasing penalty this document
+diagnosed below. Category plans now bypass cosine entirely and route by
+DIMENSION (T2 `design-dimension-routed-category-plans-2026-08-21`), so
+the population this calibration measured no longer uses the cosine path
+at all.
+
+What the cosine path serves now is INSTANCE-level grown plans, matching
+question against question — where MiniLM already scores 0.94 on a
+verbatim repeat. Fixes there are structural rather than embedding
+quality: see nexus-7g0rg (a 0.94 match dropped by the unanchored-grown
+filter, fixed) and nexus-93cc6 (grown plans carry the originating
+question verbatim instead of a generalised description, open).
 
 ## Why MiniLM cosine is low on this dataset
 
@@ -130,18 +158,69 @@ Two effects stack:
    does…", "why is…"). Cosine over MiniLM dims heavily penalises the
    phrasing difference.
 
-Both effects dissolve under a CCE embedder like `voyage-context-3`,
-which is trained to match questions with relevant documents. The
-harness in this bead is the regression test that will fire when that
-swap happens — re-running should show the F1 curve shift right (higher
-thresholds become viable).
+Both effects would be reduced by an embedder trained to match questions
+against documents. That is not the path taken — see the retirement note
+above — and it would not have addressed the larger effect, which is that
+a topic-free description has no topic to match against at any embedding
+quality.
+
+The harness in this bead remains as a REGRESSION PIN on the numbers this
+document measured, not as an anticipation of a swap. Re-running it after
+any change to the plan cache's embedding or match-text synthesis should
+reproduce the ROC table above; a drift means something moved under the
+threshold this document chose.
 
 ## Reproducibility
 
 - Dataset: frozen in `tests/fixtures/calibration_paraphrases.py`
-  (version-controlled; changes should be PR-reviewed).
+  (version-controlled; changes should be PR-reviewed). The 8 meta-verb
+  positives were removed 2026-08-22 when those templates were retired
+  (nexus-77cct) — 40 positives remain.
 - Harness: `tests/test_min_confidence_calibration.py`.
+
+  **CORRECTION 2026-08-22:** that harness did not exist when this section
+  was written, and had never been committed — verified against the full
+  git history four months after this RDR closed. Only the dataset
+  shipped. So the CI guarantee asserted below was false for the whole
+  period, and the threshold governing every cosine plan match was
+  unguarded while a closed design record said otherwise. The harness has
+  now been written and the claim is true.
 - Runtime: ~1 second on a Macbook (ONNX-only, no network).
 - Test `test_best_threshold_clears_minimum_f1` asserts `F1 ≥ 0.40` at
   the best threshold; drops below 0.40 → CI fails → someone broke
-  either the embedder wiring or the dataset labels.
+  either the embedder wiring or the dataset labels. (True as of
+  2026-08-22; see the correction above for its first four months.)
+
+### What this calibration no longer establishes
+
+Re-run 2026-08-22 against the current tree, the ROC has moved and, more
+importantly, so has its relevance:
+
+| threshold | F1 | TP | FP | FN |
+|----------:|---:|---:|---:|---:|
+| 0.15 | 0.633 | 19 | 17 | 5 |
+| **0.40** (shipped) | **0.367** | 9 | 6 | 25 |
+| 0.50 | 0.222 | 5 | 0 | 35 |
+
+F1 plateaus around 0.06-0.11 (F1 = 0.698) and is 0.367 at the shipped
+0.40 — the optimum sits at a threshold that admits nearly everything — and the intended plan is rank 1 for only 22 of 40
+curated paraphrases even ignoring the threshold. That is this document's
+own dataset corroborating, from the other side, why category-level plans
+stopped competing on cosine at all.
+
+Which is most of the point: every positive in this dataset is a
+category-level verb default, and those plans usually no longer reach the
+confidence floor — they route by dimension instead.
+
+**Usually, not always.** The category route fires only when `nx_answer`
+derives a verb from the question, and `infer_verb` returns `None` for
+plenty of ordinary phrasings. On that path a category plan is gated by
+`min_confidence` exactly as this document measured. So the populations
+OVERLAP rather than being disjoint (an earlier version of this note
+claimed disjoint; that was wrong), and the floor still governs
+category plans whenever verb inference misses — as well as the
+instance-level grown plans for which no dataset exists at all. The 0.40 floor is therefore
+inherited rather than justified: the same state RDR-078's 0.85 was in
+before this document measured it. Tracked; do not re-tune the floor from
+the curve above, which would be calibrating against traffic that does not
+use it.

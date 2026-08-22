@@ -11,11 +11,13 @@ path; ``mcp/core.py::_nx_answer_plan_miss``, the inline planner) — see
 ``tests/test_operator_model_tiers.py::TestNotConsultedRepoWide``.
 
 **RDR-196 .p2d landed (nexus-nyry9.17, 2026-08-21)**: the DEFAULT path
-(``NX_OPERATOR_MODEL_TIERING`` unset, the common case) now routes the 4
-:data:`FLIPPED_OPERATORS` (filter/groupby/extract/rank) to the cheap
-tier automatically — no opt-in required. Every other operator (check/
-verify/aggregate/summarize/compare/generate) still gets no ``model``
-override by default (HOLD). ``NX_OPERATOR_MODEL_TIERING=1`` keeps its
+(``NX_OPERATOR_MODEL_TIERING`` unset, the common case) now routes the
+:data:`FLIPPED_OPERATORS` to the cheap tier automatically — no opt-in
+required. **Extended 2026-08-21 (nexus-3mea3, Sam decision)**: check and
+verify joined the original 4 (filter/groupby/extract/rank) on the
+three-arm study's evidence (T2 nexus_rdr/196-model-tier-study). Every
+other operator (aggregate/summarize/compare/generate) still gets no
+``model`` override by default (HOLD). ``NX_OPERATOR_MODEL_TIERING=1`` keeps its
 .p2c meaning — a measurement override that consults the WHOLE tier
 table (including "strong" entries) for A/B re-verification.
 ``NX_OPERATOR_MODEL_TIERING=0`` is the kill switch: forces every
@@ -77,8 +79,21 @@ OPERATOR_MODEL_TIER: Final[dict[str, Tier]] = {
     "operator_rank": "cheap",
     "operator_summarize": "strong",  # no proxy (196-R4); not flip-eligible until one exists
     "operator_generate": "strong",
-    "operator_check": "strong",
-    "operator_verify": "strong",
+    # check/verify flipped to "cheap" 2026-08-21 (nexus-3mea3, Sam
+    # decision) on the pre-registered three-arm study (T2 nexus_rdr/
+    # 196-model-tier-study [23196]): check agreed 1.000 on every pair
+    # across all three models; verify fable-vs-haiku min 0.941 with
+    # haiku noise min 1.000 (threshold 0.70 each), haiku ~0.07-0.08x
+    # fable's cost. verify carries a caveat on record: it is UNDECIDABLE
+    # on the .p2a strong-vs-strong proxy (margin +0.033, T2 [23121]) and
+    # the study registration pre-declared its verdicts non-binding — the
+    # flip is Sam's decision on the three-arm data, individually
+    # revertible per RDR-196's mitigation. The SYNTHESIS study
+    # (nexus-rv9xp) does not bear on these two: check/verify are
+    # structured judgment operators with .p2a proxies, not free-text
+    # synthesis.
+    "operator_check": "cheap",
+    "operator_verify": "cheap",
     "operator_compare": "strong",
 }
 
@@ -96,16 +111,53 @@ OPERATOR_MODEL_TIER: Final[dict[str, Tier]] = {
 #: a future eligibility change to the table, e.g. re-flipping aggregate/
 #: summarize once a proxy exists for them, must not silently ALSO
 #: become a default-flip without its own .p2d-shaped decision bead).
-#: check/verify (HOLD — no tiering delta between arms, both strong in
-#: every arm per this table) and aggregate/summarize/compare/generate
-#: (HOLD by construction — no .p2a quality proxy) are absent by
-#: construction, not by omission.
+#: aggregate/summarize/compare/generate stay HOLD: no .p2a quality proxy
+#: (and the nexus-rv9xp synthesis study REFUTED the cheap arms for
+#: summarize/generate/compare outright).
 FLIPPED_OPERATORS: Final[frozenset[str]] = frozenset({
     "operator_filter",
     "operator_groupby",
     "operator_extract",
     "operator_rank",
+    # 2026-08-21 (nexus-3mea3): check/verify joined on the three-arm
+    # study evidence — see the OPERATOR_MODEL_TIER comment above for the
+    # numbers and verify's recorded caveat.
+    "operator_check",
+    "operator_verify",
 })
+
+
+#: nexus-ek8tr (Sam directive 2026-08-21, "pin fable explicitly"): the
+#: EXPLICIT model alias for every non-flipped operator, every bundle, and
+#: the inline planner on the DEFAULT path. Before this pin, HOLD meant
+#: "pass no --model" — the box CLI default by inheritance (fable only
+#: because the default moved off opus), so an account switch or CLI
+#: re-default would silently rebase every synthesis cost and quality
+#: number. fable-on-synthesis is a MEASURED choice (T2 nexus_rdr/
+#: 196-synthesis-tier-study: preferred over sonnet and haiku in every
+#: completed judgment); re-point HERE, nowhere else, if a future study
+#: (e.g. the opus arm) changes the verdict. Alias probe-verified
+#: 2026-08-21: claude -p --model fable resolves canonical claude-fable-5.
+#: DISTINCT from _TIER_ALIASES["strong"] ("sonnet"), which only the
+#: NX_OPERATOR_MODEL_TIERING=1 measurement override consults.
+#:
+#: RE-POINTED fable -> opus 2026-08-21 (Sam decision, same day the pin
+#: landed): the v4 opus arm of the synthesis study (T2 nexus_rdr/
+#: 196-synthesis-tier-study, registration [23229]) measured
+#: claude-opus-5 at ~0.5-0.6x fable's dispatch cost with the sonnet
+#: judge preferring opus in 17 of 24 completed pairs (fable 6, tie 1;
+#: recount verified against the raw records). summarize/compare/
+#: aggregate NOT_REFUTED — summarize itself JUDGE_UNSTABLE (position-
+#: swap disagreement 0.67: fable and opus not stably separable there,
+#: "at least as good" is the defensible read). generate's judged pairs
+#: went 4/6 to opus (fable 2/6) — its cell verdict carried a single
+#: 240s plumbing timeout on the mismatched-corpus input, retried to
+#: completion. TRADE ON RECORD: opus is SLOWER per dispatch on every
+#: operator (generate mean 94s vs fable 48s), so published nx_answer
+#: latency figures measured under the fable pin are stale until
+#: re-measured. Alias probe-verified: --model opus resolves
+#: claude-opus-5.
+STRONG_DEFAULT_ALIAS: Final[str] = "opus"
 
 
 class UnknownTierError(ValueError):
@@ -166,3 +218,16 @@ def resolve_model_for_flipped_operator(operator: str) -> str | None:
     diagnose — it degrades to "no override", the safe HOLD side.
     """
     return resolve_model_for_tier("cheap") if operator in FLIPPED_OPERATORS else None
+
+
+def resolve_model_for_default_path(operator: str) -> str:
+    """The DEFAULT (env-unset) path's model for *operator* — nexus-ek8tr:
+    every known operator now gets an EXPLICIT model. Flipped operators
+    resolve to the cheap alias; everything else resolves to
+    :data:`STRONG_DEFAULT_ALIAS` (never bare). Callers guard membership
+    in :data:`OPERATOR_MODEL_TIER` themselves — an unknown tool name is
+    not this table's business and gets no injection.
+    """
+    if operator in FLIPPED_OPERATORS:
+        return resolve_model_for_tier("cheap")
+    return STRONG_DEFAULT_ALIAS

@@ -281,6 +281,25 @@ Every step below is **required**. Missing any one of them has caused problems in
    rely on free-text scraping for a bead you are writing today; use the
    marker. Closed beads are never scanned.
 
+   **Pre-tag snapshot for the CI replay (nexus-fehi3, MANDATORY, do BEFORE Step 8's commit).**
+   This repo's `bd` backend is Dolt with no credentials on the CI runner, so
+   `release.yml` cannot run `bd export` live at tag-publish time — it
+   replays this gate against a cut-time snapshot instead. Write it now:
+   ```bash
+   uv run python scripts/check_remediation_commits_ride_release.py --write-snapshot .release-gates/remediation-snapshot.json
+   ```
+   Stage `.release-gates/remediation-snapshot.json` into Step 8's release-branch
+   commit alongside the version-bump manifests (see Step 8's `git add` list
+   below). `release.yml` reruns the gate against that exact committed file at
+   tag-publish time via `--verify-snapshot`, which fails the release closed
+   if the file is missing from the tagged commit, present on disk but never
+   committed, or stale (its newest bead `updated_at` predates the commit
+   immediately preceding this release). Per the tag-retraction policy below
+   (§ Break-glass), a published tag can never be moved or re-pointed to add
+   the missing file, so the only remedy at that point is a brand-new release
+   tag. A snapshot from a prior release does not carry forward — write a
+   fresh one every release.
+
 1. **Verify the full release test battery passes**
    ```bash
    uv run pytest                                             # unit suite (no API keys)
@@ -452,7 +471,8 @@ Every step below is **required**. Missing any one of them has caused problems in
    git add pyproject.toml mcpb/pyproject.toml mcpb/manifest.json uv.lock \
            CHANGELOG.md conexus/CHANGELOG.md \
            conexus/.claude-plugin/plugin.json sn/.claude-plugin/plugin.json \
-           .claude-plugin/marketplace.json docs/
+           .claude-plugin/marketplace.json docs/ \
+           conexus/PENDING_RELEASE.md .release-gates/remediation-snapshot.json
    git commit -m "chore(release): conexus X.Y.Z"
    git push -u origin release/vX.Y.Z
    gh pr create --base main --title "release: conexus X.Y.Z"
@@ -600,6 +620,7 @@ This is exactly the v7.7.0 sequence (2026-08-14, commit `62da4273b`): the first 
 | `README.md` | high-level feature descriptions |
 | `src/nexus/upgrade_ladder/` | new DATA-convergence axes land as rungs registered in `registry.py` (the client-side T2 migration chain is deleted — RDR-158 P4 Stage 4; schema is Liquibase in the engine) |
 | `conexus/PENDING_RELEASE.md` | empty the pending-drift list for every entry this release ships — advancing `source.ref` is what makes the declared plugin changes live; a stale entry fails `tests/test_plugin_release_drift_ledger.py` |
+| `.release-gates/remediation-snapshot.json` | write via Step 0b's `--write-snapshot`; `release.yml` fails the release closed at tag-publish time if this is missing from the tagged commit |
 
 ### Pre-push release checklist
 

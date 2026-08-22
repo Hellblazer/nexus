@@ -128,13 +128,51 @@ done
   || bad "nx search did not return the probe document — write or read path broken on the published binary"
 
 # ── doctor must be clean ─────────────────────────────────────────────────────
-say "Doctor — no ✗ on a freshly acquired install"
+# nexus-e1ti4: `nx doctor` (plain, no mode flag) runs the plan-library check
+# as part of its DEFAULT supplementary sweep and DOES print a "FAIL:" line
+# when the global-tier builtin floor isn't met -- but that check's raised
+# Exit is swallowed by the supplementary-check loop (non-gating BY DESIGN:
+# doctor.py's `_run_supplementary_checks` -- a deliberate, separately-
+# reviewed decision this gate does not re-litigate), so it never flips $?
+# and a glyph-only "✗" grep is blind to it. The text-match below (widened
+# to "✗|FAIL:") is a secondary net; it is not the PRIMARY assertion for
+# this specific check because text matching breaks the moment someone
+# rewords a message. The primary assertion is the dedicated
+# `--check-plan-library` step right after this one, which runs doctor's
+# ONE standalone mode whose raised Exit(1)/(2) genuinely becomes the
+# process's own exit code for this check -- proven red against synthetic
+# FAIL: output before this fix (nexus-e1ti4 investigation), where the old
+# "✗"-only grep passed silently.
+say "Doctor — no ✗ and no FAIL: on a freshly acquired install"
 DOC_OUT="$(nx doctor 2>&1 || true)"
 echo "$DOC_OUT" | sed 's/^/       /'
-if echo "$DOC_OUT" | grep -q "✗"; then
-  bad "nx doctor reported at least one ✗ on the published binary"
+# DOC_OUT is already a fully-drained command substitution (not a live pipe),
+# so matching in-shell with [[ =~ ]] avoids piping it into an early-exit
+# `grep -q` consumer under `set -o pipefail` (nexus-i66g4/6zxfb/wbeyi class;
+# the lint at tests/test_pipefail_early_exit_consumer_lint.py enforces this).
+if [[ "$DOC_OUT" =~ (✗|FAIL:) ]]; then
+  bad "nx doctor reported at least one ✗ or FAIL: line on the published binary"
 else
   ok "nx doctor clean"
+fi
+
+# ── doctor --check-plan-library must exit 0 (PRIMARY assertion for this
+# check, nexus-e1ti4) ─────────────────────────────────────────────────────────
+# This is the rc-gated form named above: the standalone `--check-plan-library`
+# mode is the one doctor invocation whose Exit(1)/(2) genuinely becomes $?
+# for the plan-library check, so it is not fooled by a future reword of the
+# "FAIL:" text the way the grep above would be. `set -uo pipefail` (no `-e`)
+# is active in this script, so a bare nonzero-exit command substitution does
+# not abort the run -- no if/then/else rc-capture dance needed here (unlike
+# fresh-install-mvv.sh, which runs under `set -e`).
+say "Doctor — --check-plan-library exits 0 on a freshly acquired install"
+PLAN_LIB_OUT="$(nx doctor --check-plan-library 2>&1)"
+PLAN_LIB_RC=$?
+echo "$PLAN_LIB_OUT" | sed 's/^/       /'
+if [ "$PLAN_LIB_RC" -eq 0 ]; then
+  ok "nx doctor --check-plan-library passed (rc=0)"
+else
+  bad "nx doctor --check-plan-library failed (rc=$PLAN_LIB_RC) on the published binary"
 fi
 
 say "RESULT"

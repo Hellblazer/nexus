@@ -32,7 +32,7 @@ from xml.sax.saxutils import escape as _xml_escape
 import click
 import structlog
 
-from nexus.config import nexus_config_dir
+from nexus import config as _config
 
 _log = structlog.get_logger(__name__)
 
@@ -739,7 +739,7 @@ def service_start_cmd(
         run_storage_supervisor,
     )
 
-    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()
 
     if foreground:
         try:
@@ -772,9 +772,11 @@ def service_start_cmd(
         )
 
 
-# The recovery-playbook URL moved to nexus.remediation.MIGRATION_RUNBOOK_URL
-# with the RDR-182 P1.3 hoist (nexus-ykzbj.7) — the shared Playbook emitter
-# is now the single source of truth for the gate's guidance text.
+# The recovery-playbook URL lives in
+# nexus.upgrade_finish.MIGRATION_RUNBOOK_URL (relocated there at
+# nexus-lgdel when the RDR-182 Playbook DSL was deleted — the chash-rekey
+# rung it steered operators toward no longer exists;
+# ``_ChashPoisonGuidance`` renders this gate's guidance text now).
 
 
 def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
@@ -812,11 +814,10 @@ def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
     if probe.playbook is None:
         return
 
-    # RDR-182 P1.3 (nexus-ykzbj.7): guidance text lives in the shared
-    # Playbook emitter — one source of truth for this gate AND the Phase-3
-    # MCP forensics/remediate tools. Locked to the nexus-o513u ladder-first
-    # contract by tests/remediation/test_playbook.py; this function keeps
-    # only the probe + flow control (force branch, exit code).
+    # Guidance text lives in nexus.upgrade_finish._ChashPoisonGuidance
+    # (nexus-lgdel: the RDR-182 Playbook emitter it used to share with the
+    # now-deleted MCP forensics/remediate tools is gone); this function
+    # keeps only the probe + flow control (force branch, exit code).
     playbook = probe.playbook
     if force:
         click.echo(playbook.force_override_warning(), err=True)
@@ -847,10 +848,10 @@ def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
     is_flag=True,
     default=False,
     help="Override the chash-poison pre-check (nexus-pnwu0 / GH #1414). Use "
-         "ONLY after healing per docs/migration-runbook.md §8.1 (ladder-first: "
-         "re-index legacy collections, nx upgrade, doctor clears). The rows "
-         "stay unhealed debt if you force past them; a pre-v0.1.48 char-era "
-         "engine can still crash-loop on boot.",
+         "ONLY after healing per docs/migration-runbook.md (re-index the "
+         "affected collections, then re-run doctor and confirm the warning "
+         "clears). The rows stay unhealed debt if you force past them; a "
+         "pre-v0.1.48 char-era engine can still crash-loop on boot.",
 )
 def service_install_binary_cmd(
     tag: str, config_dir_str: str | None, want_pg_bundle: bool, force: bool,
@@ -881,15 +882,17 @@ def service_install_binary_cmd(
     except PackageNotFoundError:
         _nx_version = "unknown"
 
-    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()
     installed_by = f"conexus {_nx_version}"
 
     # nexus-pnwu0 / GH #1414 upgrade gate: refuse to install a new engine onto a
     # store whose pgvector target holds width-non-conformant chash rows. The
-    # rows are unhealed upgrade-ladder debt the operator should converge FIRST
-    # (nexus-o513u ladder-first: re-index legacy collections -> nx upgrade ->
-    # doctor clears); swapping engine binaries mid-debt just churns the boot
-    # path while the heal is pending. Note the original crash-loop premise was
+    # rows are unhealed debt the operator should converge FIRST (re-index the
+    # affected collections, then doctor clears); swapping engine binaries
+    # mid-debt just churns the boot path while the heal is pending. The
+    # chash-rekey upgrade rung this used to steer operators toward is deleted
+    # (nexus-lgdel) — re-indexing is the remedy now. Note the original
+    # crash-loop premise was
     # narrowed by nexus-joima (2026-07-21): v0.1.48+ engines tolerate the rows
     # at boot (octet checks NOT VALID until the rekey rung); only a pre-v0.1.48
     # char-era engine can still crash-loop on catalog-013-3's first VALIDATE
@@ -970,7 +973,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
         stop_storage_service,
     )
 
-    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()
     outcome = stop_storage_service(config_dir=config_dir)
     pid = outcome.pids[0] if outcome.pids else None
     pids_str = ", ".join(str(p) for p in outcome.pids)
@@ -1258,7 +1261,7 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     import os as _os  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
-    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
     scope = str(_os.getuid())
     record = registry.discover(scope)
@@ -1426,7 +1429,7 @@ def aspect_worker_start_cmd(
     """
     from nexus.daemon.aspect_worker_daemon import run_aspect_worker_daemon  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
-    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+    config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()
     click.echo(
         f"Aspect-worker daemon starting (config_dir={config_dir}, tenant={tenant})..."
     )
@@ -1493,7 +1496,7 @@ def restart_stale_cmd(dry_run: bool) -> None:
     except Exception as exc:  # noqa: BLE001 — one leg's failure must not block the others
         click.echo(f"process-skew detection failed ({exc}) — skipping this leg.", err=True)
 
-    config_dir = nexus_config_dir()
+    config_dir = _config.nexus_config_dir()
 
     # nexus-cfgo9 code-review HIGH: converge_engine documents a "never
     # raises" contract, but that contract lives in one function's docstring

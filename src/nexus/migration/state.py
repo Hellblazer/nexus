@@ -38,7 +38,7 @@ from typing import Any, Final, Literal
 
 import structlog
 
-from nexus.config import nexus_config_dir
+from nexus import config as _config
 
 _log = structlog.get_logger(__name__)
 
@@ -92,7 +92,7 @@ class MigrationState:
 
 def state_path() -> Path:
     """Path to the sentinel under the (env-overridable) nexus config dir."""
-    return nexus_config_dir() / _STATE_FILENAME
+    return _config.nexus_config_dir() / _STATE_FILENAME
 
 
 def _utc_now_iso() -> str:

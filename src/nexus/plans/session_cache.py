@@ -66,6 +66,21 @@ class PlanSessionCache:
         self._session_id = session_id
         self._available = True
         try:
+            # The bundled MiniLM is the SETTLED choice, not an interim
+            # one (2026-08-22). RDR-079 P5 proposed migrating this cache to
+            # voyage-context-3 and tracked it as a follow-up for four
+            # months; that prescription is RETIRED — see
+            # docs/rdr/rdr-079-calibration.md, "Alternative considered and
+            # RETIRED". A hosted embedder here would bill a per-SessionStart
+            # cost on the path ahead of every plan match, including the
+            # cache hits that finish in milliseconds, to raise a similarity
+            # score that cannot help the largest class of plan: a
+            # category-level template is topic-free by construction and
+            # loses a topical-similarity contest at any embedding quality.
+            # Those plans now route by DIMENSION instead. What cosine
+            # serves here is instance-level grown plans, question against
+            # question, where MiniLM already scores 0.94 on a verbatim
+            # repeat.
             self._col = client.get_or_create_collection(
                 PLANS_COLLECTION,
                 embedding_function=LocalEmbeddingFunction(),

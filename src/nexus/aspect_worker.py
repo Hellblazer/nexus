@@ -69,7 +69,7 @@ from nexus.aspect_extractor import (
     extract_aspects as _extract_aspects,
     extract_aspects_batch as _extract_aspects_batch,
 )
-from nexus.config import nexus_config_dir
+from nexus import config as _config
 
 _log = structlog.get_logger(__name__)
 
@@ -655,7 +655,7 @@ def _worker_lock_path(locks_dir: Path | None = None) -> Path:
     import os  # noqa: PLC0415 — stdlib os deferred to function scope
 
     base = locks_dir if locks_dir is not None else (
-        nexus_config_dir() / "locks"
+        _config.nexus_config_dir() / "locks"
     )
     return base / f"aspect_worker.{os.getpid()}"
 
@@ -1018,18 +1018,32 @@ def _canonicalize_source_path(collection: str, source_path: str) -> str:
         doc_id = cat.lookup_doc_id_by_collection_and_path(collection, source_path)
     except Exception:  # noqa: BLE001 — best-effort resolve; any query error degrades to no-op
         doc_id = ""
+    entry = None
     if not doc_id:
-        _log.warning(
-            "aspect_source_path_uncanonical",
-            collection=collection,
-            source_path=source_path,
-        )
-        return source_path
+        # The first probe keys on file_path/title, both of which the catalog
+        # stores RELATIVE. An ABSOLUTE source_path therefore always misses it
+        # -- that is the whole documented Bucket-B population, and it warned
+        # ~300x/day on this box while its one-time cleanup bead (nexus-nx9nx)
+        # was closed as superseded without the normalization half ever running.
+        #
+        # The catalog also stores the ABSOLUTE form, as `source_uri`
+        # (`file://<abspath>`, RDR-096 P3.1), and exposes `by_source_uri`. So
+        # an absolute path has an exact, deterministic key into the catalog.
+        # This is NOT the nexus-3e4s CWD-anchoring class: no base path is
+        # chosen, nothing is synthesized, and the value is accepted only when
+        # the catalog itself returns an entry IN THIS COLLECTION.
+        entry = _entry_by_source_uri(cat, collection, source_path)
+        if entry is None:
+            _log.warning(
+                "aspect_source_path_uncanonical",
+                collection=collection,
+                source_path=source_path,
+            )
+            return source_path
     # ``lookup_doc_id_by_collection_and_path`` returns either a legacy
     # ``metadata.doc_id`` or the catalog ``tumbler``; resolve the entry via
     # whichever the catalog honours (``by_doc_id`` keys on doc_id only).
-    entry = None
-    for getter in ("by_doc_id", "resolve"):
+    for getter in ("by_doc_id", "resolve") if entry is None else ():
         fn = getattr(cat, getter, None)
         if fn is None:
             continue
@@ -1049,6 +1063,33 @@ def _canonicalize_source_path(collection: str, source_path: str) -> str:
         )
         return canonical
     return source_path
+
+
+
+def _entry_by_source_uri(cat: object, collection: str, source_path: str):
+    """Catalog entry for an ABSOLUTE ``source_path`` via its ``source_uri``.
+
+    Returns ``None`` unless the catalog resolves the URI to an entry whose
+    ``physical_collection`` matches ``collection`` -- a cross-collection hit is
+    refused rather than used, so this can never re-point an aspect row at a
+    document in a different collection. Best-effort: any catalog error or a
+    missing ``by_source_uri`` degrades to ``None`` (the caller then warns
+    exactly as before).
+    """
+    if not os.path.isabs(source_path):
+        return None
+    fn = getattr(cat, "by_source_uri", None)
+    if fn is None:
+        return None
+    try:
+        entry = fn("file://" + source_path)
+    except Exception:  # noqa: BLE001 — best-effort probe; any error degrades to the warn branch
+        return None
+    if entry is None:
+        return None
+    if (getattr(entry, "physical_collection", "") or "") != collection:
+        return None
+    return entry
 
 
 def aspect_extraction_enqueue_hook(
@@ -1208,7 +1249,7 @@ def _ensure_aspect_worker() -> None:
     try:
         from nexus.daemon.aspect_worker_daemon import ensure_aspect_worker_daemon  # noqa: PLC0415 — deferred; daemon module is CLI/service-side
 
-        ensure_aspect_worker_daemon(config_dir=nexus_config_dir(), tenant=_ENQUEUE_TENANT)
+        ensure_aspect_worker_daemon(config_dir=_config.nexus_config_dir(), tenant=_ENQUEUE_TENANT)
     except Exception as exc:  # noqa: BLE001 — best-effort spawn; the row is enqueued, do not fail the store
         # RDR-173 P5 observability (nexus-xv5fl): make the store-time failure
         # LOUD with diagnostic context (tenant + how many rows are now stranded

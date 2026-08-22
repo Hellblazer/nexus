@@ -62,7 +62,7 @@ For a durable always-running service (recommended for any host that
 runs Claude Code regularly):
 
 ```
-nx init --service              # provisions PG cluster + credentials + persistent supervisor
+nx init                        # provisions PG cluster + credentials + persistent supervisor
 nx daemon service install --autostart   # LaunchAgent / systemd user unit
 ```
 
@@ -107,7 +107,7 @@ Two options, in order of preference:
    downtime — old tokens stay valid through a grace window).
 
 2. **Reuse the root bearer** the supervisor was provisioned with —
-   persisted by `nx init --service` in
+   persisted by `nx init` in
    `~/.config/nexus/pg_credentials`:
 
    ```bash

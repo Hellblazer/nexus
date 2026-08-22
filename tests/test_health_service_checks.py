@@ -703,11 +703,19 @@ class TestCheckMigrationState:
         assert "heal-by-replacement" in chash.detail
         assert "deleting affected content also lowers it" in chash.detail
         assert "not data loss" not in chash.detail
-        # nexus-o513u: ladder-first — heal steps lead; no unconditional
-        # do-not-upgrade gate; rollback only as the will-not-boot branch.
-        assert any("nx upgrade" in s for s in chash.fix_suggestions)
+        # nexus-o513u: heal steps lead; no unconditional do-not-upgrade
+        # gate; rollback only as the will-not-boot branch. The chash-rekey
+        # rung was deleted at 5a3dcd16c, so re-indexing is the ONLY remedy
+        # — these asserts must never again name a rung that cannot run
+        # (default_registry() == [] and RUNG_ORDER == ()).
+        assert any("nx index repo" in s for s in chash.fix_suggestions)
+        assert not any("nx upgrade" in s for s in chash.fix_suggestions)
+        assert not any("chash-rekey" in s for s in chash.fix_suggestions)
         assert not any("Do NOT upgrade" in s for s in chash.fix_suggestions)
-        assert any("§8.1" in s for s in chash.fix_suggestions)
+        # the runbook rewrite replaced numbered headings with prose ones
+        assert any(
+            "If the service will not start" in s for s in chash.fix_suggestions
+        )
         # RDR-155 P4b: the --rollback verb died with the migration machinery;
         # the will-not-boot branch now names the pinned-release redirect.
         pinned = [s for s in chash.fix_suggestions if "LAST_MIGRATION_CAPABLE" in s]
@@ -2124,7 +2132,10 @@ class TestCheckChashConformanceReport:
         assert "2 chunk row(s)" in r.detail, r.detail
         assert "nexus.chunks_384=2" in r.detail, r.detail
         assert "TENANT-SCOPED" in r.detail, r.detail
-        assert any("nx upgrade" in f for f in r.fix_suggestions)
+        # nexus-lgdel.l1 deleted the chash-rekey rung, so `nx upgrade` is a
+        # no-op for this warning and must not be offered as its remedy. The
+        # real remedy is re-indexing, which recomputes ids from stored text.
+        assert any("nx index repo" in f for f in r.fix_suggestions)
 
     def test_engine_predating_route_renders_skipped_with_warning(self, monkeypatch) -> None:
         """vw594 F3 / manifest_verify_all precedent: a pre-route engine 404s

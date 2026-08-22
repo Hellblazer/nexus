@@ -28,6 +28,9 @@ Errors:
 * :class:`PlanRunStepRefError` — a ``$stepN.<field>`` reference points
   at a step that has not run yet, or at a field absent from the
   prior step's output dict.
+* :class:`PlanRunUnresolvedVarError` — a ``$var`` reference has no
+  default and no caller-supplied value. Checked for every step, before
+  any step dispatches (nexus-pucte) — no silent literal-token fallback.
 * :class:`PlanRunEmbeddingDomainError` — a step's
   ``scope.taxonomy_domain`` mismatches the embedding model of the
   collection it dispatches against.
@@ -64,6 +67,7 @@ __all__ = [
     "PlanRunOperatorUnavailableError",
     "PlanRunStepRefError",
     "PlanRunToolNotFoundError",
+    "PlanRunUnresolvedVarError",
     "StepRecord",
     "ToolDispatcher",
     "merge_bindings",
@@ -221,6 +225,34 @@ class PlanRunEmbeddingDomainError(ValueError):
             )
 
 
+class PlanRunUnresolvedVarError(ValueError):
+    """Raised when a step's args reference a ``$var`` binding that the
+    merged bindings (``{**default_bindings, **caller}``) cannot resolve —
+    checked at validation time, BEFORE any step dispatches (nexus-pucte).
+
+    Previously :func:`_resolve_value` resolved ``$var`` via
+    ``bindings.get(var_name, value)``, so a binding with no default and
+    no caller-supplied value silently reached the dispatched tool as the
+    literal string ``'$var'`` — the same silent-literal class
+    nexus-nyry9.5 fixed for ``nx_answer``'s ``single_query`` fast path
+    (it was querying the literal string ``'$question'``).
+    ``$stepN.<field>`` references already raise
+    :class:`PlanRunStepRefError` on an unresolved reference; this closes
+    the gap for the other reference kind so both fail loud alike — no
+    silent fallback for either.
+    """
+
+    def __init__(self, *, step_index: int, var_name: str) -> None:
+        self.step_index = step_index
+        self.var_name = var_name
+        super().__init__(
+            f"plan_run: steps[{step_index}] references unresolved "
+            f"binding '${var_name}' — not present in default_bindings "
+            "or caller-supplied bindings. Malformed plan or missing "
+            "binding; rejected before any step dispatched."
+        )
+
+
 # ── Tool dispatcher protocol ────────────────────────────────────────────────
 
 
@@ -342,6 +374,14 @@ class PlanResult:
     #: was active. ``None`` (the default) means the run completed or
     #: failed through the pre-a4 sentinel-and-continue path unchanged.
     budget_exhausted_at_step: int | None = None
+    #: RDR-196 .p3c (nexus-nyry9.21): which budget axis cut the run short
+    #: — ``"time"`` (the ``deadline`` mechanism above) or ``"cost"`` (the
+    #: ``budget_usd_remaining`` pre-segment check). ``None`` whenever
+    #: ``budget_exhausted_at_step`` is also ``None``. Threaded into the
+    #: single marker emitter's text (``core.py``'s
+    #: ``_budget_exhausted_response``) so a caller can tell which budget
+    #: ran out without inventing a second marker shape.
+    budget_exhausted_kind: str | None = None
     #: Total steps in the plan as parsed, regardless of how many actually
     #: ran. Lets a caller render "step N of M" without re-parsing
     #: ``match.plan_json`` itself.
@@ -724,8 +764,22 @@ def resolve_step_bindings(
     step's args outside of a full ``plan_run`` invocation should call
     instead — currently ``nexus.mcp.core``'s ``nx_answer`` single-query
     fast path (nexus-nyry9.5, RDR-196 .r5 review-fix).
+
+    Raises :class:`PlanRunUnresolvedVarError` on any ``$var`` in
+    ``raw_args`` the merged bindings can't resolve (nexus-pucte). The
+    single-query fast path bypasses :func:`plan_run` — and therefore
+    its :func:`_validate_var_refs` pre-dispatch check — entirely by
+    design, so without a guard HERE the exact same silent-literal-token
+    bug the fast path was already fixed for once (nexus-nyry9.5,
+    querying the literal string ``'$question'``) stays fully
+    reproducible for any OTHER var a future single-query template might
+    reference. Treats ``raw_args`` as a synthetic one-step plan
+    (``step_index`` is always ``0`` in the raised error) — there is no
+    ``scope`` at this call site, so the ``scope.topic`` half of
+    ``_validate_var_refs`` never fires here.
     """
     merged = merge_bindings(default_bindings, caller_bindings)
+    _validate_var_refs([{"args": raw_args}], merged)
     return _resolve_args(
         raw_args, bindings=merged, step_outputs=step_outputs or [],
         deferred_step_indices=deferred_step_indices,
@@ -930,6 +984,101 @@ def _validate_bindings(match: Match, bindings: dict[str, Any]) -> None:
     ]
     if missing:
         raise PlanRunBindingError(missing=missing)
+
+
+def _scan_var_refs(value: Any, found: set[str]) -> None:
+    """Collect every ``$var`` token name referenced by *value* into
+    *found*, IN PLACE.
+
+    Mirrors :func:`_resolve_value`'s own traversal exactly — list
+    elements are recursed into, a string is checked only when it is
+    EXACTLY a ``$var`` token (no inline interpolation), and dict values
+    are NOT recursed into. This keeps "what counts as a $var reference"
+    identical between validation and resolution — anything this scan
+    would miss is, by construction, also something the runtime never
+    resolves (nexus-pucte scope: the two reference kinds this bug
+    concerns are exactly the shapes ``_resolve_value`` substitutes).
+    """
+    if isinstance(value, list):
+        for item in value:
+            _scan_var_refs(item, found)
+        return
+    if isinstance(value, str):
+        m = _VAR_RE.match(value)
+        if m is not None:
+            found.add(m.group(1))
+
+
+def _validate_var_refs(
+    steps: list[dict[str, Any]], bindings: dict[str, Any],
+) -> None:
+    """Fail loud on any ``$var`` token a step's args reference that
+    *bindings* (the merged ``{**default_bindings, **caller}`` map)
+    cannot resolve — BEFORE any step dispatches (nexus-pucte).
+
+    Closes the gap between the two reference kinds: ``$stepN.<field>``
+    already raises :class:`PlanRunStepRefError` on an unresolved
+    reference at DISPATCH time; an unresolved ``$var`` previously had no
+    equivalent check at all and silently reached the tool as the literal
+    token string. ``_validate_bindings`` above only checks
+    ``match.required_bindings`` NAMES — it never looks at what a step's
+    args actually reference, so an optional (or simply undeclared) var
+    with no default and no caller value sailed through unnoticed. This
+    walks every step once, mirroring the existing malformed-step
+    validation loop in :func:`plan_run` (nexus-nyry9.4) that already
+    runs a single pass over every step before the first dispatch — and
+    reuses that loop's own :class:`PlanRunToolNotFoundError` for
+    shape problems (non-dict ``args``) for the same reason: this file
+    already treats that class as the general "malformed plan step,
+    rejected before any dispatch" error, not a tool-lookup-specific one
+    (see the ``_step is not a mapping`` check just above, in
+    :func:`plan_run` itself).
+
+    Also covers ``step.scope.topic`` (e.g. ``scope: {topic: $area}`` —
+    a real pattern in the ``analyze-default``, ``document-default``, and
+    ``research-default`` builtin templates). It is resolved through the
+    SAME :func:`_resolve_value` ``$var`` branch as ``args``, via
+    :func:`_apply_scope_to_args`, and forwarded into the dispatched
+    call's ``args["topic"]`` — an unresolved var there is the identical
+    silent-literal risk. ``scope.taxonomy_domain`` is never
+    ``$var``-substituted (read as a literal domain name), so it is not
+    scanned.
+
+    ``_apply_scope_to_args`` only resolves ``scope.topic`` when the
+    step's own ``args`` has NOT already set ``"topic"`` — a caller-set
+    ``args["topic"]`` wins outright and ``scope.topic`` is never touched
+    by :func:`_resolve_value` at all. This scan mirrors that exact
+    precedence: it skips ``scope.topic`` whenever ``"topic"`` is already
+    a key in ``args`` (checked on the RAW, pre-resolution args — key
+    presence never changes across resolution, only values do, so this is
+    equivalent to checking the resolved dict without needing one).
+    Without this guard, a step shaped
+    ``{"args": {"topic": "explicit"}, "scope": {"topic": "$unset"}}`` is
+    a perfectly valid plan (``scope.topic`` is dead) that this validator
+    would otherwise reject with a spurious hard failure.
+    """
+    for step_index, step in enumerate(steps):
+        args = step.get("args") or {}
+        if not isinstance(args, dict):
+            raise PlanRunToolNotFoundError(
+                tool="",
+                reason=(
+                    f"plan_json.steps[{step_index}] has non-dict args "
+                    f"{args!r} ({type(args).__name__}) — malformed plan, "
+                    "rejected before any step dispatched"
+                ),
+            )
+        found: set[str] = set()
+        for val in args.values():
+            _scan_var_refs(val, found)
+        if "topic" not in args:
+            scope = step.get("scope") or {}
+            _scan_var_refs(scope.get("topic"), found)
+        unresolved = found - bindings.keys()
+        if unresolved:
+            raise PlanRunUnresolvedVarError(
+                step_index=step_index, var_name=sorted(unresolved)[0],
+            )
 
 
 # ── Default dispatcher (lazy MCP-tool wiring) ───────────────────────────────
@@ -1153,20 +1302,18 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     #
     #   == "1"  measurement override (.p2c, UNCHANGED): consult the WHOLE
     #           ``OPERATOR_MODEL_TIER`` table, including "strong" entries
-    #           — for A/B re-verification, not production traffic. An
-    #           operator whose MCP-tool signature doesn't accept ``model``
-    #           (check/verify/generate/compare/aggregate/summarize) has
-    #           the kwarg silently dropped + logged by the kwargs-drop
-    #           pass below, same as any other tool-incompatible arg.
-    #   != "0"  (unset, or any other value) DEFAULT PATH (.p2d): only the
-    #           4 :data:`~nexus.operators.model_tiers.FLIPPED_OPERATORS`
-    #           (filter/groupby/extract/rank) get the cheap-tier alias —
-    #           every other operator (HOLD/UNDECIDED per .p2d's decision
-    #           table) gets no ``model`` kwarg at all, same as pre-.p2c.
+    #           — for A/B re-verification, not production traffic. Every
+    #           table operator's MCP signature accepts ``model`` since
+    #           nexus-3mea3 + nexus-ek8tr (guarded by
+    #           test_every_tier_table_operator_mcp_signature_accepts_model).
+    #   != "0"  (unset, or any other value) DEFAULT PATH (.p2d as
+    #           extended by nexus-ek8tr 2026-08-21): EVERY table operator
+    #           gets an explicit model — FLIPPED_OPERATORS the cheap
+    #           alias, everything else STRONG_DEFAULT_ALIAS. Nothing on
+    #           this path inherits the box CLI default any more.
     #   == "0"  kill switch: neither branch fires, ``args`` stays
-    #           untouched — every operator dispatches at whatever the
-    #           untiered (pre-.p2d, strong) default has always been.
-    #           Rollback without a code change.
+    #           untouched — bare dispatch, the true pre-tiering rollback
+    #           (the model is then whatever the box CLI defaults to).
     #
     # Each branch's env check is inlined (not hoisted to a local) so the
     # AST structural guard (``TestNotConsultedRepoWide::
@@ -1184,11 +1331,17 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
             if resolved_tool in OPERATOR_MODEL_TIER:
                 args = {**args, "model": resolve_model_for_operator(resolved_tool)}
         elif _os.environ.get("NX_OPERATOR_MODEL_TIERING") != "0":
-            from nexus.operators.model_tiers import resolve_model_for_flipped_operator  # noqa: PLC0415 — default-path resolver, kept adjacent to its measurement-override sibling above
+            from nexus.operators.model_tiers import (  # noqa: PLC0415 — default-path resolver, kept adjacent to its measurement-override sibling above
+                OPERATOR_MODEL_TIER as _OMT,
+                resolve_model_for_default_path,
+            )
 
-            _default_model = resolve_model_for_flipped_operator(resolved_tool)
-            if _default_model is not None:
-                args = {**args, "model": _default_model}
+            # nexus-ek8tr: EVERY known operator gets an explicit model on
+            # the default path — flipped -> cheap alias, everything else
+            # -> STRONG_DEFAULT_ALIAS. Bare dispatch survives only via
+            # the kill switch or an unknown tool name.
+            if resolved_tool in _OMT:
+                args = {**args, "model": resolve_model_for_default_path(resolved_tool)}
 
     # RDR-093 S-1: pop runner-attached truncation metadata before the
     # kwargs-drop pass so the operator never sees the marker (it's not
@@ -1370,6 +1523,7 @@ async def plan_run(
     dispatcher: ToolDispatcher | None = None,
     bundle_operators: bool = True,
     deadline: float | None = None,
+    budget_usd_remaining: float | None = None,
 ) -> PlanResult:
     """Execute the steps in *match* and return the captured outputs.
 
@@ -1402,10 +1556,50 @@ async def plan_run(
     kwarg, and if it raises ``OperatorTimeoutError`` anyway, the
     reconstructed ``partial_text``/``event_count`` are captured into the
     terminal sentinel and the loop stops. Either trigger sets
-    :attr:`PlanResult.budget_exhausted_at_step` (1-indexed). Retrieval
+    :attr:`PlanResult.budget_exhausted_at_step` (1-indexed) and
+    :attr:`PlanResult.budget_exhausted_kind` to ``"time"``. Retrieval
     steps are never budget-cut mid-flight — they don't accept a
     ``timeout`` kwarg — only the pre-segment deadline check can stop
     the loop before one starts.
+
+    ``budget_usd_remaining`` (RDR-196 .p3c, nexus-nyry9.21): an OPTIONAL
+    USD ceiling on the sum of already-completed steps' ``cost_usd``
+    (``StepRecord.cost_usd``, non-``None`` entries only — an unknown-cost
+    step never contributes a fabricated 0 to the running sum, and never
+    trips the check either). ``None`` (the default) reproduces pre-.p3c
+    behavior exactly — no cost check runs. When set, checked at the SAME
+    point as the ``deadline`` check above — BEFORE dispatching each
+    segment — because a dispatch's real cost is unknowable until it
+    returns; unlike ``deadline``, there is no mid-dispatch cost cut. This
+    makes the budget a STOP-LINE, not a hard ceiling: the running sum is
+    only ever compared to the cap using costs already known when a
+    segment STARTS, so the segment that pushes the sum over the cap
+    still finishes and its own cost is not counted until AFTER it
+    completes — the final executed segment's cost can carry the run
+    total above ``budget_usd_remaining``. Treat this as the documented
+    contract, not a bug: the caller learns of any overshoot from the
+    step's own recorded ``cost_usd``, same as it always could. When the
+    check trips, the loop stops (the segment about to start does not
+    dispatch) and :attr:`PlanResult.budget_exhausted_at_step` /
+    :attr:`PlanResult.budget_exhausted_kind` (``"cost"``) are set exactly
+    like the ``deadline`` trigger, sharing the same marker convention on
+    the ``nx_answer`` side.
+
+    **Validation is WHOLE-PLAN and PRE-DISPATCH (nexus-pucte), which
+    runs BEFORE either budget check above ever executes.** Required
+    bindings, malformed-step shape, and unresolved ``$var`` references
+    are all checked once, up front, across every step in the plan —
+    not just the step about to dispatch. This is a deliberate contract,
+    not an oversight: previously, a ``deadline``/``budget_usd_remaining``
+    cut that stopped the run before a LATE, malformed step was ever
+    reached meant that step's problems were harmless — dead code the run
+    never got to. Since this validation pass now runs first, a plan with
+    an unresolvable ``$var`` in step 5 fails the ENTIRE call with
+    :class:`PlanRunUnresolvedVarError` even when a tight ``deadline``
+    would have stopped the run at step 1 and never reached step 5 at
+    all. The runner refuses malformed input outright, rather than let it
+    slip through opportunistically depending on how far execution
+    happens to get before a budget cuts it off.
     """
     from nexus.plans.bundle import (  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         BUNDLED_INTERMEDIATE,
@@ -1498,11 +1692,19 @@ async def plan_run(
                     "rejected before any step dispatched"
                 ),
             )
+    # nexus-pucte: same "validate everything before the first dispatch"
+    # discipline as the tool-name loop just above — every step is
+    # confirmed to be a dict with a resolvable tool name by this point,
+    # so ``step.get("args")`` below is safe.
+    _validate_var_refs(steps, merged)
     dispatch: ToolDispatcher = dispatcher or _default_dispatcher
     step_outputs: list[dict[str, Any]] = []
     #: nexus-h33x8.6 a4: set when ``deadline`` cuts the run short. See
     #: :class:`PlanResult` and the ``deadline`` docstring above.
     budget_exhausted_at_step: int | None = None
+    #: RDR-196 .p3c: "time" or "cost", set alongside budget_exhausted_at_step
+    #: whichever axis cut the run short. See PlanResult.budget_exhausted_kind.
+    budget_exhausted_kind: str | None = None
     #: RDR-196 .p1b (nexus-nyry9.8): one StepRecord per executed dispatch
     #: segment. See StepRecord's own docstring for the source/model/cost
     #: attribution rules.
@@ -1587,13 +1789,46 @@ async def plan_run(
                     budget_exhausted_at_step = seg.plan_indices[0] + 1
                 else:
                     budget_exhausted_at_step = seg.plan_index + 1
+                budget_exhausted_kind = "time"
                 _log.info(
                     "nx_answer_budget_exhausted",
                     at_step=budget_exhausted_at_step,
                     total_steps=len(steps),
                     steps_completed=len(step_outputs),
+                    kind=budget_exhausted_kind,
                 )
                 break
+
+            # RDR-196 .p3c (nexus-nyry9.21): USD cost check, same
+            # pre-segment placement as the deadline check above (a
+            # dispatch's real cost is unknowable until it returns, so
+            # this can only ever be a stop-line before the NEXT segment,
+            # not a hard ceiling -- see budget_usd_remaining's own
+            # docstring paragraph above). Sums only the non-None costs
+            # of steps already completed in THIS plan_run call; an
+            # unknown-cost step contributes nothing to the running sum
+            # (never a fabricated 0) and therefore can never trip this
+            # check on its own.
+            if budget_usd_remaining is not None:
+                _spent_so_far = sum(
+                    r.cost_usd for r in step_records if r.cost_usd is not None
+                )
+                if _spent_so_far >= budget_usd_remaining:
+                    if isinstance(seg, OperatorBundleSlice):
+                        budget_exhausted_at_step = seg.plan_indices[0] + 1
+                    else:
+                        budget_exhausted_at_step = seg.plan_index + 1
+                    budget_exhausted_kind = "cost"
+                    _log.info(
+                        "nx_answer_budget_exhausted",
+                        at_step=budget_exhausted_at_step,
+                        total_steps=len(steps),
+                        steps_completed=len(step_outputs),
+                        kind=budget_exhausted_kind,
+                        spent_usd=_spent_so_far,
+                        budget_usd_remaining=budget_usd_remaining,
+                    )
+                    break
 
             # nexus-0qi9: per-step progress visibility. Emit start/complete
             # log events at each segment boundary so the silent claude -p
@@ -1774,6 +2009,14 @@ async def plan_run(
                 # appended whenever a result envelope parsed, even on some
                 # subsequent raises (.p1a contract) — read back below.
                 _bundle_usage: list[Any] = []
+                # nexus-ek8tr: bundles are strong by construction (they fuse
+                # synthesis operators) — pin them to STRONG_DEFAULT_ALIAS
+                # explicitly on every path except the kill switch, instead
+                # of inheriting the box CLI default bare.
+                if _os.environ.get("NX_OPERATOR_MODEL_TIERING") != "0":
+                    from nexus.operators.model_tiers import STRONG_DEFAULT_ALIAS as _SDA  # noqa: PLC0415 — default-path pin (nexus-ek8tr)
+
+                    _bundle_kwargs["model"] = _SDA
                 try:
                     bundle_result = await dispatch_bundle(
                         bundle, usage_sink=_bundle_usage, **_bundle_kwargs,
@@ -1799,6 +2042,7 @@ async def plan_run(
                             exc=exc,
                         ))
                         budget_exhausted_at_step = seg.plan_indices[0] + 1
+                        budget_exhausted_kind = "time"
                         # A timeout NEVER reaches claude_dispatch's usage_sink
                         # append (.p1a contract) — usage is genuinely None,
                         # never fabricated. Still one record: one dispatch
@@ -1968,6 +2212,7 @@ async def plan_run(
                         tool=tool, step_index=index, exc=exc,
                     ))
                     budget_exhausted_at_step = index + 1
+                    budget_exhausted_kind = "time"
                     # RDR-196 .p1b: a timeout never reaches usage_sink's
                     # append (.p1a contract) — usage genuinely None (the
                     # ambient sink is symmetric: it appends at the same site
@@ -2051,6 +2296,7 @@ async def plan_run(
         steps=step_outputs,
         final=step_outputs[-1] if step_outputs else None,
         budget_exhausted_at_step=budget_exhausted_at_step,
+        budget_exhausted_kind=budget_exhausted_kind,
         total_planned_steps=len(steps),
         step_records=step_records,
     )

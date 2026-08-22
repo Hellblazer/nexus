@@ -333,17 +333,15 @@ class TestTelemetryConfig:
 
 def test_set_config_value_through_flat_scalar_converts(home: Path) -> None:
     """nexus-s4a98 regression: a hand-written flat scalar at a section key is
-    converted to the nested form instead of crashing with TypeError — the
-    RDR-182 refusal text directs users to exactly this command as the remedy
-    for the flat shape, so it must succeed on it."""
+    converted to the nested form instead of crashing with TypeError."""
     cfg = home / ".config" / "nexus" / "config.yml"
     cfg.parent.mkdir(parents=True)
-    cfg.write_text("claude_assisted_remediation: true\nother: keep\n")
+    cfg.write_text("pdf: mineru\nother: keep\n")
 
-    set_config_value("claude_assisted_remediation.enabled", "true")
+    set_config_value("pdf.extractor", "mineru")
 
     data = yaml.safe_load(cfg.read_text())
-    assert data["claude_assisted_remediation"] == {"enabled": "true"}
+    assert data["pdf"] == {"extractor": "mineru"}
     assert data["other"] == "keep"  # sibling keys survive the conversion
 
 

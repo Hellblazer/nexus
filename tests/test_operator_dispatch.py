@@ -917,6 +917,317 @@ class TestModelAndOperatorKwargs:
         )
 
 
+class TestMaxBudgetUsd:
+    """nexus-2g8y7: ``max_budget_usd`` is an opt-in, per-DISPATCH cost
+    ceiling wired straight to the CLI's own ``--max-budget-usd`` flag.
+    The protected assertion is the DEFAULT-argv-unchanged test below --
+    everything else is new, additive behavior gated behind an explicit
+    opt-in (param or env)."""
+
+    @pytest.mark.asyncio
+    async def test_default_produces_no_max_budget_flag_in_argv(self) -> None:
+        """max_budget_usd=None (the default) and no env var set must leave
+        argv byte-identical -- no --max-budget-usd flag anywhere in it."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert "--max-budget-usd" not in captured[0], (
+            f"--max-budget-usd must not appear in argv when unset: {captured[0]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_param_appends_max_budget_flag_to_argv(self) -> None:
+        """An explicit max_budget_usd= reaches argv as an adjacent
+        --max-budget-usd <value> pair, fixed-point formatted."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA, max_budget_usd=1.5)
+
+        argv = captured[0]
+        assert "--max-budget-usd" in argv, f"--max-budget-usd missing from argv: {argv}"
+        idx = argv.index("--max-budget-usd")
+        assert argv[idx + 1] == "1.500000", (
+            f"expected fixed-point '1.500000' after --max-budget-usd, got "
+            f"{argv[idx + 1]!r} in {argv}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_tiny_param_does_not_use_scientific_notation(self) -> None:
+        """A very small ceiling (e.g. the probe script's 0.000001) must not
+        reach argv as Python's default scientific-notation str() -- the
+        CLI must see an unambiguous decimal literal."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA, max_budget_usd=0.000001)
+
+        argv = captured[0]
+        idx = argv.index("--max-budget-usd")
+        assert "e" not in argv[idx + 1].lower(), (
+            f"budget value must not use scientific notation: {argv[idx + 1]!r}"
+        )
+        assert argv[idx + 1] == "0.000001"
+
+    @pytest.mark.asyncio
+    async def test_env_fallback_appends_max_budget_flag(self, monkeypatch) -> None:
+        """NX_DISPATCH_MAX_BUDGET_USD is consulted when the param is not
+        passed."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        monkeypatch.setenv("NX_DISPATCH_MAX_BUDGET_USD", "2.25")
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        argv = captured[0]
+        idx = argv.index("--max-budget-usd")
+        assert argv[idx + 1] == "2.250000"
+
+    @pytest.mark.asyncio
+    async def test_param_wins_over_env(self, monkeypatch) -> None:
+        """The explicit parameter takes precedence over the env fallback
+        when both are set."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        monkeypatch.setenv("NX_DISPATCH_MAX_BUDGET_USD", "9.99")
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA, max_budget_usd=0.5)
+
+        argv = captured[0]
+        idx = argv.index("--max-budget-usd")
+        assert argv[idx + 1] == "0.500000", (
+            "param must win over env, not be overridden or merged"
+        )
+
+    @pytest.mark.asyncio
+    async def test_invalid_env_value_fails_loud_before_spawning(self, monkeypatch) -> None:
+        """An unparseable NX_DISPATCH_MAX_BUDGET_USD must raise ValueError
+        immediately -- never silently ignored, never reaching argv, and
+        never spawning the subprocess."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        monkeypatch.setenv("NX_DISPATCH_MAX_BUDGET_USD", "not-a-number")
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
+            with pytest.raises(ValueError, match="NX_DISPATCH_MAX_BUDGET_USD"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        mock_spawn.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "-1", "0"])
+    async def test_non_finite_or_non_positive_budget_fails_loud(
+        self, monkeypatch, bad,
+    ) -> None:
+        """Review Medium 2 ([23268]): float() accepts nan/inf/negatives,
+        none of which is a budget. Env AND param paths both reject."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        monkeypatch.setenv("NX_DISPATCH_MAX_BUDGET_USD", bad)
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
+            with pytest.raises(ValueError, match="finite positive"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        mock_spawn.assert_not_called()
+
+        monkeypatch.delenv("NX_DISPATCH_MAX_BUDGET_USD")
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
+            with pytest.raises(ValueError, match="finite positive"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA,
+                                      max_budget_usd=float(bad))
+        mock_spawn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_env_value_is_treated_as_unset(self, monkeypatch) -> None:
+        """An empty-string env value (unset-but-exported) must not raise
+        and must not append the flag -- consistent with the model= empty-
+        string normalization elsewhere in this module."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        monkeypatch.setenv("NX_DISPATCH_MAX_BUDGET_USD", "")
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert "--max-budget-usd" not in captured[0]
+
+    @pytest.mark.asyncio
+    async def test_budget_signal_raises_typed_error_with_partial_fields(self) -> None:
+        """A fabricated budget-abort stderr, WITH max_budget_usd set, must
+        raise OperatorBudgetExceededError (not the generic OperatorError)
+        carrying the same partial_text/event_count/log_path fields as
+        OperatorTimeoutError."""
+        from pathlib import Path
+
+        from nexus.operators.dispatch import (
+            claude_dispatch,
+            OperatorBudgetExceededError,
+        )
+
+        ndjson_line = json.dumps({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "partial answer text"},
+            },
+        })
+        proc = _make_proc(
+            stdout=(ndjson_line + "\n").encode(),
+            stderr=b"Error: max-budget-usd 0.000001 exceeded, aborting run",
+            returncode=1,
+        )
+
+        captured_log_calls: list[tuple] = []
+
+        def fake_persist(max_budget_usd, partial_text, stderr, event_count) -> str:
+            captured_log_calls.append((max_budget_usd, partial_text, stderr, event_count))
+            return "/fake/budget/log/path.log"
+
+        with (
+            patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
+            patch("nexus.operators.dispatch._persist_budget_log", side_effect=fake_persist),
+        ):
+            with pytest.raises(OperatorBudgetExceededError) as exc_info:
+                await claude_dispatch(
+                    "prompt", _SIMPLE_SCHEMA, max_budget_usd=0.000001,
+                )
+
+        err = exc_info.value
+        assert "partial answer text" in err.partial_text
+        assert err.event_count == 1
+        assert err.log_path == Path("/fake/budget/log/path.log")
+        assert captured_log_calls, "_persist_budget_log was never called"
+        assert captured_log_calls[0][0] == 0.000001
+
+    @pytest.mark.asyncio
+    async def test_budget_signal_ignored_when_not_opted_in(self) -> None:
+        """The SAME budget-shaped stderr, WITHOUT max_budget_usd set, must
+        raise the ordinary OperatorError -- a dispatch that never opted
+        into a ceiling cannot have its failures reclassified."""
+        from nexus.operators.dispatch import (
+            claude_dispatch,
+            OperatorBudgetExceededError,
+            OperatorError,
+        )
+
+        proc = _make_proc(
+            stdout=b"",
+            stderr=b"Error: max-budget-usd 0.000001 exceeded, aborting run",
+            returncode=1,
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError) as exc_info:
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert not isinstance(exc_info.value, OperatorBudgetExceededError), (
+            "a dispatch that never set max_budget_usd must not raise the "
+            "budget-specific subclass, even if the failure text mentions "
+            "'budget'"
+        )
+
+    @pytest.mark.asyncio
+    async def test_unrelated_failure_with_budget_set_keeps_ordinary_error(self) -> None:
+        """max_budget_usd is set, but the failure text has no budget/abort
+        signal at all -- must raise the ordinary OperatorError, not the
+        typed subclass (no false positive from the mere presence of the
+        opt-in kwarg)."""
+        from nexus.operators.dispatch import (
+            claude_dispatch,
+            OperatorBudgetExceededError,
+            OperatorError,
+        )
+
+        proc = _make_proc(
+            stdout=b"", stderr=b"rate limit exceeded", returncode=1,
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError) as exc_info:
+                await claude_dispatch(
+                    "prompt", _SIMPLE_SCHEMA, max_budget_usd=5.0,
+                )
+
+        assert not isinstance(exc_info.value, OperatorBudgetExceededError)
+
+    @pytest.mark.asyncio
+    async def test_cli_rejecting_the_flag_surfaces_cli_stderr_not_stripped(self) -> None:
+        """An old CLI that does not support --max-budget-usd must still
+        fail loud with the CLI's own stderr in the message -- the flag is
+        never silently stripped from argv on a prior failure (there is no
+        retry path here at all: the failure is simply reported)."""
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(
+            stdout=b"",
+            stderr=b"error: unknown option '--max-budget-usd'",
+            returncode=1,
+        )
+        captured: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            with pytest.raises(OperatorError) as exc_info:
+                await claude_dispatch(
+                    "prompt", _SIMPLE_SCHEMA, max_budget_usd=1.0,
+                )
+
+        assert "--max-budget-usd" in captured[0], (
+            "the flag must still have been passed to argv -- never stripped"
+        )
+        assert "unknown option" in str(exc_info.value), (
+            "the CLI's real stderr must reach the caller-visible message"
+        )
+
+
 # ── nexus-5daww: _build_dispatch_env must not forward a live T1 session ─────
 #
 # operators.dispatch.claude_dispatch's `ephemeral=True` mode (the default,
@@ -1980,7 +2291,7 @@ class TestSimpleOperatorReturnShapeAndPromptContent:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured.append(prompt)
             return fake_return
 
@@ -2003,7 +2314,7 @@ class TestOperatorCompare:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout, model=None):
+        async def fake(prompt, schema, timeout, model=None, **kw):
             captured["prompt"] = prompt
             return {"comparison": "ok"}
 
@@ -2024,7 +2335,7 @@ class TestOperatorCompare:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout, model=None):
+        async def fake(prompt, schema, timeout, model=None, **kw):
             captured["prompt"] = prompt
             return {"comparison": "cross"}
 
@@ -2053,7 +2364,7 @@ class TestOperatorCompare:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout, model=None):
+        async def fake(prompt, schema, timeout, model=None, **kw):
             captured["prompt"] = prompt
             return {"comparison": "ok"}
 
@@ -2078,7 +2389,7 @@ class TestOperatorCompare:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout, model=None):
+        async def fake(prompt, schema, timeout, model=None, **kw):
             captured["prompt"] = prompt
             return {"comparison": ""}
 
@@ -2097,7 +2408,7 @@ class TestOperatorCompare:
 
         captured = {}
 
-        async def fake(prompt, schema, timeout, model=None):
+        async def fake(prompt, schema, timeout, model=None, **kw):
             captured["prompt"] = prompt
             return {"comparison": "ok"}
 
@@ -2144,7 +2455,7 @@ class TestOperatorFilter:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured.append(prompt)
             return {"items": [], "rationale": []}
 
@@ -2166,7 +2477,7 @@ class TestOperatorFilter:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured.append(prompt)
             return {"items": [], "rationale": []}
 
@@ -2188,7 +2499,7 @@ class TestOperatorFilter:
 
         captured_schemas: list[dict] = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured_schemas.append(schema)
             return {"items": [], "rationale": []}
 
@@ -2219,7 +2530,7 @@ class TestOperatorFilter:
 
         inputs = [{"id": f"item-{i}", "title": f"Item {i}"} for i in range(10)]
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             kept = inputs[:4]
             rationale = [
                 {"id": it["id"], "reason": "keeps criterion"} for it in kept
@@ -2270,7 +2581,7 @@ class TestOperatorFilter:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_filter
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             return {"items": [], "rationale": []}
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
@@ -2311,7 +2622,7 @@ class TestOperatorCheck:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured.append(prompt)
             return {"ok": True, "evidence": []}
 
@@ -2335,7 +2646,7 @@ class TestOperatorCheck:
 
         captured_schemas: list[dict] = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured_schemas.append(schema)
             return {"ok": True, "evidence": []}
 
@@ -2359,7 +2670,7 @@ class TestOperatorCheck:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_check
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             return {
                 "ok": True,
                 "evidence": [
@@ -2391,7 +2702,7 @@ class TestOperatorCheck:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_check
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             return {
                 "ok": False,
                 "evidence": [
@@ -2450,7 +2761,7 @@ class TestOperatorVerify:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured.append(prompt)
             return {"verified": False, "reason": "", "citations": []}
 
@@ -2471,7 +2782,7 @@ class TestOperatorVerify:
 
         captured_schemas: list[dict] = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured_schemas.append(schema)
             return {"verified": False, "reason": "", "citations": []}
 
@@ -2494,7 +2805,7 @@ class TestOperatorVerify:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_verify
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             return {
                 "verified": True,
                 "reason": "quote-at-p3-matches-claim",
@@ -2549,7 +2860,7 @@ class TestOperatorGroupby:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured.append(prompt)
             return {"groups": []}
 
@@ -2573,7 +2884,7 @@ class TestOperatorGroupby:
 
         captured_schemas: list[dict] = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured_schemas.append(schema)
             return {"groups": []}
 
@@ -2604,7 +2915,7 @@ class TestOperatorGroupby:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_groupby
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             return {
                 "groups": [
                     {"key_value": "2018",
@@ -2729,7 +3040,7 @@ class TestOperatorAggregate:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured.append(prompt)
             return {"aggregates": []}
 
@@ -2755,7 +3066,7 @@ class TestOperatorAggregate:
 
         captured_schemas: list[dict] = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured_schemas.append(schema)
             return {"aggregates": []}
 
@@ -2784,7 +3095,7 @@ class TestOperatorAggregate:
 
         captured: list[str] = []
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             captured.append(prompt)
             return {"aggregates": []}
 
@@ -2813,7 +3124,7 @@ class TestOperatorAggregate:
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import operator_aggregate
 
-        async def fake(prompt, schema, timeout=60.0, model=None):
+        async def fake(prompt, schema, timeout=60.0, model=None, **kw):
             return {
                 "aggregates": [
                     {"key_value": "alpha", "summary": "alpha-wins-method"},

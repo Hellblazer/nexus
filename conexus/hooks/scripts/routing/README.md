@@ -8,9 +8,9 @@ message naming the preferred invocation.
 ## Plugin ownership (RDR-125)
 
 **Each plugin owns the routing rules whose deny message redirects to a
-tool the plugin ships.** The nx-side rules under this directory
-(`git_add_all_redirects_to_explicit_paths`, `phase_review_close_requires_gate`)
-redirect to commands or skills that nx ships. The `grep_for_symbols_redirects_to_serena`
+tool the plugin ships.** The nx-side rule under this directory
+(`phase_review_close_requires_gate`) redirects to commands or skills
+that nx ships. The `grep_for_symbols_redirects_to_serena`
 rule lives in `sn/hooks/scripts/routing/` because it redirects to Serena
 MCP tools that sn ships; installing nx without sn means the hook does
 not exist, which is the right default.
@@ -35,13 +35,15 @@ follow-on RDR.
 The 4-hook cap on PreToolUse:Bash from RDR-121 § Performance
 Expectations is an **aggregate across all installed plugins**, not a
 per-plugin count -- Claude Code merges hook registrations and fires
-them sequentially. Current count:
+them sequentially. Current count (the review-coverage push gate,
+`git_add_all_redirects_to_explicit_paths`, was deleted 2026-08-22 —
+Sam's decision, see the file's former git history):
 
 | Plugin | Routing rules | Other PreToolUse:Bash | Subtotal |
 |--------|----|----|----|
-| nx | 2 (`git_add_all`, `phase_review_close`) | 1 (`pre_close_verification_hook.sh`) | 3 |
+| nx | 1 (`phase_review_close`) | 1 (`pre_close_verification_hook.sh`) | 2 |
 | sn | 1 (`grep_for_symbols`) | 0 | 1 |
-| **Aggregate** | | | **4 (at cap)** |
+| **Aggregate** | | | **3** |
 
 Adding a fifth routing rule in any plugin requires either consolidation
 or a budget revision in a successor RDR. The

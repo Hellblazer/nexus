@@ -34,6 +34,10 @@ The `query` MCP tool has catalog-aware routing: `author`, `content_type`, `subtr
 | `auto_linker.py` | Storage-boundary auto-linking from T1 scratch link-context. Hook firing site is `mcp/core.py`. |
 | `link_generator.py` | Post-hoc batch linkers (citation, RDR↔file-path, prose↔file-path, pdf same-as via shared head_hash). |
 | `catalog_spans.py`, `store_hook.py`, `orphan_backfill.py`, `manifest_backfill.py`, `write_priority.py` | Span resolution, post-store registration hook, backfill tooling, indexer fairness window. |
+| `manifest_heal.py` | Shared manifest-gap heal core (nexus-8g0ch + nexus-c21fk) — rebuilds `document_chunks` manifest rows from T3 chunks already stored, without re-embedding. Consumed by both `nx catalog reconcile` and the `nx index repo` self-heal pass. |
+| `chunk_quarantine.py` | Orphan-chunk soft delete (nexus-xukbj) — moves GC orphans to a sibling `quarantine__*` collection (excluded from every search corpus by construction) instead of hard-deleting; restores chashes that become referenced again. |
+| `dt_link_generator.py` | DEVONthink semantic + structural link generation (RDR-139 Layer B) — writes `relates` edges from DT 'See Also' similarity and author-curated item links; gated on `devonthink.available`. |
+| `collection_name.py` | `CollectionName` value object (RDR-103 Phase 1) — the four-segment `(content_type, owner_id, embedding_model, model_version)` tuple rendered as `<content_type>__<owner_id>__<embedding_model>__v<n>`; `parse` is strict. |
 
 Deleted in nexus-i711w (RDR-158 P4 terminal deletion): `catalog.py` (the local `Catalog` class), `catalog_db.py`, `event_log.py`, `projector.py`, `events.py`, `catalog_owners.py`, `catalog_sync.py`, `catalog_links.py`, `catalog_docs.py`, `catalog_backup.py`, `catalog_git.py`, `catalog_writes.py` (ManifestRow relocated to `types.py`), `consolidation.py`, `collections_owner_backfill.py`, `synthesizer.py`.
 

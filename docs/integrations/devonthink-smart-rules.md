@@ -170,8 +170,10 @@ is exactly right; for a bulk import (you drag 20 PDFs in at once), it
 spawns 20 parallel `nx` processes that race on the same T3 ChromaDB
 collection.
 
-ChromaDB's per-collection quota is `MAX_CONCURRENT_WRITES = 10` (see
-`src/nexus/db/chroma_quotas.py`). A 20-record bulk import will succeed
+ChromaDB's per-collection quota is `MAX_CONCURRENT_WRITES = 10` (now a
+generic serving-path ceiling, `QUOTAS.MAX_CONCURRENT_WRITES` in
+`src/nexus/db/limits.py` — `chroma_quotas.py` was deleted at RDR-155 P4b).
+A 20-record bulk import will succeed
 because the underlying upserts batch internally, but you'll see
 `429`-style warnings in the log if your network is slow and the
 queues stack up.

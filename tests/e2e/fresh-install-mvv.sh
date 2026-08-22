@@ -624,11 +624,45 @@ _nx search "era-32 wire re-id re-embed" >"$LOGS/search2.log" 2>&1 || true
 _search_log_confirms_markdown_leg "$LOGS/search2.log" \
     || _fail "search did not return the indexed markdown (fresh-mvv-markdown-note)"
 
-echo "── 8/9 doctor: zero ✗, zero ⚠, warnings allowlisted ──"
+echo "── 8/9 doctor: zero ✗, zero FAIL:, zero ⚠, warnings allowlisted ──"
 _nx doctor >"$LOGS/doctor.log" 2>&1 || _fail "doctor exited non-zero"
-if grep -q "✗" "$LOGS/doctor.log"; then
-    grep "✗" "$LOGS/doctor.log" >&2
-    _fail "doctor shows red ✗ on a virgin box (9xfx5 class)"
+# nexus-e1ti4 follow-up (critic review): doctor's five promoted
+# supplementary checks (resources, plan-library, taxonomy, aspect-queue,
+# t1) use THREE different failure conventions, not one -- verified against
+# doctor.py directly: resources/taxonomy/t1 print a bare or bracketed "✗"
+# glyph on failure, plan-library prints "FAIL:" text with no glyph, and
+# aspect-queue prints NEITHER (its own gap -- tracked separately as
+# nexus-fylxo, deliberately out of scope here). A glyph-only grep is
+# structurally blind to the plan-library convention, which is exactly the
+# nexus-e1ti4 defect class; grep for both, matching the same widening
+# already applied to rehearse_acquire.sh's equivalent assertion. This is a
+# grep against a FILE (doctor.log), not a live pipe, so it is not subject
+# to the pipefail/early-exit-consumer class rehearse_acquire.sh's DOC_OUT
+# variable match had to route around.
+if grep -qE "✗|FAIL:" "$LOGS/doctor.log"; then
+    grep -E "✗|FAIL:" "$LOGS/doctor.log" >&2
+    _fail "doctor shows a red ✗ or FAIL: line on a virgin box (9xfx5 / nexus-e1ti4 class)"
+fi
+
+echo "── 8b/9 doctor --check-plan-library: virgin-box builtin plan floor ──"
+# nexus-e1ti4: plain `nx doctor`'s default sweep DOES run the plan-library
+# check and DOES print a "FAIL:" line when the global-tier builtin floor
+# isn't met, but that check's raised Exit is swallowed by the
+# supplementary-check loop (non-gating by design) -- it never flips $?, and
+# the step-8 "✗"-only grep above never sees it either (the check emits
+# "FAIL:" text, not the "✗" glyph). This is exactly why this gate PASSED on
+# a virgin box carrying zero builtin plans (nexus-e1ti4 evidence). The
+# standalone `--check-plan-library` mode is the one path whose Exit(1)/(2)
+# genuinely becomes the process exit code, so it is the only rc-based
+# assertion that can catch this class.
+if _nx doctor --check-plan-library >"$LOGS/doctor-plan-library.log" 2>&1; then
+    PLAN_LIBRARY_RC=0
+else
+    PLAN_LIBRARY_RC=$?
+fi
+cat "$LOGS/doctor-plan-library.log" >&2
+if [ "$PLAN_LIBRARY_RC" -ne 0 ]; then
+    _fail "doctor --check-plan-library failed (rc=$PLAN_LIBRARY_RC) on a virgin box (nexus-e1ti4 class) -- see $LOGS/doctor-plan-library.log"
 fi
 # Warnings allowlist — EMPTY by design. Every new fresh-box warning is a
 # decision: fix it or allowlist it HERE with a rationale + bead reference.

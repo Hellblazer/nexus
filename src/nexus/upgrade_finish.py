@@ -538,6 +538,75 @@ def detect_engine_convergence(config_dir: Path) -> EngineConvergence:
     )
 
 
+#: Full clickable https URL, pinned to ``main`` (releases promote develop ->
+#: main, so an operator on a released build finds the section on main).
+#: Relocated from the deleted ``nexus.remediation`` package (nexus-lgdel):
+#: this is now the sole real consumer, via :class:`_ChashPoisonGuidance`.
+MIGRATION_RUNBOOK_URL = (
+    "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md"
+)
+
+_PASTE_RULE = "  " + "-" * 64
+
+
+@dataclass(frozen=True)
+class _ChashPoisonGuidance:
+    """Plain-text chash-poison gate guidance for ``PoisonProbe.playbook``.
+
+    Replaces the RDR-182 ``Playbook`` DSL (deleted at nexus-lgdel — the
+    chash-rekey upgrade rung every prior rendering steered operators
+    toward no longer exists, and the RDR-182 guided-remediation MCP
+    surface + CLI ``nx remediate`` are deleted with it). This carries only
+    the two renderings the two REAL, independent safety gates still need
+    (:func:`converge_engine`'s block and ``nx daemon service
+    install-binary``'s refuse/force-override, nexus-pnwu0 / GH #1390) —
+    remedy corrected to re-indexing (the mechanism that actually
+    recomputes conformant ids today), no ordered-step/consent machinery,
+    because none remains to guide.
+    """
+
+    store_detail: str
+
+    def _agent_prompt(self) -> str:
+        return (
+            "My conexus/nexus store has width-non-conformant chash rows in "
+            "pgvector (octet_length <> 32 — legacy pre-RDR-108 ids; the "
+            "GH #1414 class). Resolve the affected collections to their "
+            "repos (`nx catalog owners`) and re-index the file-backed ones "
+            "(`nx index repo <path>` — additive, per-collection), then "
+            "re-run `nx doctor` and confirm the 'Chunk chash conformance' "
+            "warning has cleared. Do NOT drop the chash length constraints."
+        )
+
+    def terminal_block(self) -> str:
+        """The CLI refusal body."""
+        return (
+            "\nRefusing to install (nexus-pnwu0 / GH #1414): this store has "
+            "width-non-conformant chash rows — heal them by re-indexing "
+            "before swapping engine binaries.\n"
+            f"  {self.store_detail}\n\n"
+            "Remediate first — full recovery runbook (clickable):\n"
+            f"  {MIGRATION_RUNBOOK_URL}\n\n"
+            "Or paste this to your Claude to be walked through it:\n"
+            f"{_PASTE_RULE}\n"
+            f"  {self._agent_prompt()}\n"
+            f"{_PASTE_RULE}\n\n"
+            "Do NOT drop the chash length constraints to force it through — "
+            "that is the exact action that caused GH #1390. Re-run with "
+            "--force ONLY after you have remediated."
+        )
+
+    def force_override_warning(self) -> str:
+        """The one-line warning when the operator overrides the gate."""
+        return (
+            "WARNING (nexus-pnwu0 / GH #1414): --force overrides the "
+            f"chash-poison gate. {self.store_detail} The rows stay unhealed "
+            "debt until you re-index the affected collections, and a "
+            "pre-v0.1.48 char-era engine can still crash-loop on boot. "
+            f"Recovery: {MIGRATION_RUNBOOK_URL}."
+        )
+
+
 @dataclass(frozen=True)
 class PoisonProbe:
     """Tri-state chash-poison gate verdict (nexus-pgdcv, GH #1414).
@@ -550,7 +619,8 @@ class PoisonProbe:
     over 35,477 poison rows that a later doctor then surfaced).
 
     Exactly one of three states:
-    - POISONED: ``playbook`` is set (render its ``terminal_block()``).
+    - POISONED: ``playbook`` is set to a :class:`_ChashPoisonGuidance`
+      (render its ``terminal_block()``).
     - UNKNOWN: ``unknown_reason`` is set — the probe could not VERIFY the
       store; the caller defers convergence loudly rather than proceeding
       blind (and never hard-blocks: ``nx daemon service install-binary``
@@ -621,12 +691,8 @@ def _poison_probe(config_dir: Path) -> PoisonProbe:
         and not r.ok and POISON_DETAIL_TOKEN in r.detail
     ]
     if poison:
-        from nexus.remediation import StoreState, emit_playbook  # noqa: PLC0415 — deferred, CLI startup cost
-
         return PoisonProbe(
-            playbook=emit_playbook(
-                "chash-poison", StoreState(detail=poison[0].detail),
-            ),
+            playbook=_ChashPoisonGuidance(store_detail=poison[0].detail),
         )
 
     probe_didnt_run = [
