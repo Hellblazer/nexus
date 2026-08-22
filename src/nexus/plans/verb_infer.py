@@ -98,10 +98,14 @@ _VERB_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # are carved out of.
     ("research", re.compile(
         r"\bresearch\b|\bexplain\b|\barchitecture\b|\bdesign\s+of\b"
-        r"|^\s*(what|which|who|where|how|when)\b"
+        # Interrogative openers. Both the wh- forms and the yes/no forms:
+        # "does the corpus have anything about X" is as much a retrieval
+        # question as "what does the corpus say about X", and omitting the
+        # yes/no half left corpus-coverage-check — a template written for
+        # exactly that phrasing — underivable, so it could never be routed.
+        r"|^\s*(what|which|who|where|how|when|why)\b"
+        r"|^\s*(do|does|did|is|are|was|were|can|could|should|has|have)\b"
         r"|\b(find|list|show|search\s+for|look\s+up)\b"
-        r"|\bwhat\s+(is|are|does|do)\b"
-        r"|\bhow\s+(does|do|is|are)\b"
     )),
 )
 
