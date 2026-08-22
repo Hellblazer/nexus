@@ -4,6 +4,41 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.15.0] - 2026-08-22
+
+Plugin version aligned with conexus 7.15.0. The pin advance activates
+everything accumulated in PENDING_RELEASE.md since v7.14.0.
+
+- **Three plan-meta skills are retired**: `plan-author`, `plan-inspect` and
+  `plan-promote`, along with their four builtin templates and
+  `traverse-then-generate.yml`. They dispatched a `plan_match` MCP tool that
+  has never existed, so no invocation ever succeeded -- but they were not
+  inert: their templates absorbed any question containing the word "plan"
+  and outranked the plan the caller actually wanted. What they described is
+  `nx plan list` / `nx plan show` / `nx plan hygiene`, which work. Existing
+  installs drop the rows on the next `nx plan reseed` or `nx upgrade`
+  (nexus-77cct).
+- **The push-time review-coverage gate is deleted.** One true positive in
+  its lifetime, against denying correct pushes, and roughly 1.2M tokens
+  went into diagnosing and repairing it on its final day alone. `develop`
+  is already PR-gated to `main` with required checks, so unreviewed code
+  ships to nobody. Push-to-main protection remains, as user-level policy
+  rather than plugin behaviour.
+- **RDR-184 ledgers are archived before the 7-day sweep reaps them.**
+  `expectations_archive` runs immediately before `expectations_sweep`,
+  riding the existing sweep site so the ordering holds by construction.
+- **A prose register for the RDR lifecycle**, wired into every stage
+  surface (nexus-3fab5).
+- **`developer.md`'s sequential-thinking directive is re-anchored to the
+  edit**, with three escape hatches removed -- the qualifiers measured to
+  zero calls in a full session.
+- **The auto-approve list no longer grants two deleted MCP tools.** No test
+  could have caught this: the permission test asserts registered-tools is a
+  subset of the allow-list, one direction only, so a stale entry naming a
+  nonexistent tool was undetectable by construction.
+- **The routing log resolves `NEXUS_CONFIG_DIR`** instead of hardcoding
+  `Path.home()`, in both the conexus and sn copies.
+
 ## [7.14.0] - 2026-08-21
 
 Plugin version aligned with conexus 7.14.0. Pin advance activates the

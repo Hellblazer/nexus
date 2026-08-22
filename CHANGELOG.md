@@ -6,6 +6,87 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.15.0] - 2026-08-22
+
+Model tiering by measurement, budget enforcement, and the removal of the
+RDR-182 remediation surface. Engine identity is unchanged at
+`engine-service-v0.1.85` -- no engine cut rides this release.
+
+### Added
+
+- **Per-dispatch `--max-budget-usd` ceiling and explicit server-side
+  text-result caps** (nexus-2g8y7, nexus-2xjge).
+- **`budget_usd` enforcement.** The default is derived rather than guessed:
+  1.0530 USD, the p90 over n=30 config-conformant runs, refusing the top
+  10%. A run stops at a step boundary on MEASURED cost. Exceeding the cap
+  pre-flight now WARNS instead of refusing -- the estimator predicted an
+  identical 0.90433 for every live plan, so refusal was a step function
+  rather than a judgement (nexus-nyry9.19, nexus-nyry9.21).
+- **Builtin plan templates are seeded at `nx init`.** A virgin service
+  install previously had zero builtin plans, and both gates that should
+  have caught it were vacuous (nexus-e1ti4).
+- **Category-level plan routing by dimension**, so `nx_answer` can reach a
+  builtin plan at all, plus typed binding derivation for plan authors.
+
+### Changed
+
+- **Operator model tiering, chosen on measurement rather than default.**
+  The six mechanical operators plus `check`/`verify` run on the cheap tier;
+  synthesis, bundles and the planner run on opus, pinned EXPLICITLY at
+  every dispatch site so nothing inherits the box CLI default. Fable is no
+  longer a default anywhere. Three-arm studies (Fable/Sonnet/Haiku, then an
+  opus arm) found synthesis is the opposite of mechanical: cheap arms were
+  refuted on summarize/generate/compare, while mechanical operators showed
+  no refutation at roughly an eighth of the cost (nexus-3mea3, nexus-ek8tr,
+  nexus-ztunv, nexus-rv9xp).
+- **The plan library reconciles by default and converges on upgrade**, so a
+  stale library repairs itself instead of staying stale.
+- **`store_get_many` batches its hydration** instead of one request per
+  document, and the T2 HTTP stores share one SSL context rather than
+  rebuilding it per client.
+- **One unextractable file no longer fails a whole repo index**; a
+  systemic skip still does (nexus-deyd5).
+- **`docs/migration-runbook.md` rewritten** 751 -> 132 lines as "Upgrading
+  nexus". It documented `nx storage migrate`, `nx guided-upgrade` and
+  `nx migrate-to-service`, all of which are deleted verbs.
+
+### Removed
+
+- **The RDR-182 claude-assisted remediation surface.** The `remediate` and
+  `forensics` MCP tools (registered nexus tools go 38 -> 36), the
+  `nx remediation` command group, and the playbook/consent modules. Every
+  playbook told operators to run `nx upgrade` for the chash-rekey rung
+  deleted at 5a3dcd16c, so the guidance could not be followed. The
+  read-only `sql_lint` guard is kept -- `db/diag_connection.py` depends on
+  it.
+
+### Fixed
+
+- **`nx doctor`'s index-log check reported recency and never content**,
+  returning `ok=True` unconditionally. It hid 1528
+  `aspect_source_path_uncanonical` warnings and 49
+  `manifest_write_many_failed` events.
+- **A second copy of the stale chash guidance** in `_check_migration_state`
+  told users to run `nx catalog owners list` (which exits 2), promised a
+  deleted rung would heal their rows, and cited a runbook section the
+  rewrite removed. Its test asserted that guidance was PRESENT -- it pinned
+  the falsehood -- and now asserts its absence.
+- **`source_uri` canonicalization** at the two sites that had drifted from
+  it, ending a warning that fired roughly 300 times a day and a workaround
+  that walked an entire collection with a suffix match (RDR-096 P3.1).
+- **The session-end census appended one row per SessionEnd firing** rather
+  than per session: 306 rows for 28 sessions, one session writing 134.
+- **The routing log ignored `NEXUS_CONFIG_DIR`** and always wrote to the
+  real config dir, which made test runs mutate live state.
+- **An unresolved `$var` now fails loud** instead of passing the literal
+  token to the tool; six builtin templates were sending operators a literal
+  `$token`, and the shape is linted so it cannot ship again (nexus-pucte,
+  nexus-y6ywo).
+- **A plan seed write could silently overwrite an unrelated plan**, and the
+  seed loader had no update path, so an edited template could never reach
+  an existing library (nexus-wp94t, nexus-f1mbo).
+
+
 ## [7.14.0] - 2026-08-21
 
 Engine identity moves to `engine-service-v0.1.85` (paired release, deploy-first:
