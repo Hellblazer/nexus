@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import structlog
@@ -3580,6 +3580,127 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
         return _mcp_tool_error("store_get", e)
 
 
+def _unique_preserve_order(ids: Iterable[str]) -> list[str]:
+    """Dedupe an id sequence while keeping first-seen order.
+
+    ``store_get_many``'s batched fan-out fix groups ids per candidate
+    collection before issuing one batched fetch; a caller-supplied id
+    list may repeat the same id at multiple positions (e.g. duplicate
+    references in a single hydration request), and fetching it twice in
+    the same batch would be wasted round-trip payload for no semantic
+    gain — the result is looked up back out of a dict, so duplicates
+    resolve identically either way.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for doc_id in ids:
+        if doc_id not in seen:
+            seen.add(doc_id)
+            out.append(doc_id)
+    return out
+
+
+def _batched_get_by_ids(t3: Any, col_name: str, ids: list[str]) -> dict[str, dict]:
+    """Batch-fetch ``ids`` from ``col_name`` in one (paged) round trip.
+
+    Delegates to ``_ServiceCollectionStub.get(ids=...)``, which already
+    pages internally at ``QUOTAS.MAX_RECORDS_PER_WRITE`` (300 — smaller
+    than the ``/v1/vectors/store-get`` route's own ``MAX_BATCH_IDS=1000``
+    ceiling, nexus-hdx2u) and fails loud on an engine-reported truncation.
+    Reshapes the Chroma-style ``{ids, documents, metadatas}`` response into
+    the same flat ``{id, content, **meta}`` shape ``HttpVectorClient.get_by_id``
+    returns, keyed by id, so callers can do the same ``entry.get("content")``
+    lookups as the single-id path.
+
+    BLAST RADIUS (code review T2 nexus/store-get-many-code-review-2026-08-21
+    [23303] Item 1): this is NOT equivalent in failure profile to the prior
+    per-id loop's ``except Exception: entry = None``, even though the
+    OUTCOME SHAPE (a caught exception degrades to "not found", never raises)
+    matches. Pre-fix, a transient failure cost exactly one id. Here, a
+    single failed request can blank up to ``QUOTAS.MAX_RECORDS_PER_WRITE``
+    (300) ids as missing in one shot — ``_post`` has no retry, and
+    ``_ServiceCollectionStub.get``'s per-page loop discards already-fetched
+    pages when a later page in the same call raises. Two mitigations:
+      1. The failure is logged LOUD (below) naming the collection and the
+         id count, so "these documents don't exist" and "the batch call to
+         fetch them failed" are distinguishable in the log — the pre-fix
+         silent-degrade-to-None-per-id was already indistinguishable in
+         THIS respect (a single missing id looked the same either way), but
+         silently blanking up to 300 at once without any signal is exactly
+         the silent-fallback-for-a-correctness-problem shape this repo bans.
+      2. A batch failure falls back to a per-id retry
+         (:func:`_fallback_get_by_ids_individually`, reusing
+         ``HttpVectorClient.get_by_id`` directly) rather than giving up on
+         the whole batch — this restores the OLD blast radius (a genuinely
+         transient blip now costs one id again, since the retry is a fresh
+         request per id) for exactly the failure path; the happy path stays
+         batched.
+
+    Uses ``get_or_create_collection`` rather than ``get_collection`` on
+    purpose: the latter does its own existence pre-check via a full
+    ``list_collections()`` round trip before returning the stub, which
+    would tax exactly the fan-out this fix removes (one extra call per
+    candidate collection per hydration request). ``get_by_id``, the path
+    this replaces on the happy path, never pre-checked existence either —
+    it POSTed directly and let a missing/unreachable collection surface as
+    a caught exception, which is the behaviour preserved here (now via the
+    per-id fallback rather than a blanket "nothing found here").
+    """
+    if not ids:
+        return {}
+    try:
+        result = t3.get_or_create_collection(col_name).get(ids=ids)
+    except Exception as exc:  # noqa: BLE001 — batch-level failure; falls back to per-id retry below, never raises to the caller
+        _log.error(
+            "store_get_many_batch_fetch_failed",
+            collection=col_name,
+            id_count=len(ids),
+            error=str(exc),
+        )
+        return _fallback_get_by_ids_individually(t3, col_name, ids)
+
+    out_ids = result.get("ids") or []
+    docs = result.get("documents") or []
+    metas = result.get("metadatas") or []
+    id_to_entry: dict[str, dict] = {}
+    for i, rid in enumerate(out_ids):
+        meta = metas[i] if i < len(metas) else {}
+        entry: dict[str, Any] = {
+            "id": rid,
+            "content": docs[i] if i < len(docs) else "",
+        }
+        if isinstance(meta, dict):
+            entry.update(meta)
+        id_to_entry[rid] = entry
+    return id_to_entry
+
+
+def _fallback_get_by_ids_individually(
+    t3: Any, col_name: str, ids: list[str],
+) -> dict[str, dict]:
+    """Per-id retry after a whole-batch fetch failure.
+
+    Deliberately NOT a general retry framework — no backoff, no attempt
+    cap beyond "try once per id," reuses the existing single-id
+    ``HttpVectorClient.get_by_id`` path verbatim. Its only job is to
+    restore the pre-fix blast radius for the failure case: one bad id
+    costs one id again, instead of the whole (up to 300-id) batch going
+    missing on one flaky request. If the underlying failure is systemic
+    (the service is actually down) every one of these calls fails too and
+    the ids end up missing anyway — no worse than the batch path, and the
+    per-id calls fail fast (connection-level errors, not slow timeouts).
+    """
+    id_to_entry: dict[str, dict] = {}
+    for doc_id in ids:
+        try:
+            entry = t3.get_by_id(col_name, doc_id)
+        except Exception:  # noqa: BLE001 — per-id graceful degradation, mirrors the pre-fix loop exactly
+            entry = None
+        if entry is not None:
+            id_to_entry[doc_id] = entry
+    return id_to_entry
+
+
 @mcp.tool(
     title="Batch-Retrieve Documents",
     annotations={"readOnlyHint": True},
@@ -3725,22 +3846,74 @@ def store_get_many(
         contents: list[str] = []
         missing: list[str] = []
 
-        for idx, doc_id in enumerate(id_list):
-            if len(coll_list) == len(id_list):
-                candidates = [coll_list[idx]]
-            else:
-                candidates = coll_list
+        # nexus fan-out fix: batch the per-collection lookups instead of one
+        # HTTP round trip per (id, candidate-collection) pair — the prior
+        # loop called ``t3.get_by_id`` (single-id POST to
+        # ``/v1/vectors/store-get``) once per id per candidate collection,
+        # even though that route accepts batches (MAX_BATCH_IDS=1000,
+        # nexus-hdx2u) and ``_ServiceCollectionStub.get(ids=...)`` already
+        # pages a batch internally at ``QUOTAS.MAX_RECORDS_PER_WRITE``
+        # (300 — the smaller of the two ceilings). This is on the
+        # ``nx_answer`` hot path (``plans/runner.py``'s auto-hydration runs
+        # it on every operator step that carries ids).
+        #
+        # Semantics preserved exactly:
+        #   * per-id routing (``len(coll_list) == len(id_list)``): each id
+        #     is looked up in exactly its assigned collection — batched by
+        #     grouping ids per collection.
+        #   * broadcast routing (the else branch): each id is tried against
+        #     every candidate collection in order, first match wins — batched
+        #     by resolving the STILL-UNRESOLVED ids per candidate collection,
+        #     one batch call per collection instead of one call per
+        #     (id, collection) pair.
+        #   * a per-collection batch call failing outright (network error,
+        #     unknown collection, ...) NEVER crashes the caller — but is
+        #     NOT the same blast radius as the old per-id
+        #     ``except Exception: entry = None``. Pre-fix, one failure cost
+        #     one id. Here a single failed request could otherwise blank up
+        #     to 300 ids as "missing" in one shot (a whole
+        #     ``QUOTAS.MAX_RECORDS_PER_WRITE`` page), indistinguishable from
+        #     genuine absence. ``_batched_get_by_ids`` closes that gap: it
+        #     logs the failure loud (collection + id count) and falls back
+        #     to a per-id retry, restoring the old one-id blast radius for
+        #     the failure path specifically — see that function's docstring
+        #     for the full rationale (nexus/store-get-many-code-review-
+        #     2026-08-21 [23303] Item 1).
+        #   * result order and per-doc truncation are unchanged.
+        per_id_routing = len(coll_list) == len(id_list)
+        entries: list[dict | None] = [None] * len(id_list)
 
-            entry = None
-            for cand in candidates:
+        if per_id_routing:
+            idxs_by_collection: dict[str, list[int]] = {}
+            for idx, cand in enumerate(coll_list):
                 col_name = t3_collection_name(cand, t3=t3)
-                try:
-                    entry = t3.get_by_id(col_name, doc_id)
-                except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-                    entry = None
-                if entry is not None:
-                    break
+                idxs_by_collection.setdefault(col_name, []).append(idx)
 
+            for col_name, idxs in idxs_by_collection.items():
+                batch_ids = _unique_preserve_order(id_list[idx] for idx in idxs)
+                id_to_entry = _batched_get_by_ids(t3, col_name, batch_ids)
+                for idx in idxs:
+                    entries[idx] = id_to_entry.get(id_list[idx])
+        else:
+            remaining_idxs = list(range(len(id_list)))
+            for cand in coll_list:
+                if not remaining_idxs:
+                    break
+                col_name = t3_collection_name(cand, t3=t3)
+                batch_ids = _unique_preserve_order(
+                    id_list[idx] for idx in remaining_idxs
+                )
+                id_to_entry = _batched_get_by_ids(t3, col_name, batch_ids)
+                still_remaining: list[int] = []
+                for idx in remaining_idxs:
+                    found = id_to_entry.get(id_list[idx])
+                    if found is not None:
+                        entries[idx] = found
+                    else:
+                        still_remaining.append(idx)
+                remaining_idxs = still_remaining
+
+        for doc_id, entry in zip(id_list, entries):
             if entry is None:
                 missing.append(doc_id)
                 contents.append("")
