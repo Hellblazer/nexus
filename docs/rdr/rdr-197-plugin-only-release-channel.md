@@ -1,17 +1,17 @@
 ---
-title: "Plugin-Only Release Channel (Dormant Emergency Path)"
+title: "Independent Plugin Release Channel (plugin-vX.Y.Z-n)"
 id: RDR-197
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
-reviewed-by: # reviewer name(s)
+reviewed-by: Sam (lgtm 2026-08-22); gate battery per References
 created: 2026-08-22
 accepted_date: # YYYY-MM-DD, set by /rdr-accept
 related_issues: ["nexus-cm9yt", "nexus-qkbo7"]
 ---
 
-# RDR-197: Plugin-Only Release Channel (Dormant Emergency Path)
+# RDR-197: Independent Plugin Release Channel (plugin-vX.Y.Z-n)
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
@@ -35,25 +35,30 @@ still being served from the previous day's tag, and three guards protected
 nothing. The pin is right. The question is what it costs when a
 plugin-surface fix is urgent and no client release is imminent.
 
-An adversarial review of this RDR's first draft measured the routine cost
-and found it small: over the last 60 days this repo cut 20 client releases,
-and only 17 commits touched exclusively the plugin's loader-visible surface;
-typical time-to-live for a merged plugin change was one to two days. The
-channel this RDR designs is therefore NOT a routine cadence. It is a
-dormant, fully tested emergency path for the case the numbers do not
-capture: a broken hook or guard that must reach installed users today, in
-an era when releases are not near-daily.
+The deeper problem is coupling: the plugin surface (skills, agents, hooks,
+commands, resources) and the wheel (the nx CLI and MCP servers) are
+different products that happen to share a repo, and today the plugin can
+only ship by re-releasing the wheel. This RDR decouples them: a release
+channel for plugin functionality that is independent of the nx CLI and MCP,
+mechanically prevented from ever carrying wheel content. An adversarial
+review of the first draft measured current demand honestly (over 60 days:
+20 client releases, 17 commits touching exclusively the plugin's
+loader-visible surface, one-to-two-day typical inertness), so the channel
+ships with usage discipline, not a quota: client releases remain the usual
+carrier while they are frequent; the channel exists so plugin functionality
+never has to wait on, or force, a wheel release.
 
 ### Enumerated gaps to close
 
-#### Gap 1: The urgent plugin-surface fix has no path shorter than a full release
+#### Gap 1: Plugin functionality cannot ship without re-releasing the wheel
 
 The full release costs the ~2-hour test battery (the release checklist's
-full gate sequence), a seven-manifest version bump,
-a PyPI publish of a byte-identical wheel, and release ceremony. When a
-shipped hook misbehaves in every installed session, that is the wrong
-denominator for a one-file fix, and "wait for the next release" can be days
-in slow eras.
+full gate sequence), a seven-manifest version bump, a PyPI publish of a
+byte-identical wheel, and release ceremony. That is the wrong denominator
+for shipping a skill, a hook fix, or a workflow: plugin functionality with
+zero wheel change pays the whole wheel price or waits, inert, in the drift
+ledger. The urgent case (a misbehaving hook in every installed session with
+no release imminent) is the sharpest form, not the only one.
 
 #### Gap 2: Every coupling that enforces the pin assumes one release channel
 
@@ -63,7 +68,7 @@ workflow treating every `v*` tag as a PyPI publish; the version-lockstep
 hook (the SessionStart check that auto-upgrades the installed `nx` when the
 plugin demands a newer one); and the release-window logic of the
 drift-ledger test (the check on `conexus/PENDING_RELEASE.md`, the file
-declaring every merged-but-not-live plugin change). An emergency path must alter each deliberately or prove it
+declaring every merged-but-not-live plugin change). An independent channel must alter each deliberately or prove it
 unaffected.
 
 #### Gap 3: "Plugin-only" needs a mechanical definition, not a judgment call
@@ -72,7 +77,7 @@ Two subdirectories of `conexus/` (`conexus/plans/`, `conexus/daemon/`) ship
 inside the wheel via the build config's force-include (a hatch setting that
 copies paths from outside `src/` into the built package). So "touches only
 `conexus/`" is not the same as "touches nothing the wheel ships." Without a
-mechanical proof, an emergency channel will eventually carry code.
+mechanical proof, an independent channel will eventually carry code.
 
 ## Context
 
@@ -86,7 +91,8 @@ first RDR draft; and a three-reviewer battery on that draft (fact-check
 [23354], fidelity critique [23355], fable adversarial [23356]). The
 adversarial review found a design-killing tag collision and the demand
 numbers above; this draft incorporates every verdict, including the
-repositioning from routine channel to dormant emergency path.
+repositioning that followed; at acceptance Sam reframed the channel as
+independent plugin releasing (this revision) rather than emergency-only.
 
 ### Technical Environment
 
@@ -156,9 +162,10 @@ the first draft (both corrected below, at their sources).
   changes per AGENTS.md, runs in no CI workflow today (independent gap,
   own bead).
 - **Documented**: `/plugin update` re-resolves `source.ref` and fetches the
-  new tree immediately. This cuts both ways: an emergency fix lands fast,
+  new tree immediately. This cuts both ways: a fix lands fast,
   and a bad cut lands just as fast, on every installed user, with no
-  opt-in step. That reach is why the path stays dormant and scripted.
+  opt-in step. That reach is why cuts are scripted, batched, and
+  deliberate.
 - **Assumed**: a pathspec-limited import plus explicit revert of the two
   force-include subpaths makes the allowlist true by construction for adds
   and edits. File deletions are a known gap (`git checkout -- ` does not
@@ -169,7 +176,7 @@ the first draft (both corrected below, at their sources).
 - [ ] The allowlist stays synchronized with the hatch build config.
   **Status**: Unverified. **Method**: a test asserting every force-include
   path in `pyproject.toml` is carved out of the allowlist.
-- [ ] The lockstep hook stays silent on an emergency-cut install.
+- [ ] The lockstep hook stays silent on a plugin-cut install.
   **Status**: Unverified. **Method**: Spike (the one-time end-to-end cut,
   checking `lockstep.log` for absence of an upgrade attempt).
 - [ ] The atomic-split precondition is checkable from ledger entries.
@@ -180,8 +187,9 @@ the first draft (both corrected below, at their sources).
 
 ### Approach
 
-Build the emergency path completely (tests, workflow, cut script,
-documentation), verify it once end to end, and then leave it dormant.
+Build the channel completely (tests, workflow, cut script,
+documentation), verify it once end to end, and use it with the discipline
+below.
 
 - **Tag shape**: `plugin-v{X.Y.Z}-{n}` (for example `plugin-v7.15.0-1`):
   the client release the cut builds on, plus a counter within it. Tags can
@@ -189,21 +197,18 @@ documentation), verify it once end to end, and then leave it dormant.
   forgetting any reset produces an odd-looking tag, not a re-mint of an
   immutable one. This replaces the first draft's bare counter, whose reset
   rule collided with tag immutability on the second cycle.
-- **Use trigger** (what "dormant" means): a cut is warranted only when BOTH
-  hold: the fix repairs defective behavior in installed sessions (a hook,
-  guard, or routing surface misbehaving, not wording, not docs), AND no
-  client release is expected before the fix is needed; an open release PR
-  always wins (never cut while one is in flight). Routine plugin
-  changes continue to ride client releases exactly as today.
-- **Adoption trigger** (when to revisit dormancy): if the drift ledger ever
-  carries a mechanized guard inert for more than seven days with no client
-  release scheduled, or release cadence drops below monthly, re-open the
-  routine-use question with that evidence.
-- **Sunset trigger** (the symmetric case, gate warn 2026-08-22): if two
-  years pass with zero emergency cuts, decommission the channel (delete
-  the workflow, the counter, the parity OR-branch, and the cut script)
-  rather than paying its maintenance forever; the RDR record keeps the
-  design recoverable if the need returns.
+- **Usage discipline** (not a quota): cut when accumulated plugin
+  functionality is worth shipping and no client release is imminent; an
+  open release PR always wins (never cut while one is in flight, and a
+  scheduled client release carries the plugin content for free). Batch
+  related plugin work into one cut, the same cadence judgment every other
+  release lifecycle here uses. A misbehaving hook in installed sessions is
+  the clearest cut-now case.
+- **Sunset trigger** (gate warn 2026-08-22): if two years pass with zero
+  cuts, decommission the channel (delete the workflow, the counter, the
+  parity OR-branch, and the cut script) rather than paying its maintenance
+  forever; the RDR record keeps the design recoverable if the need
+  returns.
 
 ### Technical Design
 
@@ -213,7 +218,7 @@ documentation), verify it once end to end, and then leave it dormant.
   `{conexus/, sn/, .claude-plugin/marketplace.json}` and outside
   `{conexus/plans/, conexus/daemon/}`. `docs/` is deliberately NOT in the
   allowlist: the adversarial review measured docs-only commits outnumbering
-  plugin-surface commits about 12:1, and an emergency path that can carry
+  plugin-surface commits about 12:1, and a plugin channel that can carry
   docs will be argued into carrying docs. Fails loud when the comparison
   cannot resolve.
 - **Parity test extension, stated exactly**:
@@ -265,31 +270,32 @@ documentation), verify it once end to end, and then leave it dormant.
 
 ### Decision Rationale
 
-The evidence supports building the capability and refuses the routine
-cadence. The 2026-07-25 incident class (a guard everyone believes is live)
-plus the measured instant-fetch reach of `/plugin update` make a tested
-emergency path worth its bounded cost; the 60-day demand numbers (17
-loader-surface commits, 1-2 day inertness, near-daily releases) make a
-routine second channel unjustifiable against the one-channel rule. Dormant
-machinery with a spike behind it and a written use trigger is the honest
-middle: the rule stays true in spirit (one routine channel) while the
-emergency case stops requiring either a 2-hour ceremony or an untested
-improvisation under pressure, which is when bespoke git choreography is
-most dangerous.
+The plugin surface and the wheel are different products; a channel that
+decouples their release cadences is the point, not a workaround. The
+mechanical fence (the allowlist proof) is what makes the decoupling safe,
+and the anchored tag shape is what makes it durable. The 60-day demand
+numbers (17 loader-surface commits, 1-2 day inertness, near-daily client
+releases) are the honest context for the usage discipline: while client
+releases are frequent they carry plugin content for free, so cuts should
+be batched and deliberate, not reflexive. The 2026-07-25 incident class (a
+guard everyone believes is live) is the sharpest single justification: a
+tested channel beats either a 2-hour ceremony or improvised git surgery
+under pressure. Sam's decision at review (2026-08-22): frame this as
+independent plugin releasing, not an emergency-only path.
 
 ## Alternatives Considered
 
-### Alternative 1: Routine plugin-vN channel (this RDR's first draft)
+### Alternative 1: Unanchored plugin-vN counter channel (this RDR's first draft)
 
-**Description**: cut plugin releases whenever plugin changes accumulate.
-**Pros**: shortest inertness for all plugin changes.
-**Cons**: measured demand near zero at current cadence; a second routine
-channel against a rule with incident lineage; per-cut operational risk on
-a bespoke flow multiplied by routine use; the first draft's tag scheme
-also self-destructed on cycle 2 (fixed here, but the fragility finding
-stands).
-**Rejection**: the adversarial battery's demand mining; adopt-narrowed was
-its strongest surviving verdict.
+**Description**: the same channel with a bare reset-per-release counter
+and `docs/` in the allowlist, cut from a develop-based branch.
+**Pros**: none over the accepted form.
+**Cons**: the tag scheme re-mints an immutable tag on its second cycle;
+the develop-based cut drags unreleased wheel changes to main by
+construction; `docs/` in the allowlist invites scope creep (docs-only
+commits outnumber plugin-surface commits about 12:1).
+**Rejection**: every defect was found by the draft battery and fixed in
+the accepted form (anchored tags, main-based cut, docs/ excluded).
 
 ### Alternative 2: Separate plugin repository
 
@@ -303,11 +309,13 @@ enforcement goes cross-repo; the single-tree drift-ledger model dies.
 
 **Description**: keep riding client releases.
 **Pros**: zero new machinery; honest fit to measured demand.
-**Cons**: leaves the emergency case exactly where 2026-07-25 found it:
-choose between a 2-hour ceremony and improvised surgery, under pressure,
-with instant blast radius either way.
-**Rejection**: rejected only for the emergency case; it remains the answer
-for routine changes, and this RDR says so explicitly.
+**Cons**: leaves the sharpest case exactly where 2026-07-25 found it
+(choose between a 2-hour ceremony and improvised surgery, under pressure)
+and keeps every other piece of plugin functionality coupled to wheel
+cadence forever.
+**Rejection**: leaves the plugin surface permanently unable to ship
+without a wheel release; acceptable while client releases are near-daily,
+wrong as a permanent coupling between two different products.
 
 ### Alternative 4: Change-class-gated cheap client releases
 
@@ -324,25 +332,27 @@ client-release path.
 ### Consequences
 
 Two tag families in one repo (unambiguous prefix; anchored shape removes
-the collision). Plugin.json's `version` never marks emergency cuts; the
+the collision). Plugin.json's `version` never marks plugin cuts; the
 tag and counter do. The release-cadence rule gains a narrowly-worded
-exception covering a dormant path with a written trigger. Maintenance:
+exception covering an independent plugin channel with a written usage
+discipline. Maintenance:
 window shapes, wiring tests, the cut script, and contributor docs exist
-even in dormancy; that cost is accepted for the emergency case and was
-weighed against demand honestly.
+even when no cut is pending; that cost is accepted for the decoupling and
+was weighed against demand honestly.
 
 ### Risks
 
 - Allowlist drift from the hatch config (guarded by the sync test).
 - The cut script's deletion handling and atomic-split check (guarded by
   script tests plus the one-time spike; never run as a one-liner).
-- Channel creep: dormant paths attract traffic. Guarded three ways: the
+- Channel creep: a cheap channel attracts traffic that belongs elsewhere.
+  Guarded three ways: the
   proof fails loud on any wheel-surface touch, `docs/` is out of the
-  allowlist, and the use trigger is written into AGENTS.md's exception
+  allowlist, and the usage discipline is written into AGENTS.md's exception
   text so "was this warranted" is checkable in review.
 - Instant blast radius of a bad cut (every installed user within one
   refresh). Guarded by the sandbox-smoke requirement in the minimal
-  battery and by dormancy itself: rare, deliberate use. Rollback is the
+  battery and by the usage discipline: batched, deliberate cuts. Rollback is the
   same mechanism in reverse: repoint `source.ref` back to the base client
   tag (or cut `-{n+1}` with the fix) through the same PR path; the next
   refresh restores every install.
@@ -354,9 +364,9 @@ weighed against demand honestly.
    validation, lockstep-silence regression test.
 2. Phase 2: `plugin-release.yml` + wiring coverage; the cut script
    (deletion-safe import, atomic-split precondition) with tests.
-3. Phase 3: AGENTS.md exception text (dormant path + use trigger +
-   adoption trigger), contributing-doc section; the one-time end-to-end
-   spike cut of `plugin-v{current}-1` on a scratch fix, then dormancy.
+3. Phase 3: AGENTS.md exception text (independent channel + usage
+   discipline + sunset trigger), contributing-doc section; the one-time end-to-end
+   spike cut of `plugin-v{current}-1` on a scratch fix.
 4. Independent follow-on beads (not gating): sandbox-smoke CI wiring;
    change-class battery for client releases.
 
@@ -390,11 +400,20 @@ Not yet run. Gate after Sam's review of this draft.
 
 ## Revision History
 
+- 2026-08-22 (acceptance review): reframed at Sam's direction from
+  "dormant emergency path" to an independent plugin release channel: the
+  plugin surface and the wheel are different products, and this channel
+  decouples their cadences. Mechanics unchanged (anchored tags, allowlist
+  proof, cut flow, minimal battery); the emergency-only use trigger became
+  a usage discipline (batch, defer to imminent client releases); the
+  adoption trigger dissolved (the channel is usable when warranted); the
+  sunset trigger stays.
+
 - 2026-08-22: first draft from the audited memo.
 - 2026-08-22 (gate): finalization gate PASSED, all six criteria; sunset
   trigger added per the gate's one warn.
 - 2026-08-22 (same day): full battery on the draft; repositioned from
-  routine channel to dormant emergency path; tag scheme anchored to the
+  routine channel to a disciplined form; tag scheme anchored to the
   client release (collision fix); `docs/` removed from the allowlist;
   atomic-split precondition added; two factual errors corrected (the
   2026-07-25 tag was about one day stale, not "five releases"; the
