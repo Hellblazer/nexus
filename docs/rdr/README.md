@@ -213,6 +213,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-195](rdr-195-voyage-batch-token-limit.md) | Token-Aware Voyage Batch Splitting: Make the 120K-Tokens-Per-Request Ceiling a Planned Bound Instead of an Opaque 500 | Bug Fix | Closed | 2026-08-19 |
 | [RDR-196](rdr-196-cost-aware-nx-answer.md) | Cost-Aware nx_answer: Per-Step Cost/Quality Telemetry, Per-Operator Model Routing, and Cost-Ranked Plan Choice — Closing the NOMA §5.1–5.3 Gap | Architecture | Closed | 2026-08-19 |
 | [RDR-197](rdr-197-plugin-only-release-channel.md) | Independent Plugin Release Channel (plugin-vX.Y.Z-n) | Architecture | Accepted | 2026-08-22 |
+| [RDR-198](rdr-198-collapse-duplicated-client-transport.md) | Collapse the Duplicated Client Transport: One Pooled Connection to One Engine | Architecture | Accepted | 2026-08-23 |
 
 > **Scrapped 2026-05-19 (RDR-110-119 arc).** Bundled the storage-substrate split with new abstractions (tuplespace, ORB, host-trust, surfaces-as-tuples, UI fabric); scope discipline failed across nine RDRs and 67 stranded beads. Files preserved as tombstones per the "never delete RDR files" rule. Postmortem: [docs/postmortem/2026-05-16-rdr110-113-remediation-chain.md](../postmortem/2026-05-16-rdr110-113-remediation-chain.md). Active substrate work continues as [RDR-120](rdr-120-storage-substrate-split.md) with an explicit moratorium on co-shipped consumers. Numbers RDR-114 through RDR-117 are unused on `main` (drafted on feature branches that never merged).
 

@@ -2,12 +2,12 @@
 title: "Collapse the Duplicated Client Transport: One Pooled Connection to One Engine"
 id: RDR-198
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Sam
 reviewed-by: self (solo)
 created: 2026-08-23
-accepted_date:
+accepted_date: 2026-08-23
 related_issues: [nexus-m20mf, RDR-063, RDR-164, RDR-193]
 ---
 
