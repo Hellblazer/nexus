@@ -226,11 +226,15 @@ below.
   `ref == "v" + pyproject_version` (unchanged happy path), OR
   `ref == "plugin-v" + pyproject_version + "-" + n` where `n` equals the
   counter file `conexus/PLUGIN_CHANNEL_VERSION` and the wheel-surface proof
-  passes. Any other shape still fails. The counter is one file shared by
-  both plugins (a cut moves only the changed plugin's `ref`), counts cuts
-  within the current client version, and resets to 1 at the next client
-  release; because the tag embeds the client version, a missed reset
-  produces an odd-looking tag, never a collision.
+  passes. Any other shape still fails. The counter is PER PLUGIN (one
+  entry per plugin in `conexus/PLUGIN_CHANNEL_VERSION`, a two-line
+  key: value file), counts that plugin's cuts within the current client
+  version, and resets to 0 at the next client release (0 means no cuts
+  yet). A shared counter was the original design and is refuted: with two
+  plugins pinned at anchored refs from different cuts, one global value
+  cannot equal both, so parity goes permanently red after the second cut
+  (plan audit round 3, finding B1). Because the tag embeds the client
+  version, a missed reset produces an odd-looking tag, never a collision.
 - **Atomic-split precondition**: the cut script maps each
   `PENDING_RELEASE.md` entry it would ship to its cited bead, and refuses
   if any such bead's commits since the base client tag touch excluded
@@ -400,6 +404,17 @@ Not yet run. Gate after Sam's review of this draft.
 
 ## Revision History
 
+- 2026-08-22 (post-acceptance erratum, plan-audit round 3): the shared
+  channel counter is refuted and becomes per-plugin (finding B1: after a
+  second cut on the other plugin, one global counter cannot match both
+  anchored refs, so parity goes permanently red). Reset value corrected
+  from 1 to 0 (0 = no cuts on this client version; the counter names the
+  most recent cut, so its first value is 1 only after the first cut).
+  Two further divergences recorded rather than left silent: the
+  wheel-surface proof anchors to the TAG under audit, never to HEAD; the
+  cut script reads the counter from the ref it replaces on main, never
+  from a working tree.
+
 - 2026-08-22 (acceptance review): reframed at Sam's direction from
   "dormant emergency path" to an independent plugin release channel: the
   plugin surface and the wheel are different products, and this channel
@@ -419,7 +434,9 @@ Not yet run. Gate after Sam's review of this draft.
   2026-07-25 tag was about one day stale, not "five releases"; the
   develop-vs-main measurement restated as the full diff, 197 files at
   measurement time); parity OR-logic written out; open questions resolved
-  (shared counter made moot by anchored tags; `docs/` decided out).
+  (the shared-vs-per-plugin counter question, then thought moot; `docs/`
+  decided out). The 2026-08-22 erratum above supersedes the counter half:
+  per-plugin, refuted-not-moot.
 - 2026-08-22 (verification round, T2 [23358]): the garbled commit-count
   sentence rewritten (214 qualifying, 197 of them docs-only); the parity
   claim narrowed to version-field parity tests, naming the `source.ref`
