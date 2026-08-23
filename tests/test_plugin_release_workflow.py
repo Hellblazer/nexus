@@ -228,3 +228,98 @@ def test_release_workflow_cannot_fire_on_an_anchored_plugin_tag() -> None:
         f"tag ({anchored_example!r}) via pattern(s) {matches}. A plugin-"
         "only cut would now also fire the PyPI publish workflow."
     )
+
+
+# ── The cut-range ledger assert (nexus-a2wmi.9 follow-up) ─────────────────
+#
+# This step shipped as an inline substring-match loop over the whole
+# ledger and failed EVERY cut: the ledger's permanent header prose names
+# `.claude-plugin/marketplace.json`, and every cut touches that file by
+# construction (moving source.ref IS the cut). It had zero coverage, and
+# the channel has never been cut, so it shipped having never executed.
+#
+# A `run:` block is executed by nothing in this suite -- structural
+# assertions about step TEXT are not execution. So the decision moved into
+# scripts/check_cut_ledger_clean.py where a test can drive it, and these
+# tests pin both the decision and the wiring.
+
+from check_cut_ledger_clean import stale_ledger_offenders  # noqa: E402
+
+#: The ledger's real header shape. Line 3 is the prose that broke the
+#: original step -- it names the one path every cut touches.
+_LEDGER_HEADER = """# Pending release: plugin changes that are NOT live yet
+
+`.claude-plugin/marketplace.json` pins `plugins[].source.ref` to an immutable
+release tag. Claude Code loads this plugin's hooks, commands, skills, and agents
+from **that tag**, not from your working tree.
+
+- Every file under the behavioural surface that differs from the pinned tag MUST
+  be listed below.
+"""
+
+#: A real entry: a bullet block carrying a path-shaped backtick span.
+_LEDGER_ENTRY = """
+- `conexus/skills/orchestration/SKILL.md` — dispatch contract reworded.
+  bead: nexus-abcde
+"""
+
+
+def test_header_prose_naming_marketplace_json_is_not_an_offender() -> None:
+    """THE REGRESSION. Every cut touches marketplace.json; the header names
+    it; the whole-file scan therefore flagged every cut forever."""
+    assert ".claude-plugin/marketplace.json" in _LEDGER_HEADER, (
+        "fixture no longer reproduces the condition -- the header must name "
+        "the path for this test to mean anything"
+    )
+    offenders = stale_ledger_offenders(
+        [".claude-plugin/marketplace.json"], _LEDGER_HEADER
+    )
+    assert offenders == [], (
+        "header contract prose is not a ledger entry; flagging it makes every "
+        "cut impossible"
+    )
+
+
+def test_a_real_entry_naming_a_shipped_path_is_still_an_offender() -> None:
+    """The belt must still catch what it was built to catch."""
+    offenders = stale_ledger_offenders(
+        ["conexus/skills/orchestration/SKILL.md"], _LEDGER_HEADER + _LEDGER_ENTRY
+    )
+    assert offenders == ["conexus/skills/orchestration/SKILL.md"]
+
+
+def test_a_path_no_entry_names_is_clean() -> None:
+    offenders = stale_ledger_offenders(
+        ["conexus/CHANGELOG.md"], _LEDGER_HEADER + _LEDGER_ENTRY
+    )
+    assert offenders == []
+
+
+def test_the_live_ledger_does_not_flag_a_marketplace_only_cut() -> None:
+    """Against the REAL ledger in the tree, not a fixture.
+
+    A fixture can drift away from the file it models; this one cannot.
+    """
+    ledger = (REPO_ROOT / "conexus" / "PENDING_RELEASE.md").read_text(encoding="utf-8")
+    assert stale_ledger_offenders([".claude-plugin/marketplace.json"], ledger) == []
+
+
+def test_the_workflow_step_delegates_to_the_tested_script() -> None:
+    """Pins the wiring: the decision must not drift back into the YAML.
+
+    An inline scan here is untestable by construction, which is how the
+    original defect reached a shipped release.
+    """
+    steps = _steps(_workflow())
+    ledger_steps = [
+        s for s in steps if "PENDING_RELEASE" in (s.get("name") or "")
+    ]
+    assert len(ledger_steps) == 1, "expected exactly one ledger-assert step"
+    run = ledger_steps[0].get("run") or ""
+    assert "check_cut_ledger_clean.py" in run, (
+        "the ledger assert must call the tested script"
+    )
+    assert "grep" not in run, (
+        "the ledger decision must not be reimplemented inline -- an inline "
+        "scan is executed by no test and was wrong for the whole of 7.16.0"
+    )
