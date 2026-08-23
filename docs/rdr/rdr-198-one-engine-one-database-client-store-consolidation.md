@@ -113,7 +113,7 @@ each table landed wherever its originating RDR put it.
 What the fix delivers: an explicit decision about which schemas exist and what
 belongs in each, so the boundary is chosen rather than inherited.
 
-#### Gap 4: Liquibase is used tactically, not strategically
+#### Gap 4: No changeset-granularity policy for a migration this size
 
 Postgres has transactional DDL: a schema change either fully applies or fully
 rolls back, and Liquibase runs each changeset in a transaction by default
@@ -354,10 +354,19 @@ on this machine, not inherited.
 - **Documented — three schemas, fifteen changelog prefixes.** The prefixes are
   the de-facto domain map; the schemas are not aligned to them.
 
-- **Assumed — the atomicity gap is real in production, not just theoretical.**
+- **Verified (REFUTED) — the atomicity gap has NOT manifested in production.**
   The `nx_answer` run-recording sequence has no spanning transaction, so a fault
-  mid-sequence should leave partial state. This has been reasoned from the code,
-  **not** observed in a log. Needs a spike.
+  mid-sequence *should* leave partial state. Research pass 1 spiked it: partial
+  state is arithmetically observable as `use_count > success + failure`, and
+  across all five plans with `use_count > 0` (29 runs) the counts balance
+  exactly — **zero orphaned starts**. `failure_count` is 0 everywhere, so the
+  outcome path has never been exercised under stress either.
+
+  The gap is therefore **latent, not observed**: the code path is genuinely
+  non-atomic and nothing prevents the orphan, but it has not fired in the
+  recorded window. Gap 2's argument rests on the mechanism plus RDR-164's
+  proof of the same class in a sibling domain, NOT on an observation in this
+  one. A reader should not take Gap 2 as reporting a live bug.
 
 ### Critical Assumptions
 
