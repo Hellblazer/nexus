@@ -3820,7 +3820,12 @@ class TestAmbientUsageSink:
         assert sink[0].input_tokens == 40
 
 
+# lived_in (nexus-pc15o, 2026-08-23): dispatches real `claude -p`, which the
+# CI runner can never authenticate. Class-level, NOT module-level -- this file
+# is overwhelmingly offline unit tests and a whole-file mark would carve out
+# hundreds of real assertions.
 @pytest.mark.integration
+@pytest.mark.lived_in
 class TestClaudeDispatchLiveUsage:
     """Live claude -p dispatch records non-zero cost -- the fixture alone
     only proves the parser handles a captured shape, not that it still
@@ -3873,7 +3878,12 @@ class TestClaudeDispatchLiveUsage:
         )
 
 
+# lived_in (nexus-pc15o, 2026-08-23): dispatches real `claude -p`, which the
+# CI runner can never authenticate. Class-level, NOT module-level -- this file
+# is overwhelmingly offline unit tests and a whole-file mark would carve out
+# hundreds of real assertions.
 @pytest.mark.integration
+@pytest.mark.lived_in
 class TestClaudeDispatchPerOperatorSchemaCheapTier:
     """RDR-196 .p2b DO 5 (nexus-nyry9.15): every operator's own real
     json_schema, dispatched at the cheap tier, must still produce

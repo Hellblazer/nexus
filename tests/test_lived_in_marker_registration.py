@@ -9,10 +9,19 @@ that contract:
    pyproject.toml, so pytest's ``--strict-markers`` (if ever enabled) and
    ``pytest --markers`` both recognise it rather than treating an
    unregistered marker as a silent typo.
-2. Each of the five class-D (real ``claude -p`` / seeded-corpora) test
-   files carries ``pytest.mark.lived_in`` in its module-level
+2. Each whole-file class-D (real ``claude -p`` / seeded-corpora) test
+   file carries ``pytest.mark.lived_in`` in its module-level
    ``pytestmark``, so ``-m "integration and not lived_in"`` deselects them
    entirely while ``-m integration`` (no exclusion) still collects them.
+
+This registry is a MINIMUM, never a maximum: it pins that the listed files
+keep the marker, and says nothing about which other files may carry it.
+Reading it as a closed list is what produced nexus-pc15o -- three RDR-196
+live-dispatch families were left ``integration``-only on that reading, spent
+the local-service gate's skip BUDGET on a runner that can never authenticate
+``claude``, and reddened eight consecutive nightlies with zero failing tests.
+The behavioral bound on the carve-out's SIZE is the gate script's
+``LIVED_IN_EXPECTED`` exact-count assert, not this list.
 
 The per-file check is a source-substring smoke test, not a collection
 assertion — the behavioral bound lives in the gate script itself, which
@@ -36,6 +45,13 @@ _LIVED_IN_FILES = (
     "tests/integration/test_rdr_088_operator_pipelines.py",
     "tests/integration/test_rdr_093_groupby_aggregate_pipelines.py",
     "tests/integration/test_nx_answer_equivalence.py",
+    # nexus-nyry9.11 / nexus-nyry9.16 (2026-08-20) and nexus-nyry9.14
+    # (registered 2026-08-23, nexus-pc15o). Whole-file class-D like the five
+    # above; omitted from this list when they landed, so nothing pinned their
+    # marker against a later careless removal.
+    "tests/integration/test_nx_answer_step_telemetry_mvv.py",
+    "tests/integration/test_rdr_196_p2c_ab_measurement.py",
+    "tests/test_operator_proxy_controls.py",
 )
 
 

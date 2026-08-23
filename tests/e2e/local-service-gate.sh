@@ -596,7 +596,25 @@ smoke_verify_count "$SMOKE_PASSED" "$SMOKE_EXPECTED" || exit 1
 # 2026-08-21: 41 -> 42 for nexus-nyry9.16's RDR-196 .p2c A/B harness
 # (tests/integration/test_rdr_196_p2c_ab_measurement.py, module-marked
 # lived_in: dispatches real claude -p, spends real money).
-LIVED_IN_EXPECTED=42
+# 2026-08-23: 42 -> 72 for nexus-pc15o, the fix for eight red nightlies
+# (2026-08-16..08-23). Three RDR-196 live-dispatch families landed marked
+# `integration` only while their six siblings were marked lived_in:
+#   +18 tests/test_operator_proxy_controls.py            (nexus-nyry9.14)
+#   +11 tests/test_operator_dispatch.py                  (nexus-nyry9.16)
+#       ::TestClaudeDispatchLiveUsage (1)
+#       ::TestClaudeDispatchPerOperatorSchemaCheapTier (10)
+#   + 1 tests/test_aspect_extraction_cost_measurement.py (nexus-nyry9.6)
+#       ::TestLiveMeasurement
+# All 30 gate on an authenticated `claude` CLI, which a CI runner does not
+# have and should not have (live model dispatch in a nightly = real money).
+# So they SKIPPED there, and 21 legitimate skips + 30 of these = 51 against
+# BUDGET=25 -- the gate went red for eight nights with ZERO failing tests
+# (run 32630987956: "573 passed, 51 skipped"). The BUDGET is deliberately
+# NOT raised: it is the guard that caught this, and it was right. Marking
+# these carves them out of the population it measures, which is what the
+# lived_in marker is for. Post-fix skips return to exactly 21 -- the count
+# of the last green run (32403015822, 2026-08-20T18:24).
+LIVED_IN_EXPECTED=72
 LIVED_IN_COUNT="$(uv run pytest -m "integration and lived_in" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
 if [ "$LIVED_IN_COUNT" -ne "$LIVED_IN_EXPECTED" ]; then
   echo "[gate] VACUITY GUARD TRIPPED: lived_in carve-out is $LIVED_IN_COUNT tests, expected exactly $LIVED_IN_EXPECTED" >&2
