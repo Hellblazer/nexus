@@ -76,6 +76,13 @@ one sha per line (7-40 hex chars). This is the structured form the gate scans fo
 uv run python scripts/check_remediation_commits_ride_release.py --write-snapshot .release-gates/remediation-snapshot.json
 ```
 
+**Known limitation before you trust a green here:** this snapshot is ONE
+developer's local Dolt clone, committed. It proves presence and freshness,
+not COMPLETENESS — anything not in that clone is invisible to the gate, and
+the staleness check cannot detect it. `bd dolt pull` first. Full statement
+and the intended replacement: `docs/contributing.md` § Step 0b KNOWN
+LIMITATION, tracked in nexus-2zmfw.
+
 Stage `.release-gates/remediation-snapshot.json` into Step 7's release-branch commit (alongside the seven version-bump manifests). `release.yml` reruns the gate against that exact committed file at tag-publish time via `--verify-snapshot`, which fails the release closed if the file is missing (the pre-tag step didn't run), present but not committed on the tagged ref, or stale (its newest bead `updated_at` predates the commit immediately preceding this release). A stale/missing snapshot from a prior release does NOT carry forward — write a fresh one every release.
 
 ### 0c. PREFLIGHT — run the cheap blockers FIRST, all of them (32s)

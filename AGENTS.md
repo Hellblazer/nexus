@@ -224,6 +224,10 @@ uv run python scripts/check_remediation_commits_ride_release.py --release-ref vX
 
 against the release tag (or the branch tip about to be tagged). Non-zero exit = STOP — a red line names the bead and the missing commit; either re-sequence that bead to run after a release that DOES carry the commit, or include the commit in this release before cutting it. Bead-authoring convention this gate reads: sequence a remediation behind a specific commit by writing `requires-commit: <sha>` in the bead's description or a comment (one sha per line, 7-40 hex chars) — the structured form the gate scans for first. Two free-text phrasings ("requires commit `<sha>`", "must include `<sha>`") are also scanned as a net for beads written before this convention existed, but the marker is the reliable form. Closed beads are never scanned.
 
+A green here proves only that no requirement was present in the snapshot the
+releaser took — not that none was missed. The snapshot is one developer's
+clone (see `docs/contributing.md` § Step 0b KNOWN LIMITATION, nexus-2zmfw).
+
 1. **Run the full release test battery.**
    ```bash
    uv run pytest                                             # unit suite (no API keys)

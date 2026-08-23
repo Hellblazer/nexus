@@ -281,6 +281,12 @@ Every step below is **required**. Missing any one of them has caused problems in
    rely on free-text scraping for a bead you are writing today; use the
    marker. Closed beads are never scanned.
 
+   A caveat that matters most to the person writing such a bead today: the
+   marker is only seen by the release if it is in the snapshot the releaser
+   happens to take (see the KNOWN LIMITATION below). Push the bead, and say
+   so in the PR that introduces the dependency rather than relying on the
+   tracker alone to carry it across to release time.
+
    **Pre-tag snapshot for the CI replay (nexus-fehi3, MANDATORY, do BEFORE Step 8's commit).**
    This repo's `bd` backend is Dolt with no credentials on the CI runner, so
    `release.yml` cannot run `bd export` live at tag-publish time — it
@@ -299,6 +305,43 @@ Every step below is **required**. Missing any one of them has caused problems in
    the missing file, so the only remedy at that point is a brand-new release
    tag. A snapshot from a prior release does not carry forward — write a
    fresh one every release.
+
+   **KNOWN LIMITATION — what this snapshot does and does not prove
+   (nexus-2zmfw).** The snapshot is a dump of ONE developer's local Dolt
+   clone at one moment, committed into the repo. It therefore proves the
+   file is present, committed on the tagged ref, and not ancient. It does
+   NOT prove the file is COMPLETE, which is the property the gate actually
+   needs:
+
+   - Anything absent from that clone is absent from the gate. Unpushed
+     beads, or a clone that has not `bd dolt pull`ed, silently drop
+     requirements — and the gate then reports green over a view that never
+     matched reality.
+   - The staleness check cannot detect that. It compares the newest bead
+     `updated_at` against a GIT COMMIT DATE, not against the bead remote's
+     head, so a releaser whose clone is a week behind still passes it: some
+     bead was updated recently, while every requirement filed by anyone
+     else that week is missing.
+   - It makes the tracker part of the release artifact, so there are two
+     sources of truth for the same data and the committed one is always the
+     stale copy.
+
+   Measured 2026-08-23: 5,717 beads exported, 5,289 of them closed (which
+   this gate documents it never scans), 428 non-closed, and **0** carrying a
+   `requires-commit:` requirement. The mechanism currently protects nothing,
+   which is what makes it safe to redesign rather than patch.
+
+   **Do not read a green from this gate as "no remediation was missed."**
+   Read it as "no requirement was present in the snapshot I took." If you
+   are sequencing a remediation behind a specific commit, `bd dolt pull`
+   first, and treat the in-repo ledger below as the real record.
+
+   The intended replacement (tracked in `nexus-2zmfw`, deliberately NOT
+   done inside a release that this gate verifies) is to move the constraint
+   into the repo, the way `docs/wire-contract-pending.md` already handles
+   the same must-ship-together shape: committed, reviewed in the diff that
+   creates it, readable by CI with no credentials, complete by construction
+   because it lives in the tree being released — and no 16 MB export.
 
 1. **Verify the full release test battery passes**
    ```bash
