@@ -4,7 +4,24 @@ markdown file's YAML frontmatter must actually parse. Ten of nineteen
 grader files shipped with unquoted ``input_match`` regexes that PyYAML
 rejects; nothing else in the suite would ever have caught it, because the
 eval runner is early-access and cannot run here. This is the harness-free
-part of that proof: syntax, not semantics."""
+part of that proof: syntax, not semantics.
+
+CI DOES NOT RUN THE EVAL CORPUS, AND THAT IS A DECISION, NOT AN OVERSIGHT.
+A grep of .github/workflows/ for ``plugin eval`` returns zero hits on
+purpose. A path-filtered CI job running the corpus on changes to
+``conexus/evals/**`` or ``conexus/skills/*/SKILL.md`` was proposed as
+nexus-dkotg item (2) and DECLINED by Sam on 2026-08-23: invoking
+``claude plugin eval`` on a runner means live model dispatch, i.e. a
+recurring spend commitment on every touch of those paths. See nexus-dkotg
+for the decision and the residual it leaves.
+
+Read that residual before proposing the job again. What this module
+catches is bound coherence and frontmatter syntax -- two failure modes.
+The corpus SCORE stays unmeasured by CI, so a grader with coherent bounds
+but a wrong matcher, a skill description that silently stops triggering,
+or a runtime change to how focus/last_message reaches the judge would all
+land the way nexus-dkotg did: found by a human running the corpus by hand.
+That is the control today, and it is a person remembering, not a gate."""
 from __future__ import annotations
 
 import re
