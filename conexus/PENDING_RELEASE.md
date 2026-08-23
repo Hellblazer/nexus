@@ -69,6 +69,7 @@ mechanize, it matters enough to ship.
   **INERT UNTIL RELEASE.** Hooks load from the pinned v7.15.0 tag, so
   neither change fires in any running session until the next release
   ships.
+  bead: nexus-2v0v7
 - `conexus/agents/strategic-planner.md`: nexus-ll7zm — the plan-audit
   loop terminates. Adds the round-counting and effort-budget call
   contract for `nx_plan_audit`, how to read the three verdicts

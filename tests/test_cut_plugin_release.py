@@ -148,6 +148,32 @@ def _mini_nexus(
         _write(repo, "conexus/evals/case.md", "eval v2 — the only conexus change\n")
     elif payload == "sn":
         _write(repo, "sn/hooks/probe.py", "v2 ships\n")
+    elif payload == "straddle":
+        # One bead's commit couples a plugin path to WHEEL content: the
+        # wholesale import cannot ship one half and hold back the other.
+        _write(repo, "conexus/registry.yaml", "registry v2\n")
+        _write(repo, "conexus/plans/builtin/p2.yml", "new wheel plan\n")
+        _write(repo, "src/nexus/straddle.py", "the wheel half\n")
+        _run(repo, "add", "-A")
+        _run(repo, "commit", "-q", "-m", "feat: registry work (nexus-ddddd)")
+        _write(
+            repo,
+            "conexus/PENDING_RELEASE.md",
+            "# Pending\n- `conexus/registry.yaml`: registry work (nexus-ddddd)\n",
+        )
+    elif payload == "cleanbead":
+        # Ride-alongs OUTSIDE the shipped surface (tests/, docs/) do not
+        # straddle: they ship nowhere, so nothing is stranded.
+        _write(repo, "conexus/hooks/hook.py", "v2 guarded\n")
+        _write(repo, "tests/hooks/test_new_guard.py", "test ride-along\n")
+        _write(repo, "docs/note.md", "doc ride-along\n")
+        _run(repo, "add", "-A")
+        _run(repo, "commit", "-q", "-m", "fix: hook guard (nexus-eeeee)")
+        _write(
+            repo,
+            "conexus/PENDING_RELEASE.md",
+            "# Pending\n- `conexus/hooks/hook.py`: guard tightened (nexus-eeeee)\n",
+        )
     else:  # pragma: no cover - fixture misuse
         raise ValueError(payload)
     _run(repo, "add", "-A")
@@ -405,3 +431,128 @@ class TestBatteryAndWindow:
         assert not (repo / "conexus" / "PLUGIN_CHANNEL_VERSION").exists()
         listing = _run(repo, "diff", "--name-only", "origin/main")
         assert "PLUGIN_CHANNEL_VERSION" not in listing
+
+
+# ---------------------------------------------------------------------------
+# The atomic-split precondition (nexus-a2wmi.9): attribution + refusal.
+# ---------------------------------------------------------------------------
+
+
+class TestAttribution:
+    """The attribution rule, stated so it needs no interpreting."""
+
+    def test_a_structured_marker_wins_over_everything(self) -> None:
+        from cut_plugin_release import attribute_entry
+
+        entry = (
+            "- `conexus/hooks/h.py`: thing nexus-aaaaa did\n"
+            "  bead: nexus-bbbbb\n"
+        )
+        assert attribute_entry(entry) == "nexus-bbbbb"
+
+    def test_first_bead_token_on_the_first_line_only(self) -> None:
+        from cut_plugin_release import attribute_entry
+
+        entry = "- `conexus/hooks/h.py`: nexus-aaaaa then nexus-bbbbb\n"
+        assert attribute_entry(entry) == "nexus-aaaaa"
+
+    def test_body_ids_are_prose_never_attribution(self) -> None:
+        """The real nexus-7zup9 entry's shape: a second bead id in the
+        body attributed the entry to a bead that never touched it."""
+        from cut_plugin_release import attribute_entry
+
+        entry = (
+            "- `conexus/evals/` (NEW): nexus-7zup9 — the first eval corpus\n"
+            "  supersedes the nexus-77cct plan that never shipped\n"
+        )
+        assert attribute_entry(entry) == "nexus-7zup9"
+
+    def test_an_unattributable_entry_is_refused_by_name(self) -> None:
+        from cut_plugin_release import CutRefused, attribute_entry
+
+        entry = "- `conexus/hooks/orphan.py`: a change nobody claimed\n"
+        with pytest.raises(CutRefused, match="orphan"):
+            attribute_entry(entry)
+
+    def test_header_prose_bullets_are_not_entries(self) -> None:
+        """The ledger's contract bullets carry no path span and are never
+        attributed (the real file opens with three of them)."""
+        from cut_plugin_release import path_entries
+
+        text = (
+            "# Pending\n"
+            "- Every file that differs MUST be declared here.\n"
+            "- Do NOT fix a failure by deleting entries.\n"
+            "- `conexus/hooks/h.py`: real entry (nexus-aaaaa)\n"
+        )
+        entries = path_entries(text)
+        assert len(entries) == 1
+        assert "real entry" in entries[0]
+
+
+class TestAtomicSplit:
+    def test_a_straddling_entry_refuses_naming_both_excluded_paths(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """RDR Critical Assumption 3's synthetic fixture: the bead's
+        commit couples conexus/registry.yaml (allowed) to wheel content
+        (excluded). Refusal, never a warning: the operator's only
+        correct action is deferring the entry in the ledger."""
+        repo = _mini_nexus(tmp_path, payload="straddle")
+        with pytest.raises(CutRefused) as exc:
+            _cut(repo)
+        message = str(exc.value)
+        assert "nexus-ddddd" in message
+        assert "conexus/plans/builtin/p2.yml" in message
+        assert "src/nexus/straddle.py" in message
+
+    def test_the_refusal_precedes_any_mutation(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """A refused cut leaves no branch, no modified file, nothing."""
+        repo = _mini_nexus(tmp_path, payload="straddle")
+        with pytest.raises(CutRefused):
+            _cut(repo)
+        assert _run(repo, "branch", "--list", "plugin-release/*") == ""
+        assert _run(repo, "status", "--porcelain") == ""
+        assert _run(repo, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+
+    def test_a_single_surface_bead_with_repo_ride_alongs_is_allowed(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """SCOPE (recorded deviation, judged at R2): offending means
+        outside the allowlist AND inside the SHIPPED surface. tests/ and
+        docs/ ride-alongs ship nowhere, so nothing is stranded — the
+        literal any-path form would refuse every real cut ever attempted
+        (today's real nexus-2v0v7 entry carries test ride-alongs)."""
+        repo = _mini_nexus(tmp_path, payload="cleanbead")
+        result = _cut(repo)
+        assert result["moved_plugins"] == ["conexus"]
+
+    def test_no_override_flag_exists(self) -> None:
+        """Deferral in the ledger is the only path past a refusal."""
+        from cut_plugin_release import _build_parser
+
+        options = {
+            string
+            for action in _build_parser()._actions
+            for string in action.option_strings
+        }
+        assert options == {"-h", "--help", "--repo"}
+
+    def test_the_real_ledger_attributes_cleanly(self) -> None:
+        """Property smoke over the LIVE ledger: every path-carrying entry
+        attributes to exactly one bead. Asserts the property, never a
+        specific bead id — the ledger changes every release."""
+        from cut_plugin_release import attribute_entry, path_entries
+
+        real = (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "conexus"
+            / "PENDING_RELEASE.md"
+        )
+        entries = path_entries(real.read_text(encoding="utf-8"))
+        assert entries, "the live ledger has no entries to smoke-test"
+        for entry in entries:
+            bead = attribute_entry(entry)  # raises = the test fails, by name
+            assert bead.startswith("nexus-")

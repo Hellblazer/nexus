@@ -145,13 +145,129 @@ def _is_allowlisted(path: str) -> bool:
     return any(path_has_prefix(path, allowed) for allowed in ALLOWED_PREFIXES)
 
 
-def atomic_split_check(repo: Path, base_tag: str, allowlisted: list[str]) -> None:
-    """The .9 seam: refuse when a ledger entry's bead straddles the
-    allowlist boundary. This placeholder refuses nothing — bead .9
-    implements the attribution rule and the commit scan. The SEAM is
-    .8's contract: perform_cut calls this BEFORE the branch exists, and
-    a raise here leaves the repository untouched.
+_BEAD_ID_RE = re.compile(r"\bnexus-[a-z0-9]+(?:\.[a-z0-9]+)*\b")
+_BEAD_MARKER_RE = re.compile(
+    r"^\s*(?:\*\*)?bead:\s*(nexus-[a-z0-9]+(?:\.[a-z0-9]+)*)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+#: Paths that land in a SHIPPED artifact — the wheel (src/, the denied
+#: wheel-data prefixes, mcpb/, dt/scripts as force-include package data).
+#: The straddle predicate is scoped to these: an entry whose bead also
+#: touched tests/ or docs/ strands nothing, because those ship nowhere.
+#: RECORDED DEVIATION (judged at R2, bead .10): the plan's literal "any
+#: path outside the allowlist" would refuse every real cut — real beads'
+#: commits always carry test ride-alongs (today's live nexus-2v0v7 entry
+#: does) — while the stated rationale is coupling to content the import
+#: must hold back. The refusal-and-defer semantics are unchanged.
+_SHIPPED_SURFACE_PREFIXES: tuple[str, ...] = (
+    "src/",
+    "conexus/plans/",
+    "conexus/daemon/",
+    "mcpb/",
+    "dt/",
+)
+
+
+def path_entries(ledger_text: str) -> list[str]:
+    """The ledger's ENTRIES: bullet groups carrying a path-shaped span.
+
+    Bullets with no backtick path (the file's header contract prose) are
+    not entries and are never attributed.
     """
+    blocks: list[str] = []
+    entry: list[str] = []
+
+    def flush() -> None:
+        if entry:
+            blocks.append("".join(entry))
+            entry.clear()
+
+    for line in ledger_text.splitlines(keepends=True):
+        if line.startswith("- "):
+            flush()
+            entry.append(line)
+        elif entry and (line.startswith("  ") or line.startswith("\t")):
+            entry.append(line)
+        else:
+            flush()
+    flush()
+    return [
+        block
+        for block in blocks
+        if any("/" in span for span in re.findall(r"`([^`]+)`", block))
+    ]
+
+
+def attribute_entry(entry: str) -> str:
+    """One bead per entry, by the rule that needs no interpreting.
+
+    1. A structured ``bead: nexus-xxxxx`` marker on any line wins and
+       nothing else is read (mirrors the requires-commit convention
+       scripts/check_remediation_commits_ride_release.py reads).
+    2. Otherwise the FIRST bead id token on the entry's FIRST line only.
+    3. Bead ids anywhere else are prose, never attribution.
+    4. No marker and no first-line id: refused by name.
+    """
+    marker = _BEAD_MARKER_RE.search(entry)
+    if marker:
+        return marker.group(1)
+    first_line = entry.splitlines()[0] if entry.splitlines() else ""
+    token = _BEAD_ID_RE.search(first_line)
+    if token:
+        return token.group(0)
+    raise CutRefused(
+        f"ledger entry has no bead attribution — add a 'bead: nexus-xxxxx' "
+        f"marker line or a bead id on its first line: {first_line.strip()!r}"
+    )
+
+
+def atomic_split_check(repo: Path, base_tag: str, allowlisted: list[str]) -> None:
+    """Refuse when a ledger entry's bead straddles into shipped content.
+
+    The import is a wholesale allowlist diff-and-apply with no per-entry
+    granularity: it cannot ship an entry's allowlisted paths while
+    holding back the same entry's wheel-surface paths, so a straddling
+    entry makes the cut impossible to perform correctly — not risky,
+    impossible. The only path forward is editing PENDING_RELEASE.md to
+    DEFER that entry, a reviewable change a human makes deliberately.
+    There is no override flag and no warn mode. Runs BEFORE the branch
+    exists; a raise leaves the repository untouched (.8's seam contract).
+    """
+    shown = _git(repo, "show", f"origin/develop:{LEDGER}", check=False)
+    if shown.returncode != 0:
+        return  # no ledger on develop; the drift contract owns that state
+    problems: list[str] = []
+    for entry in path_entries(shown.stdout):
+        bead = attribute_entry(entry)
+        shas = _git(
+            repo, "log", f"{base_tag}..origin/develop",
+            f"--grep={bead}", "--format=%H",
+        ).stdout.split()
+        offending: set[str] = set()
+        for sha in shas:
+            for path in _git(
+                repo, "diff-tree", "--no-commit-id", "--name-only", "-r", sha
+            ).stdout.splitlines():
+                path = path.strip()
+                if (
+                    path
+                    and not _is_allowlisted(path)
+                    and any(
+                        path_has_prefix(path, prefix)
+                        for prefix in _SHIPPED_SURFACE_PREFIXES
+                    )
+                ):
+                    offending.add(path)
+        if offending:
+            problems.append(f"{bead}: {sorted(offending)}")
+    if problems:
+        raise CutRefused(
+            "straddling ledger entries — the wholesale import cannot ship "
+            "an entry's plugin half while holding back its wheel half. "
+            "DEFER these entries in conexus/PENDING_RELEASE.md; there is "
+            "no flag:\n  " + "\n  ".join(problems)
+        )
 
 
 def assert_branch_agreement(repo: Path, version: str, n: int) -> None:
@@ -363,11 +479,16 @@ def perform_cut(
     return {"n": n, "tag": tag, "branch": branch, "moved_plugins": moved}
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    """No override flag and no warn mode exist, by design (pinned by test)."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("base_tag", help="the released client tag the cut anchors to, e.g. v7.15.0")
     parser.add_argument("--repo", default=".", help="repository checkout to cut from")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
     try:
         result = perform_cut(Path(args.repo).resolve(), args.base_tag)
     except CutRefused as refusal:
