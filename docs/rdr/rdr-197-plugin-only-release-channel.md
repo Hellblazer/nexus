@@ -192,11 +192,12 @@ documentation), verify it once end to end, and use it with the discipline
 below.
 
 - **Tag shape**: `plugin-v{X.Y.Z}-{n}` (for example `plugin-v7.15.0-1`):
-  the client release the cut builds on, plus a counter within it. Tags can
-  never collide across cycles because the client version advances;
-  forgetting any reset produces an odd-looking tag, not a re-mint of an
-  immutable one. This replaces the first draft's bare counter, whose reset
-  rule collided with tag immutability on the second cycle.
+  the client release the cut builds on, plus a sequence number within it,
+  derived at cut time from the existing tag list. Collision with an
+  existing tag is impossible by construction: the number comes from
+  enumerating real tags, and there is no reset to forget because there is
+  no stored state at all. This replaces the first draft's bare counter,
+  whose reset rule collided with tag immutability on the second cycle.
 - **Usage discipline** (not a quota): cut when accumulated plugin
   functionality is worth shipping and no client release is imminent; an
   open release PR always wins (never cut while one is in flight, and a
@@ -205,7 +206,7 @@ below.
   release lifecycle here uses. A misbehaving hook in installed sessions is
   the clearest cut-now case.
 - **Sunset trigger** (gate warn 2026-08-22): if two years pass with zero
-  cuts, decommission the channel (delete the workflow, the counter, the
+  cuts, decommission the channel (delete the workflow, the
   parity OR-branch, and the cut script) rather than paying its maintenance
   forever; the RDR record keeps the design recoverable if the need
   returns.
@@ -224,17 +225,17 @@ below.
 - **Parity test extension, stated exactly**:
   `test_marketplace_source_ref_matches_pyproject` accepts
   `ref == "v" + pyproject_version` (unchanged happy path), OR
-  `ref == "plugin-v" + pyproject_version + "-" + n` where `n` equals the
-  counter file `conexus/PLUGIN_CHANNEL_VERSION` and the wheel-surface proof
-  passes. Any other shape still fails. The counter is PER PLUGIN (one
-  entry per plugin in `conexus/PLUGIN_CHANNEL_VERSION`, a two-line
-  key: value file), counts that plugin's cuts within the current client
-  version, and resets to 0 at the next client release (0 means no cuts
-  yet). A shared counter was the original design and is refuted: with two
-  plugins pinned at anchored refs from different cuts, one global value
-  cannot equal both, so parity goes permanently red after the second cut
-  (plan audit round 3, finding B1). Because the tag embeds the client
-  version, a missed reset produces an odd-looking tag, never a collision.
+  `ref == "plugin-v" + pyproject_version + "-" + n` for any positive
+  integer `n`, judged per plugin. Any other shape still fails. There is
+  NO counter file: git's own tag list is the only record of cuts. The
+  cut script picks `n` by enumerating existing tags
+  (`git tag -l 'plugin-v{version}-*'`) and taking the next number, so a
+  collision with an immutable tag is impossible by construction, and no
+  reset, no ownership, and no cross-plugin state exist to get wrong.
+  (Two earlier designs tracked `n` in a repo file; a shared counter was
+  refuted outright by plan-audit round 3, and the per-plugin file it
+  briefly became was deleted the same day at Sam's direction: it
+  duplicated state git already keeps.)
 - **Atomic-split precondition**: the cut script maps each
   `PENDING_RELEASE.md` entry it would ship to its cited bead, and refuses
   if any such bead's commits since the base client tag touch excluded
@@ -244,7 +245,8 @@ below.
 - **The cut** (script with its own tests, not a checklist): branch
   `plugin-release/{X.Y.Z}-{n}` off main; import allowlisted paths from
   develop by diff-and-apply (deletion-safe); revert `conexus/plans/` and
-  `conexus/daemon/` to main's content; bump the counter; move `source.ref`
+  `conexus/daemon/` to main's content; derive `n` from the existing tag
+  list; move `source.ref`
   for the changed plugin(s) only, with no version field moving anywhere; empty
   covered ledger entries; run the minimal battery; PR to main; merge; tag;
   push; back-merge main into develop (expected conflict-free: main gains
@@ -337,7 +339,7 @@ client-release path.
 
 Two tag families in one repo (unambiguous prefix; anchored shape removes
 the collision). Plugin.json's `version` never marks plugin cuts; the
-tag and counter do. The release-cadence rule gains a narrowly-worded
+tag alone does. The release-cadence rule gains a narrowly-worded
 exception covering an independent plugin channel with a written usage
 discipline. Maintenance:
 window shapes, wiring tests, the cut script, and contributor docs exist
@@ -404,6 +406,15 @@ Not yet run. Gate after Sam's review of this draft.
 
 ## Revision History
 
+- 2026-08-22 (design simplification, Sam's direction): the channel is
+  COUNTER-LESS. `conexus/PLUGIN_CHANNEL_VERSION` is deleted from the
+  design entirely; the parity test validates the tag SHAPE per plugin,
+  and the cut script derives the next sequence number from git's own tag
+  list. This supersedes the same-day erratum below (which had made the
+  counter per-plugin): the root observation is that a counter file
+  duplicates state git already keeps, and every audit-round defect
+  (shared-vs-per-plugin, reset ownership, read source) was a property of
+  that duplication, not of the channel.
 - 2026-08-22 (post-acceptance erratum, plan-audit round 3): the shared
   channel counter is refuted and becomes per-plugin (finding B1: after a
   second cut on the other plugin, one global counter cannot match both
