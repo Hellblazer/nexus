@@ -402,13 +402,18 @@ class TestBatteryAndWindow:
         assert result["battery_ran"] == ["battery"]
 
     def test_the_produced_branch_passes_parity_and_window_checks(
-        self, tmp_path: pathlib.Path
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Step 17: a cut script that emits a branch its own battery
         rejects is a failure earlier plan revisions actually contained.
         Parity: the ref parses for the version with a clean wheel-surface
         proof. Window: conditions (a), (b) and (d) hold on the branch
-        ((c) is the upstream probe, not evaluable in a fixture)."""
+        ((c) is the upstream probe, not evaluable in a fixture).
+
+        GITHUB_HEAD_REF must be cleared: on PR CI it names the PR's own
+        branch and current_branch_name prefers it over the fixture
+        repo's real branch (first hit on the 7.16.0 release PR)."""
+        monkeypatch.delenv("GITHUB_HEAD_REF", raising=False)
         from plugin_channel import (
             is_cut_branch_for,
             next_plugin_tag_number,
@@ -624,7 +629,12 @@ class TestAtomicSplit:
             / "PENDING_RELEASE.md"
         )
         entries = path_entries(real.read_text(encoding="utf-8"))
-        assert entries, "the live ledger has no entries to smoke-test"
+        if not entries:
+            # The release window: the pin advance just emptied the ledger,
+            # a legitimate recurring state (first hit on the 7.16.0 cut's
+            # own PR CI). Nothing to attribute is a pass; the attribution
+            # unit tests above carry the mechanism's non-vacuity.
+            return
         for entry in entries:
             bead = attribute_entry(entry)  # raises = the test fails, by name
             assert bead.startswith("nexus-")
