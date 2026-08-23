@@ -796,7 +796,20 @@ jobs:
         run: uv sync --group dev
 
       - name: Run lint-marked tests
-        run: uv run pytest -m lint -q | tee lint-output.txt
+        # `set -euo pipefail` is load-bearing, not decoration. GitHub's
+        # default shell here is `bash -e {0}`, which does NOT set pipefail
+        # (only an explicit `shell: bash` does). Without it this step exits
+        # with `tee`'s status, so a lint-test FAILURE reported success --
+        # and since pyproject's addopts deselect `lint` from every other
+        # leg, this job is the sole enforcement point for the whole bucket,
+        # feeding the required `pytest-gate` check. The shard-matrix step
+        # above already does this correctly; this one did not.
+        # The non-vacuity floor below does not cover it: that gate counts
+        # failures TOWARD its executed floor, by design -- it asks whether
+        # enough tests ran, not whether they passed.
+        run: |
+          set -euo pipefail
+          uv run pytest -m lint -q | tee lint-output.txt
 
       - name: Enforce lint-leg non-vacuity floor
         # nexus-wixar: a 938-skipped/0-executed run exits 0 (skip is not a
