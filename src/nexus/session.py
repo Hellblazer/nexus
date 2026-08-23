@@ -97,7 +97,13 @@ def resolve_active_session_id(arg: str | None = None) -> str | None:
        empirically). It is harness-provided per-process, not file-based,
        so it does not suffer the flat-file's last-writer-wins clobbering
        when a second top-level Claude Code session starts on the same
-       machine (nexus-36q84).
+       machine (nexus-36q84). Harness-provided means correct AT SPAWN:
+       a long-lived process (the MCP server) keeps its spawn-time env
+       across ``/clear``/``/resume`` — the process is NOT respawned,
+       proven from live logs (nexus-ggvi0, 2026-08-22, CC 2.1.238) — so
+       this tier can be STALE there, and the nexus-d76vc handoff layer,
+       not an env re-read, is what moves the MCP T1 scope. See
+       ``docs/architecture.md`` § T1's three scopes.
     4. ``~/.config/nexus/current_session`` via ``read_claude_session_id``.
        Machine-wide and unscoped — a second top-level Claude Code session
        overwrites this file unconditionally on its own SessionStart

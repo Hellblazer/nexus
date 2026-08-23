@@ -1206,6 +1206,30 @@ missing signal instead of accepting the freeze:
   This fix closes the ONE specific divergence window item 1 described; it
   does not touch how a session id is resolved in the first place.
 
+**Update 2026-08-22 (nexus-ggvi0): the handoff layer stays — respawn-on-`/clear` is FALSE.**
+A proposal to collapse T1 session identity onto `CLAUDE_CODE_SESSION_ID`
+alone — deleting the entire nexus-d76vc marker/watcher apparatus above
+(~700 lines) on the premise that Claude Code terminates and respawns MCP
+servers on every `/clear`/`/resume` — was falsified before any spike
+spend, from the live install's own logs on Claude Code 2.1.238:
+`~/.config/nexus/logs/mcp.log` shows `t1_handoff_released` events in
+which the SAME `mcp_pid` releases two DIFFERENT `old_session_id`s hours
+apart. The MCP server process survives session changes; its env-at-spawn
+goes stale; the handoff layer is what keeps its T1 scope current. The
+Claude Code 2.1.163 release-note line about `--resume` therefore means
+newly-spawned servers get the current id at spawn — not that live
+processes refresh. Anyone re-proposing the deletion must first re-prove
+respawn behavior on the then-current Claude Code (the disproof method:
+grep `mcp.log` for `t1_handoff_released` and compare `mcp_pid` across
+`old_session_id`s). Deletability inventory with the ordered 7-guarantee
+list a future re-proposal must test: T2
+`nexus/s1-t1-identity-inventory-2026-08-22` [23344]. Two facts from that
+inventory stand regardless: the lease layer (§2 there) solves token
+sharing, not id resolution, and survives any respawn outcome; and the
+tier-4 `current_session` flat file is already scoped to genuinely
+no-harness callers by construction — it is reached only when neither
+`NX_SESSION_ID` nor `CLAUDE_CODE_SESSION_ID` is set.
+
 ## Heritage
 
 | Tool | What Nexus borrows |
