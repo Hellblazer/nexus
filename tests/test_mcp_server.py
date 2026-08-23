@@ -1183,6 +1183,47 @@ def test_search_default_mode_returns_calltoolresult_with_structured_content():
     assert data["truncated_chars"] == 0
 
 
+def test_search_structured_content_carries_the_render_text():
+    """structuredContent must be SELF-SUFFICIENT (nexus-6jlki follow-up).
+
+    A conforming MCP client may render ``structuredContent`` INSTEAD of the
+    text block -- that is not a client bug, the protocol permits it, and
+    nexus's own client does exactly that (``mcp_client/core.py::_parse_result``
+    documents its preference order as "structuredContent (already a dict) ->
+    the first text content block"). Claude Code does the same, so between
+    c9762865d and this test the flagship retrieval tool delivered
+    ids/tumblers/distances and NO file paths, line numbers or snippets to
+    its largest consumer.
+
+    The design memo (T2 [23351]) modelled the new field as additive -- "a
+    new structuredContent field they can ignore or start consuming" -- and
+    every test written for the spike asserts on the SERVER's CallToolResult,
+    where both shapes are present and correct. The displacement is invisible
+    from there, which is why six green wire-shape tests could not see it.
+
+    The invariant that IS checkable server-side: whichever shape a client
+    picks, it must get the render. Hence the text lives in both.
+    """
+    _mock_t3([{"name": "code__test", "count": 1}])
+    with patch("nexus.search_engine.search_cross_corpus",
+               lambda *a, **kw: [SearchResult(id="r1", content="vector database internals",
+                                              distance=0.1234, collection="code__test",
+                                              metadata={"tumbler": "1.1",
+                                                        "chunk_text_hash": "ab" * 32})]), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        result = search(query="vector database", corpus="code__test")
+
+    assert isinstance(result, CallToolResult)
+    rendered = result.content[0].text
+    assert result.structuredContent["text"] == rendered, (
+        "structuredContent must carry the same render the text block does; a "
+        "client that reads only structuredContent otherwise receives content-"
+        "addressed hashes with nothing readable in them"
+    )
+    # The render is what makes it self-sufficient: paths and snippet, not ids.
+    assert "vector database internals" in result.structuredContent["text"]
+
+
 def test_search_structured_true_wire_call_unchanged():
     """``structured=True`` over the wire is untouched: bare dict, no
     CallToolResult, no new keys — the plan-runner in-process contract."""
