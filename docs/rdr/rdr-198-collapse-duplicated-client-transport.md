@@ -418,8 +418,22 @@ change, no release-lifecycle coupling, no wire-contract change.
 `HttpScratchStore` from constructor-baked `Authorization` to the per-call
 `_auth_headers` pattern the other twelve stores already use, and migrate
 `HttpAspectQueue`'s constructor-time timeout kwarg to per-call `timeout=`
-overrides. Each is correct on its own merits regardless of whether Layer 1 ever
-happens, and Layer 1 is unsafe without them.
+overrides.
+
+**Be honest about the asymmetry.** Layer 0 is technically independent of
+Layer 1, but its standalone value is *defensive*, not corrective: no credential
+bleeds today, because each store owns its own client. What Layer 0 buys on its
+own is the removal of a trap — a future author who shares a client (the
+obvious, tempting optimisation) would introduce cross-domain credential bleed —
+plus consistency with a pattern twelve of fourteen stores already follow. Set
+against that, it carries real risk: it rewrites a credential-refresh path, and
+a mistake there is an auth outage rather than a slow request.
+
+So Layer 0 is **not** independently justified to the same degree Layer 1 would
+be if the measurement clears. It is justified as Layer 1's precondition, and
+worth shipping alone only if you accept a hygienic fix carrying non-trivial
+risk. If Layer 1 is dropped at step 3 of Sequencing, Layer 0 should be
+re-argued on its own merits rather than shipped by momentum.
 
 **Layer 1 — One pooled transport.** Introduce a single process-wide pooled
 `httpx` transport for the fourteen httpx stores. The facades are unchanged from
@@ -602,15 +616,31 @@ mirroring of it is.
 1. **Layer 0** — convert `HttpTokenStore` and `HttpScratchStore` to per-call
    auth; migrate `HttpAspectQueue`'s timeout to per-call overrides. Ship it.
    Independently correct; no dependency on anything below.
-2. **Measure the bulk path before committing to Layer 1.** The indexer
-   constructs stores per file. Measure construction cost per indexed file, in
-   BOTH local and cloud mode — the keep-alive argument is cloud-specific and is
-   currently asserted from code, not measured. This is a gate on Layer 1, not a
-   follow-up.
-3. **Decide Layer 1 on that measurement.** If the per-file cost is material,
-   implement the shared pool with explicit `httpx.Limits`. If it is as small as
-   the `nx_answer` figure, **drop Layer 1 and close this RDR with Layer 0
-   shipped** — Alternative 1 becomes the answer.
+2. **Measure the bulk path before committing to Layer 1.** Measure store-
+   construction cost as a fraction of per-file indexing wall time, in BOTH local
+   and cloud mode — the keep-alive argument is cloud-specific and is currently
+   asserted from code, not measured. This is a gate on Layer 1, not a follow-up.
+
+   Two things must be measured, not one: (a) that the indexer really does
+   construct stores per file rather than once per run, and (b) what fraction of
+   per-file wall time that costs. (a) is currently an assumption.
+
+3. **Decide Layer 1 against a stated threshold.** Let *C* be store-construction
+   cost as a percentage of median per-file indexing wall time:
+
+   | *C* | Decision |
+   | --- | --- |
+   | ≥ 5% | Layer 1 is justified. Implement with explicit `httpx.Limits`. |
+   | < 2% | **Drop Layer 1 and close this RDR with Layer 0 shipped.** Alternative 1 becomes the answer. |
+   | 2–5% | Judgment call. Record the reasoning in this RDR before proceeding. |
+
+   **Back-of-envelope, to be replaced by the real measurement**: a local
+   `nx index repo` run on 2026-08-23 timed 169 files at a **median 0.30 s**
+   each. Against ~60 ms of construction that is **~20%** — roughly 285× more
+   material than the 0.07% `nx_answer` figure, and comfortably over the 5%
+   bar. This is an ESTIMATE built on assumption (a); it is not the measurement,
+   and it must not be cited as one. If (a) turns out false, *C* collapses toward
+   zero and the answer flips to "drop".
 
 No engine work, no tag, no `REQUIRED_ENGINE_VERSION` coupling, no deploy
 choreography. That is the point of the narrowed scope.
