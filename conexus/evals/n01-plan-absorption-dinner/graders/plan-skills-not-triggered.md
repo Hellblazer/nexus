@@ -1,13 +1,8 @@
 ---
-type: llm
-criteria: >
-  Fail if the transcript contains a Skill tool call whose input names
-  "strategic-planning", "plan-first", "architecture", or any other
-  planning/plan-machinery skill. This prompt is a casual dinner-recipe
-  question that happens to contain the word "plan" — it is not
-  development work needing decomposition into tasks (strategic-planning)
-  and not a retrieval question needing reduction from many documents
-  (plan-first). No skill invocation is expected at all.
+type: tool_used
+tool: Skill
+input_match: '"skill"\s*:\s*"(conexus:)?(strategic-planning|plan-first|architecture)"'
+max: 0
 ---
 
 Targets the exact absorption defect class already found once in this
@@ -18,5 +13,19 @@ regression guard for that class recurring in `strategic-planning` /
 `plan-first`, the two live skills whose names or descriptions still key
 on the bare word "plan".
 
-OPEN QUESTION (enablement day): no documented negation primitive on
-`tool_used`; `llm` criteria used as best-effort, field name unconfirmed.
+GRADER TYPE CORRECTED 2026-08-23. This was `type: llm` with criteria that
+began "Fail if the transcript contains a Skill tool call...". An `llm`
+grader cannot see tool calls: its `focus` field defaults to
+`last_message`, and the runtime feeds the judge only
+`run.lastAssistantText`. Verified against the binary's own schema
+(`focus: c2h().default("last_message")`, where `c2h` is
+`enum(["trace","last_message","files"])`). Proven in a real run: this
+class of grader voted FAIL 3/3 on a trace where a paired
+`tool_used max: 0` counter reported the skill was never invoked.
+
+`tool_used` with `max: 0` is the negation primitive. The earlier note here
+claiming none was documented was wrong -- the schema is
+`{type:"tool_used", tool, input_match?, min?, max?}` with both bounds
+`int >= 0`. `max: 0` asserts the matching call never happened, which is
+exactly what a not-triggered case means, and it reads the trace instead of
+a summary sentence.
