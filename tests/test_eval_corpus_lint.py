@@ -27,8 +27,18 @@ def test_eval_corpus_population_is_real():
     files = _frontmatter_files()
     prompts = [p for p in files if p.name == "prompt.md"]
     graders = [p for p in files if p.parent.name == "graders"]
-    assert len(prompts) >= 15, f"only {len(prompts)} prompt files found"
-    assert len(graders) >= 19, f"only {len(graders)} grader files found"
+    # 12 cases / 14 graders since nexus-dkotg dropped n03, p07 and p08. Those
+    # three targeted .claude/skills/release and .claude/skills/engine-release,
+    # which are repo-local and NOT part of the shipped conexus plugin. The eval
+    # sandbox runs in a temp HOME, so it never loaded them: p07/p08 reported
+    # "Skill called 0x" in every run of all three full runs, and n03 passed
+    # VACUOUSLY -- its claim was never tested, which is also why nobody noticed
+    # the claim is contestable (the release skill's own checklist step 4 is
+    # "Update both changelogs", and n03's prompt asks for release notes).
+    # A $2.43 probe confirmed relocating them does not help: targeting
+    # `.claude` resolves a plugin, not the repo-local skills dir.
+    assert len(prompts) >= 12, f"only {len(prompts)} prompt files found"
+    assert len(graders) >= 14, f"only {len(graders)} grader files found"
 
 
 @pytest.mark.parametrize(
