@@ -103,6 +103,7 @@ class TestTagShape:
             "plugin-v7.15-1",
             "plugin-v7.15.0-1-2",
             "engine-service-v0.1.85",
+            "plugin-v7.15.0-1\n",
         ],
     )
     def test_parse_rejects_everything_else(self, ref: str) -> None:
@@ -300,12 +301,17 @@ def test_the_prefix_mapping_covers_every_marketplace_plugin() -> None:
 
 
 def test_nothing_under_src_imports_the_channel_module() -> None:
-    """Acceptance pin: the channel is repo machinery, never wheel code."""
+    """Acceptance pin: the channel is repo machinery, never wheel code.
+
+    git grep exits 1 on no match (the pass state) and >=2 on error — an
+    error also prints nothing, so the return code is checked too
+    (test-validator finding, a2wmi.6)."""
     listing = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "grep", "-l", "plugin_channel", "--", "src/nexus/"],
         capture_output=True,
         text=True,
     )
+    assert listing.returncode == 1, (listing.returncode, listing.stderr)
     assert listing.stdout.strip() == "", listing.stdout
 
 

@@ -1578,15 +1578,20 @@ class TestNxPlanAudit:
 
     @pytest.mark.asyncio
     async def test_returns_verdict_string(self, monkeypatch):
+        """The verdict is COMPUTED from classified findings (nexus-ll7zm),
+        never taken from the model — the stub's own "pass" must not
+        appear; zero findings resolve to READY."""
         import nexus.operators.dispatch as _mod
         from nexus.mcp.core import nx_plan_audit
+        from nexus.plans.audit_rounds import READY
 
         async def fake(prompt, schema, timeout=60.0, **kwargs):
             return {"verdict": "pass", "findings": [], "summary": "All good."}
 
         monkeypatch.setattr(_mod, "claude_dispatch", fake)
         result = await nx_plan_audit(plan_json='{"steps": []}')
-        assert "pass" in result
+        assert READY in result
+        assert "pass" not in result
         assert "All good." in result
 
     @pytest.mark.asyncio

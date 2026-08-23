@@ -10,7 +10,11 @@ from pathlib import Path
 import yaml
 import pytest
 
-from plugin_channel import parse_plugin_tag, wheel_surface_offenders
+from plugin_channel import (
+    assert_tag_visibility,
+    parse_plugin_tag,
+    wheel_surface_offenders,
+)
 
 pytestmark = pytest.mark.lint
 
@@ -896,6 +900,12 @@ def _assert_ref_valid_for_plugin(
         f"marketplace.json '{plugin_name}' source.ref {ref!r} anchors "
         f"version {version!r}, which != pyproject.toml {pv!r}"
     )
+    # Blind-checkout sentinel BEFORE the proof (review finding, a2wmi.6):
+    # in a checkout that never fetched the base client tag the diff below
+    # would fail as an opaque GitCommandError; the sentinel names the real
+    # cause and the remedy. Today ci.yml's lint job checks out with
+    # fetch-depth 0, but that is that workflow's choice, not a guarantee.
+    assert_tag_visibility(pv, cwd=cwd)
     target = _resolve_ref_or_head(ref, cwd=cwd)
     offenders = wheel_surface_offenders(client_form, target, cwd=cwd)
     assert offenders == [], (
@@ -1029,6 +1039,29 @@ class TestSourceRefPerPluginParity:
             "conexus", f"v{self.VERSION}", self.VERSION, cwd=tmp_path
         )
         _assert_ref_valid_for_plugin("sn", f"v{self.VERSION}", self.VERSION, cwd=tmp_path)
+
+    def test_anchored_ref_in_a_blind_checkout_names_the_cause(
+        self, tmp_path: Path
+    ) -> None:
+        """R1 review finding (a2wmi.6): a checkout that never fetched the
+        base client tag must fail as TagVisibilityError naming the fetch
+        remedy, not as an opaque diff failure. Dormant until a real cut
+        PR meets such a checkout, which is exactly when an opaque error
+        would cost the most."""
+        from plugin_channel import TagVisibilityError
+
+        repo = tmp_path / "blind"
+        repo.mkdir()
+        _channel_git("init", "-q", "-b", "main", cwd=repo)
+        _channel_git("config", "user.email", "test@test.invalid", cwd=repo)
+        _channel_git("config", "user.name", "test", cwd=repo)
+        (repo / "seed").write_text("seed\n", encoding="utf-8")
+        _channel_git("add", "seed", cwd=repo)
+        _channel_git("commit", "-q", "-m", "seed", cwd=repo)
+        with pytest.raises(TagVisibilityError, match="blind to tags"):
+            _assert_ref_valid_for_plugin(
+                "conexus", f"plugin-v{self.VERSION}-1", self.VERSION, cwd=repo
+            )
 
 
 #: The release boundary at which ``PINNED_SERVICE_TAG`` must become non-None.

@@ -123,7 +123,9 @@ PLUGIN_BY_ALLOWLIST_PREFIX: dict[str, str] = {
     "sn/": "sn",
 }
 
-_PLUGIN_TAG_RE = re.compile(r"^plugin-v(\d+\.\d+\.\d+)-([1-9]\d*)$")
+#: \Z, not $: a bare $ also matches before a trailing newline, so
+#: "plugin-v7.15.0-1\n" would parse (review finding, a2wmi.6).
+_PLUGIN_TAG_RE = re.compile(r"^plugin-v(\d+\.\d+\.\d+)-([1-9]\d*)\Z")
 
 
 def format_plugin_tag(version: str, n: int) -> str:
@@ -270,6 +272,14 @@ def wheel_surface_offenders(
     Raises :class:`GitCommandError` when the git command exits non-zero
     or either ref does not resolve — this function never returns an
     empty list because the comparison failed.
+
+    ACCEPTED FLATNESS (R1 review, a2wmi.6): the allowlist is judged
+    across BOTH plugin trees, not scoped to the plugin whose ref moved —
+    the proof guarantees "no wheel content ships", not "this plugin's
+    cut touches only its own tree". Cross-plugin content isolation was
+    never in the design of record; ref movement is what keys on
+    :data:`PLUGIN_BY_ALLOWLIST_PREFIX`, and a cut carrying both trees
+    still ships only plugin surface.
     """
     diff = _run_git(["diff", "--name-only", f"{base_ref}..{target_ref}"], cwd)
     if diff.returncode != 0:

@@ -1093,6 +1093,54 @@ class TestAnchoredWindowBehaviour:
         assert plugin_in_release_window("sn", "v9.9.0") is False
 
 
+class TestReleaseWindowComposite:
+    """The composite _in_release_window's REAL try/except body (R1 review
+    finding, a2wmi.6): every other test stubs the composite itself, so its
+    TagVisibilityError-to-False conversion had no direct coverage. Only
+    the per-plugin predicate is stubbed here — the body under test runs."""
+
+    def _pins(self, monkeypatch, predicate) -> None:
+        module = sys.modules[__name__]
+        monkeypatch.setattr(
+            module,
+            "_pinned_refs",
+            lambda: {"conexus": "plugin-v9.9.0-1", "sn": "v9.9.0"},
+        )
+        monkeypatch.setattr(module, "plugin_in_release_window", predicate)
+
+    def test_all_windowed_composes_to_true(self, monkeypatch) -> None:
+        self._pins(monkeypatch, lambda name, ref: True)
+        assert _in_release_window() is True
+
+    def test_one_unwindowed_composes_to_false(self, monkeypatch) -> None:
+        self._pins(monkeypatch, lambda name, ref: ref != "v9.9.0")
+        assert _in_release_window() is False
+
+    def test_a_blind_checkout_reads_as_not_a_window(self, monkeypatch) -> None:
+        """TagVisibilityError converts to False HERE ONLY — the tagless
+        path, where _require_or_skip then fails loudly under the require
+        flag and skips locally. Everywhere else the sentinel's raise
+        propagates (S6)."""
+        from plugin_channel import TagVisibilityError
+
+        def blind(name: str, ref: str) -> bool:
+            raise TagVisibilityError("base client tag does not resolve")
+
+        self._pins(monkeypatch, blind)
+        assert _in_release_window() is False
+
+    def test_any_other_exception_propagates(self, monkeypatch) -> None:
+        """The conversion is scoped to TagVisibilityError alone; a broader
+        except would silently misread real git failures as not-a-window."""
+
+        def broken(name: str, ref: str) -> bool:
+            raise RuntimeError("unrelated failure")
+
+        self._pins(monkeypatch, broken)
+        with pytest.raises(RuntimeError, match="unrelated failure"):
+            _in_release_window()
+
+
 def test_the_tagless_probe_targets_the_pinned_refs(monkeypatch) -> None:
     """Site 3 (nexus-a2wmi.4): the upstream probe checks the refs ACTUALLY
     pinned, never a reconstructed "v" + pyproject string — which checks
