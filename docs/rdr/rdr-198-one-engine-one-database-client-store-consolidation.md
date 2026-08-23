@@ -64,8 +64,24 @@ constructions. Keep-alive cannot survive a context boundary, so connections are
 re-established repeatedly against a remote engine even though every one of them
 targets the same host.
 
-What the fix delivers: one shared, pooled transport per process, with the
-fifteen domain facades retained as thin typed views over it.
+**The fifteen are not one shape** (Verified, research pass 1). They fall into
+three groups with materially different mechanics, and an earlier draft of this
+RDR treated them as uniform:
+
+| Group | Count | Mechanism | Shareable? |
+| --- | --- | --- | --- |
+| 1 | 12 | `RefreshableHttpStoreMixin` — auth headers built fresh per call (`_auth_headers`); the `httpx.Client` carries no headers or base_url and is never rebuilt on refresh | **Yes** — safe today |
+| 2 | 2 | `HttpTokenStore`, `HttpScratchStore` — bake `Authorization` into the `httpx.Client` **constructor** and rebuild the client object on refresh (`http_scratch_store.py:291,333,401`) | **No** — naive sharing bleeds one domain's header into another |
+| 3 | 1 | `HttpVectorClient` — built on **urllib**, not `httpx.Client` at all (`http_vector_client.py:422`) | Inapplicable |
+
+`base_url` is identical across all fifteen (all resolve through the same
+`resolve_service_endpoint()`), so there is no per-store endpoint divergence to
+preserve.
+
+What the fix delivers: one shared, pooled transport for Group 1 immediately;
+Group 2 converted to per-call auth *first*, because sharing them as they stand
+is a correctness bug, not an optimisation; Group 3 addressed separately or left
+alone, since it does not use the transport being consolidated.
 
 #### Gap 2: One logical operation is not one transaction
 
@@ -100,15 +116,33 @@ belongs in each, so the boundary is chosen rather than inherited.
 #### Gap 4: Liquibase is used tactically, not strategically
 
 Postgres has transactional DDL: a schema change either fully applies or fully
-rolls back, and Liquibase runs each changeset in a transaction by default. Only
-three of 104 changelogs opt out (`staging-002`, `vectors-002`, `vectors-003`),
-all of them correctly, because `CREATE INDEX CONCURRENTLY` cannot run inside a
-transaction.
+rolls back, and Liquibase runs each changeset in a transaction by default
+(**Verified** — `ChangeSet.java:425` and its javadoc, liquibase-core 4.29.0).
 
-That default is doing real work already. What is missing is deliberate use of
-it: multi-object changes that must land atomically are not currently grouped to
-say so, and there is no stated policy for when a consolidation step may be
-split across changesets versus when it must not be.
+**CORRECTED 2026-08-23 (research pass 1).** An earlier draft of this gap
+claimed three of 104 changelogs opt out of the transaction via
+`runInTransaction="false"` for `CREATE INDEX CONCURRENTLY`. That is **wrong**.
+There are **zero** actual `runInTransaction` attribute usages across all 104
+changelogs, and **no changeset issues `CONCURRENTLY` at all**. The two apparent
+matches are prose inside XML *comments* in `vectors-002` and `vectors-003`,
+explaining why those files deliberately chose a plain `CREATE INDEX` in order to
+*avoid* needing the opt-out; a third comment says that if `CONCURRENTLY` is ever
+required, do it manually outside Liquibase. The original claim came from
+misreading a grep that did not distinguish attribute from comment text.
+
+So the real position is *better* than the draft asserted: **every changeset in
+this repository runs inside a transaction today, deliberately, with the
+reasoning written down.** Liquibase is not being used tactically. That framing
+is withdrawn.
+
+What actually remains is narrower, and it is a forward-looking policy question
+rather than a defect: a consolidation of this size will want multi-object
+changes that must land atomically, and there is no stated rule for when a step
+may be split across changesets versus when it must not be. The mechanism for
+that rule is **Verified to work** — all statements within one changeset share a
+single transaction (one `autoCommit` set, one `commit()` after the full change
+loop, one catch-all `rollback()` on failure), so "group atomically-required
+changes into one changeset" is real rather than wishful.
 
 What the fix delivers: a written changeset-granularity policy for this
 migration, so each step is atomic by construction rather than by accident.
@@ -121,10 +155,22 @@ statement-granular, carries a sanctioned-exception registry, tracks raw-SQL
 assembly sentinels and wrapper call sites, and includes meta-tests proving the
 gate itself flags violations rather than passing vacuously.
 
-Six raw-SQL sites remain in `service/src/main/java`, and all six are constructs
-for which jOOQ offers no typed DSL form: `ALTER TABLE … FORCE ROW LEVEL
-SECURITY` (`SchemaMigrator`), `VACUUM (ANALYZE)` (`TenantScope`),
-`pg_advisory_xact_lock` and `SET CONSTRAINTS … DEFERRED` (`CatalogRepository`).
+Six raw-SQL sites remain in `service/src/main/java`. **Verified** against
+jOOQ 3.20.11 sources (the version `service/pom.xml` pins), not inferred from our
+own sanction registry:
+
+| Construct | Site | jOOQ DSL form |
+| --- | --- | --- |
+| `ALTER TABLE … [NO] FORCE ROW LEVEL SECURITY` | `SchemaMigrator:239,248` | **Does not exist** (full `AlterTableStep` inventory + `PostgresDSL`) |
+| `VACUUM (ANALYZE)` | `TenantScope:389` | **Does not exist** (zero hits in the jar) |
+| `SET CONSTRAINTS … DEFERRED` | `CatalogRepository:6040` | **Does not exist** (session command) |
+| `pg_advisory_xact_lock(hashtext(…))` | `CatalogRepository:5303` | **Exists but unsuitable** — `DSL.function(String, Class<T>, Field<?>…)` is a genuine typed generic function-call builder that could express it |
+
+The fourth row is a correction to an earlier draft, which claimed no DSL form
+existed for any of the six. For the advisory lock a form *does* exist; the
+sanction rests on readability and precision, not impossibility. Saying so
+matters, because "jOOQ cannot express this" and "we chose not to use what jOOQ
+offers" are different claims and only one of them is true here.
 
 The gap is not that discipline is missing. It is that a migration of this size
 is exactly the pressure that produces "just this once" exceptions.
@@ -270,8 +316,8 @@ on this machine, not inherited.
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
 | httpx 0.28.1 | Yes (via `888bdee8f` review) | `Client.__init__` builds an `ssl.SSLContext` eagerly and unconditionally, before the scheme is known. One context per client is the library's own internal model for a pool. |
-| jOOQ | Partial | No typed DSL form for `VACUUM`, `SET CONSTRAINTS`, `ALTER TABLE … ROW LEVEL SECURITY`, or `pg_advisory_xact_lock`. Confirmed by the four sanctioned sites; **not** exhaustively verified against the jOOQ API — flagged as an assumption below. |
-| Liquibase | Docs only | Each changeset runs in a transaction unless `runInTransaction="false"`. Consistent with the three observed opt-outs, all `CONCURRENTLY`. Needs source confirmation before the policy in Gap 4 is written. |
+| jOOQ 3.20.11 | **Yes — sources** | Three of four sanctioned constructs have no typed DSL form; `pg_advisory_xact_lock` **does**, via `DSL.function(String, Class<T>, Field<?>…)`. Corrects an earlier "none of them" claim. |
+| Liquibase 4.29.0 | **Yes — sources** | Per-changeset transaction is the default (`ChangeSet.java:425`). All statements in ONE changeset share ONE transaction. **Correction**: this repo has ZERO `runInTransaction` opt-outs and issues no `CONCURRENTLY` — the earlier "three opt-outs" reading was comment text, not attributes. |
 | Postgres | Documented | Transactional DDL; `CREATE INDEX CONCURRENTLY` cannot run inside a transaction. |
 
 ### Key Discoveries
@@ -315,21 +361,54 @@ on this machine, not inherited.
 
 ### Critical Assumptions
 
-- [ ] A partial `nx_answer` run record is observable in production data (orphan
-  run rows, or step rows without an outcome) — **Status**: Unverified —
-  **Method**: Spike (query `nx_answer_runs` for runs lacking a terminal outcome)
-- [ ] jOOQ genuinely has no typed DSL form for the four sanctioned construct
-  classes — **Status**: Unverified — **Method**: Source Search against the jOOQ
-  API, not inference from the existing sanction list
-- [ ] Liquibase wraps each changeset in a transaction by default on Postgres —
-  **Status**: Unverified — **Method**: Source Search
-- [ ] Collapsing to one shared client does not break the credential-refresh
-  path — `RefreshableHttpStoreMixin` re-resolves endpoints and refreshes tokens
-  per store; a shared transport must preserve that without cross-domain token
-  bleed — **Status**: Unverified — **Method**: Source Search + Spike
-- [ ] No consumer depends on per-store connection isolation for correctness
-  (e.g. a long-running streaming read that must not share a pool with a fast
-  write) — **Status**: Unverified — **Method**: Source Search
+Discharged in research pass 1, 2026-08-23 (T2 `nexus_rdr/198-research-1`,
+`198-research-jooq-liquibase`, `198-research-transport-isolation`).
+
+- [x] A partial `nx_answer` run record is observable in production data —
+  **Status**: **REFUTED** — **Method**: Spike. Zero orphaned starts across all
+  five plans with `use_count > 0` (29 runs; `use_count == success + failure`
+  everywhere). The mechanism is real — `increment_run_started` and
+  `increment_run_outcome` sit in separate `_t2_ctx` blocks
+  (`mcp_infra.py:391-392`), so nothing is atomic between them — but it has not
+  fired in the recorded window, and `failure_count` is 0 everywhere, so the
+  outcome path has never been exercised under stress. **Gap 2 is therefore a
+  LATENT correctness gap, not an observed defect.** The class is nonetheless
+  proven in a sibling domain by RDR-164 (nexus-tquoj, nexus-cugrk).
+
+- [x] jOOQ has no typed DSL form for the four sanctioned construct classes —
+  **Status**: **PARTIALLY VERIFIED** — **Method**: Source Search against
+  jooq-3.20.11 sources. Three genuinely have no form; `pg_advisory_xact_lock`
+  **does** have one via `DSL.function(String, Class<T>, Field<?>…)`. See the
+  Gap 5 table.
+
+- [x] Liquibase wraps each changeset in a transaction by default on Postgres —
+  **Status**: **VERIFIED** — **Method**: Source Search (`ChangeSet.java:425`,
+  liquibase-core 4.29.0), upgraded from Docs Only. Also verified: all statements
+  in ONE changeset share ONE transaction, so Gap 4's proposed mechanism works.
+  This pass also **corrected a factual error** in the draft — see Gap 4.
+
+- [x] Collapsing to one shared client does not break credential refresh —
+  **Status**: **PARTIALLY VERIFIED / REFUTED FOR 2 OF 15** — **Method**: Source
+  Search. Safe for the 12 mixin stores; **unsafe as-is** for `HttpTokenStore`
+  and `HttpScratchStore`, which bake auth into the client constructor and
+  rebuild it on refresh. Layer 1 must convert those two before sharing, or scope
+  the shared pool to Group 1. See the Gap 1 table.
+
+- [x] No consumer depends on per-store connection isolation —
+  **Status**: **PARTIALLY VERIFIED** — **Method**: Source Search. No streaming,
+  SSE, cookies, or sticky routing anywhere. The aspect worker is a genuine OS
+  subprocess, so an in-process singleton cannot reach it and Layer 1's scoping
+  is safe. Timeouts DO differ (30s default vs 600s for the catalog combined
+  write and vector upsert), but the long cases already use per-request
+  `timeout=` overrides, which are stateless and survive sharing. **One real
+  gap**: `HttpAspectQueue` sets its timeout as a constructor kwarg on the client
+  default rather than per call, and that customization point disappears under a
+  shared singleton — it must migrate to per-call overrides, as the catalog
+  client already does.
+
+**Net effect on the design**: Layer 1 is still sound but is no longer a single
+uniform step. It has a required precursor (convert Group 2 to per-call auth,
+migrate `HttpAspectQueue`'s timeout) that must land before any pool is shared.
 
 ## Proposed Solution
 
@@ -339,10 +418,23 @@ Three separable layers, sequenced so each is shippable and reversible on its
 own. **This RDR does not commit to the design of layers 2 and 3 in detail** —
 it commits to the decomposition and to doing layer 1 first.
 
-**Layer 1 — One transport, fifteen typed facades (client-only).**
-Introduce a single process-wide pooled HTTP transport. The fifteen classes stay
-exactly as they are from the caller's point of view; they stop owning
-connections. `mcp_infra.t2_index_write` already runs against a refcounted
+**Layer 0 — Make the stores shareable (client-only, REQUIRED PRECURSOR).**
+Research pass 1 refuted the assumption that all fifteen can share a pool as they
+stand. Two of them (`HttpTokenStore`, `HttpScratchStore`) bake `Authorization`
+into the `httpx.Client` constructor and rebuild the client on refresh, so
+sharing them naively bleeds one domain's credential into another — a
+correctness bug, not a slow path. Convert both to the per-call `_auth_headers`
+pattern the other twelve already use, and migrate `HttpAspectQueue`'s
+constructor-time timeout kwarg to a per-call `timeout=` override (the catalog
+client already does this). None of that requires a shared pool; it is
+independently correct and independently shippable.
+
+**Layer 1 — One transport, typed facades (client-only).**
+Introduce a single process-wide pooled HTTP transport for the twelve mixin
+stores plus the two converted in Layer 0. `HttpVectorClient` is out of scope: it
+is built on urllib, not `httpx.Client`, so it shares nothing to begin with. The
+facades stay exactly as they are from the caller's point of view; they stop
+owning connections. `mcp_infra.t2_index_write` already runs against a refcounted
 process singleton and returns its callable's value, so it serves reads as well
 as writes; `t2_ctx`'s own docstring already lists these call sites as "not yet
 converted". The catalog tier already has a shared handle. **T2 is the outlier,
@@ -492,16 +584,23 @@ mirroring of it is.
 
 ## Sequencing and Logistics
 
-1. **Spike the atomicity assumption first.** Query for `nx_answer` runs lacking a
-   terminal outcome. If partial records exist, the correctness argument is
-   measured rather than reasoned, and it survives layer 1 removing the symptom.
-2. **Layer 1** (client-only): shared transport, facades unchanged. Ships on the
-   normal client cadence.
-3. **Layer 2, first endpoint only**: `nx_answer` run recording. Engine-first,
+1. ~~**Spike the atomicity assumption first.**~~ **DONE, and it came back
+   REFUTED** (research pass 1). Zero orphaned starts in 29 runs. The original
+   rationale for sequencing it first — "Layer 1 removes the symptom and the
+   pressure leaves with it" — is now void, because there is no symptom. Gap 2
+   stands as a latent gap on a proven-elsewhere class, not an observed one, and
+   the sequencing argument rests on Layer 0/1 being cheap and reversible instead.
+2. **Layer 0** (client-only, REQUIRED before any sharing): convert
+   `HttpTokenStore` and `HttpScratchStore` to per-call auth; migrate
+   `HttpAspectQueue`'s timeout to a per-call override. Independently correct,
+   independently shippable, and the thing that makes Layer 1 safe.
+3. **Layer 1** (client-only): shared transport for the fourteen httpx stores,
+   facades unchanged. Ships on the normal client cadence.
+4. **Layer 2, first endpoint only**: `nx_answer` run recording. Engine-first,
    then client, paired by `REQUIRED_ENGINE_VERSION`.
-4. **Census before widening layer 2.** Which operations genuinely fan out, and
+5. **Census before widening layer 2.** Which operations genuinely fan out, and
    how many round trips each costs. Pick the next one or two on evidence.
-5. **Layer 3 last.** Schema decision, then transactional moves under the Gap 4
+6. **Layer 3 last.** Schema decision, then transactional moves under the Gap 4
    policy.
 
 **Delivery constraint, non-negotiable**: engine endpoints are Java under
