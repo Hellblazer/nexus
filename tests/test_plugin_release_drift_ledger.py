@@ -37,6 +37,7 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 
 import pytest
 
@@ -85,7 +86,14 @@ SURFACE_BY_PLUGIN: dict[str, tuple[str, ...]] = {
     ),
 }
 
-#: Flattened, for the checks that do not care which plugin a path belongs to.
+#: Flattened, for the checks that legitimately do not care which plugin owns a
+#: path: the ledger parser (_declared_paths — a declaration is a declaration
+#: whichever plugin it names), the surface-exists non-vacuity check, and the
+#: workflow path-filter coverage check. DRIFT is never computed over this —
+#: each plugin diffs against its OWN ref over its OWN prefixes
+#: (_drifted_paths / _drift_by_plugin, nexus-a2wmi.14), because after a
+#: single-plugin cut the other plugin's older ref would otherwise report the
+#: cut's files as its own undeclared drift.
 SURFACE: tuple[str, ...] = tuple(
     prefix for prefixes in SURFACE_BY_PLUGIN.values() for prefix in prefixes
 )
@@ -154,8 +162,15 @@ def _has_any_tags() -> bool:
     return bool(_git("tag", "-l").stdout.strip())
 
 
-def _drifted_paths(ref: str) -> list[str]:
-    proc = _git("diff", "--name-only", f"{ref}..HEAD", "--", *SURFACE)
+def _drifted_paths(plugin: str, ref: str) -> list[str]:
+    """Paths under *plugin*'s OWN surface that differ from *its* ref.
+
+    Scoped per plugin (nexus-a2wmi.14): after a conexus-only cut, sn's
+    ref still names the older client tag, and diffing it over the
+    flattened surface would return the conexus files the cut just
+    shipped — undeclared drift caused by the channel working correctly.
+    """
+    proc = _git("diff", "--name-only", f"{ref}..HEAD", "--", *SURFACE_BY_PLUGIN[plugin])
     # A FAILED diff must never read as "no drift". That silent-zero is the whole
     # bug class this file exists for.
     assert proc.returncode == 0, (
@@ -163,6 +178,14 @@ def _drifted_paths(ref: str) -> list[str]:
         f"{proc.stderr}"
     )
     return sorted(p for p in proc.stdout.splitlines() if p.strip())
+
+
+def _drift_by_plugin() -> set[str]:
+    """Union of every plugin's drift, each judged against its own ref."""
+    drifted: set[str] = set()
+    for plugin, ref in _pinned_refs().items():
+        drifted |= set(_drifted_paths(plugin, ref))
+    return drifted
 
 
 def _ledger_text() -> str:
@@ -354,9 +377,7 @@ def test_every_drifted_file_is_declared_in_the_ledger() -> None:
         )
         return
     declared = _declared_paths()
-    drifted: set[str] = set()
-    for ref in set(_pinned_refs().values()):
-        drifted |= set(_drifted_paths(ref))
+    drifted = _drift_by_plugin()
     if not drifted:
         return
 
@@ -388,9 +409,7 @@ def test_the_ledger_has_no_stale_entries() -> None:
         )
         return
     declared = _declared_paths()
-    drifted: set[str] = set()
-    for ref in set(_pinned_refs().values()):
-        drifted |= set(_drifted_paths(ref))
+    drifted = _drift_by_plugin()
 
     stale = sorted(declared - drifted)
     assert not stale, (
@@ -743,3 +762,131 @@ def test_no_caller_passes_a_merge_base_as_the_proof_target() -> None:
         "scan itself is broken, which is not a pass"
     )
     assert not violations, violations
+
+
+class TestPerPluginDriftScoping:
+    """RDR-197 (nexus-a2wmi.14): drift is judged per plugin, ref by ref.
+
+    After a conexus-only cut, sn's ref still points at the older client
+    tag. Diffing that older ref against HEAD over the FLATTENED surface
+    returns the conexus files the cut just shipped; the cut emptied the
+    ledger, so those paths read as undeclared drift and the contract
+    fails on develop — caused by the channel working correctly. The fix
+    is scoping each plugin's diff to its own surface, and these tests pin
+    it from both directions: the cut must not fail the other plugin, and
+    scoping must not blind the check to that plugin's genuine drift.
+
+    This is row 4 / state S3 of the mixed-state truth table (bead .4).
+    """
+
+    SN_PROBE = "sn/hooks/probe.py"
+
+    @classmethod
+    def _cut_world(
+        cls,
+        tmp_path: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        sn_drift: bool,
+    ) -> pathlib.Path:
+        """A repo one conexus cut past the shared client tag.
+
+        History: baseline (tag v9.9.0, both plugins pinned there) → the
+        conexus cut (a conexus/hooks/ change + conexus's pin advanced to
+        plugin-v9.9.0-1, tagged) → post-cut develop (a conexus/commands/
+        change, DECLARED in the ledger; with *sn_drift*, an UNDECLARED
+        sn/hooks/ change too). The production test functions then run
+        against this world via the module globals.
+        """
+        repo = tmp_path / "cutworld"
+        repo.mkdir()
+
+        def run(*args: str) -> None:
+            subprocess.run(
+                ["git", *args], cwd=repo, check=True, capture_output=True,
+                text=True,
+            )
+
+        def write(rel: str, content: str) -> None:
+            target = repo / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+
+        def marketplace(conexus_ref: str) -> str:
+            return json.dumps(
+                {
+                    "plugins": [
+                        {
+                            "name": "conexus",
+                            "source": {"source": "git-subdir", "ref": conexus_ref},
+                        },
+                        {
+                            "name": "sn",
+                            "source": {"source": "git-subdir", "ref": "v9.9.0"},
+                        },
+                    ]
+                }
+            )
+
+        run("init", "-q", "-b", "main")
+        run("config", "user.email", "test@test.invalid")
+        run("config", "user.name", "test")
+        write("conexus/hooks/hook.py", "v1\n")
+        write("conexus/commands/cmd.md", "v1\n")
+        write(cls.SN_PROBE, "v1\n")
+        write(".claude-plugin/marketplace.json", marketplace("v9.9.0"))
+        write("conexus/PENDING_RELEASE.md", "# Pending\n")
+        write("pyproject.toml", '[project]\nname = "w"\nversion = "9.9.0"\n')
+        run("add", ".")
+        run("commit", "-q", "-m", "baseline")
+        run("tag", "v9.9.0")
+
+        write("conexus/hooks/hook.py", "v2 shipped by the cut\n")
+        write(".claude-plugin/marketplace.json", marketplace("plugin-v9.9.0-1"))
+        run("add", ".")
+        run("commit", "-q", "-m", "conexus cut 1")
+        run("tag", "plugin-v9.9.0-1")
+
+        write("conexus/commands/cmd.md", "v2 post-cut work\n")
+        write(
+            "conexus/PENDING_RELEASE.md",
+            "# Pending\n- `conexus/commands/cmd.md`: post-cut change (fixture)\n",
+        )
+        if sn_drift:
+            write(cls.SN_PROBE, "v2 UNDECLARED\n")
+        run("add", ".")
+        run("commit", "-q", "-m", "post-cut develop")
+
+        module = sys.modules[__name__]
+        monkeypatch.setattr(module, "REPO_ROOT", repo)
+        monkeypatch.setattr(
+            module, "MARKETPLACE", repo / ".claude-plugin" / "marketplace.json"
+        )
+        monkeypatch.setattr(
+            module, "LEDGER", repo / "conexus" / "PENDING_RELEASE.md"
+        )
+        return repo
+
+    def test_a_conexus_only_cut_reports_no_failure_for_sn(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The channel working correctly must not turn develop red.
+
+        Restore the flattened-surface diff and this fails: sn's older ref
+        picks up the cut's conexus files as undeclared drift.
+        """
+        self._cut_world(tmp_path, monkeypatch, sn_drift=False)
+        test_every_drifted_file_is_declared_in_the_ledger()
+        test_the_ledger_has_no_stale_entries()
+
+    def test_genuine_sn_drift_is_still_caught_while_refs_differ(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Per-plugin scoping must not narrow the check into blindness.
+
+        Stub the per-plugin diff to return nothing and this fails: the
+        undeclared sn change would sail through.
+        """
+        self._cut_world(tmp_path, monkeypatch, sn_drift=True)
+        with pytest.raises(AssertionError, match=re.escape(self.SN_PROBE)):
+            test_every_drifted_file_is_declared_in_the_ledger()
