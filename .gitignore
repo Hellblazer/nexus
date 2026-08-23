@@ -58,3 +58,8 @@ tests/containers/out/
 # (transcripts + DispatchUsage from real, costed claude -p calls) --
 # reproducible on demand, not a source-of-truth artifact to diff in git.
 bench/out/
+
+# Eval run output (traces, HTML reports). Lands INSIDE the shipped plugin
+# subdir, so an accidental commit would push run artefacts to every user's
+# install via the git-subdir marketplace source. nexus-dkotg.
+conexus/evals/results/

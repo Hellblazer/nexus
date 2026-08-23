@@ -2,6 +2,7 @@
 type: tool_used
 tool: Skill
 input_match: '"skill"\s*:\s*"(conexus:)?(strategic-planning|plan-first|architecture)"'
+min: 0
 max: 0
 ---
 
