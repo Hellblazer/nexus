@@ -2,7 +2,8 @@
 title: "Collapse the Duplicated Client Transport: One Pooled Connection to One Engine"
 id: RDR-198
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-08-23
 priority: high
 author: Sam
 reviewed-by: self (solo)
