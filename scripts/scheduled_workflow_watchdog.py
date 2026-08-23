@@ -258,9 +258,21 @@ def fetch_latest_runs(
     call = api or (lambda u: _api(u, token))
     out: dict[str, dict | None] = {}
     for path in paths:
+        # status=completed is load-bearing (nexus, 2026-08-23). Without it
+        # this samples the newest run of ANY status, and the schedules make
+        # that an IN-FLIGHT run almost every time: this watchdog fires 6
+        # minutes after the nightly gate it watches, which takes 12-25
+        # minutes. An in-progress run has conclusion: null -- not "failure",
+        # so not flagged -- and created_at is minutes old, so not "stale"
+        # either. The result was a clean bill of health over 8 consecutive
+        # red nights of local-service-gate-nightly (08-16..08-23), and issue
+        # #1457 closed 2026-08-18 saying every scheduled workflow was green.
+        # "The last thing this workflow decided" is the newest COMPLETED
+        # run; ask the API for that instead of filtering after the fact.
         url = (
             f"https://api.github.com/repos/{repo}/actions/workflows/"
-            f"{urllib.parse.quote(path, safe='')}/runs?per_page=1"
+            f"{urllib.parse.quote(path, safe='')}/runs"
+            f"?per_page=1&status=completed"
         )
         try:
             data = call(url)

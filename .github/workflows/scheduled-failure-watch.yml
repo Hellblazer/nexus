@@ -77,10 +77,17 @@ jobs:
           set -e
           cat sweep.err
           cat body.md
-          # rc 2 is a usage/config error (missing token or repo) — that is a
-          # BROKEN WATCHDOG, and must not be mistaken for either state.
-          if [ "$rc" = "2" ]; then
-            echo "watchdog could not run — treating as failure, not as all-clear" >&2
+          # Only 0 (clean) and 1 (findings) are VERDICTS. Everything else is
+          # a broken watchdog and must not be mistaken for either state: rc 2
+          # is a usage/config error (missing token or repo), and 127/124/137
+          # are a missing interpreter, a timeout and a kill. The consumer step
+          # below branches on FINDINGS == "1" and CLOSES the tracking issue on
+          # anything else, so an unhandled rc used to post "All scheduled
+          # workflows are green and firing on cadence" over a watchdog that
+          # never ran. Fail loud instead (2026-08-23, alongside the
+          # status=completed fix in the script itself).
+          if [ "$rc" != "0" ] && [ "$rc" != "1" ]; then
+            echo "watchdog exited $rc — treating as failure, not as all-clear" >&2
             exit 1
           fi
           echo "findings=$rc" >> "$GITHUB_OUTPUT"

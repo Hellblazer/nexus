@@ -76,6 +76,57 @@ def test_cancelled_and_skipped_are_not_failures() -> None:
         assert findings == [], f"{conclusion!r} should not be a finding"
 
 
+# ── In-flight runs must never read as healthy (the 8-red-nights defect) ─────
+#
+# classify() flags only conclusion == "failure", but the API returns
+# conclusion: null for an IN-PROGRESS run. The crons are 6 minutes apart
+# (the nightly at 09:17 UTC, this watchdog at 09:23) while the nightly takes
+# 12-25 minutes, so a per_page=1 sample was almost always the still-running
+# run: null is not "failure", and its age is 0 days so it is not "stale"
+# either -- no finding, every time.
+#
+# Measured 2026-08-23: local-service-gate-nightly.yml had conclusion=failure
+# on EVERY scheduled run from 08-16 through 08-23 while this watchdog
+# reported success on 08-22 and 08-23. Issue #1457 named that gate as
+# failing and was closed 2026-08-18 with "All scheduled workflows are green
+# and firing on cadence."
+#
+# The fix is at the fetch layer: ask for the newest COMPLETED run, which is
+# what "the last thing this workflow actually decided" means. classify()
+# then never sees an in-flight run at all.
+
+
+def test_fetch_requests_only_completed_runs() -> None:
+    """THE REGRESSION. Without status=completed the sample is whatever is
+    running right now, and an in-flight run is indistinguishable from a
+    healthy one."""
+    seen: list[str] = []
+
+    def fake_api(url: str) -> dict:
+        seen.append(url)
+        return {"workflow_runs": [_run("success")]}
+
+    fetch_latest_runs("o/r", "tok", ["p.yml"], api=fake_api)
+    assert len(seen) == 1
+    assert "status=completed" in seen[0], (
+        "the watchdog must sample the newest COMPLETED run; sampling the "
+        "newest run of any status makes an in-flight run read as healthy"
+    )
+
+
+def test_a_workflow_whose_only_runs_are_in_flight_is_not_silently_green() -> None:
+    """status=completed returns an empty list while the first run is still
+    going. That must reach classify() as 'no judged run', which is a finding,
+    not an all-clear."""
+    def fake_api(url: str) -> dict:
+        return {"workflow_runs": []}
+
+    latest = fetch_latest_runs("o/r", "tok", ["p.yml"], api=fake_api)
+    assert latest == {"p.yml": None}
+    findings = classify({"p.yml": "p.yml"}, latest, NOW)
+    assert [f.kind for f in findings] == ["never-ran"]
+
+
 # ── Non-vacuity: the watchdog's own silent-pass mode ─────────────────────────
 
 
