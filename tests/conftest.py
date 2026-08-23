@@ -512,7 +512,28 @@ def _is_allowlisted_config_dir_path(rel_path: str) -> bool:
     # level only -- a ``*.cache`` anywhere deeper is still reported -- and a
     # TEST leaking a repo cache here is the class the fixture-cache-leak
     # guard (nexus-nifd) polices separately.
-    return "/" not in rel_path and rel_path.endswith(".cache")
+    if "/" not in rel_path and rel_path.endswith(".cache"):
+        return True
+    # ServiceRegistry per-scope election flocks, `{tier}_elect.{scope}.lock`
+    # at the config root (`daemon/service_registry.py:202`). Any live daemon
+    # or MCP server takes one, and `sweep_dead_t1_elect_locks`
+    # (`health.py:1641`) reaps dead ones, so they APPEAR and VANISH during
+    # any pytest run that overlaps a live install -- independent of the
+    # suite. Observed 2026-08-23: a full local-service-gate run failed with
+    # `REMOVED aspect_worker_elect.default.lock` as its ONLY finding (592
+    # passed, 0 failed) while 14 nx-mcp processes served this box; the file
+    # was back three minutes later, before the run even finished.
+    #
+    # Matched by shape rather than per-tier prefix deliberately: five such
+    # locks across four tiers were present that day (aspect_worker, mineru,
+    # t1 x2, t2), so a prefix list is whack-a-mole. Kept narrow -- root
+    # level only, and `_elect.` AND `.lock` together, so a bare `.lock`
+    # leak from a test is still reported.
+    return (
+        "/" not in rel_path
+        and rel_path.endswith(".lock")
+        and "_elect." in rel_path
+    )
 
 
 def _diff_config_dir_snapshots(

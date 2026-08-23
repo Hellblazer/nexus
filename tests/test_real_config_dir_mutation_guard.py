@@ -147,6 +147,42 @@ class TestAllowlist:
         assert _is_allowlisted_config_dir_path("logs/mcp.log.1") is True
         assert _is_allowlisted_config_dir_path("index.log") is True
 
+    def test_service_registry_election_flocks_are_allowlisted(self) -> None:
+        """ServiceRegistry per-scope election flocks churn independently of
+        pytest and must not trip the guard.
+
+        `service_registry.py:202` builds them as
+        `{tier}_elect.{scope_key}.lock` at the config ROOT, and
+        `sweep_dead_t1_elect_locks` (health.py:1641) reaps dead ones, so
+        they both APPEAR and VANISH while any live daemon or MCP server is
+        running. Observed 2026-08-23: a full local-service-gate run failed
+        with `REMOVED aspect_worker_elect.default.lock` as its ONLY finding
+        (592 passed, 0 failed) while 14 nx-mcp processes served this box --
+        the file was back, mtime three minutes later, before the run
+        finished.
+
+        Not a per-tier prefix, because that is whack-a-mole: five such locks
+        across four tiers existed on the box that day (aspect_worker,
+        mineru, t1 x2, t2). Root level only, and the `_elect.` +
+        `.lock` shape together -- a bare `.lock` allowance would mask real
+        leaks.
+        """
+        for tier in ("aspect_worker", "mineru", "t1", "t2", "storage_service"):
+            rel = f"{tier}_elect.default.lock"
+            assert _is_allowlisted_config_dir_path(rel) is True, rel
+        assert _is_allowlisted_config_dir_path(
+            "t1_elect.24c01b46-040f-41f3-8d7c-add0293a0ee5.lock"
+        ) is True
+
+    def test_election_flock_allowance_stays_narrow(self) -> None:
+        """The carve-out must not become a blanket .lock allowance."""
+        assert _is_allowlisted_config_dir_path("something.lock") is False
+        assert _is_allowlisted_config_dir_path("data_token_mint_lock.abc") is False
+        # nested is still reported -- only the root-level registry shape is ambient
+        assert _is_allowlisted_config_dir_path("sub/t1_elect.default.lock") is False
+        # `_elect.` without the .lock suffix is not the flock
+        assert _is_allowlisted_config_dir_path("t1_elect.default.json") is False
+
     def test_is_allowlisted_rejects_unrelated_path(self) -> None:
         assert _is_allowlisted_config_dir_path("backfill_state.json") is False
         assert _is_allowlisted_config_dir_path("routing_log.jsonl") is False
