@@ -31,4 +31,13 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.16.0)
 
-(nothing pending — the v7.16.0 release shipped the previous list)
+- `conexus/skills/using-nx-skills/SKILL.md`: nexus-bc292 — replaced the
+  lead sentence "You MUST invoke `Skill`" (measured, not assumed, not to
+  work: across 6 sandboxed eval-corpus runs exercising exactly this
+  rule, a conexus skill was invoked 1 time in 6, three runs made zero
+  Skill calls) with "Conexus skills carry this project's accumulated
+  practice for specific situations", mirroring the same change already
+  made to `src/nexus/session_start_guidance.py`'s `GUIDANCE_IMPERATIVE`.
+  **INERT UNTIL RELEASE.** Skills load from the pinned v7.16.0 tag, so
+  the reworded lead does not reach any running session until the next
+  release ships.

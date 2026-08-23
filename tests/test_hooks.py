@@ -549,5 +549,18 @@ class TestGuidanceByteBudgetIntegration:
             f"nx hook session-start emitted {n} bytes, budget is "
             f"{self._TOTAL_BUDGET_BYTES}"
         )
+        # TONE CHANGED 2026-08-23 (nexus-bc292). This asserted the
+        # literal "You MUST invoke `Skill`". That sentence was measured,
+        # not assumed, and it did not work: across 6 sandboxed runs of
+        # the eval corpus case that exercises exactly this rule, the
+        # SessionStart hook fired, this text reached the model verbatim,
+        # and a conexus skill was invoked 1 time in 6. Three of those
+        # runs made ZERO Skill calls. The instruction was already
+        # maximal -- "hard rule, not a hint", "skipping is a defect" --
+        # so writing it harder was the one remedy known to fail, because
+        # that IS what shipped. What this test protects is unchanged:
+        # the byte budget above, and that the routing statement leads
+        # the output rather than sitting behind a preamble. Only the
+        # sentence it pins changed.
         head = output.encode("utf-8")[:500].decode("utf-8", errors="ignore")
-        assert "You MUST invoke `Skill`" in head
+        assert "Conexus skills carry this project's accumulated practice" in head
