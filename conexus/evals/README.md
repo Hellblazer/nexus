@@ -7,15 +7,26 @@ skills that "absorb any question containing the word 'plan'") — does the
 wrong skill stay silent on a prompt that only superficially resembles its
 trigger phrasing.
 
-## Status: authored, not runnable here
+## Status: runnable, three runs executed
 
-`claude plugin eval` is early access and not enabled on this box
-(`claude plugin eval` prints "currently in early access", exit 1, as of
-this writing). This suite was authored blind to actual runtime behavior —
-no case here has ever executed. Enablement is gated on an org-level
-setting from Anthropic; ask your Anthropic contact to turn it on for this
-org before attempting a run. Everything under "Open questions" below is a
-concrete verification task for whoever runs this suite first.
+`claude plugin eval` is early access and gated: every invocation path
+prints "`plugin eval` is currently in early access" and exits 1 (`--help`
+renders anyway, because commander prints help before the gate). The
+binary documents its own bypass — set `CLAUDE_CODE_WALNUT_SPIRE=1` in the
+shell env or in `~/.claude/settings.json`'s `env` block (NOT the repo's
+`.claude/settings.json`). With it set the runner works end to end here.
+
+The earlier "not enabled on this box" was accurate; the implied
+"therefore unrunnable" was not, and it cost this corpus two release
+cycles of being repaired against documentation instead of against a run.
+
+Three full runs to date, all `--runs 1 --ablation none`, 15 cases:
+
+| Corpus state | Passed | Score | Cost |
+|---|---|---|---|
+| v7.16.0 | 11/15 | 0.833 | $6.69 |
+| v7.16.1 (nine graders unsatisfiable) | 4/15 | 0.333 | $7.80 |
+| nexus-dkotg (`min: 0` added) | 12/15 | 0.867 | $6.12 |
 
 ## Layout
 
@@ -61,28 +72,47 @@ on the skill list regardless of plugin ownership — but see "Open
 questions" below: whether that's the right scope for a suite that ships
 *inside* the conexus plugin is unresolved.
 
-## Running (once enabled)
+## Running
 
 ```bash
-claude plugin eval --json report.json --max-cost-usd 10 --threshold 0.8
+CLAUDE_CODE_WALNUT_SPIRE=1 claude plugin eval \
+  --runs 3 --ablation none --max-cost-usd 30 \
+  --json report.json <path-to-conexus-plugin>
 ```
 
-- `--max-cost-usd 10`: each case is a real model run through a full
-  Claude Code turn (prompt in, tool calls out, graders evaluate the
-  transcript) — this is not a cheap unit test.
+- **`--runs 3` is the floor, not a luxury.** At `--runs 1` the positive
+  half of this corpus is not a measurement. Measured across the three
+  runs above, a DIFFERENT positive case flipped verdict every single time
+  while nothing about it changed:
 
-  **MEASURED, first real run, 2026-08-23** (the figure this bullet used to
-  ask for): 15 cases at `--runs 1 --ablation none` cost **$6.69** and took
-  **899s**, i.e. **~$0.75 per case-run**. A `--max-cost-usd 10` ceiling
-  therefore fits that shape with little headroom. Note the DEFAULTS are
-  far more expensive: `--runs 3` with `--ablation with-without` is 90
-  case-runs, roughly **$67**. Choose the flags deliberately; the command
-  above is not the default command.
-- `--threshold 0.8`: first run scored **0.833 overall, 11/15 passing**, so
-  0.8 happens to sit just under the measured baseline. Do not read that as
-  validation — three of the four failures were grader defects, not skill
-  defects (see Open questions 2 and 4), so the number will move once they
-  are re-run against the corrected corpus.
+  | Case | run 1 | run 2 | run 3 |
+  |---|---|---|---|
+  | p01 using-nx-skills-generic-turn | pass | fail | pass |
+  | p05 query-rdr-synthesis | pass | fail | pass |
+  | p02 code-review-before-pr | pass | pass | fail |
+
+  Skill triggering is a model decision, so it is nondeterministic, and a
+  single sample cannot separate "this skill stopped firing" from "this
+  run happened to go the other way". The negative half does not flap —
+  all nine `min: 0, max: 0` graders were unanimous across every run — so
+  the noise is specific to asserting that something DID fire. Any number
+  read off a `--runs 1` invocation is a coin, including the 12/15 above.
+
+- **Do not run the bare defaults.** `--runs` defaults to `case.runs ?? 3`
+  and `--ablation` defaults to `with-without`, which is 90 case-runs at
+  roughly **$67**. Passing `--max-cost-usd 10` with the defaults, as this
+  file used to recommend, aborts at about 15% with exit 2 and reports a
+  partial as though it were a run.
+
+- **Cost.** ~$0.45/case-run measured ($6.12 and $7.80 for 15 case-runs).
+  `--runs 3 --ablation none` is 45 case-runs, so budget **~$20** and set
+  the ceiling above it, not at it.
+
+- **Do not set `--threshold` against a moving baseline.** Two of the
+  three remaining failures (p07, p08) are structural and can never pass
+  in this harness — see Open question 4 — so a threshold tuned to today's
+  score encodes those defects as acceptable. Fix the cases, then pick a
+  threshold.
 - Exit code contract (per the CI format spec): `0` = pass, `1` =
   fail/no cases, `2` = partial. Wire the CI job on that exit code, not on
   parsing `report.json`'s pass/fail language, since the aggregate-result
