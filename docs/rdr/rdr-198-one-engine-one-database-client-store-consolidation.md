@@ -130,8 +130,15 @@ critique removed the support for all three:
 
 ## Relationship to Prior RDRs
 
-**This RDR is not a novel diagnosis. It is the third member of an established
-family, and it must be read against the other two.**
+**Three prior RDRs bear on this one, and none of them justifies it.** Two are
+the origin and the precedent for scope this RDR has now WITHDRAWN; the third is
+an adjacent draft it no longer overlaps. They are recorded here because a reader
+who finds them will otherwise assume a relationship that the narrowed scope has
+dissolved — and because the deferred work will need them.
+
+An earlier, wider draft opened this section by claiming RDR-198 was "the third
+member of an established family". That claim is withdrawn with the scope that
+supported it.
 
 ### RDR-063 — the origin of the split (closed)
 
