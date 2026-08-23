@@ -65,10 +65,20 @@ jobs:
           # Scheduled workflows execute from the DEFAULT branch (main), but the
           # tree worth gating nightly is develop — the integration branch where
           # regressions land daily (main only moves at releases, where the
-          # release checklist runs this gate by hand anyway). Manual dispatch
-          # also gets develop; dispatch from a feature ref if you need a
-          # different tree.
-          ref: develop
+          # release checklist runs this gate by hand anyway). So schedule
+          # falls back to develop.
+          #
+          # A DISPATCH gets the branch you picked. It did not until
+          # 2026-08-23 (nexus-pc15o): this line read a bare `ref: develop`,
+          # which overrides checkout's triggering-ref default
+          # UNCONDITIONALLY. The comment here used to say "dispatch from a
+          # feature ref if you need a different tree" — advice this very
+          # line made impossible. Run 32659044975 dispatched a pc15o fix
+          # against its own branch, gated develop instead, reported
+          # "573 passed, 51 skipped" byte-identical to the pre-fix run, and
+          # was read as the fix having failed. Pinned by
+          # tests/test_workflow_dispatch_ref_lint.py.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'develop' }}
           # nexus-f6qzj: the gate's `mandatory_regression_pin` tests need the
           # REAL tag history (v7.6.1 / engine-service-v0.1.71 for the
           # release-floor source-ancestry pin) — a shallow clone makes them
