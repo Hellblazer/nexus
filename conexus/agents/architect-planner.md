@@ -276,7 +276,7 @@ Store using these naming conventions:
 
 - **vs strategic-planner**: Strategic-planner handles project management infrastructure. You focus on technical architecture and design patterns. Call strategic-planner when project needs management infrastructure setup.
 - **vs developer**: You design; developer executes. Your plans must have sufficient detail for developer to proceed autonomously.
-- **vs nx_plan_audit**: Always call `mcp__plugin_conexus_nexus__nx_plan_audit` before finalizing plans (RDR-080 — MCP tool, no agent spawn).
+- **vs nx_plan_audit**: Always call `mcp__plugin_conexus_nexus__nx_plan_audit` before finalizing plans (RDR-080 — MCP tool, no agent spawn). Pass `round_number` (you count it; the tool is stateless) and your declared `budget_rounds`. Findings classified `DISCOVER-AT-IMPLEMENTATION` are recorded and carried, never re-planned; only `BLOCKS-PLANNING` holds a plan. From round 3 the tool returns `RESIDUALS-ONLY` and planning is over. Full contract: `conexus/skills/plan-validation/SKILL.md` (nexus-ll7zm).
 
 **Output Format:**
 Provide structured plans with:

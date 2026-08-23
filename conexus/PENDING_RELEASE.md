@@ -69,3 +69,36 @@ mechanize, it matters enough to ship.
   **INERT UNTIL RELEASE.** Hooks load from the pinned v7.15.0 tag, so
   neither change fires in any running session until the next release
   ships.
+- `conexus/agents/strategic-planner.md`: nexus-ll7zm — the plan-audit
+  loop terminates. Adds the round-counting and effort-budget call
+  contract for `nx_plan_audit`, how to read the three verdicts
+  (`READY`, `NOT READY`, `RESIDUALS-ONLY`), the rule that
+  `DISCOVER-AT-IMPLEMENTATION` findings are recorded rather than
+  re-planned, and the instruction to evaluate the LOOP rather than the
+  finding after round 2. Origin: a five-round audit loop against the
+  RDR-197 plan on 2026-08-23 where every finding was real and the loop
+  was still the defect.
+- `conexus/skills/plan-validation/SKILL.md`: nexus-ll7zm — same
+  contract at the skill surface, since the skill is what most callers
+  reach for.
+- `conexus/commands/plan-audit.md`: nexus-ll7zm — same contract at the
+  slash-command surface.
+- `conexus/agents/architect-planner.md`: nexus-ll7zm — one-paragraph
+  pointer to the same contract, because this agent also instructs
+  "always call nx_plan_audit" and would otherwise reintroduce the
+  unterminated loop through the other planner.
+  **SPLIT DELIVERY, READ THIS BEFORE ASSUMING THE FIX IS LIVE.** The
+  enforcement half of nexus-ll7zm ships in the WHEEL
+  (`src/nexus/plans/audit_rounds.py` and the `nx_plan_audit` tool in
+  `src/nexus/mcp/core.py`) and goes live on `uv tool install` /
+  `nx upgrade`. These three plugin files ship on the PINNED TAG and go
+  live only at the next release or plugin cut. Between those two
+  moments the tool enforces the cap while the guidance still reads as
+  though it does not, which is safe in that direction: callers who
+  never pass `round_number` keep blocking-capable round-1 semantics.
+  One thing DOES change for every caller at wheel upgrade, with or
+  without `round_number`: the verdict is now computed from classified
+  findings rather than taken from the model, so a round whose findings
+  are all `DISCOVER-AT-IMPLEMENTATION` reads READY where the model
+  might have said NOT READY. That direction is the fix itself, not a
+  regression — but it is a behavior change at upgrade, not a no-op.

@@ -8721,12 +8721,28 @@ async def nx_plan_audit(
     plan_json: str,
     context: str = "",
     timeout: float = 600.0,
+    round_number: int = 1,
+    budget_rounds: int = 0,
 ) -> str:
     """Audit a plan for correctness and codebase alignment via claude -p. RDR-080 P3.
 
     Replaces the ``plan-auditor`` agent. Spawns a ``claude -p``
     subprocess that validates the plan's file paths, dependencies,
     and assumptions against the current codebase state.
+
+    **Findings are classified, and the loop terminates** (nexus-ll7zm).
+    Every finding is either ``BLOCKS-PLANNING`` (the plan would cause
+    someone to build the wrong thing, or cannot be executed as
+    sequenced) or ``DISCOVER-AT-IMPLEMENTATION`` (real, but the first
+    test run surfaces it). Only the first class can produce a NOT READY
+    verdict. From round 3 onward NO verdict blocks: everything found is
+    emitted as residuals to record and carry into implementation. The
+    rules live in :mod:`nexus.plans.audit_rounds` and are enforced in
+    Python, not requested in the prompt, because the failure this
+    closes was a defect-finder being asked to judge when to stop finding
+    defects. Origin: a five-round audit loop against the RDR-197 plan on
+    2026-08-23, where rounds 3-5 refined hypothetical CI semantics for a
+    release cut that had never been performed.
 
     Args:
         plan_json: The plan to audit (JSON string or free-text description).
@@ -8740,11 +8756,32 @@ async def nx_plan_audit(
             agents from re-introducing false-positive timeouts via
             low overrides; a structlog warning is emitted when
             clamping occurs.
+        round_number: Which audit round this is for THIS plan, counted by
+            the caller. The tool is stateless — one ``claude -p``
+            dispatch with no memory between invocations — so the round
+            cannot be inferred here. Leaving it at 1 forever reproduces
+            the unterminated loop, which is why the planner guidance
+            requires passing it.
+        budget_rounds: The effort budget the plan author declared up
+            front from the feature's own stakes. 0 means unstated. A
+            budget may only TIGHTEN the cap, never widen it: a one-day
+            change can declare 1, but nothing can buy a third blocking
+            round.
 
     Returns:
-        Audit verdict as a human-readable string.
+        Audit verdict as a human-readable string, with blocking findings
+        and residuals shown separately and the recording instruction
+        attached to the residuals.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
+    from nexus.plans.audit_rounds import (  # noqa: PLC0415 — branch-local, keeps MCP import graph flat
+        BLOCKS_PLANNING,
+        CLASSIFICATION_PROMPT,
+        VALID_CLASSIFICATIONS,
+        render_audit_report,
+        resolve_verdict,
+        round_prompt,
+    )
 
     timeout = _clamp_subagent_timeout(timeout, "nx_plan_audit")
     mcp_servers, allowed_tools = _subprocess_tool_grant()
@@ -8754,7 +8791,21 @@ async def nx_plan_audit(
         "required": ["verdict", "findings", "summary"],
         "properties": {
             "verdict": {"type": "string"},
-            "findings": {"type": "array", "items": {"type": "object"}},
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["classification"],
+                    "properties": {
+                        "severity": {"type": "string"},
+                        "title": {"type": "string"},
+                        "classification": {
+                            "type": "string",
+                            "enum": list(VALID_CLASSIFICATIONS),
+                        },
+                    },
+                },
+            },
             "summary": {"type": "string"},
         },
     }
@@ -8763,6 +8814,8 @@ async def nx_plan_audit(
         "to nx MCP tools (search, query) for codebase verification. "
         "Parse the plan, verify file paths exist, check dependency ordering, "
         "identify gaps or incorrect assumptions, then emit a structured verdict.\n\n"
+        f"{round_prompt(round_number, budget_rounds)}\n\n"
+        f"{CLASSIFICATION_PROMPT}\n\n"
         f"Audit this plan for correctness and codebase alignment:\n\n{plan_json}"
     )
     if context:
@@ -8774,13 +8827,44 @@ async def nx_plan_audit(
         model=_pin_default_model(None),
     )
     if isinstance(payload, dict):
-        verdict = payload.get("verdict", "unknown")
-        summary = payload.get("summary", "")
         findings = payload.get("findings", [])
-        lines = [f"Verdict: {verdict}", summary]
-        for f in findings:
-            lines.append(f"  [{f.get('severity', '?')}] {f.get('title', '')}")
-        return "\n".join(lines)
+        if not isinstance(findings, list):
+            # A malformed container must never read as a clean audit
+            # (e.g. the timeout-drain partial-JSON path can hand back a
+            # non-list). Synthesize a blocking finding instead of
+            # emptying: same conservative direction as the per-finding
+            # unclassified default.
+            findings = [
+                {
+                    "classification": BLOCKS_PLANNING,
+                    "severity": "error",
+                    "title": (
+                        "audit payload malformed: findings was "
+                        f"{type(findings).__name__}, not a list — re-run "
+                        "the audit; do not treat this round as clean"
+                    ),
+                }
+            ]
+        verdict, blocking, residual, reason = resolve_verdict(
+            findings, round_number=round_number, budget_rounds=budget_rounds
+        )
+        _log.info(
+            "nx_plan_audit_verdict",
+            verdict=verdict,
+            round_number=round_number,
+            budget_rounds=budget_rounds,
+            blocking_count=len(blocking),
+            residual_count=len(residual),
+            cap_converted=bool(reason),
+        )
+        return render_audit_report(
+            verdict,
+            blocking,
+            residual,
+            summary=payload.get("summary", ""),
+            reason=reason,
+            round_number=round_number,
+        )
     return str(payload)
 
 
