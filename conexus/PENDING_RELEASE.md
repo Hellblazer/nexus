@@ -28,4 +28,7 @@ mechanize, it matters enough to ship.
 
 ---
 
-_Empty: the pin advanced at 7.15.0 and everything below has shipped._
+
+## Awaiting the next release or plugin cut (pinned: v7.16.0)
+
+(nothing pending — the v7.16.0 release shipped the previous list)

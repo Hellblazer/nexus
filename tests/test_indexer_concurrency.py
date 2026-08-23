@@ -455,25 +455,51 @@ class TestRunFileLoop:
         explicitly documented as never safe to swallow into a green
         summary) must still cancel pending files and fail the run, exactly
         like any other unclassified exception."""
+        import threading
+
         from nexus.errors import IndexRunVerifyRefused
         from nexus.indexer_utils import run_file_loop
 
         started: list[str] = []
+        # DETERMINISTIC cancellation proof (nexus-z2rop): the original
+        # free-running form let the healthy worker start all 49 remaining
+        # microsecond-tasks before the failing worker's exception reached
+        # the loop (assert 50 < 50 on loaded CI runners, twice on
+        # 2026-08-22). Park the healthy worker on its FIRST file and only
+        # raise once it is parked: every later file is then provably
+        # cancelled-while-pending, not lost to scheduling luck.
+        other_worker_parked = threading.Event()
+        run_over = threading.Event()
 
         def index_one(file, score, timers):
             started.append(file.name)
             if file.name == "f0.py":
+                other_worker_parked.wait(timeout=30)
                 raise IndexRunVerifyRefused(
                     doc_id="d1", referenced=3, present=1, missing=2, chunk_count=3,
                 )
+            other_worker_parked.set()
+            run_over.wait(timeout=30)
             return 1
 
-        with pytest.raises(IndexRunVerifyRefused):
-            run_file_loop(
-                self._files(50), index_one, concurrency=2,
-                on_file=None, on_stage_timers=None,
-            )
-        assert len(started) < 50
+        release = threading.Timer(2.0, run_over.set)
+        release.start()
+        try:
+            with pytest.raises(IndexRunVerifyRefused):
+                run_file_loop(
+                    self._files(50), index_one, concurrency=2,
+                    on_file=None, on_stage_timers=None,
+                )
+        finally:
+            run_over.set()
+            release.cancel()
+        # Provable bound: f0 plus at most ONE parked in-flight file per
+        # worker (the failing worker may legitimately grab one more file
+        # before the main thread observes the failure and cancels; that
+        # file parks too). Every other file was cancelled while pending.
+        # A broken cancellation path churns all 50 once the park releases
+        # and fails this loudly.
+        assert len(started) <= 3, started
 
     # ── nexus-deyd5 round 3: run_file_loop NEVER raises for the systemic-
     # skip condition — that verdict moved to a run-level check in

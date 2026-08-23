@@ -4,6 +4,27 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.16.0] - 2026-08-22
+
+The pin advance activates everything accumulated in PENDING_RELEASE.md
+since v7.15.0:
+
+- Plan-audit termination guidance (nexus-ll7zm) on four surfaces:
+  `agents/strategic-planner.md` (round counting, effort budget, the
+  three verdicts, evaluate-the-loop-after-round-2),
+  `skills/plan-validation/SKILL.md`, `commands/plan-audit.md`, and a
+  pointer in `agents/architect-planner.md`. The wheel half
+  (`nx_plan_audit` enforcement) ships in the same release, closing the
+  split delivery.
+- `hooks/scripts/expectations.sh`: new `expectations_reconcile`
+  function (ledger vs the harness's `background_tasks` ground truth;
+  STRANDED and UNDECLARED_TASK classes, rc=4), and
+  `hooks/scripts/stop_verification_hook.sh` wires it into the Stop
+  hook WARN-only, gated on `NX_ORCH_STOP_GUARD`.
+- `conexus/evals/` (NEW): the first `claude plugin eval` corpus for the
+  skill-triggering surface (15 cases), authored pending early-access
+  enablement.
+
 ## [7.15.0] - 2026-08-22
 
 Plugin version aligned with conexus 7.15.0. The pin advance activates

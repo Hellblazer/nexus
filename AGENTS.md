@@ -154,6 +154,40 @@ Six rules borrowed from the global `marketplace-pinned-source-playbook`:
 5. **Releaser is human. AI prepares; human cuts.** AI can draft the release PR, bump manifests, write the CHANGELOG entry. The human runs `gh pr merge` + `git tag` + `git push origin vX.Y.Z`.
 6. **Parity tests stay strict.** Any drift between `pyproject.toml` version and the other six version surfaces (`mcpb/pyproject.toml`, `mcpb/manifest.json`, marketplace.json's two `plugins[].version` fields, `conexus/.claude-plugin/plugin.json`, `sn/.claude-plugin/plugin.json`) — plus `source.ref` in marketplace.json and `uv.lock` — fails CI. No `# noqa` escape hatches.
 
+### Independent plugin release channel (RDR-197)
+
+A plugin cut ships plugin-surface content (paths under `conexus/` and
+`sn/`, plus `.claude-plugin/marketplace.json`) without a client release:
+it moves the changed plugin's `source.ref` to an anchored tag of the
+shape `plugin-v{X.Y.Z}-{n}`, where `X.Y.Z` is the CURRENT released
+client version and `n` is the cut's sequence number. The number comes
+from git's own tag list at cut time (one more than the highest existing
+`plugin-v{X.Y.Z}-*` tag); there is NO stored counter file, so there is
+nothing to reset and nothing to read from the wrong place. The channel
+publishes nothing to PyPI: the `plugin-v*` tag fires a verify-only
+workflow (`.github/workflows/plugin-release.yml`), and the wheel-surface
+proof asserts the cut's range touches no wheel content. The cut itself
+is `scripts/cut_plugin_release.py` (a script with tests, never a
+checklist); invariants R and W live in `scripts/plugin_channel.py`'s
+docstring.
+
+**Usage discipline** (was this cut warranted?):
+1. Cut when accumulated plugin functionality is worth shipping and no
+   client release is imminent. A client release ships the same content
+   for free.
+2. An open release PR always wins. Never cut while one is in flight.
+3. Batch related plugin work into one cut, exactly as the release
+   cadence rules above batch client releases.
+
+**Sunset trigger:** if two years pass with zero cuts, delete the
+workflow, the parity test's anchored-form branch, and the cut script.
+RDR-197 (`docs/rdr/rdr-197-plugin-only-release-channel.md`) is the
+record that keeps the design recoverable.
+
+`docs/` is NOT in the channel allowlist, deliberately: docs-only commits
+outnumber plugin-surface commits about 12 to 1, and admitting them would
+make nearly every cut a docs cut.
+
 ### Engine-service release (a SECOND lifecycle — decoupled from the PyPI release)
 
 The Java **engine-service** binary is a separate release artifact with its own cadence. Conflating it with the PyPI/marketplace release is how the cloud engine silently drifts behind develop (2026-06-26: 22 `service/` commits / 4 days un-deployed, un-cloud-tested).

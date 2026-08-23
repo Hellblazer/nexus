@@ -7,7 +7,7 @@ from __future__ import annotations
 
 # Core tools (14 registered + 3 demoted + helper)
 from nexus.mcp.core import (  # noqa: F401
-    search, query,
+    search, _search_render, query,
     store_put, store_get, store_list, store_delete,
     memory_put, memory_get, memory_delete, memory_search, memory_consolidate,
     scratch, scratch_manage,

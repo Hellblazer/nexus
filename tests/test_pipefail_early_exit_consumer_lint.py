@@ -1179,9 +1179,11 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         # or a dedicated gate elsewhere, never from these truncated
         # echoes. Retargeted (gap-8/gap-15, T2 [22511]) after this pass's
         # edits shifted the file; same 3 sites, same rationale.
-        "tests/e2e/release-sandbox.sh:1103",
-        "tests/e2e/release-sandbox.sh:1107",
-        "tests/e2e/release-sandbox.sh:1155",
+        #   Retargeted AGAIN (7.15.0 release fix a1f6bf7c4 shifted the
+        #   file +7 lines): :1103 -> :1110, :1107 -> :1114, :1155 -> :1162.
+        "tests/e2e/release-sandbox.sh:1110",
+        "tests/e2e/release-sandbox.sh:1114",
+        "tests/e2e/release-sandbox.sh:1162",
     }
 )
 _PIPEFAIL_OR_TRUE_SITES_CEILING = 9

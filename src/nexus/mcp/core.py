@@ -17,6 +17,7 @@ from typing import Any
 
 import structlog
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent
 
 try:  # nexus-vc5yb: UNEXPORTED SDK internal — absence must not kill startup
     from mcp.server.fastmcp.server import Settings as _FastMCPSettings
@@ -1674,12 +1675,8 @@ def _no_results_message(diagnostics: list, *, base: str = "No results.") -> str:
 # Note: catalog server also registers a "search" tool. No collision — Claude Code
 # disambiguates by server prefix (mcp__plugin_conexus_nexus__search vs
 # mcp__plugin_conexus_nexus-catalog__search).
-@mcp.tool(
-    title="Semantic Search",
-    annotations={"readOnlyHint": True},
-)
 @degrade_loud_when_migrating
-def search(
+def _search_render(
     query: str,
     corpus: str = "knowledge,code,docs",
     limit: int = 10,
@@ -1690,7 +1687,17 @@ def search(
     structured: bool = False,
     threshold: float | None = None,
 ) -> "str | dict":
-    """Semantic search across T3 collections. Paged results (``offset=N`` for next page).
+    """Business logic for the ``search`` MCP tool. Paged results (``offset=N`` for next page).
+
+    Private render function — NOT ``@mcp.tool()``-decorated. This is what
+    plan-runner, ``nx doc cite`` (``_phase5_search``), and every direct
+    in-process caller import and call; its ``str``/``dict`` return contract
+    (keyed on the ``structured`` bool) is unchanged from before nexus-6jlki
+    and must stay that way — the wire-facing ``search()`` wrapper below is
+    the ONLY thing that changed shape. See ``search()``'s docstring for why
+    the split exists (structuredContent needs a ``CallToolResult`` return,
+    which is incompatible with the plain ``str`` this function's direct
+    callers depend on).
 
     Ranking: with ``cluster_by=""`` (the default), results are ranked by
     ``hybrid_score`` — vector similarity blended with ``frecency_score``
@@ -1935,6 +1942,140 @@ def search(
         return _mcp_tool_error("search", e)
 
 
+def _truncated_chars_dropped(capped_text: str, tool: str) -> tuple[bool, int]:
+    """Detect whether ``_cap_text_result`` fired and recover the drop count.
+
+    ``_cap_text_result`` appends ``"[<tool>: result capped at N chars; D
+    chars dropped — ...]"`` as a trailing, never-prepended marker (house
+    doctrine: no silent truncation). This is the one place that marker
+    format is parsed back out, so a structuredContent consumer can see the
+    same truncation fact the text reader sees (nexus-6jlki: truncation must
+    be visible in BOTH shapes). A parse miss degrades to ``(True, 0)`` —
+    still flagged truncated, just without a char count — never silently
+    ``(False, 0)`` (that would hide a real truncation from the structured
+    shape).
+    """
+    marker = f"[{tool}: result capped at "
+    if marker not in capped_text:
+        return False, 0
+    try:
+        dropped = int(capped_text.rsplit("; ", 1)[1].split(" chars dropped", 1)[0])
+    except (IndexError, ValueError):
+        return True, 0
+    return True, dropped
+
+
+@mcp.tool(
+    title="Semantic Search",
+    annotations={"readOnlyHint": True},
+    structured_output=False,
+)
+def search(
+    query: str,
+    corpus: str = "knowledge,code,docs",
+    limit: int = 10,
+    offset: int = 0,
+    where: str = "",
+    cluster_by: str = "",
+    topic: str = "",
+    structured: bool = False,
+    threshold: float | None = None,
+) -> "str | dict | CallToolResult":
+    """Semantic search across T3 collections. Paged results (``offset=N`` for next page).
+
+    nexus-6jlki spike: the wire-facing tool. ``structured_output=False`` on
+    the ``@mcp.tool()`` registration turns OFF FastMCP's own return-type
+    auto-detection — left on, the ``str | dict`` return annotation gets
+    silently auto-wrapped as ``structuredContent: {"result": <value>}``
+    (verified against the pinned mcp==1.27.1; the nexus-r90ao audit,
+    T2 [23357], narrowed the affected set: ``str``, ``str | dict`` unions,
+    and ``list[...]`` returns were auto-wrapped, while bare unparameterized
+    ``dict`` returns never were — nobody designed the wrapping, no client
+    is documented to rely on it).
+    This tool is the first to replace that accident with a deliberate shape.
+
+    Business logic lives in ``_search_render`` (unchanged since before this
+    tool existed) — plan-runner, ``nx doc cite``, and this repo's test
+    suite call ``_search_render`` directly and see EXACTLY the same
+    ``str``/``dict`` contract as before. Only a real MCP-wire call (an
+    actual ``tools/call``, not an in-process Python call) goes through this
+    wrapper and can observe the new ``structuredContent`` field; the reason
+    for the split is that a ``CallToolResult`` return is the only SDK-level
+    way to give a caller byte-identical human text AND separate machine
+    data in one response (confirmed via spike — a bare-dict/str return
+    ties ``content`` and ``structuredContent`` to the SAME serialization,
+    which would replace today's human-readable rendering with a JSON dump).
+
+    Default (``structured=False``, the path every existing MCP caller
+    exercises today): ``content`` is ``_search_render``'s human-readable
+    string, byte-identical to what this tool returned before nexus-6jlki.
+    ``structuredContent`` is NEW — the same ``{ids, tumblers, distances,
+    collections, chunk_collections, chunk_text_hash}`` shape
+    ``structured=True`` has always returned (fetched via the page-turn
+    cache, so this costs no extra vector-store round trip), plus
+    ``truncated``/``truncated_chars`` reflecting whether the 250K text cap
+    (``_cap_text_result``) fired — visible in the structured shape even
+    though the cap marker itself only lives in the text.
+
+    ``structured=True``: UNCHANGED. Returns the bare dict exactly as
+    before — no ``CallToolResult``, no new keys, no ``structuredContent``
+    wrapping. This is the plan-runner's in-process contract
+    (``$stepN.ids`` / ``$stepN.tumblers`` / ``$stepN.distances``
+    references) and it is explicitly out of scope for this change.
+
+    Older/non-structuredContent-aware MCP clients are unaffected either
+    way: an unrecognized response field is ignored per the protocol, and
+    ``outputSchema`` is no longer advertised for this tool (fine — it was
+    advertising the wrong, auto-wrapped shape before).
+
+    Args:
+        query: Search query string
+        corpus: Corpus prefixes or collection names, comma-separated. "all" for everything.
+        limit: Page size (default 10)
+        offset: Skip N results for pagination (default 0)
+        where: Metadata filter (KEY=VALUE, comma-separated). Ops: = >= <= > < !=
+        cluster_by: "semantic" for topic/Ward clustering (default), empty to disable
+        topic: Pre-filter to documents in this topic label (from nx taxonomy discover)
+        structured: Return ``{ids, tumblers, distances, collections}`` dict instead
+            of human-readable string (unchanged; see docstring above).  Used by
+            the plan runner so ``$stepN.ids`` references resolve to actual chunk IDs.
+        threshold: Override the per-collection distance threshold uniformly
+            (raw cosine distance, lower is stricter). Pass ``float('inf')``
+            to disable filtering entirely. ``None`` (default) uses per-corpus
+            config thresholds. RDR-087 Phase 1.1 workaround for silent
+            threshold-drop on dense-prose collections.
+    """
+    result = _search_render(
+        query, corpus=corpus, limit=limit, offset=offset, where=where,
+        cluster_by=cluster_by, topic=topic, structured=structured,
+        threshold=threshold,
+    )
+    if structured or not isinstance(result, str):
+        # structured=True, or an error string that already reads like one —
+        # unchanged wire behavior.
+        return result
+
+    truncated, dropped = _truncated_chars_dropped(result, "search")
+    data = _search_render(
+        query, corpus=corpus, limit=limit, offset=offset, where=where,
+        cluster_by=cluster_by, topic=topic, structured=True,
+        threshold=threshold,
+    )
+    empty_shape = {
+        "ids": [], "tumblers": [], "distances": [], "collections": [],
+        "chunk_collections": [], "chunk_text_hash": [],
+    }
+    structured_content = {
+        **(data if isinstance(data, dict) else empty_shape),
+        "truncated": truncated,
+        "truncated_chars": dropped,
+    }
+    return CallToolResult(
+        content=[TextContent(type="text", text=result)],
+        structuredContent=structured_content,
+    )
+
+
 #: nexus-e4srp: single-entry page-turn cache for the ``search`` tool. Page
 #: bursts are same-identity, seconds apart; one entry with a short TTL covers
 #: them without holding stale results past content changes. Thread-safe via
@@ -2158,6 +2299,7 @@ def _dedup_by_id_keep_best(rows: list[dict], limit: int) -> list[dict]:
 @mcp.tool(
     title="Metadata-Scoped Combined Search",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def search_metadata_scoped(
     query: str,
@@ -2295,6 +2437,7 @@ def search_metadata_scoped(
 @mcp.tool(
     title="Topic-Scoped Combined Search",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def search_topic_scoped(
     query: str,
@@ -2365,6 +2508,7 @@ def search_topic_scoped(
 @mcp.tool(
     title="Graph-Hop Combined Search",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def search_graph_hop(
     query: str,
@@ -2537,6 +2681,7 @@ _MAX_GRAPH_HOP_SEEDS = 6000
 @mcp.tool(
     title="Catalog-Aware Document Query",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def query(
     question: str,
@@ -3187,6 +3332,7 @@ def query(
 @mcp.tool(
     title="Store Knowledge Document",
     annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
 )
 def store_put(
     content: str,
@@ -3499,6 +3645,7 @@ def store_put(
 @mcp.tool(
     title="Retrieve Knowledge Document",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 @degrade_loud_when_migrating
 def store_get(doc_id: str, collection: str = "knowledge") -> str:
@@ -3686,6 +3833,7 @@ def _fallback_get_by_ids_individually(
 @mcp.tool(
     title="Batch-Retrieve Documents",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 @degrade_loud_when_migrating
 def store_get_many(
@@ -3925,6 +4073,7 @@ def store_get_many(
 @mcp.tool(
     title="List Collection Documents",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def store_list(
     collection: str = "knowledge",
@@ -4038,6 +4187,7 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
 @mcp.tool(
     title="Store Memory Entry",
     annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
 )
 def memory_put(
     content: str,
@@ -4120,6 +4270,7 @@ def memory_put(
 @mcp.tool(
     title="Retrieve Memory Entry",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def memory_get(project: str, title: str = "") -> str:
     """Retrieve a memory entry by project and title.
@@ -4180,6 +4331,7 @@ def memory_get(project: str, title: str = "") -> str:
 @mcp.tool(
     title="Delete Memory Entry",
     annotations={"readOnlyHint": False, "destructiveHint": True},
+    structured_output=False,
 )
 def memory_delete(project: str, title: str) -> str:
     """Delete a T2 memory entry by project and title.
@@ -4203,6 +4355,7 @@ def memory_delete(project: str, title: str) -> str:
 @mcp.tool(
     title="Search Memory Entries",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 0) -> str:
     """Full-text search across T2 memory entries.
@@ -4247,6 +4400,7 @@ def memory_search(query: str, project: str = "", limit: int = 20, offset: int = 
 @mcp.tool(
     title="Consolidate Memory Entries",
     annotations={"readOnlyHint": False, "destructiveHint": True},
+    structured_output=False,
 )
 def memory_consolidate(
     action: str,
@@ -4352,6 +4506,7 @@ def memory_consolidate(
 @mcp.tool(
     title="Session Scratch Pad",
     annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
 )
 def scratch(
     action: str,
@@ -4470,6 +4625,7 @@ def scratch(
 @mcp.tool(
     title="Manage Scratch Entry",
     annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
 )
 def scratch_manage(
     action: str,
@@ -4509,6 +4665,7 @@ def scratch_manage(
 @mcp.tool(
     title="List T3 Collections",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def collection_list() -> str:
     """List all T3 collections with document counts and embedding models."""
@@ -4528,6 +4685,7 @@ def collection_list() -> str:
 @mcp.tool(
     title="Save Query Plan",
     annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
 )
 def plan_save(
     query: str,
@@ -4631,6 +4789,7 @@ def plan_save(
 @mcp.tool(
     title="Search Plan Library",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) -> str:
     """Search the T2 plan library for similar query plans.
@@ -4674,6 +4833,7 @@ def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) 
 @mcp.tool(
     title="Delete Query Plan",
     annotations={"readOnlyHint": False, "destructiveHint": True},
+    structured_output=False,
 )
 def plan_delete(plan_id: int) -> str:
     """Delete a plan-library entry by id (nexus-v92zj).
@@ -4877,6 +5037,7 @@ def _pin_default_model(model: "str | None") -> "str | None":
 @mcp.tool(
     title="Extract Structured Fields",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 async def operator_extract(
     inputs: str, fields: str, timeout: float = 300.0, model: str | None = None,
@@ -4918,6 +5079,7 @@ async def operator_extract(
 @mcp.tool(
     title="Rank Items by Criterion",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 async def operator_rank(
     items: str, criterion: str, timeout: float = 300.0, model: str | None = None,
@@ -4955,6 +5117,7 @@ async def operator_rank(
 @mcp.tool(
     title="Compare Items",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 async def operator_compare(
     items: str = "",
@@ -5048,6 +5211,7 @@ async def operator_compare(
 @mcp.tool(
     title="Summarize Content",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 async def operator_summarize(
     content: str,
@@ -5083,6 +5247,7 @@ async def operator_summarize(
 @mcp.tool(
     title="Generate from Template",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 async def operator_generate(
     template: str,
@@ -5141,6 +5306,7 @@ _CHECK_EVIDENCE_ITEM_SCHEMA: dict = {
 @mcp.tool(
     title="Filter Items by Criterion",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 async def operator_filter(
     items: str,
@@ -5255,6 +5421,7 @@ async def operator_filter(
 @mcp.tool(
     title="Check Cross-Item Consistency",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 async def operator_check(
     items: str,
@@ -5321,6 +5488,7 @@ async def operator_check(
 @mcp.tool(
     title="Verify Claim Against Evidence",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 async def operator_verify(
     claim: str,
@@ -5383,6 +5551,7 @@ async def operator_verify(
 @mcp.tool(
     title="Group Items by Key",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 async def operator_groupby(
     items: str,
@@ -5511,6 +5680,7 @@ async def operator_groupby(
 @mcp.tool(
     title="Aggregate Grouped Items",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 async def operator_aggregate(
     groups: str,
@@ -5624,6 +5794,7 @@ _TRAVERSE_MAX_DEPTH: int = 3
 @mcp.tool(
     title="Walk Catalog Link Graph",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 def traverse(
     seeds: list[str] | str,
@@ -6740,6 +6911,7 @@ NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX: str = "[budget exhausted"
 @mcp.tool(
     title="Multi-Step Knowledge Answer",
     annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
 )
 @degrade_loud_when_migrating
 async def nx_answer(
@@ -8379,6 +8551,7 @@ async def nx_answer(
 @mcp.tool(
     title="Consolidate Knowledge Topic",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 async def nx_tidy(
     topic: str,
@@ -8474,6 +8647,7 @@ async def nx_tidy(
 @mcp.tool(
     title="Enrich Bead Context",
     annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
 )
 async def nx_enrich_beads(
     bead_description: str,
@@ -8541,17 +8715,34 @@ async def nx_enrich_beads(
 @mcp.tool(
     title="Audit Plan Correctness",
     annotations={"readOnlyHint": True},
+    structured_output=False,
 )
 async def nx_plan_audit(
     plan_json: str,
     context: str = "",
     timeout: float = 600.0,
+    round_number: int = 1,
+    budget_rounds: int = 0,
 ) -> str:
     """Audit a plan for correctness and codebase alignment via claude -p. RDR-080 P3.
 
     Replaces the ``plan-auditor`` agent. Spawns a ``claude -p``
     subprocess that validates the plan's file paths, dependencies,
     and assumptions against the current codebase state.
+
+    **Findings are classified, and the loop terminates** (nexus-ll7zm).
+    Every finding is either ``BLOCKS-PLANNING`` (the plan would cause
+    someone to build the wrong thing, or cannot be executed as
+    sequenced) or ``DISCOVER-AT-IMPLEMENTATION`` (real, but the first
+    test run surfaces it). Only the first class can produce a NOT READY
+    verdict. From round 3 onward NO verdict blocks: everything found is
+    emitted as residuals to record and carry into implementation. The
+    rules live in :mod:`nexus.plans.audit_rounds` and are enforced in
+    Python, not requested in the prompt, because the failure this
+    closes was a defect-finder being asked to judge when to stop finding
+    defects. Origin: a five-round audit loop against the RDR-197 plan on
+    2026-08-23, where rounds 3-5 refined hypothetical CI semantics for a
+    release cut that had never been performed.
 
     Args:
         plan_json: The plan to audit (JSON string or free-text description).
@@ -8565,11 +8756,32 @@ async def nx_plan_audit(
             agents from re-introducing false-positive timeouts via
             low overrides; a structlog warning is emitted when
             clamping occurs.
+        round_number: Which audit round this is for THIS plan, counted by
+            the caller. The tool is stateless — one ``claude -p``
+            dispatch with no memory between invocations — so the round
+            cannot be inferred here. Leaving it at 1 forever reproduces
+            the unterminated loop, which is why the planner guidance
+            requires passing it.
+        budget_rounds: The effort budget the plan author declared up
+            front from the feature's own stakes. 0 means unstated. A
+            budget may only TIGHTEN the cap, never widen it: a one-day
+            change can declare 1, but nothing can buy a third blocking
+            round.
 
     Returns:
-        Audit verdict as a human-readable string.
+        Audit verdict as a human-readable string, with blocking findings
+        and residuals shown separately and the recording instruction
+        attached to the residuals.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
+    from nexus.plans.audit_rounds import (  # noqa: PLC0415 — branch-local, keeps MCP import graph flat
+        BLOCKS_PLANNING,
+        CLASSIFICATION_PROMPT,
+        VALID_CLASSIFICATIONS,
+        render_audit_report,
+        resolve_verdict,
+        round_prompt,
+    )
 
     timeout = _clamp_subagent_timeout(timeout, "nx_plan_audit")
     mcp_servers, allowed_tools = _subprocess_tool_grant()
@@ -8579,7 +8791,21 @@ async def nx_plan_audit(
         "required": ["verdict", "findings", "summary"],
         "properties": {
             "verdict": {"type": "string"},
-            "findings": {"type": "array", "items": {"type": "object"}},
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["classification"],
+                    "properties": {
+                        "severity": {"type": "string"},
+                        "title": {"type": "string"},
+                        "classification": {
+                            "type": "string",
+                            "enum": list(VALID_CLASSIFICATIONS),
+                        },
+                    },
+                },
+            },
             "summary": {"type": "string"},
         },
     }
@@ -8588,6 +8814,8 @@ async def nx_plan_audit(
         "to nx MCP tools (search, query) for codebase verification. "
         "Parse the plan, verify file paths exist, check dependency ordering, "
         "identify gaps or incorrect assumptions, then emit a structured verdict.\n\n"
+        f"{round_prompt(round_number, budget_rounds)}\n\n"
+        f"{CLASSIFICATION_PROMPT}\n\n"
         f"Audit this plan for correctness and codebase alignment:\n\n{plan_json}"
     )
     if context:
@@ -8599,19 +8827,51 @@ async def nx_plan_audit(
         model=_pin_default_model(None),
     )
     if isinstance(payload, dict):
-        verdict = payload.get("verdict", "unknown")
-        summary = payload.get("summary", "")
         findings = payload.get("findings", [])
-        lines = [f"Verdict: {verdict}", summary]
-        for f in findings:
-            lines.append(f"  [{f.get('severity', '?')}] {f.get('title', '')}")
-        return "\n".join(lines)
+        if not isinstance(findings, list):
+            # A malformed container must never read as a clean audit
+            # (e.g. the timeout-drain partial-JSON path can hand back a
+            # non-list). Synthesize a blocking finding instead of
+            # emptying: same conservative direction as the per-finding
+            # unclassified default.
+            findings = [
+                {
+                    "classification": BLOCKS_PLANNING,
+                    "severity": "error",
+                    "title": (
+                        "audit payload malformed: findings was "
+                        f"{type(findings).__name__}, not a list — re-run "
+                        "the audit; do not treat this round as clean"
+                    ),
+                }
+            ]
+        verdict, blocking, residual, reason = resolve_verdict(
+            findings, round_number=round_number, budget_rounds=budget_rounds
+        )
+        _log.info(
+            "nx_plan_audit_verdict",
+            verdict=verdict,
+            round_number=round_number,
+            budget_rounds=budget_rounds,
+            blocking_count=len(blocking),
+            residual_count=len(residual),
+            cap_converted=bool(reason),
+        )
+        return render_audit_report(
+            verdict,
+            blocking,
+            residual,
+            summary=payload.get("summary", ""),
+            reason=reason,
+            round_number=round_number,
+        )
     return str(payload)
 
 
 @mcp.tool(
     title="Uninstall Nexus Daemon",
     annotations={"destructiveHint": True, "idempotentHint": True},
+    structured_output=False,
 )
 def daemon_uninstall(confirm: bool = False, remove_data: bool = False) -> str:
     """Tear down the nexus storage stack's OS-level install (RDR-126 §4).

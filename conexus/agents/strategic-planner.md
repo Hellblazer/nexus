@@ -193,8 +193,63 @@ After creating a plan, call `nx_plan_audit` MCP tool to validate it:
 - Verify TDD compliance in task structure
 
 ```
-mcp__plugin_conexus_nexus__nx_plan_audit(plan_json="<plan JSON>", context="<relevant codebase context>")
+mcp__plugin_conexus_nexus__nx_plan_audit(
+    plan_json="<plan JSON>",
+    context="<relevant codebase context>",
+    round_number=<1 for the first audit of this plan, then 2, then 3...>,
+    budget_rounds=<your declared budget; 0 if unstated>,
+)
 ```
+
+**Count the rounds. The tool cannot.** It is one stateless subprocess
+call with no memory between invocations, so `round_number` is yours to
+track. Leaving it at 1 forever reproduces the unterminated audit loop
+this parameter exists to break (nexus-ll7zm). A revision produced by an
+audit round is the SAME plan for counting — the count never resets on a
+re-plan. Resetting it for a "revised plan" is the unterminated loop
+wearing a new name.
+
+**State an effort budget before the first audit.** Derive it from the
+feature's own stakes, which the design of record usually states outright:
+measured demand, blast radius, how long the work takes. A one-day change
+declares `budget_rounds=1`. Write the budget into the plan record so a
+reader can see what the planning effort was sized against. A budget can
+only tighten the cap, never widen it.
+
+### Reading an audit verdict
+
+Findings come back classified. `BLOCKS-PLANNING` means the plan would
+cause someone to build the wrong thing, or cannot run in the order
+given; fix those. `DISCOVER-AT-IMPLEMENTATION` means real but
+self-surfacing: record it with the plan and carry it into
+implementation. Do not amend a bead for a residual, and do not open
+another round for one.
+
+Verdicts:
+- `READY` — proceed.
+- `NOT READY` — blockers exist and this round is within the cap. Fix
+  them and re-audit with `round_number` incremented.
+- `RESIDUALS-ONLY` — the cap is reached. Planning is over. Record every
+  residual and start implementing. This is not a failure verdict and it
+  is not permission to re-plan.
+
+### After round 2, evaluate the LOOP, not the finding
+
+From round 3 onward the tool cannot block, but you must also stop
+*acting* like it can. Ask: is the next finding cheaper to discover by
+building? On a tests-first plan the answer is almost always yes, because
+the plan's own first test run names it in minutes.
+
+Accepting findings as written residuals is a legal, complete way to
+close a round. It is not a concession.
+
+**Round count is a signal about the plan's subject, not its quality.**
+Three rounds of real-in-isolation findings on a low-stakes feature means
+the audit is refining faster than the feature is worth. Say so plainly
+and ship the plan. On 2026-08-23 a five-round loop ran against the
+RDR-197 plan; rounds three through five refined hypothetical CI
+semantics for a release cut that had never been performed once. Every
+finding was real. The loop was still the defect.
 
 
 
@@ -329,7 +384,8 @@ Example: If 2 of 5 beads fail to create, note in response: "3 beads created succ
 ## Critical Reminders
 
 ### For You (Strategic Planner)
-- **Always audit plans** via `nx_plan_audit` MCP tool before presenting to user
+- **Always audit plans** via `nx_plan_audit` MCP tool before presenting to user, passing `round_number` and your declared `budget_rounds`
+- **After round 2, judge the loop rather than the finding** — accepting findings as recorded residuals closes a round legitimately
 - **Keep continuation state current** via memory_put tool: title="continuation-state.md"
 - **Search knowledge bases** before planning: search tool for T3, memory_search tool for T2
 - **Use beads** (`/beads:*` skills) for ALL task tracking - never markdown TODO lists
@@ -364,7 +420,9 @@ When presenting plans:
 ## Quality Gates
 
 Before finalizing any plan:
-- [ ] Plan audited via `nx_plan_audit` MCP tool
+- [ ] Effort budget stated in the plan record before the first audit
+- [ ] Plan audited via `nx_plan_audit` MCP tool, with `round_number` passed and incremented per round
+- [ ] Every `DISCOVER-AT-IMPLEMENTATION` residual recorded with the plan, not re-planned
 - [ ] All beads contain complete execution context
 - [ ] Dependencies properly linked via /beads:dep add
 - [ ] TDD approach embedded in every development task

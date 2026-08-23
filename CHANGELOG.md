@@ -6,6 +6,58 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.16.0] - 2026-08-22
+
+The independent plugin release channel (RDR-197) and the plan-audit
+termination contract. Engine identity is unchanged at
+`engine-service-v0.1.85` -- no engine cut rides this release.
+
+### Added
+- **Independent plugin release channel (RDR-197)**: anchored
+  `plugin-v{X.Y.Z}-{n}` tags can now ship accumulated `conexus/`/`sn/`
+  plugin content without a client release. Channel primitives
+  (`scripts/plugin_channel.py`: per-plugin ref invariants R and W with
+  the cut-branch closer, blind-checkout sentinel, counter-less tag
+  numbering, tag-anchored wheel-surface proof), the cut script
+  (`scripts/cut_plugin_release.py`: main-readiness guard, atomic-split
+  refusal with ledger bead attribution, deletion-safe allowlist
+  import), a verify-only `plugin-release.yml` tag workflow that
+  publishes nothing, per-plugin `source.ref` parity, per-plugin drift
+  scoping, the release window accepted at all three sites, and a
+  26-cell mixed-state truth table. Operator docs in AGENTS.md
+  ("Independent plugin release channel") and `docs/contributing.md`
+  ("Plugin channel cut"). This release carries the machinery to main,
+  arming the channel; no cut has been performed yet.
+- **`nx_plan_audit` terminates** (nexus-ll7zm): every finding is
+  classified `BLOCKS-PLANNING` or `DISCOVER-AT-IMPLEMENTATION`; only
+  the first can block; from round 3 (or a tighter caller-declared
+  `budget_rounds`) the verdict is `RESIDUALS-ONLY` and planning is
+  over. The verdict is computed from classified findings -- the
+  model's own proposed verdict is not an input -- and a malformed
+  findings payload synthesizes a blocking finding instead of reading
+  as a clean audit. New `round_number`/`budget_rounds` parameters;
+  `nx_plan_audit_verdict` structlog event. Enforcement in
+  `src/nexus/plans/audit_rounds.py`; the four plugin guidance surfaces
+  ship in this same release, closing the split delivery.
+- **Deliberate MCP wire shapes** (nexus-r90ao): explicit
+  `structured_output` declarations on all 46 MCP tools; `search()`
+  ships real `structuredContent`.
+- **Expectations-ledger reconciliation** (nexus-2v0v7):
+  `expectations_reconcile` cross-checks outstanding background STARTs
+  against the harness's own `background_tasks` ground truth (STRANDED /
+  UNDECLARED_TASK classes), wired into the Stop hook as WARN-only.
+- **Named workflows** `pressure-test` and `dead-wire-census`
+  (nexus-hhqli).
+- **Plugin-eval corpus** (nexus-7zup9): 15 skill-triggering cases under
+  `conexus/evals/`, authored pending the org-gated `claude plugin eval`
+  early access.
+
+### Fixed
+- The T1 three-scopes record: the MCP server is NOT respawned on
+  `/clear`/`/resume` (nexus-ggvi0 falsification, proven from live
+  logs); the handoff layer remains load-bearing and the re-proposal bar
+  is documented in `docs/architecture.md`.
+
 ## [7.15.0] - 2026-08-22
 
 Model tiering by measurement, budget enforcement, and the removal of the

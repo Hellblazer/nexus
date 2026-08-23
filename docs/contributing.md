@@ -567,6 +567,49 @@ Every step below is **required**. Missing any one of them has caused problems in
     keeps the old wheel until this runs — caught on v4.9.11 (`nx
     --version` reported 4.9.10 even after PyPI showed 4.9.11).
 
+### Plugin channel cut (RDR-197)
+
+A plugin cut ships accumulated `conexus/` and `sn/` plugin content
+without a client release. It moves the changed plugin's `source.ref` in
+`.claude-plugin/marketplace.json` to an anchored tag
+`plugin-v{X.Y.Z}-{n}` (the current released client version plus a
+sequence number derived from git's tag list at cut time; no counter
+file exists). It publishes nothing to PyPI and moves no version field.
+Usage discipline and the sunset trigger live in AGENTS.md's
+"Independent plugin release channel" section; check them before
+cutting.
+
+Command sequence (the script does the work; the human pushes):
+
+```bash
+uv run python scripts/cut_plugin_release.py vX.Y.Z   # the CURRENT released client tag
+# The script: verifies origin/main carries the channel machinery,
+# derives n from the tag list, runs the atomic-split check, branches
+# plugin-release/X.Y.Z-n off origin/main, imports the allowlist from
+# develop as a diff-and-apply, moves only the changed plugins' refs,
+# empties the covered PENDING_RELEASE.md entries, runs the minimal
+# battery, and prints the commands below. It pushes and tags NOTHING.
+git push -u origin plugin-release/X.Y.Z-n
+gh pr create --base main --head plugin-release/X.Y.Z-n --title "plugin release: plugin-vX.Y.Z-n"
+gh pr merge <N> --merge
+git tag -a plugin-vX.Y.Z-n -m "plugin-vX.Y.Z-n" <merge-commit>
+git push origin plugin-vX.Y.Z-n     # fires the verify-only plugin-release.yml
+git checkout develop && git merge origin/main --no-edit && git push origin develop
+```
+
+Minimal battery (run by the script, re-run by the tag workflow):
+`-m lint` (minus `test_wire_contract_pairing_lint.py`, which needs tag
+history the workflow's single-tag fetch does not carry),
+`tests/test_plugin_release_drift_ledger.py`, `tests/hooks/`, and
+`./tests/e2e/release-sandbox.sh smoke`. Deliberately skipped, because
+none of them executes plugin-loader content: substrate gates, migration
+rehearsal, fresh-install MVVs, shakedown, and the engine floor.
+
+A CLIENT release needs no channel-specific step at all: the channel
+keeps no state a release would have to reset. The client release's own
+`source.ref` bump to `vX.Y.Z` supersedes any anchored pin, and the next
+cut derives its number from the new version's (empty) tag list.
+
 ### Schema/data-migration releases (conditional)
 
 Trigger: this release's tag (client `vX.Y.Z` or engine `engine-service-vX.Y.Z`) carries a schema or data migration — a new Liquibase changeset, a new `upgrade_ladder` rung, or any change to a shape data already has to conform to. Four requirements, none of which the checklist above enforced before this section existed (T2 [22511] gap 9 — no schema-migration protocol existed in any release document; every prior trigger for "is this release safe" reduced to version identity and the standard functional gates, none of which speak to migration risk specifically). Operational checklist form: `.claude/skills/release/SKILL.md` Step 6d (client-side data migrations) and `.claude/skills/engine-release/SKILL.md` Step 5b (engine-side schema DDL). This section is their shared rationale and evidence citations.

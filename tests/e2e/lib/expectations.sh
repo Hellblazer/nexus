@@ -1215,3 +1215,187 @@ expectations_sweep() {
     find "$dir" -maxdepth 1 -name '*.expectations.credit.*' -type l -mtime +7 -delete 2>/dev/null
     return 0
 }
+
+# expectations_reconcile <session_id> <stop_payload_json> — cross-check the
+# ledger's outstanding background STARTs against the harness's OWN
+# background-task ground truth, now available in Stop/SubagentStop hook
+# input (CC 2.1.145: `background_tasks`, `session_crons`). Bead nexus-2v0v7
+# (epic nexus-qkbo7).
+#
+# THE GAP THIS CLOSES. Every consult surface above answers "did THIS agent
+# report" from the ledger alone. None of them can see an agent that never
+# fired SubagentStop at all — a hook crash, an OOM kill, or a harness-level
+# SIGKILL between dispatch and stop all leave a START row with no terminal
+# row (REPORTED/BLOCKED/WOULDBLOCK), indistinguishable from "still
+# legitimately running" from the ledger's point of view alone. The
+# harness's own background-task list is independent ground truth: a task
+# the harness no longer tracks, while the ledger still calls it
+# outstanding, is a silent death the ledger alone could never detect.
+#
+# SCHEMA CAUTION — READ BEFORE TRUSTING THIS BEYOND WARN-ONLY (written
+# ahead of full schema confirmation by a companion research pass;
+# nexus-2v0v7's relay flagged this explicitly):
+#   - The exact per-task field names inside `background_tasks` are NOT YET
+#     independently verified against a live payload. This function reads
+#     the first present of a small CANDIDATE FIELD LIST (below) per task;
+#     if the real schema uses a different key, every task degrades to
+#     "unidentifiable" rather than crashing or false-matching.
+#   - `background_tasks` may be a MIXED population (background Bash
+#     processes alongside background Agent dispatches) — there is no
+#     confirmed discriminator field to separate them, so this function
+#     does not attempt to filter by task kind. A harness whose background
+#     tasks are ALL non-agent (e.g. only Bash jobs) would make every
+#     outstanding agent START look STRANDED, every stop, which is a real
+#     false-positive risk this caveat exists to name rather than hide.
+#   - Because of the two points above, treat STRANDED output as a lead to
+#     investigate, not a confirmed verdict, until the schema is verified.
+#   - `background_tasks` absent, null, not a list, or the whole payload
+#     unparseable => nothing to reconcile, rc 0, no output — unconditionally,
+#     on every pre-2.1.145 harness (zero behavior change).
+#
+# CANDIDATE FIELD LIST (ordered, first hit per task wins): agent_id, id,
+# task_id, taskId, subagent_id. A bare string array entry is taken as the
+# id verbatim. Revisit this list (and the two caveats above) the moment the
+# schema is independently confirmed.
+#
+# OUTPUT (stdout, TSV-ish, same convention as expectations_undeclared):
+#   STRANDED\t<agent_id>\t<agent_type>   — ledger says outstanding (STARTed,
+#       no REPORTED/BLOCKED/WOULDBLOCK row yet); the harness's
+#       background_tasks list at Stop time carries no matching id. The new
+#       detection class: a silent death the ledger alone could never see
+#       (subject to the SCHEMA CAUTION above).
+#   UNDECLARED_TASK\t<harness_id>        — the harness tracks this
+#       background task, but no ledger START row was ever matched to it.
+#       Corroborates (does not replace) expectations_undeclared's rc=2
+#       class.
+#   SUMMARY\toutstanding=<N> harness_tasks=<M> unidentified=<U> stranded=<S> undeclared_tasks=<T>
+#
+# RC CONTRACT (adds rc=4 to the 0/1/2/3 vocabulary expectations_undeclared
+# owns — see that function's header; the numbers below are NOT a
+# reinterpretation of that vocabulary except where explicitly marked
+# reused):
+#   0 = clean. Either no harness background-task data was present (nothing
+#       to reconcile, silently skipped) or data was present and every
+#       outstanding START correlated to a live harness task with no extra
+#       harness-only tasks.
+#   2 = REUSED, deliberately, from expectations_undeclared's vocabulary: at
+#       least one UNDECLARED_TASK line and zero STRANDED lines. This is
+#       corroborating evidence for the SAME "undeclared dispatch" deficit
+#       that function already reports, not a new class, so it reuses that
+#       function's exit code rather than inventing a new number for the
+#       same idea.
+#   4 = NEW: at least one STRANDED line — the ledger and the harness
+#       disagree about whether an agent is still alive. Takes priority over
+#       rc=2 when both conditions hold: a silent death is a strictly more
+#       actionable finding than an undeclared corroboration.
+# Never blocks and never mutates the ledger: this function only prints and
+# returns an rc. The caller (a Stop-hook site) is responsible for treating
+# rc=4 as WARN-ONLY — see stop_verification_hook.sh.
+expectations_reconcile() {
+    local sid="$1" payload="${2:-}"
+    [[ -n "$sid" && -n "$payload" ]] || return 0
+    local file
+    file="$(expectations_file "$sid" 2>/dev/null)" || return 0
+    [[ -r "$file" ]] || return 0
+
+    # PRESENT/ABSENT marker on line 1 distinguishes "no background_tasks
+    # key at all" (older harness, or the field genuinely does not apply)
+    # from "background_tasks is an empty list" (harness currently tracks
+    # zero tasks) — both print nothing further from python, so without the
+    # marker they would be indistinguishable from bash and the "absent
+    # fields => no-op" contract could not be honored.
+    #
+    # Routed through a FILE, deliberately, not a `$(...)` capture: command
+    # substitution strips ALL trailing newlines, so a batch whose LAST N
+    # task entries are unidentifiable (each prints an empty line) would
+    # silently lose those trailing empty lines and undercount `unidentified`
+    # in the SUMMARY below. Measured, not theoretical (nexus-2v0v7 manual
+    # verification: a single trailing unidentifiable entry vanished
+    # entirely). Reading the file back with `tail`/`head` preserves every
+    # line, blank or not.
+    local py_file marker
+    py_file="$(mktemp 2>/dev/null)" || return 0
+    printf '%s' "$payload" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+if not isinstance(d, dict):
+    d = {}
+tasks = d.get("background_tasks")
+if not isinstance(tasks, list):
+    print("ABSENT")
+    sys.exit(0)
+print("PRESENT")
+candidates = ("agent_id", "id", "task_id", "taskId", "subagent_id")
+scrub = str.maketrans({"\t": " ", "\n": " ", "\r": " "})
+for t in tasks:
+    ident = ""
+    if isinstance(t, dict):
+        for k in candidates:
+            v = t.get(k)
+            if v:
+                ident = str(v)
+                break
+    elif isinstance(t, str):
+        ident = t
+    print(ident.translate(scrub) if ident else "")
+' >"$py_file" 2>/dev/null
+    marker="$(head -n 1 "$py_file" 2>/dev/null)"
+    if [[ "$marker" != "PRESENT" ]]; then
+        rm -f "$py_file" 2>/dev/null
+        return 0
+    fi
+
+    # Single combined stream, not awk's classic two-file `NR == FNR` array-
+    # load idiom: that idiom silently breaks when the FIRST file has zero
+    # records (exactly the "background_tasks: []" case this function must
+    # handle) — NR stays 0 through an empty first file, so the SECOND
+    # file's first line also makes NR==FNR true, and NR/FNR then stay in
+    # lockstep for the rest of that file too, so the whole ledger is
+    # mis-read as harness ids instead of being parsed as ledger rows.
+    # Measured, not theoretical (nexus-2v0v7 manual verification). A single
+    # stream with an explicit mode-flip sentinel has no such edge case.
+    local combined_file sentinel="___EXPECTATIONS_RECONCILE_SENTINEL___"
+    combined_file="$(mktemp 2>/dev/null)" || { rm -f "$py_file" 2>/dev/null; return 0; }
+    {
+        tail -n +2 "$py_file"
+        printf '%s\n' "$sentinel"
+        cat "$file"
+    } >"$combined_file"
+    rm -f "$py_file" 2>/dev/null
+
+    local rc
+    awk -F'\t' -v sentinel="$sentinel" '
+        mode == 0 && $0 == sentinel { mode = 1; next }
+        mode == 0 {
+            if ($0 != "") { hids[$0] = 1; htotal++ } else { unident++ }
+            next
+        }
+        $2 == "START" {
+            if (!($3 in allstart)) { allstart[$3] = 1; stype[$3] = $4; order[++n] = $3 }
+        }
+        $2 == "REPORTED" || $2 == "BLOCKED" || $2 == "WOULDBLOCK" { term[$3] = 1 }
+        END {
+            outstanding = 0; stranded = 0
+            for (i = 1; i <= n; i++) {
+                id = order[i]
+                if (!(id in term)) {
+                    outstanding++
+                    if (!(id in hids)) { print "STRANDED\t" id "\t" stype[id]; stranded++ }
+                }
+            }
+            undecl = 0
+            for (h in hids) { if (!(h in allstart)) { print "UNDECLARED_TASK\t" h; undecl++ } }
+            printf "SUMMARY\toutstanding=%d harness_tasks=%d unidentified=%d stranded=%d undeclared_tasks=%d\n", \
+                outstanding, (htotal + 0) + (unident + 0), unident + 0, stranded, undecl
+            if (stranded > 0) exit 4
+            if (undecl > 0) exit 2
+            exit 0
+        }
+    ' "$combined_file"
+    rc=$?
+    rm -f "$combined_file" 2>/dev/null
+    return $rc
+}
