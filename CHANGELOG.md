@@ -6,6 +6,79 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.16.1] - 2026-08-23
+
+A patch of gate defects found by exercising 7.16.0's own plugin work.
+Engine identity unchanged at `engine-service-v0.1.85`.
+
+Seven fixes: one user-visible regression, three gates that could not
+fail, one gate measuring the wrong file, one test coupled to ambient
+developer state, and nine eval graders blind to their own subject. Four
+shipped in 7.16.0 itself (`search`, the cut assert, the reconcile tests,
+the eval graders); three are older (the lint leg, the watchdog, the
+routing cap). They share a shape: **the test sat one layer below where
+the behaviour lived**, so it passed while the thing it named was broken.
+
+### Fixed
+- **`search` over MCP returned hashes instead of results.** The wire
+  wrapper added in 7.16.0 attaches `structuredContent` alongside the text
+  block. A conforming client may render `structuredContent` INSTEAD of
+  the text -- the protocol permits it, nexus's own client does it
+  (`mcp_client/core.py::_parse_result` prefers it), and Claude Code does
+  too. So a default-mode `search` delivered ids, tumblers, distances and
+  chunk hashes with no file paths, line numbers, snippets or pagination
+  footer. The payload now carries the render, so either representation is
+  self-sufficient. The server was never wrong and neither were its ten
+  tests: every assertion is on the `CallToolResult`, where both shapes
+  are present and correct, and the displacement is not observable from
+  there. An AST census now requires any tool building a
+  `CallToolResult` with `structuredContent` to carry a `text` key, which
+  binds `query`/`nx_answer`/`memory_search` before they are written.
+  (`nexus-6jlki`)
+- **The plugin-cut ledger assert failed every cut.** `plugin-release.yml`
+  grepped each touched path against the whole of `PENDING_RELEASE.md`;
+  the ledger's permanent header names `.claude-plugin/marketplace.json`,
+  and every cut touches that file by construction, so the offender list
+  was never empty. The decision moved to
+  `scripts/check_cut_ledger_clean.py`, which scans bullet ENTRIES via the
+  existing `path_entries()` parser. Blocked the first real cut
+  (`nexus-a2wmi.12`). (`nexus-a2wmi.9`)
+- **The `-m lint` CI leg could not fail.** `pytest ... | tee` under
+  GitHub's default `bash -e` (no workflow declares `shell:`) exits with
+  `tee`'s status. Since `addopts` deselects `lint` everywhere else, that
+  job was the sole enforcement point for ~1050 tests feeding the required
+  `pytest-gate` check -- including the guards against a new MCP tool
+  re-opening the regression above. A new lint requires every piping
+  `run:` block in every workflow to set pipefail.
+- **The scheduled-failure watchdog reported green over 8 red nights.** It
+  sampled the newest run of any status, and fires 6 minutes after a
+  nightly that takes 12-25, so the sample was an in-flight run whose
+  `conclusion` is null -- not a failure, not stale. It now requests
+  `status=completed`. Separately, the Sweep step forwarded any exit code
+  but 2 as a verdict, so 127/124/137 closed the tracking issue with an
+  all-clear. Verified against the live API: the same command that
+  reported 0 findings now names the failing gate.
+- **The routing-hook cap measured the documentation.** It summed
+  `registry.yaml` rules, but `hook.py:271` says `hooks.json` is the
+  registration surface -- 3 hooks fire on `PreToolUse:Bash` against 2
+  listed rules, so a fifth could land under a reported 2/4. The RDR-121
+  budget is now enforced against the registration surface.
+- **Stop-hook reconciliation tests failed on developer machines.** They
+  faked `HOME`, which drops `~/.config/git/ignore`, so the standing
+  untracked `.claude/settings.local.json` resurfaced and tripped the
+  hook's uncommitted-changes check; an in-progress bead tripped it too.
+  Now run from an isolated cwd. Passed in CI and failed locally, which is
+  how they shipped. (`nexus-2v0v7`)
+- **Nine eval graders could not observe what they graded.** Every
+  not-triggered case was `type: llm` with criteria beginning "Fail if the
+  transcript contains a Skill tool call", but `llm`'s `focus` defaults to
+  `last_message` and the judge never sees tool calls. They now use
+  `tool_used` with `max: 0`, the negation primitive the README wrongly
+  said did not exist. Proven in the corpus's first real run, where an
+  `llm` grader voted FAIL 3/3 against a `max: 0` counter reporting the
+  skill was never invoked. (`nexus-7zup9`)
+
+
 ## [7.16.0] - 2026-08-22
 
 The independent plugin release channel (RDR-197) and the plan-audit
