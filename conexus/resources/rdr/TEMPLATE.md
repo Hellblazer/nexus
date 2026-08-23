@@ -36,6 +36,28 @@ Describe the specific problem or missing behavior this gap addresses. Be concret
 
 (Add additional gaps as needed. Remove placeholder headings for gaps you do not use.)
 
+## Relationship to Prior RDRs
+
+*Scan the existing-RDR list BEFORE drafting. For each RDR whose title overlaps
+this problem, read it and classify it. If the scan finds nothing, write one line
+saying what you searched for — an unrecorded dead end is indistinguishable from
+not having looked.*
+
+- **Origin** — it created the thing you now want to change. Quote its stated
+  rationale and say whether that rationale still holds. An expired rationale is
+  the strongest evidence for the change.
+- **Precedent** — it reached your diagnosis for a different scope and shipped.
+  Cite it; your claim becomes proven rather than asserted, and this RDR argues
+  the remedy generalises.
+- **Adjacent draft** — unmerged and overlapping. Give an explicit scope-boundary
+  table (which concern belongs to which RDR) and say how the two sequence.
+- **Superseded** — this RDR replaces it. Say so and follow the supersede
+  convention.
+
+| Prior RDR | Relationship | What it means for this one |
+| --- | --- | --- |
+| RDR-NNN | Origin / Precedent / Adjacent draft / Superseded | [consequence] |
+
 ## Context
 
 ### Background

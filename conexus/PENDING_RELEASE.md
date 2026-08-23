@@ -31,6 +31,18 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.16.0)
 
+- `conexus/resources/rdr/TEMPLATE.md`: nexus-bc292 — added a
+  `## Relationship to Prior RDRs` section between Problem Statement and
+  Context, with the origin / precedent / adjacent-draft / superseded
+  classification and a scope-boundary table. Pairs with the PRIOR-ART
+  SCAN step added to `conexus/commands/rdr-create.md`: the command asks
+  for the scan, the template makes its absence structurally visible,
+  since `/conexus:rdr-gate` Layer 1 checks required headings. Prompt
+  text alone is the weak lever — measured this session at 1-in-6
+  compliance for an emphatic SessionStart instruction — so the template
+  carries the enforcement.
+  **INERT UNTIL RELEASE.** Resources load from the pinned v7.16.0 tag.
+
 - `conexus/commands/rdr-create.md`: nexus-bc292 — added a PRIOR-ART SCAN
   step that runs BEFORE drafting. The command already pre-loads every
   existing RDR with title and status, but framed it as "data … no
