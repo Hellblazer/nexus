@@ -578,3 +578,168 @@ class TestTheCIWiringItself:
             f"{missing}. Drift there would never trigger this workflow, so it "
             f"could merge undeclared on a green PR."
         )
+
+
+# ---------------------------------------------------------------------------
+# RDR-197 (nexus-a2wmi.1): the tag-anchored wheel-surface proof.
+#
+# A plugin cut ships plugin-tree content ONLY. The proof diffs the base
+# client tag against the cut's target (the anchored tag when it resolves,
+# else the cut PR's head commit — the ANCHORING rule in
+# scripts/plugin_channel.py's docstring) and fails on any path outside the
+# channel allowlist. Never a merge base as target (the fork point carries
+# none of the cut's content — vacuous proof), never a development branch's
+# HEAD (reports offenders the cut never shipped).
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_tag_leaves_wheel_surface_untouched() -> None:
+    """For every plugin pinned at an anchored ref, the range from the base
+    client tag to the anchored tag touches only channel-allowlisted paths.
+
+    Skips while no plugin is pinned anchored (today's steady state); the
+    fixture arm below is the non-vacuity proof of the mechanism, so this
+    skip is honest, not a masked gate.
+    """
+    from plugin_channel import parse_plugin_tag, wheel_surface_offenders
+
+    anchored = {
+        name: parsed
+        for name, ref in _pinned_refs().items()
+        if (parsed := parse_plugin_tag(ref)) is not None
+    }
+    if not anchored:
+        pytest.skip("no plugin pinned at an anchored ref; fixture arm covers the mechanism")
+    for name, (version, n) in sorted(anchored.items()):
+        offenders = wheel_surface_offenders(
+            f"v{version}", f"plugin-v{version}-{n}", cwd=REPO_ROOT
+        )
+        assert offenders == [], (
+            f"plugin {name}'s cut plugin-v{version}-{n} touches wheel-surface "
+            f"paths: {offenders}. A plugin cut may never alter wheel content."
+        )
+
+
+def _cut_fixture_repo(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str]:
+    """A repo with a tagged base and a cut commit that violates the surface.
+
+    Returns (repo, cut head sha). The proof target is the resolved head
+    sha — the cut PR's head commit per the anchoring rule — never a bare
+    HEAD and never a merge base.
+    """
+    repo = tmp_path / "cutrepo"
+    repo.mkdir()
+
+    def run(*args: str) -> None:
+        subprocess.run(
+            ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+        )
+
+    run("init", "-q", "-b", "main")
+    run("config", "user.email", "test@test.invalid")
+    run("config", "user.name", "test")
+    (repo / "seed").write_text("seed\n", encoding="utf-8")
+    run("add", "seed")
+    run("commit", "-q", "-m", "seed")
+    run("tag", "v0.0.1")
+    for rel in (
+        "src/nexus/cli.py",
+        "conexus/plans/builtin/x.yml",
+        "conexus/skills/ok.md",
+        "sn/commands/ok.md",
+    ):
+        target = repo / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("cut content\n", encoding="utf-8")
+        run("add", rel)
+    run("commit", "-q", "-m", "cut")
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return repo, head
+
+
+def test_the_wheel_surface_proof_reports_offenders(tmp_path: pathlib.Path) -> None:
+    """Non-vacuity arm: a range carrying wheel content MUST fail the proof.
+
+    src/nexus/cli.py is off-allowlist outright; conexus/plans/builtin/x.yml
+    is inside the allowlist prefix but carved out by DENIED_PREFIXES (it is
+    wheel package data). Empty DENIED_PREFIXES and this test fails — the
+    designed falsification.
+    """
+    from plugin_channel import wheel_surface_offenders
+
+    repo, cut_sha = _cut_fixture_repo(tmp_path)
+    offenders = wheel_surface_offenders("v0.0.1", cut_sha, cwd=repo)
+    assert offenders == ["conexus/plans/builtin/x.yml", "src/nexus/cli.py"]
+
+
+def test_the_proof_raises_when_the_target_does_not_resolve(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An unresolvable ref is an unknown answer, never an empty offender list."""
+    from plugin_channel import GitCommandError, wheel_surface_offenders
+
+    repo, _ = _cut_fixture_repo(tmp_path)
+    with pytest.raises(GitCommandError):
+        wheel_surface_offenders("v0.0.1", "does-not-resolve", cwd=repo)
+
+
+def test_no_caller_passes_a_merge_base_as_the_proof_target() -> None:
+    """No caller in this repo hands wheel_surface_offenders a merge-base
+    target. A merge base is only ever a range BASE; as a target the proof
+    is vacuous (the fork point carries none of the cut's content).
+
+    Scans the realistic caller surfaces — tests/, scripts/ (python, via
+    ast so docstrings do not false-positive) and .github/workflows/ (text
+    lines) — and fails if any call's target argument mentions a merge
+    base. Non-vacuity: asserts the scan saw at least one python call site
+    (this file has two above).
+    """
+    import ast
+
+    violations: list[str] = []
+    python_call_sites = 0
+    for directory in ("tests", "scripts"):
+        for path in sorted((REPO_ROOT / directory).rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                name = (
+                    func.attr
+                    if isinstance(func, ast.Attribute)
+                    else getattr(func, "id", "")
+                )
+                if name != "wheel_surface_offenders":
+                    continue
+                python_call_sites += 1
+                target: ast.expr | None = None
+                if len(node.args) >= 2:
+                    target = node.args[1]
+                for keyword in node.keywords:
+                    if keyword.arg == "target_ref":
+                        target = keyword.value
+                rendered = ast.unparse(target) if target is not None else ""
+                if "merge" in rendered.lower():
+                    violations.append(f"{path}: target {rendered!r}")
+    workflows = REPO_ROOT / ".github" / "workflows"
+    if workflows.is_dir():
+        for path in sorted(workflows.glob("*.yml")):
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                if (
+                    "wheel_surface_offenders" in line or "plugin_channel" in line
+                ) and ("merge-base" in line or "merge_base" in line):
+                    violations.append(f"{path}:{line_number}: {line.strip()}")
+    assert python_call_sites >= 1, (
+        "the scan recognised zero wheel_surface_offenders call sites — the "
+        "scan itself is broken, which is not a pass"
+    )
+    assert not violations, violations
