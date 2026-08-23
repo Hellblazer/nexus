@@ -265,9 +265,26 @@ Must end with `[done]` and confirm the new schema version. Halt on any failure.
 
 This reinstall is genuinely isolated (fixed 2026-07-01, `137d2688`) — safe to run with live Claude Code sessions/MCP servers active, no `--force`/`--cycle-daemons` needed. If it ever refuses with a live-holder error again, suspect a step-ordering regression in `release-sandbox.sh` (sandbox `HOME` must activate *before* the reinstall, since `uv tool install` resolves its install location off `$HOME`) before reaching for `--force`.
 
-### 6b. Run upgrade-shakeout (~3-5 min, conditional)
+### 6b. Run upgrade-shakeout (~3-5 min, EVERY RELEASE)
 
-Required when the release touches the **upgrade path** an installed user traverses: hook stanzas (`src/nexus/commands/hooks.py`), the `nx doctor` drift checks, plugin name / marketplace.json `source.ref` pinning, or any migration touchpoint. `release-sandbox.sh smoke` tests one version in isolation; this tests `FROM_VERSION` to this branch.
+**Unconditional as of 7.16.1.** This step used to read "conditional",
+qualified by a trigger list ending in "plugin name / marketplace.json
+`source.ref` pinning" -- a condition that is TRUE OF EVERY RELEASE, because
+advancing `source.ref` to the new tag IS the release (Step 3). A gate whose
+condition never fails is not conditional; it is unconditional wearing a
+qualifier that invites a skip. It got one on 7.16.1, caught only because
+Sam asked what testing remained.
+
+Run it every time. The gate's own step 9/12 is `plugin marketplace.json
+reflects rename + tag pinning`, so it verifies the very thing every release
+changes, and it costs 3-5 minutes.
+
+`release-sandbox.sh smoke` (6) tests ONE version in isolation. This is the
+only gate that tests `FROM_VERSION` -> this branch, which is the path an
+installed user actually traverses.
+
+Must end `UPGRADE-SHAKEOUT PASSED — steps=12 skipped=0`. A non-zero
+`skipped` is a finding, not a pass.
 
 ```bash
 ./tests/e2e/upgrade-shakeout.sh run                       # latest stable -> this branch (clean-upgrade path)

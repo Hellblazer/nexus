@@ -486,20 +486,29 @@ Every step below is **required**. Missing any one of them has caused problems in
    doctor wiring only a real subprocess exercises. Must end
    `DATA-TOKEN CLI GATE PASSED`.
 
-7e. **Run the upgrade-shakeout** (~3-5 min; conditional)
+7e. **Run the upgrade-shakeout** (~3-5 min; EVERY RELEASE)
    ```bash
    ./tests/e2e/upgrade-shakeout.sh run                       # latest stable -> this branch
    ./tests/e2e/upgrade-shakeout.sh run --from-version 4.34.6 # exercises drift -> reconcile
    ```
-   Required when this release touches the upgrade path an installed user
-   traverses: hook stanzas (`src/nexus/commands/hooks.py`), `nx doctor`
-   drift checks, plugin name / marketplace.json `source.ref` pinning, or
-   any migration touchpoint. Sandbox smoke (7b) tests one version in
-   isolation; this tests `FROM_VERSION` to this branch. Runnable from any
-   baseline — it detects stanza drift at runtime and cross-checks `nx
-   doctor`'s drift claim against the actual stanza byte-diff, so a doctor
-   false-positive/negative fails the run. Must end `12/12 PASS`.
-   `./tests/e2e/upgrade-shakeout.sh reset` cleans the sandbox.
+   **Unconditional as of 7.16.1.** This step previously read "conditional",
+   qualified by a trigger list ending in "plugin name / marketplace.json
+   `source.ref` pinning" — a condition true of EVERY release, since advancing
+   `source.ref` to the new tag IS the release (step 7 above). A gate whose
+   condition never fails is unconditional wearing a qualifier, and the
+   qualifier is what invites the skip. It got skipped on 7.16.1, caught only
+   because a human asked what testing remained.
+
+   The gate's own step 9/12 is `plugin marketplace.json reflects rename + tag
+   pinning`, so it checks precisely what every release changes, for 3-5
+   minutes. Sandbox smoke (7b) tests one version in isolation; this is the only
+   gate that tests `FROM_VERSION` → this branch, the path an installed user
+   actually traverses. Runnable from any baseline — it detects stanza drift at
+   runtime and cross-checks `nx doctor`'s drift claim against the actual stanza
+   byte-diff, so a doctor false-positive/negative fails the run. Must end
+   `UPGRADE-SHAKEOUT PASSED — steps=12 skipped=0`; a non-zero `skipped` is a
+   finding, not a pass. `./tests/e2e/upgrade-shakeout.sh reset` cleans the
+   sandbox.
 
 8. **Commit on a release branch and PR to `main`** (branch protection requires a PR; do NOT direct-push).
    Base the release branch on **develop**, not main — a release PROMOTES develop's accumulated
