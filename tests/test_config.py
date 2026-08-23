@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from nexus import config as cfgmod
 from nexus.config import (
     _DEFAULTS,
     detect_test_command,
@@ -370,3 +371,80 @@ def test_set_config_value_dict_intermediates_merge_not_replace(home: Path) -> No
     data = yaml.safe_load(cfg.read_text())
     assert data["pdf"]["extractor"] == "mineru"
     assert data["pdf"]["timeout"] == 30  # sibling of the leaf survives
+
+
+# ── nexus-m20mf: get_credential's config.yml parse is cached ────────────────
+#
+# WHY: every T2 store construction calls get_credential, which re-parsed
+# config.yml on EVERY call. One nx_answer builds 40 stores across 5 _t2_ctx
+# blocks -> up to 80 parses. Measured 0.248 ms/call before, 0.009 ms after
+# (26.6x). SCOPE HONESTLY: ~20 ms against an nx_answer whose measured p50 is
+# 80 SECONDS. The bead's "90% of steady-state cost" was measured against a
+# MOCKED-I/O harness where construction is all there is. The real
+# beneficiaries are bulk callers (the indexer constructs stores per file).
+#
+# test_get_credential_parses_config_once is the one that fails pre-fix; the
+# rest pin the properties the cache must not break.
+
+
+class TestGetCredentialConfigCache:
+    def _write(self, home: Path, value: str = "sekrit") -> Path:
+        cfg = home / ".config" / "nexus" / "config.yml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(yaml.safe_dump({"credentials": {"probe_key": value}}))
+        return cfg
+
+    def test_get_credential_parses_config_once(self, home: Path, monkeypatch):
+        """Repeated reads with no file change must parse exactly once.
+
+        This is the assertion that fails without the cache — pre-fix it
+        counted one safe_load per call.
+        """
+        self._write(home)
+        monkeypatch.delenv("PROBE_KEY", raising=False)
+        monkeypatch.setattr(cfgmod, "_GLOBAL_CONFIG_CACHE", None, raising=False)
+
+        calls = {"n": 0}
+        real = cfgmod.yaml.safe_load
+
+        def counting(*a, **kw):
+            calls["n"] += 1
+            return real(*a, **kw)
+
+        monkeypatch.setattr(cfgmod.yaml, "safe_load", counting)
+        for _ in range(10):
+            assert cfgmod.get_credential("probe_key") == "sekrit"
+        assert calls["n"] == 1, f"expected 1 parse for 10 reads, got {calls['n']}"
+
+    def test_on_disk_change_invalidates_without_restart(self, home: Path, monkeypatch):
+        """Keyed on mtime_ns+size, so an edit is seen by the same process.
+
+        Deliberately stronger than the SSL-context cache (888bdee8f), which
+        documents a restart-required trade for trust-store changes.
+        """
+        cfg = self._write(home, "first")
+        monkeypatch.delenv("PROBE_KEY", raising=False)
+        monkeypatch.setattr(cfgmod, "_GLOBAL_CONFIG_CACHE", None, raising=False)
+        assert cfgmod.get_credential("probe_key") == "first"
+        cfg.write_text(yaml.safe_dump({"credentials": {"probe_key": "second"}}))
+        assert cfgmod.get_credential("probe_key") == "second"
+
+    def test_env_precedence_stays_per_call(self, home: Path, monkeypatch):
+        """Only the FILE parse is cached; env must win on every call."""
+        self._write(home, "from-file")
+        monkeypatch.setattr(cfgmod, "_GLOBAL_CONFIG_CACHE", None, raising=False)
+        monkeypatch.delenv("PROBE_KEY", raising=False)
+        assert cfgmod.get_credential("probe_key") == "from-file"
+        monkeypatch.setenv("PROBE_KEY", "from-env")
+        assert cfgmod.get_credential("probe_key") == "from-env"
+        monkeypatch.delenv("PROBE_KEY")
+        assert cfgmod.get_credential("probe_key") == "from-file"
+
+    def test_caller_mutation_cannot_poison_the_cache(self, home: Path, monkeypatch):
+        """_load_global_config returns a copy — a mutating caller must not
+        corrupt what every other reader sees."""
+        cfg = self._write(home)
+        monkeypatch.setattr(cfgmod, "_GLOBAL_CONFIG_CACHE", None, raising=False)
+        first = cfgmod._load_global_config(cfg)
+        first["credentials"] = {"probe_key": "poisoned"}
+        assert cfgmod._load_global_config(cfg)["credentials"]["probe_key"] == "sekrit"
