@@ -1,0 +1,172 @@
+# Plugin-only release channel, verify-only gate (RDR-197, nexus-a2wmi).
+#
+# This is what makes a `plugin-vX.Y.Z-n` tag mean something. It runs the
+# minimal battery against the tagged tree and PUBLISHES NOTHING -- no PyPI
+# step, no wheel build, no `.mcpb` bundle, no GitHub release asset. The
+# plugin surface and the wheel are different products with different
+# release cadences (see the RDR's Decision Rationale); this workflow is the
+# mechanical fence that makes that decoupling safe rather than a promise.
+#
+# STATELESS BY DESIGN: there is no counter file anywhere in this repo or
+# this workflow. `n` in the tag comes from `scripts/plugin_channel.py`'s
+# `next_plugin_tag_number`, which enumerates existing `plugin-v{version}-*`
+# tags -- git's own tag list is the only record of cuts (docs/rdr/
+# rdr-197-plugin-only-release-channel.md, Technical Design). Two earlier
+# designs tracked `n` in a repo file; both were refuted. Nothing here
+# tracks or resets a counter, so there is nothing to get wrong across cuts.
+#
+# SHAPE COPIED FROM plugin-drift-ledger.yml: depth-1 checkout plus an
+# EXPLICIT shallow fetch of exactly the one tag this job needs (never
+# `fetch-depth: 0`, never `fetch-tags: true` -- release.yml's own checkout
+# step records that `fetch-tags` on a depth-1 clone delivers nothing,
+# because the tag objects live outside the shallow history). This workflow
+# needs only the BASE CLIENT TAG the cut anchors to; the tag it runs on is
+# already the checkout's own HEAD.
+#
+# DELIBERATELY SKIPPED GATES (RDR-197 step 9) -- named here so a missing
+# gate reads as a decision, not an oversight:
+#   - substrate gates (T2/engine/PG-backed test legs): the plugin surface
+#     is markdown + hooks + skills; nothing in it touches a database.
+#   - migration rehearsal (tests/e2e/migration-rehearsal/): exercises the
+#     SQLite -> PG upgrade path, which a plugin cut never touches.
+#   - fresh-install MVVs: prove a virgin `nx init` journey; a plugin cut
+#     changes no installer code.
+#   - shakedown (release-sandbox.sh shakedown): exercises MinerU / PDF
+#     indexing end to end; no plugin-surface path reaches that code.
+#   - engine floor (check_engine_release_floor.py): the engine-service
+#     binary has its own independent release lifecycle; a plugin cut ships
+#     no engine change and carries no REQUIRED_ENGINE_VERSION bump.
+# None of the above executes plugin-loader content, so none of them can
+# tell you whether a plugin cut is safe. What DOES tell you that is the
+# wheel-surface allowlist proof below, which is the whole point of this
+# job.
+#
+# ALSO DELIBERATELY NOT WIRED HERE (distinct from the RDR's skip list
+# above -- this one is a known gap, not a because-it-can't-help skip):
+# `./tests/e2e/release-sandbox.sh smoke` belongs in the cut battery per the
+# RDR's "Minimal battery" section and is the only gate that proves a real
+# isolated install round-trip, but it runs in no CI workflow today (not
+# even the client release path). Wiring it in is follow-on bead F1
+# (nexus-a2wmi EXECUTION REMINDERS), not this bead.
+
+name: plugin release
+
+on:
+  push:
+    tags:
+      - 'plugin-v*'
+
+concurrency:
+  group: plugin-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify-only battery
+    runs-on: ubuntu-latest
+    env:
+      # nexus-wixar precedent: this runner provisions no service jar, so
+      # every step below would otherwise hit the autouse T2-substrate
+      # fixture's CI-only graceful skip and the job would report green
+      # having checked nothing. None of the battery below needs T2 --
+      # it is git/YAML/AST-level structure checking, the same category
+      # as ci.yml's dedicated `pytest (lint markers)` job, which sets
+      # this identically for the same reason.
+      NX_TEST_T2_SUBSTRATE: "none"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive and fetch the base client tag
+        env:
+          CUT_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Anchored tag shape is plugin-v{version}-{n} (scripts/
+          # plugin_channel.py's format_plugin_tag / _PLUGIN_TAG_RE). Fail
+          # loud on anything else rather than silently deriving garbage.
+          if ! [[ "$CUT_TAG" =~ ^plugin-v[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*$ ]]; then
+            echo "CUT_TAG '$CUT_TAG' is not an anchored plugin tag (expected" \
+                 "plugin-vX.Y.Z-n) -- refusing to guess a base tag" >&2
+            exit 1
+          fi
+          # Strip the "plugin-" prefix, then the trailing "-n": the
+          # version itself is dotted only (no dashes), so `%-*` removes
+          # exactly the cut number and nothing else.
+          without_prefix="${CUT_TAG#plugin-}"
+          base="${without_prefix%-*}"
+          echo "base client tag: $base"
+          echo "BASE_CLIENT_TAG=$base" >> "$GITHUB_ENV"
+          echo "CUT_TAG=$CUT_TAG" >> "$GITHUB_ENV"
+          # Explicit single-tag shallow fetch -- see the header comment.
+          # Needed for both the wheel-surface proof's range base (below)
+          # and the drift-ledger contract's own anchored-window checks.
+          git fetch --depth=1 origin "refs/tags/$base:refs/tags/$base"
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Run the wheel-surface proof + drift ledger contract (tests/test_plugin_release_drift_ledger.py)
+        env:
+          # The require flag and the T2 opt-out are the drift-ledger
+          # workflow's own env discipline, reused verbatim: without the
+          # flag a broken tag-fetch degrades to a silent SKIP rather than
+          # a failure, which is the exact defect class this whole channel
+          # exists to close (2026-07-25 incident, see the drift-ledger
+          # test module's own docstring).
+          NX_REQUIRE_PLUGIN_DRIFT_CHECK: "1"
+        run: |
+          set -euo pipefail
+          uv run pytest tests/test_plugin_release_drift_ledger.py -q -rs 2>&1 \
+            | tee pytest-drift-ledger.txt
+          # Vacuity belt, copied from plugin-drift-ledger.yml: on THIS gate
+          # a skip is never acceptable. The require-flag above already
+          # hard-fails the taglessness path; any skip still appearing means
+          # a new vacuity mechanism crept in around it. Fail loud instead
+          # of reporting green having checked nothing.
+          if grep -qE '[0-9]+ skipped' pytest-drift-ledger.txt; then
+            echo "VACUITY: drift-ledger tests skipped on the plugin-release" \
+                 "gate runner -- the job proved nothing." >&2
+            exit 1
+          fi
+
+      - name: Run tests/test_plugin_structure.py
+        run: uv run pytest tests/test_plugin_structure.py -q
+
+      - name: Run tests/hooks/
+        run: uv run pytest tests/hooks/ -q
+
+      - name: Run the -m lint bucket
+        run: uv run pytest -m lint -q
+
+      - name: Assert PENDING_RELEASE.md carries no entry for this cut's own range
+        run: |
+          set -euo pipefail
+          # The pytest contract run above (test_the_ledger_has_no_stale_
+          # entries) already enforces no-stale-entries against the pinned
+          # marketplace ref. This is a narrower, cheap belt beyond that:
+          # for every path this cut's OWN range (base client tag..this
+          # tag) actually touched, the ledger must not still name it --
+          # a cut that ships a path but forgets to empty its own ledger
+          # bullet would otherwise pass the broader contract test (which
+          # reasons about the pinned ref, not this specific diff) and
+          # only get caught at the next unrelated drift check.
+          touched=$(git diff --name-only "${BASE_CLIENT_TAG}..${CUT_TAG}")
+          echo "paths touched by this cut's range:"
+          echo "$touched"
+          offenders=""
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            if grep -qF -- "$path" conexus/PENDING_RELEASE.md; then
+              offenders="${offenders}${path}\n"
+            fi
+          done <<< "$touched"
+          if [ -n "$offenders" ]; then
+            echo "STALE LEDGER ENTRY: this cut ships the following path(s)," \
+                 "but conexus/PENDING_RELEASE.md still names them:" >&2
+            printf '%b' "$offenders" >&2
+            echo "Empty the covering bullet(s) before cutting -- see" \
+                 "conexus/PENDING_RELEASE.md's own header for the rule." >&2
+            exit 1
+          fi
