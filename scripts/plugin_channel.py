@@ -82,6 +82,7 @@ __all__ = [
     "assert_tag_visibility",
     "current_branch_name",
     "format_plugin_tag",
+    "is_channel_path",
     "is_cut_branch_for",
     "next_plugin_tag_number",
     "parse_plugin_tag",
@@ -249,7 +250,11 @@ def is_cut_branch_for(
     return current_branch_name(cwd=cwd) == f"plugin-release/{version}-{n}"
 
 
-def _is_channel_path(path: str) -> bool:
+def is_channel_path(path: str) -> bool:
+    """Whether *path* is content a plugin cut may ship: inside the
+    allowlist and not carved out by :data:`DENIED_PREFIXES`. The single
+    predicate behind the wheel-surface proof and the cut script's own
+    allowlist decisions (R2 finding: two verbatim copies drift)."""
     if any(path_has_prefix(path, denied) for denied in DENIED_PREFIXES):
         return False
     if path in ALLOWED_EXACT:
@@ -288,4 +293,4 @@ def wheel_surface_offenders(
             f"(rc {diff.returncode}): {diff.stderr.strip()}"
         )
     changed = [line.strip() for line in diff.stdout.splitlines() if line.strip()]
-    return sorted(path for path in changed if not _is_channel_path(path))
+    return sorted(path for path in changed if not is_channel_path(path))

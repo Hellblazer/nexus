@@ -138,7 +138,14 @@ jobs:
         run: uv run pytest tests/hooks/ -q
 
       - name: Run the -m lint bucket
-        run: uv run pytest -m lint -q
+        # test_wire_contract_pairing_lint.py is EXCLUDED here (R2 gate,
+        # nexus-a2wmi.10): it walks v* client-tag history (v7.6.1..HEAD)
+        # that this workflow's deliberate single-tag fetch cannot resolve,
+        # so on a real cut it would fail for tag availability, not
+        # correctness. The RDR's cost discipline says the battery bends,
+        # not the fetch; the module still runs in ci.yml's dedicated lint
+        # job, which checks out with fetch-depth 0 for exactly this need.
+        run: uv run pytest -m lint -q --ignore=tests/test_wire_contract_pairing_lint.py
 
       - name: Assert PENDING_RELEASE.md carries no entry for this cut's own range
         run: |

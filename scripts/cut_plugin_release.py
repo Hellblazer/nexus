@@ -57,6 +57,7 @@ from plugin_channel import (  # noqa: E402
     DENIED_PREFIXES,
     PLUGIN_BY_ALLOWLIST_PREFIX,
     format_plugin_tag,
+    is_channel_path,
     next_plugin_tag_number,
     path_has_prefix,
 )
@@ -113,7 +114,11 @@ def check_main_readiness(repo: Path) -> list[str]:
     """Every machinery miss on origin/main, described. Empty means ready.
 
     One scan collects ALL misses (never abort-on-first: one refusal
-    yields the whole fix list — the release-preflight lesson).
+    yields the whole fix list — the release-preflight lesson). The
+    marker check is a substring probe, spoofable in principle (R2 gate,
+    accepted): its job is catching the honest not-yet-released state,
+    and a spoofed marker still faces the cut branch's own battery, where
+    the real rules run.
     """
     misses: list[str] = []
     for path, markers in REQUIRED_ON_MAIN.items():
@@ -137,12 +142,9 @@ def _allowlist_pathspec() -> list[str]:
     return spec
 
 
-def _is_allowlisted(path: str) -> bool:
-    if any(path_has_prefix(path, denied) for denied in DENIED_PREFIXES):
-        return False
-    if path in ALLOWED_EXACT:
-        return True
-    return any(path_has_prefix(path, allowed) for allowed in ALLOWED_PREFIXES)
+# The single allowlist predicate lives in plugin_channel (is_channel_path);
+# this module used to carry a verbatim copy (R2 finding: two copies drift).
+_is_allowlisted = is_channel_path
 
 
 _BEAD_ID_RE = re.compile(r"\bnexus-[a-z0-9]+(?:\.[a-z0-9]+)*\b")
@@ -160,6 +162,9 @@ _BEAD_MARKER_RE = re.compile(
 #: commits always carry test ride-alongs (today's live nexus-2v0v7 entry
 #: does) — while the stated rationale is coupling to content the import
 #: must hold back. The refusal-and-defer semantics are unchanged.
+#: scripts/ and .github/ are likewise DELIBERATELY out (R2 gate): they
+#: are repo-operational, never delivered to an installed user, and a
+#: plugin cut cannot carry them to main regardless — nothing strands.
 _SHIPPED_SURFACE_PREFIXES: tuple[str, ...] = (
     "src/",
     "conexus/plans/",
@@ -169,33 +174,63 @@ _SHIPPED_SURFACE_PREFIXES: tuple[str, ...] = (
 )
 
 
+def _is_continuation(line: str) -> bool:
+    return line.startswith("  ") or line.startswith("\t")
+
+
+def _ledger_blocks(ledger_text: str) -> list[tuple[bool, list[str]]]:
+    """Group the ledger into (is_bullet_block, lines) runs.
+
+    A blank line INSIDE a bullet stays with it when the next non-blank
+    line is an indented continuation — a CommonMark paragraph break
+    within one list item (R2 finding: treating the blank as an
+    unconditional boundary split a two-paragraph entry, judged its first
+    half covered, erased it, and orphaned the second half's wheel-half
+    warning and `bead:` marker).
+    """
+    lines = ledger_text.splitlines(keepends=True)
+    blocks: list[tuple[bool, list[str]]] = []
+    i = 0
+    total = len(lines)
+    while i < total:
+        line = lines[i]
+        if not line.startswith("- "):
+            blocks.append((False, [line]))
+            i += 1
+            continue
+        entry = [line]
+        i += 1
+        while i < total:
+            nxt = lines[i]
+            if _is_continuation(nxt):
+                entry.append(nxt)
+                i += 1
+            elif nxt.strip() == "":
+                j = i
+                while j < total and lines[j].strip() == "":
+                    j += 1
+                if j < total and _is_continuation(lines[j]):
+                    entry.extend(lines[i:j])
+                    i = j
+                else:
+                    break
+            else:
+                break
+        blocks.append((True, entry))
+    return blocks
+
+
 def path_entries(ledger_text: str) -> list[str]:
     """The ledger's ENTRIES: bullet groups carrying a path-shaped span.
 
     Bullets with no backtick path (the file's header contract prose) are
     not entries and are never attributed.
     """
-    blocks: list[str] = []
-    entry: list[str] = []
-
-    def flush() -> None:
-        if entry:
-            blocks.append("".join(entry))
-            entry.clear()
-
-    for line in ledger_text.splitlines(keepends=True):
-        if line.startswith("- "):
-            flush()
-            entry.append(line)
-        elif entry and (line.startswith("  ") or line.startswith("\t")):
-            entry.append(line)
-        else:
-            flush()
-    flush()
     return [
-        block
-        for block in blocks
-        if any("/" in span for span in re.findall(r"`([^`]+)`", block))
+        "".join(lines)
+        for is_bullet, lines in _ledger_blocks(ledger_text)
+        if is_bullet
+        and any("/" in span for span in re.findall(r"`([^`]+)`", "".join(lines)))
     ]
 
 
@@ -232,7 +267,23 @@ def atomic_split_check(repo: Path, base_tag: str, allowlisted: list[str]) -> Non
     impossible. The only path forward is editing PENDING_RELEASE.md to
     DEFER that entry, a reviewable change a human makes deliberately.
     There is no override flag and no warn mode. Runs BEFORE the branch
-    exists; a raise leaves the repository untouched (.8's seam contract).
+    exists; a raise leaves branch and working-tree state untouched (only
+    the fetch's remote-tracking/tag refresh has happened — .8's seam
+    contract).
+
+    KNOWN BOUNDARIES (R2 gate, accepted with their backstops):
+
+    - Attribution is by commit MESSAGE: a straddling commit that does
+      not name its bead escapes this scan. Honest-attribution is the
+      same boundary the round-counting contract accepts (a caller that
+      lies defeats any stateless check); the backstops are the stray-
+      path assert on the branch (wheel content cannot ship regardless)
+      and the human review of the cut PR.
+    - Deleting a ledger entry instead of deferring it is invisible HERE,
+      but not overall: the deleted entry's paths still drift from the
+      pinned tag, so develop's own ledger contract
+      (test_every_drifted_file_is_declared_in_the_ledger) goes red on
+      the next push — falsifying the ledger is already a caught state.
     """
     shown = _git(repo, "show", f"origin/develop:{LEDGER}", check=False)
     if shown.returncode != 0:
@@ -240,8 +291,11 @@ def atomic_split_check(repo: Path, base_tag: str, allowlisted: list[str]) -> Non
     problems: list[str] = []
     for entry in path_entries(shown.stdout):
         bead = attribute_entry(entry)
+        # -F: fixed-string matching. The default BRE would let the dot in
+        # an id like nexus-a2wmi.5 match any character (R2 finding —
+        # spurious refusals on near-miss commit text).
         shas = _git(
-            repo, "log", f"{base_tag}..origin/develop",
+            repo, "log", "-F", f"{base_tag}..origin/develop",
             f"--grep={bead}", "--format=%H",
         ).stdout.split()
         offending: set[str] = set()
@@ -300,30 +354,14 @@ def _rewrite_ledger(repo: Path) -> None:
     survives untouched, as does an entry naming no path at all.
     """
     ledger = repo / LEDGER
-    lines = ledger.read_text(encoding="utf-8").splitlines(keepends=True)
     kept: list[str] = []
-    entry: list[str] = []
-
-    def flush() -> None:
-        if not entry:
-            return
-        text = "".join(entry)
-        spans = [s for s in re.findall(r"`([^`]+)`", text) if "/" in s]
-        covered = bool(spans) and all(_is_allowlisted(s) for s in spans)
-        if not covered:
-            kept.extend(entry)
-        entry.clear()
-
-    for line in lines:
-        if line.startswith("- "):
-            flush()
-            entry.append(line)
-        elif entry and (line.startswith("  ") or line.startswith("\t")):
-            entry.append(line)
-        else:
-            flush()
-            kept.append(line)
-    flush()
+    for is_bullet, lines in _ledger_blocks(ledger.read_text(encoding="utf-8")):
+        if is_bullet:
+            text = "".join(lines)
+            spans = [s for s in re.findall(r"`([^`]+)`", text) if "/" in s]
+            if bool(spans) and all(_is_allowlisted(s) for s in spans):
+                continue  # covered: this cut ships it
+        kept.extend(lines)
     ledger.write_text("".join(kept), encoding="utf-8")
 
 
@@ -360,6 +398,14 @@ def perform_cut(
         raise CutRefused(f"base tag {base_tag!r} is not a client tag vX.Y.Z")
     version = match.group(1)
 
+    # FIRST: refresh remote-tracking refs AND tags. Every judgment below
+    # (readiness against origin/main, the import diff, the split check's
+    # commit scan, n's enumeration) reads origin/* state — a stale clone
+    # would silently judge outdated branches (R2 finding). This mutates
+    # only remote-tracking refs and the tag list, never branch or
+    # working-tree state.
+    _git(repo, "fetch", "--tags", "--force", "origin")
+
     misses = check_main_readiness(repo)
     if misses:
         raise CutRefused(
@@ -368,7 +414,6 @@ def perform_cut(
             + "\n  ".join(misses)
         )
 
-    _git(repo, "fetch", "--tags", "--force", "origin")
     n = next_plugin_tag_number(version, cwd=repo)
     tag = format_plugin_tag(version, n)
 

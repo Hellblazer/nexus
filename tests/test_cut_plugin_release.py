@@ -540,6 +540,78 @@ class TestAtomicSplit:
         }
         assert options == {"-h", "--help", "--repo"}
 
+    def test_a_two_paragraph_entry_stays_one_entry(self, tmp_path: pathlib.Path) -> None:
+        """R2 finding: a blank line inside a bullet (a CommonMark
+        paragraph break within one list item) was treated as an entry
+        boundary — the first half was judged covered and ERASED while
+        the second half's wheel warning and bead: marker survived as
+        orphaned prose. Both parsers must keep the item whole."""
+        from cut_plugin_release import _rewrite_ledger, attribute_entry, path_entries
+
+        entry = (
+            "- `conexus/agents/dev.md`: guidance half of a split delivery\n"
+            "\n"
+            "  the wheel half is `src/nexus/plans/x.py` and ships at the\n"
+            "  next client release, not on a plugin cut.\n"
+            "  bead: nexus-fffff\n"
+        )
+        text = "# Pending\n" + entry
+        entries = path_entries(text)
+        assert len(entries) == 1
+        assert "wheel half" in entries[0]
+        assert attribute_entry(entries[0]) == "nexus-fffff"
+
+        repo = tmp_path / "ledgeronly"
+        (repo / "conexus").mkdir(parents=True)
+        (repo / "conexus" / "PENDING_RELEASE.md").write_text(text, encoding="utf-8")
+        _rewrite_ledger(repo)
+        after = (repo / "conexus" / "PENDING_RELEASE.md").read_text(encoding="utf-8")
+        assert after == text  # uncovered split-delivery entry survives WHOLE
+
+    def test_bead_id_matching_is_fixed_string(self, tmp_path: pathlib.Path) -> None:
+        """R2 finding: --grep's default BRE let the dot in nexus-xxxxx.5
+        match any character, attributing near-miss commit text. With -F
+        the near-miss commit is not scanned and the cut proceeds."""
+        repo = _mini_nexus(tmp_path, payload="cleanbead")
+        # The fixture returns checked out on main; the scenario commits
+        # must land on DEVELOP or the push republishes the old branch
+        # and the test goes vacuous (test-validator finding, R2 gate).
+        _run(repo, "checkout", "-q", "develop")
+        # A wheel-touching commit whose text is a NEAR MISS for the
+        # ledger bead id under BRE dot-matching (nexus-eeeee vs a
+        # dotted-id shape): use a dotted ledger bead to expose it.
+        _write(repo, "src/nexus/near_miss.py", "wheel content\n")
+        _run(repo, "add", "-A")
+        _run(repo, "commit", "-q", "-m", "unrelated: nexus-eeeeeX5 work")
+        _write(
+            repo,
+            "conexus/PENDING_RELEASE.md",
+            "# Pending\n- `conexus/hooks/hook.py`: guard tightened (nexus-eeeee.5)\n",
+        )
+        _run(repo, "add", "-A")
+        _run(repo, "commit", "-q", "-m", "fix: hook guard (nexus-eeeee.5)")
+        _run(repo, "push", "-q", "origin", "develop")
+        result = _cut(repo)
+        assert result["moved_plugins"] == ["conexus"]
+
+    def test_an_unattributed_straddling_commit_escapes_the_scan(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """KNOWN BOUNDARY, pinned so it is a decision and not a surprise:
+        attribution is by commit message, so a straddling commit that
+        never names its bead is not scanned. Backstops: the stray-path
+        assert (wheel content cannot ship regardless) and human review
+        of the cut PR. Documented in atomic_split_check's docstring."""
+        repo = _mini_nexus(tmp_path, payload="cleanbead")
+        _run(repo, "checkout", "-q", "develop")  # see the fixed-string test
+        _write(repo, "src/nexus/unnamed.py", "wheel half, bead never named\n")
+        _write(repo, "conexus/hooks/hook.py", "v3 coupled to the wheel half\n")
+        _run(repo, "add", "-A")
+        _run(repo, "commit", "-q", "-m", "a commit that names no bead")
+        _run(repo, "push", "-q", "origin", "develop")
+        result = _cut(repo)  # proceeds: the scan cannot see the coupling
+        assert result["moved_plugins"] == ["conexus"]
+
     def test_the_real_ledger_attributes_cleanly(self) -> None:
         """Property smoke over the LIVE ledger: every path-carrying entry
         attributes to exactly one bead. Asserts the property, never a
