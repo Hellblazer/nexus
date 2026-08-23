@@ -246,6 +246,121 @@ class TestDispatchIsNonBlocking:
         assert "version_lockstep_action.py" in flat
 
 
+class TestPluginChannelInstallSilence:
+    """RDR-197 P1e (nexus-a2wmi.5): pins RDR Critical Assumption 2 -- a
+    plugin-channel cut (``plugin-vX.Y.Z-n``) moves marketplace.json's
+    ``source.ref`` only. It never touches plugin.json's ``version`` field,
+    which is the only thing this hook reads to decide whether to nudge +
+    dispatch an upgrade. A plugin cut must therefore leave the hook silent.
+    """
+
+    @pytest.fixture()
+    def plugin_channel_install(self, tmp_path: Path) -> Path:
+        """A fixture repo layout mimicking a plugin-channel cut: a
+        marketplace.json at the repo root carrying a ``plugin-vX.Y.Z-n``
+        source.ref, and a conexus/.claude-plugin/plugin.json (the actual
+        CLAUDE_PLUGIN_ROOT payload) whose version is UNCHANGED. Returns the
+        plugin root.
+        """
+        repo_root = tmp_path
+        mp_dir = repo_root / ".claude-plugin"
+        mp_dir.mkdir(parents=True)
+        (mp_dir / "marketplace.json").write_text(
+            json.dumps(
+                {
+                    "name": "nexus-plugins",
+                    "plugins": [
+                        {
+                            "name": "conexus",
+                            "source": {
+                                "source": "git-subdir",
+                                "url": "https://github.com/Hellblazer/nexus.git",
+                                "path": "conexus",
+                                "ref": "plugin-v7.15.0-1",
+                            },
+                            "version": "7.15.0",
+                        }
+                    ],
+                }
+            )
+        )
+        plugin_root = repo_root / "conexus"
+        pj_dir = plugin_root / ".claude-plugin"
+        pj_dir.mkdir(parents=True)
+        (pj_dir / "plugin.json").write_text(
+            json.dumps({"name": "conexus", "version": "7.15.0"})
+        )
+        return plugin_root
+
+    def test_plugin_cut_with_unchanged_version_is_silent(
+        self, mod, plugin_channel_install, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """Steps 2-3: a plugin cut (source.ref moved, version unchanged)
+        with a marker already matching plugin.json's version -- the hook
+        must attempt no upgrade."""
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_channel_install))
+        marker = tmp_path / "marker"
+        marker.write_text("7.15.0")  # already in lockstep with plugin.json
+        monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(marker))
+        dispatched: list[str] = []
+        monkeypatch.setattr(mod, "dispatch_action", lambda v: dispatched.append(v))
+
+        mod.main()
+
+        assert capsys.readouterr().out.strip() == "", (
+            "a plugin-channel cut must not provoke a nudge (RDR-197 CA-2)"
+        )
+        assert dispatched == [], (
+            "a plugin-channel cut must not provoke an upgrade attempt (RDR-197 CA-2)"
+        )
+
+    def test_hook_still_upgrades_when_plugin_version_is_genuinely_ahead(
+        self, mod, plugin_channel_install, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """Step 4 (falsifier): same plugin-channel fixture, but the marker
+        is stale relative to plugin.json's version. The hook must still
+        nudge + dispatch -- proving the silence above is not because this
+        test suite (or the hook) has been neutered. Red-verified manually
+        by temporarily stubbing the hook's dispatch call and restoring it
+        (see nexus-a2wmi.5 completion report; not part of the committed
+        suite)."""
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_channel_install))
+        marker = tmp_path / "marker"
+        marker.write_text("7.14.0")  # stale -- plugin.json says 7.15.0
+        monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(marker))
+        dispatched: list[str] = []
+        monkeypatch.setattr(mod, "dispatch_action", lambda v: dispatched.append(v))
+
+        mod.main()
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+        assert dispatched == ["7.15.0"]
+
+    def test_hook_never_reads_source_ref(self) -> None:
+        """Step 5: loud pin. If the hook ever starts reading marketplace.json
+        or a source.ref field, this must break here -- not in a user's
+        session -- naming the bead and RDR that froze the contract.
+
+        A source-text scan (rather than a behavioral seam) is the least
+        brittle option available: the hook is a small, stdlib-only script
+        with a stable, narrow contract (plugin.json's ``version`` field
+        plus the marker file, see the module docstring), and none of these
+        tokens has any legitimate reason to appear in it. A behavioral pin
+        would require inventing a marketplace.json-reading seam the hook
+        does not have today, which is more code to maintain than three
+        forbidden substrings and no more resistant to the regression this
+        guards against.
+        """
+        text = SCRIPT.read_text()
+        for needle in ("source.ref", "source_ref", "marketplace.json"):
+            assert needle not in text, (
+                f"version_lockstep_hook.py must never read {needle!r} -- "
+                f"the hook keys off plugin.json's version field only "
+                f"(nexus-a2wmi.5, RDR-197 CA-2: a plugin cut must stay silent)"
+            )
+
+
 class TestRunsUnderBareInterpreter:
     def test_end_to_end_match_silent(self, plugin_root, tmp_path) -> None:
         """Invoke the script as a subprocess (mimics _run_python_hook.sh)
