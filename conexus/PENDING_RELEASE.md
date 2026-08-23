@@ -31,6 +31,23 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.16.0)
 
+- `conexus/commands/rdr-create.md`: nexus-bc292 — added a PRIOR-ART SCAN
+  step that runs BEFORE drafting. The command already pre-loads every
+  existing RDR with title and status, but framed it as "data … no
+  additional tool calls needed", which reads as reference material for
+  picking the next ID rather than a corpus to mine. Measured failure:
+  RDR-198 was drafted claiming a novel diagnosis while RDR-164 —
+  present in that same pre-load table — had already reached it, shipped
+  the fix for one domain, and named two resulting bugs. The new step
+  requires classifying each overlapping RDR as origin / precedent /
+  adjacent-draft / superseded, recording the result in a
+  `## Relationship to Prior RDRs` section, and writing one line if the
+  scan finds nothing (an unrecorded dead end is indistinguishable from
+  not having looked).
+  **INERT UNTIL RELEASE.** Commands load from the pinned v7.16.0 tag,
+  so `/conexus:rdr-create` keeps its current text in every running
+  session until the next release or plugin cut ships.
+
 - `conexus/skills/using-nx-skills/SKILL.md`: nexus-bc292 — replaced the
   lead sentence "You MUST invoke `Skill`" (measured, not assumed, not to
   work: across 6 sandboxed eval-corpus runs exercising exactly this
