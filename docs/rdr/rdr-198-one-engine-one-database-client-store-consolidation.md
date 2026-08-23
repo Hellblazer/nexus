@@ -165,10 +165,11 @@ has expired — but this RDR does not propose undoing the domain split at all. I
 proposes collapsing the TRANSPORT beneath it, which RDR-063 never argued for in
 the first place. RDR-063 is therefore context, not justification.
 
-### RDR-164 — the same diagnosis, already proven and shipped (closed)
+### RDR-164 — precedent for the withdrawn scope, not for this one (closed)
 
-RDR-164 reached this RDR's Gap 2 independently, for the collection- and
-document-lifecycle domain, and shipped the fix. Its words:
+RDR-164 reached the diagnosis behind this RDR's **WITHDRAWN** engine-side
+scope — non-atomic client-side cross-store orchestration — for the collection-
+and document-lifecycle domain, and shipped the fix. Its words:
 
 > *"This shape is a **SQLite-era artifact**… there was no way to express
 > 'deleting a collection purges all its derived state' as one transaction…
@@ -182,10 +183,16 @@ delete never purged `aspect_extraction_queue`, so the aspect worker churned on
 rows whose collection was gone) and `nexus-cugrk` (an orphan centroid kept
 attracting chunks to a deleted topic).
 
-**This materially raises the confidence of Gap 2.** The orphan-state bug class
-is not hypothesised here; it is documented, with instances, and the atomic-
-cascade remedy is already in production for one domain. RDR-198 argues the same
-remedy generalises from lifecycle cascades to operations at large.
+**What this means now that the scope is narrowed.** RDR-164 is strong support
+for the atomicity work — the orphan-state bug class is documented, with two
+named instances, and the atomic-cascade remedy is in production for one domain.
+It is **not** support for THIS RDR, which proposes no atomicity work at all.
+
+Recorded here deliberately: when the deferred atomicity RDR is written, RDR-164
+is its precedent and this is where to start. An earlier draft of RDR-198 leaned
+on RDR-164 to raise confidence in a gap that has since been withdrawn — a
+transfer of confidence from a sibling domain to an instance that had not been
+observed in this one. The gate flagged that as overstated, and it was.
 
 ### RDR-193 — the adjacent draft (draft, UNMERGED)
 
@@ -216,7 +223,7 @@ free. One dependency worth recording for later: RDR-193 Part A *grows* the
 `staging` schema, so whenever the deferred schema-boundary question is picked
 up, RDR-193's outcome is an input to it.
 
-### The family this belongs to
+### The family this does NOT belong to
 
 RDR-154 and RDR-156 established the "lean on Postgres" line — put integrity and
 computation in the database that can express them. RDR-164 applied it to
