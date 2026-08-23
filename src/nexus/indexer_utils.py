@@ -1374,6 +1374,41 @@ def run_file_loop(
             )
             chunks = 0
             skip_reason = str(exc)
+        except Exception as exc:
+            # nexus-1jtob: NAME THE FILE. Both loop paths let an unrecognised
+            # exception escape ``run_file_loop`` -- the sequential path by
+            # propagating out of this call, the concurrent path via
+            # ``raise failures[0][1]`` below. Neither carried the file, so the
+            # traceback always surfaced at the phase boundary ("RDR indexing
+            # done") with NO indication of which document was rejected. Measured
+            # cost: 151 aborted index runs across four days (2026-08-19..08-23)
+            # where the offending file could not be identified from the log at
+            # all, because the ONE failure that ends the run was the one failure
+            # nothing logged -- the SUPPRESSED siblings below were already
+            # logged with ``file=``, the raised one was not.
+            #
+            # ``add_note`` rather than wrapping in a new exception type, ON
+            # PURPOSE: callers classify this failure BY TYPE (the
+            # ``UnextractableContentError`` arm above, the transient- and
+            # quality-gate containment tests, ``skip_floor_breached``), so
+            # re-raising a different class would silently change containment
+            # behaviour while looking like a logging change. A note leaves
+            # ``type(exc)`` and ``str(exc)`` byte-identical and only enriches
+            # the rendered traceback.
+            #
+            # NOTE ONLY -- NO LOGGING HERE, and that is load-bearing. An
+            # earlier revision logged from this handler and broke
+            # ``test_unclassified_exception_still_fails_the_run``: with
+            # concurrency=2 over 50 trivial files, the structlog write is slow
+            # relative to the loop body, so the failing task sat in stdout I/O
+            # while the pool churned through every remaining file. All 50
+            # started before ``wait(..., FIRST_EXCEPTION)`` returned and
+            # ``fut.cancel()`` could fire, silently defeating the
+            # cancel-pending-work contract. ``add_note`` is in-memory and
+            # cannot do that. The log line lives at the two RAISE sites below,
+            # after the drain, where it races nothing.
+            exc.add_note(f"nexus: raised while indexing {file}")
+            raise
         with cb_lock:
             if skip_reason is not None:
                 skipped[0] += 1
@@ -1388,7 +1423,15 @@ def run_file_loop(
 
     if concurrency <= 1:
         for score, file in files:
-            _process(score, file)
+            try:
+                _process(score, file)
+            except Exception as exc:  # nexus-1jtob: log at the raise site
+                _log.error(
+                    "index_file_failed",
+                    file=str(file), error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                raise
         return _finish_ok()
 
     from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait  # noqa: PLC0415 — leaf module keeps import surface minimal
@@ -1450,4 +1493,13 @@ def run_file_loop(
                 "index_file_loop_skip_summary",
                 skipped=skipped[0], total=len(files),
             )
+        # nexus-1jtob: log the failure that ENDS the run, symmetrically with
+        # the suppressed siblings above. Before this, the suppressed ones were
+        # logged with ``file=`` and the raised one was not -- so the only
+        # failure that mattered was the only one nothing named.
+        _log.error(
+            "index_file_failed",
+            file=str(failures[0][0]), error=str(failures[0][1]),
+            error_type=type(failures[0][1]).__name__,
+        )
         raise failures[0][1]

@@ -99,14 +99,34 @@ def _make_vector_service_error(
 # ── Baseline retry/backoff contract ──────────────────────────────────────
 
 
-def test_retries_on_transient_403_then_succeeds() -> None:
+def test_retries_on_transient_503_then_succeeds() -> None:
+    """Baseline retry/backoff contract. The SUBJECT here is the curve and the
+    brake, not the status -- the status is only a vehicle.
+
+    Vehicle changed 403 -> 503 (nexus-1jtob, 2026-08-23). 403 was removed from
+    ``_RETRYABLE_ETL_HTTP_STATUSES``: it sat there on a "transient edge 403"
+    premise that was never measured, and conexus's sweep of 3,675,603 edge
+    log records over 2026-08-19..08-23 found zero 403s on this path. The real
+    403s are deterministic AWS WAF refusals keyed on request-body content, and
+    retrying them 5-8x with escalating brake amplified load against our own
+    edge for requests that could never succeed.
+
+    This file already knew: see the comments at the two tests below noting
+    "403 is non-retryable at the vector classifier". The ETL path was the
+    outlier, and this test was the pin holding it there.
+
+    503 is genuinely transient (an ALB with no healthy target returns it), so
+    the backoff assertions below are unchanged and still falsifiable.
+    ``test_403_is_not_retryable_edge_refusals_are_deterministic`` pins the
+    removal itself.
+    """
     call_count = 0
 
     def flaky() -> str:
         nonlocal call_count
         call_count += 1
         if call_count < 2:
-            raise _make_status_exc(403)
+            raise _make_status_exc(503)
         return "ok"
 
     with patch("nexus.retry.time.sleep") as mock_sleep, patch(
@@ -117,6 +137,31 @@ def test_retries_on_transient_403_then_succeeds() -> None:
     # nexus-cy9u7 CRITICAL-2: the brake now trips on this retry too (base
     # escalating default 2.0), floored above the local backoff's 1.0.
     mock_sleep.assert_called_once_with(2.0)
+
+
+def test_403_is_not_retryable_edge_refusals_are_deterministic() -> None:
+    """nexus-1jtob: the removal itself, pinned so it cannot silently return.
+
+    A 403 on this path is either an AWS WAF refusal (deterministic in the
+    request body -- the same payload is refused every time) or a control-plane
+    authz verdict. Neither is transient. One attempt, no sleep.
+    """
+    for label, make in (
+        ("httpx", lambda: _make_status_exc(403)),
+        ("VectorServiceError", lambda: _make_vector_service_error(403)),
+    ):
+        call_count = 0
+
+        def always_403() -> str:
+            nonlocal call_count
+            call_count += 1
+            raise make()
+
+        with patch("nexus.retry.time.sleep") as mock_sleep:
+            with pytest.raises((httpx.HTTPStatusError, VectorServiceError)):
+                _etl_with_retry(always_403)
+        assert call_count == 1, f"{label}: a 403 must not be retried even once"
+        mock_sleep.assert_not_called()
 
 
 def test_backoff_curve_1_2() -> None:

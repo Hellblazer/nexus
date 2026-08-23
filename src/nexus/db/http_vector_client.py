@@ -1077,6 +1077,66 @@ def _request(
         return _once_with_gateway_retry()
 
 
+#: ``Server`` value AWS's ALB stamps on a response IT generated — a WAF rule
+#: refusal, a listener-level rejection — rather than proxying from the app.
+#: MEASURED against the live edge 2026-08-23 (conexus-a5), not recalled.
+_EDGE_SERVER_PREFIX = "awselb/"
+
+
+def _edge_server(headers: object) -> str | None:
+    """Return the ``Server`` value when the EDGE answered, else ``None``.
+
+    nexus-1jtob. A 403 from the AWS WAF and a 403 from the application are the
+    same integer and mean opposite things:
+
+      WAF/ALB refusal   server: awselb/2.0, content-type: text/html, a 118-byte
+                        HTML page. Never reached the app. DETERMINISTIC in the
+                        request body — retrying cannot help.
+      application       NO ``Server`` header at all, no content-type, PLAIN TEXT
+                        body ("Missing or malformed Authorization header").
+
+    This module previously read only ``e.code`` and the body, so 151 index-run
+    aborts over four days produced ZERO header evidence and the operator was
+    sent after the token (see :func:`_managed_remedy`) for a rejection the token
+    had nothing to do with. The actual cause was WAF ``KnownBadInputs`` sub-rule
+    ``JavaDeserializationRCE_BODY`` firing on a JVM root package prefix in the
+    body: RDR-195 quotes a JVM stack trace, so the document DOCUMENTING the bug
+    could not be indexed because the bug report reads as an exploit payload.
+
+    POSITIVE TEST, deliberately. Key on ``awselb/`` being PRESENT — never on a
+    header being absent and never on an expected app value. Two reasons. The
+    app emits no ``Server`` at all, so "not nginx" would have been inverted; and
+    the engine sits behind an nginx TLS sidecar, so a proxied engine response
+    may legitimately carry ``server: nginx/...``. The not-``awselb`` population
+    is heterogeneous and must not be read as "therefore the control plane".
+    """
+    try:
+        get = headers.get  # type: ignore[attr-defined]
+    except AttributeError:
+        return None
+    try:
+        server = get("Server") or get("server")
+    except Exception:  # noqa: BLE001 — header access is best-effort diagnostics
+        return None
+    if isinstance(server, str) and server.strip().lower().startswith(_EDGE_SERVER_PREFIX):
+        return server.strip()
+    return None
+
+
+def _edge_refusal_remedy(server: str, code: int) -> str:
+    """Remedy naming the EDGE, for a response the application never saw."""
+    return (
+        f"this was rejected at the EDGE (server={server}), not by the nexus "
+        f"application — the request never reached it, so the HTTP {code} says "
+        "nothing about NX_SERVICE_TOKEN. An AWS WAF managed rule is the usual "
+        "cause and it matches on REQUEST BODY CONTENT, so it is deterministic: "
+        "the same payload will be refused every time. Documentation that quotes "
+        "exploit payloads (a JVM stack trace, a deserialization gadget, an "
+        "injection string) is the known trigger — see nexus-1jtob. Check the "
+        "edge/WAF logs for the blocking rule, not your credentials."
+    )
+
+
 def _managed_remedy() -> str | None:
     """Remedy text when the client is pointed at an EXPLICIT managed endpoint.
 
@@ -1180,12 +1240,20 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
             ]
             if extras:
                 msg += f" ({', '.join(extras)})"
-        remedy = _managed_remedy() if e.code in (401, 403) else None
-        if remedy is None:
-            remedy = _local_voyage_restart_remedy(e.code, str(err.get("error", err)))
+        # nexus-1jtob: the EDGE check runs FIRST and wins. _managed_remedy is
+        # the "check your token" text, and for a WAF refusal it is not merely
+        # unhelpful, it is wrong — it cost four days of chasing credentials for
+        # a rejection the credentials had nothing to do with.
+        edge_server = _edge_server(e.headers)
+        if edge_server:
+            remedy: str | None = _edge_refusal_remedy(edge_server, e.code)
+        else:
+            remedy = _managed_remedy() if e.code in (401, 403) else None
+            if remedy is None:
+                remedy = _local_voyage_restart_remedy(e.code, str(err.get("error", err)))
         if remedy:
             msg += f"\n{remedy}"
-        raise VectorServiceError(msg, code=e.code) from e
+        raise VectorServiceError(msg, code=e.code, edge_refusal=bool(edge_server)) from e
     except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
         # Connection-level failure (bad/unreachable endpoint). Reframe with a
         # remedy ONLY for an explicit managed endpoint; local/lease users keep
@@ -1209,12 +1277,16 @@ def _get(path: str, *, tenant: str = "default") -> Any:
         except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
             err = {"error": body_bytes.decode(errors="replace")}
         msg = f"GET {path} → HTTP {e.code}: {err.get('error', err)}"
-        remedy = _managed_remedy() if e.code in (401, 403) else None
-        if remedy is None:
-            remedy = _local_voyage_restart_remedy(e.code, str(err.get("error", err)))
+        edge_server = _edge_server(e.headers)  # nexus-1jtob — see _post
+        if edge_server:
+            remedy: str | None = _edge_refusal_remedy(edge_server, e.code)
+        else:
+            remedy = _managed_remedy() if e.code in (401, 403) else None
+            if remedy is None:
+                remedy = _local_voyage_restart_remedy(e.code, str(err.get("error", err)))
         if remedy:
             msg += f"\n{remedy}"
-        raise VectorServiceError(msg, code=e.code) from e
+        raise VectorServiceError(msg, code=e.code, edge_refusal=bool(edge_server)) from e
     except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
         remedy = _managed_remedy()
         if remedy is None:
@@ -1232,9 +1304,15 @@ class VectorServiceError(RuntimeError):
     JAR → fall back to /collections + /count).
     """
 
-    def __init__(self, message: str, *, code: int | None = None) -> None:
+    def __init__(
+        self, message: str, *, code: int | None = None, edge_refusal: bool = False
+    ) -> None:
         super().__init__(message)
         self.code = code
+        #: nexus-1jtob: True when the EDGE (AWS ALB/WAF) generated this
+        #: response and the application never saw the request. Deterministic
+        #: in the request body — a caller must not retry it.
+        self.edge_refusal = edge_refusal
 
 
 # ── Collection-handle stub ────────────────────────────────────────────────────
