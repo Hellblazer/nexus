@@ -159,21 +159,14 @@ jobs:
           # bullet would otherwise pass the broader contract test (which
           # reasons about the pinned ref, not this specific diff) and
           # only get caught at the next unrelated drift check.
-          touched=$(git diff --name-only "${BASE_CLIENT_TAG}..${CUT_TAG}")
-          echo "paths touched by this cut's range:"
-          echo "$touched"
-          offenders=""
-          while IFS= read -r path; do
-            [ -z "$path" ] && continue
-            if grep -qF -- "$path" conexus/PENDING_RELEASE.md; then
-              offenders="${offenders}${path}\n"
-            fi
-          done <<< "$touched"
-          if [ -n "$offenders" ]; then
-            echo "STALE LEDGER ENTRY: this cut ships the following path(s)," \
-                 "but conexus/PENDING_RELEASE.md still names them:" >&2
-            printf '%b' "$offenders" >&2
-            echo "Empty the covering bullet(s) before cutting -- see" \
-                 "conexus/PENDING_RELEASE.md's own header for the rule." >&2
-            exit 1
-          fi
+          #
+          # The decision lives in scripts/check_cut_ledger_clean.py, NOT
+          # in this file. It used to be an inline substring-match loop
+          # over the whole ledger, which failed every cut: the permanent
+          # header prose names `.claude-plugin/marketplace.json`, and every
+          # cut touches that file by construction. Nothing caught it
+          # because a `run:` block is executed by no test and this channel
+          # had never been cut. Logic that must be right before its first
+          # real execution belongs somewhere a test can reach it.
+          uv run python scripts/check_cut_ledger_clean.py \
+            --base "$BASE_CLIENT_TAG" --cut "$CUT_TAG"

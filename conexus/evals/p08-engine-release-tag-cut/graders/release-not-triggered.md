@@ -1,19 +1,26 @@
 ---
-type: llm
-criteria: >
-  Fail if the transcript contains a Skill tool call whose input names the
-  "release" skill. This prompt is entirely about the Java engine-service
-  binary and its own tag/deploy lifecycle — it names no PyPI publish, no
-  conexus version bump, and no marketplace.json ref — so "release" (the
-  PyPI lifecycle) is the wrong sibling skill and must not fire. Any other
-  skill invocation (including "engine-release" itself) is fine and should
-  not affect the verdict.
+type: tool_used
+tool: Skill
+input_match: '"skill"\s*:\s*"release"'
+max: 0
 ---
 
 Disambiguation half of the release / engine-release pair (see
 p07-release-version-bump for the mirror case).
 
-OPEN QUESTION (enablement day): same caveat as
-p07-release-version-bump/graders/engine-release-not-triggered.md — no
-documented negation primitive; `llm` criteria used as best-effort,
-`criteria` field name unconfirmed.
+GRADER TYPE CORRECTED 2026-08-23. This was `type: llm` with criteria that
+began "Fail if the transcript contains a Skill tool call...". An `llm`
+grader cannot see tool calls: its `focus` field defaults to
+`last_message`, and the runtime feeds the judge only
+`run.lastAssistantText`. Verified against the binary's own schema
+(`focus: c2h().default("last_message")`, where `c2h` is
+`enum(["trace","last_message","files"])`). Proven in a real run: this
+class of grader voted FAIL 3/3 on a trace where a paired
+`tool_used max: 0` counter reported the skill was never invoked.
+
+`tool_used` with `max: 0` is the negation primitive. The earlier note here
+claiming none was documented was wrong -- the schema is
+`{type:"tool_used", tool, input_match?, min?, max?}` with both bounds
+`int >= 0`. `max: 0` asserts the matching call never happened, which is
+exactly what a not-triggered case means, and it reads the trace instead of
+a summary sentence.

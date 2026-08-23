@@ -4,6 +4,35 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.16.1] - 2026-08-23
+
+Plugin version aligned with conexus 7.16.1. The pin advance makes two
+plugin-surface fixes live in installed sessions.
+
+- **The nine not-triggered eval graders can now observe what they grade.**
+  Every negative and disambiguation case (`n01`-`n05`, `p07`-`p10`) was
+  `type: llm` with criteria beginning "Fail if the transcript contains a
+  Skill tool call". An `llm` grader cannot see tool calls: its `focus`
+  field defaults to `last_message`, so the judge receives only the final
+  assistant text. All nine now use `tool_used` with `max: 0` -- the
+  negation primitive the corpus README said did not exist, read here from
+  the runner's own schema rather than guessed. Proven in the corpus's
+  first real run: an `llm` grader voted FAIL three times out of three on a
+  trace where a `tool_used max: 0` counter on that same trace reported the
+  skill was never invoked (`nexus-7zup9`).
+- **The README's own open questions corrected**, since one of them is what
+  produced the defect above, plus the measured per-run cost it asked the
+  first runner to record (~$0.75 per case-run; the DEFAULT flags are 90
+  case-runs, not 15).
+
+Not fixed, and stated so the gap is not mistaken for coverage: `p07` and
+`p08` cannot pass regardless of grader type, because the eval sandbox runs
+in a temporary HOME and never loads the repo-local `release` /
+`engine-release` skills. Whether those belong in a plugin-shipped suite is
+an open scope decision. Nothing in CI invokes `claude plugin eval` either,
+so the corpus remains inert as a behavioural gate; the frontmatter lint
+that does run only checks that the YAML parses.
+
 ## [7.16.0] - 2026-08-22
 
 The pin advance activates everything accumulated in PENDING_RELEASE.md

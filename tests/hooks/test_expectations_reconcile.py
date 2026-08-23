@@ -274,6 +274,22 @@ class TestStopHookWiring:
         env.pop("NX_ORCH_STOP_GUARD", None)
         if guard is not None:
             env["NX_ORCH_STOP_GUARD"] = guard
+        # cwd is the isolated state dir, NOT the repo (nexus-2v0v7 follow-up).
+        # The hook's advisory checks shell out to `git status --porcelain` and
+        # `bd list --status=in_progress` in whatever cwd it inherits. Pointed at
+        # the live checkout those read AMBIENT DEVELOPER STATE, so the
+        # plain-approve assertions below fail for reasons that have nothing to
+        # do with reconciliation:
+        #   - any untracked file makes Check 1 emit "Uncommitted changes". This
+        #     bites even on a clean tree, because `env` above overrides HOME and
+        #     git then loses the user's ~/.config/git/ignore, so files ignored
+        #     ONLY globally (`.claude/settings.local.json` is the standing one)
+        #     resurface as untracked.
+        #   - any in-progress bead makes Check 3 emit its own warning.
+        # CI never saw either: fresh checkout, no local settings file, no beads.
+        # Running from the state dir means neither command finds a repo or a
+        # beads db, both degrade to empty exactly as the hook intends, and the
+        # test observes reconciliation alone.
         return subprocess.run(
             ["bash", str(STOP_HOOK)],
             input=stdin,
@@ -281,6 +297,7 @@ class TestStopHookWiring:
             text=True,
             timeout=30,
             env=env,
+            cwd=str(state),
         )
 
     def test_stranded_agent_produces_a_warning_but_still_approves(self, state):

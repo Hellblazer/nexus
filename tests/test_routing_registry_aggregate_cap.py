@@ -17,9 +17,21 @@ successor RDR.
 Currently in scope: ``conexus/hooks/scripts/routing/registry.yaml`` and
 ``sn/hooks/scripts/routing/registry.yaml``. Extend ``_REGISTRY_PATHS``
 when a third plugin ships a routing registry.
+
+CORRECTION (2026-08-23). The registry count alone does not measure the
+budget. ``src/nexus/commands/hook.py`` says it outright -- "registry.yaml
+is documentation, hooks.json is the registration surface" -- and the two
+disagree: ``conexus/hooks/hooks.json`` fires THREE hooks on the
+``PreToolUse: Bash`` matcher (``pre_close_verification_hook.sh`` plus the
+two routing hooks) while the registry lists two rules. A hook registered
+in hooks.json with no registry entry costs latency on every Bash call and
+was invisible to this cap, so a fifth could land while the lint reported
+2/4. The budget is cumulative wall-clock per Bash call, so the count that
+matters is every hook on that matcher, routing or not.
 """
 from __future__ import annotations
 
+import json
 import pathlib
 
 import pytest
@@ -87,4 +99,70 @@ def test_no_duplicate_rule_names_across_plugins() -> None:
         + ". RDR-125 ownership rule says each rule lives in exactly one "
         "plugin; a duplicate means the migration is half-done or two "
         "plugins claim the same rule."
+    )
+
+
+# ── The registration surface, which is what actually costs latency ─────────
+
+_HOOKS_JSON_PATHS: tuple[pathlib.Path, ...] = (
+    REPO_ROOT / "conexus" / "hooks" / "hooks.json",
+    REPO_ROOT / "sn" / "hooks" / "hooks.json",
+)
+
+
+def _bash_hook_count(manifest: dict) -> int:
+    """Hooks registered against a matcher that includes Bash, in *manifest*.
+
+    Pure, so the cap logic below is falsifiable without editing a real
+    hooks.json.
+    """
+    total = 0
+    for entries in (manifest.get("hooks") or {}).values():
+        for entry in entries or []:
+            if "Bash" in str(entry.get("matcher", "")):
+                total += len(entry.get("hooks") or [])
+    return total
+
+
+def test_bash_hook_counter_is_falsifiable() -> None:
+    """Non-vacuity: the counter must actually count."""
+    assert _bash_hook_count({}) == 0
+    assert _bash_hook_count({
+        "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{}, {}, {}]}]}
+    }) == 3
+    assert _bash_hook_count({
+        "hooks": {"PreToolUse": [{"matcher": "Write", "hooks": [{}, {}]}]}
+    }) == 0, "a non-Bash matcher does not spend the Bash budget"
+    over = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{}] * 5}]}}
+    assert _bash_hook_count(over) > AGGREGATE_CAP, (
+        "a 5-hook manifest must exceed the cap, or the assertion below can "
+        "never fail"
+    )
+
+
+def test_registered_bash_hooks_within_cap() -> None:
+    """The cap against the REGISTRATION SURFACE, not the documentation.
+
+    This is the assertion the registry-based one above was standing in for.
+    """
+    per_plugin: dict[str, int] = {}
+    for manifest_path in _HOOKS_JSON_PATHS:
+        if not manifest_path.exists():
+            continue
+        plugin = manifest_path.relative_to(REPO_ROOT).parts[0]
+        per_plugin[plugin] = _bash_hook_count(
+            json.loads(manifest_path.read_text(encoding="utf-8"))
+        )
+
+    assert per_plugin, (
+        "no hooks.json found in any plugin -- the paths are wrong and this "
+        "lint is proving nothing"
+    )
+    aggregate = sum(per_plugin.values())
+    breakdown = ", ".join(f"{k}={v}" for k, v in sorted(per_plugin.items()))
+    assert aggregate <= AGGREGATE_CAP, (
+        f"{aggregate} hooks fire on PreToolUse:Bash across plugins "
+        f"({breakdown}), over the RDR-121 cap of {AGGREGATE_CAP}. That "
+        "budget is cumulative wall-clock on EVERY Bash call the user makes. "
+        "Consolidate, or revise the budget in a successor RDR."
     )

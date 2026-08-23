@@ -2069,6 +2069,19 @@ def search(
         **(data if isinstance(data, dict) else empty_shape),
         "truncated": truncated,
         "truncated_chars": dropped,
+        # SELF-SUFFICIENCY (nexus-6jlki follow-up). A conforming MCP client
+        # may render structuredContent INSTEAD of the text block -- the
+        # protocol permits it and nexus's own client does exactly that
+        # (mcp_client/core.py::_parse_result prefers structuredContent over
+        # the first text block), as does Claude Code. The original design
+        # (T2 [23351]) modelled this field as purely additive -- "a new
+        # structuredContent field they can ignore or start consuming" -- so
+        # between c9762865d and this line a default-mode search delivered
+        # ids/tumblers/distances and NO paths, line numbers or snippets to
+        # a structuredContent-preferring client. Carrying the render here
+        # costs one duplicated string and makes the shape correct for
+        # whichever representation the client chooses to read.
+        "text": result,
     }
     return CallToolResult(
         content=[TextContent(type="text", text=result)],

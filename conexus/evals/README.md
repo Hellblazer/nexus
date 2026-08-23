@@ -69,13 +69,20 @@ claude plugin eval --json report.json --max-cost-usd 10 --threshold 0.8
 
 - `--max-cost-usd 10`: each case is a real model run through a full
   Claude Code turn (prompt in, tool calls out, graders evaluate the
-  transcript) — this is not a cheap unit test. 15 cases at whatever the
-  per-case cost turns out to be; start with a ceiling, not an assumption,
-  and record the observed per-run cost the first time this executes so
-  future runs can budget accurately.
-- `--threshold 0.8`: placeholder. Pick the real number after the first
-  run establishes a baseline pass rate; 0.8 is not derived from anything
-  measured.
+  transcript) — this is not a cheap unit test.
+
+  **MEASURED, first real run, 2026-08-23** (the figure this bullet used to
+  ask for): 15 cases at `--runs 1 --ablation none` cost **$6.69** and took
+  **899s**, i.e. **~$0.75 per case-run**. A `--max-cost-usd 10` ceiling
+  therefore fits that shape with little headroom. Note the DEFAULTS are
+  far more expensive: `--runs 3` with `--ablation with-without` is 90
+  case-runs, roughly **$67**. Choose the flags deliberately; the command
+  above is not the default command.
+- `--threshold 0.8`: first run scored **0.833 overall, 11/15 passing**, so
+  0.8 happens to sit just under the measured baseline. Do not read that as
+  validation — three of the four failures were grader defects, not skill
+  defects (see Open questions 2 and 4), so the number will move once they
+  are re-run against the corrected corpus.
 - Exit code contract (per the CI format spec): `0` = pass, `1` =
   fail/no cases, `2` = partial. Wire the CI job on that exit code, not on
   parsing `report.json`'s pass/fail language, since the aggregate-result
@@ -113,17 +120,28 @@ authored against the documented format only, never against a live run:
    actual `Skill` tool-call payload. Check the first real
    `report.json`'s per-case transcript for the literal `skill` field
    value and tighten or loosen the regex accordingly.
-2. **No documented negation primitive.** The grader-type list is
-   `regex | tool_used | tool_order | file_exists | llm | baseline`.
-   Nothing there is an explicit "assert this tool was NOT called."
-   Every negative/absorption case (n01–n05) and every disambiguation
-   case's second grader (p07–p10) expresses "skill X must not fire" as
-   an `llm` grader with a `criteria` field asking a judge to fail on a
-   matching Skill call. Two things need confirming once eval is live:
-   (a) whether `llm` graders actually receive the full tool-call
-   transcript (not just final text output) to judge against, and (b)
-   whether `criteria` is the real field name for an `llm` grader — it is
-   a best guess, not sourced from a schema.
+2. **RESOLVED 2026-08-23 — there IS a negation primitive, and the `llm`
+   graders were blind.** This entry used to say no primitive existed, and
+   that error is what produced the defect it now records.
+
+   `tool_used` takes `min` and `max`. Read from the binary's own schema:
+   `{type:"tool_used", name, tool, input_match?, min:int>=0?, max:int>=0?,
+   weight, arm}`. **`max: 0` is "assert this tool was NOT called"** — all
+   nine not-triggered graders (n01–n05, p07–p10) now use it.
+
+   The `llm` graders they replace could not do the job they were written
+   for. Every one began "Fail if the transcript contains a Skill tool
+   call…", but an `llm` grader's `focus` field defaults to
+   `last_message` (`focus: c2h().default("last_message")`, where `c2h` is
+   `enum(["trace","last_message","files"])`), so the judge received only
+   `run.lastAssistantText` and never saw a tool call at all. Only
+   `focus: trace` passes tool calls. Proven in a real run before the
+   rewrite: an `llm` grader voted FAIL 3/3 on a trace where a paired
+   `tool_used max: 0` counter on the same trace reported the skill was
+   never invoked — unanimously wrong against ground truth.
+
+   (`criteria` *was* the right field name for `llm`; that half of the
+   guess was correct.)
 3. **`case.yaml` context scaffolds.** None of these 15 cases use one —
    every prompt is judged answerable from the plugin's own skill
    descriptions with no repo state dependency. If a real run shows a

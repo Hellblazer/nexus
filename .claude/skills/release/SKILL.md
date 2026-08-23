@@ -76,6 +76,13 @@ one sha per line (7-40 hex chars). This is the structured form the gate scans fo
 uv run python scripts/check_remediation_commits_ride_release.py --write-snapshot .release-gates/remediation-snapshot.json
 ```
 
+**Known limitation before you trust a green here:** this snapshot is ONE
+developer's local Dolt clone, committed. It proves presence and freshness,
+not COMPLETENESS — anything not in that clone is invisible to the gate, and
+the staleness check cannot detect it. `bd dolt pull` first. Full statement
+and the intended replacement: `docs/contributing.md` § Step 0b KNOWN
+LIMITATION, tracked in nexus-2zmfw.
+
 Stage `.release-gates/remediation-snapshot.json` into Step 7's release-branch commit (alongside the seven version-bump manifests). `release.yml` reruns the gate against that exact committed file at tag-publish time via `--verify-snapshot`, which fails the release closed if the file is missing (the pre-tag step didn't run), present but not committed on the tagged ref, or stale (its newest bead `updated_at` predates the commit immediately preceding this release). A stale/missing snapshot from a prior release does NOT carry forward — write a fresh one every release.
 
 ### 0c. PREFLIGHT — run the cheap blockers FIRST, all of them (32s)
@@ -258,9 +265,26 @@ Must end with `[done]` and confirm the new schema version. Halt on any failure.
 
 This reinstall is genuinely isolated (fixed 2026-07-01, `137d2688`) — safe to run with live Claude Code sessions/MCP servers active, no `--force`/`--cycle-daemons` needed. If it ever refuses with a live-holder error again, suspect a step-ordering regression in `release-sandbox.sh` (sandbox `HOME` must activate *before* the reinstall, since `uv tool install` resolves its install location off `$HOME`) before reaching for `--force`.
 
-### 6b. Run upgrade-shakeout (~3-5 min, conditional)
+### 6b. Run upgrade-shakeout (~3-5 min, EVERY RELEASE)
 
-Required when the release touches the **upgrade path** an installed user traverses: hook stanzas (`src/nexus/commands/hooks.py`), the `nx doctor` drift checks, plugin name / marketplace.json `source.ref` pinning, or any migration touchpoint. `release-sandbox.sh smoke` tests one version in isolation; this tests `FROM_VERSION` to this branch.
+**Unconditional as of 7.16.1.** This step used to read "conditional",
+qualified by a trigger list ending in "plugin name / marketplace.json
+`source.ref` pinning" -- a condition that is TRUE OF EVERY RELEASE, because
+advancing `source.ref` to the new tag IS the release (Step 3). A gate whose
+condition never fails is not conditional; it is unconditional wearing a
+qualifier that invites a skip. It got one on 7.16.1, caught only because
+Sam asked what testing remained.
+
+Run it every time. The gate's own step 9/12 is `plugin marketplace.json
+reflects rename + tag pinning`, so it verifies the very thing every release
+changes, and it costs 3-5 minutes.
+
+`release-sandbox.sh smoke` (6) tests ONE version in isolation. This is the
+only gate that tests `FROM_VERSION` -> this branch, which is the path an
+installed user actually traverses.
+
+Must end `UPGRADE-SHAKEOUT PASSED — steps=12 skipped=0`. A non-zero
+`skipped` is a finding, not a pass.
 
 ```bash
 ./tests/e2e/upgrade-shakeout.sh run                       # latest stable -> this branch (clean-upgrade path)
