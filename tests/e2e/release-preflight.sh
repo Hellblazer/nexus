@@ -87,13 +87,8 @@ check "engine-release-floor"      uv run python scripts/check_engine_release_flo
 # 2. Merge-blocking on EVERY PR to main -- an unacknowledged ## Unshipped entry
 #    blocks the release PR itself, not just the tag.
 check "wire-contract-ledger"      uv run python scripts/check_engine_release_floor.py --ledger-only
-# 3. Remediation beads whose fix must ride this release.
-check "remediation-commits"       uv run python scripts/check_remediation_commits_ride_release.py --release-ref HEAD
-# 4. The tag-publish snapshot replay, against the base a merge commit really
-#    has (main's tip), not the local HEAD^ -- see --release-base-ref's help.
-check "remediation-snapshot"      uv run python scripts/check_remediation_commits_ride_release.py \
-                                    --release-ref HEAD --release-base-ref origin/main \
-                                    --bd-export-json .release-gates/remediation-snapshot.json --verify-snapshot
+# (3 and 4, the remediation-commit gate and its snapshot replay, were RETIRED
+#  with nexus-2zmfw -- see that bead. Numbering below is left as-is.)
 # 5. Seven version surfaces + both source.ref fields + the emptied ledger.
 # plugin-drift-ledger.yml runs this with NX_REQUIRE_PLUGIN_DRIFT_CHECK=1 and
 # NX_TEST_T2_SUBSTRATE=none, which turns a SKIP into a failure. Running it bare

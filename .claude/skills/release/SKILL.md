@@ -49,41 +49,7 @@ git log --oneline <last-engine-tag>..HEAD -- service/        # cloud-relevant dr
 
 This gate exists because the engine silently drifted 22 `service/` commits / 4 days behind the cloud (2026-06-26); the PyPI checklist had no step that would have caught it.
 
-### 0b. Remediation-commit gate (open beads whose fix must ride this release)
-
-nexus-fix9t: nexus-3n7pr's remediation was sequenced "after the client release ships" — 7.7.0 shipped, but the commit its plan depended on (5f59ede70, nexus-gvmbo / nexus-b91tv) was NOT an ancestor of v7.7.0, so the installed `nx` at 7.7.0 carried the pre-fix DESTRUCTIVE `manifest_backfill` module the plan assumed was already safe. Nothing checked this at release time.
-
-```bash
-uv run python scripts/check_remediation_commits_ride_release.py --release-ref vX.Y.Z
-```
-
-Run it against the **release tag** (or the branch tip about to be tagged). Non-zero exit = **STOP** — a red line names the bead and the missing commit; the remedy is one of:
-
-- re-sequence the named bead to run after a release that DOES carry the commit, or
-- include the commit in this release before cutting it.
-
-**Bead-authoring convention this gate reads**: when sequencing a remediation bead behind a specific commit ("do not run this until commit X has shipped"), write a line anywhere in the bead's description or a comment:
-
-```
-requires-commit: <sha>
-```
-
-one sha per line (7-40 hex chars). This is the structured form the gate scans for first. It also nets two free-text phrasings ("requires commit `<sha>`", "must include `<sha>`") for beads written before this convention existed, but the marker is the reliable form — prefer it. Closed beads are never scanned.
-
-**Pre-tag snapshot for the CI replay (nexus-fehi3, MANDATORY, do BEFORE Step 7's commit).** This repo's `bd` backend is Dolt with no credentials on the CI runner, so `release.yml` cannot run `bd export` live — it replays this gate against a cut-time snapshot instead. Write it now:
-
-```bash
-uv run python scripts/check_remediation_commits_ride_release.py --write-snapshot .release-gates/remediation-snapshot.json
-```
-
-**Known limitation before you trust a green here:** this snapshot is ONE
-developer's local Dolt clone, committed. It proves presence and freshness,
-not COMPLETENESS — anything not in that clone is invisible to the gate, and
-the staleness check cannot detect it. `bd dolt pull` first. Full statement
-and the intended replacement: `docs/contributing.md` § Step 0b KNOWN
-LIMITATION, tracked in nexus-2zmfw.
-
-Stage `.release-gates/remediation-snapshot.json` into Step 7's release-branch commit (alongside the seven version-bump manifests). `release.yml` reruns the gate against that exact committed file at tag-publish time via `--verify-snapshot`, which fails the release closed if the file is missing (the pre-tag step didn't run), present but not committed on the tagged ref, or stale (its newest bead `updated_at` predates the commit immediately preceding this release). A stale/missing snapshot from a prior release does NOT carry forward — write a fresh one every release.
+<!-- RETIRED 2026-08-24 (nexus-2zmfw). The remediation-commit gate and its committed bead snapshot are gone. It gated nothing — 0 of 428 non-closed beads named a required commit — while asserting a repo-wide invariant from ONE developer's local clone, dumped and committed by hand. It could report confident green over a view that never matched reality, and its staleness check keyed on max(updated_at) across every bead (closed included), so it failed a release on wall-clock rather than on content. It blocked v7.16.2 for exactly that reason. The real requirement it stood for — sequence a remediation behind a commit — is a bead-authoring convention, not a release gate. -->
 
 ### 0c. PREFLIGHT — run the cheap blockers FIRST, all of them (32s)
 
@@ -113,8 +79,6 @@ UNVERIFIED (a dependency such as Docker was absent; "could not check" is never
 
 Covered: engine-release-floor, wire-contract ledger (`--ledger-only`, which is
 MERGE-BLOCKING on every PR to main, not just at tag time), remediation-commits,
-the remediation-snapshot replay against the base a merge commit really has
-(`--release-base-ref origin/main`, NOT the local `HEAD^`), the seven version
 surfaces + both `source.ref` fields + the emptied ledger, the ci-evidence
 required-context drift tests run with `-m ""` so the integration-marked live
 check actually executes, the `--package-upgrade` staleness predicate evaluated
@@ -354,17 +318,12 @@ git merge origin/main   # resolve: changelogs = union (fold main's released
 # plus Step 0b's pre-tag snapshot and the cleared PENDING_RELEASE.md ledger.
 # mcpb/pyproject.toml + mcpb/manifest.json are the easy-to-miss pair here and
 # their omission fails CI's mcpb-manifest-version parity check; omitting
-# .release-gates/remediation-snapshot.json fails release.yml's
-# --verify-snapshot step outright (missing snapshot); omitting
-# conexus/PENDING_RELEASE.md leaves a stale entry that fails
-# tests/test_plugin_release_drift_ledger.py.
 git add pyproject.toml uv.lock CHANGELOG.md conexus/CHANGELOG.md \
         mcpb/pyproject.toml mcpb/manifest.json \
         .claude-plugin/marketplace.json \
         conexus/.claude-plugin/plugin.json \
         sn/.claude-plugin/plugin.json \
         conexus/PENDING_RELEASE.md \
-        .release-gates/remediation-snapshot.json
 git commit -m "chore(release): conexus X.Y.Z"
 
 git push -u origin release/vX.Y.Z

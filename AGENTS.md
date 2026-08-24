@@ -216,13 +216,7 @@ If it exits non-zero, STOP — do not proceed with the PyPI release; cut a fresh
 
 `release.yml`'s own copy of this step (unattended, no human to type `--paired-deploy <tag>`) runs `--paired-deploy-auto` instead of bare (nexus-gc9ir, after v7.10.0's publish red'd on the exact expected pre-deploy paired-release state) — it derives the candidate tag from `REQUIRED_ENGINE_VERSION` itself and only engages paired acceptance when the cloud is confirmed below floor. The pre-tag human invocation above stays the explicit `--paired-deploy` form.
 
-**Remediation-commit gate (step 0b — BLOCKING, run alongside step 0).** nexus-fix9t: nexus-3n7pr's remediation was sequenced "after the client release ships" — 7.7.0 shipped, but the commit its plan depended on (5f59ede70, nexus-gvmbo / nexus-b91tv) was NOT an ancestor of v7.7.0, so the installed `nx` at 7.7.0 carried the pre-fix DESTRUCTIVE `manifest_backfill` module the plan assumed was already safe (found retroactively via `git merge-base --is-ancestor`; nothing checked this at release time). Run:
-
-```bash
-uv run python scripts/check_remediation_commits_ride_release.py --release-ref vX.Y.Z
-```
-
-against the release tag (or the branch tip about to be tagged). Non-zero exit = STOP — a red line names the bead and the missing commit; either re-sequence that bead to run after a release that DOES carry the commit, or include the commit in this release before cutting it. Bead-authoring convention this gate reads: sequence a remediation behind a specific commit by writing `requires-commit: <sha>` in the bead's description or a comment (one sha per line, 7-40 hex chars) — the structured form the gate scans for first. Two free-text phrasings ("requires commit `<sha>`", "must include `<sha>`") are also scanned as a net for beads written before this convention existed, but the marker is the reliable form. Closed beads are never scanned.
+**Remediation-commit gate — RETIRED.** RETIRED 2026-08-24 (nexus-2zmfw). The remediation-commit gate and its committed bead snapshot are gone. It gated nothing — 0 of 428 non-closed beads named a required commit — while asserting a repo-wide invariant from ONE developer's local clone, dumped and committed by hand. It could report confident green over a view that never matched reality, and its staleness check keyed on max(updated_at) across every bead (closed included), so it failed a release on wall-clock rather than on content. It blocked v7.16.2 for exactly that reason. The real requirement it stood for — sequence a remediation behind a commit — is a bead-authoring convention, not a release gate.
 
 A green here proves only that no requirement was present in the snapshot the
 releaser took — not that none was missed. The snapshot is one developer's
