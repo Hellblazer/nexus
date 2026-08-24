@@ -2,6 +2,7 @@
 type: tool_used
 tool: Skill
 input_match: '"skill"\s*:\s*"(conexus:)?test-validation"'
+min: 0
 max: 0
 ---
 

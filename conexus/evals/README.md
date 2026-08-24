@@ -7,15 +7,26 @@ skills that "absorb any question containing the word 'plan'") — does the
 wrong skill stay silent on a prompt that only superficially resembles its
 trigger phrasing.
 
-## Status: authored, not runnable here
+## Status: runnable, three runs executed
 
-`claude plugin eval` is early access and not enabled on this box
-(`claude plugin eval` prints "currently in early access", exit 1, as of
-this writing). This suite was authored blind to actual runtime behavior —
-no case here has ever executed. Enablement is gated on an org-level
-setting from Anthropic; ask your Anthropic contact to turn it on for this
-org before attempting a run. Everything under "Open questions" below is a
-concrete verification task for whoever runs this suite first.
+`claude plugin eval` is early access and gated: every invocation path
+prints "`plugin eval` is currently in early access" and exits 1 (`--help`
+renders anyway, because commander prints help before the gate). The
+binary documents its own bypass — set `CLAUDE_CODE_WALNUT_SPIRE=1` in the
+shell env or in `~/.claude/settings.json`'s `env` block (NOT the repo's
+`.claude/settings.json`). With it set the runner works end to end here.
+
+The earlier "not enabled on this box" was accurate; the implied
+"therefore unrunnable" was not, and it cost this corpus two release
+cycles of being repaired against documentation instead of against a run.
+
+Three full runs to date, all `--runs 1 --ablation none`, 15 cases:
+
+| Corpus state | Passed | Score | Cost |
+|---|---|---|---|
+| v7.16.0 | 11/15 | 0.833 | $6.69 |
+| v7.16.1 (nine graders unsatisfiable) | 4/15 | 0.333 | $7.80 |
+| nexus-dkotg (`min: 0` added) | 12/15 | 0.867 | $6.12 |
 
 ## Layout
 
@@ -28,10 +39,11 @@ conexus/evals/
       <grader-name>.md          YAML frontmatter (type: + type-specific fields)
 ```
 
-15 cases, each named `p<NN>-...` (positive/disambiguation) or
-`n<NN>-...` (negative/absorption):
+12 cases, each named `p<NN>-...` (positive/disambiguation) or
+`n<NN>-...` (negative/absorption). Numbering is historical and has gaps —
+n03, p07 and p08 were dropped, see below.
 
-| Case | Target skill | Shape | Grader(s) |
+| Case | Target skill | Shape | Graders |
 |---|---|---|---|
 | p01-using-nx-skills-generic-turn | using-nx-skills | positive | tool_used |
 | p02-code-review-before-pr | code-review | positive | tool_used |
@@ -39,50 +51,98 @@ conexus/evals/
 | p04-rdr-create-schema-decision | rdr-create | positive | tool_used |
 | p05-query-rdr-synthesis | query | positive (reduce-from-many) | tool_used |
 | p06-orchestration-agent-choice | orchestration | positive | tool_used |
-| p07-release-version-bump | release | positive + disambig. vs engine-release | tool_used + llm |
-| p08-engine-release-tag-cut | engine-release | positive + disambig. vs release | tool_used + llm |
-| p09-debugging-intermittent-npe | debugging | positive + disambig. vs test-validation | tool_used + llm |
-| p10-test-validation-coverage-check | test-validation | positive + disambig. vs debugging | tool_used + llm |
-| n01-plan-absorption-dinner | strategic-planning / plan-first | negative (absorption) | llm |
-| n02-query-absorption-single-fact | query | negative (absorption) | llm |
-| n03-release-absorption-release-notes | release / engine-release | negative (absorption) | llm |
-| n04-test-authoring-absorption-figurative-test | test-authoring / test-validation | negative (absorption) | llm |
-| n05-debugging-absorption-detective-novels | debugging | negative (absorption) | llm |
+| p09-debugging-intermittent-npe | debugging | positive + disambig. vs test-validation | tool_used ×2 |
+| p10-test-validation-coverage-check | test-validation | positive + disambig. vs debugging | tool_used ×2 |
+| n01-plan-absorption-dinner | strategic-planning / plan-first / architecture | negative (absorption) | tool_used `0..0` |
+| n02-query-absorption-single-fact | query | negative (absorption) | tool_used `0..0` |
+| n04-test-authoring-absorption-figurative-test | test-authoring / test-validation | negative (absorption) | tool_used `0..0` |
+| n05-debugging-absorption-detective-novels | debugging / debug | negative (absorption) | tool_used `0..0` |
 
-`release` and `engine-release` (p07, p08, and their absorption/disambig.
-counterparts) are **repo-local** skills — they live at
-`.claude/skills/release/` and `.claude/skills/engine-release/` in this
-checkout, not under `conexus/skills/`, so they ship with this repo's dev
-sessions but are not part of the `conexus` plugin distributed via
-`marketplace.json`. They're included here because the bead that
-commissioned this suite named them explicitly as disambiguation targets
-and because a `claude plugin eval` run from this checkout will have them
-on the skill list regardless of plugin ownership — but see "Open
-questions" below: whether that's the right scope for a suite that ships
-*inside* the conexus plugin is unresolved.
+Every grader is `tool_used`. There are no `llm` graders left — they could
+not see tool calls (their `focus` defaults to `last_message`), which is
+what nexus-7zup9 removed.
 
-## Running (once enabled)
+### Dropped: n03, p07, p08 (nexus-dkotg, 2026-08-23)
+
+These three targeted `release` and `engine-release`, which are
+**repo-local** skills at `.claude/skills/` in this checkout, not under
+`conexus/skills/` — so they are not part of the plugin distributed via
+`marketplace.json`. The eval sandbox runs in a temp HOME and never loaded
+them: p07 and p08 reported `Skill called 0x` in every run of all three
+full runs, and n03 passed **vacuously**, its claim never actually tested.
+
+A $2.43 probe settled whether relocation could rescue them. It cannot:
+targeting `.claude` resolves a *plugin*, not the repo-local skills
+directory, and `release-triggered` still reported `0x` across three runs.
+
+Dropping them also retires a claim that would not have survived being
+tested. n03 asserted `release` must stay silent on "help me write the
+release notes" — but that skill's own checklist has a literal step
+**"### 4. Update both changelogs"**, so the case demanded silence from a
+skill whose documented job covers the request. The vacuous pass was
+hiding a contestable premise.
+
+**Repo-local skill triggering is now an explicit non-goal of this
+corpus.** A suite that ships inside the conexus plugin tests the conexus
+plugin's own surface. If `release`/`engine-release` coverage is wanted,
+it belongs in a separate repo-local suite with its own invocation.
+
+### Hazard: worktrees pollute discovery
+
+Point the runner at a directory containing git worktrees and it walks
+into them. The probe above, targeting `.claude`, resolved its plugin from
+`.claude/worktrees/skeets-session-parallel/conexus` and ran the same case
+**twice** — once from the intended corpus and once from the worktree's
+stale copy, which was on `develop` and still carried the pre-fix
+`expected 1..0` graders.
+
+Target `conexus/` specifically, never a parent that contains
+`.claude/worktrees/`. Verify by checking `suite.root` and the case count
+in the JSON report: this corpus is 12 cases with 12 unique names. It is
+read-only — nothing was written into any worktree — but a run scored
+against a stale corpus is a wrong answer delivered confidently.
+
+## Running
 
 ```bash
-claude plugin eval --json report.json --max-cost-usd 10 --threshold 0.8
+CLAUDE_CODE_WALNUT_SPIRE=1 claude plugin eval \
+  --runs 3 --ablation none --max-cost-usd 30 \
+  --json report.json <path-to-conexus-plugin>
 ```
 
-- `--max-cost-usd 10`: each case is a real model run through a full
-  Claude Code turn (prompt in, tool calls out, graders evaluate the
-  transcript) — this is not a cheap unit test.
+- **`--runs 3` is the floor, not a luxury.** At `--runs 1` the positive
+  half of this corpus is not a measurement. Measured across the three
+  runs above, a DIFFERENT positive case flipped verdict every single time
+  while nothing about it changed:
 
-  **MEASURED, first real run, 2026-08-23** (the figure this bullet used to
-  ask for): 15 cases at `--runs 1 --ablation none` cost **$6.69** and took
-  **899s**, i.e. **~$0.75 per case-run**. A `--max-cost-usd 10` ceiling
-  therefore fits that shape with little headroom. Note the DEFAULTS are
-  far more expensive: `--runs 3` with `--ablation with-without` is 90
-  case-runs, roughly **$67**. Choose the flags deliberately; the command
-  above is not the default command.
-- `--threshold 0.8`: first run scored **0.833 overall, 11/15 passing**, so
-  0.8 happens to sit just under the measured baseline. Do not read that as
-  validation — three of the four failures were grader defects, not skill
-  defects (see Open questions 2 and 4), so the number will move once they
-  are re-run against the corrected corpus.
+  | Case | run 1 | run 2 | run 3 |
+  |---|---|---|---|
+  | p01 using-nx-skills-generic-turn | pass | fail | pass |
+  | p05 query-rdr-synthesis | pass | fail | pass |
+  | p02 code-review-before-pr | pass | pass | fail |
+
+  Skill triggering is a model decision, so it is nondeterministic, and a
+  single sample cannot separate "this skill stopped firing" from "this
+  run happened to go the other way". The negative half does not flap —
+  all nine `min: 0, max: 0` graders were unanimous across every run — so
+  the noise is specific to asserting that something DID fire. Any number
+  read off a `--runs 1` invocation is a coin, including the 12/15 above.
+
+- **Do not run the bare defaults.** `--runs` defaults to `case.runs ?? 3`
+  and `--ablation` defaults to `with-without`, which is 90 case-runs at
+  roughly **$67**. Passing `--max-cost-usd 10` with the defaults, as this
+  file used to recommend, aborts at about 15% with exit 2 and reports a
+  partial as though it were a run.
+
+- **Cost.** ~$0.45/case-run measured ($6.12 and $7.80 for 15 case-runs,
+  when the corpus was 15). At 12 cases, `--runs 3 --ablation none` is 36
+  case-runs, so budget **~$16** and set the ceiling above it, not at it.
+
+- **Do not set `--threshold` yet.** The two structural failures (p07,
+  p08) are gone, but no `--runs 3` baseline exists — every number this
+  corpus has produced came from a single sample, and the flap table above
+  shows what that is worth on the positive half. Establish a `--runs 3`
+  baseline first, then pick a threshold against it.
 - Exit code contract (per the CI format spec): `0` = pass, `1` =
   fail/no cases, `2` = partial. Wire the CI job on that exit code, not on
   parsing `report.json`'s pass/fail language, since the aggregate-result
@@ -126,8 +186,13 @@ authored against the documented format only, never against a live run:
 
    `tool_used` takes `min` and `max`. Read from the binary's own schema:
    `{type:"tool_used", name, tool, input_match?, min:int>=0?, max:int>=0?,
-   weight, arm}`. **`max: 0` is "assert this tool was NOT called"** — all
-   nine not-triggered graders (n01–n05, p07–p10) now use it.
+   weight, arm}`. **`max: 0` is "assert this tool was NOT called" — and it
+   requires `min: 0` alongside it, because `min` DEFAULTS TO 1.** Setting
+   `max: 0` alone yields `expected 1..0`, which nothing can satisfy; that
+   was nexus-dkotg, and it silently voided every not-triggered grader in
+   7.16.1. `test_grader_bounds_are_satisfiable` now refuses that shape at
+   PR time. Nine graders were converted here; six survive the n03/p07/p08
+   drop (n01, n02, n04, n05, and the negative halves of p09 and p10).
 
    The `llm` graders they replace could not do the job they were written
    for. Every one began "Fail if the transcript contains a Skill tool
@@ -142,20 +207,31 @@ authored against the documented format only, never against a live run:
 
    (`criteria` *was* the right field name for `llm`; that half of the
    guess was correct.)
-3. **`case.yaml` context scaffolds.** None of these 15 cases use one —
+3. **`case.yaml` context scaffolds.** None of these 12 cases use one —
    every prompt is judged answerable from the plugin's own skill
    descriptions with no repo state dependency. If a real run shows a
    skill firing (or not) differently depending on ambient repo context
    (e.g., whether an RDR directory exists, whether a bead is
    in_progress), add `case.yaml` scaffolds then; nothing here assumes
    their absence is permanent.
-4. **Repo-local skill scope.** See the `release`/`engine-release` note
-   above — these two skills are not part of the shipped `conexus`
-   plugin. A `claude plugin eval` run scoped strictly to the published
-   plugin's own surface (as opposed to this dev checkout's full skill
-   list) may not have them available at all, in which case p07/p08 and
-   n03 would need to move to a repo-local eval location instead of
-   `conexus/evals/`, or be dropped from the plugin suite entirely.
+4. **RESOLVED 2026-08-23 — repo-local skills are out of scope, and the
+   cases are dropped.** This was filed as a hypothetical and was already
+   a live defect: the sandbox never loaded `.claude/skills/`, so p07 and
+   p08 could not pass and n03 passed vacuously, across three full runs.
+   Relocation was probed and does not work. n03, p07 and p08 are removed;
+   see "Dropped" above. Repo-local skill triggering is an explicit
+   non-goal of this corpus.
+
+   The open item that survives: `debugging` and `debug` both exist under
+   `conexus/skills/` with overlapping descriptions ("tests fail,
+   exceptions occur" vs "debugging a failing code path"). n05 and p10's
+   negatives now match both. p09 has NO grader asserting `debug` stays
+   silent while `debugging` fires — that is a claim about where the
+   boundary sits, and it should be settled by watching a run rather than
+   asserted into the corpus. Same for `query` vs `plan-first`, whose
+   descriptions both say the answer "must be reduced from many
+   documents"; p05 covers `query` positively but nothing disambiguates
+   the pair.
 5. **`experimental.evals` declaration.** `conexus/.claude-plugin/plugin.json`
    does not currently declare `experimental.evals`. This suite lives at
    the plugin-root convention (`conexus/evals/`) per the format spec,

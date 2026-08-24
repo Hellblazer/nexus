@@ -4,6 +4,28 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.16.2] - 2026-08-23
+
+Plugin version aligned with conexus 7.16.2. The pin advance makes three
+plugin-surface changes live in installed sessions.
+
+- **`using-nx-skills` no longer opens with a `MUST` imperative.** The
+  instruction was already maximal -- "You MUST", "a hard rule, not a hint",
+  "skipping a matching skill is a defect" -- and measured 1-in-6 compliance
+  across six sandboxed runs, with three runs making zero `Skill` calls. Writing
+  it harder is the one remedy known to have failed, so the lead is now
+  situational: skills carry accumulated practice, and invoking one is usually
+  cheaper than re-deriving the approach. "Starting any turn" is also gone from
+  the trigger list -- a trigger that fires always is not a trigger.
+  (`nexus-bc292`)
+- **`/conexus:rdr-create` scans the prior-art corpus BEFORE drafting.** It ran
+  the scan after, which is when it can no longer change what you write. The
+  scan also moved into the RDR template itself, where the finalization gate can
+  see whether it happened. (`nexus-bc292`)
+
+Nothing else in the plugin surface changed this release; the ledger
+(`conexus/PENDING_RELEASE.md`) is empty at this pin.
+
 ## [7.16.1] - 2026-08-23
 
 Plugin version aligned with conexus 7.16.1. The pin advance makes two

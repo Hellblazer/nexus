@@ -6,6 +6,93 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.16.2] - 2026-08-23
+
+A patch of production-outage and diagnostic fixes found by running the system
+against itself. Engine identity unchanged at `engine-service-v0.1.85`.
+
+Four fixes and one perf change. Three share a shape that is worth naming: a
+short-lived `git worktree` under `/private/tmp` reaching into long-lived
+production state, in a repo whose own guidance routes sessions into exactly
+such directories.
+
+### Fixed
+- **The aspect-worker died permanently and silently when its launch directory
+  was deleted.** It inherits the cwd of whatever spawned it -- and RDR-173
+  requires that parent to be an interactive session holding `claude -p`
+  credentials. When that directory goes away, `os.getcwd()` raises inside every
+  `os.path.abspath()`, so `aspect_readers.uri_for` throws and every batch
+  fails. Observed on a production install: 16 consecutive batches, zero
+  successes, ~40 minutes, all at WARNING with nothing alerting. The daemon now
+  `chdir`s to `config_dir` before anything can resolve a path. The trigger --
+  removing a finished worktree -- was correct; depending on it was the defect.
+  (`nexus-yg70j`)
+- **An edge/WAF 403 told the operator to check their token.** Every `nx index
+  repo` run against production died on exactly one 403 from
+  `POST /v1/vectors/upsert-chunks` between 08-19 and 08-23: 151 occurrences,
+  one per run, in 151 of 397 runs, and the RDR corpus went un-reindexed for
+  four days. The cause was an AWS WAF rule matching a JVM root package prefix
+  in the request body -- RDR-195 quotes a JVM stack trace, so the document
+  documenting the bug could not be indexed because the bug report reads as an
+  exploit payload. The client reframed that as "check `NX_SERVICE_URL` is
+  reachable and `NX_SERVICE_TOKEN` is valid" while 477 upserts succeeded in the
+  same run on the same token. An edge-generated response is now named as one.
+  The discriminator is a POSITIVE test on `server: awselb/2.0`, measured
+  against the live edge -- the two obvious alternatives were both inverted (the
+  application emits NO `Server` header and answers in plain text, not JSON).
+  (`nexus-1jtob`)
+- **An index failure did not say which file failed.** `run_file_loop` re-raised
+  `failures[0][1]`, so the traceback surfaced at the phase boundary with no
+  indication of the rejected document -- the SUPPRESSED sibling failures were
+  logged with `file=`, the one that ended the run was not. Both loop paths now
+  name it. (`nexus-1jtob`)
+- **403 was in the ETL retry set on an unmeasured premise.** It sat there as a
+  "transient edge 403"; a sweep of 3,675,603 edge log records over four days
+  found zero 403s on that path. The two populations were backwards by path: on
+  the vector path 403s are frequent and deterministic (and correctly excluded),
+  while the ETL path retried unpassable WAF refusals 5-8x with escalating
+  brake against our own edge. ALB 5xx is genuinely transient and carries the
+  same `server` header, so `429/502/503/504` still retry. (`nexus-1jtob`)
+- **A dispatchable workflow gated the wrong tree.** `local-service-gate-nightly`
+  and `guided-upgrade-mvv` hard-pinned `ref: develop` in their checkout, which
+  overrides `actions/checkout`'s triggering-ref default unconditionally -- so a
+  `workflow_dispatch` against any branch silently gated `develop` and reported
+  a confident verdict about a tree nobody asked about. This is why the
+  local-service gate's fix appeared to fail: the run never executed it. A
+  repo-wide lint now flags any dispatchable workflow whose checkout ref is a
+  literal. (`nexus-pc15o`)
+- **The nightly local-service gate had been red for eight nights with zero
+  failing tests.** Three RDR-196 live-dispatch families landed marked
+  `integration` only while six identical siblings carried `lived_in`, so 30
+  tests that cannot authenticate a `claude` CLI on a runner skipped there: 21
+  legitimate skips + 30 = 51 against a budget of 25. The budget was right and
+  was not raised. Post-fix skips are exactly 21. (`nexus-pc15o`)
+- **Committing inside a `git worktree` fired a full production index of the
+  duplicate tree.** ~1876 files, projected 64-131 minutes, detached so the cost
+  never landed on the committing session's clock. Nine such runs in one day
+  from three sessions. The hook now skips linked worktrees, discriminating on
+  `--git-dir` vs `--git-common-dir` -- not a path prefix, since four of the
+  nine were under `.claude/worktrees/` inside the repo. (`nexus-ws67k`)
+
+### Changed
+- `config.yml` is parsed once per mtime instead of on every access.
+  (`nexus-m20mf`)
+- `using-nx-skills` replaced its `MUST` imperative with situational triggers.
+  The instruction was already maximal, and measured 1-in-6 compliance across
+  six sandboxed runs -- writing it harder is the one remedy known to have
+  failed. (`nexus-bc292`)
+
+### Known gaps
+- `aspect_readers.uri_for` still resolves relative paths against the process
+  cwd. The daemon no longer dies, but the same stored `source_path` yields
+  different URIs depending on where the process stands -- the `nexus-3e4s`
+  CWD-anchoring class. `catalog/types.py` already implements the correct shape
+  (anchor on a passed `repo_root`); threading that through is tracked on
+  `nexus-yg70j`.
+- RDR-198 (collapse the duplicated client transport) was DECLINED after
+  measurement: the "90% of steady-state cost" that motivated it was measured
+  against a mocked-I/O harness and is 0.07% in production.
+
 ## [7.16.1] - 2026-08-23
 
 A patch of gate defects found by exercising 7.16.0's own plugin work.

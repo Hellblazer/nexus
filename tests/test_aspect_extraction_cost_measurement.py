@@ -227,7 +227,12 @@ class TestPerPaperCostConstantIsMeasured:
         assert _PER_PAPER_COST_USD > 0
 
 
+# lived_in (nexus-pc15o, 2026-08-23): dispatches real `claude -p`, which the
+# CI runner can never authenticate. Class-level, NOT module-level --
+# TestPerPaperCostConstantIsMeasured above is an offline constant check that
+# must keep running everywhere.
 @pytest.mark.integration
+@pytest.mark.lived_in
 class TestLiveMeasurement:
     """The measurement instrument (run manually to (re)derive the constant).
 

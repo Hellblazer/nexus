@@ -126,10 +126,25 @@ def test_guidance_imperative_under_byte_budget():
     )
 
 
-def test_imperative_sentence_within_first_500_bytes():
-    """VERIFICATION 1: the imperative itself, not a preamble, leads."""
+def test_routing_statement_within_first_500_bytes():
+    """VERIFICATION 1: the routing statement, not a preamble, leads.
+
+    TONE CHANGED 2026-08-23 (nexus-dkotg). This asserted the literal
+    "You MUST invoke `Skill`". That sentence was measured, not assumed,
+    and it did not work: across 6 sandboxed runs of the eval corpus case
+    that exercises exactly this (p01 using-nx-skills-generic-turn), the
+    SessionStart hook fired, this text reached the model verbatim, and
+    a conexus skill was invoked 1 time in 6. Three of those runs made
+    ZERO Skill calls and went straight to Bash. The instruction was
+    already maximal -- "hard rule, not a hint or a preference",
+    "skipping is a defect" -- so writing it harder was the one remedy
+    known to fail, because that IS what shipped.
+
+    What this test protects is unchanged: the lead must state why
+    routing helps, not preamble around it. Only the sentence it pins
+    changed."""
     head = GUIDANCE_IMPERATIVE.encode("utf-8")[:500].decode("utf-8", errors="ignore")
-    assert "You MUST invoke `Skill`" in head
+    assert "Conexus skills carry this project's accumulated practice" in head
 
 
 def test_guidance_imperative_carries_no_routing_destinations():
@@ -219,8 +234,8 @@ def test_imperative_sentence_present_in_both_files():
     hard-rule imperative and SKILL.md's own copy of it (SKILL.md line 9,
     unchanged by this bead)."""
     imperative = (
-        "You MUST invoke `Skill` for any plausibly-matching conexus skill "
-        "before producing any other response."
+        "Conexus skills carry this project's accumulated practice for "
+        "specific situations"
     )
     skill_text = SKILL_MD.read_text(encoding="utf-8")
     assert imperative in GUIDANCE_IMPERATIVE, (

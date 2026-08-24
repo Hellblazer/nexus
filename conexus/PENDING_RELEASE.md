@@ -29,6 +29,6 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release or plugin cut (pinned: v7.16.0)
+## Awaiting the next release or plugin cut (pinned: v7.16.2)
 
-(nothing pending — the v7.16.0 release shipped the previous list)
+_None. Every declared entry shipped in v7.16.2; the pin advanced, so drift is zero._

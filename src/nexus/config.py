@@ -1138,11 +1138,64 @@ def _global_config_path() -> Path:
     return nexus_config_dir() / "config.yml"
 
 
+#: Parsed-``config.yml`` cache for the hot read path (nexus-m20mf).
+#: Keyed on (path, st_mtime_ns, st_size) so an on-disk edit invalidates
+#: itself — unlike the SSL-context cache in ``db/t2/_refreshable_client.py``
+#: (888bdee8f), which is process-lifetime and documents a restart-required
+#: trade. Here that trade is unnecessary: stat() is the thing we were trying
+#: to avoid paying yaml.safe_load on top of, and stat alone is ~40x cheaper.
+_GLOBAL_CONFIG_CACHE: tuple[tuple[str, int, int], dict] | None = None
+_GLOBAL_CONFIG_LOCK = threading.Lock()
+
+
+def _load_global_config(path: Path) -> dict:
+    """Parsed ``config.yml``, cached on the file's (path, mtime_ns, size).
+
+    WHY (nexus-m20mf, measured 2026-08-23): every T2 store construction
+    calls ``get_credential``, which re-parsed this file on EVERY call. One
+    ``nx_answer`` builds 40 stores across 5 ``_t2_ctx`` blocks, so it paid
+    up to 80 parses. Measured 0.256 ms/call, ~20 ms per nx_answer.
+
+    SCOPE HONESTLY: that is ~20 ms against an nx_answer whose measured p50
+    is 80 SECONDS, i.e. 0.03%. The bead's "90% of steady-state cost" figure
+    was taken against a MOCKED-I/O harness (0.405 s total), where
+    construction genuinely dominates because nothing else runs. This cache
+    is worth having because it is free and because bulk callers (the
+    indexer constructs stores per file) pay it far more than nx_answer
+    does — NOT because it materially moves nx_answer.
+
+    Returns a SHALLOW COPY so a caller mutating the result cannot poison
+    the cache for every other reader.
+    """
+    global _GLOBAL_CONFIG_CACHE
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        # Unreadable/vanished between exists() and stat(): fall back to an
+        # uncached parse attempt rather than serving a stale hit.
+        try:
+            return dict(yaml.safe_load(path.read_text()) or {})
+        except OSError:
+            return {}
+    cached = _GLOBAL_CONFIG_CACHE
+    if cached is not None and cached[0] == key:
+        return dict(cached[1])
+    data = dict(yaml.safe_load(path.read_text()) or {})
+    with _GLOBAL_CONFIG_LOCK:
+        _GLOBAL_CONFIG_CACHE = (key, data)
+    return dict(data)
+
+
 def get_credential(name: str) -> str:
     """Return the credential value for *name*.
 
     Precedence: environment variable > ``~/.config/nexus/config.yml``.
     Returns ``""`` when not set in either location.
+
+    The env lookup is deliberately NOT cached — precedence must stay
+    per-call so an env change takes effect immediately. Only the file
+    parse is cached, and it self-invalidates on mtime/size change.
     """
     env_var = CREDENTIALS.get(name, name.upper())
     env_val = os.environ.get(env_var, "")
@@ -1150,7 +1203,7 @@ def get_credential(name: str) -> str:
         return env_val
     path = _global_config_path()
     if path.exists():
-        data = yaml.safe_load(path.read_text()) or {}
+        data = _load_global_config(path)
         return data.get("credentials", {}).get(name, "")
     return ""
 

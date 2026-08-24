@@ -518,9 +518,39 @@ def run_aspect_worker_daemon(
     environment. ``stale_timeout_seconds`` is the reclaim staleness threshold —
     keep it above the ``claude -p`` extraction budget (review L3 operator knob).
     """
+    import os  # noqa: PLC0415 — branch-local, startup-cost avoidance
+
     from nexus.logging_setup import configure_logging  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     configure_logging("aspect_worker_daemon", config_dir=config_dir)
+
+    # nexus-yg70j: DETACH FROM THE LAUNCH DIRECTORY BEFORE ANYTHING ELSE.
+    #
+    # A long-lived daemon inherits the cwd of whatever spawned it, and this
+    # daemon is spawned from an interactive session (RDR-173 requires a parent
+    # holding `claude -p` credentials). When that directory is later removed,
+    # `os.getcwd()` raises FileNotFoundError inside every subsequent
+    # `os.path.abspath()` — and the worker dies PERMANENTLY and SILENTLY: 16
+    # consecutive batches raised at WARNING with nothing alerting, zero
+    # successes, ~40 minutes on a production install (2026-08-24).
+    #
+    # This is the NORMAL case here, not an edge case: this project's own
+    # guidance routes sessions into `git worktree` checkouts under
+    # /private/tmp, so the launch directory is expected to be short-lived.
+    # The observed instance was a worktree removed after its branch merged --
+    # a correct developer action. The daemon depending on it was the defect.
+    #
+    # config_dir is the stable anchor: the daemon cannot run without it, and
+    # nothing in normal operation removes it while the daemon lives. Falls
+    # back to "/" (classic daemonization) if it is somehow unavailable, so a
+    # chdir failure can never itself be what stops the daemon starting.
+    for _anchor in (config_dir, Path("/")):
+        try:
+            os.chdir(_anchor)
+            break
+        except OSError:  # noqa: PERF203 — two candidates, clarity over micro-perf
+            continue
+
     _require_extraction_credentials()
     daemon = AspectWorkerDaemon(
         config_dir=config_dir, tenant=tenant,

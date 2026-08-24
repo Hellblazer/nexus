@@ -36,6 +36,48 @@ _HOOK_NAMES = ("post-commit", "post-merge", "post-rewrite")
 _STANZA = """\
 {begin}
 REPO_TOP="$(git rev-parse --show-toplevel)"
+# LINKED-WORKTREE GUARD (nexus-ws67k, 2026-08-23). A worktree is a transient
+# VIEW of a repository, not a thing worth indexing:
+#   * it is ephemeral by design -- created for a branch, deleted when done, so
+#     any index of it describes a path that will not exist tomorrow;
+#   * N worktrees of one repo hold byte-identical content, so each one is a
+#     full re-index of a tree already indexed;
+#   * the pgrep guard below compares RESOLVED PATHS, so it cannot see a sibling
+#     worktree indexing the same repo -- three views run three concurrent full
+#     indexes, each believing it is alone;
+#   * hooks live in the COMMON git dir, so installing once in the primary arms
+#     every worktree automatically. Nobody opts in.
+# Measured 2026-08-23 over ~/.config/nexus/index.log: 433 runs in 14 days, 9 of
+# them worktree-targeted in a single day, each re-embedding hundreds of files of
+# a ~2151-file tree, several projected at 64-131 minutes, all detached so the
+# cost never lands on the committing session's clock.
+# --git-dir equals --git-common-dir in a primary checkout and differs in a
+# linked worktree; both are normalised to absolute physical paths first because
+# git returns a bare ".git" for the primary and an absolute path for a worktree.
+# INTERIM, AND DELIBERATELY NARROWER THAN THE FIX. It suppresses indexing of
+# feature-branch views, which is the safer default while the catalog carries NO
+# branch dimension at all (head_hash is per-OWNER, so whichever branch indexes
+# last overwrites the one shared corpus; on 2026-08-23 that corpus briefly
+# carried a head_hash for a commit that had been rebased away and existed in no
+# branch).
+# The durable model, Sam 2026-08-23, is its own RDR and this guard is NOT it:
+#   * index BRANCHES, not checkouts -- a branch is the durable unit, a checkout
+#     path is a transient view of one;
+#   * OPT IN to what is indexed -- nexus has two stable branches (main,
+#     develop); everything else should be silent by default rather than indexed
+#     by default;
+#   * a directory changing is NOT a complete reindex -- measured over the last
+#     12 develop commits, each touched 1-5 files while the indexer re-processed
+#     182-441 per run, roughly 100x amplification. Git already knows the exact
+#     changed set; the staleness scan walks the whole tree and ignores it.
+# Do not extend this guard toward that design in place. It is a stopgap.
+_NX_GIT_DIR="$(cd "$(git rev-parse --git-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
+_NX_GIT_COMMON="$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
+if [ -n "$_NX_GIT_DIR" ] && [ -n "$_NX_GIT_COMMON" ] && [ "$_NX_GIT_DIR" != "$_NX_GIT_COMMON" ]; then
+  echo "=== nx index post-commit SKIPPED (linked worktree, nexus-ws67k) $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
+    >> "$HOME/.config/nexus/index.log"
+  exit 0
+fi
 # pgrep guard (nexus-mkj6u 2026-05-23): skip if an indexer for THIS
 # repo is already running. Belt-and-suspenders with --on-locked=skip,
 # which races on lock acquisition under burst-commit workloads. The

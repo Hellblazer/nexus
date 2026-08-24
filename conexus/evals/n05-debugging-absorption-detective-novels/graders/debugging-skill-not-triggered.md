@@ -1,7 +1,8 @@
 ---
 type: tool_used
 tool: Skill
-input_match: '"skill"\s*:\s*"(conexus:)?debugging"'
+input_match: '"skill"\s*:\s*"(conexus:)?(debugging|debug)"'
+min: 0
 max: 0
 ---
 

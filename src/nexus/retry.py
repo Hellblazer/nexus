@@ -505,7 +505,27 @@ def _voyage_with_retry(
 #: the bug was this classifier's scope, not a bypassed call site. See
 #: ``EtlCircuitBreaker`` below for the companion fix (pacing a SUSTAINED
 #: outage rather than burning through batches at import speed).
-_RETRYABLE_ETL_HTTP_STATUSES: frozenset[int] = frozenset({403, 429, 502, 503, 504})
+#: nexus-1jtob (2026-08-23): 403 REMOVED. It was here on a "transient edge
+#: 403" premise asserted in the comments below and never measured. conexus
+#: swept 3,675,603 edge application-log records over 2026-08-19..08-23 and
+#: found ZERO 403s on this path — strong evidence of absence over that window,
+#: though not proof for all history.
+#:
+#: The two 403 populations are real, and this set had them exactly backwards
+#: by path. On the VECTOR path 403s are frequent (151 in four days) and are
+#: DETERMINISTIC AWS WAF refusals keyed on request-body content; that path
+#: already excluded 403 correctly. On THIS path, which included it, no 403 of
+#: any kind was observed. So the set was armed for a mode with no observed
+#: instances while the mode that actually occurs is unpassable — retrying it
+#: 5-8 times with escalating brake amplified load against our own edge for a
+#: request that could never succeed.
+#:
+#: Neither real 403 population is transient: a WAF refusal is deterministic in
+#: the body, and a control-plane 401/403 is an authz verdict. 5xx from the ALB
+#: (``server: awselb/2.0`` with no healthy target) IS transient and stays
+#: retryable via 502/503/504 — the edge is not blanket-untrustworthy, only its
+#: 4xx refusals are deterministic.
+_RETRYABLE_ETL_HTTP_STATUSES: frozenset[int] = frozenset({429, 502, 503, 504})
 
 _etl_retry_seconds: float = 0.0
 _etl_retry_count: int = 0
@@ -528,7 +548,8 @@ def _is_retryable_etl_error(exc: BaseException) -> bool:
     # Transport-level httpx (ConnectError, ReadTimeout, RemoteProtocolError, …).
     if isinstance(exc, httpx.TransportError):
         return True
-    # httpx response error — only the transient edge 403.
+    # httpx response error — transient statuses only; see the frozenset above
+    # for why 403 is NOT among them (nexus-1jtob).
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in _RETRYABLE_ETL_HTTP_STATUSES
     # urllib.error.HTTPError is a URLError subclass — check it FIRST so a 404
@@ -543,10 +564,16 @@ def _is_retryable_etl_error(exc: BaseException) -> bool:
     if isinstance(exc, (TimeoutError, ConnectionError)):
         return True
     # VectorServiceError-like: an explicit integer ``.code`` (duck-typed so this
-    # leaf module imports no nexus.*). A transient edge 403 wrapper carries
-    # ``code=403`` and retries here.
+    # leaf module imports no nexus.*). nexus-1jtob: a ``code=403`` wrapper no
+    # longer retries here — see the frozenset above. Such a wrapper also carries
+    # ``edge_refusal=True`` when the ALB/WAF generated it, checked first below
+    # so an edge 4xx can never be retried even if a status is re-added later.
     code = getattr(exc, "code", None)
     if isinstance(code, int):
+        # nexus-1jtob: an EDGE-generated 4xx is deterministic in the request
+        # body. Belt-and-braces against a future status re-addition.
+        if getattr(exc, "edge_refusal", False) and 400 <= code < 500:
+            return False
         return code in _RETRYABLE_ETL_HTTP_STATUSES
     # Transport drop wrapped with no code: the managed vector path reframes a
     # urllib/connection/timeout failure as ``VectorServiceError(code=None)`` via

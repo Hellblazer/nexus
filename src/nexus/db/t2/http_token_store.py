@@ -74,6 +74,18 @@ class HttpTokenStore:
         _log.debug("http_token_store.init", base_url=self._base_url)
 
     def _build_client(self) -> httpx.Client:
+        # RDR-198 (closed, declined): this client carries a BAKED
+        # Authorization header, so it must NEVER be shared with another
+        # store — doing so sends this domain's credential on the other
+        # domain's requests. Twelve of the fourteen httpx stores build
+        # auth per call and ARE safe to share; these two are the
+        # exception. Guarded by
+        # tests/test_constructor_baked_auth_clients_not_shared.py.
+        # Converting to per-call auth was measured and declined: the
+        # shared-pool benefit was 0.07% of an nx_answer call and the
+        # indexer turned out not to construct stores per file at all
+        # (T2 nexus_rdr/198-research-2, 198-research-3). Convert BEFORE
+        # sharing, never after.
         return httpx.Client(
             base_url=self._base_url,
             headers={

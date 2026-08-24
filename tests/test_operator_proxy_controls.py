@@ -5,13 +5,25 @@ proxy (nexus-nyry9.14, the Phase 2 GATE).
 Dispatches REAL ``claude -p`` calls at the strong tier -- costs real
 money, same convention already established by
 ``tests/test_operator_dispatch.py::TestClaudeDispatchLiveUsage`` and
-``::TestClaudeDispatchPerOperatorSchemaCheapTier`` (RDR-196 .p2b):
-``@pytest.mark.integration`` only (not ``lived_in`` -- that marker is
-reserved for the 5 enumerated whole-file class-D tests the local-service
-gate's closed list tracks; see
-``tests/test_lived_in_marker_registration.py``), skip loudly when
-``claude`` isn't authenticated, same ``_claude_auth_available()`` helper
-duplicated per that file's own precedent rather than a shared fixture.
+``::TestClaudeDispatchPerOperatorSchemaCheapTier`` (RDR-196 .p2b): skip
+loudly when ``claude`` isn't authenticated, same
+``_claude_auth_available()`` helper duplicated per that file's own
+precedent rather than a shared fixture.
+
+MARKED ``lived_in`` (nexus-pc15o, 2026-08-23). This file originally said
+``integration`` only, on the belief that ``lived_in`` was "reserved for
+the 5 enumerated whole-file class-D tests the local-service gate's closed
+list tracks". That belief was wrong when it was written and was falsified
+the same day: ``tests/test_lived_in_marker_registration.py`` asserts a
+MINIMUM registry (each listed file must carry the marker), never a
+maximum, and nexus-nyry9.11 / nexus-nyry9.16 added a sixth and seventh
+``lived_in`` file on 2026-08-20 -- hours after this one landed. The
+marker's registered meaning in pyproject.toml is exactly what this file
+does: "dispatches real ``claude -p``". The cost of the miss was eight red
+nightlies: these 18 tests can never authenticate a ``claude`` CLI on the
+CI runner, so they skipped there and spent the local-service gate's skip
+BUDGET (25) that exists to detect coverage collapse -- 51 skips against
+it, with zero test failures in the run.
 
 Budget discipline (bead DO 5: "run for real ONCE per operator"): the two
 live dispatches per operator are cached at module scope
@@ -34,6 +46,11 @@ import pytest
 
 from bench.operator_proxy import BUILDERS, DEGRADERS, score
 from bench.operator_proxy_metrics import THRESHOLDS
+
+# Whole-file class-D: EVERY test here dispatches real `claude -p`. Module
+# level rather than per-class so a test added to this file later is carved
+# out by construction instead of by the author remembering.
+pytestmark = [pytest.mark.integration, pytest.mark.lived_in]
 
 _OPERATORS = tuple(THRESHOLDS)  # the 6 in-scope operators, insertion order
 
@@ -90,7 +107,6 @@ async def _get_or_dispatch_pair(operator_name: str) -> tuple[dict, dict, list]:
         return _live_cache[operator_name]
 
 
-@pytest.mark.integration
 class TestPositiveControl:
     """Strong-vs-strong on the same fixed input must score >= threshold.
     If it doesn't, either the metric or the threshold is wrong -- see the
@@ -137,7 +153,6 @@ class TestPositiveControl:
             )
 
 
-@pytest.mark.integration
 class TestNegativeControl:
     """Strong vs a synthetically degraded copy of the SAME run must score
     < threshold. No extra dispatch -- reuses the pair from the positive

@@ -1,12 +1,12 @@
 ---
 name: using-nx-skills
-description: Use when starting any turn — you MUST scan the available conexus skill list and invoke `Skill` for any matching skill BEFORE producing any other response (clarifying questions, code, or prose included). Direct answers without first invoking a matching skill are a defect. False positives are cheap; misses cost real time.
+description: Use when work matches a conexus skill's territory — something is broken or two failed fix attempts, work spans modules or needs design before code, code or tests or a plan need a quality gate, an answer must be reduced from many documents rather than looked up, prior work in T1/T2/T3 has not been checked, or a validated finding is about to go unstored.
 effort: low
 ---
 
 # Using Conexus Skills
 
-**You MUST invoke `Skill` for any plausibly-matching conexus skill before producing any other response.** This is not a hint or a preference — it is a hard rule. Skipping a matching skill is a defect, not an optimization. False positives are cheap; misses cost real time. Skills evolve — read the current version, don't rely on memory.
+Conexus skills carry this project's accumulated practice for specific situations — which tools apply, which storage tier already holds prior work, and the failure modes this project has already paid for. When a situation matches, invoking `Skill` is usually cheaper than re-deriving the approach, and it is how a session inherits what earlier ones learned. Skills change; read the current version rather than recalling a prior one.
 
 SessionStart emits only a condensed form of this rule plus its trigger conditions (nexus-h33x8.5) — this file is the full routing menu, MCP tool catalogue, Common Mistakes table, Red Flags table, and RDR lifecycle chain, read in full whenever `Skill` is invoked on `using-nx-skills`.
 
