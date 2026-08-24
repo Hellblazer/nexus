@@ -98,19 +98,42 @@ def uri_for(
     SQLite ``NULL`` in :class:`AspectRecord` writes and matches the
     migration's NULL-on-empty backfill behavior.
 
-    Filesystem-backed collections (``rdr__/docs__/code__``) use
-    ``file://`` with ``os.path.abspath``; everything else
-    (``knowledge__`` and any future prefix) uses ``chroma://`` with
-    the literal source_path as the path component. The chroma reader
-    handles the title/source_path identity-field fallback for
-    knowledge collections internally (research-5, id 1014).
+    Filesystem-backed collections (``rdr__/docs__/code__``) get a
+    ``file://`` URI; everything else (``knowledge__`` and any future
+    prefix) gets ``chroma://`` with the literal source_path as the path
+    component. The chroma reader handles the title/source_path
+    identity-field fallback for knowledge collections internally
+    (research-5, id 1014).
 
-    Note: ``abspath`` resolves against the caller's CWD, so URIs
-    produced from a relative ``source_path`` depend on where the
-    writer (or migration) ran. Stored absolute paths round-trip
-    deterministically; relative paths may diverge between the
-    backfill site and going-forward writers if those run from
-    different CWDs.
+    THE URI NEVER DEPENDS ON THE PROCESS WORKING DIRECTORY. For a
+    filesystem-backed collection:
+
+    * ``source_path`` ABSOLUTE  -> ``file://`` + the normalised path;
+    * ``source_path`` RELATIVE and ``repo_root`` given -> anchored on
+      that root;
+    * ``source_path`` RELATIVE and no root -> ``None``, plus a one-time
+      WARN naming the remedy. It is never guessed at.
+
+    ``None`` therefore means one of two things, and both map to SQL
+    ``NULL`` in :class:`AspectRecord` writes: an empty ``source_path``,
+    or a relative one with no root to anchor it. A MISSING identity is
+    detectable, recoverable and announced; a CWD-anchored one is none of
+    those, which is why this returns nothing rather than inventing
+    something.
+
+    This docstring previously described the opposite — that ``abspath``
+    resolved against the caller's CWD and that relative paths "may
+    diverge between writers running from different CWDs". That was true
+    until nexus-yg70j, and it sat directly above the comment explaining
+    why the behaviour was removed, so a reader who stopped here learned
+    the bug as the contract. Same shape as the ``noqa`` on
+    ``_process_batch`` that said "rows re-queued" while the code
+    terminal-failed them, which is how that defect survived review.
+    Found by nexus-1f reading the shipped 7.16.3 code.
+
+    Same rule as :meth:`HttpCatalogClient.resolve_path` and the engine's
+    ``CatalogRepository.deriveSourceUri`` — three implementations, one
+    contract.
     """
     import os.path  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
