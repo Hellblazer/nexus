@@ -6,6 +6,62 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.16.3] - 2026-08-24
+
+Closes the two defects 7.16.2 shipped as documented Known gaps, and adds the
+lint that would have caught one of them before it shipped. Engine identity
+unchanged at `engine-service-v0.1.85`.
+
+### Fixed
+- **A persistent identity depended on where the process was standing.**
+  `aspect_readers.uri_for` derived `source_uri` with `os.path.abspath`, which
+  calls `getcwd()` for a relative path. Two failures, both observed: with the
+  cwd DELETED it raised, and before 7.16.2 that killed the aspect-worker
+  permanently and silently (16 batches, ~40 minutes on a production install);
+  with the cwd merely UNRELATED it minted a plausible URI for a file that does
+  not exist -- after 7.16.2's chdir fix the worker stands in `~/.config/nexus`,
+  so `docs/rdr/x.md` became
+  `file:///Users/<u>/.config/nexus/docs/rdr/x.md`. A loud failure became a quiet
+  wrong answer. Now: absolute as-is, relative anchored only on an explicit
+  `repo_root`, relative with no root returns nothing and warns. Never a guess.
+  The same rule as `HttpCatalogClient.resolve_path` and the engine's
+  `deriveSourceUri`. A missing identity is detectable and recoverable; a
+  cwd-anchored one is neither. (`nexus-yg70j`)
+- **A batch failure was recorded as a verdict about every document in it.**
+  The aspect-worker's batch path called `mark_failed` -- terminal -- on all
+  five rows for any extraction exception, while the single-row path already
+  routed through the retry taxonomy with its backoff budget. Measured on the
+  incident's 26 terminally-failed rows: 7 were genuine victims and **19 were
+  healthy documents that exist on disk**, killed only by sharing a batch with
+  one bad neighbour. 73% collateral. The batch is a transport detail, not a
+  fact about any document in it. Every row now reaches the router individually.
+  (`nexus-yg70j`)
+- **A third instance of the same cwd-anchoring class**, in
+  `catalog/types.py`'s `_normalize_source_uri` -- defended when a `repo_root`
+  was supplied, exposed when it was not. Found by the new lint rather than by
+  an incident, which is the first time this class has been caught that way.
+  (`nexus-yg70j`)
+
+### Added
+- **A lint against cwd-anchored identities.** A function that constructs a
+  `file://` URI may not call `os.path.abspath`, `os.getcwd` or `Path.cwd`.
+  Function-scoped rather than module-scoped on purpose: CLI code resolving user
+  input against the cwd is correct there, and module scope would have forced an
+  allowlist entry that then hides a real offender added to the same file later.
+  The allowlist ships empty. Verified red against the shipped 7.16.2 code,
+  where it names both historical offenders by file, line and function.
+
+### Note on 7.16.2
+7.16.2 did not introduce the cwd-anchoring; it is the `nexus-3e4s` class, known
+since `nexus-5i864`, and the crash it fixed had been masking it. The honest
+statement is that a fatal bug was fixed and a latent one became reachable.
+
+### Known gaps
+- An environmental fault (a deleted cwd) still classifies as non-retryable and
+  terminal-fails its row. The taxonomy has two buckets, transient-remote and
+  bad-document; a self/infrastructure fault is neither and should touch no row
+  state at all. Tracked on `nexus-yg70j`.
+
 ## [7.16.2] - 2026-08-23
 
 A patch of production-outage and diagnostic fixes found by running the system

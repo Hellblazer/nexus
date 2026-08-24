@@ -145,6 +145,30 @@ def _resolve_all(items: list[dict]) -> list[tuple[str, str]] | None:
 # ── SQL builders ────────────────────────────────────────────────────────────
 
 
+_unresolvable_idents_warned: set[tuple[str, str]] = set()
+
+
+def _warn_unresolvable_ident(collection: str, source_path: str) -> None:
+    """Log once per (collection, source_path) that an ident yielded no URI.
+
+    nexus-yg70j. These operators key on ``source_uri``; an ident that cannot
+    produce one is EXCLUDED from the result. Excluding it silently makes a
+    resolution failure indistinguishable from a genuine non-match -- the same
+    class of defect as the cwd-anchored URI this change removed, one layer up
+    and harder to see.
+    """
+    key = (collection, source_path)
+    if key in _unresolvable_idents_warned:
+        return
+    _unresolvable_idents_warned.add(key)
+    _log.warning(
+        "aspect_sql_ident_unresolvable_dropped",
+        collection=collection, source_path=source_path,
+        impact="excluded from this operator's result",
+        remedy="relative source_path with no repo_root -- see aspect_readers.uri_for",
+    )
+
+
 def _build_filter_predicate(field: str, query: str) -> tuple[str, list]:
     """Return (sql_fragment, params) for a single-column filter.
 
@@ -544,14 +568,23 @@ def _query_filter(
     # the last param is always the LIKE pattern the service expects.
     _, pred_params = _build_filter_predicate(field, query)
 
-    # Derive URIs for every ident up front; idents whose
-    # ``uri_for`` returns None are unreachable post-source_path-drop
-    # (the migration's audit guarantees no NULL/empty source_uri
-    # rows so a None here is a caller-side issue, not a row issue).
+    # Derive URIs for every ident up front.
+    #
+    # nexus-yg70j: a None here is REACHABLE again. This comment used to say it
+    # was not -- true only while `uri_for` fell back to a CWD-anchored abspath,
+    # i.e. only because it always invented something. It now returns None for a
+    # RELATIVE source_path with no repo_root rather than guessing, so a
+    # relative ident yields no URI and is dropped below.
+    #
+    # The drop is LOGGED, not silent. Dropping it quietly would trade one wrong
+    # answer for a different one a layer up: the item vanishes from the
+    # filter/groupby/aggregate result with nothing saying so, which reads to
+    # the caller as "did not match" rather than "could not be resolved".
     ident_to_uri: dict[tuple[str, str], str] = {}
     for c, sp in idents:
         u = uri_for(c, sp) or ""
         if not u:
+            _warn_unresolvable_ident(c, sp)
             continue
         ident_to_uri[(c, sp)] = u
 
@@ -629,6 +662,7 @@ def _query_groupby(
     for c, sp in idents:
         u = uri_for(c, sp) or ""
         if not u:
+            _warn_unresolvable_ident(c, sp)
             continue
         ident_to_uri[(c, sp)] = u
 
@@ -686,6 +720,8 @@ def _query_confidence_aggregate(
         u = uri_for(c, sp) or ""
         if u:
             uris_for_query.append(u)
+        else:  # nexus-yg70j: never drop an ident without saying so
+            _warn_unresolvable_ident(c, sp)
 
     # nexus-l9hd8: call the real HTTP endpoint. (The local-SQLite fold leg
     # died with the =sqlite opt-out, RDR-158 P3 nexus-7bomn.)
