@@ -108,6 +108,20 @@ _log = structlog.get_logger(__name__)
     ),
 )
 @click.option(
+    "--link-coverage",
+    "link_coverage",
+    is_flag=True,
+    help=(
+        "nexus-glivh: per-content-type link coverage. FAIL on any content "
+        "type holding >= MIN_TYPE_DOCS documents with ZERO links, which "
+        "means no generator has ever run for that type rather than that "
+        "its documents are genuinely unrelated. WARN below "
+        "LOW_COVERAGE_PCT. Index-time generation only links NEWLY "
+        "registered tumblers, so a corpus can sit permanently unlinked "
+        "with every other check green."
+    ),
+)
+@click.option(
     "--json", "as_json", is_flag=True,
     help="Emit machine-readable JSON instead of text output.",
 )
@@ -118,6 +132,7 @@ def doctor_cmd(
     t3_vs_catalog: bool,
     name_vs_embed_dim: bool,
     store_put_integrity: bool,
+    link_coverage: bool,
     as_json: bool,
 ) -> None:
     """RDR-101 catalog doctor surface.
@@ -138,13 +153,14 @@ def doctor_cmd(
         collections_drift
         or chunk_size_distribution or chunk_text_dedup or t3_vs_catalog
         or name_vs_embed_dim or store_put_integrity
+        or link_coverage
     )
     if not any_check:
         raise click.UsageError(
             "Pass a check flag: --collections-drift, "
             "--chunk-size-distribution, --chunk-text-dedup, "
-            "--t3-vs-catalog, --name-vs-embed-dim, or "
-            "--store-put-integrity."
+            "--t3-vs-catalog, --name-vs-embed-dim, "
+            "--store-put-integrity, or --link-coverage."
         )
 
     overall_pass = True
@@ -213,6 +229,18 @@ def doctor_cmd(
             if _printed_anything:
                 click.echo("")
             _print_store_put_integrity_text(report)
+            _printed_anything = True
+        if not report["pass"]:
+            overall_pass = False
+
+    if link_coverage:
+        report = _run_link_coverage()
+        if as_json:
+            json_payload["link_coverage"] = report
+        else:
+            if _printed_anything:
+                click.echo("")
+            _print_link_coverage_text(report)
             _printed_anything = True
         if not report["pass"]:
             overall_pass = False
@@ -1217,3 +1245,127 @@ def _print_store_put_integrity_text(report: dict) -> None:
 def register(group: click.Group) -> None:
     """Attach the diagnostics commands to the shared ``catalog`` group."""
     group.add_command(doctor_cmd)
+
+
+# ── link coverage (nexus-glivh) ──────────────────────────────────────────────
+#
+# Index-time link generation is scoped to NEWLY registered tumblers
+# (indexer.py, `if new_tumblers`), so links accrue only at first registration
+# and nothing walks the corpus retroactively. A corpus can therefore sit at
+# near-zero link coverage indefinitely while every other doctor check is
+# green, which is exactly the state found on the live catalog 2026-08-23:
+# code 8.3%, rdr 22.3%, prose 13.3%, knowledge 9.7%, and a median document
+# with no links at depth 2. Typed-link traversal (the traverse operator,
+# search_graph_hop, follow_links on query()) then walks an empty graph and
+# returns nothing rather than failing, which is a silent-wrong-answer class.
+
+#: A content type below this many documents is too small for a coverage
+#: percentage to mean anything; a 2-document type at 0% is noise.
+MIN_TYPE_DOCS: int = 10
+
+#: There is deliberately NO low-coverage percentage threshold.
+#:
+#: The first draft of this check warned below 25%, set just above the
+#: measured 2026-08-23 baseline. A dry run of every generator over that same
+#: corpus then showed the whole corpus-wide pass would create 133 links,
+#: taking the catalog 2,680 -> 2,813. So low percentage coverage is the
+#: NATURAL state of a filepath-extraction link graph -- most code files are
+#: never named by path in any prose document -- and no available remedy moves
+#: it. A warning that fires permanently with nothing to do about it is the
+#: alarm-fatigue pattern, and it trains people to ignore the row that DOES
+#: mean something. Percentages are reported; only the unambiguous case fails.
+#:
+#: Restore a threshold only alongside a link source that can actually move
+#: the number, and set it where that source's measured yield puts it.
+
+
+def _run_link_coverage() -> dict:
+    """Per-content-type link coverage over the whole catalog.
+
+    FAIL is reserved for the unambiguous signal: a content type with at least
+    :data:`MIN_TYPE_DOCS` documents and ZERO linked documents. That is not a
+    corpus whose documents happen to be unrelated, it is a generator that has
+    never run for that type. WARN covers the tunable judgement (below
+    :data:`LOW_COVERAGE_PCT`) and never fails the command on its own.
+
+    Returns ``{"pass": bool, "rows": [...], "failures": [...],
+    "warnings": [...], "totals": {...}}``.
+    """
+    from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
+
+    try:
+        cat = _cat_cmd._get_catalog()
+        raw = cat.coverage_by_content_type("")
+    except Exception as exc:  # noqa: BLE001 — an unreadable catalog is UNKNOWN, never a pass
+        return {
+            "pass": False, "rows": [], "failures": [], "warnings": [],
+            "totals": {},
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    if not raw:
+        # A sweep that found nothing to check is a failure, not a pass
+        # (the vacuous-gate doctrine, nexus-moht0).
+        return {
+            "pass": False, "rows": [], "failures": [], "warnings": [],
+            "totals": {},
+            "error": "catalog reported no content types; nothing was checked",
+        }
+
+    rows, failures, warnings = [], [], []
+    tot_docs = tot_linked = 0
+    for r in sorted(raw, key=lambda r: r["content_type"] or ""):
+        ct = r["content_type"] or "(none)"
+        total = int(r["total"])
+        linked = int(r["linked"])
+        pct = (linked / total * 100) if total else 0.0
+        tot_docs += total
+        tot_linked += linked
+        row = {"content_type": ct, "total": total, "linked": linked, "pct": round(pct, 1)}
+        rows.append(row)
+        if total >= MIN_TYPE_DOCS and linked == 0:
+            failures.append(row)
+
+    return {
+        "pass": not failures,
+        "rows": rows,
+        "failures": failures,
+        "warnings": warnings,
+        "totals": {
+            "documents": tot_docs,
+            "linked": tot_linked,
+            "pct": round((tot_linked / tot_docs * 100) if tot_docs else 0.0, 1),
+        },
+    }
+
+
+def _print_link_coverage_text(report: dict) -> None:
+    click.echo("Link coverage by content type (nexus-glivh):")
+    if report.get("error"):
+        click.echo(f"  ✗ {report['error']}")
+        return
+    for row in report["rows"]:
+        mark = " "
+        if row in report["failures"]:
+            mark = "✗"
+        click.echo(
+            f"  {mark} {row['content_type']:<12} {row['linked']:>5}/{row['total']:<6} "
+            f"= {row['pct']:5.1f}%"
+        )
+    tot = report["totals"]
+    click.echo(f"  total: {tot['linked']}/{tot['documents']} = {tot['pct']}%")
+    for row in report["failures"]:
+        click.echo(
+            f"  ✗ FAIL {row['content_type']}: {row['total']} documents, ZERO links. "
+            "No generator has run for this type."
+        )
+    if report["failures"]:
+        click.echo(
+            "  Remediate with: nx catalog generate-links --dry-run  "
+            "(measure the volume BEFORE writing; see nexus-ybj1b)"
+        )
+    click.echo(
+        "  Note: a low percentage is NOT flagged. Measured 2026-08-23, the "
+        "full generator pass over this corpus yields 133 links, so low "
+        "coverage is the natural state here and no available remedy moves it."
+    )

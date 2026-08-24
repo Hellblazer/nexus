@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import structlog
@@ -470,3 +471,118 @@ def generate_pdf_corpus_links(
     return count
 
 
+
+
+# ── Dry-run preview (nexus-glivh) ────────────────────────────────────────────
+#
+# `nx catalog generate-links --dry-run` previously printed "dry-run mode not
+# yet supported for link preview" and previewed nothing, so the only way to
+# learn what a pass would do was to let it write to a live catalog. That is
+# the wrong order for a generator whose failure mode is VOLUME: the
+# implements-heuristic flood (nexus-ybj1b) had to be disabled at engine
+# v0.1.57 after exactly that kind of unmeasured pass.
+
+@dataclass(frozen=True)
+class ProposedLink:
+    """One link a dry run would have created."""
+    from_tumbler: str
+    to_tumbler: str
+    link_type: str
+    created_by: str
+
+
+class DryRunLinkWriter:
+    """A ``CatalogWriter``-shaped recorder that writes nothing.
+
+    Composes with the generators UNCHANGED: they already take a ``writer=``,
+    so a dry run is the real code path with the writes swapped out. A preview
+    computed by a separate path is a preview of the wrong thing.
+
+    ``link_if_absent`` returns True only when a link is genuinely new, so a
+    count means "would create" and never "would attempt". Pre-existing links
+    are supplied up front via :func:`load_existing_link_keys` rather than
+    probed one at a time, which would be thousands of round trips.
+    """
+
+    def __init__(self, existing: set[tuple[str, str, str]] | None = None) -> None:
+        self._existing: set[tuple[str, str, str]] = existing or set()
+        self._seen: set[tuple[str, str, str]] = set()
+        self._proposed: list[ProposedLink] = []
+
+    def link_if_absent(
+        self, from_t: object, to_t: object, link_type: str,
+        created_by: str = "", **_meta: object,
+    ) -> bool:
+        key = (str(from_t), str(to_t), str(link_type))
+        # Dedupe within the run as well as against the catalog: a generator
+        # that proposes the same edge twice must not be counted twice, or the
+        # projected volume is inflated by its own repetition.
+        if key in self._existing or key in self._seen:
+            return False
+        self._seen.add(key)
+        self._proposed.append(
+            ProposedLink(str(from_t), str(to_t), str(link_type), str(created_by))
+        )
+        return True
+
+    # The generators only ever call link_if_absent, but a writer that silently
+    # accepted a direct link() would write nothing while reporting nothing —
+    # fail loud instead of previewing a lie.
+    def link(self, *_args: object, **_kwargs: object) -> None:
+        raise NotImplementedError(
+            "DryRunLinkWriter received a direct link() call. Dry-run preview "
+            "only models link_if_absent; a generator using link() would write "
+            "unconditionally and its volume would not appear in this preview."
+        )
+
+    def close(self) -> None:
+        return None
+
+    @property
+    def proposed(self) -> list[ProposedLink]:
+        return list(self._proposed)
+
+    def count_by_link_type(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for p in self._proposed:
+            out[p.link_type] = out.get(p.link_type, 0) + 1
+        return out
+
+    def count_by_creator(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for p in self._proposed:
+            out[p.created_by] = out.get(p.created_by, 0) + 1
+        return out
+
+    def fan_out(self) -> dict[str, int]:
+        """Proposed out-degree per source document.
+
+        The number that decides whether a pass is a fix or a flood: total
+        count hides a single document proposing thousands of edges.
+        """
+        out: dict[str, int] = {}
+        for p in self._proposed:
+            out[p.from_tumbler] = out.get(p.from_tumbler, 0) + 1
+        return out
+
+
+def load_existing_link_keys(cat: CatalogReader, *, page: int = 200) -> set[tuple[str, str, str]]:
+    """Every ``(from, to, link_type)`` already in the catalog.
+
+    Paged; the whole link set is small enough to hold in memory (order 1e3 on
+    a real corpus). Raises rather than returning a partial set, because a
+    short read would silently inflate the "would create" count with links that
+    already exist.
+    """
+    keys: set[tuple[str, str, str]] = set()
+    offset = 0
+    while True:
+        batch = cat.link_query(limit=page, offset=offset)
+        if not batch:
+            break
+        for link in batch:
+            keys.add((str(link.from_tumbler), str(link.to_tumbler), str(link.link_type)))
+        if len(batch) < page:
+            break
+        offset += page
+    return keys
