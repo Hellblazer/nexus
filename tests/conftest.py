@@ -347,6 +347,47 @@ def pytest_sessionfinish(session, exitstatus):
 # plus this project's T1/daemon architecture docs).
 
 
+#: Files under the real config dir that are APPEND-ONLY LOGS. A session that
+#: grows one of these is untidy; it is not a state leak, and failing a run over
+#: it is worse than useless. Measured cost of not distinguishing: a 7.16.3
+#: battery leg reported exit 1 over 14,405 passing tests because
+#: ``routing_log.jsonl`` gained lines. An exit code that cannot separate "the
+#: suite failed" from "a log file grew" makes every downstream consumer rerun a
+#: 40-minute battery to find out which -- and the rerun appends to the log
+#: again. The guard's real subject is in-place mutation of production STATE
+#: (``backfill_state.json``, ``last_seen_version``), which still fails.
+_APPEND_ONLY_REAL_CONFIG_LOGS = frozenset({
+    "routing_log.jsonl",
+    "index.log",
+})
+
+
+def _split_appends_from_state(
+    changed: list[str],
+    before: dict[str, tuple[int, int]],
+    after: dict[str, tuple[int, int]],
+) -> tuple[list[str], list[str]]:
+    """Split changed paths into (state_mutations, benign_appends).
+
+    A path counts as a benign append ONLY when all three hold: its basename is
+    a known append-only log, it existed before, and its size strictly GREW.
+    A log that SHRANK or was rewritten in place is a truncation, which is a
+    state mutation and still fails -- that is the case worth catching, and
+    size alone distinguishes it without reading content (which this guard
+    deliberately never does; the directory can hold a live user's real data).
+    """
+    state: list[str] = []
+    appends: list[str] = []
+    for rel in changed:
+        b, a = before.get(rel), after.get(rel)
+        name = rel.rsplit("/", 1)[-1]
+        if name in _APPEND_ONLY_REAL_CONFIG_LOGS and b is not None and a is not None and a[1] > b[1]:
+            appends.append(rel)
+        else:
+            state.append(rel)
+    return state, appends
+
+
 def _snapshot_real_config_dir() -> dict[str, tuple[int, int]]:
     """Return ``{relative_posix_path: (mtime_ns, size)}`` for every regular
     file under the REAL ``~/.config/nexus/``.
@@ -599,6 +640,21 @@ def _check_real_config_dir_mutations(session) -> None:
         return
     after = _snapshot_real_config_dir()
     changed = _diff_config_dir_snapshots(_real_config_dir_baseline, after)
+    if not changed:
+        return
+    # nexus-pfuns follow-on: an append to a known append-only log is untidy,
+    # not a state leak. Report it, do not redden the run over it.
+    changed, benign_appends = _split_appends_from_state(
+        changed, _real_config_dir_baseline, after,
+    )
+    if benign_appends:
+        print(
+            f"\n\nNOTE: nexus-pfuns — {len(benign_appends)} append-only log(s) "
+            f"grew under the REAL ~/.config/nexus/ during the session: "
+            f"{', '.join(benign_appends)}\n"
+            f"  Reported, not failed: these are append-only logs, not state. "
+            f"A truncation or in-place rewrite of the same file WOULD fail.\n"
+        )
     if not changed:
         return
     names = ", ".join(changed[:10])
