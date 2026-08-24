@@ -6,6 +6,71 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.17.0] - 2026-08-24
+
+Makes the link generator measurable before it writes, gives the catalog a check
+for the corpus it silently never links, and closes the last of the aspect-worker
+failure-taxonomy gaps 7.16.2/7.16.3 opened. Engine identity unchanged at
+`engine-service-v0.1.85`.
+
+### Added
+- **`nx catalog generate-links --dry-run` now previews for real.** It printed
+  "dry-run mode not yet supported for link preview" and previewed nothing, so
+  the only way to learn what a pass would do was to let it write to a live
+  catalog. Wrong order for a generator whose failure mode is VOLUME -- the
+  implements-heuristic flood had to be disabled engine-side after exactly that
+  kind of unmeasured pass. The preview runs the SAME generators through a
+  recording writer rather than a separate preview path, so it cannot drift from
+  the write path. Counts mean "would create", never "would attempt": existing
+  links are deduped against and repeated proposals within a run collapse.
+  Reports per-generator totals, by link type, by creator, and source fan-out --
+  a total hides one document proposing everything. A generator that fails to
+  preview reports UNKNOWN, never zero. (`nexus-glivh`)
+- **Two of the four link generators were unreachable from the CLI.** `prose`
+  and `pdf` ran at index time but not from `generate-links`. All four now run;
+  `--no-prose` / `--no-pdf` restore the older scope. Without this the preview
+  understated a full pass by 103 of its 133 links. (`nexus-glivh`)
+- **`nx catalog doctor --link-coverage`.** Index-time generation only links
+  NEWLY registered tumblers, so a corpus can sit permanently unlinked with
+  every other check green, and typed-link traversal then walks an empty graph
+  and returns nothing rather than failing -- a silent-wrong-answer class. FAILs
+  only on a content type with at least 10 documents and ZERO links, which means
+  no generator ever ran for it. Deliberately NO low-percentage threshold: the
+  measured full pass over this corpus yields 133 links, so low coverage is the
+  natural ceiling of filepath extraction, and a warning that fires forever with
+  no available remedy is the alarm-fatigue pattern. (`nexus-glivh`)
+
+### Fixed
+- **An environmental fault was recorded as a verdict about a document.** The
+  aspect-worker's failure taxonomy had two buckets -- transient-remote (retry)
+  and bad-document (terminal) -- and a fault in the worker's OWN environment is
+  neither. It reached terminal by OMISSION rather than judgement: nothing
+  claimed the document was bad, it simply fell through to the else-branch. On
+  2026-08-24 that omission recorded "failed" against 26 healthy production rows
+  because the daemon was standing in a deleted directory. A self fault now
+  writes no row state at all, logs at ERROR (the incident ran 16 consecutive
+  failed batches at WARNING with nothing alerting), and stands the daemon down
+  so its lease is relinquished and the respawn gets a fresh environment; the
+  claimed rows return via `reclaim_stale`. Detection measures the PROCESS
+  rather than classifying the exception, because `FileNotFoundError` is a fact
+  about the document when the document is missing and a fact about the process
+  when `getcwd()` raised -- the type cannot tell you which. `ENOENT` / `EACCES`
+  / `EPERM` stay excluded, with a test each: classifying them as self faults
+  would strand every genuinely-missing document instead of failing it for
+  triage. (`nexus-yg70j`)
+- `AspectWorkerDaemon.start` cleared its stop event AFTER starting the worker,
+  so a fault raised in the worker's first instants was erased. (`nexus-yg70j`)
+- The migration-rehearsal container now receives `UV_HTTP_TIMEOUT`, and its
+  comment no longer describes committed code as "UNCOMMITTED". (`nexus-0j6gy`)
+- A growing append-only log no longer reddens a passing run in the real-config
+  guard; growth is reported, a state mutation still fails. (`nexus-pfuns`)
+
+### Documentation
+- `aspect_readers.uri_for`'s docstring described the cwd bug 7.16.3 had just
+  removed as the contract, directly above the comment explaining why it was
+  removed. A reader who stopped at the docstring -- which is what a docstring is
+  for -- learned the removed bug as the rule. (`nexus-yg70j`)
+
 ## [7.16.3] - 2026-08-24
 
 Closes the two defects 7.16.2 shipped as documented Known gaps, and adds the

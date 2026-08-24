@@ -40,9 +40,14 @@ Result handling:
 * ``record is null-fields`` (extractor's internal 3-retry budget
   exhausted) → upsert null record, mark_done. The extractor
   already retried; the worker MUST NOT retry again.
-* Uncaught exception in the worker body (T2 connection lost,
-  programming bug) → mark_failed for triage; the worker keeps
-  running. Failed rows are terminal until manually re-enqueued.
+* Uncaught exception in the worker body → routed by
+  ``_mark_retry_or_fail_routed`` into one of THREE classes
+  (nexus-yg70j): a transient remote failure retries with backoff;
+  a bad document terminal-fails for triage; a SELF FAULT — this
+  process's own environment is broken — writes no row state at
+  all, stands the worker down, and leaves the claimed rows for
+  ``reclaim_stale``. Only the middle class is terminal, and it is
+  terminal until manually re-enqueued.
 
 The hook function ``aspect_extraction_enqueue_hook`` is registered
 in ``mcp/core.py`` alongside the other post-document consumers. It
@@ -52,11 +57,13 @@ worker spawn).
 """
 from __future__ import annotations
 
+import errno
 import os
 import random
 import re
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import structlog
@@ -120,6 +127,82 @@ def _is_retryable(exc: BaseException) -> bool:
             )
             continue
     return False
+
+
+# ── The third fault class: self / infrastructure (nexus-yg70j) ──────────────
+#
+# ``_is_retryable`` above describes a TWO-BUCKET world:
+#
+#     TRANSIENT-REMOTE   the far side is briefly unwell   -> retry
+#     BAD-DOCUMENT       this row is malformed            -> terminal
+#
+# A fault in the worker's OWN environment is neither, and before this it
+# reached terminal by OMISSION rather than by judgement: nothing claimed it
+# was a bad document, it simply fell through to the else-branch. On
+# 2026-08-24 that omission recorded "failed" against 26 healthy production
+# rows because the daemon was standing in a deleted directory.
+#
+# The distinguishing question is not what the exception WAS. FileNotFoundError
+# is a fact about the document when the document is missing and a fact about
+# the process when ``getcwd()`` raised, and the type cannot tell you which. So
+# this predicate MEASURES THE PROCESS instead of classifying the exception.
+
+#: Errnos that can never be a property of a document — the host is out of a
+#: resource, or its filesystem cannot be written. Deliberately EXCLUDED:
+#: ENOENT / EACCES / EPERM / EISDIR / ENOTDIR, each of which is genuinely
+#: ambiguous with "this row's path is wrong", which IS a fact about the row.
+#: A false positive here strands healthy rows AND kills a healthy daemon, so
+#: this set stays narrow; widening it is a decision, not a tidy-up.
+_ENVIRONMENT_ERRNOS: frozenset[int] = frozenset(
+    code for code in (
+        getattr(errno, name, None)
+        for name in ("ENOSPC", "EROFS", "EMFILE", "ENFILE", "ENOMEM", "EDQUOT")
+    )
+    if code is not None
+)
+
+#: Bounded so a self-referential ``__context__`` chain cannot spin here.
+_CAUSE_CHAIN_MAX_DEPTH: int = 8
+
+
+def _self_fault_reason(exc: BaseException) -> str | None:
+    """Return a short reason iff the WORKER'S OWN environment is broken, else
+    ``None``.
+
+    A self fault means the failure had nothing to do with the row that happened
+    to be in hand when it surfaced, so no verdict about that row is honest —
+    neither ``mark_failed`` (terminal is a claim about the document) nor
+    ``mark_retry`` (retry says the document may succeed later, which is true
+    here but for reasons that are not about the document).
+
+    Two arms:
+
+    1. POSITIVE CONTROL on the process. ``os.getcwd()`` raising is proof — not
+       inference — that this process is standing in a directory that no longer
+       exists, and every relative path it resolves from here is nonsense. A
+       successful call is equally load-bearing: it shows the check can return
+       the healthy answer, so a failing one is evidence rather than absence.
+    2. HOST RESOURCE EXHAUSTION by errno (see ``_ENVIRONMENT_ERRNOS``), walked
+       down the cause chain because the batch extractor wraps.
+
+    Cost is one ``getcwd()`` syscall per FAILED row, which is a rare path.
+    """
+    try:
+        os.getcwd()
+    except OSError as cwd_exc:
+        return f"cwd_unresolvable ({type(cwd_exc).__name__}: {cwd_exc})"
+
+    cursor: BaseException | None = exc
+    for _ in range(_CAUSE_CHAIN_MAX_DEPTH):
+        if cursor is None:
+            break
+        if isinstance(cursor, MemoryError):
+            return "host_out_of_memory"
+        if isinstance(cursor, OSError) and cursor.errno in _ENVIRONMENT_ERRNOS:
+            name = errno.errorcode.get(cursor.errno, str(cursor.errno))
+            return f"host_resource_exhausted ({name})"
+        cursor = cursor.__cause__ or cursor.__context__
+    return None
 
 
 def _backoff_interval_seconds(retry_count: int, *, rng=random.random) -> int:
@@ -196,6 +279,7 @@ class AspectExtractionWorker:
         poll_interval: float = 2.0,
         stale_timeout_seconds: int = 60,
         batch_size: int = _DEFAULT_BATCH_SIZE,
+        on_self_fault: Callable[[str], None] | None = None,
     ) -> None:
         self._poll_interval = poll_interval
         self._stale_timeout_seconds = stale_timeout_seconds
@@ -203,6 +287,28 @@ class AspectExtractionWorker:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        # nexus-yg70j: the host's stand-down hook. A worker running loose in an
+        # nx-mcp process has no host and simply stops claiming; a worker hosted
+        # by AspectWorkerDaemon hands the fault up so the PROCESS exits, which
+        # is what makes the failure loud and what gets a fresh environment.
+        self._on_self_fault: Callable[[str], None] | None = on_self_fault
+        self._self_fault: str | None = None
+        self._self_fault_lock = threading.Lock()
+
+    def set_self_fault_handler(self, handler: Callable[[str], None] | None) -> None:
+        """Install the host's stand-down hook after construction.
+
+        ``AspectWorkerDaemon`` receives its worker from an injected ZERO-ARG
+        factory, so it cannot pass this through the constructor without
+        changing that protocol for every caller and test fake. Direct
+        constructions use the ``on_self_fault`` kwarg instead.
+        """
+        self._on_self_fault = handler
+
+    def self_fault(self) -> str | None:
+        """The reason this worker stood down, or ``None`` if it is healthy."""
+        with self._self_fault_lock:
+            return self._self_fault
 
     def start(self) -> None:
         """Spawn the daemon thread. Idempotent — calling twice does
@@ -211,6 +317,10 @@ class AspectExtractionWorker:
             if self._thread is not None and self._thread.is_alive():
                 return
             self._stop_event.clear()
+            # A latched fault would otherwise survive the restart and suppress
+            # the NEXT stand-down entirely (the latch also gates _stop_event).
+            with self._self_fault_lock:
+                self._self_fault = None
             self._thread = threading.Thread(
                 target=self._run_loop,
                 name="aspect-extraction-worker",
@@ -429,13 +539,13 @@ class AspectExtractionWorker:
             # on a per-row property is the defect: the batch is a transport
             # detail, not a fact about any document in it.
             #
-            # The router decides per row: non-retryable exception or exhausted
-            # budget -> terminal; otherwise mark_retry with backoff. Note that
-            # an environmental fault (a deleted cwd, this incident's actual
-            # cause) classifies as NON-retryable today and still terminal-fails
-            # -- a third "self/infrastructure" class that touches no row state
-            # is the remaining gap, tracked on nexus-yg70j. This change removes
-            # the collateral, not that gap.
+            # The router decides per row: a SELF FAULT (this process's own
+            # environment is broken -- a deleted cwd, this incident's actual
+            # cause) writes no row state at all and stands the worker down;
+            # otherwise a non-retryable exception or an exhausted budget is
+            # terminal, and anything else is mark_retry with backoff. The self
+            # fault is latched inside the router, so this loop reports one
+            # episode rather than one per row.
             for row in rows:
                 try:
                     self._mark_retry_or_fail_routed(row, exc)
@@ -512,7 +622,12 @@ class AspectExtractionWorker:
         """Route a failed row to a backed-off retry, or terminal-fail it
         (RDR-163 P1, nexus-ztpt6).
 
-        Decision:
+        Decision, in order:
+        * SELF FAULT — this process's own environment is broken (nexus-yg70j)
+          → NO row-state write at all. Stand the worker down and leave the
+          claimed rows for ``reclaim_stale``. Checked FIRST, because the two
+          branches below both record a verdict about the document and neither
+          verdict is honest when the fault was never about the document;
         * non-retryable exception (programming bug / malformed record) →
           terminal ``mark_failed``;
         * retry budget exhausted (``retry_count >= _RETRY_MAX_ATTEMPTS``) →
@@ -526,6 +641,11 @@ class AspectExtractionWorker:
         ``reclaim_stale`` rather than killing the worker thread — the same
         best-effort posture as ``_mark_failed_routed``.
         """
+        self_fault = _self_fault_reason(exc)
+        if self_fault is not None:
+            self._stand_down(self_fault, row=row, exc=exc)
+            return
+
         retry_count = getattr(row, "retry_count", 0) or 0
         if not _is_retryable(exc) or retry_count >= _RETRY_MAX_ATTEMPTS:
             self._mark_failed_routed(row, str(exc))
@@ -553,6 +673,54 @@ class AspectExtractionWorker:
                 source_path=row.source_path,
                 exc_info=True,
             )
+
+    def _stand_down(self, reason: str, *, row, exc: BaseException) -> None:
+        """Report a self fault and stop claiming, WITHOUT touching row state.
+
+        Latched, because the batch arm calls the router once per row: an
+        episode produces one ERROR line and one stand-down, not five.
+
+        The rows this worker holds stay ``in_progress``. They are recovered by
+        the daemon's ``reclaim_stale`` sweep, which is documented as
+        RECLAIM-FIRST precisely so a freshly respawned daemon clears the
+        backlog a dead worker left behind rather than waiting an interval.
+
+        Stopping the THREAD is not enough on its own. The host daemon
+        heartbeats a per-tenant lease, so a process whose worker has quietly
+        stopped keeps that lease looking healthy and is never respawned — a
+        second silent-permanent-death, which is the thing this bead exists to
+        remove. So the fault is handed to the host, which stops the PROCESS;
+        the lease is relinquished and the next enqueue spawns a daemon with a
+        fresh environment. A persistent host fault (a full disk) therefore
+        becomes a respawn loop rather than a silent one. That is the intended
+        trade: loud and non-destructive over quiet and destructive.
+        """
+        with self._self_fault_lock:
+            first = self._self_fault is None
+            if first:
+                self._self_fault = reason
+        if not first:
+            return
+
+        # ERROR, not WARNING: the 2026-08-24 incident ran 16 consecutive failed
+        # batches at WARNING with nothing alerting (nexus-yg70j criterion 3).
+        _log.error(
+            "aspect_worker_self_fault",
+            reason=reason,
+            collection=getattr(row, "collection", None),
+            source_path=getattr(row, "source_path", None),
+            error=str(exc),
+            action="row state untouched; worker standing down for reclaim_stale",
+        )
+        self._stop_event.set()
+
+        handler = self._on_self_fault
+        if handler is None:
+            return
+        try:
+            handler(reason)
+        except Exception:  # noqa: BLE001 — the host hook must not mask the fault it reports
+            _log.warning("aspect_worker_self_fault_handler_failed", exc_info=True)
 
     def _process_row(self, row) -> None:
         """Run extraction on one queue row and dispatch on the result.

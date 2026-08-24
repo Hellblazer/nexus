@@ -953,17 +953,37 @@ nx catalog link-generate [--dry-run]
 ```
 
 **Deprecated alias** for `nx catalog generate-links` (nexus-2297) — prefer
-the canonical command below. Runs the RDR filepath link generator over the
-full catalog. Use for initial setup or after bulk imports. Normal index runs
-are incremental. For citation links too, use `nx catalog generate-links`.
+the canonical command below. It delegates in full, so `--dry-run` here gets
+the same real preview described there. Use for initial setup or after bulk
+imports; normal index runs are incremental.
 
 ### nx catalog generate-links
 
 ```
-nx catalog generate-links [--citations/--no-citations] [--filepath/--no-filepath] [--dry-run]
+nx catalog generate-links [--citations/--no-citations] [--filepath/--no-filepath]
+                          [--prose/--no-prose] [--pdf/--no-pdf] [--dry-run]
 ```
 
-Auto-generate typed links from metadata cross-matching. `--citations` generates citation links from bibliographic metadata. `--filepath` generates RDR-to-code links by file path matching. Both default to enabled.
+Auto-generate typed links from metadata cross-matching. Four generators, all
+enabled by default: `--citations` (citation links from bibliographic
+metadata), `--filepath` (RDR-to-code links by file path), `--prose`
+(prose/markdown filepath links) and `--pdf` (PDF corpus links).
+
+`--prose` and `--pdf` were reachable at index time but not from this command
+until 7.16.4 (nexus-glivh); before that a full pass here understated itself by
+103 of its 133 links. Pass `--no-prose` / `--no-pdf` to restore the older,
+narrower scope.
+
+`--dry-run` reports what a pass WOULD create — per generator, by link type, by
+creator, and source fan-out — and writes nothing. The preview runs the SAME
+generators through a recording writer rather than a separate preview path, so
+it cannot drift from the write path. Counts mean "would create", never "would
+attempt": pre-existing links are deduped against and repeated proposals within
+a run collapse. A generator that fails to preview reports UNKNOWN, never zero.
+
+Measure before writing. This generator's failure mode is VOLUME — the
+implements-heuristic flood had to be disabled engine-side after exactly one
+unmeasured pass.
 
 ### nx catalog update
 
@@ -1159,7 +1179,8 @@ T3 chunks are NOT moved by this verb. Operators repopulate the target via `nx in
 
 ```
 nx catalog doctor [--collections-drift] [--chunk-size-distribution] [--chunk-text-dedup]
-                  [--t3-vs-catalog] [--name-vs-embed-dim] [--store-put-integrity] [--json]
+                  [--t3-vs-catalog] [--name-vs-embed-dim] [--store-put-integrity]
+                  [--link-coverage] [--json]
 ```
 
 RDR-101 catalog doctor surface; pass at least one check flag.
@@ -1172,6 +1193,7 @@ RDR-101 catalog doctor surface; pass at least one check flag.
 - `--t3-vs-catalog`: projection-vs-T3 triage — T3 collections with no catalog documents (orphan), projected collections with 0 chunks (zombie), and catalog documents whose `physical_collection` is gone from T3.
 - `--name-vs-embed-dim`: samples one chunk per conformant collection and compares the actual embedding dimension to the one implied by the collection name's `__<model>__` segment; FAIL suggests `nx collection rename` (cosmetic, no re-embed).
 - `--store-put-integrity`: store_put-origin integrity (nexus-b6enc, GH #1419 Issue 8) — for `content_type='knowledge'` documents with no `file_path`: FAIL on `chunk_count` != manifest-row count (drift) and on ghosts (catalog row with zero manifest rows AND zero T3 chunks), reporting title + tumbler so the content can be re-created while it is still remembered.
+- `--link-coverage` (7.16.4, nexus-glivh): per-content-type link coverage. FAILs only on a content type holding at least 10 documents with ZERO links — which means no generator has ever run for that type, not that its documents are unrelated. Percentages are reported and never flagged: a measured full generator pass over this corpus yields 133 links, so a low percentage is the natural ceiling of filepath extraction and no available remedy moves it. Index-time generation only links NEWLY registered tumblers, so a corpus can sit permanently unlinked with every other check green. Remediate with `nx catalog generate-links --dry-run` first.
 
 Returns non-zero on any check failure. `--json` emits the per-check result for CI consumption.
 

@@ -2377,8 +2377,12 @@ class TestLinkGenerate:
         assert result.exit_code == 0
         # Deprecation warning fires from the alias.
         assert "deprecated" in result.output.lower()
-        # The canonical command's dry-run message lands.
-        assert "would generate" in result.output.lower()
+        # The canonical command's dry-run summary lands. This asserted
+        # "would generate" until ac89209dd (nexus-glivh) replaced the
+        # placeholder preview with a real one, whose summary line reads
+        # "total links that would be created: N". The deprecation warning
+        # alone cannot satisfy this, so it still proves the delegation.
+        assert "total links that would be created" in result.output.lower()
 
     def test_link_generate_empty_catalog(self, initialized_catalog, catalog_env):
         """Running on a catalog with no entries produces 0 links."""

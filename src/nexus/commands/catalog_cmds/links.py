@@ -590,43 +590,103 @@ def suggest_links_cmd(limit: int, threshold: float) -> None:
 
 
 @click.command("generate-links")
-@click.option("--citations/--no-citations", default=True, help="Generate citation links from bib metadata")
-@click.option("--filepath/--no-filepath", default=True, help="Generate RDR filepath links")
-@click.option("--dry-run", is_flag=True, help="Show what would be created without writing")
-def generate_links_cmd(citations: bool, filepath: bool, dry_run: bool) -> None:
-    """Auto-generate typed links from metadata cross-matching."""
+@click.option("--citations/--no-citations", default=True, help="Citation links from bib metadata")
+@click.option("--filepath/--no-filepath", default=True, help="RDR filepath links")
+@click.option("--prose/--no-prose", default=True, help="Prose/markdown filepath links")
+@click.option("--pdf/--no-pdf", default=True, help="PDF corpus links")
+@click.option("--dry-run", is_flag=True, help="Report what WOULD be created, per generator, without writing")
+@click.option("-n", "--sample", "sample", type=int, default=5,
+              help="Proposed links to show per generator under --dry-run")
+def generate_links_cmd(
+    citations: bool, filepath: bool, prose: bool, pdf: bool,
+    dry_run: bool, sample: int,
+) -> None:
+    """Auto-generate typed links from metadata cross-matching.
+
+    \b
+    --dry-run reports the real projected volume per generator, by link type,
+    by creator, and by worst-case source fan-out, writing nothing. Fan-out is
+    the number that distinguishes a fix from a flood: a total count hides one
+    document proposing thousands of edges, which is how implements-heuristic
+    became a flood that had to be disabled engine-side (nexus-ybj1b).
+
+    NOTE (nexus-glivh): this command previously ran only 2 of the 4
+    generators, so prose and pdf links were reachable at index time but not
+    from the CLI. All four now run; --no-prose / --no-pdf restore the old
+    scope.
+    """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
     cat = _cat_cmd._get_catalog()
     from nexus.catalog.link_generator import (  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+        DryRunLinkWriter,
         generate_citation_links,
+        generate_pdf_corpus_links,
+        generate_prose_filepath_links,
         generate_rdr_filepath_links,
+        load_existing_link_keys,
     )
 
-    writer = _cat_cmd._get_catalog_writer() if not dry_run else None
+    generators = [
+        ("citation", citations, generate_citation_links),
+        ("rdr-filepath", filepath, generate_rdr_filepath_links),
+        ("prose-filepath", prose, generate_prose_filepath_links),
+        ("pdf-corpus", pdf, generate_pdf_corpus_links),
+    ]
+    selected = [(name, fn) for name, enabled, fn in generators if enabled]
+    if not selected:
+        click.echo("No generators selected.")
+        return
+
+    if dry_run:
+        existing = load_existing_link_keys(cat)
+        click.echo(f"Existing links in catalog: {len(existing)}")
+        click.echo("DRY RUN — nothing is written.\n")
+        grand = 0
+        for name, fn in selected:
+            recorder = DryRunLinkWriter(existing=existing)
+            try:
+                fn(cat, writer=recorder)
+            except Exception as exc:  # noqa: BLE001 — one generator's failure must not read as zero
+                click.echo(f"  {name}: FAILED to preview ({type(exc).__name__}: {exc})")
+                click.echo("    A failed preview is UNKNOWN volume, not zero. Do not run the")
+                click.echo("    write pass on the strength of the generators that did preview.")
+                continue
+            proposals = recorder.proposed
+            grand += len(proposals)
+            click.echo(f"  {name}: would create {len(proposals)} link(s)")
+            if not proposals:
+                continue
+            by_type = recorder.count_by_link_type()
+            click.echo(f"    by link type: {by_type}")
+            click.echo(f"    by creator:   {recorder.count_by_creator()}")
+            fan = recorder.fan_out()
+            worst = max(fan.items(), key=lambda kv: kv[1])
+            click.echo(
+                f"    source fan-out: {len(fan)} source doc(s), "
+                f"max {worst[1]} from {worst[0]}"
+            )
+            for prop in proposals[:sample]:
+                click.echo(
+                    f"      {prop.from_tumbler} -> {prop.to_tumbler} "
+                    f"({prop.link_type}) by {prop.created_by}"
+                )
+            if len(proposals) > sample:
+                click.echo(f"      … {len(proposals) - sample} more not shown")
+        click.echo(f"\nTotal links that WOULD be created: {grand}")
+        click.echo(f"Catalog link count would go {len(existing)} -> {len(existing) + grand}")
+        return
+
+    writer = _cat_cmd._get_catalog_writer()
     try:
         total = 0
-        if citations:
-            if dry_run:
-                click.echo("Would generate citation links (dry-run mode not yet supported for link preview)")
-            else:
-                count = generate_citation_links(cat, writer=writer)
-                click.echo(f"Citation links created: {count}")
-                total += count
-
-        if filepath:
-            if dry_run:
-                click.echo("Would generate RDR filepath links (dry-run mode not yet supported for link preview)")
-            else:
-                count = generate_rdr_filepath_links(cat, writer=writer)
-                click.echo(f"RDR filepath links created: {count}")
-                total += count
-
-        if not dry_run:
-            click.echo(f"Total links generated: {total}")
+        for name, fn in selected:
+            count = fn(cat, writer=writer)
+            click.echo(f"{name} links created: {count}")
+            total += count
+        click.echo(f"Total links generated: {total}")
     finally:
-        if writer is not None:
-            writer.close()
+        writer.close()
 
 
 @click.command("link-generate", hidden=True)
