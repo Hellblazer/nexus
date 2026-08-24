@@ -189,8 +189,21 @@ class AspectWorkerDaemon:
         )
         self._supervisor.publish_once()
         self._worker = self._worker_factory()
-        self._worker.start()
+        # nexus-yg70j: hand this daemon's stand-down hook to the worker. A
+        # worker that detects its own environment is broken must be able to
+        # stop the PROCESS -- stopping only its thread leaves this daemon
+        # heartbeating a healthy-looking lease while draining nothing, which is
+        # the silent-permanent-death shape the bead exists to remove. Attached
+        # by duck-typing so the zero-arg worker fakes the injected
+        # ``worker_factory`` protocol allows keep working unchanged.
+        _attach = getattr(self._worker, "set_self_fault_handler", None)
+        if callable(_attach):
+            _attach(self._on_worker_self_fault)
+        # Cleared BEFORE the worker starts: the worker thread can report a
+        # self fault the instant it runs, and clearing afterwards would erase
+        # that stand-down (nexus-yg70j).
         self._stop.clear()
+        self._worker.start()
         self._hb_thread = threading.Thread(
             target=self._heartbeat_loop,
             name=f"aspect-worker-hb-{self._tenant}",
@@ -207,6 +220,22 @@ class AspectWorkerDaemon:
         )
         self._reclaim_thread.start()
         _log.info("aspect_worker_daemon.started", tenant=self._tenant, pid=os.getpid())
+
+    def _on_worker_self_fault(self, reason: str) -> None:
+        """Stand this daemon down because the hosted worker reported that THIS
+        PROCESS's environment is broken (nexus-yg70j).
+
+        Setting ``_stop`` releases ``run_until_signal``, whose caller's
+        ``finally`` calls :meth:`stop` and relinquishes the tenant lease. The
+        next enqueue then spawns a daemon with a fresh environment, and its
+        reclaim-first sweep returns the rows this worker was holding.
+        """
+        _log.error(
+            "aspect_worker_daemon.worker_self_fault",
+            tenant=self._tenant, pid=os.getpid(), reason=reason,
+            action="relinquishing lease; respawn will get a fresh environment",
+        )
+        self._stop.set()
 
     def _reclaim_loop(self) -> None:
         """Periodically reset stranded ``in_progress`` rows to ``pending`` so a
