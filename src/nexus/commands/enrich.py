@@ -999,6 +999,18 @@ _DEFAULT_VALIDATE_SAMPLE_PCT = 5
     ),
 )
 @click.option(
+    "--all",
+    "extract_all",
+    is_flag=True,
+    help=(
+        "Re-extract EVERY document in the collection, including ones that "
+        "already have an aspect row. This was the default before nexus-ym9ey; "
+        "on a Claude-CLI-backed collection it re-spends on the whole corpus, "
+        "so it is now opt-in. Without it, only documents with NO aspect row "
+        "are processed."
+    ),
+)
+@click.option(
     "--re-extract",
     is_flag=True,
     help="Re-run only on rows whose model_version < --extractor-version.",
@@ -1012,6 +1024,7 @@ def enrich_aspects(
     collection: str,
     dry_run: bool,
     validate_sample: int,
+    extract_all: bool,
     re_extract: bool,
     extractor_version: str,
 ) -> None:
@@ -1057,6 +1070,7 @@ def enrich_aspects(
     entries = _select_entries(
         collection=collection,
         re_extract=re_extract,
+        extract_all=extract_all,
         extractor_version=extractor_version,
         config_extractor_name=config.extractor_name,
     )
@@ -1112,6 +1126,7 @@ def _select_entries(
     re_extract: bool,
     extractor_version: str,
     config_extractor_name: str,
+    extract_all: bool = False,
 ) -> list | None:
     """Return the catalog entries to process, or None if the catalog
     is missing (terminal error already echoed)."""
@@ -1127,30 +1142,55 @@ def _select_entries(
         return None
     entries = cat.list_by_collection(collection)
 
-    if re_extract:
-        # Filter to entries whose existing aspect row has model_version
-        # below the threshold. Rows without an existing aspect entry
-        # are also included (they need first-time extraction).
+    if re_extract or not extract_all:
+        # ONE T2 open serves both filters. nexus-ym9ey originally added a
+        # second `with T2Database(...)` for the gap-fill branch; that is a new
+        # construction site, and storage_boundary_lint counts them per file
+        # (T2DATABASE_CONSTRUCTION_ALLOWLIST, enrich.py: 8). Growing that count
+        # is an explicit decision recorded on a bead, never a side effect of an
+        # unrelated fix — so both filters read from the same handle instead.
         with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+            existing_paths = {
+                r.source_path
+                for r in db.document_aspects.list_by_collection(collection)
+            }
             outdated_paths = {
                 r.source_path
                 for r in db.document_aspects.list_by_extractor_version(
                     config_extractor_name, extractor_version,
                 )
-            }
-            # Find entries missing from document_aspects so they get
-            # included too (re-extract is "ensure all entries are at
-            # >= version"; a missing row is by definition at < version).
-            existing_paths = set()
-            for r in db.document_aspects.list_by_collection(collection):
-                existing_paths.add(r.source_path)
+            } if re_extract else set()
 
-        filtered = []
-        for e in entries:
-            sp = e.file_path or e.title
-            if sp in outdated_paths or sp not in existing_paths:
-                filtered.append(e)
-        entries = filtered
+        if re_extract:
+            # "Ensure every entry is at >= version": rows below the threshold,
+            # plus rows with no aspect row at all (missing is by definition
+            # below any version).
+            entries = [
+                e for e in entries
+                if (e.file_path or e.title) in outdated_paths
+                or (e.file_path or e.title) not in existing_paths
+            ]
+        else:
+            # nexus-ym9ey: gap-fill is the DEFAULT. Before this, a bare
+            # `nx enrich aspects COLLECTION` re-extracted every document in
+            # the collection on every invocation. Measured 2026-08-24 on
+            # rdr__1-1__voyage-context-3__v1: three consecutive runs each
+            # reported "294 extracted", none of them filling a gap. Free for a
+            # deterministic parser; on a Claude-CLI-backed collection it
+            # re-spends on the whole corpus AND re-rolls non-deterministic
+            # extractions that were already correct.
+            before = len(entries)
+            entries = [
+                e for e in entries
+                if (e.file_path or e.title) not in existing_paths
+            ]
+            skipped = before - len(entries)
+            if skipped:
+                click.echo(
+                    f"Skipping {skipped} document(s) that already have "
+                    f"aspects. Use --all to re-extract them, or --re-extract "
+                    f"--extractor-version X to refresh only outdated rows."
+                )
 
     return entries
 
