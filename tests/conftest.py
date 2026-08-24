@@ -361,6 +361,33 @@ _APPEND_ONLY_REAL_CONFIG_LOGS = frozenset({
     "index.log",
 })
 
+#: Directories under the real config dir that hold AMBIENT DAEMON OUTPUT --
+#: written by long-lived processes this suite neither owns nor can stop.
+#:
+#: The discriminator here is STRUCTURAL, not "it grew". ``logs/`` is where the
+#: aspect-worker, the T2 daemon, the storage service, the MCP servers, MinerU
+#: and the watchdog write; none of them is production STATE, and none of them
+#: is under the suite's control. That is why this is a directory rule while
+#: _APPEND_ONLY_REAL_CONFIG_LOGS stays an exact-name rule: growth alone never
+#: excuses an unlisted file, but "a live daemon owns this directory" does.
+#:
+#: Rotation is why growth-only is not enough here. A daemon rolling
+#: ``aspect_worker_daemon.log`` -> ``.log.1`` and opening a fresh one produces
+#: a CREATE plus a size DECREASE, which the append rule correctly refuses. So
+#: paths under these directories are exempted from the state verdict entirely
+#: and reported instead.
+#:
+#: WHY THIS WAS WIDENED (2026-08-24, Sam's call, nexus-pfuns). The guard
+#: snapshots ``(mtime_ns, size)`` and never reads content, so ANY daemon write
+#: -- even re-stamping an identical value -- registers as a mutation. It had
+#: not been hit only because the aspect-worker was WEDGED for hours by the
+#: nexus-yg70j cwd bug. Fixing that daemon means it writes again, so the flake
+#: rate goes UP from here: every pytest session overlapping any daemon
+#: activity would fail over a log line. The gate is separately fenced now
+#: (nexus-pfuns follow-up), so a TEST can no longer reach this directory
+#: without an absolute path.
+_AMBIENT_DAEMON_DIRS: tuple[str, ...] = ("logs/",)
+
 
 def _split_appends_from_state(
     changed: list[str],
@@ -369,8 +396,10 @@ def _split_appends_from_state(
 ) -> tuple[list[str], list[str]]:
     """Split changed paths into (state_mutations, benign_appends).
 
-    A path counts as a benign append ONLY when all three hold: its basename is
-    a known append-only log, it existed before, and its size strictly GREW.
+    Two ways to be benign. (1) The path lives under a directory a live daemon
+    owns (:data:`_AMBIENT_DAEMON_DIRS`), in which case any change is ambient
+    output rather than suite behaviour. (2) Its basename is a known
+    append-only log, it existed before, and its size strictly GREW.
     A log that SHRANK or was rewritten in place is a truncation, which is a
     state mutation and still fails -- that is the case worth catching, and
     size alone distinguishes it without reading content (which this guard
@@ -381,7 +410,12 @@ def _split_appends_from_state(
     for rel in changed:
         b, a = before.get(rel), after.get(rel)
         name = rel.rsplit("/", 1)[-1]
-        if name in _APPEND_ONLY_REAL_CONFIG_LOGS and b is not None and a is not None and a[1] > b[1]:
+        if rel.startswith(_AMBIENT_DAEMON_DIRS):
+            # Ambient daemon output: exempt from the state verdict in every
+            # direction (create, grow, rotate), because rotation is a create
+            # plus a shrink and a daemon may do either at any moment.
+            appends.append(rel)
+        elif name in _APPEND_ONLY_REAL_CONFIG_LOGS and b is not None and a is not None and a[1] > b[1]:
             appends.append(rel)
         else:
             state.append(rel)

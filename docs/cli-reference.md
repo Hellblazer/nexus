@@ -565,8 +565,19 @@ Document rows (year, authors, venue, citation count, backend id), so
 
 Batch-extract structured aspects (problem formulation, proposed method, datasets, baselines, results, extras) for documents in a `knowledge__*` collection. Iterates the catalog (one entry per source document, NOT per chunk) and calls the synchronous extractor directly, bypassing the post-document hook chain to avoid double-firing on documents already triggered at ingest. Aspects land in T2 `document_aspects`.
 
+**GAP-FILL IS THE DEFAULT (7.18.0, `nexus-ym9ey`).** A bare invocation processes
+only documents with NO aspect row. Before 7.18.0 it re-extracted the entire
+collection every time: three consecutive runs over the same `rdr__` collection
+each reported "294 extracted" while filling zero gaps. That was free there
+because `rdr__` routes to the deterministic parser, but on a Claude-CLI-backed
+collection it re-spends on the whole corpus — filling one missing document in a
+421-document collection re-dispatched all 421, and re-rolled 420
+non-deterministic extractions that were already correct. Pass `--all` for the
+old behaviour.
+
 ```
-nx enrich aspects knowledge__delos
+nx enrich aspects knowledge__delos                     # gap-fill: only uncovered documents
+nx enrich aspects knowledge__delos --all               # re-extract everything (pre-7.18.0 default)
 nx enrich aspects knowledge__delos --dry-run
 nx enrich aspects knowledge__delos --validate-sample 10
 nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku-4-5-20251001
@@ -575,6 +586,7 @@ nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku
 | Flag | Description |
 |------|-------------|
 | `COLLECTION` (positional) | Must be a `knowledge__*` collection (Phase 1 scope). Other prefixes return a "no extractor config" error |
+| `--all` | Re-extract EVERY document, including ones that already have an aspect row. The pre-7.18.0 default; now opt-in because it re-spends on the whole corpus. Without it, only documents with NO aspect row are processed |
 | `--dry-run` | Report document count + cost estimate (Haiku-class). No API calls, no T2 writes |
 | `--validate-sample N` | Validate N% of newly-extracted aspects via `operator_verify` against the document text. Disagreements append to `./validation_failures.jsonl`. Pass 0 to skip. Default 5 |
 | `--re-extract` | Re-run only on rows whose `model_version` is strictly less than `--extractor-version` (and rows that are missing entirely) |

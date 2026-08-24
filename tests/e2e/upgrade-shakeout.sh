@@ -362,10 +362,18 @@ _step "2/12 uv tool install conexus==$FROM_VERSION (the OLD version)"
 export UV_TOOL_DIR="$SANDBOX/uv_tools"
 export UV_TOOL_BIN_DIR="$SANDBOX/uv_bin"
 export PATH="$UV_TOOL_BIN_DIR:$PATH"
+# HOME is NOT exported globally here (uv resolves its tool dir off $HOME and
+# this script pins UV_TOOL_BIN_DIR explicitly), so every `nx` call below must
+# carry its own HOME="$SANDBOX". Four `nx --version` calls did not, and on
+# 2026-08-24 that stamped the OPERATOR'S ~/.config/nexus/last_seen_version
+# with the sandbox's FROM_VERSION (7.16.3) mid-release-battery, reddening a
+# concurrently-running local-service-gate leg in which all 560 tests passed.
+# `nx --version` is not a read: cli.py stamps last_seen_version on invocation.
+# Enforced by tests/test_e2e_gates_isolate_home.py.
 uv tool install "conexus==$FROM_VERSION" --reinstall >/dev/null 2>&1 \
     || _die "uv tool install conexus==$FROM_VERSION failed"
-_pass "installed: $(nx --version)"
-[[ "$(nx --version)" == *"$FROM_VERSION"* ]] || _die "version mismatch after install"
+_pass "installed: $(HOME="$SANDBOX" nx --version)"
+[[ "$(HOME="$SANDBOX" nx --version)" == *"$FROM_VERSION"* ]] || _die "version mismatch after install"
 
 # ── 3. Install hooks (baseline stanza) ───────────────────────────────────────
 _step "3/12 nx hooks install (writes the baseline stanza)"
@@ -397,7 +405,7 @@ _step "4/12 Pre-upgrade state snapshot"
 # step 5 diffs the post-upgrade version against THIS snapshot (not just the
 # nominal --from-version pin, which could in principle drift from what is
 # really on disk).
-OLD_VERSION_LINE="$(nx --version)"
+OLD_VERSION_LINE="$(HOME="$SANDBOX" nx --version)"
 OLD_VERSION="$(echo "$OLD_VERSION_LINE" | awk '{print $NF}')"
 [[ -n "$OLD_VERSION" ]] \
     || _die "could not parse a version out of 'nx --version' pre-upgrade (got: $OLD_VERSION_LINE)"
@@ -407,7 +415,7 @@ _pass "pre-upgrade snapshot: $OLD_VERSION_LINE"
 _step "5/12 uv tool install --reinstall from REPO_ROOT (the NEW version)"
 uv tool install --reinstall "$REPO_ROOT" >/dev/null 2>&1 \
     || _die "uv tool install from REPO_ROOT failed"
-NEW_VER="$(nx --version | awk '{print $NF}')"
+NEW_VER="$(HOME="$SANDBOX" nx --version | awk '{print $NF}')"
 # nexus-x8fuq item C: a version-identical "upgrade" never exercised the
 # upgrade path at all — hard failure, not the old "(note: ...)" arm that
 # let the run continue as if nothing were wrong.

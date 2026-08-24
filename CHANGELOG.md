@@ -6,6 +6,43 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.18.0] - 2026-08-24
+
+One user-visible change: `nx enrich aspects` no longer re-extracts a whole
+collection on every invocation. Engine identity unchanged at
+`engine-service-v0.1.85`.
+
+### Changed
+- **`nx enrich aspects` gap-fills by default; `--all` restores the old
+  behaviour.** A bare invocation re-extracted EVERY document in the collection
+  every time. Measured on a live install: three consecutive runs over the same
+  `rdr__` collection each reported "294 extracted" and filled zero gaps. Free
+  there, because `rdr__` routes to the deterministic parser -- but on a
+  Claude-CLI-backed collection the same shape re-spends on the entire corpus.
+  Measured on this install at release time, the
+  `knowledge__knowledge__voyage-context-3__v1` collection holds 427 documents:
+  426 already carry an aspect record and 1 does not. Under the old default,
+  filling that single gap re-dispatched all 427. The cost is not only spend.
+  Those 426 re-dispatches re-roll non-deterministic extractions that were
+  already correct, so a gap-fill was quietly a correctness churn as well as a
+  bill. `--re-extract --extractor-version X` is unchanged. (`nexus-ym9ey`)
+
+### Fixed
+- The e2e gates no longer write the operator's real `~/.config/nexus`. The
+  local-service gate pinned `NEXUS_CONFIG_DIR` per invocation but left `HOME`
+  alone, and `nexus_config_dir()` falls back to `Path.home()` whenever that
+  variable is absent; `upgrade-shakeout` separately ran four unfenced
+  `nx --version` calls, which are WRITES (`cli.py` stamps `last_seen_version`).
+  Together they reddened a release leg in which all 560 tests passed. The gate
+  now mirrors HOME and shadows only `~/.config/nexus`, and a lint requires
+  every `tests/e2e/*.sh` to isolate HOME. (`nexus-pfuns`)
+- The real-config-dir guard no longer fails a run over ambient daemon output.
+  It snapshots `(mtime_ns, size)` and never reads content, so any write by the
+  aspect-worker, T2 daemon, storage service, MCP servers, MinerU or the
+  watchdog registered as a state mutation. `logs/` is now exempt structurally
+  -- rotation is a create plus a shrink, which a growth-only rule refuses --
+  while the exact-name append-only rule is untouched. (`nexus-pfuns`)
+
 ## [7.17.0] - 2026-08-24
 
 Makes the link generator measurable before it writes, gives the catalog a check

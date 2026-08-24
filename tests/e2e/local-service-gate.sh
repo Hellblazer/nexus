@@ -241,6 +241,86 @@ cd "$REPO_ROOT"
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/nx-local-service-gate.XXXXXX")"
 echo "[gate] scratch config: $SCRATCH"
 
+# ── Fence the REAL config dir (nexus-pfuns follow-up) ────────────────────────
+#
+# Pinning NEXUS_CONFIG_DIR per-invocation is necessary and NOT sufficient.
+# ``config.nexus_config_dir()`` falls back to ``Path.home()/".config"/"nexus"``
+# whenever that variable is absent, so ANY process in this tree that does not
+# inherit it -- a subprocess with a scrubbed env, a helper invoked through a
+# shell that resets it, another gate running concurrently on this box -- writes
+# the OPERATOR'S REAL config dir instead. The env pin is load-bearing with
+# nothing underneath it.
+#
+# Observed twice, both recorded in this script:
+#   2026-07-13  get_credential()'s config.yml fallback read the operator's real
+#               ~/.config/nexus/config.yml from inside this "fully isolated"
+#               gate. Fixed by pinning the variable; the fallback was left open.
+#   2026-08-24  the pfuns guard caught last_seen_version stamped 7.16.3 -- the
+#               INSTALLED tool's version, not the tree under test -- reddening a
+#               release leg in which all 560 tests passed.
+#
+# THE MIRROR IS A DENYLIST, NOT AN ALLOWLIST, and that distinction is the whole
+# design. The first attempt symlinked a hand-picked set (.cache/.local/.claude)
+# back into a fresh HOME and broke on the SECOND thing it touched: the Maven
+# jar rebuild died because ~/.testcontainers.properties (which carries
+# ``testcontainers.ryuk.disabled=true``) and ~/.docker (which holds the socket
+# at ~/.docker/run/docker.sock) were both absent, so testcontainers fell back
+# to its ryuk-enabled default and could not reach the daemon. An allowlist of
+# "things HOME is for" cannot be completed by enumeration -- every tool that
+# reads $HOME would have to be known in advance.
+#
+# So: mirror EVERYTHING, shadow ONE path. Every top-level entry of the real
+# HOME is symlinked through; ~/.config is recreated as a real directory whose
+# entries are likewise symlinked through EXCEPT ``nexus``, which becomes a
+# fresh empty scratch dir. Net effect: exactly one path in the whole home is
+# fenced, and any tool needing anything else is unaffected by construction.
+#
+# NOT A LAYER: sandbox-exec. An earlier revision created a Seatbelt profile
+# denying file-write* under the real config dir, printed "real-config writes
+# denied", and then only exported the profile path -- NOTHING consumed it. It
+# was an inert guard advertising protection it did not provide. Wiring it up
+# for real was then measured and REJECTED: `ps` is blocked under sandbox-exec
+# even with explicit (allow process-exec*) (allow process-info*), and this
+# repo's conftest substrate sweep shells out to `ps`, so a sandboxed pytest leg
+# errors on collection. Do not re-add it without re-measuring that.
+
+REAL_HOME="$HOME"
+
+# LAYER 1 -- HOME mirror, shadowing only ~/.config/nexus. The implementation
+# lives in lib/fence_home.sh so the test suite drives THIS code rather than a
+# reimplementation of it.
+# shellcheck source=tests/e2e/lib/fence_home.sh
+source "$REPO_ROOT/tests/e2e/lib/fence_home.sh"
+GATE_HOME="$SCRATCH/home"
+fence_home "$REAL_HOME" "$GATE_HOME" ".config/nexus"
+export HOME="$GATE_HOME"
+# uv resolves its cache off HOME at process start; pin it explicitly so the
+# mirror is not the only thing between this gate and a cold 250-package
+# resolve.
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$REAL_HOME/.cache/uv}"
+
+# LAYER 2 -- PATH. A bare ``nx`` resolves to the INSTALLED tool, a different
+# build from the tree under test: the 2026-08-24 stamp read 7.16.3 while the
+# tree was 7.17.0. Every legitimate call here goes through ``uv run nx``, so a
+# bare one is always a mistake and must fail LOUDLY naming its caller rather
+# than quietly succeeding against production state.
+GATE_SHIM="$SCRATCH/shim"
+mkdir -p "$GATE_SHIM"
+cat > "$GATE_SHIM/nx" <<'SHIM'
+#!/bin/sh
+echo "FATAL: bare 'nx' called inside local-service-gate (PPID=$PPID)." >&2
+echo "  It resolves to the INSTALLED tool, not the tree under test, and it" >&2
+echo "  writes the real ~/.config/nexus. Use 'uv run nx'." >&2
+exit 1
+SHIM
+chmod +x "$GATE_SHIM/nx"
+export PATH="$GATE_SHIM:$PATH"
+
+# NOTE: no "nx <word>" sequence in this string. tests/test_release_artifact_verb_rot.py
+# extracts `nx <verb>` from release artifacts and checks the verb exists; prose like
+# a bare tool name followed by a word parses as a verb and reddens develop (it did).
+echo "[gate] fenced: HOME mirrored to $HOME, only ~/.config/nexus shadowed; PATH shim active"
+
 # .env does NOT auto-load anywhere in the suite; source it explicitly, and
 # BEFORE the service starts — the supervisor plumbs VOYAGE_API_KEY ->
 # NX_VOYAGE_API_KEY into the service env at spawn (storage_service_daemon.py),
