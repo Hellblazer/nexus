@@ -836,10 +836,13 @@ elif [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
 fi
 if [ "$PACKAGE_UPGRADE" = 1 ]; then
   run_env+=(-e "PREV_RELEASE=$PREV_RELEASE" -e "PREV_ENGINE_TAG=$PREV_ENGINE_TAG" -e "NEW_ENGINE_TAG=$NEW_ENGINE_TAG")
-  # UNCOMMITTED LOCAL PROBE: uv defaults to a 30s HTTP timeout INSIDE the
+  # nexus-0j6gy follow-on: uv defaults to a 30s HTTP timeout INSIDE the
   # container, and Stage 1 pip-installs an OLD release whose transitive set
   # pulls hundred-MB wheels (onnxruntime, nvidia-cufft via mineru->torch).
-  # Raising it on the host does nothing — this -e list is the only channel.
+  # Raising UV_HTTP_TIMEOUT on the HOST does nothing: this -e list is the only
+  # channel into the container, so the value was silently discarded while the
+  # failure text told the operator to raise exactly this variable. Observed
+  # twice on 2026-08-24; only a `bash -x` trace showed the -e list.
   run_env+=(-e "UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT:-300}")
   # nexus-86mx2: forward which upgrade target staged above (published wheel
   # vs worktree build) so rehearse_package_upgrade.sh's own logging + verdict
