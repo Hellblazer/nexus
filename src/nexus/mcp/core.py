@@ -1599,9 +1599,10 @@ def _record_tier_write(
         session_id = resolve_active_session_id() or "unknown"
         ts = datetime.now(timezone.utc).isoformat()
         with t2_ctx() as t2:
-            # nexus-pyzk7: route through the telemetry store, which persists to
-            # SQLite (raw) or the service (POST /v1/telemetry/tier_writes/record)
-            # depending on backend — no raw ``.conn`` reach, no silent drop.
+            # nexus-pyzk7: route through the telemetry store, which persists
+            # via the service (POST /v1/telemetry/tier_writes/record) — no raw
+            # ``.conn`` reach, no silent drop. The SQLite branch this comment
+            # used to name went away with the T2 stores (RDR-158 P4).
             t2.telemetry.record_tier_write(
                 session_id=session_id, ts=ts, tool=tool, tier=tier,
                 agent=agent, project=project, target_title=target_title,
@@ -5345,8 +5346,9 @@ async def operator_filter(
     - **SQL fast path** (default ``source="auto"``): when items carry
       ``collection`` + ``source_path`` identity AND an aspect column
       can be resolved (either explicitly via ``aspect_field`` or by
-      heuristic inference from the criterion), filter via a SQLite
-      query against ``document_aspects``. Returns in milliseconds.
+      heuristic inference from the criterion), filter via a SQL
+      query against ``document_aspects`` in PostgreSQL. Returns in
+      milliseconds.
     - **LLM path** (``source="llm"`` or fallback): dispatches the
       criterion to ``claude -p`` per call. The original behavior;
       kicks in when SQL prerequisites do not hold.
@@ -5363,7 +5365,7 @@ async def operator_filter(
             in this string drive aspect-field inference unless
             ``aspect_field`` overrides.
         timeout: Seconds before the subprocess is killed. Default 300s
-            (LLM path only; SQL path is bounded by SQLite query time).
+            (LLM path only; SQL path is bounded by the engine's query time).
         source: Execution mode. ``"auto"`` (default) tries SQL first,
             falls back to LLM on prerequisite failure. ``"aspects"``
             forces SQL — failing prerequisites yield an empty result
@@ -5707,7 +5709,7 @@ async def operator_aggregate(
 
     Two execution paths (RDR-089 follow-up). The SQL fast path
     (default ``source="auto"``) recognises a small reducer
-    vocabulary backed by SQLite aggregates: ``count``, ``count
+    vocabulary backed by SQL aggregates: ``count``, ``count
     distinct``, and ``avg`` / ``min`` / ``max confidence``. The
     ``avg/min/max confidence`` reducers query
     ``document_aspects.confidence`` per group. Anything outside the
