@@ -4,6 +4,12 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.18.0] - 2026-08-24
+
+Plugin version aligned with conexus 7.18.0. No plugin-surface changes this
+release; the enrich and test-harness work is all client-side. The pin advance
+carries the version only, so `conexus/PENDING_RELEASE.md` is empty at this pin.
+
 ## [7.17.0] - 2026-08-24
 
 Plugin version aligned with conexus 7.17.0. No plugin-surface changes this
