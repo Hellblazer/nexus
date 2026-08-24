@@ -96,31 +96,6 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --sha "$(git rev-parse HEAD)"
 
-      - name: Verify remediation-commit snapshot rides this release (nexus-fehi3)
-        # CI replay of the release skill's Step 0b human pre-tag gate
-        # (scripts/check_remediation_commits_ride_release.py). This repo's
-        # `bd` backend is Dolt with no credentials on this runner, so CI
-        # cannot run `bd export` live -- and the only git-tracked bead
-        # artifact, .beads/issues.jsonl, is a stale pre-Dolt fossil that
-        # would manufacture a permanently-green, blind check if wired in
-        # directly (nexus-fix9t bead description has the full verification).
-        # Instead the human pre-tag step (release skill Step 0b) runs
-        # `--write-snapshot .release-gates/remediation-snapshot.json` and
-        # commits the result onto the release branch alongside the
-        # version-bump commit; --verify-snapshot here replays the real
-        # ancestor-check against that committed file and additionally
-        # fails closed if the file is MISSING (the pre-tag step never ran),
-        # present but not committed on this exact tag, or stale (its
-        # newest bead updated_at predates the commit immediately preceding
-        # this release). Stdlib-only script, same as the evidence step
-        # above -- runs before setup-uv/build so a red exits fast and cheap
-        # (CI Cost Discipline).
-        run: |
-          python3 scripts/check_remediation_commits_ride_release.py \
-            --release-ref "$RELEASE_TAG" \
-            --bd-export-json .release-gates/remediation-snapshot.json \
-            --verify-snapshot
-
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           python-version: "3.12"
