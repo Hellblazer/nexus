@@ -113,10 +113,18 @@ def _normalize_source_uri(
     """
     if not source_uri:
         if file_path:
-            base = file_path
-            if repo_root and not os.path.isabs(file_path):
-                base = os.path.join(repo_root, file_path)
-            return "file://" + os.path.abspath(base)
+            # nexus-yg70j / nexus-3e4s: never anchor an identity on the process
+            # CWD. `os.path.abspath` on a RELATIVE file_path with no repo_root
+            # called getcwd() -- raising when the cwd was deleted, and silently
+            # minting a plausible-but-wrong URI when it was merely unrelated.
+            # Mirrors the engine's CatalogRepository.deriveSourceUri, which
+            # returns "" for a relative file_path when repoRoot is empty rather
+            # than guessing, and aspect_readers.uri_for's identical rule.
+            if os.path.isabs(file_path):
+                return "file://" + os.path.normpath(file_path)
+            if repo_root:
+                return "file://" + os.path.normpath(os.path.join(repo_root, file_path))
+            return ""
         return ""
 
     parsed = urlparse(source_uri)

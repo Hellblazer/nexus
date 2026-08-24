@@ -38,14 +38,28 @@ class TestUriFor:
     rather than re-implementing the rule.
     """
 
-    def test_filesystem_collection_returns_file_uri_with_abspath(self):
-        import os.path
+    def test_filesystem_collection_returns_file_uri(self):
+        """REPLACED 2026-08-24 (nexus-yg70j defect B).
 
+        This asserted `uri_for(rel) == "file://" + os.path.abspath(rel)` --
+        computing the expected value with the SAME call the code under test
+        made. A tautology: true from any cwd, and true whether uri_for was
+        right or wrong. It is why a cwd-dependent identity field survived in
+        the suite, and why the aspect-worker minted
+        file:///Users/<u>/.config/nexus/docs/rdr/x.md for a file that lives in
+        a git repo.
+
+        The contract now: absolute in, absolute out, no cwd anywhere. The full
+        property set (same input -> same output from three unrelated cwds) is
+        in tests/test_yg70j_uri_for_is_cwd_independent.py.
+        """
         from nexus.aspect_readers import uri_for
 
+        abs_path = "/Users/example/git/nexus/src/cli.py"
         for collection in ("rdr__nexus", "docs__corpus", "code__nx"):
-            uri = uri_for(collection, "src/cli.py")
-            assert uri == "file://" + os.path.abspath("src/cli.py")
+            assert uri_for(collection, abs_path) == f"file://{abs_path}"
+            # relative with no root is refused, never guessed at
+            assert uri_for(collection, "src/cli.py") is None
 
     def test_knowledge_collection_returns_chroma_uri(self):
         from nexus.aspect_readers import uri_for

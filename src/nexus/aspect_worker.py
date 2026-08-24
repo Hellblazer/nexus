@@ -411,19 +411,40 @@ class AspectExtractionWorker:
                 row_count=len(rows),
                 exc_info=True,
             )
-            # nexus-zir76: route through the daemon, never direct memory.db.
-            def _fail_all(db):  # noqa: ANN001
-                for row in rows:
-                    db.aspect_queue.mark_failed(
-                        row.collection, row.source_path, error=str(exc),
+            # nexus-yg70j defect A: ROUTE, do not terminal-fail the batch.
+            #
+            # This arm used to call mark_failed() on EVERY row -- terminal,
+            # "terminal until re-enqueued" -- for ANY batch-extract exception.
+            # The single-row path at the bottom of this method already routes
+            # through _mark_retry_or_fail_routed, which carries the real
+            # transient-vs-terminal taxonomy (RDR-163 P1, nexus-ztpt6) and a
+            # retry budget with backoff. Only the batch path bypassed it.
+            #
+            # MEASURED COST of that bypass, on the 2026-08-24 incident's 26
+            # terminally-failed rows:
+            #     7  relative source_paths  -- genuine victims of the fault
+            #    19  absolute source_paths  -- ALL 19 EXIST ON DISK
+            # The 19 were healthy documents killed solely by sharing a batch of
+            # five with one bad neighbour. 73% collateral. A per-batch verdict
+            # on a per-row property is the defect: the batch is a transport
+            # detail, not a fact about any document in it.
+            #
+            # The router decides per row: non-retryable exception or exhausted
+            # budget -> terminal; otherwise mark_retry with backoff. Note that
+            # an environmental fault (a deleted cwd, this incident's actual
+            # cause) classifies as NON-retryable today and still terminal-fails
+            # -- a third "self/infrastructure" class that touches no row state
+            # is the remaining gap, tracked on nexus-yg70j. This change removes
+            # the collateral, not that gap.
+            for row in rows:
+                try:
+                    self._mark_retry_or_fail_routed(row, exc)
+                except Exception:  # noqa: BLE001 — per-row routing is best-effort; reclaim_stale backstops
+                    _log.warning(
+                        "aspect_worker_batch_route_failed",
+                        collection=row.collection, source_path=row.source_path,
+                        exc_info=True,
                     )
-            try:
-                t2_index_write(_fail_all)
-            except Exception:  # noqa: BLE001 — persist of mark-failed is best-effort; logged via log.warning
-                _log.warning(
-                    "aspect_worker_batch_mark_failed_persist_failed",
-                    exc_info=True,
-                )
             return
 
         # nexus-zir76: one routed write_fn does the whole batch's persist;
