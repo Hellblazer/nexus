@@ -114,15 +114,31 @@ class TestDoctorLinkCoverage:
         assert report["pass"] is False
         assert report["failures"][0]["content_type"] == "code"
 
-    def test_zero_links_below_min_docs_is_not_a_failure(self, monkeypatch) -> None:
-        """A 2-document type at 0% is noise, not evidence."""
-        _patch_catalog(
-            monkeypatch,
-            [{"content_type": "markdown", "total": MIN_TYPE_DOCS - 1, "linked": 0}],
-        )
+    def test_nine_documents_with_zero_links_is_not_a_failure(self, monkeypatch) -> None:
+        """Below the threshold, a 0% type is noise rather than evidence.
+
+        The literal 9 is deliberate. An earlier version of this test built its
+        fixture as ``MIN_TYPE_DOCS - 1``, derived from the constant under test,
+        so it tracked whatever value the constant took and could never
+        contradict it: the suite passed with MIN_TYPE_DOCS at 1 and at 100.
+        Paired with the test below, these two literals pin the threshold from
+        both sides.
+        """
+        _patch_catalog(monkeypatch, [{"content_type": "markdown", "total": 9, "linked": 0}])
         report = _run_link_coverage()
-        assert report["pass"] is True
+        assert report["pass"] is True, "9 documents is below the intended threshold of 10"
         assert report["failures"] == []
+
+    def test_ten_documents_with_zero_links_is_a_failure(self, monkeypatch) -> None:
+        """At the threshold, zero links means no generator ever ran."""
+        _patch_catalog(monkeypatch, [{"content_type": "markdown", "total": 10, "linked": 0}])
+        report = _run_link_coverage()
+        assert report["pass"] is False, "10 documents is at the intended threshold of 10"
+        assert report["failures"][0]["content_type"] == "markdown"
+
+    def test_min_type_docs_is_the_documented_value(self) -> None:
+        """The two literals above are only meaningful against a known constant."""
+        assert MIN_TYPE_DOCS == 10
 
     def test_low_but_nonzero_coverage_is_not_flagged(self, monkeypatch) -> None:
         """8.3% is the natural state, not a defect.
@@ -134,16 +150,16 @@ class TestDoctorLinkCoverage:
         _patch_catalog(monkeypatch, [{"content_type": "code", "total": 15424, "linked": 1275}])
         report = _run_link_coverage()
         assert report["pass"] is True
-        assert report["warnings"] == []
         assert report["failures"] == []
+        assert "warnings" not in report, "the WARN channel was removed; do not re-advertise it"
 
-    def test_healthy_type_neither_fails_nor_warns(self, monkeypatch) -> None:
+    def test_healthy_type_is_not_flagged(self, monkeypatch) -> None:
         _patch_catalog(monkeypatch, [{"content_type": "paper", "total": 107, "linked": 68}])
         report = _run_link_coverage()
         assert report["pass"] is True
-        assert report["warnings"] == [] and report["failures"] == []
+        assert report["failures"] == []
 
-    def test_measured_2026_08_23_baseline_passes_with_no_warnings(self, monkeypatch) -> None:
+    def test_measured_2026_08_23_baseline_is_not_flagged(self, monkeypatch) -> None:
         """Pins the real corpus against the no-threshold decision.
 
         Every one of these types is low, and none is a defect: the measured
@@ -160,8 +176,8 @@ class TestDoctorLinkCoverage:
         ])
         report = _run_link_coverage()
         assert report["pass"] is True
-        assert report["warnings"] == []
         assert report["failures"] == []
+        assert "warnings" not in report, "the WARN channel was removed; do not re-advertise it"
         assert report["totals"]["documents"] == 19315
         assert report["totals"]["pct"] == 9.6
 

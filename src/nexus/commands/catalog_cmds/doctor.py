@@ -115,10 +115,12 @@ _log = structlog.get_logger(__name__)
         "nexus-glivh: per-content-type link coverage. FAIL on any content "
         "type holding >= MIN_TYPE_DOCS documents with ZERO links, which "
         "means no generator has ever run for that type rather than that "
-        "its documents are genuinely unrelated. WARN below "
-        "LOW_COVERAGE_PCT. Index-time generation only links NEWLY "
-        "registered tumblers, so a corpus can sit permanently unlinked "
-        "with every other check green."
+        "its documents are genuinely unrelated. Percentages are REPORTED "
+        "and never flagged: a measured full generator pass over this "
+        "corpus yields 133 links, so a low percentage is the natural "
+        "ceiling of filepath extraction and no available remedy moves it. "
+        "Index-time generation only links NEWLY registered tumblers, so a "
+        "corpus can sit permanently unlinked with every other check green."
     ),
 )
 @click.option(
@@ -1285,11 +1287,13 @@ def _run_link_coverage() -> dict:
     FAIL is reserved for the unambiguous signal: a content type with at least
     :data:`MIN_TYPE_DOCS` documents and ZERO linked documents. That is not a
     corpus whose documents happen to be unrelated, it is a generator that has
-    never run for that type. WARN covers the tunable judgement (below
-    :data:`LOW_COVERAGE_PCT`) and never fails the command on its own.
+    never run for that type. There is deliberately no low-percentage
+    threshold and therefore no WARN channel; see :data:`MIN_TYPE_DOCS` and
+    the comment block above it for why a permanent unactionable warning was
+    removed rather than tuned.
 
     Returns ``{"pass": bool, "rows": [...], "failures": [...],
-    "warnings": [...], "totals": {...}}``.
+    "totals": {...}}``.
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
@@ -1298,7 +1302,7 @@ def _run_link_coverage() -> dict:
         raw = cat.coverage_by_content_type("")
     except Exception as exc:  # noqa: BLE001 — an unreadable catalog is UNKNOWN, never a pass
         return {
-            "pass": False, "rows": [], "failures": [], "warnings": [],
+            "pass": False, "rows": [], "failures": [],
             "totals": {},
             "error": f"{type(exc).__name__}: {exc}",
         }
@@ -1307,12 +1311,12 @@ def _run_link_coverage() -> dict:
         # A sweep that found nothing to check is a failure, not a pass
         # (the vacuous-gate doctrine, nexus-moht0).
         return {
-            "pass": False, "rows": [], "failures": [], "warnings": [],
+            "pass": False, "rows": [], "failures": [],
             "totals": {},
             "error": "catalog reported no content types; nothing was checked",
         }
 
-    rows, failures, warnings = [], [], []
+    rows, failures = [], []
     tot_docs = tot_linked = 0
     for r in sorted(raw, key=lambda r: r["content_type"] or ""):
         ct = r["content_type"] or "(none)"
@@ -1330,7 +1334,6 @@ def _run_link_coverage() -> dict:
         "pass": not failures,
         "rows": rows,
         "failures": failures,
-        "warnings": warnings,
         "totals": {
             "documents": tot_docs,
             "linked": tot_linked,
