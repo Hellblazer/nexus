@@ -316,7 +316,10 @@ SHIM
 chmod +x "$GATE_SHIM/nx"
 export PATH="$GATE_SHIM:$PATH"
 
-echo "[gate] fenced: HOME mirrored to $HOME, only ~/.config/nexus shadowed; bare-nx shim on PATH"
+# NOTE: no "nx <word>" sequence in this string. tests/test_release_artifact_verb_rot.py
+# extracts `nx <verb>` from release artifacts and checks the verb exists; prose like
+# a bare tool name followed by a word parses as a verb and reddens develop (it did).
+echo "[gate] fenced: HOME mirrored to $HOME, only ~/.config/nexus shadowed; PATH shim active"
 
 # .env does NOT auto-load anywhere in the suite; source it explicitly, and
 # BEFORE the service starts — the supervisor plumbs VOYAGE_API_KEY ->
