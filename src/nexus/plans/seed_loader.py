@@ -6,8 +6,10 @@ Scans a directory of YAML plan templates, validates each against the
 Phase 4a schema, dedups by canonical dimensions, and upserts into a
 :class:`~nexus.db.t2.http_plan_library.HttpPlanLibrary`.
 
-This is the glue that ships the five builtin scenario templates
-(``conexus/plans/builtin/*.yml``) as ``scope:global`` seeds. The same
+This is the glue that ships the builtin scenario templates
+(``conexus/plans/builtin/*.yml``) as ``scope:global`` seeds. The count
+is whatever that directory holds -- it was five at RDR-078 P4b and is
+not fixed; do not restate it here. The same
 loader powers the Phase 6 multi-tier loader (``.nexus/plans/*.yml``,
 ``docs/rdr/<slug>/plans.yml``, umbrella repo plans).
 
