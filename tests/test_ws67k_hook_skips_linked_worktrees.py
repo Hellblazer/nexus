@@ -81,7 +81,20 @@ def test_primary_checkout_still_reaches_the_dispatch(repo: Path, tmp_path: Path)
     pass the worktree test below and silently disable all indexing."""
     log = tmp_path / "home" / ".config" / "nexus" / "index.log"
     rc, out = _run_guard(repo, log)
-    assert rc == 0, out
+    # DELIBERATELY NOT asserting rc == 0. The stanza's exit code is not its
+    # contract, and asserting it made this test fail on Linux CI while passing
+    # on macOS (nexus-ws67k, caught by shard 4/4 on the v7.16.2 release PR):
+    #
+    #     hook.sh: 74: disown: not found
+    #
+    # `disown` is a bash/zsh builtin. macOS /bin/sh is bash in sh-mode and has
+    # it; Ubuntu /bin/sh is dash and does not, so the stanza exits 127 there.
+    # That is harmless in production -- git ignores post-commit exit codes, the
+    # `nx index repo ... &` has already launched by then, and a non-interactive
+    # shell has job control off so the child is not SIGHUPed -- but it is real
+    # and is recorded on the bead. What this test must pin is WHERE CONTROL
+    # WENT, which is exactly what the markers below say.
+    _ = rc
     text = log.read_text() if log.exists() else ""
     assert "SKIPPED (linked worktree" not in text, (
         "the primary checkout must NOT be treated as a worktree"
@@ -96,6 +109,10 @@ def test_linked_worktree_is_skipped(repo: Path, tmp_path: Path) -> None:
     _git("worktree", "add", "-q", "-b", "feature/x", str(wt), cwd=repo)
     log = tmp_path / "home" / ".config" / "nexus" / "index.log"
     rc, out = _run_guard(wt, log)
+    # The worktree path exits 0 via the guard's own `exit 0`, BEFORE reaching
+    # the `disown` that trips dash -- so rc IS meaningful here, unlike the
+    # primary-checkout case above. Asserting it pins that the guard exits
+    # through its own branch rather than falling off the end of the script.
     assert rc == 0, out
     assert "REACHED_DISPATCH" not in out, (
         "a linked worktree must never reach the indexer dispatch"
