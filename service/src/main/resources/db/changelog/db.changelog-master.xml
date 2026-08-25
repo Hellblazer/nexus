@@ -78,6 +78,8 @@
     <include file="db/changelog/service-tokens-003-scope-column.xml"/>
     <!-- nexus-xidcq: tenant-locked mint credential scope (RDR-005 2a). -->
     <include file="db/changelog/service-tokens-004-mint-locked-scope.xml"/>
+    <!-- nexus-lgiqw: partial expiry index for the scope=data reaper. -->
+    <include file="db/changelog/service-tokens-005-data-expiry-index.xml"/>
 
     <!-- Store 10: pgvector chunks tables + manifest collection column (bead nexus-mf447) -->
     <include file="db/changelog/vectors-001-baseline.xml"/>

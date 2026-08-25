@@ -125,10 +125,30 @@ public final class TokenStore {
      * covers every tenant that can have rows.
      */
     public java.util.List<String> listKnownTenants() {
-        return dsl()
-            .selectDistinct(SERVICE_TOKENS.TENANT_ID)
-            .from(SERVICE_TOKENS)
-            .fetch(SERVICE_TOKENS.TENANT_ID);
+        return listKnownTenants(null);
+    }
+
+    /**
+     * As {@link #listKnownTenants()}, bounded by {@code statementTimeout}
+     * (nexus-lgiqw).
+     *
+     * <p>This one is easy to miss and bounding it is NOT optional: the scheduled
+     * sweep calls it to build its tenant list BEFORE any arm runs, so an unbounded
+     * SELECT here would stall the cycle at enumeration and every per-arm bound
+     * downstream would never be reached. An {@code ACCESS EXCLUSIVE} lock on
+     * {@code service_tokens} — a non-CONCURRENT index build, a VACUUM FULL — blocks
+     * a plain SELECT, not just writes.
+     *
+     * @param statementTimeout per-statement ceiling, or null for none
+     */
+    public java.util.List<String> listKnownTenants(java.time.Duration statementTimeout) {
+        return dsl().transactionResult(cfg -> {
+            DSLContext tx = DSL.using(cfg);
+            SweepBounds.applyStatementTimeout(tx, statementTimeout);
+            return tx.selectDistinct(SERVICE_TOKENS.TENANT_ID)
+                .from(SERVICE_TOKENS)
+                .fetch(SERVICE_TOKENS.TENANT_ID);
+        });
     }
 
     /**
@@ -679,15 +699,139 @@ public final class TokenStore {
      * @return number of rows deleted (0 when none had expired)
      */
     public int sweepExpiredSessions(String tenant, Instant now) {
+        return sweepExpiredSessions(tenant, now, null);
+    }
+
+    /**
+     * As {@link #sweepExpiredSessions(String, Instant)}, bounded by {@code
+     * statementTimeout} (nexus-lgiqw). The scheduled sweep task passes {@link
+     * SweepBounds#STATEMENT_TIMEOUT}; a null timeout is the unbounded behaviour
+     * this method had before the bound existed.
+     *
+     * @param statementTimeout per-statement ceiling, or null for none
+     */
+    public int sweepExpiredSessions(String tenant, Instant now, java.time.Duration statementTimeout) {
         if (tenant == null || tenant.isBlank()) {
             return 0;
         }
         OffsetDateTime cutoff = OffsetDateTime.ofInstant(now, ZoneOffset.UTC);
-        int deleted = dsl().deleteFrom(SESSION_TOKENS)
-            .where(SESSION_TOKENS.TENANT_ID.eq(tenant))
-            .and(SESSION_TOKENS.EXPIRES_AT.lt(cutoff))
-            .execute();
+        int deleted = dsl().transactionResult(cfg -> {
+            DSLContext tx = DSL.using(cfg);
+            SweepBounds.applyStatementTimeout(tx, statementTimeout);
+            return tx.deleteFrom(SESSION_TOKENS)
+                .where(SESSION_TOKENS.TENANT_ID.eq(tenant))
+                .and(SESSION_TOKENS.EXPIRES_AT.lt(cutoff))
+                .execute();
+        });
         log.info("event=session_token_sweep tenant={} cutoff={} deleted={}", tenant, cutoff, deleted);
+        return deleted;
+    }
+
+    /**
+     * Delete every {@code service_tokens} row for {@code tenant} whose scope is
+     * {@link #SCOPE_DATA} and whose {@code expires_at} is more than {@code grace}
+     * in the past (nexus-lgiqw). Rides the SAME {@code t1-ttl-sweep} thread and
+     * per-tenant loop as {@link #sweepExpiredSessions} and {@link
+     * ScratchRepository#sweepTenant} — one extra query on an existing schedule,
+     * not a new thread.
+     *
+     * <p>WHY THIS EXISTS. The JIT mint path writes a short-TTL {@code scope=data}
+     * row per (tenant, TTL window) and nothing ever deleted one; expiry was
+     * read-time filtering only, so the table grew monotonically. Measured on the
+     * live estate 2026-08-25: 14,308 data rows, 14,307 of them already expired,
+     * accruing ~313/day. The producer is the EDGE, not the client — enabling or
+     * disabling client-side minting does not change it.
+     *
+     * <p>WHY {@code grace}, AND WHY IT IS NOT OPTIONAL. Nothing else in this
+     * database records that a token was ever minted: there is no token-audit
+     * table (gc_audit is chash garbage collection, unrelated), so this row is the
+     * only DB evidence of the mint. The one other record is the control plane's
+     * {@code engine_data_token_mint_ok} CloudWatch line.
+     *
+     * <p>Stated honestly, because the first version of this comment claimed more
+     * than it could support: there is NO forensic, compliance, or contractual
+     * requirement on these rows — conexus confirmed that directly for the estate
+     * that holds them. 7 days is a conservative default that leaves an operator
+     * debugging a recent mint failure something to look at; it is not derived from
+     * a requirement. The "keep it shorter than CloudWatch retention" comparison is
+     * a sanity bound, not a derivation, and it is worth knowing that the bound
+     * depends on a retention knob ANOTHER team owns — one that moved from 365 to
+     * 30 days on 2026-08-25 as a side effect of unrelated cost work. If it is cut
+     * again below this window, the comparison silently inverts and nobody here
+     * finds out. Do not treat that inequality as load-bearing.
+     *
+     * <p>A null {@code grace} is refused rather than treated as zero. That much IS
+     * load-bearing regardless of the window's size: silently defaulting to no
+     * grace would turn a caller's omission into an immediate delete of everything
+     * already expired.
+     *
+     * <p>WHY THE SCOPE FILTER IS EXPLICIT. {@code root}, {@code tenant}, {@code
+     * mint} and {@code mint-locked} are long-lived operator artifacts and are
+     * never swept. {@code root} and {@code mint-locked} happen to carry {@code
+     * expires_at IS NULL} — {@code mint-locked} being the production credential
+     * provisioned 2026-08-16, which has no expiry precisely so it cannot age out
+     * — and a NULL never satisfies the cutoff comparison. That is a second,
+     * independent reason they are safe, NOT the one relied on here: the safety of
+     * a production credential must not rest on NULL comparison semantics.
+     * {@code TokenStoreDataTokenSweepTest} fails if this filter is removed.
+     *
+     * <p>NOT BATCHED, and no statement timeout — deliberately, matching {@link
+     * #sweepExpiredSessions}. Steady state is ~80 rows per 6h cycle: a periodic
+     * sweep never sees cumulative growth, only what accrued since the last cycle,
+     * so the delete does not grow with the table. The one-time backlog is ~12k
+     * rows on a 4 MB table, sub-second. (Recorded because it was argued and
+     * measured: a batched delete would ALSO have weakened the bound, since
+     * statement_timeout resets per statement — see CatalogRepository's sweep-gate
+     * constants.)
+     *
+     * <p>KNOWN, ACCEPTED, AND NOT PAPERED OVER: this DELETE has no statement
+     * timeout, and the sweep loop that calls it is single-threaded across all
+     * tenants and all three arms. A pathological tenant could therefore stall the
+     * whole cycle with no ceiling. That risk pre-dates this arm and is shared with
+     * both siblings; it is accepted here on the measured numbers (~80 rows/cycle,
+     * 4 MB table, single engine, zero long-running transactions), not because it
+     * was overlooked. The counter-argument that a single statement with one
+     * timeout would be a genuinely stronger bound than the current none is real
+     * and is recorded on nexus-lgiqw rather than settled unilaterally here.
+     *
+     * @param tenant the tenant to sweep (blank/null is a no-op, returns 0)
+     * @param now    the sweep's reference instant
+     * @param grace  how far past {@code expires_at} a row must be before it is
+     *               eligible; null is refused (returns 0) rather than treated as
+     *               zero grace
+     * @return number of rows deleted (0 when none were eligible)
+     */
+    public int sweepExpiredDataTokens(String tenant, Instant now, java.time.Duration grace) {
+        return sweepExpiredDataTokens(tenant, now, grace, null);
+    }
+
+    /**
+     * As {@link #sweepExpiredDataTokens(String, Instant, java.time.Duration)},
+     * bounded by {@code statementTimeout}. The scheduled sweep task passes {@link
+     * SweepBounds#STATEMENT_TIMEOUT}; null is unbounded.
+     *
+     * @param statementTimeout per-statement ceiling, or null for none
+     */
+    public int sweepExpiredDataTokens(String tenant, Instant now, java.time.Duration grace,
+                                      java.time.Duration statementTimeout) {
+        if (tenant == null || tenant.isBlank()) {
+            return 0;
+        }
+        if (grace == null) {
+            log.warn("event=service_token_sweep_refused tenant={} reason=null_grace", tenant);
+            return 0;
+        }
+        OffsetDateTime cutoff = OffsetDateTime.ofInstant(now.minus(grace), ZoneOffset.UTC);
+        int deleted = dsl().transactionResult(cfg -> {
+            DSLContext tx = DSL.using(cfg);
+            SweepBounds.applyStatementTimeout(tx, statementTimeout);
+            return tx.deleteFrom(SERVICE_TOKENS)
+                .where(SERVICE_TOKENS.TENANT_ID.eq(tenant))
+                .and(SERVICE_TOKENS.SCOPE.eq(SCOPE_DATA))
+                .and(SERVICE_TOKENS.EXPIRES_AT.lt(cutoff))
+                .execute();
+        });
+        log.info("event=service_token_sweep tenant={} cutoff={} deleted={}", tenant, cutoff, deleted);
         return deleted;
     }
 }

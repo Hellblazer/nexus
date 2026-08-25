@@ -10,6 +10,7 @@ import dev.nexus.service.db.PipelineRepository;
 import dev.nexus.service.db.PlanRepository;
 import dev.nexus.service.db.RemapRepository;
 import dev.nexus.service.db.ScratchRepository;
+import dev.nexus.service.db.SweepBounds;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TelemetryRepository;
 import dev.nexus.service.db.TenantScope;
@@ -43,6 +44,7 @@ import org.slf4j.LoggerFactory;
 import javax.sql.DataSource;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -78,6 +80,19 @@ public final class NexusService {
     /** Age threshold: scratch rows older than this are eligible for TTL sweep. */
     private static final long SWEEP_TTL_HOURS = 24L;
 
+    /**
+     * How far past {@code expires_at} a {@code scope=data} service token must be
+     * before the reaper deletes it (nexus-lgiqw).
+     *
+     * <p>Not arbitrary, and not a round number chosen for comfort: nothing else in
+     * the database records that a token was minted, so the row is the only DB
+     * evidence of it. What outlives the row is the control plane's
+     * {@code engine_data_token_mint_ok} CloudWatch line, retained 30 days. The
+     * window must therefore stay SHORTER than that retention so the log always
+     * outlives the row; 7 leaves margin if the log retention is cut again.
+     */
+    private static final long SWEEP_DATA_TOKEN_GRACE_DAYS = 7L;
+
     /** Always-swept tenant; the sweeper additionally loops every token-bearing tenant (nexus-4qq1m). */
     private static final String DEFAULT_TENANT = "default";
 
@@ -85,6 +100,9 @@ public final class NexusService {
     private final TenantScope tenantScope;
     private final ScheduledExecutorService sweepScheduler;
     private final TokenStore tokenStore;
+    /** Held as a field, not a constructor local, so {@link #runScheduledSweep}
+     *  can reach it — the scratch arm of the sweep loop (nexus-lgiqw). */
+    private final ScratchRepository scratchRepo;
     private final TokenCache tokenCache;
 
     /**
@@ -252,7 +270,7 @@ public final class NexusService {
         var memoryRepo    = new MemoryRepository(tenantScope);
         var planRepo      = new PlanRepository(tenantScope);
         var telemetryRepo = new TelemetryRepository(tenantScope);
-        var scratchRepo   = new ScratchRepository(tenantScope);
+        this.scratchRepo  = new ScratchRepository(tenantScope);
         var taxonomyRepo  = new TaxonomyRepository(tenantScope);
         var taxonomyCentroidRepo = new dev.nexus.service.vectors.TaxonomyCentroidRepository(tenantScope);
         var aspectRepo    = new AspectRepository(tenantScope);
@@ -400,40 +418,7 @@ public final class NexusService {
         this.sweepScheduler.scheduleAtFixedRate(
             () -> {
                 try {
-                    OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-                    OffsetDateTime cutoff = now.minusHours(SWEEP_TTL_HOURS);
-                    var tenants = new java.util.LinkedHashSet<String>();
-                    tenants.add(DEFAULT_TENANT);
-                    tenants.addAll(tokenStore.listKnownTenants());
-                    int total = 0;
-                    int totalSessionTokens = 0;
-                    for (String tenant : tenants) {
-                        try {
-                            int deleted = scratchRepo.sweepTenant(tenant, cutoff);
-                            total += deleted;
-                            log.info("event=t1_scheduled_sweep tenant={} deleted={}", tenant, deleted);
-                        } catch (Exception ex) {
-                            // One tenant's failure must not starve the rest of the fleet's sweep.
-                            log.warn("event=t1_scheduled_sweep_tenant_failed tenant={} error={}",
-                                tenant, ex.getMessage(), ex);
-                        }
-                        // nexus-t23zk: expired session_tokens backstop, riding the SAME
-                        // per-tenant loop and schedule as the scratch sweep above (one
-                        // extra query per tenant, no new thread). closeSession alone
-                        // leaves a permanent row behind whenever a minting process dies
-                        // without calling it (crashed MCP, killed dispatch, reboot) —
-                        // inert (auth checks expires_at live) but otherwise never deleted.
-                        try {
-                            int sessionDeleted = tokenStore.sweepExpiredSessions(tenant, now.toInstant());
-                            totalSessionTokens += sessionDeleted;
-                        } catch (Exception ex) {
-                            log.warn("event=t1_scheduled_session_sweep_tenant_failed tenant={} error={}",
-                                tenant, ex.getMessage(), ex);
-                        }
-                    }
-                    log.info("event=t1_scheduled_sweep_complete tenants={} total_deleted={} "
-                            + "total_session_tokens_deleted={}",
-                        tenants.size(), total, totalSessionTokens);
+                    runScheduledSweep(OffsetDateTime.now(ZoneOffset.UTC));
                 } catch (Exception ex) {
                     log.warn("event=t1_scheduled_sweep_failed error={}", ex.getMessage(), ex);
                 }
@@ -447,6 +432,126 @@ public final class NexusService {
         server.start();
         log.info("event=service_started port={}", getPort());
     }
+
+    /**
+     * One cycle of the {@code t1-ttl-sweep} loop, extracted from the scheduler
+     * lambda so the WIRING is testable and not merely the three methods it calls.
+     *
+     * <p>nexus-lgiqw: before this extraction nothing exercised the loop at all —
+     * every arm's own unit test passed while nothing proved the scheduler invoked
+     * it, so removing an arm would have left the whole suite green. The counters
+     * are returned rather than only logged for the same reason: the aggregate line
+     * is the reaper's tripwire, and a tripwire nothing asserts on is not one.
+     *
+     * <p>Package-private and time-injected deliberately. The scheduler passes the
+     * real clock; tests pass a fixed instant.
+     *
+     * @param now the cycle's reference instant
+     * @return per-arm deletion counts for this cycle
+     */
+    // EVERY ARM IS BOUNDED BY SweepBounds.STATEMENT_TIMEOUT (nexus-lgiqw). Read its
+    // javadoc before changing any of this; the short version:
+    //
+    // This cycle is single-threaded across every tenant and all three arms, so one
+    // blocked statement used to stall the entire cycle, for every other tenant, with
+    // no ceiling — and silently, because this is a daemon thread with no exception,
+    // no restart, and no alarm on the ABSENCE of the completion line below.
+    // The bound is passed to EVERY arm rather than just the newest: bounding one of
+    // three leaves the cycle unbounded and buys only an arm that behaves differently
+    // from its siblings. The hazard belongs to the loop, so the bound does too.
+    //
+    // A cancelled statement is safe here because every sweep is idempotent and
+    // cumulative — the rows simply wait for the next cycle, and the per-tenant catch
+    // blocks below turn PostgreSQL's 57014 into a logged warning without abandoning
+    // the remaining tenants or arms.
+    SweepCounts runScheduledSweep(OffsetDateTime now) {
+        return runScheduledSweep(now, SweepBounds.STATEMENT_TIMEOUT);
+    }
+
+    /**
+     * As {@link #runScheduledSweep(OffsetDateTime)}, with the per-statement bound
+     * injected. Production always passes {@link SweepBounds#STATEMENT_TIMEOUT};
+     * tests pass a short one so that "a blocked statement does not stall the cycle"
+     * is a fast assertion rather than a thirty-second one.
+     */
+    SweepCounts runScheduledSweep(OffsetDateTime now, java.time.Duration statementTimeout) {
+        OffsetDateTime cutoff = now.minusHours(SWEEP_TTL_HOURS);
+        var tenants = new java.util.LinkedHashSet<String>();
+        tenants.add(DEFAULT_TENANT);
+        // Bounded too, and deliberately: this runs BEFORE any arm, so an unbounded
+        // enumeration would stall the cycle where no per-arm bound can reach it.
+        tenants.addAll(tokenStore.listKnownTenants(statementTimeout));
+        int total = 0;
+        int totalSessionTokens = 0;
+        int totalDataTokens = 0;
+        for (String tenant : tenants) {
+            try {
+                int deleted = scratchRepo.sweepTenant(tenant, cutoff, statementTimeout);
+                total += deleted;
+                log.info("event=t1_scheduled_sweep tenant={} deleted={}", tenant, deleted);
+            } catch (Exception ex) {
+                // One tenant's failure must not starve the rest of the fleet's sweep.
+                log.warn("event=t1_scheduled_sweep_tenant_failed tenant={} error={}",
+                    tenant, ex.getMessage(), ex);
+            }
+            // nexus-t23zk: expired session_tokens backstop, riding the SAME
+            // per-tenant loop and schedule as the scratch sweep above (one
+            // extra query per tenant, no new thread). closeSession alone
+            // leaves a permanent row behind whenever a minting process dies
+            // without calling it (crashed MCP, killed dispatch, reboot) —
+            // inert (auth checks expires_at live) but otherwise never deleted.
+            try {
+                int sessionDeleted = tokenStore.sweepExpiredSessions(
+                    tenant, now.toInstant(), statementTimeout);
+                totalSessionTokens += sessionDeleted;
+            } catch (Exception ex) {
+                log.warn("event=t1_scheduled_session_sweep_tenant_failed tenant={} error={}",
+                    tenant, ex.getMessage(), ex);
+            }
+            // nexus-lgiqw: expired scope=data service_tokens reaper, riding
+            // this SAME loop and schedule for the same reason as the session
+            // arm above. The JIT mint path writes a short-TTL row per (tenant,
+            // TTL window) and nothing ever deleted one — expiry was read-time
+            // filtering only, so the table grew monotonically (14,308 rows,
+            // 14,307 expired, ~313/day, measured 2026-08-25).
+            //
+            // WHY THIS LOOP CANNOT MISS A TENANT — state this explicitly,
+            // because the property is invisible after the fact and a
+            // well-meaning refactor that sourced `tenants` from a tenants
+            // table instead would silently break it: `tenants` is
+            // {DEFAULT_TENANT} ∪ tokenStore.listKnownTenants(), and
+            // listKnownTenants() is SELECT DISTINCT tenant_id FROM
+            // service_tokens — the very table this arm sweeps. Any tenant
+            // holding a sweepable row is in the list by construction.
+            try {
+                int dataDeleted = tokenStore.sweepExpiredDataTokens(
+                    tenant, now.toInstant(), Duration.ofDays(SWEEP_DATA_TOKEN_GRACE_DAYS),
+                    statementTimeout);
+                totalDataTokens += dataDeleted;
+            } catch (Exception ex) {
+                log.warn("event=t1_scheduled_data_token_sweep_tenant_failed tenant={} error={}",
+                    tenant, ex.getMessage(), ex);
+            }
+        }
+        // Emitted unconditionally, zero-delete cycles included: a cycle that
+        // swept nothing must be distinguishable from a cycle that did not run.
+        //
+        // total_data_tokens_deleted is a BREADCRUMB, not a tripwire. Steady state
+        // is ~80 per cycle, so an order-of-magnitude departure means the cadence
+        // slipped or accrual changed shape — but this is a log line and NOTHING
+        // ALERTS ON IT. It makes that diagnosis possible for someone already
+        // looking; it does not detect anything on its own. The design notes for
+        // nexus-lgiqw originally called it a tripwire, which claimed a property
+        // no code here provides.
+        log.info("event=t1_scheduled_sweep_complete tenants={} total_deleted={} "
+                + "total_session_tokens_deleted={} total_data_tokens_deleted={}",
+            tenants.size(), total, totalSessionTokens, totalDataTokens);
+        return new SweepCounts(tenants.size(), total, totalSessionTokens, totalDataTokens);
+    }
+
+    /** Per-arm deletion counts from one {@link #runScheduledSweep} cycle. */
+    record SweepCounts(int tenants, int scratch, int sessionTokens, int dataTokens) { }
+
 
     /** Stop the HTTP server, TTL sweep scheduler, and purge-trash VACUUM
      *  executor immediately. */
