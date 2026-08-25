@@ -37,6 +37,7 @@ from nexus.install_layout import (
     build_spec,
     current_link,
     generation_dir,
+    previous_link,
     receipt_path,
     render_shim,
     tools_dir,
@@ -134,6 +135,7 @@ def test_both_halves_agree_on_the_derived_paths(
     gen = generation_dir("20260825T041200Z")
     assert _shell_says("nx_generation_dir 20260825T041200Z", env) == str(gen)
     assert _shell_says("nx_current_link", env) == str(current_link())
+    assert _shell_says("nx_previous_link", env) == str(previous_link())
     assert _shell_says(f'nx_receipt_path "{gen}"', env) == str(receipt_path(gen))
 
 

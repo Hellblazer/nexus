@@ -74,6 +74,12 @@ GENERATION_PREFIX = "gen-"
 #: ``readlink`` suffices -- ``readlink -f`` is macOS >= 12.3 only.
 CURRENT_LINK_NAME = "current"
 
+#: ``<tools>/previous``, the generation a rollback returns to. Written by the
+#: flip (nexus-utpuw.3). GC's never-delete rule (b) protects "the previous
+#: current", and until .3 that had no on-disk representation — GC would have
+#: had to infer it from mtime, the heuristic this arc exists to replace.
+PREVIOUS_LINK_NAME = "previous"
+
 #: The nexus-owned receipt, which replaces ``uv-receipt.toml`` as the home of
 #: extras. Losing extras re-opens the 768->384 embedder downgrade (README:80).
 RECEIPT_NAME = "nexus-install.json"
@@ -197,6 +203,11 @@ def generation_dir(stamp: str, *, tools: Path | None = None) -> Path:
 def current_link(*, tools: Path | None = None) -> Path:
     """``<tools>/current``, the pointer a flip moves and a shim reads."""
     return _root(tools) / CURRENT_LINK_NAME
+
+
+def previous_link(*, tools: Path | None = None) -> Path:
+    """``<tools>/previous``, the pointer a rollback reads."""
+    return _root(tools) / PREVIOUS_LINK_NAME
 
 
 def receipt_path(generation: Path) -> Path:

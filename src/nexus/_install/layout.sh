@@ -32,6 +32,12 @@ NX_GENERATION_PREFIX="gen-"
 # `readlink` suffices; `readlink -f` is macOS >= 12.3 only.
 NX_CURRENT_LINK_NAME="current"
 
+# The rollback pointer, written by the flip (nexus-utpuw.3). GC's never-delete
+# rule (b) protects "the previous current", and until .3 the layout gave that no
+# on-disk representation at all -- GC would have had to approximate it from
+# mtime, the heuristic this arc replaced with an exact readlink.
+NX_PREVIOUS_LINK_NAME="previous"
+
 # The nexus-owned receipt: the replacement for uv-receipt.toml and the only
 # home extras have. Losing extras re-opens the 768->384 embedder downgrade.
 NX_RECEIPT_NAME="nexus-install.json"
@@ -162,6 +168,13 @@ nx_generation_dir() {
 nx_current_link() {
     _nx_cl_root=$(_nx_root "${1-}") || return "$NX_LAYOUT_USAGE_EXIT"
     printf '%s\n' "$_nx_cl_root/$NX_CURRENT_LINK_NAME"
+}
+
+# <tools>/previous: the generation a rollback returns to.
+# $1 optional tools root.
+nx_previous_link() {
+    _nx_pl_root=$(_nx_root "${1-}") || return "$NX_LAYOUT_USAGE_EXIT"
+    printf '%s\n' "$_nx_pl_root/$NX_PREVIOUS_LINK_NAME"
 }
 
 # The receipt inside a generation, which must already be an absolute path.
