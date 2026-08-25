@@ -386,3 +386,47 @@ def test_the_installer_is_executable_and_the_library_is_not() -> None:
         "layout.sh is SOURCED, never executed -- an exec bit on it invites "
         "someone to run it, and its set-no-options contract assumes a caller"
     )
+
+
+def test_a_pyvenv_cfg_without_home_refuses_rather_than_writing_an_empty_field(env, tmp_path) -> None:
+    """RG-A finding. An EMPTY base_interpreter is worse than a missing one:
+    .11's doctor check tests whether that path still exists, and Path("")
+    resolves to False, so every healthy install would read as "the base
+    interpreter was pruned" -- or, written the other way, as a silent pass.
+    Either way the check stops meaning anything."""
+    tools, _, argv_log = env
+    broken_uv = tmp_path / "brokenbin"
+    _stub_uv(broken_uv, argv_log=argv_log)
+    # A uv that builds a venv whose pyvenv.cfg has no `home` line.
+    uv = broken_uv / "uv"
+    uv.write_text(uv.read_text().replace(
+        "printf 'home = /opt/uv/pythons/cpython-3.12.8/bin\\nversion = 3.12.8\\n'",
+        "printf 'version = 3.12.8\\n'"))
+
+    result = _run(tools, "--source", "conexus", "--version", "7.18.0", uv_bin=broken_uv)
+
+    assert result.returncode != 0
+    assert "base_interpreter" in result.stderr
+    assert [d for d in tools.glob("gen-*") if (d / "nexus-install.json").exists()] == [], (
+        "a generation we cannot describe must not get a receipt"
+    )
+
+
+def test_stamp_exhaustion_fails_loudly(env) -> None:
+    """Nine colliding suffixes is a bound, not a guarantee. .14's self-install
+    and the SessionStart auto-upgrade can both fire near-simultaneously, so the
+    exhaustion path is reachable -- and it must say so rather than overwrite."""
+    tools, uv_bin, _ = env
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # Claim every candidate for this second and the next two, so the run cannot
+    # simply tick past the collision.
+    for offset in range(3):
+        stamp = (now + datetime.timedelta(seconds=offset)).strftime("%Y%m%dT%H%M%SZ")
+        for suffix in ["", *"abcdefgh"]:
+            (tools / f"gen-{stamp}{suffix}").mkdir(exist_ok=True)
+
+    result = _run(tools, "--source", "conexus", "--version", "7.18.0", uv_bin=uv_bin)
+
+    assert result.returncode != 0
+    assert "collision" in result.stderr.lower()

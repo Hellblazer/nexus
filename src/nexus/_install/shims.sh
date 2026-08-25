@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 #
@@ -55,16 +55,19 @@ _nx_declared_scripts() {
 import sys
 try:
     import importlib.metadata as md
-except ImportError:
-    sys.exit(0)
-try:
     eps = md.distribution(sys.argv[1]).entry_points
-except Exception:
-    sys.exit(0)
+except Exception as exc:
+    # Distinguish "the distribution declares no console scripts" from "we could
+    # not ask". Both used to print nothing and exit 0, so a dist-name mismatch
+    # would silently unshim EVERY one of the project’s own console scripts --
+    # strictly worse than the hardcoded-list bug (F1) this rule replaced,
+    # because a list at least fails visibly. Found by RG-A.
+    print("NX_LOOKUP_FAILED", exc, file=sys.stderr)
+    sys.exit(3)
 for ep in eps:
     if getattr(ep, "group", None) == "console_scripts":
         print(ep.name)
-' "$2" 2>/dev/null
+' "$2"
 }
 
 # Write <bin>/<command> for every shim this generation should own.
@@ -97,8 +100,16 @@ nx_write_shims() {
     # process "bad" and "name" -- two individually VALID names -- so the
     # allowlist never sees the hostile one and nothing is refused or reported.
     # Caught by test_a_refused_name_is_warned_about_not_silently_dropped.
+    # The lookup's exit status is CHECKED. Without this the dependency scripts
+    # would still be written and the run would report success, so an operator
+    # would see mineru appear and nx quietly vanish.
+    if ! _nx_ws_declared="$(_nx_declared_scripts "$_nx_ws_gen" "$_nx_ws_dist")"; then
+        echo "nexus: could not read console scripts from distribution '$_nx_ws_dist' in $_nx_ws_gen — refusing to write a partial shim set" >&2
+        return "$NX_LAYOUT_USAGE_EXIT"
+    fi
+
     _nx_ws_names="$(
-        _nx_declared_scripts "$_nx_ws_gen" "$_nx_ws_dist"
+        printf '%s\n' "$_nx_ws_declared"
         for _nx_ws_dep in $NX_DEPENDENCY_SCRIPTS; do printf '%s\n' "$_nx_ws_dep"; done
     )"
 

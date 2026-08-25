@@ -176,6 +176,66 @@ def test_the_flip_has_no_window_that_ln_sfn_would_open(tools) -> None:
     )
 
 
+def test_the_live_pointer_is_only_ever_REPLACED_never_removed(tools) -> None:
+    """DETERMINISTIC coverage of constraint 3, and the default suite's real gate.
+
+    RG-A caught that marking the concurrency measurement `slow` left this file
+    guarding the no-window property with sequential post-conditions plus a
+    textual grep for "ln -sfn" — and the critic constructed a regression the
+    grep sails past:
+
+        rm -f "$link"; ln -s "$target" "$link"
+
+    Same unlink-then-create race, different spelling. Fixing red CI by
+    deselecting the test that was watching is exactly the silent scope
+    reduction this gate exists to catch, so the property is now asserted
+    structurally instead of statistically.
+
+    THE PROPERTY: the live pointer is only ever the DESTINATION OF A RENAME. It
+    is never removed, and never the link-name argument of an `ln`. Traced by
+    putting recording stubs for rm/ln/mv on PATH ahead of the real binaries, so
+    this catches any spelling of unlink-then-create rather than the two
+    substrings someone happened to think of.
+    """
+    a = _make_gen(tools, "A")
+    b = _make_gen(tools, "B")
+    pointer = str(tools / "current")
+
+    trace = tools.parent / "ops.log"
+    stub_bin = tools.parent / "stubbin"
+    stub_bin.mkdir()
+    for tool in ("rm", "ln", "mv"):
+        real = f"/bin/{tool}"
+        stub = stub_bin / tool
+        stub.write_text(f'#!/bin/sh\necho "{tool} $*" >> "{trace}"\nexec {real} "$@"\n')
+        stub.chmod(0o755)
+
+    env = {"PATH": f"{stub_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
+    _sh(f'nx_flip_current "{a}"', tools, extra_env=env)
+    _sh(f'nx_flip_current "{b}"', tools, extra_env=env)
+
+    ops = [line.split() for line in trace.read_text().splitlines() if line.strip()]
+    assert ops, "NON-VACUITY: the stubs recorded nothing, so nothing was traced"
+
+    removed = [o for o in ops if o[0] == "rm" and pointer in o]
+    assert removed == [], (
+        f"the live pointer was REMOVED before being recreated -- that is the "
+        f"unlink-then-create window, whatever it is spelled as: {removed}"
+    )
+
+    linked_over = [o for o in ops if o[0] == "ln" and o and o[-1] == pointer]
+    assert linked_over == [], (
+        f"`ln` was pointed directly at the live pointer; the replacement must be "
+        f"built under a temporary name and renamed over it: {linked_over}"
+    )
+
+    renamed_onto = [o for o in ops if o[0] == "mv" and o and o[-1] == pointer]
+    assert renamed_onto, (
+        f"the pointer was never the destination of a rename, so whatever moved it "
+        f"was not an atomic replace: {ops}"
+    )
+
+
 def test_flip_is_not_implemented_with_ln_sfn() -> None:
     """A literal negative assertion, because `ln -sfn` is the obvious way to
     write this and it is precisely wrong. Scoped to code, not comments: the
@@ -324,3 +384,41 @@ def test_flip_leaves_no_temporary_pointer_behind(tools) -> None:
     _sh(f'nx_flip_current "{a}"', tools)
     leftovers = [p.name for p in tools.iterdir() if ".tmp" in p.name]
     assert leftovers == [], f"temporary pointers left behind: {leftovers}"
+
+
+def test_previous_is_recorded_BEFORE_current_moves(tools) -> None:
+    """RG-A finding: nothing distinguished this ordering from the reverse. The
+    reviewer swapped the two swaps and every test still passed, because the
+    end state is identical when both succeed -- the ordering only matters when
+    the run dies BETWEEN them.
+
+    So kill it between them. With the `previous` write failing, the correct
+    order has not touched `current` yet; the reversed order would already have
+    moved it and would leave the operator pointed at the new generation with no
+    usable rollback.
+    """
+    a = _make_gen(tools, "A")
+    b = _make_gen(tools, "B")
+    _sh(f'nx_flip_current "{a}"', tools)
+
+    stub_bin = tools.parent / "failbin"
+    stub_bin.mkdir()
+    mv = stub_bin / "mv"
+    # Fail only the write to `previous`; let everything else through.
+    mv.write_text(
+        '#!/bin/sh\n'
+        'for arg in "$@"; do\n'
+        '  case "$arg" in */previous) exit 9 ;; esac\n'
+        'done\n'
+        'exec /bin/mv "$@"\n'
+    )
+    mv.chmod(0o755)
+
+    result = _sh(f'nx_flip_current "{b}"', tools,
+                 extra_env={"PATH": f"{stub_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}"})
+
+    assert result.returncode != 0, "a failed previous-write must fail the flip"
+    assert os.readlink(tools / "current") == str(a), (
+        "current MOVED even though recording previous failed -- that is the "
+        "reversed order, and it leaves no usable rollback"
+    )

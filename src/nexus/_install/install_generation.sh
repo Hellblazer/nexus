@@ -141,6 +141,15 @@ BASE_INTERPRETER="$(sed -n 's/^home *= *//p' "$GEN/pyvenv.cfg")"
 BASE_INTERPRETER="${BASE_INTERPRETER%%$'\n'*}"
 PYTHON_FULL="$(sed -n 's/^version *= *//p' "$GEN/pyvenv.cfg")"
 PYTHON_FULL="${PYTHON_FULL%%$'\n'*}"
+
+# An EMPTY base_interpreter is worse than a missing one. .11's doctor check
+# tests whether that path still exists, and Path("").exists() is False -- so an
+# empty value would read as "the base interpreter has been pruned" on every
+# healthy install, or (depending which way the check is written) as a silent
+# pass. Either way the check stops meaning anything. A venv whose pyvenv.cfg has
+# no `home` is not one we can describe, so refuse to write a receipt claiming we
+# can. Found by RG-A; PYTHON_FULL already had a fallback and this did not.
+[ -n "$BASE_INTERPRETER" ] || _die "pyvenv.cfg has no 'home =' line; refusing to write a receipt with an empty base_interpreter: $GEN/pyvenv.cfg"
 [ -n "$PYTHON_FULL" ] || PYTHON_FULL="$PYTHON_VERSION"
 
 RECEIPT="$(nx_receipt_path "$GEN")" || exit $?

@@ -329,3 +329,26 @@ def test_shims_survive_a_flip_and_follow_it(env) -> None:
 
     assert before == "ran-nx"
     assert after == "ran-from-B", "the shim must follow the pointer without being rewritten"
+
+
+def test_a_metadata_lookup_failure_refuses_the_whole_shim_set(env) -> None:
+    """RG-A finding. The lookup used to swallow every exception and exit 0, so a
+    distribution-name mismatch printed nothing and the run reported success --
+    every one of the project's OWN console scripts silently unshimmed while the
+    dependency scripts still appeared. Strictly worse than the hardcoded list
+    (F1) this rule replaced, because a list at least fails visibly."""
+    tools, bin_dir = env
+    gen = _make_gen(tools, "A", entry_points=["nx"], bin_extras=["mineru"])
+    # A python that cannot answer -- the shape of a dist-name mismatch.
+    python = gen / "bin" / "python"
+    python.write_text("#!/bin/sh\necho 'NX_LOOKUP_FAILED simulated' >&2\nexit 3\n")
+    python.chmod(0o755)
+
+    result = _sh(f'nx_write_shims "{gen}"', tools, bin_dir)
+
+    assert result.returncode != 0, "a lookup that could not run must not report success"
+    assert "could not read console scripts" in result.stderr
+    assert list(bin_dir.iterdir()) == [], (
+        "no partial shim set: writing mineru while nx vanishes is the failure "
+        "mode that would send someone hunting the wrong thing"
+    )
