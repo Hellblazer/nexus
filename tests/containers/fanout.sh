@@ -141,34 +141,11 @@ wait "${PIDS[@]}" 2>/dev/null || true
 T1=$(date +%s)
 
 # ── Aggregate ────────────────────────────────────────────────────────────────
+# The verdict logic lives in lib/verdict.sh so tests/test_fanout_verdict.py can
+# drive THIS code rather than a reimplementation of it.
+# shellcheck source=tests/containers/lib/verdict.sh
+. "$REPO_ROOT/tests/containers/lib/verdict.sh"
 FAIL=0
-TOTAL_T=0; TOTAL_P=0; TOTAL_F=0; TOTAL_E=0; TOTAL_S=0
-echo
-echo "shard  exit  wall     summary"
-for i in $(seq 0 $((SHARDS - 1))); do
-  rc="$(cat "$OUT/shard-$i.rc" 2>/dev/null || echo 99)"
-  read -r s e < "$OUT/shard-$i.time" 2>/dev/null || { s=0; e=0; }
-  wall=$((e - s))
-  summary="$(grep -E '^[0-9]+ (passed|failed|error)|=+ .*(passed|failed|error|no tests ran).*=+' \
-    "$OUT/shard-$i.log" 2>/dev/null | tail -1 || true)"
-  xml="$OUT/shard-$i.xml"
-  if [ -f "$xml" ]; then
-    # junit: <testsuite ...> carries tests/errors/failures/skipped counts;
-    # attribute ORDER is not guaranteed, so pull each one independently.
-    suite_tag="$(grep -o '<testsuite [^>]*>' "$xml" | head -1 || true)"
-    attr() { printf '%s' "$suite_tag" | sed -n "s/.*$1=\"\([0-9]*\)\".*/\1/p"; }
-    t="$(attr tests)"; err="$(attr errors)"; f="$(attr failures)"; sk="$(attr skipped)"
-    if [ -n "${t:-}" ]; then
-      TOTAL_T=$((TOTAL_T + t)); TOTAL_E=$((TOTAL_E + err))
-      TOTAL_F=$((TOTAL_F + f)); TOTAL_S=$((TOTAL_S + sk))
-      TOTAL_P=$((TOTAL_P + t - err - f - sk))
-    fi
-  fi
-  # pytest exit 5 = no tests collected in this shard (marker deselect) — pass.
-  if [ "$rc" != 0 ] && [ "$rc" != 5 ]; then FAIL=1; fi
-  printf "%-6s %-5s %-8s %s\n" "$i" "$rc" "${wall}s" "${summary:-<no summary>}"
-done
-echo
-echo "total: ${TOTAL_T} tests / ${TOTAL_P} passed / ${TOTAL_F} failed / ${TOTAL_E} errors / ${TOTAL_S} skipped"
+fanout_verdict "$OUT" "$SHARDS" "${NX_FANOUT_MIN_TESTS:-}" || FAIL=$?
 echo "wall-clock: $((T1 - T0))s across $SHARDS shards ($CPUS cpus, $MEMORY each) — logs: $OUT"
 exit "$FAIL"
