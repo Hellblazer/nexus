@@ -35,6 +35,53 @@ _BULK_DELETE_CONFIRM_THRESHOLD = 10
     annotations={"readOnlyHint": True},
     structured_output=False,
 )
+
+
+def _file_path_matches(entry_path: str, wanted: str) -> bool:
+    """True when *wanted* names the same document as the stored *entry_path*.
+
+    nexus-fhim9. The catalog stores a document's path RELATIVE to its owner
+    root (``tests/test_aspect_worker.py``) while recording the absolute form
+    separately in ``source_uri`` (``file:///Users/.../tests/test_aspect_worker.py``).
+    An exact ``==`` against the stored value therefore rejects the absolute
+    path -- which is the form a caller actually holds. It is what
+    ``os.path.abspath`` produces, what ``source_uri`` records, and what any
+    tool that just touched the file has in hand.
+
+    Measured before the fix: the same document, in the same catalog, one call
+    apart --
+
+        file_path="tests/test_aspect_worker.py"            -> tumbler 1.1.100
+        file_path="/Users/.../tests/test_aspect_worker.py" -> empty
+
+    Returning empty for a path the catalog demonstrably holds under a
+    different spelling is a false NEGATIVE, and the tool's name invites the
+    caller to trust it -- the nexus-yg70j family, where an identity resolves
+    from only one vantage point and reports absence rather than refusing.
+
+    Matching is deliberately narrow: exact, or the stored relative path is a
+    trailing path-SEGMENT suffix of the absolute one (and vice versa). Segment
+    boundaries matter -- ``a/foo.py`` must not match ``a/barfoo.py`` -- so the
+    suffix test is anchored on a separator rather than being a bare
+    ``endswith``. No globbing, no basename-only matching: a bare
+    ``foo.py`` still will not match, because that would trade a false negative
+    for a false positive across every same-named file in the tree.
+    """
+    if not entry_path or not wanted:
+        return False
+    if entry_path == wanted:
+        return True
+    a, b = entry_path.rstrip("/"), wanted.rstrip("/")
+    long_, short_ = (a, b) if len(a) >= len(b) else (b, a)
+    # The shorter side must itself be multi-segment. Without this a bare
+    # basename matches ("tests/x.py".endswith("/x.py") is True), which is the
+    # false POSITIVE this widening exists to avoid -- it would collide across
+    # every same-named file in the tree. Caught by this function's own
+    # negative test on first run.
+    if "/" not in short_:
+        return False
+    return long_.endswith("/" + short_)
+
 def catalog_search(
     query: str = "",
     content_type: str = "",
@@ -82,7 +129,7 @@ def catalog_search(
                 if corpus:
                     candidates = [e for e in candidates if e.corpus == corpus]
                 if file_path:
-                    candidates = [e for e in candidates if e.file_path == file_path]
+                    candidates = [e for e in candidates if _file_path_matches(e.file_path, file_path)]
                 if author:
                     candidates = [e for e in candidates if author.lower() in (e.author or "").lower()]
                 if content_type:
@@ -91,7 +138,7 @@ def catalog_search(
             elif corpus:
                 candidates = cat.by_corpus(corpus)
                 if file_path:
-                    candidates = [e for e in candidates if e.file_path == file_path]
+                    candidates = [e for e in candidates if _file_path_matches(e.file_path, file_path)]
                 if author:
                     candidates = [e for e in candidates if author.lower() in (e.author or "").lower()]
                 if content_type:
@@ -100,7 +147,7 @@ def catalog_search(
             elif content_type:
                 candidates = cat.by_content_type(content_type)
                 if file_path:
-                    candidates = [e for e in candidates if e.file_path == file_path]
+                    candidates = [e for e in candidates if _file_path_matches(e.file_path, file_path)]
                 if author:
                     candidates = [e for e in candidates if author.lower() in (e.author or "").lower()]
                 entries = candidates[offset:offset + limit + 1]
@@ -114,7 +161,7 @@ def catalog_search(
                 else:
                     batch = cat.all_documents(limit + offset + 1)
                 if file_path:
-                    batch = [e for e in batch if e.file_path == file_path]
+                    batch = [e for e in batch if _file_path_matches(e.file_path, file_path)]
                 if author:
                     batch = [e for e in batch if author.lower() in (e.author or "").lower()]
                 entries = batch[offset:offset + limit + 1]
