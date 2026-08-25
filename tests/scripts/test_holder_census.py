@@ -238,6 +238,46 @@ def test_holder_pids_refuses_a_relative_generation(env) -> None:
     assert "absolute" in result.stderr.lower()
 
 
+# --------------------------------------------------------------------------
+# symlinked entries: .7's legacy pseudo-generation
+# --------------------------------------------------------------------------
+
+def test_a_symlinked_generation_entry_is_censused_by_its_real_target(env) -> None:
+    """.7 registers the legacy uv-tool tree as a pseudo-generation: a symlink
+    inside tools/ pointing OUTSIDE it, at $(uv tool dir)/conexus. A holder's
+    ps argv names that real path, never our synthetic pointer -- so census
+    must resolve one level of symlink before grepping, or a live legacy
+    holder reads as zero holders and GC's rule (c) would not protect it."""
+    tools, stub_bin, bin_dir = env
+    legacy_real = tools.parent / "uv-tool-dir" / "conexus"
+    legacy_real.mkdir(parents=True)
+    pseudo = tools / "gen-legacy-uv-tool"
+    pseudo.symlink_to(legacy_real)
+    _stub_ps(stub_bin, [f"  909 {legacy_real}/bin/python {legacy_real}/bin/nx-mcp"])
+
+    result = _sh(f'nx_generation_holder_pids "{pseudo}"', tools, stub_bin, bin_dir)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["909"], (
+        "a live holder of the legacy tree was not attributed to its pseudo-"
+        "generation pointer"
+    )
+
+
+def test_a_symlinked_generation_entry_with_no_holders_reports_none(env) -> None:
+    tools, stub_bin, bin_dir = env
+    legacy_real = tools.parent / "uv-tool-dir" / "conexus"
+    legacy_real.mkdir(parents=True)
+    pseudo = tools / "gen-legacy-uv-tool"
+    pseudo.symlink_to(legacy_real)
+    _stub_ps(stub_bin, ["  101 /usr/bin/vim x"])
+
+    result = _sh(f'nx_generation_holder_pids "{pseudo}"', tools, stub_bin, bin_dir)
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == ""
+
+
 def test_one_ps_snapshot_serves_the_whole_census(env) -> None:
     """Attribution must come from a SINGLE snapshot. Calling ps per generation
     lets a process exit between calls and appear to hold two trees, or none --

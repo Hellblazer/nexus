@@ -38,6 +38,14 @@ NX_CURRENT_LINK_NAME="current"
 # mtime, the heuristic this arc replaced with an exact readlink.
 NX_PREVIOUS_LINK_NAME="previous"
 
+# The ONE generation entry permitted to be a symlink, and the only route by
+# which GC may ever delete something outside the tools root: .7 registers the
+# legacy uv-tool tree as gen-legacy-uv-tool pointing at $(uv tool dir)/conexus.
+# Defined here rather than in legacy.sh because gc.sh must recognise it WITHOUT
+# sourcing legacy.sh — it deliberately does not, so that a reap can never fire
+# during a migrating run.
+NX_LEGACY_GENERATION_NAME="legacy-uv-tool"
+
 # The nexus-owned receipt: the replacement for uv-receipt.toml and the only
 # home extras have. Losing extras re-opens the 768->384 embedder downgrade.
 NX_RECEIPT_NAME="nexus-install.json"
