@@ -112,10 +112,18 @@ def _flip_storm(tools: Path, swap: str, flips: int = 300) -> tuple[int, int]:
     return misses, seen
 
 
+@pytest.mark.slow
 def test_the_flip_has_no_window_that_ln_sfn_would_open(tools) -> None:
-    """THE test of this bead, written as a MEASURED COMPARISON rather than an
-    absolute, because the instrument has a noise floor and an absolute
-    ``misses == 0`` cannot be asserted honestly.
+    """A MEASURED COMPARISON rather than an absolute, and marked ``slow``.
+
+    MARKED SLOW FOR TWO REASONS, both learned the hard way on CI. It cannot
+    calibrate everywhere -- a GitHub ubuntu runner recorded 0 misses for
+    ``ln -sfn``, where macOS records ~1% -- and it is a CPU hog: two tight
+    busy-wait readers for ~20s. Run in the default suite it took develop red
+    twice over, once on its own non-vacuity guard and once by starving a
+    50ms wall-clock budget in a NEIGHBOURING shard. The deterministic
+    structural tests in this file are the real gate; this one is the
+    corroborating measurement, and it belongs in the nightly leg.
 
     Measured while building this: against ``python os.replace`` -- a bare
     ``rename(2)``, atomic by POSIX definition and therefore incapable of opening
@@ -144,10 +152,19 @@ def test_the_flip_has_no_window_that_ln_sfn_would_open(tools) -> None:
         f"NON-VACUITY: reader barely spun (impl={impl_seen}, banned={banned_seen}); "
         f"a clean result would prove nothing"
     )
-    assert banned_misses > 0, (
-        f"NON-VACUITY: `ln -sfn` recorded {banned_misses} misses, so this machine "
-        f"is not exercising the window at all and the comparison below is empty"
-    )
+    if banned_misses == 0:
+        # NOT a pass, and not a failure either: on this machine the banned form
+        # did not open a window the reader could see, so there is no baseline to
+        # compare against and a green result would be meaningless. Measured on a
+        # GitHub ubuntu runner, where GNU `ln -sfn` recorded 0 misses where macOS
+        # BSD `ln` records ~1%. Skipping is honest here BECAUSE the load-bearing
+        # assertions do not depend on it: `ln -sfn` is banned by a code-level
+        # check that always runs, and the flip's observable behaviour (target,
+        # absoluteness, previous, rollback) is pinned deterministically.
+        pytest.skip(
+            f"no baseline: `ln -sfn` recorded 0 misses over {banned_seen} reads on "
+            f"this machine, so the comparison has nothing to calibrate against"
+        )
 
     impl_rate = impl_misses / impl_seen
     banned_rate = banned_misses / banned_seen
