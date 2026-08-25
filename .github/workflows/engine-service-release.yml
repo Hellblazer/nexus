@@ -57,9 +57,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
       - name: Set up GraalVM 25.0.3
-        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
@@ -70,7 +70,7 @@ jobs:
         # applies the master changelog, generates into target/generated-sources/jooq).
         run: ./mvnw -q generate-sources
       - name: Upload generated jOOQ sources
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: jooq-sources
           path: service/target/generated-sources/jooq
@@ -240,12 +240,12 @@ jobs:
       ASSET: nexus-service-${{ matrix.target.arch }}
 
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
       - name: Set up GraalVM 25.0.3
         # SHA-pinned (not @v1): this is a PUBLISH path that creates a GitHub
         # Release, so a floating tag is a supply-chain hole. bef4b0e == v1.
-        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
         with:
           # >= 25.0.2 REQUIRED: the bundled jOOQ / liquibase reachability metadata
           # use GraalVM's unified reachability-metadata schema (nexus-lp2qo).
@@ -295,7 +295,7 @@ jobs:
       - name: Download pre-generated jOOQ sources
         # From the jooq-codegen job — compiled by -Pprebuilt-jooq below. No Docker
         # needed to build, which is what lets mac-arm64 build here.
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: jooq-sources
           path: service/target/generated-sources/jooq
@@ -621,7 +621,7 @@ jobs:
           echo "cosign signatures verified for $ASSET (.cosign.bundle + .sigstore.json)"
 
       - name: Upload Actions artifact (always — dev smoke / non-tag path)
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ${{ env.ASSET }}
           path: dist/*
@@ -687,7 +687,7 @@ jobs:
       PGVECTOR_VERSION: "v0.8.2"
       ASSET: nexus-pg-${{ matrix.target.arch }}
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
       # nexus-m8au7: PG_VERSION + PGVECTOR_VERSION are pinned constants that
       # rarely change across tags, yet every tag recompiled both from source
@@ -706,7 +706,7 @@ jobs:
       # legit main-scoped entries. Only pg-bundle-cache-seed.yml saves.
       - name: Restore compiled PG bundle cache
         id: pg-bundle-cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: bundle
           key: pg-bundle-${{ matrix.target.arch }}-${{ matrix.target.runner }}-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ matrix.target.image || 'native' }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}
@@ -866,7 +866,7 @@ jobs:
           echo "cosign signature verified for $ASSET.txz (.sigstore.json)"
 
       - name: Upload Actions artifact (always — dev smoke / non-tag path)
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ${{ env.ASSET }}
           path: dist/*
