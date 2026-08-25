@@ -34,6 +34,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -51,8 +52,12 @@ from nexus.install_layout import (
     Receipt,
     bin_dir,
     build_spec,
+    current_generation,
     current_link,
     generation_dir,
+    is_stale,
+    list_generations,
+    read_receipt,
     receipt_path,
     render_shim,
     tools_dir,
@@ -621,3 +626,190 @@ def test_a_receipt_built_from_build_spec_is_consistent_by_construction(
     is wrong and the builder is caught between them."""
     spec = build_spec("conexus", extras, "7.18.0")
     assert _receipt(spec=spec, extras=extras).extras == sorted(set(extras))
+
+
+# --------------------------------------------------------------------------
+# runtime half (nexus-utpuw.9, P5a): resolve current, enumerate generations,
+# read receipts, and answer "am I stale?" -- exactly, via one readlink.
+# --------------------------------------------------------------------------
+
+def _make_complete_generation(tmp_path: Path, stamp: str) -> Path:
+    """A gen-<stamp> directory WITH a receipt -- a real generation."""
+    gen = generation_dir(stamp, tools=tmp_path)
+    gen.mkdir(parents=True)
+    receipt_path(gen).write_text(_receipt().to_json())
+    return gen
+
+
+class TestCurrentGeneration:
+    """current_generation(): one os.readlink, wrapped so a caller gets a
+    named, catchable state instead of a bare OSError."""
+
+    def test_resolves_the_pointer_via_readlink(self, tmp_path: Path) -> None:
+        gen = _make_complete_generation(tmp_path, "genA")
+        current_link(tools=tmp_path).symlink_to(gen)
+        assert current_generation(tools=tmp_path) == gen
+
+    def test_raises_when_the_pointer_is_missing(self, tmp_path: Path) -> None:
+        """No symlink at all -- e.g. a tools dir with no generations built
+        yet. Distinct from list_generations(), which treats this as an
+        ordinary empty state rather than an error."""
+        with pytest.raises(InstallLayoutError) as excinfo:
+            current_generation(tools=tmp_path)
+        assert str(current_link(tools=tmp_path)) in str(excinfo.value)
+
+    def test_raises_over_a_regular_file_pointer(self, tmp_path: Path) -> None:
+        """readlink refuses a non-symlink; that must not be mistaken for a
+        generation named by the file's contents (mirrors the shim's own
+        refusal over the identical hazard)."""
+        tmp_path.mkdir(exist_ok=True)
+        current_link(tools=tmp_path).write_text("/somewhere/else\n")
+        with pytest.raises(InstallLayoutError):
+            current_generation(tools=tmp_path)
+
+    def test_does_not_raise_over_a_dangling_target(self, tmp_path: Path) -> None:
+        """UGLY CASE. readlink(2) reads the link's content; it never stats
+        the target. A pointer at a reaped generation is exactly the ordinary
+        operating state between a GC pass and the next flip, not an error."""
+        current_link(tools=tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        reaped = tmp_path / f"{GENERATION_PREFIX}reaped"
+        current_link(tools=tmp_path).symlink_to(reaped)
+        assert current_generation(tools=tmp_path) == reaped
+
+    def test_raises_over_a_relative_symlink_target(self, tmp_path: Path) -> None:
+        """The contract (module docstring) says current is ALWAYS an
+        absolute symlink so that plain readlink suffices. A relative target
+        would silently resolve against the READER's cwd, not the tools
+        root -- refused rather than guessed."""
+        tools = tmp_path / "tools"
+        tools.mkdir(parents=True)
+        current_link(tools=tools).symlink_to(Path(f"{GENERATION_PREFIX}x"))
+        with pytest.raises(InstallLayoutError):
+            current_generation(tools=tools)
+
+
+class TestIsStale:
+    """is_stale(): THE SAME MECHANISM as design point 6's spawn-time
+    tripwire -- one readlink, compared against a baseline that defaults to
+    this process's own sys.prefix but may be supplied by a caller that
+    captured it earlier (a long-lived host at startup)."""
+
+    def test_false_when_baked_matches_current(self, tmp_path: Path) -> None:
+        gen = _make_complete_generation(tmp_path, "genA")
+        current_link(tools=tmp_path).symlink_to(gen)
+        assert is_stale(gen, tools=tmp_path) is False
+
+    def test_true_when_baked_differs_from_current(self, tmp_path: Path) -> None:
+        gen_a = _make_complete_generation(tmp_path, "genA")
+        gen_b = _make_complete_generation(tmp_path, "genB")
+        current_link(tools=tmp_path).symlink_to(gen_b)
+        assert is_stale(gen_a, tools=tmp_path) is True
+
+    def test_true_then_false_across_a_flip(self, tmp_path: Path) -> None:
+        """The formula stated directly: stale <=> Path(sys.prefix) !=
+        readlink(current). A flip must move the answer, not just the input,
+        or the detector is inferring from something other than the pointer."""
+        gen_a = _make_complete_generation(tmp_path, "genA")
+        gen_b = _make_complete_generation(tmp_path, "genB")
+        pointer = current_link(tools=tmp_path)
+        pointer.symlink_to(gen_a)
+
+        assert is_stale(gen_a, tools=tmp_path) is False
+        assert is_stale(gen_b, tools=tmp_path) is True
+
+        tmp_pointer = tmp_path / ".current.tmp"
+        tmp_pointer.symlink_to(gen_b)
+        os.replace(tmp_pointer, pointer)
+
+        assert is_stale(gen_a, tools=tmp_path) is True
+        assert is_stale(gen_b, tools=tmp_path) is False
+
+    def test_defaults_the_baseline_to_sys_prefix(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        gen = _make_complete_generation(tmp_path, "genA")
+        current_link(tools=tmp_path).symlink_to(gen)
+        monkeypatch.setattr(sys, "prefix", str(gen))
+        assert is_stale(tools=tmp_path) is False
+        monkeypatch.setattr(sys, "prefix", str(tmp_path / "somewhere-else"))
+        assert is_stale(tools=tmp_path) is True
+
+    def test_propagates_when_current_is_missing(self, tmp_path: Path) -> None:
+        """No pointer at all is not a stale/fresh verdict this formula can
+        make -- it is current_generation()'s named failure, surfaced rather
+        than papered over as an unconditional answer."""
+        with pytest.raises(InstallLayoutError):
+            is_stale(tmp_path / "anything", tools=tmp_path)
+
+    def test_reports_stale_over_a_dangling_current(self, tmp_path: Path) -> None:
+        """UGLY CASE. A pointer at a reaped generation never equals a live
+        baseline, so this is unconditionally stale -- and must not raise."""
+        gen = generation_dir("genA", tools=tmp_path)  # never built
+        current_link(tools=tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        current_link(tools=tmp_path).symlink_to(tmp_path / f"{GENERATION_PREFIX}reaped")
+        assert is_stale(gen, tools=tmp_path) is True
+
+
+class TestListGenerations:
+    """list_generations(): a gen-* directory COUNTS only with a receipt --
+    the same completeness rule nexus-utpuw.6's GC pass applies, so the two
+    halves cannot disagree about what a generation is."""
+
+    def test_returns_complete_generations_oldest_first(self, tmp_path: Path) -> None:
+        # Stamps sort chronologically as plain strings (install_generation.sh);
+        # inserted out of order to prove the function sorts rather than
+        # preserving filesystem iteration order.
+        gen_b = _make_complete_generation(tmp_path, "20260825T020000Z")
+        gen_a = _make_complete_generation(tmp_path, "20260825T010000Z")
+        gen_c = _make_complete_generation(tmp_path, "20260825T030000Z")
+        assert list_generations(tools=tmp_path) == [gen_a, gen_b, gen_c]
+
+    def test_excludes_a_receipt_less_directory(self, tmp_path: Path) -> None:
+        """Wreckage from a build that died before writing its completion
+        marker is not a generation -- matches gc.sh exactly, so GC and this
+        enumeration can never disagree about what exists."""
+        complete = _make_complete_generation(tmp_path, "genA")
+        wreckage = generation_dir("genB", tools=tmp_path)
+        wreckage.mkdir(parents=True)
+        assert list_generations(tools=tmp_path) == [complete]
+
+    def test_ignores_non_generation_entries(self, tmp_path: Path) -> None:
+        """The pointers and any unrelated file living beside the
+        generations must not be mistaken for one."""
+        complete = _make_complete_generation(tmp_path, "genA")
+        current_link(tools=tmp_path).symlink_to(complete)
+        (tmp_path / "some-other-file").write_text("not a generation\n")
+        assert list_generations(tools=tmp_path) == [complete]
+
+    def test_empty_on_a_tools_dir_with_no_generations(self, tmp_path: Path) -> None:
+        tmp_path.mkdir(exist_ok=True)
+        assert list_generations(tools=tmp_path) == []
+
+    def test_empty_when_the_tools_dir_does_not_exist_at_all(self, tmp_path: Path) -> None:
+        """UGLY CASE. Distinct from current_generation()'s raise-on-missing:
+        no generations built yet is a normal state, not an error."""
+        assert list_generations(tools=tmp_path / "never-created") == []
+
+
+class TestReadReceipt:
+    """read_receipt(): missing and corrupt are both named, catchable states
+    -- never a bare FileNotFoundError or JSONDecodeError the caller must
+    know to expect."""
+
+    def test_round_trips_a_written_receipt(self, tmp_path: Path) -> None:
+        gen = _make_complete_generation(tmp_path, "genA")
+        assert read_receipt(gen) == _receipt()
+
+    def test_raises_on_a_missing_receipt(self, tmp_path: Path) -> None:
+        gen = generation_dir("genA", tools=tmp_path)
+        gen.mkdir(parents=True)
+        with pytest.raises(InstallLayoutError) as excinfo:
+            read_receipt(gen)
+        assert str(receipt_path(gen)) in str(excinfo.value)
+
+    def test_raises_on_a_corrupt_receipt(self, tmp_path: Path) -> None:
+        gen = generation_dir("genA", tools=tmp_path)
+        gen.mkdir(parents=True)
+        receipt_path(gen).write_text("{not json")
+        with pytest.raises(InstallLayoutError):
+            read_receipt(gen)
