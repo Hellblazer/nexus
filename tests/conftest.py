@@ -122,7 +122,27 @@ def _real_config_dir_for_guard() -> Path:
     override IS the point (the leak being guarded against is precisely a
     test hitting the real path despite that override existing)."""
     override = os.environ.get(_REAL_CONFIG_DIR_ENV_OVERRIDE, "").strip()
-    home = Path(override) if override else Path.home()
+    if override:
+        home = Path(override)
+    else:
+        # nexus-pfuns: once the suite is fenced, ``Path.home()`` IS the
+        # throwaway mirror, and a guard pointed at it would watch a directory
+        # nothing cares about while reporting green. REAL_HOME_ENV carries the
+        # operator's actual home across the fence and into xdist workers, which
+        # inherit the fenced HOME and would otherwise compute the wrong root.
+        from tests._fence_home import (  # noqa: PLC0415 — test-only helper
+            FENCED_HOME_ENV,
+            REAL_HOME_ENV,
+        )
+        home = Path.home()
+        real = os.environ.get(REAL_HOME_ENV, "").strip()
+        fenced = os.environ.get(FENCED_HOME_ENV, "").strip()
+        # Substitute ONLY when Path.home() is the fence we installed. A test
+        # that monkeypatches Path.home is asking a question about ITS tmp dir,
+        # and an unconditional substitution answers a different one -- that
+        # broke 6 guard tests before this check existed.
+        if real and fenced and str(home) == fenced:
+            home = Path(real)
     return home / ".config" / "nexus"
 
 
@@ -228,6 +248,27 @@ def pytest_sessionstart(session):
     """
     global _fixture_cache_baseline, _real_config_dir_baseline, _is_controller_or_serial
     _is_controller_or_serial = not _is_xdist_worker(session)
+
+    # nexus-pfuns: FENCE $HOME before any test runs. The gates were fenced
+    # first; this suite was not, and it runs with the operator's real home.
+    # `nexus_config_dir()` falls back to `Path.home()/".config"/"nexus"`
+    # whenever NEXUS_CONFIG_DIR is absent, and
+    # `upgrade_finish.check_version_transition` WRITES that directory on a
+    # version transition -- `install_mtime_and_version()` reads the INSTALLED
+    # distribution's version, so running this suite from a version-bumped
+    # worktree is itself a transition. Installed on the CONTROLLER before xdist
+    # spawns workers, so they inherit both the fenced HOME and REAL_HOME_ENV.
+    #
+    # The guard above is NOT retired by this. It keeps watching the operator's
+    # real dir and is now a backstop for a fence ESCAPE -- a test writing that
+    # path absolutely rather than through $HOME.
+    if _is_controller_or_serial and not os.environ.get("NX_NO_HOME_FENCE"):
+        import tempfile  # noqa: PLC0415 — session-start only
+
+        from tests._fence_home import install_fence  # noqa: PLC0415 — test-only helper
+
+        install_fence(Path(tempfile.mkdtemp(prefix="nx-suite-home-")))
+
     if _is_controller_or_serial:
         # Snapshotting here (before any worker is spawned -- xdist spawns
         # workers lazily inside pytest_runtestloop, called after
