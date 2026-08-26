@@ -353,3 +353,39 @@ def test_a_process_merely_naming_a_path_inside_a_generation_counts_as_a_holder(e
         "attribution narrowed to argv[0]; that trades over-retention for "
         "under-reporting, which is the direction that deletes data"
     )
+
+
+def test_a_trailing_slash_on_the_generation_does_not_hide_its_holders(env) -> None:
+    """The match appends '/' as a path boundary, so an argument that already ends
+    in one builds '<gen>//' -- a pattern no ps line can contain, and a held tree
+    reports zero holders. Neither call site can produce it today (both pass a
+    glob expansion, which bash never suffixes with '/'), which is precisely why
+    it would have waited here for a third caller. Under-reporting is the
+    direction that lets GC delete a tree somebody is running from, so the
+    function normalises rather than trusting its callers. RG-B re-review."""
+    tools, stub_bin, bin_dir = env
+    (a,) = _make_gens(tools, "A")
+    _stub_ps(stub_bin, [f"  101 {a}/bin/python {a}/bin/nx-mcp"])
+
+    result = _sh(f'nx_generation_holder_pids "{a}/"', tools, stub_bin, bin_dir)
+
+    assert result.stdout.split() == ["101"], (
+        "a trailing slash on the generation path hid a live holder"
+    )
+
+
+def test_the_filesystem_root_is_refused_not_censused_as_empty(env) -> None:
+    """Normalising trailing slashes turns "/" into the empty string, and an empty
+    match would make the boundary pattern "/" -- every process on the machine a
+    holder of everything. Refuse instead. Reporting zero holders would be worse
+    still: it is the answer that invites a reap."""
+    tools, stub_bin, bin_dir = env
+    _make_gens(tools, "A")
+    _stub_ps(stub_bin, ["  101 /usr/bin/vim notes.txt"])
+
+    result = _sh('nx_generation_holder_pids "/"', tools, stub_bin, bin_dir)
+
+    assert result.returncode != 0, (
+        "the filesystem root was accepted as a generation and censused"
+    )
+    assert result.stdout.strip() == "", "root census produced holder output"

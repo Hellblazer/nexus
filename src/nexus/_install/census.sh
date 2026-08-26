@@ -78,6 +78,26 @@ nx_generation_holder_pids() {
         [ -n "$_nx_hp_resolved" ] && _nx_hp_match="$_nx_hp_resolved"
     fi
 
+    # NORMALISE A TRAILING SLASH -- on the argument and on a resolved ledger
+    # target alike, which is why this sits after the readlink and not in the
+    # case above. The match below appends '/' as a path boundary, so a value
+    # that already ends in one builds '<gen>//': a pattern no ps line can ever
+    # contain, so a held tree reports ZERO holders and rule (c) waves the reap
+    # through. Neither call site can produce it today -- both pass a value from
+    # "$root"/"$prefix"* glob expansion, which bash never suffixes with '/' --
+    # and that is exactly the reason to normalise here rather than note it: an
+    # unreachable false negative in the under-reporting direction is a landmine
+    # waiting for a third caller. Found by the RG-B re-review of nexus-qzawu.
+    while [ "${_nx_hp_match%/}" != "$_nx_hp_match" ]; do
+        _nx_hp_match="${_nx_hp_match%/}"
+    done
+    if [ -z "$_nx_hp_match" ]; then
+        # "/" normalises to empty, and an empty match would make the boundary
+        # pattern "/" -- every process on the machine a holder of everything.
+        echo "nexus: refusing to census the filesystem root as a generation" >&2
+        return "$NX_LAYOUT_USAGE_EXIT"
+    fi
+
     # PROVIDED-BUT-EMPTY is not the same as NOT PROVIDED, and testing the value
     # conflates them: a snapshot with no matching processes is empty, so the
     # falsy check re-took one PER GENERATION -- ps ran N+1 times for one census
