@@ -449,6 +449,41 @@ def install_mtime_and_version() -> tuple[float, str]:
 #: primitive, not duplicated.
 
 
+def _process_markers() -> tuple[str, ...]:
+    """Every substring that marks a command as belonging to a conexus venv.
+
+    ONE definition, because two of them drifted and the drift was silent.
+    nexus-utpuw.10 rewired :func:`enumerate_processes` onto the layout-derived
+    markers and left :func:`restart_stale`'s pre-kill re-check on the hardcoded
+    :data:`_PROC_MARKERS` -- which .10's own audit (finding F5) had called out
+    as a SEPARATE must-fix item with its own test. The result on a migrated box:
+    every stale aspect-worker was enumerated, reported by ``nx doctor``, and
+    then skipped as "gone or recycled" at the instant of signalling, so both
+    ``nx daemon restart-stale`` and the automatic finish pass silently restarted
+    nothing (nexus-mjhwk). That is the exact silent-no-op class this arc exists
+    to close, surviving in the one call site that does the actual work.
+
+    Order matters and is not arbitrary. The layout-derived markers come first
+    because on a generation box they are the only ones that can match; the
+    running install's venv root is the pre-generation box's answer; and
+    :data:`_PROC_MARKERS` is the last resort for a box whose metadata will not
+    resolve at all. Returning empty is deliberately NOT possible -- an empty
+    marker set makes ``any(...)`` False for every row, which reads as "nothing
+    is ours" and is the under-reporting direction.
+    """
+    from nexus import install_census  # noqa: PLC0415 — deferred, avoids an import cycle
+
+    markers: tuple[str, ...] = install_census.generation_match_prefixes()
+    if markers:
+        return markers
+    try:
+        # No generation layout readable: the venv root of the running install,
+        # which is what a pre-generation box carries.
+        return (str(_install_root().parents[2]),)
+    except Exception:  # noqa: BLE001 — metadata unavailable: conventional layout
+        return _PROC_MARKERS
+
+
 def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, str]]:
     """``[(pid, age_s, command)]`` for every running conexus-VENV process.
 
@@ -472,16 +507,7 @@ def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, st
     # marks a holder, shared with the shell half and pinned by
     # tests/test_install_census_twins_agree.py. Giving this function its own
     # notion is how the markers it used to carry drifted into matching nothing.
-    from nexus import install_census  # noqa: PLC0415 — deferred, avoids an import cycle
-
-    markers: tuple[str, ...] = install_census.generation_match_prefixes()
-    if not markers:
-        try:
-            # No generation layout readable: the venv root of the running
-            # install, which is what a pre-generation box carries.
-            markers = (str(_install_root().parents[2]),)
-        except Exception:  # noqa: BLE001 — metadata unavailable: conventional layout
-            markers = _PROC_MARKERS
+    markers = _process_markers()
     return [
         (pid, age, command)
         for pid, age, command in rows
@@ -587,7 +613,7 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                 # the same convention as t2_daemon's pre-kill re-check.
                 current = process_command(proc.pid)
                 if "aspect-worker" not in current or not any(
-                    k in current for k in _PROC_MARKERS
+                    k in current for k in _process_markers()
                 ):
                     actions.append(
                         f"{proc.kind} pid {proc.pid}: gone or recycled; skipped"

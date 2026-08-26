@@ -345,3 +345,96 @@ def test_the_widened_verdict_still_classifies_what_it_reports(
     assert kinds == {4248: "aspect-worker", 4249: "mcp-host"}
     assert [p.pid for p in report.restartable] == [4248]
     assert [p.pid for p in report.session_bound] == [4249]
+
+
+# --------------------------------------------------------------------------
+# (e) the KILL -- nexus-mjhwk, found by both RG-D reviewers independently
+#
+# Detecting a stale process and actually restarting it are two different
+# claims, and only the first was tested. restart_stale's pre-kill
+# pid-recycle re-check still matched the legacy _PROC_MARKERS, so on a
+# migrated box every genuinely-stale aspect-worker was enumerated, reported
+# by `nx doctor`, and then skipped as "gone or recycled" at the instant of
+# signalling. `nx daemon restart-stale` -- the remedy doctor's own row
+# recommends -- restarted nothing, and said nothing.
+#
+# .10's audit called this out as finding F5, a SEPARATE must-fix item with
+# its own test. The test is these two.
+# --------------------------------------------------------------------------
+
+def test_restart_stale_actually_signals_a_generation_aspect_worker(
+    tmp_path, monkeypatch
+) -> None:
+    """The whole point of the pass. A detection that never leads to a signal
+    is the silent no-op this arc exists to remove, one layer further in."""
+    import signal  # noqa: PLC0415 — file pattern: deferred imports
+
+    old, _new = _layout(tmp_path, monkeypatch)
+    command = (
+        f"{old}/bin/python {old}/bin/nx daemon aspect-worker "
+        "start --tenant default"
+    )
+    report = upgrade_finish.SkewReport(
+        installed_version="7.18.0", install_mtime=1_000.0
+    )
+    report.stale.append(upgrade_finish.StaleProcess(
+        pid=4250, kind="aspect-worker", command=command, age_s=500,
+    ))
+
+    calls: list[tuple[int, int]] = []
+
+    def _kill(pid, sig):
+        calls.append((pid, sig))
+        if sig == 0:
+            raise ProcessLookupError  # drained on the first liveness poll
+
+    monkeypatch.setattr(
+        "nexus.upgrade_finish.process_command", lambda pid: command
+    )
+    monkeypatch.setattr("nexus.upgrade_finish.os.kill", _kill)
+    monkeypatch.setattr("nexus.upgrade_finish.time.sleep", lambda _s: None)
+
+    actions = upgrade_finish.restart_stale(report)
+
+    assert calls[0] == (4250, signal.SIGTERM), (
+        "no signal was sent: neither legacy marker ('uv/tools/conexus', "
+        "'.local/bin/nx') can appear in a shim-launched generation path, so "
+        "the pre-kill re-check skipped a live worker as 'gone or recycled'"
+    )
+    assert any("restarted aspect-worker" in a for a in actions)
+
+
+def test_the_pid_recycle_guard_still_refuses_a_foreign_command(
+    tmp_path, monkeypatch
+) -> None:
+    """Non-vacuity for the above, and the reason the check exists at all.
+
+    Widening the marker set must not degrade the re-check into "signal
+    whatever the report named". The command below deliberately CONTAINS
+    'aspect-worker' so the first half of the condition passes and the marker
+    half is what has to refuse it -- a pid recycled onto an unrelated process
+    between detection and signalling is the TOCTOU this guard was added for
+    (review 38b7db3d High-3)."""
+    _layout(tmp_path, monkeypatch)
+    report = upgrade_finish.SkewReport(
+        installed_version="7.18.0", install_mtime=1_000.0
+    )
+    report.stale.append(upgrade_finish.StaleProcess(
+        pid=4251, kind="aspect-worker",
+        command="/tools/gen-00/bin/nx daemon aspect-worker start", age_s=500,
+    ))
+
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "nexus.upgrade_finish.process_command",
+        lambda pid: "/usr/bin/vim /notes/aspect-worker.md",
+    )
+    monkeypatch.setattr(
+        "nexus.upgrade_finish.os.kill",
+        lambda pid, sig: calls.append((pid, sig)),
+    )
+
+    actions = upgrade_finish.restart_stale(report)
+
+    assert calls == []
+    assert any("gone or recycled" in a for a in actions)

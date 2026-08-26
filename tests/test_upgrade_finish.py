@@ -171,9 +171,18 @@ class TestRestartStale:
 
         # Pre-kill re-verification (review 38b7db3d High-3): the probe must
         # see OUR command at that pid, else the kill is skipped.
+        #
+        # THE ROOT IS PINNED AND THE PATH IS REAL-SHAPED (nexus-mjhwk). This
+        # check used to consult the hardcoded _PROC_MARKERS while
+        # enumerate_processes consulted the layout-derived ones, so this
+        # fixture passed on the legacy vocabulary alone -- by coincidence
+        # rather than because the marker matched anything the enumerate side
+        # would have selected. Both call sites now share _process_markers(),
+        # so the command has to sit under the pinned install root the way a
+        # real one does. Do not "simplify" this back to a bare /u/ path.
         probe = MagicMock(returncode=0, stdout=(
-            "/u/.local/share/uv/tools/conexus/bin/python3 "
-            "/u/.local/bin/nx daemon aspect-worker start\n"
+            "/Users/u/.local/share/uv/tools/conexus/bin/python3 "
+            "/Users/u/.local/bin/nx daemon aspect-worker start\n"
         ))
 
         calls = []
@@ -186,7 +195,8 @@ class TestRestartStale:
         # mock never reaches it there (CI-only IndexError, 2026-08-01). The
         # test's subject is the KILL choreography; pin the command-read at
         # its own seam (the transport has its own tests).
-        with patch("nexus.upgrade_finish.os.kill", side_effect=_kill), \
+        with _pin_tool_root(), \
+                patch("nexus.upgrade_finish.os.kill", side_effect=_kill), \
                 patch("nexus.upgrade_finish.time.sleep"), \
                 patch("nexus.upgrade_finish.process_command",
                       return_value=probe.stdout.strip()), \
