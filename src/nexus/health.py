@@ -190,6 +190,93 @@ def _check_python() -> list[HealthResult]:
     return [r]
 
 
+def _check_generation_layout() -> list[HealthResult]:
+    """The generation layout itself: is there a working install to run from?
+
+    nexus-utpuw.11. health.py carried ZERO references to install_layout, so
+    every way the layout can break was invisible to the one command whose job
+    is noticing. Three things can go wrong and they are not the same severity:
+
+    * ``current`` missing or dangling is a HARD failure. Every shim resolves it
+      at spawn, so nothing starts. Not a warning.
+    * A shim that uv has taken back is a FAILURE, and it is nexus-utpuw.7's
+      accepted risk realised: between migration and reap uv still holds a valid
+      receipt, so a stray ``uv tool upgrade conexus`` re-symlinks over the
+      nexus-owned shim files and live sessions resolve through uv's tree again.
+      The mitigation is that re-running the installer repairs it, which only
+      helps if somebody is told.
+    * A ``gen-*`` directory with no receipt is NOT a fault. It is a build that
+      died before finishing; nothing ever pointed ``current`` at it and GC reaps
+      it. Reporting wreckage as breakage trains the operator to ignore this row,
+      which is how a real fault gets missed.
+
+    The shim names are DERIVED from ``<current>/bin`` rather than hardcoded. A
+    hardcoded inventory is the failure class this whole arc removes, and doctor
+    is the last place to reintroduce one.
+    """
+    label = "Generation layout"
+    try:
+        from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+        tools = install_layout.tools_dir()
+        bin_dir = install_layout.bin_dir()
+        current = install_layout.current_generation()
+    except Exception as exc:  # noqa: BLE001 — never crash doctor
+        # UNCERTAIN MEANS SAY SO. Returning ok here would be the silent green
+        # this bead exists to remove, relocated one function over.
+        _log.warning("doctor_generation_layout_check_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"could not check the generation layout — {exc}",
+        )]
+
+    if not current.is_dir():
+        return [HealthResult(
+            label=label, ok=False,
+            detail=(
+                f"current points at {current}, which does not exist — every "
+                "shim resolves current at spawn, so nothing will start"
+            ),
+            fix_suggestions=["scripts/reinstall-tool.sh"],
+        )]
+
+    if not install_layout.receipt_path(current).is_file():
+        return [HealthResult(
+            label=label, ok=False,
+            detail=(
+                f"current points at {current.name}, which has no receipt — that "
+                "is an unfinished build, not a generation"
+            ),
+            fix_suggestions=["scripts/reinstall-tool.sh"],
+        )]
+
+    reclaimed = [
+        entry.name
+        for entry in sorted((current / "bin").iterdir())
+        if (bin_dir / entry.name).is_symlink()
+    ] if (current / "bin").is_dir() else []
+    if reclaimed:
+        return [HealthResult(
+            label=label, ok=False,
+            detail=(
+                f"{', '.join(reclaimed)} in {bin_dir} are symlinks, not "
+                "nexus-owned shims — uv has taken them back (a stray "
+                "`uv tool upgrade conexus` does this), so those commands "
+                "resolve through uv's tree instead of current"
+            ),
+            fix_suggestions=["scripts/reinstall-tool.sh"],
+        )]
+
+    generations = install_layout.list_generations(tools=tools)
+    return [HealthResult(
+        label=label, ok=True,
+        detail=(
+            f"current -> {current.name}, {len(generations)} complete "
+            f"generation(s), shims owned by nexus"
+        ),
+    )]
+
+
 def _check_process_skew() -> list[HealthResult]:
     """nexus-4xgfy: the disk can be upgraded while every running process
     still executes the old code from memory — three live incidents
@@ -202,6 +289,7 @@ def _check_process_skew() -> list[HealthResult]:
     try:
         from nexus.upgrade_finish import (  # noqa: PLC0415 — deferred import
             detect_stale_processes,
+            enumerate_processes,
             install_source,
         )
 
@@ -221,15 +309,40 @@ def _check_process_skew() -> list[HealthResult]:
             detail=f"could not check — probe failed: {exc}",
         )]
     if not report.stale:
-        return [HealthResult(
-            label="Process freshness",
-            ok=True,
-            detail=(
-                f"all running conexus processes match the installed "
+        # A GREEN MUST STATE WHAT IT EXAMINED. This row used to say "all running
+        # conexus processes match the installed version" whether it had looked
+        # at twelve processes or none, and under the generation layout it was
+        # always none: the markers were pinned to the CURRENT generation while a
+        # stale process by definition runs from a different one, so report.stale
+        # was empty by construction (nexus-utpuw.10). The sentence was a vacuous
+        # truth dressed as a positive finding, on the one check whose whole
+        # purpose is noticing that the machine is stale.
+        #
+        # Two ps views rather than one: the count is display-only and never
+        # gates a decision, so a process starting between them can make the
+        # count off by one but cannot make this row wrong.
+        try:
+            examined = len(enumerate_processes())
+        except Exception:  # noqa: BLE001 — a display count must never fail the row
+            examined = -1
+
+        if examined == 0:
+            detail = (
+                "no running conexus processes found — nothing to compare "
+                f"against the installed {report.installed_version}"
+            )
+        elif examined < 0:
+            detail = (
+                f"no stale processes found against the installed "
+                f"{report.installed_version}; could not count how many were examined"
+            )
+        else:
+            detail = (
+                f"{examined} running conexus process(es) all match the installed "
                 f"{report.installed_version} (install source: "
                 f"{install_source().split(' — ')[0]})"
-            ),
-        )]
+            )
+        return [HealthResult(label="Process freshness", ok=True, detail=detail)]
     names = ", ".join(
         f"{p.kind} pid {p.pid}" for p in report.stale[:6]
     )
@@ -5527,6 +5640,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
 
     results.extend(_check_python())
     results.extend(_check_cli_version())
+    results.extend(_check_generation_layout())
     results.extend(_check_process_skew())
     results.extend(_check_plugin_name())
     results.extend(_check_credential_persistence())
