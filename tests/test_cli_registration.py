@@ -41,6 +41,9 @@ def test_all_command_modules_registered():
         "doctor": "doctor",
         "hook": "hook",
         "mineru": "mineru",
+        # `self.py` would be a confusing module name next to the keyword;
+        # `self_cmd` -> `self` follows config_cmd/search_cmd/service_cmd.
+        "self_cmd": "self",
         "search_cmd": "search",
         "service_cmd": "service",
         "storage_cmd": "storage",
