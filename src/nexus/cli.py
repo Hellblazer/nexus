@@ -132,7 +132,19 @@ def main(ctx: click.Context, verbose: bool) -> None:
 
         _stranded = detect_stranded_install_default()
         if _stranded is not None:
-            click.echo(f"[stranded-install] {_stranded.message}", err=True)
+            # The leaf cannot ask which layout this box has (its import
+            # contract forbids it), and the CLI can — so the banner names the
+            # same first hop nx doctor names, rather than the two surfaces
+            # printing different commands for one procedure (nexus-utpuw.13).
+            from nexus import install_advice  # noqa: PLC0415 — deferred import
+
+            _hop = install_advice.pinned_install_command(
+                _stranded.pinned_release,
+                legacy=f"uv tool install conexus=={_stranded.pinned_release}",
+            )
+            click.echo(
+                f"[stranded-install] {_stranded.message_for(_hop)}", err=True
+            )
     except Exception:  # noqa: BLE001 — the detector must never break CLI startup
         import structlog  # noqa: PLC0415 — deferred import
         structlog.get_logger(__name__).warning(

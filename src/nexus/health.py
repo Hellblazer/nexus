@@ -190,30 +190,29 @@ def _check_python() -> list[HealthResult]:
     return [r]
 
 
+def _install_advice():
+    """The advice module, deferred (health is imported early and widely)."""
+    from nexus import install_advice  # noqa: PLC0415 — deferred import
+
+    return install_advice
+
+
 def _upgrade_advice(fallback: str) -> str:
-    """How to upgrade THIS box, in one place.
+    """How to upgrade THIS box. MOVED to :mod:`nexus.install_advice` (.13).
 
-    nexus-utpuw.11 lists three remediation strings that go wrong under the
-    generation layout: they name `uv tool upgrade conexus`, `uv tool install
-    conexus==<pin>` and `uv tool install --reinstall conexus`, none of which
-    touches a generation install.
+    The rule was born here in .11 and is needed by callers that cannot import
+    ``health`` — ``stranded_install`` records at its own line 102 that it is a
+    leaf with import constraints, and ``pdf_extractor`` and ``mcp_infra`` were
+    each carrying their own hardcoded uv string. One answer, one module.
 
-    They are not simply WRONG, though, which is why this is a function and not
-    a find-and-replace: a box that has not migrated yet still upgrades through
-    uv, and .7 leaves that state in place until the legacy tree has no holders.
-    Telling such a user to run a script out of a checkout they may not have is
-    a different wrong answer. So the advice follows the layout the box actually
-    has.
+    This wrapper stays because it reads better at the call sites here. Note the
+    generation branch now names ``nx self install`` rather than
+    ``scripts/reinstall-tool.sh``: .11 predates .14, and the packaged installer
+    needs no checkout (see the module docstring there for the full reason).
     """
-    try:
-        from nexus import install_layout  # noqa: PLC0415 — deferred import
+    from nexus import install_advice  # noqa: PLC0415 — deferred import
 
-        current = install_layout.current_generation()
-    except Exception:  # noqa: BLE001 — no generation layout: the uv advice is right
-        return fallback
-    if current.is_dir():
-        return "scripts/reinstall-tool.sh    # installs a new generation, safe under live sessions"
-    return fallback
+    return install_advice.upgrade_advice(fallback)
 
 
 def _check_generation_layout() -> list[HealthResult]:
@@ -645,7 +644,9 @@ def _check_cli_version() -> list[HealthResult]:
         detail=f"{current} → {latest} available",
     )
     r.fix_suggestions = [
-        _upgrade_advice(f"uv tool upgrade conexus    # → {latest}"),
+        _install_advice().upgrade_advice(
+            "uv tool upgrade conexus", note=f"→ {latest}"
+        ),
     ]
     return [r]
 
@@ -4306,16 +4307,26 @@ def _check_stranded_install() -> list[HealthResult]:
     stranded = detect_stranded_install_default()
     if stranded is None:
         return [HealthResult(label=label, ok=True, detail="no unmigrated pre-PG data")]
+    # THE PIN IS THE POINT. The detail used to come from stranded.message,
+    # whose first hop is uv-shaped because that module is a stdlib-only leaf,
+    # and the suggestion used to route the whole sentence through
+    # _upgrade_advice — which on a generation box replaced it wholesale with
+    # the generic installer, dropping both the pinned version and the "last
+    # migration-capable release" framing, and so advising the NEWEST release:
+    # the exact hop this procedure exists to avoid. doctor can ask which
+    # layout the box has, so it asks, once, and the banner and the suggestion
+    # now name the same command (nexus-utpuw.13).
+    first_hop = _install_advice().pinned_install_command(
+        stranded.pinned_release,
+        legacy=f"uv tool install conexus=={stranded.pinned_release}",
+    )
     return [HealthResult(
         label=label,
         ok=False,
         fatal=True,
-        detail=stranded.message,
+        detail=stranded.message_for(first_hop),
         fix_suggestions=[
-            _upgrade_advice(
-                f"Install the last migration-capable release: "
-                f"uv tool install conexus=={stranded.pinned_release}"
-            ),
+            f"Install the last migration-capable release: {first_hop}",
             "Run: nx upgrade (the ladder converges the pre-PG data migration)",
             "Then upgrade back to this version",
         ],

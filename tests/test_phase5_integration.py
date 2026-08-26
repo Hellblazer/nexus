@@ -188,6 +188,28 @@ class TestPluginCliVersionCheck:
             kwargs = mock_log.warning.call_args.kwargs
             assert "uv tool upgrade conexus" in kwargs["hint"]
 
+    def test_plugin_newer_hint_follows_the_layout(self, tmp_path: Path, monkeypatch) -> None:
+        """nexus-utpuw.13: on a generation box the hint must name the
+        installer that actually upgrades it. conftest fences $HOME, so the
+        test above only ever sees the legacy branch."""
+        from nexus.mcp_infra import check_version_compatibility
+        from tests import _generation_layout
+
+        plugin_root = tmp_path / "plugin"
+        self._write_plugin_manifest(plugin_root, "4.10.0")
+        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+        _generation_layout.build(tmp_path, monkeypatch)
+
+        with (
+            patch("nexus.mcp_infra.default_db_path", return_value=tmp_path / "no.db"),
+            patch("importlib.metadata.version", return_value="4.9.2"),
+            patch("structlog.get_logger") as mock_get_logger,
+        ):
+            check_version_compatibility()
+            kwargs = mock_get_logger.return_value.warning.call_args.kwargs
+            assert "nx self install" in kwargs["hint"]
+            assert "uv tool" not in kwargs["hint"]
+
     def test_corrupt_manifest_silent(self, tmp_path: Path, monkeypatch) -> None:
         """Corrupt plugin.json must not crash MCP startup."""
         from nexus.mcp_infra import check_version_compatibility

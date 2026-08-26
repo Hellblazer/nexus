@@ -398,6 +398,64 @@ class TestWiring:
         assert "unmigrated pre-PG data" in results[0].detail
         assert any(f"conexus=={_PIN}" in s for s in results[0].fix_suggestions)
 
+    def test_doctor_keeps_the_pin_and_agrees_with_itself_on_a_generation_box(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-utpuw.13, two failures at once.
+
+        (1) THE PIN. Hop one is a DOWNGRADE to the last migration-capable
+        release. The suggestion used to run the whole sentence through
+        _upgrade_advice, which on a generation box replaced it wholesale with
+        the generic installer — dropping the pin and advising the NEWEST
+        release, the exact hop this procedure exists to avoid.
+
+        (2) ONE ANSWER. `detail` comes from the stdlib-only leaf, which cannot
+        ask which layout the box has, while `fix_suggestions` can. Left alone
+        they print different commands for one procedure.
+        """
+        from tests import _generation_layout
+
+        config = tmp_path / "cfg"
+        config.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
+        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(tmp_path / "chroma-none"))
+        monkeypatch.delenv("NEXUS_CATALOG_PATH", raising=False)
+        (config / "t2.db").write_bytes(b"x")
+        monkeypatch.setattr(stranded_install, "LAST_MIGRATION_CAPABLE", _PIN)
+        _generation_layout.build(tmp_path, monkeypatch)
+
+        results = _check_stranded_install()
+        hop = f"nx self install --version {_PIN}"
+        assert hop in results[0].detail, results[0].detail
+        assert any(hop in s for s in results[0].fix_suggestions), (
+            results[0].fix_suggestions
+        )
+        assert "uv tool install" not in results[0].detail
+        # the ladder and the return hop must survive the rewrite
+        assert any("nx upgrade" in s for s in results[0].fix_suggestions)
+
+    def test_the_leaf_message_stays_uv_shaped(self) -> None:
+        """The default must NOT consult the layout: this module is a
+        stdlib-only leaf (TestLeafContract) and importing nexus here is the
+        circular-import class that contract exists to prevent. Callers that
+        can ask, ask — via message_for."""
+        s = stranded_install.StrandedInstall(
+            era="6.17.0", artifacts=["t2.db"], pinned_release=_PIN
+        )
+        assert f"uv tool install conexus=={_PIN}" in s.message
+        assert "nx self install" not in s.message
+
+    def test_message_for_substitutes_only_the_first_hop(self) -> None:
+        s = stranded_install.StrandedInstall(
+            era="6.17.0", artifacts=["t2.db"], pinned_release=_PIN
+        )
+        out = s.message_for("nx self install --version " + _PIN)
+        assert f"nx self install --version {_PIN}" in out
+        assert "uv tool install" not in out
+        # the pip alternative and the rest of the procedure are untouched
+        assert f"pip install conexus=={_PIN}" in out
+        assert "nx upgrade" in out
+
     def test_doctor_check_disarmed_is_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(stranded_install, "LAST_MIGRATION_CAPABLE", None)
         results = _check_stranded_install()

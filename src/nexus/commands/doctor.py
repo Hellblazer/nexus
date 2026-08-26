@@ -69,9 +69,9 @@ def _reinstall_command() -> str:
     one re-symlinks over the nexus shims, which is the accepted risk doctor
     now reports separately.
     """
-    from nexus.health import _upgrade_advice  # noqa: PLC0415 — deferred import
+    from nexus import install_advice  # noqa: PLC0415 — deferred import
 
-    return _upgrade_advice("uv tool install --reinstall conexus").split("    #")[0].strip()
+    return install_advice.upgrade_command("uv tool install --reinstall conexus")
 
 
 def _run_check_schema() -> None:

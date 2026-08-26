@@ -532,7 +532,14 @@ def test_upgrade_advice_names_the_generation_installer_on_a_generation_box(layou
 
     advice = health._upgrade_advice("uv tool upgrade conexus")
 
-    assert "reinstall-tool.sh" in advice, advice
+    # CHANGED at nexus-utpuw.13, deliberately: this asserted
+    # "reinstall-tool.sh". .11 chose the repo script because .14 had not
+    # landed; `nx self install` is the packaged installer, is what .15's hook
+    # actually runs, and needs no checkout — a generation box has `nx` on PATH
+    # via the shims. A reader whose `nx` IS a checkout gets a refusal naming
+    # scripts/reinstall-tool.sh, so that case corrects itself.
+    assert "nx self install" in advice, advice
+    assert "reinstall-tool.sh" not in advice, advice
     assert "uv tool" not in advice, f"uv advice survived on a generation box: {advice!r}"
 
 
