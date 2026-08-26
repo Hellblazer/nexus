@@ -397,7 +397,7 @@ _uv_sandboxed() {
 }
 
 if [ "$PUBLISHED_MODE" = 1 ]; then
-    echo "── 1/9 Install PUBLISHED artifact from PyPI (uv-tool resolution layer) ──"
+    echo "── 1/10 Install PUBLISHED artifact from PyPI (uv-tool resolution layer) ──"
     # nexus-796zn / T2 nexus/shakedown-playbook SS2 S1 GAP: HOME is
     # redirected to the sandbox BEFORE `uv tool install` runs, via
     # _uv_sandboxed()'s env -i allowlist (see its definition above for why
@@ -424,10 +424,10 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
     echo "  installed into (sandbox): $TOOL_VENV"
     echo "  console scripts at (sandbox): $BIN_DIR"
 
-    echo "── 2/9 Confirm the installed version resolved from PyPI ──"
+    echo "── 2/10 Confirm the installed version resolved from PyPI ──"
     _nx --version
 else
-    echo "── 1/9 Build the wheel under test ──"
+    echo "── 1/10 Build the wheel under test ──"
     ( cd "$REPO_ROOT" && uv build --wheel -o "$WORK/dist" ) >"$LOGS/build.log" 2>&1 \
         || _fail "wheel build failed (see $LOGS/build.log)"
     WHEEL="$(ls "$WORK"/dist/conexus-*.whl)"
@@ -457,7 +457,7 @@ else
     fi
     sed 's/^/    /' "$LOGS/twine-check.log"
 
-    echo "── 2/9 Virgin venv + install ──"
+    echo "── 2/10 Virgin venv + install ──"
     # nexus-1ktd5 item E (wave-2 review fast-follow): the local-wheel
     # install layer used to run with the AMBIENT env while --published ran
     # under _uv_sandboxed's env -i — an operator's UV_INDEX_URL /
@@ -471,7 +471,7 @@ else
     _nx --version
 fi
 
-echo "── 3/9 MCP entry-point handshake (nexus-l2ku5 layer test) ──"
+echo "── 3/10 MCP entry-point handshake (nexus-l2ku5 layer test) ──"
 # nexus-l2ku5: mcp 2.0.0 (2026-07-28) removed mcp.server.fastmcp; the
 # unbounded `mcp>=1.0` floor let it into every fresh install for 4 days —
 # both nx-mcp and nx-mcp-catalog died at import with ZERO signal (Claude
@@ -546,7 +546,7 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
     esac
 fi
 
-echo "── 4/9 nx init (local mode, virgin HOME, scrubbed env) ──"
+echo "── 4/10 nx init (local mode, virgin HOME, scrubbed env) ──"
 _nx init -y --no-autostart 2>&1 | tee "$LOGS/init.log"
 grep -Eq "the service backend is serving" "$LOGS/init.log" \
     || _fail "init did not confirm a serving backend"
@@ -563,7 +563,7 @@ if [ -n "${FRESH_MVV_CACHE:-}" ] && [ -d "$HOME_DIR/.cache/nexus" ]; then
     cp -R "$HOME_DIR/.cache/nexus" "$FRESH_MVV_CACHE/nexus" 2>/dev/null || true
 fi
 
-echo "── 5/9 store put: catalog row + manifest (the f1itv assertions) ──"
+echo "── 5/10 store put: catalog row + manifest (the f1itv assertions) ──"
 SENTINEL="fresh-mvv-sentinel: portable pgvector never ships the builder ISA"
 echo "$SENTINEL" | _nx store put - --title "fresh-mvv-sentinel" \
     >"$LOGS/store.log" 2>&1 || _fail "store put failed (see $LOGS/store.log)"
@@ -595,7 +595,7 @@ _nx search "re-put must win not duplicate" >"$LOGS/search-reput.log" 2>&1 || tru
 grep -q "fresh-mvv-sentinel-v2" "$LOGS/search-reput.log" \
     || _fail "semantic search after re-put did not surface the NEW content (nexus-sdp0u class); see $LOGS/search-reput.log"
 
-echo "── 6/9 index md: catalog registration (the e9ru2 assertions) ──"
+echo "── 6/10 index md: catalog registration (the e9ru2 assertions) ──"
 # File stem == frontmatter title on purpose: the pre-flight registration
 # titles the catalog row by STEM, and the post-hook's update branch does not
 # overwrite title from frontmatter (recorded as nexus bead — see gate docs);
@@ -616,7 +616,7 @@ _nx catalog search "fresh-mvv-markdown-note" >"$LOGS/catalog-md.log" 2>&1 || tru
 grep -q "fresh-mvv-markdown-note" "$LOGS/catalog-md.log" \
     || _fail "index md did not register in the engine catalog (nexus-e9ru2 class)"
 
-echo "── 7/9 semantic search returns both ──"
+echo "── 7/10 semantic search returns both ──"
 _nx search "portable pgvector builder ISA" >"$LOGS/search1.log" 2>&1 || true
 grep -q "fresh-mvv-sentinel" "$LOGS/search1.log" \
     || _fail "search did not return the stored sentinel"
@@ -624,7 +624,7 @@ _nx search "era-32 wire re-id re-embed" >"$LOGS/search2.log" 2>&1 || true
 _search_log_confirms_markdown_leg "$LOGS/search2.log" \
     || _fail "search did not return the indexed markdown (fresh-mvv-markdown-note)"
 
-echo "── 8/9 doctor: zero ✗, zero FAIL:, zero ⚠, warnings allowlisted ──"
+echo "── 8/10 doctor: zero ✗, zero FAIL:, zero ⚠, warnings allowlisted ──"
 _nx doctor >"$LOGS/doctor.log" 2>&1 || _fail "doctor exited non-zero"
 # nexus-e1ti4 follow-up (critic review): doctor's five promoted
 # supplementary checks (resources, plan-library, taxonomy, aspect-queue,
@@ -644,7 +644,7 @@ if grep -qE "✗|FAIL:" "$LOGS/doctor.log"; then
     _fail "doctor shows a red ✗ or FAIL: line on a virgin box (9xfx5 / nexus-e1ti4 class)"
 fi
 
-echo "── 8b/9 doctor --check-plan-library: virgin-box builtin plan floor ──"
+echo "── 8b/10 doctor --check-plan-library: virgin-box builtin plan floor ──"
 # nexus-e1ti4: plain `nx doctor`'s default sweep DOES run the plan-library
 # check and DOES print a "FAIL:" line when the global-tier builtin floor
 # isn't met, but that check's raised Exit is swallowed by the
@@ -742,7 +742,40 @@ if [ -n "$WARNING_LINES" ]; then
     printf '%s\n' "$WARNING_LINES" | sed 's/^/    /'
 fi
 
-echo "── 9/9 non-vacuity ──"
+echo "── 9/10 generation install path on the virgin HOME (nexus-utpuw.19) ──"
+# This gate installs via `uv pip install` into a scrubbed venv and never
+# touches the tool layout, so it is unaffected by the generation change AND
+# could not catch a regression in it — a gap in the one gate whose subject is
+# the virgin journey. This leg closes it, and proves one thing nothing else
+# does: that the WHEEL actually ships `nexus/_install/*.sh`. Every other test
+# of `packaged_install_dir()` runs against an editable checkout, where that
+# path exists because the repo does.
+#
+# It also restores a semantic assertion this arc lost by accident. Bead .19
+# asks to re-point rehearse_chash_window.sh's TOOLPY canary
+# ("install root satisfies running_from_tool_install", aborting with "the
+# transition gate would never fire"). That file was DELETED by nexus-lgdel.l2
+# on 2026-08-16 — its subject, the pre-cutover 32-hex window, died at L1 — and
+# the assertion went with it. Every surviving reference in the suite mocks the
+# predicate. The probe evaluates it against a REAL generation instead.
+#
+# Runs LAST of the substantive legs on purpose: it creates a second install
+# tree (a generation plus shims) under the same virgin HOME, so putting it
+# earlier would let it perturb legs whose subject is the venv install.
+if [ "$PUBLISHED_MODE" = 1 ]; then
+    GEN_SOURCE="conexus==$EXPECTED_VERSION"
+else
+    GEN_SOURCE="$WHEEL"
+fi
+echo "  source: $GEN_SOURCE"
+if ! "$PROBE_PYTHON" "$REPO_ROOT/tests/e2e/lib/generation_install_probe.py" \
+        "$HOME_DIR" "$GEN_SOURCE" >"$LOGS/generation-install.log" 2>&1; then
+    cat "$LOGS/generation-install.log" >&2
+    _fail "the generation install path failed on a virgin HOME — see the assertions above (nexus-utpuw.19)"
+fi
+cat "$LOGS/generation-install.log"
+
+echo "── 10/10 non-vacuity ──"
 # The gate must never skip-pass: prove the substantive legs actually ran.
 # nexus-1ktd5 item C: `test -s` alone only proves non-emptiness -- every
 # log below already carries a real content assertion earlier in this
@@ -751,7 +784,7 @@ echo "── 9/9 non-vacuity ──"
 # despite a background-thread exception) read as fine. This calls
 # _leg_log_is_substantive instead, which adds the one thing `-s` cannot: no
 # unhandled Python traceback anywhere in the leg's own log.
-LEGS_TO_CHECK="mcp-entrypoints.log init.log store.log store-reput.log search-reput.log index.log doctor.log"
+LEGS_TO_CHECK="mcp-entrypoints.log init.log store.log store-reput.log search-reput.log index.log doctor.log generation-install.log"
 if [ "$PUBLISHED_MODE" = 1 ]; then
     LEGS_TO_CHECK="install.log $LEGS_TO_CHECK"
 else
