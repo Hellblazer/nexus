@@ -31,4 +31,24 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.18.0)
 
-_None. Every declared entry shipped; the pin advanced, so drift is zero._
+- `conexus/agents/_shared/CONTEXT_PROTOCOL.md` (nexus-e3mak) — reserves the
+  `review-completed` token: no agent may write it, only the session that owns
+  the gate, once every mandated reviewer has run.
+- `conexus/agents/code-review-expert.md` (nexus-e3mak) — same prohibition,
+  stated at the point of use for one half of a stacked review gate.
+- `conexus/agents/substantive-critic.md` (nexus-e3mak) — same, for the other
+  half of the gate.
+
+**What is NOT protected until this ships.** `pre_close_verification_hook.sh`
+matches `review-completed` by substring across T1 and T2, so a reviewer's
+handoff note carrying that token plus a bead id closes the gate it is only half
+of. Observed twice on 2026-08-26 during RG-C: the code-review-expert wrote one
+after reviewer 1 of 2, and the substantive-critic dispatched afterwards did the
+same thing independently and caught itself. Until the pin advances, reviewers
+still load from the tag and still do not know the token is reserved — so every
+stacked gate run before the next release needs the marker checked by hand
+(`nx scratch search review-completed`) before closing.
+
+The lint that pins this guidance (`tests/test_review_marker_authorship_guidance.py`)
+DOES run from the working tree and is live now; it protects the files from
+silently losing the rule, not the sessions from lacking it.

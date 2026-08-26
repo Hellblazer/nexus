@@ -84,11 +84,47 @@ def _install_root() -> Path:
 
 
 def running_from_tool_install() -> bool:
-    """True when this interpreter IS the uv tool install (vs a dev
-    checkout venv). The restart pass only ever acts from the tool
-    install — a dev venv's mtime says nothing about production
-    processes and must never kill them."""
-    return "uv/tools/conexus" in str(_install_root())
+    """True when this interpreter IS a MANAGED install (vs a dev checkout venv).
+
+    The pass only ever acts from a managed install — a dev venv's mtime says
+    nothing about the production processes on this box, and measuring, let
+    alone killing, them from there is the cross-venv confusion class. That
+    property is why this cannot simply return True.
+
+    Two shapes are managed, and both must answer yes:
+
+    * a GENERATION, ``<tools>/gen-<stamp>`` (nexus-utpuw)
+    * the LEGACY uv tool tree, for a box that has not migrated yet. The
+      migration window is deliberately long — .7 leaves the old tree in place
+      until it has zero holders — so dropping this would turn the pass off on
+      every un-migrated box, trading one silent no-op for another.
+
+    THIS USED TO BE ``"uv/tools/conexus" in str(_install_root())``. Under the
+    generation layout the install root is ``<tools>/gen-<stamp>/lib/...``, so it
+    was False on every migrated box — and the ``return None`` it guards sits
+    upstream of restart-stale, converge_engine, the diag-view heal, both
+    launchagent unloads and the pending-data-rung callout. The whole finish pass
+    went quiet, and nothing said so. nexus-p78a0 already fixed this exact
+    coupling one leg down, for a ps-less box; the gate above it kept doing it.
+    """
+    root = _install_root()
+
+    try:
+        venv_root = root.parents[2]
+    except IndexError:  # a root too shallow to be a venv layout
+        return False
+
+    try:
+        from nexus import install_layout  # noqa: PLC0415 — deferred, avoids an import cycle
+
+        if venv_root.parent == install_layout.tools_dir() and venv_root.name.startswith(
+            install_layout.GENERATION_PREFIX
+        ):
+            return True
+    except Exception:  # noqa: BLE001 — layout unreadable: fall through to the legacy shape
+        pass
+
+    return "uv/tools/conexus" in str(root)
 
 #: Filename of the version stamp inside the nexus config dir.
 STAMP_FILENAME = "last_seen_version"
@@ -195,14 +231,45 @@ def self_staleness(baseline: tuple[float, str]) -> SelfStaleness:
 
 
 def _classify(command: str) -> str:
-    if "aspect-worker" in command:
-        return "aspect-worker"
-    if "mineru" in command:
+    """What KIND of process this is, from its argv structure.
+
+    This decides who gets a SIGTERM, so a false positive is not cosmetic. It
+    used to ask whether a word appeared ANYWHERE in the command line, which made
+    ``nx index /papers/mineru-benchmarks/`` a mineru daemon and
+    ``nx search aspect-worker`` an aspect-worker. Worse, the aspect-worker
+    TOCTOU re-verify re-checks the SAME predicate, so a misclassified process
+    passes the one check placed there to catch exactly this -- and the mineru
+    branch has no pid re-verify at all before running a 300s stop/start.
+
+    Structural instead: the EXECUTABLE decides, and for `nx` the verb sequence
+    decides. An argument is not a daemon.
+    """
+    parts = command.split()
+    if not parts:
+        return "other"
+
+    exe = os.path.basename(parts[0])
+    rest = parts[1:]
+    # A shebang-wrapped entry point: the kernel rewrites argv to
+    # [python, script, ...], so the SCRIPT is the real executable.
+    if exe.startswith("python") and rest:
+        exe = os.path.basename(rest[0])
+        rest = rest[1:]
+
+    if exe in ("mineru", "mineru-api"):
         return "mineru"
-    if "nx-mcp" in command:
+    if exe in ("nx-mcp", "nx-mcp-catalog"):
         return "mcp-host"
-    if "daemon service" in command or "nexus-service" in command:
+    # The engine ships as a native binary and as a jar; both name themselves.
+    if exe.startswith("nexus-service") or any(
+        os.path.basename(tok).startswith("nexus-service") for tok in rest
+    ):
         return "service"
+    if exe == "nx":
+        if rest[:2] == ["daemon", "aspect-worker"]:
+            return "aspect-worker"
+        if rest[:2] == ["daemon", "service"]:
+            return "service"
     return "other"
 
 
@@ -265,12 +332,29 @@ def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, st
     """
     rows = all_process_rows(ps_output)
     me = os.getpid()
-    try:
-        # site-packages -> lib/pythonX.Y -> lib -> THE VENV ROOT: the one
-        # path every process launched from this install carries.
-        markers: tuple[str, ...] = (str(_install_root().parents[2]),)
-    except Exception:  # noqa: BLE001 — metadata unavailable: fall back to the conventional layout
-        markers = _PROC_MARKERS
+    # EVERY GENERATION, not the current one. A stale process runs from a
+    # generation that is NOT current -- that is what makes it stale -- so a
+    # filter pinned to the current install excludes precisely the processes
+    # this pass exists to find, and report.stale is empty by construction.
+    #
+    # Not a typo but a design inversion: the old layout kept the path CONSTANT
+    # across upgrades (in-place swap), so mtime was the only discriminator.
+    # Generations make the path itself the version.
+    #
+    # The prefixes come from install_census so there is ONE definition of what
+    # marks a holder, shared with the shell half and pinned by
+    # tests/test_install_census_twins_agree.py. Giving this function its own
+    # notion is how the markers it used to carry drifted into matching nothing.
+    from nexus import install_census  # noqa: PLC0415 — deferred, avoids an import cycle
+
+    markers: tuple[str, ...] = install_census.generation_match_prefixes()
+    if not markers:
+        try:
+            # No generation layout readable: the venv root of the running
+            # install, which is what a pre-generation box carries.
+            markers = (str(_install_root().parents[2]),)
+        except Exception:  # noqa: BLE001 — metadata unavailable: conventional layout
+            markers = _PROC_MARKERS
     return [
         (pid, age, command)
         for pid, age, command in rows
