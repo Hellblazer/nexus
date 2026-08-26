@@ -67,12 +67,39 @@ _NEUTRALISED = (
 )
 
 
+def _code_only(body: str) -> str:
+    """*body* with whole-line shell comments removed.
+
+    EVERY pattern in this module is matched against this, not against the raw
+    file, and that is load-bearing rather than tidy. Found by RG-E's
+    test-validator (nexus-utpuw.25): removing upgrade-shakeout.sh's
+    NX_TOOLS_DIR/NX_BIN_DIR pin left this suite GREEN, because that file
+    contains the substring ``env -i`` in a PROSE COMMENT — one written by
+    nexus-utpuw.18 itself, explaining why a SIBLING gate reaches for `env -i`.
+    The guard was satisfied by documentation describing a mechanism the file
+    does not use.
+
+    It cuts both ways, so both directions are stripped: a comment mentioning
+    ``uv tool install`` would also have classified a non-installing gate as
+    installing, and then "neutralised" it on the strength of more prose.
+
+    RESIDUAL LIMIT, stated rather than left to be discovered: this drops
+    whole-line comments only. A TRAILING comment (``code  # env -i``) still
+    matches. Stripping those needs real shell lexing — ``#`` inside a string
+    is not a comment — and buying that with a hand-rolled regex would trade a
+    known narrow hole for an unknown wide one.
+    """
+    return "\n".join(
+        line for line in body.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
 def _gates() -> list[Path]:
     return sorted(p for p in _E2E.glob("*.sh") if p.is_file())
 
 
 def _installing_gates() -> list[Path]:
-    return [p for p in _gates() if _INSTALLS.search(p.read_text())]
+    return [p for p in _gates() if _INSTALLS.search(_code_only(p.read_text()))]
 
 
 @pytest.mark.lint
@@ -93,7 +120,7 @@ def test_the_sweep_finds_installing_gates() -> None:
 @pytest.mark.lint
 @pytest.mark.parametrize("gate", _installing_gates(), ids=lambda p: p.name)
 def test_an_installing_gate_neutralises_the_ambient_generation_root(gate: Path) -> None:
-    body = gate.read_text()
+    body = _code_only(gate.read_text())
     if any(pattern.search(body) for pattern in _NEUTRALISED):
         return
     pytest.fail(

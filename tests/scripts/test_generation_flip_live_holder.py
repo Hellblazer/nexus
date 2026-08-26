@@ -32,8 +32,10 @@ is what a REAL interpreter does with a path, so the venv has to be real.
 from __future__ import annotations
 
 import os
+import queue
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -196,10 +198,46 @@ class Bed:
         )
 
 
-def _ask(holder: subprocess.Popen, command: str) -> str:
+def _pump(holder: subprocess.Popen) -> "queue.Queue":
+    """Drain *holder*'s stdout into a queue, once per process.
+
+    `readline()` HAS NO TIMEOUT, and this module runs in the FAST tier on every
+    `pytest -n auto` with no pytest-timeout plugin configured — so a holder that
+    stops answering would hang the whole dev-loop suite indefinitely rather than
+    failing one test. Found by RG-E (nexus-utpuw.25). A daemon pump plus
+    `queue.get(timeout=...)` makes the wait bounded: the test fails in seconds
+    with a readable message instead of stalling the run.
+    """
+    existing = getattr(holder, "_nx_lines", None)
+    if existing is not None:
+        return existing
+    lines: queue.Queue = queue.Queue()
+    holder._nx_lines = lines  # type: ignore[attr-defined]
+
+    def drain() -> None:
+        try:
+            for line in holder.stdout:
+                lines.put(line)
+        finally:
+            lines.put(None)
+
+    threading.Thread(target=drain, daemon=True).start()
+    return lines
+
+
+def _ask(holder: subprocess.Popen, command: str, timeout: float = 60.0) -> str:
+    lines = _pump(holder)
     holder.stdin.write(f"{command}\n")
     holder.stdin.flush()
-    line = holder.stdout.readline().strip()
+    try:
+        line = lines.get(timeout=timeout)
+    except queue.Empty:
+        raise AssertionError(
+            f"holder did not answer {command!r} within {timeout}s — it is hung, "
+            "not slow; failing rather than stalling the suite"
+        ) from None
+    assert line is not None, f"holder closed stdout instead of answering {command!r}"
+    line = line.strip()
     assert line, f"holder gave no answer to {command!r} (died?)"
     return line
 

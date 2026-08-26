@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -100,17 +102,50 @@ class Holder:
             text=True, bufsize=1,
         )
         self._next_id = 0
-        self._handshake()
+        # A PUMP THREAD, because `readline()` has no timeout (RG-E Critical).
+        # The deadline loop below used to re-check the clock only BETWEEN
+        # reads, so a hung nx-mcp blocked in readline() forever and this
+        # release-battery gate hung with it instead of failing at the stated
+        # 120s. A daemon thread draining into a queue makes the timeout real:
+        # `queue.get(timeout=...)` returns whether or not the child ever
+        # speaks again.
+        self._lines: queue.Queue = queue.Queue()
+        threading.Thread(target=self._pump, daemon=True).start()
+        # A FAILED HANDSHAKE MUST NOT LEAK THE CHILD (RG-E Important). `fail()`
+        # raises SystemExit, and this constructor runs OUTSIDE the caller's
+        # try/finally, so without this the nx-mcp process outlived the gate.
+        # BaseException, not Exception, precisely because SystemExit is the
+        # expected way out of here.
+        try:
+            self._handshake()
+        except BaseException:
+            self.proc.kill()
+            raise
+
+    def _pump(self) -> None:
+        """Drain the child's stdout into the queue until EOF."""
+        try:
+            for line in self.proc.stdout:
+                self._lines.put(line)
+        finally:
+            self._lines.put(None)  # EOF sentinel
 
     def _send(self, payload: dict) -> None:
         self.proc.stdin.write(json.dumps(payload) + "\n")
         self.proc.stdin.flush()
 
     def _read(self, timeout: float = 120.0) -> dict | None:
+        """The next JSON-RPC message, or None on EOF or a REAL timeout."""
         deadline = time.time() + timeout
-        while time.time() < deadline:
-            line = self.proc.stdout.readline()
-            if not line:
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None
+            try:
+                line = self._lines.get(timeout=remaining)
+            except queue.Empty:
+                return None
+            if line is None:  # child closed stdout
                 return None
             line = line.strip()
             if not line:
@@ -119,7 +154,6 @@ class Holder:
                 return json.loads(line)
             except json.JSONDecodeError:
                 continue
-        return None
 
     def _handshake(self) -> None:
         self._next_id += 1
