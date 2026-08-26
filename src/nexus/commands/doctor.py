@@ -61,6 +61,19 @@ def _check(label: str, ok: bool, detail: str = "") -> str:
     return _check_line(label, ok, detail)
 
 
+def _reinstall_command() -> str:
+    """The reinstall command for THIS box's layout (nexus-utpuw.11).
+
+    `uv tool install --reinstall conexus` rebuilds the uv tree, which a
+    generation install does not use — and under .7's migration window a stray
+    one re-symlinks over the nexus shims, which is the accepted risk doctor
+    now reports separately.
+    """
+    from nexus.health import _upgrade_advice  # noqa: PLC0415 — deferred import
+
+    return _upgrade_advice("uv tool install --reinstall conexus").split("    #")[0].strip()
+
+
 def _run_check_schema() -> None:
     """Validate the T2 schema is actually applied (RDR-076; PORTED at
     nexus-vl8lk from an N/A stub).
@@ -1282,7 +1295,7 @@ def _run_check_mineru() -> None:
         click.echo(_check("MinerU import", False, f"{type(exc).__name__}: {exc}"))
         click.echo(
             "  ↳ MinerU is required since nexus-2fyb. Reinstall with "
-            "`uv tool install --reinstall conexus`."
+            f"`{_reinstall_command()}`."
         )
         return
 

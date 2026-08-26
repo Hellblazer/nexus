@@ -39,19 +39,30 @@ from pathlib import Path
 
 import pytest
 
-from nexus import health
+from nexus import health, install_layout
 
 
-def _receipt(version: str = "7.18.0") -> str:
+def _receipt(version: str = "7.18.0", base_interpreter: str = "/usr/bin") -> str:
+    # A base_interpreter that EXISTS by default: the check below is about a
+    # pruned one, and a fixture whose interpreter never exists would make every
+    # other test in this module trip that row instead of the one it targets.
     return json.dumps({
         "schema": 1, "version": version, "spec": "conexus",
-        "source_kind": "directory", "source": "/src/nexus", "extras": "",
-        "python": "3.12", "base_interpreter": "/opt/py/bin",
+        # A LIST, which is what the shell half actually writes
+        # (`"extras": ["local"]`) and what read_receipt requires. The first
+        # version of this fixture used "" -- a shape no installer produces --
+        # and read_receipt raised on every generation, which the check's
+        # `except: continue` swallowed into "all interpreters present".
+        "source_kind": "directory", "source": "/src/nexus", "extras": [],
+        "python": "3.12", "base_interpreter": base_interpreter,
         "created_at": "2026-08-26T00:00:00Z", "installer_schema": 1,
     })
 
 
-def _generation(tools: Path, stamp: str, *, receipt: bool = True) -> Path:
+def _generation(
+    tools: Path, stamp: str, *, receipt: bool = True,
+    base_interpreter: str = "/usr/bin",
+) -> Path:
     gen = tools / f"gen-{stamp}"
     (gen / "bin").mkdir(parents=True)
     # Real entry points: the shim check derives the names it owns from
@@ -60,7 +71,9 @@ def _generation(tools: Path, stamp: str, *, receipt: bool = True) -> Path:
     for ep in ("nx", "nx-mcp"):
         (gen / "bin" / ep).write_text("#!/bin/sh\n")
     if receipt:
-        (gen / "nexus-install.json").write_text(_receipt())
+        (gen / "nexus-install.json").write_text(
+            _receipt(base_interpreter=base_interpreter)
+        )
     return gen
 
 
@@ -234,7 +247,11 @@ def test_an_unreadable_layout_warns_rather_than_passing(layout, monkeypatch) -> 
 # RG-C findings against this check (nexus-utpuw.11 follow-up)
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("intruder", ["python", "python3", "pip", "activate", "uv"])
+# Every name in NEVER_SHIM, derived from the set itself rather than retyped:
+# 29bac46f3's message claimed "one per excluded name" while covering five of
+# nine (RG-C reviewer 2). Deriving it means the coverage cannot drift from the
+# set again, and adding a name to NEVER_SHIM adds its regression case for free.
+@pytest.mark.parametrize("intruder", sorted(install_layout.NEVER_SHIM))
 def test_an_unrelated_tools_symlink_is_not_a_reclaimed_shim(layout, intruder) -> None:
     """FALSE POSITIVE found by RG-C, reproduced before fixing. The shim set is
     derived from <current>/bin -- but a venv's bin holds python, pip and
@@ -318,6 +335,215 @@ def test_an_empty_tools_root_is_not_a_failure(layout) -> None:
     running."""
     row = _result(health._check_generation_layout(), "Generation layout")
 
-    assert row.ok is not False or row.warn is True, (
-        f"a box with nothing installed was hard-failed: {row.detail!r}"
+    # EXACTLY ok, not "ok or warn". The first version of this assertion read
+    # `row.ok is not False or row.warn is True`, which accepts either rendering
+    # and therefore pins neither -- mutating the branch to ok=False,warn=True
+    # left it green (RG-C reviewer 2, proved by mutation). An assertion that
+    # accepts both answers to the question it asks is not an assertion.
+    assert row.ok is True and row.warn is False and row.fatal is False, (
+        f"nothing-installed rendered as ok={row.ok} warn={row.warn} "
+        f"fatal={row.fatal}: {row.detail!r}"
+    )
+
+
+# --------------------------------------------------------------------------
+# the checks this bead enumerated that did not ship first time round
+# --------------------------------------------------------------------------
+
+def test_a_missing_base_interpreter_on_current_is_fatal(layout) -> None:
+    """The bead calls this "the one failure we can only detect, never prevent"
+    (research amendment 4, the uv-python-pruning class).
+
+    A generation's venv does not contain its interpreter -- pyvenv.cfg records
+    a ``home =`` pointing at one uv manages elsewhere. uv prunes those. When it
+    prunes the one a generation points at, that tree stops working, and nothing
+    nexus does can stop it happening: the only defence is noticing.
+
+    On CURRENT that is fatal, because nothing will start."""
+    tools, bin_dir = layout
+    gen = _generation(tools, "20260826T010000Z", base_interpreter="/opt/pruned/bin")
+    (tools / "current").symlink_to(gen)
+    (bin_dir / "nx").write_text("#!/bin/sh\n")
+
+    row = _result(health._check_generation_layout(), "Base interpreter")
+
+    assert row.ok is False and row.fatal is True, (
+        f"a pruned base interpreter under current is not fatal: {row.detail!r}"
+    )
+
+
+def test_a_missing_base_interpreter_on_an_old_generation_warns(layout) -> None:
+    """On a NON-current generation it is a warning, not a failure: that tree is
+    a rollback target rather than the running install, and reporting it as
+    breakage on a box that works fine is how this row gets ignored."""
+    tools, bin_dir = layout
+    good = _generation(tools, "20260826T020000Z")
+    _generation(tools, "20260101T000000Z", base_interpreter="/opt/pruned/bin")
+    (tools / "current").symlink_to(good)
+    (bin_dir / "nx").write_text("#!/bin/sh\n")
+
+    row = _result(health._check_generation_layout(), "Base interpreter")
+
+    assert row.ok is False and row.warn is True and row.fatal is False, (
+        f"a pruned interpreter on an old generation was not a warning: {row.detail!r}"
+    )
+
+
+def test_a_live_base_interpreter_passes(layout) -> None:
+    """Non-vacuity for both above."""
+    tools, bin_dir = layout
+    gen = _generation(tools, "20260826T010000Z", base_interpreter=str(Path("/usr/bin")))
+    (tools / "current").symlink_to(gen)
+    (bin_dir / "nx").write_text("#!/bin/sh\n")
+
+    row = _result(health._check_generation_layout(), "Base interpreter")
+    assert row.ok is True, row.detail
+
+
+def test_an_orphan_uv_install_is_reported_with_the_fix_named(layout, tmp_path, monkeypatch) -> None:
+    """A uv-managed conexus alive ALONGSIDE the generation layout. nexus-utpuw.7
+    leaves the legacy tree in place until it has zero holders, so its presence
+    is expected during the migration window -- what makes it worth naming is
+    that uv still holds a valid receipt for it, so `uv tool upgrade conexus`
+    will rebuild it and re-symlink over the shims (.7's accepted risk)."""
+    tools, bin_dir = layout
+    gen = _generation(tools, "20260826T010000Z")
+    (tools / "current").symlink_to(gen)
+    (bin_dir / "nx").write_text("#!/bin/sh\n")
+    home = tmp_path / "home"
+    uv_conexus = home / ".local" / "share" / "uv" / "tools" / "conexus" / "bin"
+    uv_conexus.mkdir(parents=True)
+    (uv_conexus / "nx").write_text("#!/bin/sh\n")
+    monkeypatch.setenv("HOME", str(home))
+
+    row = _result(health._check_generation_layout(), "uv install")
+
+    assert row.ok is False, "an orphan uv install was not reported"
+    assert "reinstall-tool" in " ".join(row.fix_suggestions) or "reinstall-tool" in row.detail, (
+        f"reported without naming the fix: {row.detail!r} {row.fix_suggestions}"
+    )
+
+
+def test_no_orphan_uv_install_passes(layout, tmp_path, monkeypatch) -> None:
+    """Non-vacuity: a migrated box with no legacy tree must be quiet."""
+    tools, bin_dir = layout
+    gen = _generation(tools, "20260826T010000Z")
+    (tools / "current").symlink_to(gen)
+    (bin_dir / "nx").write_text("#!/bin/sh\n")
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+
+    row = _result(health._check_generation_layout(), "uv install")
+    assert row.ok is True, row.detail
+
+
+def test_a_shim_with_the_right_shape_and_wrong_content_is_caught(layout) -> None:
+    """The bead asks that shims "match the template", not merely that they are
+    regular files. A shim that is a regular file but resolves the WRONG pointer
+    -- a stale one baked before NX_TOOLS_DIR moved, or a hand-edit -- has the
+    right shape and the wrong behaviour, and the not-a-symlink check passes it."""
+    from nexus import install_layout
+
+    tools, bin_dir = layout
+    gen = _generation(tools, "20260826T010000Z")
+    (tools / "current").symlink_to(gen)
+    (bin_dir / "nx").write_text("#!/bin/sh\nexec /somewhere/else/bin/nx \"$@\"\n")
+
+    row = _result(health._check_generation_layout(), "Shim")
+
+    assert row.ok is False, "a shim that does not match the template passed"
+    assert "nx" in row.detail
+    # and the real template must pass
+    (bin_dir / "nx").write_text(install_layout.render_shim("nx", tools=tools))
+    assert _result(health._check_generation_layout(), "Shim").ok is True
+
+
+def test_holders_of_older_generations_are_rendered_informationally(layout, monkeypatch) -> None:
+    """The bead asks for the holder census "rendered informationally". Holders
+    are a FACT, not a fault: they converge at their next spawn. A row that
+    failed on them would contradict the acceptance criterion, which exists
+    precisely so live holders stop being an obstacle."""
+    from nexus import install_census
+
+    tools, bin_dir = layout
+    old = _generation(tools, "20260101T000000Z")
+    new = _generation(tools, "20260826T010000Z")
+    (tools / "current").symlink_to(new)
+    (bin_dir / "nx").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(
+        install_census, "generation_holder_pids",
+        lambda gen, snapshot=None: [4242] if Path(gen).name == old.name else [],
+    )
+
+    row = _result(health._check_generation_layout(), "Holders")
+
+    assert row.ok is True, f"a live holder was rendered as a fault: {row.detail!r}"
+    assert "4242" in row.detail or "1" in row.detail, row.detail
+
+
+# --------------------------------------------------------------------------
+# the silent-green regression guard the bead asked for BY NAME
+# --------------------------------------------------------------------------
+
+def test_a_stale_process_renders_red_not_green(layout, monkeypatch) -> None:
+    """The bead's own words: "Add a test that a stale process under the
+    generation layout renders RED, not green (the silent-green regression
+    guard -- assert the failing colour, not merely that a string appears)."
+
+    Every other test in this module asserts what a HEALTHY box reports. This
+    one asserts the colour of an UNHEALTHY one, which is the direction the
+    original defect failed in: the row was green while the machine was stale,
+    and a test that only checks green-when-healthy would have passed
+    throughout."""
+    from nexus import upgrade_finish as uf
+
+    tools, bin_dir = layout
+    gen = _generation(tools, "20260826T010000Z")
+    (tools / "current").symlink_to(gen)
+
+    report = uf.SkewReport(installed_version="7.18.0", install_mtime=0.0)
+    report.stale.append(uf.StaleProcess(
+        pid=4242, kind="mcp-host",
+        command=f"{gen}/bin/python {gen}/bin/nx-mcp", age_s=99,
+    ))
+    monkeypatch.setattr(uf, "detect_stale_processes", lambda: report)
+    monkeypatch.setattr(uf, "install_source", lambda: "directory — /src/nexus")
+
+    row = _result(health._check_process_skew(), "Process freshness")
+
+    assert row.ok is False, (
+        f"a stale process rendered GREEN — the exact defect this row exists to "
+        f"prevent: ok={row.ok} detail={row.detail!r}"
+    )
+    assert "4242" in row.detail, f"the stale pid is not named: {row.detail!r}"
+
+
+# --------------------------------------------------------------------------
+# remediation advice follows the layout the box actually has
+# --------------------------------------------------------------------------
+
+def test_upgrade_advice_names_the_generation_installer_on_a_generation_box(layout) -> None:
+    """Three remediation strings named `uv tool upgrade conexus`,
+    `uv tool install conexus==<pin>` and `uv tool install --reinstall conexus`.
+    None of them touches a generation install, and the third actively triggers
+    .7's accepted risk by rebuilding the uv tree over the shims."""
+    tools, _ = layout
+    gen = _generation(tools, "20260826T010000Z")
+    (tools / "current").symlink_to(gen)
+
+    advice = health._upgrade_advice("uv tool upgrade conexus")
+
+    assert "reinstall-tool.sh" in advice, advice
+    assert "uv tool" not in advice, f"uv advice survived on a generation box: {advice!r}"
+
+
+def test_upgrade_advice_keeps_the_uv_form_on_an_unmigrated_box(layout) -> None:
+    """NOT a blanket replacement, and this is the half a find-and-replace would
+    have got wrong. A box that has not migrated still upgrades through uv --
+    .7 leaves that state in place until the legacy tree has zero holders --
+    and sending such a user to a script in a checkout they may not have is a
+    different wrong answer."""
+    advice = health._upgrade_advice("uv tool upgrade conexus")
+
+    assert advice == "uv tool upgrade conexus", (
+        f"an un-migrated box was told to run the generation installer: {advice!r}"
     )
