@@ -246,6 +246,28 @@ Watch for these specifically, all of which have shipped past green suites:
   error log, empty list) — all satisfied by a code path that did nothing.
 - A gate or health check whose failure path returns success (`ok=True`, exit
   0) when its subject was unreachable or when it examined zero items.
+- A statistic compared against a threshold that CAN EXCEED ITS OWN MAXIMUM. A
+  "fraction of energy on one branch" that summed projections onto directions
+  which were not mutually orthogonal returned 1.41, cleared its `> 0.6`
+  threshold, and measured nothing. Wherever a check gates a fraction, a
+  probability, a cosine or a normalised overlap, ASSERT THE BOUND TOO —
+  `0 < x <= 1` is not pedantry, it is the check that catches the malformed
+  metric.
+- A quantity obtained by SUBTRACTING AN ASSUMED CONSTANT. `internal = nullity
+  - 6` hides the assumption that six rigid-body modes are in the null space;
+  when they were not, it returned -3, which is nonsense that gets explained
+  away rather than investigated. Measuring the constant instead exposed a
+  geometrically infeasible constraint set. Any value computed by subtracting
+  something assumed is concealing the assumption.
+- AN ASSUMPTION STATED IN PROSE THAT NOTHING ENFORCES. This is the highest-
+  yield class in the list and the hardest to see, because the prose reads as
+  documentation rather than as an unchecked claim. "These pairs are well
+  inside the valid regime anyway" was true when written and false one step
+  later; it cost an entire measurement axis and stood for months behind a
+  fully green suite. Treat every declarative sentence in a docstring or
+  comment that asserts a PROPERTY — "X cannot happen", "these are always Y",
+  "safe because Z" — as a candidate assertion. Either it becomes one, or the
+  same comment says why it cannot.
 
 Falsify what you doubt, in this turn, by READING — do not hand the question to
 another agent to re-derive. For each test you doubt, name the concrete
