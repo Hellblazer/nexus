@@ -389,3 +389,50 @@ def test_the_filesystem_root_is_refused_not_censused_as_empty(env) -> None:
         "the filesystem root was accepted as a generation and censused"
     )
     assert result.stdout.strip() == "", "root census produced holder output"
+
+
+# --------------------------------------------------------------------------
+# EVERY daemon class counts, not just the MCP servers (nexus-103v2 descendant)
+# --------------------------------------------------------------------------
+
+# Verbatim from tests/scripts/test_reinstall_tool_cycle_mcp.py's holder-shape
+# builders, which nexus-utpuw.8 deletes along with the choreography they fed.
+# The shapes outlive the choreography: they are what these processes actually
+# look like in ps, and inventing them here instead of carrying them over is how
+# a fixture stops resembling the system it stands for.
+_DAEMON_SHAPES = [
+    pytest.param("{gen}/bin/nx daemon service start --foreground", id="storage-service"),
+    pytest.param("{gen}/bin/nx daemon aspect-worker start --tenant default", id="aspect-worker"),
+    pytest.param("{gen}/bin/mineru-api --port 8899", id="mineru"),
+    pytest.param("{gen}/bin/python3 {gen}/bin/nx-mcp", id="shebang-wrapped-mcp"),
+]
+
+
+@pytest.mark.parametrize("shape", _DAEMON_SHAPES)
+def test_every_daemon_class_counts_as_a_holder(env, shape) -> None:
+    """A substantive-critic CRITICAL (nexus-103v2) once caught the storage
+    service silently missing from the holder set, because the old code carried a
+    per-class list and the service was not on it. Under generations the census
+    has no class list to omit anything from -- attribution is one structural
+    match on the generation path -- so every class is counted BY CONSTRUCTION.
+
+    That is exactly why this test exists. The guarantee is now a property of the
+    shape of the code rather than of an inventory somebody maintains, and a
+    property nobody asserts is one refactor away from being an inventory again.
+    Before this, the census suite exercised only nx-mcp, nx-mcp-catalog, nx
+    doctor, vim and grep: the class that was dropped once was again the only
+    class with no test.
+
+    mineru is the load-bearing row. It is the only canonical holder whose argv
+    does not begin `<gen>/bin/nx`, so any reintroduced class list drops it
+    first."""
+    tools, stub_bin, bin_dir = env
+    (a,) = _make_gens(tools, "A")
+    _stub_ps(stub_bin, [f"  404 {shape.format(gen=a)}"])
+
+    result = _sh(f'nx_generation_holder_pids "{a}"', tools, stub_bin, bin_dir)
+
+    assert result.stdout.split() == ["404"], (
+        f"a live holder of shape '{shape.format(gen='<gen>')}' was not counted; "
+        "GC's rule (c) will reap the tree it is running from"
+    )
