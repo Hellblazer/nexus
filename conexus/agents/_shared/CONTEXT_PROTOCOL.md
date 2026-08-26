@@ -76,6 +76,36 @@ All agents SHOULD use these tags when writing to scratch:
 
 Tags are comma-separated. Combine with domain tags: `failed-approach,auth,retry`.
 
+### RESERVED — never write `review-completed`
+
+`review-completed` is not a note tag. It is the token
+`pre_close_verification_hook.sh` reads to decide whether a bead may close, and
+it matches by SUBSTRING over T1 tags/content and T2 title/content. Any entry
+carrying that token plus a bead id IS that bead's review coverage, whatever the
+entry meant to say.
+
+**No agent writes it. Only the session that owns the gate does, once, after
+every mandated reviewer has run and any resulting fixes have landed.**
+
+This is not hypothetical. On 2026-08-26 a dispatched reviewer finished the FIRST
+of a two-reviewer gate and left a handoff note for its sibling beginning
+`review-completed bead=nexus-utpuw.23 (RG-C reviewer 1/2: ...)`. It was honest
+and it said "1/2" — and the hook cannot read that. The gate would have closed
+with the critic never dispatched, on a gate whose own text says the critic is
+never optional (nexus-e3mak).
+
+The failure is structural, not a lapse of care: a gate whose evidence is written
+by one of the parties it gates cannot distinguish coverage from a progress
+report. The same shape is filed as nexus-1f98p, where a scope audit read an
+allowlist typed by the agent whose commits it audited.
+
+To hand findings to a sibling reviewer or to the dispatcher, write to T2 with a
+descriptive title and no reserved token, and return them in your response text:
+
+```
+nx memory put - -p <project> -t "<gate>-review-<role>-findings"   # no reserved token
+```
+
 **T1 MCP Tools:**
 ```
 mcp__plugin_conexus_nexus__scratch(action="put", content="<content>", tags="TAG1,TAG2")

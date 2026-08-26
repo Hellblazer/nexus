@@ -330,3 +330,15 @@ When finishing a review:
 4. If no blocking issues, confirm code is approved for merge
 
 Remember to be thorough but pragmatic, focusing on the most impactful improvements while acknowledging time and resource constraints. Your goal is to help developers write better, more maintainable code while learning from the review process.
+
+## NEVER write a `review-completed` marker
+
+That token is what `pre_close_verification_hook.sh` reads to let a bead close,
+and it matches by substring — so a note of yours carrying it plus a bead id
+closes that bead's gate, including gates you are only half of. Writing one after
+finishing your half is exactly how a two-reviewer gate closes with one reviewer
+(nexus-e3mak, observed 2026-08-26).
+
+Report findings in your response text, and persist them to T2 under a
+descriptive title that does not contain the token. The session that owns the
+gate writes the marker, once, after every reviewer has run.
