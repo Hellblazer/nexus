@@ -76,10 +76,7 @@ TOOLS_DIR="$(nx_tools_dir)" || exit $?
 # test_spec_reaches_uv_with_extras_before_the_pin, which runs from the repo root
 # for exactly that reason. A bare distribution name is a registry source
 # wherever you happen to be standing.
-case "$SOURCE" in
-    .|..|/*|./*|../*|"~"/*|*/*) SOURCE_KIND="directory" ;;
-    *)                          SOURCE_KIND="registry"  ;;
-esac
+SOURCE_KIND="$(nx_source_kind "$SOURCE")"
 
 # Shape decides the KIND; existence is still checked so a mistyped path fails
 # here with a clear message rather than inside uv.

@@ -67,6 +67,26 @@ NX_LAYOUT_USAGE_EXIT=64
 # Where an install came from. Pinned against the Python half's SOURCE_KINDS.
 NX_SOURCE_KINDS="directory registry"
 
+# Which KIND of source a spec names, decided by SHAPE alone. The one place that
+# question is answered, because it used to be answered in two: the generation
+# builder classified by shape while scripts/reinstall-tool.sh's divergent-source
+# guard classified by whether "$SOURCE/pyproject.toml" existed. They agree on
+# "." and on "conexus" and disagree on a bare name that happens to match a
+# directory in cwd -- and the guard only fires when it concludes "registry", so
+# the disagreement SKIPPED the refusal that stops a PyPI install from wiping a
+# dev checkout's unreleased modules (nexus-pk9yt; the incident is nexus-q3xrx #2).
+#
+# Shape, never existence: a bare distribution name is a registry source wherever
+# you happen to be standing. Existence is still worth checking, but it answers
+# "can I read this", not "what kind of thing is it".
+# $1 source spec.
+nx_source_kind() {
+    case "${1-}" in
+        .|..|/*|./*|../*|"~"/*|*/*) printf 'directory\n' ;;
+        *)                          printf 'registry\n'  ;;
+    esac
+}
+
 # Make a value safe to place inside a JSON string. Backslashes first, then
 # quotes -- the other order double-escapes. A value carrying a control
 # character (a newline in a path, say) cannot be represented by this escaper,

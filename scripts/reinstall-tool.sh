@@ -109,7 +109,9 @@ fi
 #
 # The receipt path travels by ENV VAR, never interpolated into the python source
 # (nexus-2fyb R5-I1): a path containing a quote would otherwise be executable.
-if [ -n "$CURRENT_GEN" ] && [ ! -f "${SOURCE}/pyproject.toml" ] \
+SOURCE_KIND="$(nx_source_kind "$SOURCE")"
+
+if [ -n "$CURRENT_GEN" ] && [ "$SOURCE_KIND" = "registry" ] \
    && [ "$ALLOW_REGISTRY_OVER_DEV" != "1" ]; then
     _receipt="$(nx_receipt_path "$CURRENT_GEN")"
     if [ -f "$_receipt" ]; then
@@ -142,7 +144,8 @@ fi
 # an install this run has nothing to do with. Under generations the target is
 # whatever `current` resolves to. A missing one (nothing installed yet)
 # correctly skips the comparison -- there is nothing to downgrade.
-if [ -n "$CURRENT_GEN" ] && [ -f "${SOURCE}/pyproject.toml" ] && [ -x "${CURRENT_GEN}/bin/nx" ]; then
+if [ -n "$CURRENT_GEN" ] && [ "$SOURCE_KIND" = "directory" ] \
+   && [ -f "${SOURCE}/pyproject.toml" ] && [ -x "${CURRENT_GEN}/bin/nx" ]; then
     # Pipe-free tail (nexus-i66g4/wbeyi class): capture sed's full output, then
     # take the first line by parameter expansion. Under `set -o pipefail` a
     # still-writing sed closed early by `head -1` risks its SIGPIPE being

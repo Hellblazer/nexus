@@ -83,7 +83,7 @@ class _Bed:
             f'#!/bin/bash\nif [[ "$1" == "--version" ]]; then echo "nx, version {version}"; fi\nexit 0\n',
         )
 
-    def run(self, *args, source: str | None = None):
+    def run(self, *args, source: str | None = None, cwd: Path | None = None):
         env = dict(os.environ)
         env["PATH"] = f"{self.stub_bin}:{self.ambient_bin}:{SAFE_BASE_PATH}"
         env["HOME"] = str(self.home)
@@ -92,6 +92,7 @@ class _Bed:
         return subprocess.run(
             ["bash", str(_SCRIPT), source or str(self.source), *args],
             env=env, capture_output=True, text=True, timeout=120,
+            cwd=str(cwd) if cwd else None,
         )
 
 
@@ -220,3 +221,47 @@ def test_neither_override_bypasses_the_other_guard(tmp_path: Path) -> None:
         + registry.stdout
     )
     assert "REFUSING" in registry.stdout
+
+
+# --------------------------------------------------------------------------
+# one classifier, not two (nexus-pk9yt)
+# --------------------------------------------------------------------------
+
+def test_a_bare_source_name_is_a_registry_source_even_if_a_directory_shadows_it(
+    tmp_path: Path,
+) -> None:
+    """install_generation.sh:79-82 decides source KIND by SHAPE and says so:
+    "a bare distribution name is a registry source wherever you happen to be
+    standing" -- deliberately, so that running from a checkout root does not
+    turn `conexus` into a local directory install.
+
+    This guard used to answer the same question by EXISTENCE
+    (`[ -f "$SOURCE/pyproject.toml" ]`). The two agree for `.` and for
+    `conexus`, and diverge for a bare name that happens to name a real
+    directory in cwd: shape says registry, existence said directory. Since the
+    guard only fires when it concludes "registry", the divergence SKIPPED the
+    registry-over-dev refusal for exactly that input -- while the builder went
+    on to install from the registry and bake source_kind="registry" into the
+    receipt, so the disagreement outlived the run.
+
+    That is nexus-q3xrx incident #2's class (a PyPI reinstall over a dev
+    install wipes unreleased modules while keeping the version string), reached
+    through a classifier mismatch rather than a missing guard."""
+    bed = _Bed(tmp_path)
+    bed.install("6.16.0", source_kind="directory")
+
+    # A real directory, with a real pyproject, whose NAME has no slash.
+    shadow = tmp_path / "workdir"
+    shadow.mkdir()
+    (shadow / "demopkg").mkdir()
+    _write_pyproject(shadow / "demopkg", "9.9.9")
+
+    result = bed.run(source="demopkg", cwd=shadow)
+
+    assert result.returncode == 1, (
+        "a bare source name was treated as a directory install because a "
+        "directory of that name existed in cwd, so the registry-over-dev "
+        "refusal was skipped\n" + result.stdout + result.stderr
+    )
+    assert "REFUSING" in result.stdout
+    assert not bed.marker.exists(), "refused, yet the build ran anyway"
