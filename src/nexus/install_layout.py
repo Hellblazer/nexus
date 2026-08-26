@@ -89,6 +89,20 @@ BIN_DIR_ENV = "NX_BIN_DIR"
 #: pass can tell a generation from anything else that lands in the root.
 GENERATION_PREFIX = "gen-"
 
+#: Names that live in a venv's ``bin/`` but are NEVER shimmed into the shared
+#: bin dir. The Python twin of ``NX_NEVER_SHIM`` in ``_install/shims.sh``,
+#: pinned by ``tests/test_install_layout_twins_agree.py``.
+#:
+#: This exists because ``~/.local/bin`` is SHARED. pyenv, asdf and homebrew all
+#: leave a ``python`` symlink there, so anything deriving "the names nexus owns"
+#: from a generation's ``bin/`` must subtract these or it will mistake another
+#: tool's symlink for evidence that uv reclaimed our shims (RG-C, nexus-utpuw.11).
+NEVER_SHIM = frozenset({
+    "python", "python3", "pip", "pip3",
+    "activate", "activate.csh", "activate.fish",
+    "uv", "uvx",
+})
+
 #: The pointer every shim resolves. Always an ABSOLUTE symlink, so that plain
 #: ``readlink`` suffices -- ``readlink -f`` is macOS >= 12.3 only.
 CURRENT_LINK_NAME = "current"

@@ -220,6 +220,28 @@ def _check_generation_layout() -> list[HealthResult]:
 
         tools = install_layout.tools_dir()
         bin_dir = install_layout.bin_dir()
+
+        # WHAT MATTERS IS NOT PRESENT-VS-ABSENT, IT IS WHETHER ANYTHING WAS EVER
+        # INSTALLED. Generations on disk with no pointer is a BROKEN install;
+        # an empty tools root is a box that has not installed yet, and
+        # hard-failing that would fail every fresh machine (RG-C).
+        link = install_layout.current_link(tools=tools)
+        if not link.is_symlink() and not link.exists():
+            generations = install_layout.list_generations(tools=tools)
+            if not generations:
+                return [HealthResult(
+                    label=label, ok=True,
+                    detail="no generation install on this box (nothing to check)",
+                )]
+            return [HealthResult(
+                label=label, ok=False, fatal=True,
+                detail=(
+                    f"{len(generations)} generation(s) exist but current does "
+                    "not — nothing resolves, so nothing will start"
+                ),
+                fix_suggestions=["scripts/reinstall-tool.sh"],
+            )]
+
         current = install_layout.current_generation()
     except Exception as exc:  # noqa: BLE001 — never crash doctor
         # UNCERTAIN MEANS SAY SO. Returning ok here would be the silent green
@@ -232,7 +254,7 @@ def _check_generation_layout() -> list[HealthResult]:
 
     if not current.is_dir():
         return [HealthResult(
-            label=label, ok=False,
+            label=label, ok=False, fatal=True,
             detail=(
                 f"current points at {current}, which does not exist — every "
                 "shim resolves current at spawn, so nothing will start"
@@ -242,7 +264,7 @@ def _check_generation_layout() -> list[HealthResult]:
 
     if not install_layout.receipt_path(current).is_file():
         return [HealthResult(
-            label=label, ok=False,
+            label=label, ok=False, fatal=True,
             detail=(
                 f"current points at {current.name}, which has no receipt — that "
                 "is an unfinished build, not a generation"
@@ -250,14 +272,23 @@ def _check_generation_layout() -> list[HealthResult]:
             fix_suggestions=["scripts/reinstall-tool.sh"],
         )]
 
+    # SUBTRACT THE NAMES NEXUS NEVER OWNS. A venv's bin/ holds python, pip and
+    # activate; nx_write_shims explicitly never shims them. ~/.local/bin is a
+    # SHARED directory — pyenv, asdf and homebrew all leave a `python` symlink
+    # there — so deriving the owned set from <current>/bin without this
+    # subtraction hard-fails a healthy install on a common machine
+    # configuration (RG-C). A row that cries wolf is this check's own docstring
+    # warning inverted: it trains the operator to ignore the row, which is how
+    # the real reclaim gets missed.
     reclaimed = [
         entry.name
         for entry in sorted((current / "bin").iterdir())
-        if (bin_dir / entry.name).is_symlink()
+        if entry.name not in install_layout.NEVER_SHIM
+        and (bin_dir / entry.name).is_symlink()
     ] if (current / "bin").is_dir() else []
     if reclaimed:
         return [HealthResult(
-            label=label, ok=False,
+            label=label, ok=False, fatal=True,
             detail=(
                 f"{', '.join(reclaimed)} in {bin_dir} are symlinks, not "
                 "nexus-owned shims — uv has taken them back (a stray "

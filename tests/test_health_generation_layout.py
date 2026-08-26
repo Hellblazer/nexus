@@ -210,6 +210,15 @@ def test_an_unreadable_layout_warns_rather_than_passing(layout, monkeypatch) -> 
     this bead exists to remove, relocated one function over."""
     from nexus import install_layout
 
+    # The layout must be INSTALLED for this path to be reachable: an empty
+    # tools root now short-circuits to "nothing installed" before
+    # current_generation is consulted at all, so patching it on a bare fixture
+    # would test nothing.
+    tools, bin_dir = layout
+    gen = _generation(tools, "20260826T010000Z")
+    (tools / "current").symlink_to(gen)
+    (bin_dir / "nx").write_text("#!/bin/sh\n")
+
     def _boom(*a, **k):
         raise OSError("layout unreadable")
 
@@ -219,3 +228,96 @@ def test_an_unreadable_layout_warns_rather_than_passing(layout, monkeypatch) -> 
 
     assert row.ok is False, "an unreadable layout passed"
     assert "could not" in row.detail.lower() or "unreadable" in row.detail.lower(), row.detail
+
+
+# --------------------------------------------------------------------------
+# RG-C findings against this check (nexus-utpuw.11 follow-up)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("intruder", ["python", "python3", "pip", "activate", "uv"])
+def test_an_unrelated_tools_symlink_is_not_a_reclaimed_shim(layout, intruder) -> None:
+    """FALSE POSITIVE found by RG-C, reproduced before fixing. The shim set is
+    derived from <current>/bin -- but a venv's bin holds python, pip and
+    activate, which nx_write_shims explicitly NEVER shims. ~/.local/bin is a
+    SHARED directory: pyenv, asdf and homebrew all leave a `python` symlink
+    there. Treating one as evidence that uv reclaimed our shims hard-fails a
+    perfectly healthy install.
+
+    That is this check's own docstring warning, inverted -- a row that cries
+    wolf on common machine configurations trains the operator to ignore it,
+    which is how the real reclaim gets missed."""
+    tools, bin_dir = layout
+    gen = _generation(tools, "20260826T010000Z")
+    (gen / "bin" / intruder).write_text("#!/bin/sh\n")
+    (tools / "current").symlink_to(gen)
+    (bin_dir / "nx").write_text("#!/bin/sh\n")
+    (bin_dir / intruder).symlink_to("/usr/bin/true")
+
+    row = _result(health._check_generation_layout(), "Generation layout")
+
+    assert row.ok is True, (
+        f"an unrelated {intruder!r} symlink was reported as uv reclaiming the "
+        f"shims: {row.detail!r}"
+    )
+
+
+def test_a_real_reclaimed_shim_is_still_caught(layout) -> None:
+    """Non-vacuity for the exclusions above: narrowing the set must not blind
+    the check to the thing it exists for (nexus-utpuw.7's accepted risk)."""
+    tools, bin_dir = layout
+    gen = _generation(tools, "20260826T010000Z")
+    (tools / "current").symlink_to(gen)
+    (bin_dir / "nx").symlink_to("/usr/bin/true")
+
+    row = _result(health._check_generation_layout(), "Generation layout")
+
+    assert row.ok is False and "nx" in row.detail
+
+
+def test_a_broken_layout_is_fatal_so_doctors_exit_code_says_so(layout) -> None:
+    """RG-C: none of the hard branches set fatal=True, so
+    format_health_for_cli reported success while the row showed a dirty glyph.
+    27 other checks of comparable or lesser severity set it. Automation that
+    gates on doctor's EXIT STATUS -- rather than grepping for a glyph -- saw a
+    pass on a layout where nothing will start."""
+    tools, _ = layout
+    gen = _generation(tools, "20260826T010000Z")
+    (tools / "current").symlink_to(gen)
+    import shutil
+    shutil.rmtree(gen)
+
+    row = _result(health._check_generation_layout(), "Generation layout")
+
+    assert row.ok is False and row.fatal is True, (
+        f"a broken layout is not fatal: ok={row.ok} fatal={row.fatal} -- "
+        "doctor exits 0 while reporting that nothing will start"
+    )
+
+
+def test_generations_present_but_no_current_is_a_hard_failure(layout) -> None:
+    """RG-C minor: a fully ABSENT current routed to WARN while only the
+    DANGLING sub-case hard-failed, though the docstring claimed both.
+
+    The distinction that actually matters is not present-vs-absent, it is
+    whether anything was ever installed. Generations on disk with no pointer is
+    a BROKEN install; an empty tools root is simply a box that has not
+    installed yet, and hard-failing that would fail every fresh machine."""
+    tools, _ = layout
+    _generation(tools, "20260826T010000Z")  # built, but current never written
+
+    row = _result(health._check_generation_layout(), "Generation layout")
+
+    assert row.ok is False and row.warn is False, (
+        f"generations exist with no current pointer, reported as: {row.detail!r}"
+    )
+
+
+def test_an_empty_tools_root_is_not_a_failure(layout) -> None:
+    """The other half of the distinction above: nothing installed yet is not
+    breakage, and a doctor that fails a fresh box is a doctor people stop
+    running."""
+    row = _result(health._check_generation_layout(), "Generation layout")
+
+    assert row.ok is not False or row.warn is True, (
+        f"a box with nothing installed was hard-failed: {row.detail!r}"
+    )

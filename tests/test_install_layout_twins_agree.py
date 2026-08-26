@@ -386,3 +386,38 @@ def test_both_halves_build_the_same_spec(
                         {"HOME": str(tmp_path)})
     python = build_spec(base, [e for e in extras.split(",") if e], version)
     assert shell == python
+
+
+def test_both_halves_name_the_same_never_shim_set() -> None:
+    """``NEVER_SHIM`` / ``NX_NEVER_SHIM``: the names that live in a venv's
+    ``bin/`` and are never shimmed into the shared bin dir.
+
+    It became a twin because a consumer needed it. ``nx doctor``'s
+    generation-layout check derives "the names nexus owns" from
+    ``<current>/bin`` in order to notice uv reclaiming a shim — and
+    ``~/.local/bin`` is SHARED, so without subtracting this set a stray
+    ``python`` symlink from pyenv, asdf or homebrew reads as evidence that uv
+    took our shims and hard-fails a healthy install (RG-C, nexus-utpuw.11).
+
+    Two copies of that set drifting apart would put the shim WRITER and the
+    shim CHECKER in disagreement about what nexus owns, and the check would
+    then be wrong in whichever direction the drift went: crying wolf, or going
+    quiet on a real reclaim.
+    """
+    import subprocess
+
+    from nexus.install_layout import NEVER_SHIM
+
+    shims_sh = _SHELL_LAYOUT.parent / "shims.sh"
+    r = subprocess.run(
+        ["bash", "-c", f'. "{shims_sh}"; printf "%s" "$NX_NEVER_SHIM"'],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, r.stderr
+    shell_set = frozenset(r.stdout.split())
+
+    assert shell_set == NEVER_SHIM, (
+        f"the halves disagree on what is never shimmed:\n"
+        f"  shell-only:  {sorted(shell_set - NEVER_SHIM)}\n"
+        f"  python-only: {sorted(NEVER_SHIM - shell_set)}"
+    )
