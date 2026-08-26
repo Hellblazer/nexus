@@ -114,17 +114,139 @@ def running_from_tool_install() -> bool:
     except IndexError:  # a root too shallow to be a venv layout
         return False
 
+    if generation_of(venv_root) is not None:
+        return True
+
+    return "uv/tools/conexus" in str(root)
+
+
+def generation_of(venv_root: Path) -> Path | None:
+    """*venv_root* itself when it is a generation, else ``None``.
+
+    The single predicate behind two questions that legitimately differ in
+    WHICH path they ask about: :func:`running_from_tool_install` asks about
+    the venv the running DISTRIBUTION resolves from, while
+    :func:`running_generation` asks about ``sys.prefix``. Under a
+    shim-launched generation those coincide; they are still different facts,
+    and nexus-utpuw.10 has a recorded reason for its choice (a dev-checkout
+    invocation must not measure production processes). So the basis stays
+    with each caller and only the RULE is shared -- one vocabulary for "is
+    this a generation", never two that can drift apart.
+
+    A RECEIPT-LESS ``gen-*`` tree answers YES here, which is deliberate and
+    is NOT a third definition of "generation". Contract 4 -- a ``gen-*``
+    directory CONTAINING a receipt -- governs ENUMERATION, what
+    :func:`install_layout.list_generations` reports and what ``gc.sh`` may
+    reap, and those two must agree exactly. This asks something else: is the
+    tree being RUN FROM part of the side-by-side layout. It is, whether or
+    not its build finished writing the receipt, and answering "no" would
+    fail CLOSED -- the silent no-op shape nexus-utpuw.10 exists to close.
+
+    Never raises: an unreadable layout answers ``None`` and the caller falls
+    through to whatever it does for a non-generation.
+    """
     try:
         from nexus import install_layout  # noqa: PLC0415 — deferred, avoids an import cycle
 
         if venv_root.parent == install_layout.tools_dir() and venv_root.name.startswith(
             install_layout.GENERATION_PREFIX
         ):
-            return True
-    except Exception:  # noqa: BLE001 — layout unreadable: fall through to the legacy shape
+            return venv_root
+    except Exception:  # noqa: BLE001 — layout unreadable: not a generation we can name
         pass
+    return None
 
-    return "uv/tools/conexus" in str(root)
+
+def running_generation() -> Path | None:
+    """The generation THIS interpreter runs from, or ``None``.
+
+    ``sys.prefix``-based, matching the nexus-utpuw.9 staleness contract
+    (``stale <=> sys.prefix != readlink(current)``) so the tripwire and the
+    comparison it feeds cannot disagree about what "this generation" means.
+    """
+    return generation_of(Path(sys.prefix))
+
+
+#: Design point 6: the spawn tripwire logs at most once per process.
+#: Tests reset it with ``monkeypatch.setattr(upgrade_finish,
+#: "_TRIPWIRE_FIRED", False)``.
+_TRIPWIRE_FIRED = False
+
+
+def _tripwire_log(**kw: object) -> None:
+    """Seam for tests; emits the spawn-time generation-skew line."""
+    _log.info("spawn_generation_skew", **kw)
+
+
+def spawn_tripwire() -> None:
+    """nexus-utpuw design point 6: log (NEVER fail) when this spawn is not
+    running the current generation. One readlink at startup.
+
+    WHAT IT CATCHES, because a reader who works this out later will
+    otherwise delete it as dead code: a shim-launched entry point readlinks
+    ``current`` and execs ``<gen>/bin/<cmd>``, so ``sys.prefix == current``
+    and this is silent BY CONSTRUCTION. It fires exactly when something
+    BYPASSED the shim -- a PATH entry pointing straight into a generation, a
+    stale wrapper, an absolute generation path baked into a launchd plist or
+    a hook config. That is the nexus-q3xrx leak shape, and nothing else on
+    this box reports it.
+
+    Long-lived hosts are the other half of design point 6 and are NOT this
+    function's job: they start fresh and go stale later, which the per-call
+    MCP hook catches (:mod:`nexus.mcp._stale_host`).
+
+    The line is INFORMATIONAL, per the nexus-utpuw acceptance criterion: the
+    bound tree is intact and serving coherent code, so nothing here is
+    breakage and saying otherwise would contradict the zero-flag promise the
+    whole arc is built on.
+
+    It deliberately does NOT promise convergence. Design point 6's phrasing
+    ("converges at next spawn") is true of a LONG-LIVED holder that went
+    stale under a flip -- which is the MCP hook's case, not this one. Here
+    the process has only just bound, so the two causes are a flip landing
+    mid-startup (transient) and a launcher resolving a generation path
+    outside the shim (persistent, recurs every spawn). One observation
+    cannot tell them apart, so the line names both rather than asserting the
+    happier one. Substantive-critic, 2026-08-26.
+
+    "Intact" is not free-standing either: it holds because GC never reaps a
+    generation with a live holder (nexus-utpuw.5/.6, and the census fence
+    re-proved by execution at the top of this session). If that fence ever
+    breaks, this line becomes a lie before anything else does.
+
+    Absorbs everything, including a failing emit: a spawn is never failed by
+    its own tripwire. The once-flag is set AFTER a successful emit, so a
+    transient logging failure cannot silently consume the only notice.
+    """
+    global _TRIPWIRE_FIRED
+    if _TRIPWIRE_FIRED:
+        return
+    try:
+        from nexus import install_layout  # noqa: PLC0415 — deferred, avoids an import cycle
+
+        generation = running_generation()
+        if generation is None:
+            return  # a checkout, or the legacy tree: not this rule's business
+        if not install_layout.is_stale(generation):
+            return
+        current = install_layout.current_generation()
+        _tripwire_log(
+            running=str(generation),
+            current=str(current),
+            detail=(
+                f"this process is bound to generation {generation.name}; "
+                f"current is {current.name}. Its tree is intact, so it is "
+                f"running coherent code. Two causes produce this and they "
+                f"need different responses: a flip that landed during this "
+                f"process's startup is transient and the next spawn binds to "
+                f"current, while a launcher that resolves a generation path "
+                f"directly instead of going through the shim will reproduce "
+                f"it on every spawn until that launcher is fixed."
+            ),
+        )
+        _TRIPWIRE_FIRED = True
+    except Exception:  # noqa: BLE001 — a spawn is never failed by its own tripwire
+        return
 
 #: Filename of the version stamp inside the nexus config dir.
 STAMP_FILENAME = "last_seen_version"

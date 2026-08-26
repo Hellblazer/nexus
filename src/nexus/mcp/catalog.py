@@ -843,6 +843,14 @@ def main():
     # subject to the identical mixed-module-graph failure after an in-place
     # `uv tool upgrade`. Same decorate+warn hook as core.main(); best-effort,
     # never blocks boot.
+    # nexus-utpuw.12 / design point 6: one readlink at spawn. A shim-launched
+    # process is silent by construction (the shim execs the generation the
+    # pointer names); this fires only when something BYPASSED the shim and
+    # bound to a generation that is no longer current. Informational —
+    # the tree it is running is intact and converges at the next spawn.
+    from nexus.upgrade_finish import spawn_tripwire  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
+
+    spawn_tripwire()
     from nexus.mcp._stale_host import install_stale_host_hook  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
 
     install_stale_host_hook(mcp)

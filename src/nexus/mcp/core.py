@@ -9062,6 +9062,14 @@ def main():
     # The hook warn-logs once and decorates import-shaped failures with
     # a "stale MCP host — restart" note. Never refuses a call; best-effort,
     # never blocks boot.
+    # nexus-utpuw.12 / design point 6: one readlink at spawn. A shim-launched
+    # process is silent by construction (the shim execs the generation the
+    # pointer names); this fires only when something BYPASSED the shim and
+    # bound to a generation that is no longer current. Informational —
+    # the tree it is running is intact and converges at the next spawn.
+    from nexus.upgrade_finish import spawn_tripwire  # noqa: PLC0415 — deferred import
+
+    spawn_tripwire()
     from nexus.mcp._stale_host import install_stale_host_hook  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
 
     install_stale_host_hook(mcp)

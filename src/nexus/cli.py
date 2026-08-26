@@ -106,6 +106,18 @@ def main(ctx: click.Context, verbose: bool) -> None:
     ctx.obj["verbose"] = verbose
     configure_logging("cli", verbose=verbose)
 
+    # nexus-utpuw.12 / design point 6: one readlink at spawn. A shim-launched
+    # process is silent by construction (the shim execs the generation the
+    # pointer names); this fires only when something BYPASSED the shim and
+    # bound to a generation that is no longer current. Informational —
+    # the tree it is running is intact and converges at the next spawn.
+    try:
+        from nexus.upgrade_finish import spawn_tripwire  # noqa: PLC0415 — deferred import
+
+        spawn_tripwire()
+    except Exception:  # noqa: BLE001 — the tripwire must never break CLI startup
+        pass
+
     # nexus-gynt2: stranded-install detector. Disarmed (a pure constant
     # check, no filesystem access) on every migration-capable release; at
     # N+1 it trips a LOUD stderr banner on EVERY invocation while pre-PG
