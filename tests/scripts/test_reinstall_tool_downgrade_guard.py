@@ -1,91 +1,47 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""``scripts/reinstall-tool.sh`` downgrade guard — resolve from the TARGET
-venv, not the ambient PATH (nexus-zfutt).
+"""The guards that SURVIVE the nexus-utpuw rewrite of scripts/reinstall-tool.sh.
 
-Root cause: the guard read the "installed" version via a bare ``nx --version``
-lookup on ``$PATH``. ``tests/e2e/release-sandbox.sh`` activates an isolated
-sandbox ``$HOME`` and PREPENDS ``$SANDBOX/.local/bin`` to ``$PATH`` before
-calling this script — but on a fresh (or not-yet-populated) sandbox no ``nx``
-exists there yet, so ``command -v nx`` falls through to the REST of ``$PATH``
-and resolves the live global install instead. A develop checkout's
-``pyproject.toml`` version (which lags the last released version between
-releases) then reads as a "downgrade" against the live global version, and the
-guard refuses a perfectly legitimate isolated sandbox install.
+nexus-utpuw comment 1 deletes the live-holder refusal, --force, --cycle-daemons
+and --cycle-mcp, because in-place swap is what made them necessary and installs
+are side-by-side now. It preserves these two explicitly: they are a DIFFERENT
+failure class. They do not protect live processes from a swap -- they protect
+the install from being replaced by something older, or by something from a
+different source.
 
-These tests never touch the real global ``uv`` tool environment: a stub
-``uv`` (handling only ``tool dir``, no-op otherwise) and stub ``nx`` binaries
-are placed on ``$PATH`` ahead of everything else, and ``$HOME`` points at a
-throwaway ``tmp_path``.
+Both were born from live incidents (nexus-q3xrx, 2026-06-11 and 2026-06-12): a
+reinstall from a stale checkout silently DOWNGRADED the shared CLI until `nx
+daemon service` vanished and the stack would not restart, and a PyPI reinstall
+over a dev install wiped 31 unreleased modules while keeping the version string.
+
+nexus-zfutt is the property that makes the downgrade guard trustworthy: resolve
+the installed version from the TARGET tree, never from a bare `nx` lookup on the
+ambient $PATH. tests/e2e/release-sandbox.sh activates an isolated sandbox $HOME
+and prepends its own bin dir; on a fresh sandbox no `nx` exists there yet, so a
+PATH lookup falls through to the REAL global install and a develop checkout's
+lagging pyproject version reads as a false downgrade of an install the run has
+nothing to do with. Under generations the target is whatever `current` resolves
+to, and a missing one correctly skips the comparison.
+
+These tests never touch the real global install: PATH excludes ~/.local/bin (see
+_generation_harness.SAFE_BASE_PATH) and $HOME is a throwaway tmp_path.
 """
 from __future__ import annotations
 
 import os
-import stat
 import subprocess
 from pathlib import Path
 
 import pytest
 
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "reinstall-tool.sh"
-
-# A curated base PATH for these subprocess runs — deliberately EXCLUDES
-# ~/.local/bin (and any other uv-tool-managed bin dir), which is where the
-# REAL `nx` / `uv` live on a dev box. These tests must never be able to reach
-# the real global install (fewer-permission-prompts / "don't break the live
-# nexus install"); only the stub `uv`/`nx` binaries these tests place on
-# PATH may be found. Includes just enough of the real system PATH for
-# bash/git/python3/sed/grep/ps to resolve.
-_SAFE_BASE_PATH = ":".join(
-    p for p in (
-        "/opt/homebrew/bin",
-        "/opt/homebrew/opt/python@3.13/libexec/bin",
-        "/usr/local/bin",
-        "/usr/bin",
-        "/bin",
-        "/usr/sbin",
-        "/sbin",
-    )
-    if Path(p).is_dir()
+from _generation_harness import (
+    SAFE_BASE_PATH,
+    fabricate_generation,
+    make_executable,
+    stub_uv,
 )
 
-
-def _make_executable(path: Path, content: str) -> None:
-    path.write_text(content)
-    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-
-
-def _stub_uv(bin_dir: Path, *, tool_dir: Path, marker: Path) -> None:
-    """A stub ``uv`` that answers ``tool dir`` and, for anything else
-    (notably ``tool install``), just drops a marker file so tests can
-    assert whether the real install step was ever reached."""
-    _make_executable(
-        bin_dir / "uv",
-        f"""#!/bin/bash
-if [[ "$1" == "tool" && "$2" == "dir" ]]; then
-    echo "{tool_dir}"
-    exit 0
-fi
-if [[ "$1" == "tool" && "$2" == "install" ]]; then
-    touch "{marker}"
-    exit 0
-fi
-exit 0
-""",
-    )
-
-
-def _stub_nx(path: Path, version: str) -> None:
-    _make_executable(
-        path,
-        f"""#!/bin/bash
-if [[ "$1" == "--version" ]]; then
-    echo "nx, version {version}"
-    exit 0
-fi
-exit 0
-""",
-    )
+_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "reinstall-tool.sh"
 
 
 def _write_pyproject(source_dir: Path, version: str) -> None:
@@ -95,145 +51,172 @@ def _write_pyproject(source_dir: Path, version: str) -> None:
     )
 
 
-def _run(env_path: str, home: Path, source: Path) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
-    env["PATH"] = env_path
-    env["HOME"] = str(home)
-    return subprocess.run(
-        ["bash", str(_SCRIPT), str(source)],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+class _Bed:
+    """tools/ + bin/ + a stub uv + a throwaway HOME."""
 
+    def __init__(self, tmp_path: Path):
+        self.tools = tmp_path / "tools"
+        self.tools.mkdir()
+        self.bin = tmp_path / "bin"
+        self.bin.mkdir()
+        self.home = tmp_path / "home"
+        self.home.mkdir()
+        self.stub_bin = tmp_path / "stubbin"
+        self.stub_bin.mkdir()
+        self.marker = tmp_path / "build-ran.marker"
+        stub_uv(self.stub_bin, marker=self.marker)
+        self.ambient_bin = tmp_path / "ambientbin"
+        self.ambient_bin.mkdir()
+        self.source = tmp_path / "checkout"
 
-class TestDowngradeGuardResolvesFromTargetVenv:
-    def test_does_not_falsely_refuse_when_only_ambient_path_nx_is_newer(
-        self, tmp_path: Path
-    ) -> None:
-        """The bug: a fresh/isolated target venv has no ``nx`` of its own
-        yet, but the REST of ``$PATH`` (the live global install) still
-        resolves to a much newer ``nx``. That must NOT read as a downgrade —
-        there is nothing installed in the target venv to downgrade."""
-        home = tmp_path / "sandbox-home"
-        home.mkdir()
-        tool_dir = home / "tools"  # VENV_DIR = tool_dir/conexus — deliberately NOT populated
-        marker = tmp_path / "install-ran.marker"
+    def install(self, version: str, *, source_kind: str = "directory") -> Path:
+        gen = fabricate_generation(
+            self.tools, "INSTALLED", version=version, source_kind=source_kind
+        )
+        (self.tools / "current").symlink_to(gen)
+        return gen
 
-        stub_bin = tmp_path / "stubbin"
-        stub_bin.mkdir()
-        _stub_uv(stub_bin, tool_dir=tool_dir, marker=marker)
-
-        # The "ambient" live global install: a DIFFERENT, later-in-PATH nx
-        # reporting a much newer version than the source checkout.
-        global_bin = tmp_path / "globalbin"
-        global_bin.mkdir()
-        _stub_nx(global_bin / "nx", "6.16.0")
-
-        source = tmp_path / "checkout"
-        _write_pyproject(source, "6.11.0")
-
-        env_path = f"{stub_bin}:{global_bin}:{_SAFE_BASE_PATH}"
-        result = _run(env_path, home, source)
-
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert "REFUSING" not in result.stdout
-        assert marker.exists()  # the (stubbed) install actually ran
-
-    def test_still_refuses_a_real_downgrade_of_the_target_venv(
-        self, tmp_path: Path
-    ) -> None:
-        """The guard's real purpose must survive: when the TARGET venv's own
-        ``nx`` (the one about to be overwritten) is genuinely ahead of the
-        source checkout, refuse without ``--force``."""
-        home = tmp_path / "real-home"
-        home.mkdir()
-        tool_dir = home / "tools"
-        venv_bin = tool_dir / "conexus" / "bin"
-        venv_bin.mkdir(parents=True)
-        marker = tmp_path / "install-ran.marker"
-
-        stub_bin = tmp_path / "stubbin"
-        stub_bin.mkdir()
-        _stub_uv(stub_bin, tool_dir=tool_dir, marker=marker)
-
-        # The nx actually installed in the target venv — this is the one
-        # about to be overwritten, and the one the guard must protect.
-        _stub_nx(venv_bin / "nx", "6.16.0")
-
-        source = tmp_path / "checkout"
-        _write_pyproject(source, "6.11.0")
-
-        env_path = f"{stub_bin}:{_SAFE_BASE_PATH}"
-        result = _run(env_path, home, source)
-
-        assert result.returncode == 1, result.stdout + result.stderr
-        assert "REFUSING" in result.stdout
-        assert "DOWNGRADE" in result.stdout
-        assert not marker.exists()  # never reached the install step
-
-    def test_force_bypasses_a_real_downgrade(self, tmp_path: Path) -> None:
-        home = tmp_path / "real-home"
-        home.mkdir()
-        tool_dir = home / "tools"
-        venv_bin = tool_dir / "conexus" / "bin"
-        venv_bin.mkdir(parents=True)
-        marker = tmp_path / "install-ran.marker"
-
-        stub_bin = tmp_path / "stubbin"
-        stub_bin.mkdir()
-        _stub_uv(stub_bin, tool_dir=tool_dir, marker=marker)
-        _stub_nx(venv_bin / "nx", "6.16.0")
-
-        # A PATH-reachable nx too — needed for the script's own post-install
-        # `nx --version` echo (unrelated to the guard under test here; the
-        # guard itself no longer needs anything on PATH).
-        global_bin = tmp_path / "globalbin"
-        global_bin.mkdir()
-        _stub_nx(global_bin / "nx", "6.16.0")
-
-        source = tmp_path / "checkout"
-        _write_pyproject(source, "6.11.0")
-
-        env = dict(os.environ)
-        env["PATH"] = f"{stub_bin}:{global_bin}:{_SAFE_BASE_PATH}"
-        env["HOME"] = str(home)
-        result = subprocess.run(
-            ["bash", str(_SCRIPT), str(source), "--force"],
-            env=env, capture_output=True, text=True, timeout=30,
+    def ambient_nx(self, version: str) -> None:
+        """A stray `nx` on PATH, standing in for the real global install."""
+        make_executable(
+            self.ambient_bin / "nx",
+            f'#!/bin/bash\nif [[ "$1" == "--version" ]]; then echo "nx, version {version}"; fi\nexit 0\n',
         )
 
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert marker.exists()
+    def run(self, *args, source: str | None = None):
+        env = dict(os.environ)
+        env["PATH"] = f"{self.stub_bin}:{self.ambient_bin}:{SAFE_BASE_PATH}"
+        env["HOME"] = str(self.home)
+        env["NX_TOOLS_DIR"] = str(self.tools)
+        env["NX_BIN_DIR"] = str(self.bin)
+        return subprocess.run(
+            ["bash", str(_SCRIPT), source or str(self.source), *args],
+            env=env, capture_output=True, text=True, timeout=120,
+        )
 
-    @pytest.mark.parametrize("global_version", ["6.16.0", "6.10.0"])
-    def test_fresh_target_venv_never_compares_against_ambient_path(
-        self, tmp_path: Path, global_version: str
-    ) -> None:
-        """Regardless of whether the stray ambient ``nx`` happens to look
-        newer or older than the source checkout, a genuinely empty target
-        venv must never trigger the guard at all — there is nothing there to
-        compare against."""
-        home = tmp_path / "sandbox-home"
-        home.mkdir()
-        tool_dir = home / "tools"
-        marker = tmp_path / "install-ran.marker"
 
-        stub_bin = tmp_path / "stubbin"
-        stub_bin.mkdir()
-        _stub_uv(stub_bin, tool_dir=tool_dir, marker=marker)
+# --------------------------------------------------------------------------
+# nexus-zfutt: the ambient PATH is never the comparison target
+# --------------------------------------------------------------------------
 
-        global_bin = tmp_path / "globalbin"
-        global_bin.mkdir()
-        _stub_nx(global_bin / "nx", global_version)
+@pytest.mark.parametrize("ambient_version", ["6.16.0", "6.10.0"])
+def test_no_current_generation_never_compares_against_ambient_path(
+    tmp_path: Path, ambient_version: str
+) -> None:
+    """Nothing installed yet, but a stray ambient `nx` resolves on PATH. It must
+    not be consulted whether it looks newer OR older than the checkout: there is
+    nothing installed to downgrade. Parametrised in both directions because a
+    guard that reads the wrong binary can accidentally be right in one of them."""
+    bed = _Bed(tmp_path)
+    _write_pyproject(bed.source, "6.11.0")
+    bed.ambient_nx(ambient_version)
 
-        source = tmp_path / "checkout"
-        _write_pyproject(source, "6.11.0")
+    result = bed.run()
 
-        env_path = f"{stub_bin}:{global_bin}:{_SAFE_BASE_PATH}"
-        result = _run(env_path, home, source)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "REFUSING" not in result.stdout
+    assert bed.marker.exists(), "the build step was never reached"
 
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert "REFUSING" not in result.stdout
-        assert marker.exists()
+
+def test_a_real_downgrade_of_the_current_generation_is_refused(tmp_path: Path) -> None:
+    """The guard's actual purpose. The version comes from the generation
+    `current` points at -- the tree this run is about to replace."""
+    bed = _Bed(tmp_path)
+    bed.install("6.16.0")
+    _write_pyproject(bed.source, "6.11.0")
+
+    result = bed.run()
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "DOWNGRADE" in result.stdout
+    assert not bed.marker.exists(), "refused, yet the build ran anyway"
+
+
+def test_allow_downgrade_overrides_the_downgrade_guard(tmp_path: Path) -> None:
+    """A guard you cannot deliberately override is not a guard, it is a wall
+    (audit finding F4). A genuine downgrade is a real workflow."""
+    bed = _Bed(tmp_path)
+    bed.install("6.16.0")
+    _write_pyproject(bed.source, "6.11.0")
+
+    result = bed.run("--allow-downgrade")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert bed.marker.exists()
+
+
+# --------------------------------------------------------------------------
+# divergent source: a registry package over a dev checkout
+# --------------------------------------------------------------------------
+
+def test_a_registry_source_over_a_directory_install_is_refused(tmp_path: Path) -> None:
+    """nexus-q3xrx incident #2 verbatim: a PyPI reinstall over a dev install
+    wiped 31 unreleased modules while keeping the version string. The signal
+    used to be a `directory = ` line in uv's receipt; it is source_kind in ours."""
+    bed = _Bed(tmp_path)
+    bed.install("6.16.0", source_kind="directory")
+
+    result = bed.run(source="conexus")
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "REFUSING" in result.stdout
+    assert not bed.marker.exists()
+
+
+def test_allow_registry_over_dev_overrides_it(tmp_path: Path) -> None:
+    """The script's own same-version advice tells you to install a released
+    build over a dev one, so this override has a first-party caller."""
+    bed = _Bed(tmp_path)
+    bed.install("6.16.0", source_kind="directory")
+
+    result = bed.run("--allow-registry-over-dev", source="conexus")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert bed.marker.exists()
+
+
+def test_a_registry_source_over_a_registry_install_is_fine(tmp_path: Path) -> None:
+    """Non-vacuity for the two above: the guard keys on the INSTALLED source
+    being a directory, not merely on the new source being a registry package.
+    Without this, a guard that refused every registry install would pass both."""
+    bed = _Bed(tmp_path)
+    bed.install("6.16.0", source_kind="registry")
+
+    result = bed.run(source="conexus")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert bed.marker.exists()
+
+
+# --------------------------------------------------------------------------
+# F4's MUST NOT: no single flag bypasses both guards
+# --------------------------------------------------------------------------
+
+def test_neither_override_bypasses_the_other_guard(tmp_path: Path) -> None:
+    """Audit finding F4 permits a narrow override PER GUARD and forbids one flag
+    that bypasses both -- that is --force wearing a new name, and it drifts back
+    into bypassing everything. Each override must be inert against the guard it
+    does not name.
+
+    Both directions are checked, because a shared bypass variable would satisfy
+    either one alone."""
+    bed = _Bed(tmp_path)
+    bed.install("6.16.0", source_kind="directory")
+
+    # --allow-registry-over-dev must NOT let a downgrade through.
+    _write_pyproject(bed.source, "6.11.0")
+    downgrade = bed.run("--allow-registry-over-dev")
+    assert downgrade.returncode == 1, (
+        "--allow-registry-over-dev bypassed the DOWNGRADE guard; the two "
+        "overrides share a bypass and are one flag wearing two names\n"
+        + downgrade.stdout
+    )
+    assert "DOWNGRADE" in downgrade.stdout
+
+    # --allow-downgrade must NOT let a registry-over-dev install through.
+    registry = bed.run("--allow-downgrade", source="conexus")
+    assert registry.returncode == 1, (
+        "--allow-downgrade bypassed the REGISTRY-OVER-DIRECTORY guard\n"
+        + registry.stdout
+    )
+    assert "REFUSING" in registry.stdout

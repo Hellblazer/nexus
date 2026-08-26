@@ -227,7 +227,7 @@ Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/mcp/**`
 
 Must end with `[done]` and confirm the new schema version. Halt on any failure.
 
-This reinstall is genuinely isolated (fixed 2026-07-01, `137d2688`) — safe to run with live Claude Code sessions/MCP servers active, no `--force`/`--cycle-daemons` needed. If it ever refuses with a live-holder error again, suspect a step-ordering regression in `release-sandbox.sh` (sandbox `HOME` must activate *before* the reinstall, since `uv tool install` resolves its install location off `$HOME`) before reaching for `--force`.
+This reinstall is genuinely isolated (fixed 2026-07-01, `137d2688`) — safe to run with live Claude Code sessions/MCP servers active. A live-holder refusal is no longer possible: installs land in a fresh generation and holders keep running from their own tree (nexus-utpuw.8), and `--force` / `--cycle-daemons` no longer exist. The step ordering still matters for ISOLATION — sandbox `HOME` must activate *before* the reinstall, because the generation root resolves off `$HOME` (`nx_tools_dir`), not because of anything `uv` does.
 
 ### 6b. Run upgrade-shakeout (~3-5 min, EVERY RELEASE)
 
