@@ -489,18 +489,76 @@ def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, st
     ]
 
 
+def _current_generation() -> Path | None:
+    """``<tools>/current``'s target, or ``None`` when the layout cannot say."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred, avoids an import cycle
+
+    try:
+        return install_layout.current_generation()
+    except Exception:  # noqa: BLE001 — no resolvable pointer: no identity verdict
+        return None
+
+
 def detect_stale_processes(
     ps_output: str | None = None,
     *,
     now: float | None = None,
 ) -> SkewReport:
-    """Every conexus process older than the installed distribution."""
+    """Every conexus process executing code older than the install.
+
+    TWO REGIMES, PER ROW, and they answer with different evidence
+    (nexus-ycw67). nexus-utpuw.10 moved the ENUMERATION half onto the layout;
+    the VERDICT half stayed on ``started < install_mtime``, which under
+    side-by-side generations is not merely imprecise but WRONG IN A DIRECTION:
+    a process bound to ``gen-00`` and STARTED AFTER ``gen-01`` was installed
+    reads FRESH, because its start time is newer than the current generation's
+    dist-info mtime. That is precisely the shim-bypass shape -- a stale
+    wrapper, a PATH entry into a generation, an absolute generation path in a
+    launchd plist (the nexus-q3xrx class) -- so the one check meant to catch
+    it was blind to it.
+
+    * A row that ATTRIBUTES to a generation is judged by IDENTITY, which is
+      the arc's own contract (nexus-utpuw.9 / :func:`install_layout.is_stale`,
+      ``stale <=> prefix != readlink(current)``). Exact: no clock inference,
+      no false positives or negatives. A holder of the legacy uv tree
+      attributes here too -- .7 registers that tree as a ``gen-*`` pointer --
+      and correctly reads stale on a migrated box.
+    * Anything else keeps the AGE heuristic: an un-migrated box, where
+      in-place replacement really does happen and mtime is the only
+      discriminator there has ever been. .7 leaves boxes in that state until
+      their legacy tree has zero holders, so this branch is live in the field
+      and is not a fallback for the paranoid.
+
+    ONE ``readlink`` FOR THE WHOLE SCAN, hoisted out of the loop deliberately
+    rather than for speed: per-row resolution could straddle a flip and
+    produce a report whose rows disagree about what ``current`` is, which is a
+    state the machine never occupied at any instant. One snapshot of the
+    pointer is the honest basis for one snapshot of the process table.
+
+    WIDENING NOTE: :func:`restart_stale` SIGTERMs what this reports, so the
+    identity regime also widens what gets cycled -- to processes that are
+    genuinely running old code and were previously missed. Only the
+    restartable classes are cycled; session-bound ones are still reported for
+    a human.
+    """
+    from nexus import install_census  # noqa: PLC0415 — deferred, avoids an import cycle
+
     mtime, version = install_mtime_and_version()
     report = SkewReport(installed_version=version, install_mtime=mtime)
     now = time.time() if now is None else now
+
+    pairs = install_census.generation_match_pairs()
+    current = _current_generation()
+
     for pid, age_s, command in enumerate_processes(ps_output):
-        started = now - age_s
-        if started < mtime:
+        generation = next(
+            (gen for marker, gen in pairs if marker in command), None
+        )
+        if generation is not None and current is not None:
+            stale = generation != current
+        else:
+            stale = (now - age_s) < mtime
+        if stale:
             report.stale.append(StaleProcess(
                 pid=pid, kind=_classify(command),
                 command=command, age_s=age_s,

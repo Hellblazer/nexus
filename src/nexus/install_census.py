@@ -40,6 +40,7 @@ from pathlib import Path
 __all__ = [
     "ps_snapshot",
     "generation_holder_pids",
+    "generation_match_pairs",
     "generation_match_prefixes",
     "PS_COMMAND",
 ]
@@ -127,6 +128,43 @@ def generation_holder_pids(
     return pids
 
 
+def generation_match_pairs(
+    *, tools: Path | None = None
+) -> tuple[tuple[str, Path], ...]:
+    """``(marker, generation)`` for every generation on this box.
+
+    The pair form exists because ``upgrade_finish`` needs to know WHICH
+    generation a matched process runs from, not merely that it runs from some
+    generation. Under the side-by-side layout staleness is an identity
+    comparison against ``current`` (nexus-utpuw.9), and a marker alone cannot
+    make that comparison -- which is why the verdict half of
+    ``detect_stale_processes`` stayed on the pre-generation age heuristic long
+    after its enumeration half moved (nexus-ycw67).
+
+    Enumerated, never hardcoded, exactly as
+    :func:`generation_match_prefixes` describes; that function is now the
+    marker-only PROJECTION of this one, derived rather than restated, so
+    there is still one enumeration and one notion of what marks a holder.
+
+    Returns empty when the layout cannot be read, which the caller must treat
+    as "cannot tell" rather than "none".
+    """
+    try:
+        from nexus import install_layout  # noqa: PLC0415 — deferred, avoids an import cycle
+
+        generations = install_layout.list_generations(tools=tools)
+    except Exception:  # noqa: BLE001 — layout unreadable: say nothing rather than guess
+        return ()
+
+    pairs: list[tuple[str, Path]] = []
+    for gen in generations:
+        try:
+            pairs.append((_match_prefix(gen), gen))
+        except ValueError:
+            continue
+    return tuple(pairs)
+
+
 def generation_match_prefixes(*, tools: Path | None = None) -> tuple[str, ...]:
     """Every string that marks a process as running from SOME generation.
 
@@ -141,17 +179,4 @@ def generation_match_prefixes(*, tools: Path | None = None) -> tuple[str, ...]:
     nothing to keep in sync. Returns empty when the layout cannot be read, which
     the caller must treat as "cannot tell" rather than "none".
     """
-    try:
-        from nexus import install_layout  # noqa: PLC0415 — deferred, avoids an import cycle
-
-        generations = install_layout.list_generations(tools=tools)
-    except Exception:  # noqa: BLE001 — layout unreadable: say nothing rather than guess
-        return ()
-
-    prefixes: list[str] = []
-    for gen in generations:
-        try:
-            prefixes.append(_match_prefix(gen))
-        except ValueError:
-            continue
-    return tuple(prefixes)
+    return tuple(prefix for prefix, _ in generation_match_pairs(tools=tools))

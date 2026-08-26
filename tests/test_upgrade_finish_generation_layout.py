@@ -178,3 +178,170 @@ def test_classify_does_not_mistake_an_argument_for_a_daemon(command, expected) -
     one check placed there to catch it -- and the mineru branch has no pid
     re-verify at all, running an unrequested 300s stop/start."""
     assert upgrade_finish._classify(command) == expected
+
+
+# --------------------------------------------------------------------------
+# (d) the VERDICT -- nexus-ycw67
+#
+# .10 moved the ENUMERATION half onto the layout and left the verdict on
+# ``started < install_mtime``. Under generations that is wrong in a
+# direction: a process bound to an OLD generation but started AFTER the
+# current one was installed reads FRESH, because its start time is newer
+# than current's dist-info mtime. That is the shim-bypass shape exactly.
+#
+# Every test here pins BOTH rows of the bead's own probe -- the false
+# negative and an age-stale control -- so an empty verdict is a real answer
+# and never a parse miss.
+# --------------------------------------------------------------------------
+
+def _layout(tmp_path, monkeypatch, *, stamps=("20260101T000000Z", "20260826T010000Z")):
+    """Two generations with ``current`` on the LAST stamp."""
+    from nexus import install_layout  # noqa: PLC0415 — file pattern: deferred imports
+
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    generations = [_fake_generation(tools, s) for s in stamps]
+    (tools / install_layout.CURRENT_LINK_NAME).symlink_to(generations[-1])
+    monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
+    return generations
+
+
+def _pinned_install(monkeypatch, mtime=1_000.0):
+    monkeypatch.setattr(
+        upgrade_finish, "install_mtime_and_version",
+        lambda: (mtime, "7.18.0"),
+    )
+
+
+def test_an_old_generation_holder_is_stale_even_when_recently_started(
+    tmp_path, monkeypatch
+) -> None:
+    """THE false negative, reproduced from nexus-ycw67's probe.
+
+    pid 4242 is bound to gen-00 and started 500s ago; the install mtime is
+    1000 and now is 2000, so it started at 1500 -- AFTER the current
+    generation was installed. The age rule calls that fresh. It is running
+    gen-00's code.
+
+    pid 4243 is the control: same generation, old enough to be stale under
+    the age rule too. If the probe ever stops seeing rows at all, the control
+    disappears with the finding and the test fails loudly instead of
+    reporting a comfortable empty verdict."""
+    old, _new = _layout(tmp_path, monkeypatch)
+    _pinned_install(monkeypatch)
+
+    ps_output = (
+        "  PID ELAPSED COMMAND\n"
+        f"  4242    08:20 {old}/bin/python {old}/bin/nx-mcp\n"
+        f"  4243    40:00 {old}/bin/python {old}/bin/nx-mcp\n"
+    )
+    report = upgrade_finish.detect_stale_processes(ps_output, now=2_000.0)
+
+    assert {p.pid for p in report.stale} == {4242, 4243}, (
+        "a holder of a non-current generation is running old code whatever "
+        "its start time says; deciding by age misses exactly the "
+        "shim-bypass case (stale wrapper, PATH entry into a generation, "
+        "absolute generation path in a plist)"
+    )
+
+
+def test_a_current_generation_holder_is_fresh_even_when_old(
+    tmp_path, monkeypatch
+) -> None:
+    """The other direction, and it is deliberate.
+
+    A flip NEVER touches an existing tree, so a holder of ``current`` is
+    running current code by construction no matter how long it has been up.
+    The age comparison was only ever a proxy for identity, and under
+    side-by-side the proxy reports a process stale for having outlived a
+    timestamp that says nothing about the tree it is executing."""
+    _old, new = _layout(tmp_path, monkeypatch)
+    _pinned_install(monkeypatch)
+
+    ps_output = (
+        "  PID ELAPSED COMMAND\n"
+        f"  4244    40:00 {new}/bin/python {new}/bin/nx-mcp\n"
+    )
+    report = upgrade_finish.detect_stale_processes(ps_output, now=2_000.0)
+
+    assert report.stale == []
+    # Non-vacuity: the row must have been ENUMERATED, or "no stale processes"
+    # is the same shape as "looked at nothing".
+    assert [pid for pid, _, _ in upgrade_finish.enumerate_processes(ps_output)] == [4244]
+
+
+def test_a_legacy_tree_holder_is_stale_on_a_migrated_box(
+    tmp_path, monkeypatch
+) -> None:
+    """.7 registers the legacy uv tree as a ``gen-*`` POINTER, so its holders
+    attribute to a generation that is not ``current`` and correctly read
+    stale. ``_match_prefix`` resolves one level of symlink because a live
+    holder's argv names the real path it exec'd from, never the ledger
+    pointer."""
+    from nexus import install_layout  # noqa: PLC0415 — file pattern: deferred imports
+
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    current = _fake_generation(tools, "20260826T010000Z")
+    (tools / install_layout.CURRENT_LINK_NAME).symlink_to(current)
+
+    legacy = tmp_path / "uv" / "tools" / "conexus"
+    (legacy / "bin").mkdir(parents=True)
+    (legacy / "nexus-install.json").write_text("{}")
+    (tools / "gen-legacy").symlink_to(legacy)
+    monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
+    _pinned_install(monkeypatch)
+
+    ps_output = (
+        "  PID ELAPSED COMMAND\n"
+        f"  4245    08:20 {legacy}/bin/python {legacy}/bin/nx-mcp\n"
+    )
+    report = upgrade_finish.detect_stale_processes(ps_output, now=2_000.0)
+
+    assert [p.pid for p in report.stale] == [4245]
+
+
+def test_the_legacy_regime_still_decides_by_age(tmp_path, monkeypatch) -> None:
+    """No layout, no identity verdict to make. In-place replacement really
+    happens on an un-migrated box and mtime is the only discriminator there
+    has ever been -- and .7 leaves boxes in that state until their legacy
+    tree has zero holders, so this branch is live in the field."""
+    monkeypatch.setenv("NX_TOOLS_DIR", str(tmp_path / "no-such-tools"))
+    root = tmp_path / "uv" / "tools" / "conexus"
+    site = root / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True)
+    monkeypatch.setattr(upgrade_finish, "_install_root", lambda: site)
+    _pinned_install(monkeypatch)
+
+    ps_output = (
+        "  PID ELAPSED COMMAND\n"
+        f"  4246    40:00 {root}/bin/python {root}/bin/nx-mcp\n"   # started 400 BEFORE
+        f"  4247    08:20 {root}/bin/python {root}/bin/nx-mcp\n"   # started 500 AFTER
+    )
+    report = upgrade_finish.detect_stale_processes(ps_output, now=2_000.0)
+
+    assert [p.pid for p in report.stale] == [4246]
+
+
+def test_the_widened_verdict_still_classifies_what_it_reports(
+    tmp_path, monkeypatch
+) -> None:
+    """``restart_stale`` SIGTERMs what this reports, so widening the verdict
+    widens what gets cycled. The newly-caught rows must carry the same kind
+    and restartability the old ones did -- a row that reads stale but
+    classifies as ``other`` would be reported to a human and never cycled,
+    and one misclassified the other way gets an unrequested SIGTERM."""
+    old, _new = _layout(tmp_path, monkeypatch)
+    _pinned_install(monkeypatch)
+
+    ps_output = (
+        "  PID ELAPSED COMMAND\n"
+        f"  4248    08:20 {old}/bin/nx daemon aspect-worker start --tenant default\n"
+        f"  4249    08:20 {old}/bin/python {old}/bin/nx-mcp\n"
+    )
+    report = upgrade_finish.detect_stale_processes(ps_output, now=2_000.0)
+
+    kinds = {p.pid: p.kind for p in report.stale}
+    assert kinds == {4248: "aspect-worker", 4249: "mcp-host"}
+    assert [p.pid for p in report.restartable] == [4248]
+    assert [p.pid for p in report.session_bound] == [4249]
