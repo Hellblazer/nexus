@@ -18,8 +18,9 @@ the finish choreography triggers from the product side:
 - :func:`restart_stale` — restarts the classes that are SAFE to cycle
   (detached daemons: aspect-worker, MinerU); reports the ones only the
   human can close (MCP hosts belong to live Claude sessions).
-- :func:`install_source` — reads the uv receipt so "``uv tool upgrade``
-  did nothing" is self-explanatory (directory-tracking vs pinned vs PyPI).
+- :func:`install_source` — reads the CURRENT generation's receipt, else
+  the uv receipt, so "the upgrade did nothing" is self-explanatory
+  (directory-tracking vs pinned vs PyPI).
 - The version stamp (:func:`check_version_transition`) — called at CLI
   startup; on the first invocation after a version change it runs the safe
   finish pass automatically and prints one summary line.
@@ -32,6 +33,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -63,6 +65,9 @@ from nexus.daemon.service_registry import (
 #: not exercise this behavior).
 from nexus.daemon.service_registry import pid_alive as _pid_alive
 from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
+
+if TYPE_CHECKING:
+    from nexus import install_layout
 
 _log = structlog.get_logger(__name__)
 
@@ -605,14 +610,102 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
     return actions
 
 
-def install_source() -> str:
-    """Human-readable uv-receipt source: directory / pinned / PyPI.
+def _current_generation_receipt() -> "install_layout.Receipt | None":
+    """The CURRENT generation's receipt, or ``None`` when there is none to read.
 
-    Explains why ``uv tool upgrade`` may report "Nothing to upgrade":
-    a directory-tracking install never consults PyPI, and an ==-pinned
-    one never moves past its pin (both live incidents, 2026-07-13).
+    CURRENT rather than the RUNNING generation, and the difference is not
+    academic: ``perform_self_install`` reproduces THIS process's install and so
+    reads the running one, while this string answers the forward-looking
+    question ("why did my upgrade not move?"). The next ``nx`` a user types
+    resolves through the shim to ``current``, so ``current`` is the tree whose
+    source governs what that invocation will do.
+
+    Never raises. A dangling pointer, an absent layout, a receipt written by a
+    schema this nx does not read -- all of them mean "no generation answer
+    available here", and the uv receipt is the better of two imperfect answers.
+    """
+    from nexus import install_layout  # noqa: PLC0415 — deferred, avoids an import cycle
+
+    try:
+        return install_layout.read_receipt(install_layout.current_generation())
+    except Exception:  # noqa: BLE001 — no readable generation receipt: fall back to uv
+        return None
+
+
+def install_source() -> str:
+    """Human-readable install source: directory / pinned / PyPI.
+
+    Explains why an upgrade may report "Nothing to upgrade": a
+    directory-tracking install never consults an index, and an ==-pinned uv
+    one never moves past its pin (both live incidents, 2026-07-13). Rendered
+    by ``nx doctor``'s Process-freshness row and by ``nx daemon
+    finish-upgrade``.
+
+    TWO LAYOUTS, AND THE GENERATION WINS (nexus-0za6e). This read the uv
+    receipt and nothing else, which is wrong twice under the generation
+    layout. During the migration window .7 leaves the legacy tree in place
+    until it has zero holders, so the uv receipt stays READABLE and a
+    directory-tracking legacy install migrated onto a PyPI generation reported
+    the legacy source -- a confident wrong answer on the one string whose job
+    is explaining an upgrade that did or did not move. After the legacy tree is
+    reaped it said "unknown" forever. The right answer was already on disk and
+    unused: the receipt the builder writes for every generation.
+
+    THE VOCABULARY IS NOT MIRRORED ACROSS THE BRANCHES, deliberately (contract
+    12). "``uv tool upgrade`` will never move past the pin" is TRUE on a uv
+    tree and FALSE under generations: ``perform_self_install`` passes
+    ``--source`` and ``--extras`` and OMITS the version, so a generation built
+    with ``--version X`` upgrades normally at the next ``nx self install``
+    (verified by execution, 2026-08-26). ``health.py`` renders only the part
+    before the em-dash, so a summary that claimed stickiness would assert it
+    standing alone.
+
+    FORMAT: ``<summary> — <explanation>``. ``health.py`` splits on the
+    separator to render the summary alone; keep both halves true in isolation.
+    """
+    receipt = _current_generation_receipt()
+    if receipt is not None:
+        from nexus.install_advice import (  # noqa: PLC0415 — deferred, avoids an import cycle
+            GENERATION_INSTALLER,
+        )
+
+        if receipt.source_kind == "directory":
+            return (
+                f"local checkout ({receipt.source}) — `{GENERATION_INSTALLER}` "
+                f"rebuilds from that checkout, so a new PyPI release will not "
+                f"move it"
+            )
+        if receipt.version:
+            return (
+                f"PyPI, built with --version {receipt.version} — that pin was "
+                f"one-shot; `{GENERATION_INSTALLER}` resolves the current release"
+            )
+        return f"PyPI — `{GENERATION_INSTALLER}` upgrades normally"
+
+    return _uv_install_source()
+
+
+def _uv_install_source() -> str:
+    """The legacy uv-tree answer, in uv's own vocabulary.
+
+    Kept verbatim rather than paraphrased: a box that has not migrated really
+    does upgrade through uv, and .7 leaves boxes in that state until their
+    legacy tree has zero holders. Telling such a user to run the generation
+    installer is a different wrong answer (contract 12).
+
+    The REMEDIATION inside it is a separate question from the DESCRIPTION
+    around it, and the two are answered by different classifiers on purpose.
+    Reaching this function means no generation RECEIPT was readable; it does
+    NOT mean the box has no generation layout -- a resolvable ``current`` whose
+    receipt is corrupt lands here. On that box ``uv tool install --reinstall
+    conexus`` would rebuild the uv tree and re-symlink over the nexus-owned
+    shims (nexus-utpuw.7's accepted risk), so the commands go through
+    ``install_advice``, which asks the layout rather than the receipt. On a
+    genuinely un-migrated box every one of them returns its uv form unchanged.
     """
     import tomllib  # noqa: PLC0415 — stdlib, deferred for startup cost
+
+    from nexus import install_advice  # noqa: PLC0415 — deferred, avoids an import cycle
 
     receipt = Path.home() / ".local/share/uv/tools/conexus/uv-receipt.toml"
     try:
@@ -627,17 +720,20 @@ def install_source() -> str:
     if req.get("directory"):
         return (
             f"local checkout ({req['directory']}) — `uv tool upgrade` never "
-            "consults PyPI for this install; use scripts/reinstall-tool.sh "
-            "or reinstall from PyPI"
+            f"consults PyPI for this install; use "
+            f"{install_advice.upgrade_command('scripts/reinstall-tool.sh')} "
+            f"or reinstall from PyPI"
         )
     spec = str(req.get("specifier", ""))
     if spec.startswith("=="):
+        reinstall = install_advice.upgrade_command("uv tool install --reinstall conexus")
         return (
             f"PyPI, PINNED ({spec}) — `uv tool upgrade` will never move "
-            "past the pin; reinstall unpinned "
-            "(`uv tool install --reinstall conexus`)"
+            f"past the pin; reinstall unpinned "
+            f"(`{reinstall}`)"
         )
-    return "PyPI, unpinned — `uv tool upgrade conexus` upgrades normally"
+    upgrade = install_advice.upgrade_command("uv tool upgrade conexus")
+    return f"PyPI, unpinned — `{upgrade}` upgrades normally"
 
 
 # ── nexus-cfgo9: ONE-engine model — converge the installed engine ─────────
