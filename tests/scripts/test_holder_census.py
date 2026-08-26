@@ -294,3 +294,62 @@ def test_one_ps_snapshot_serves_the_whole_census(env) -> None:
 
     calls = counter.read_text().count("x") if counter.exists() else 0
     assert calls == 1, f"ps was invoked {calls} times for one census; expected 1"
+
+
+# --------------------------------------------------------------------------
+# attribution is structural, not a denylist on argv text (nexus-qzawu)
+# --------------------------------------------------------------------------
+
+def test_a_holder_whose_argv_contains_the_word_grep_is_still_a_holder(env) -> None:
+    """RG-B Critical. The transient-grep exclusion was a DENYLIST on argv text
+    (``grep -v -e '[[:space:]]grep[[:space:]]' -e '[[:space:]]grep$'``), so it
+    dropped every process whose argv merely contained the word -- ``nx search
+    grep`` is a live holder that reported as none. GC's rule (c) then reaped the
+    tree that process was running from: nexus-q3xrx, reachable with no symlink
+    trickery. Reproduced against the real scripts before this test existed."""
+    tools, stub_bin, bin_dir = env
+    (a,) = _make_gens(tools, "A")
+    _stub_ps(stub_bin, [f"  101 {a}/bin/python {a}/bin/nx search grep"])
+
+    result = _sh(f'nx_generation_holder_pids "{a}"', tools, stub_bin, bin_dir)
+
+    assert result.stdout.split() == ["101"], (
+        "a live holder was dropped because its argv contained the word 'grep'; "
+        "GC will reap the tree it is running from"
+    )
+
+
+def test_a_stamp_collision_sibling_does_not_borrow_its_neighbours_holders(env) -> None:
+    """install_generation.sh suffixes a same-second stamp collision, so
+    ``gen-<stamp>`` and ``gen-<stamp>a`` coexist by design. Substring matching
+    made every holder of the suffixed tree count as a holder of the bare one."""
+    tools, stub_bin, bin_dir = env
+    base, suffixed = _make_gens(tools, "20260825", "20260825a")
+    _stub_ps(stub_bin, [f"  202 {suffixed}/bin/python {suffixed}/bin/nx-mcp"])
+
+    result = _sh(f'nx_generation_holder_pids "{base}"', tools, stub_bin, bin_dir)
+
+    assert result.stdout.strip() == "", (
+        f"gen-20260825 borrowed a holder of gen-20260825a: {result.stdout.split()}"
+    )
+
+
+def test_a_process_merely_naming_a_path_inside_a_generation_counts_as_a_holder(env) -> None:
+    """DELIBERATE, and pinned here so it cannot be 'fixed' by accident. An editor
+    with a file inside the tree open is not running from it, yet it is counted.
+
+    Narrowing attribution to argv[0] would end this over-attribution and buy
+    under-reporting instead. The failure directions are not symmetric: this way
+    GC retains a tree nobody holds, which wastes disk until the next pass; the
+    other way GC deletes a tree somebody is running from. Retention is the
+    direction to fail in."""
+    tools, stub_bin, bin_dir = env
+    (a,) = _make_gens(tools, "A")
+    _stub_ps(stub_bin, [f"  303 /usr/bin/vim {a}/README.txt"])
+
+    result = _sh(f'nx_generation_holder_pids "{a}"', tools, stub_bin, bin_dir)
+
+    assert result.stdout.split() == ["303"], (
+        "attribution narrowed to argv[0]; that trades over-retention for "
+        "under-reporting, which is the direction that deletes data"
+    )

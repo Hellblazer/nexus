@@ -496,3 +496,21 @@ def test_the_reserved_ledger_pointing_at_a_real_venv_is_reaped(env) -> None:
 
     assert not legacy.exists(), "the legacy tree was not reaped through its ledger"
     assert not (tools / "gen-legacy-uv-tool").exists()
+
+
+def test_rule_c_holds_when_the_holders_argv_contains_the_word_grep(env) -> None:
+    """RG-B Critical (nexus-qzawu), at the layer where it does the damage. The
+    census dropped holders whose argv contained the word 'grep', so rule (c) saw
+    an unheld generation and reaped it out from under a live process. Rule (c) is
+    absolute; it cannot depend on what a holder happens to be searching for."""
+    tools, stub_bin = env
+    gens = [_gen(tools, f"{i:02d}") for i in range(8)]
+    _point(tools, "current", gens[7])
+    _stub_ps(stub_bin, [f"  101 {gens[0]}/bin/python {gens[0]}/bin/nx search grep"])
+
+    _sh("nx_gc_generations --keep 2", tools, stub_bin)
+
+    assert gens[0].is_dir(), (
+        "a generation a live process is running from was deleted because that "
+        "process's argv contained the word 'grep' -- nexus-q3xrx via the census"
+    )

@@ -352,3 +352,54 @@ def test_a_metadata_lookup_failure_refuses_the_whole_shim_set(env) -> None:
         "no partial shim set: writing mineru while nx vanishes is the failure "
         "mode that would send someone hunting the wrong thing"
     )
+
+
+def test_a_shim_uv_symlinked_over_is_repaired_by_rewriting(env) -> None:
+    """nexus-utpuw.7's accepted risk, and the ONLY one of its three named
+    mitigations that is supposed to work inside this arc rather than in a later
+    bead (.11, .15). Between migration and reap uv still holds a valid receipt,
+    so a stray `uv tool upgrade conexus` re-symlinks ~/.local/bin/nx over our
+    shim and live sessions start resolving through uv's tree again.
+
+    The mitigation is that shim writes are idempotent: re-running the writer
+    repairs it. test_an_existing_uv_owned_symlink_becomes_a_regular_file already
+    covers the replacement itself; what was missing is the property that makes
+    the repair WORTH anything -- that the repaired shim still resolves through
+    the current pointer instead of baking a generation path. A repair that
+    silently pinned every reclaimed name to one tree would satisfy the older
+    test and break the next flip.
+
+    Both assertions were watched failing: mutating the writer's atomic
+    `mv -f` to a write-through redirect (which follows uv's symlink instead of
+    replacing it) turns this test and its sibling red."""
+    tools, bin_dir = env
+    gen = _make_gen(tools, "A", entry_points=_PROJECT_SCRIPTS)
+    _sh(f'nx_write_shims "{gen}"', tools, bin_dir)
+
+    # uv takes the name back the way uv actually does it: a symlink into its
+    # own tree, replacing our regular-file shim.
+    uv_tree = tools.parent / "uvtools" / "conexus" / "bin"
+    uv_tree.mkdir(parents=True)
+    (uv_tree / "nx").write_text("#!/bin/sh\necho uv\n")
+    shim = bin_dir / "nx"
+    shim.unlink()
+    shim.symlink_to(uv_tree / "nx")
+    assert shim.is_symlink(), "fixture failed to reproduce uv's takeover"
+
+    result = _sh(f'nx_write_shims "{gen}"', tools, bin_dir)
+
+    assert result.returncode == 0, result.stderr
+    assert not shim.is_symlink(), (
+        "re-running the writer left uv's symlink in place; the accepted risk of "
+        "nexus-utpuw.7 has no working mitigation"
+    )
+    body = shim.read_text()
+    assert f"{tools}/current" in body, (
+        "the repaired shim does not resolve through the current pointer"
+    )
+    # Contract #2, readlink-before-exec: the shim must bake the POINTER, never a
+    # generation path. A repair that wrote the generation in directly would look
+    # correct here and pin every repaired name to one tree across the next flip.
+    assert str(gen) not in body, (
+        "the repaired shim baked a generation path instead of the current pointer"
+    )

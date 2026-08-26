@@ -38,10 +38,19 @@
 #                      [--python 3.12] [--legacy-venv <dir>] [--dist <name>]
 #
 # `--legacy-venv` overrides where the legacy tree is looked for; omitted, it
-# resolves via `uv tool dir` (nx_legacy_venv_dir). When no legacy tree is
-# found, this is a clean no-op: exit 0, nothing built, nothing printed on
-# stdout — a caller that only migrates when there is something to migrate
-# can tell the two apart by whether stdout produced a path.
+# resolves via `uv tool dir` (nx_legacy_venv_dir). When uv resolves and no
+# legacy tree is found, this is a clean no-op: exit 0, nothing built, nothing
+# printed on stdout — a caller that only migrates when there is something to
+# migrate can tell the two apart by whether stdout produced a path.
+#
+# ABSENT OR UNRESOLVABLE uv IS NOT A NO-OP: it exits non-zero and says so on
+# stderr. The no-op contract answers "uv says there is no legacy tree", and an
+# unresolvable `uv tool dir` does not answer that question at all. Reporting
+# success there would tell a caller the migration is done while a real legacy
+# tree sits unmigrated and its holders keep running from it, which is the
+# silent half of the nexus-q3xrx failure. Pass `--legacy-venv` to migrate
+# without uv on PATH. (RG-B, nexus-utpuw.22: the previous wording promised the
+# no-op unconditionally and drifted from what the code does.)
 #
 # Prints the new generation's directory on stdout when it migrated
 # something, mirroring install_generation.sh's stdout-purity contract.
