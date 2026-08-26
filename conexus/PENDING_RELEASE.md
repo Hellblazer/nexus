@@ -31,6 +31,27 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.18.0)
 
+- `conexus/hooks/scripts/version_lockstep_action.py` (nexus-utpuw.15) — gate 1
+  no longer requires a uv receipt (False forever under the generation layout,
+  which silently no-opped the whole auto-upgrade), and gate 3 calls
+  `nx self install` on a generation box instead of `uv tool upgrade conexus`.
+- `conexus/hooks/hooks.json` (nexus-utpuw.15) — the unconditional leg's failure
+  message named `uv tool upgrade conexus` only.
+
+**What is NOT protected until this ships.** On a migrated box the installed
+plugin still runs the OLD action from the pinned tag, so auto-upgrade remains a
+silent no-op there: the marker stays stale and the hook re-nudges forever while
+nothing happens. Users are not currently migrated (nothing calls the migration
+yet), so the live exposure is limited to boxes migrated by hand — but the moment
+migration is wired up, this entry is the difference between working
+auto-upgrades and a silent one. Manual remedy meanwhile: `nx self install`.
+
+Note this pairing is deliberate and must ship TOGETHER. Shipping the gate-1 fix
+without the gate-3 fix would be WORSE than the bug: the hook would proceed past
+detection and run `uv tool upgrade conexus` on a generation box, rebuilding the
+legacy uv tree and re-symlinking over the nexus-owned shims on every session
+start (nexus-utpuw.7's accepted risk, automated).
+
 - `conexus/agents/_shared/CONTEXT_PROTOCOL.md` (nexus-e3mak) — reserves the
   `review-completed` token: no agent may write it, only the session that owns
   the gate, once every mandated reviewer has run.
