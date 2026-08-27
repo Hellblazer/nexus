@@ -120,6 +120,7 @@ class Holder:
             self._handshake()
         except BaseException:
             self.proc.kill()
+            self._reap()
             raise
 
     def _pump(self) -> None:
@@ -134,8 +135,19 @@ class Holder:
         self.proc.stdin.write(json.dumps(payload) + "\n")
         self.proc.stdin.flush()
 
-    def _read(self, timeout: float = 120.0) -> dict | None:
-        """The next JSON-RPC message, or None on EOF or a REAL timeout."""
+    def _read(
+        self, timeout: float = 120.0, expect_id: int | None = None
+    ) -> dict | None:
+        """The next JSON-RPC message, or None on EOF or a REAL timeout.
+
+        *expect_id* discards anything that is not the response being waited
+        for. The old fully-synchronous `readline()` could not desynchronise;
+        the pump-thread queue can, because a reply arriving AFTER its call
+        timed out stays queued and would otherwise be handed to the NEXT call
+        on this holder as if it were that call's answer. No current call site
+        reaches that (every timeout path exits), so this closes a latent trap
+        rather than a live bug — RG-E reviewer 1, nexus-utpuw.25.
+        """
         deadline = time.time() + timeout
         while True:
             remaining = deadline - time.time()
@@ -146,14 +158,21 @@ class Holder:
             except queue.Empty:
                 return None
             if line is None:  # child closed stdout
+                # Put it back: the sentinel is single-shot otherwise, so a
+                # second read after EOF would wait out the whole timeout
+                # instead of answering immediately.
+                self._lines.put(None)
                 return None
             line = line.strip()
             if not line:
                 continue
             try:
-                return json.loads(line)
+                message = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if expect_id is not None and message.get("id") != expect_id:
+                continue  # a notification, or a reply to a call that timed out
+            return message
 
     def _handshake(self) -> None:
         self._next_id += 1
@@ -162,8 +181,24 @@ class Holder:
             "params": {"protocolVersion": "2024-11-05", "capabilities": {},
                        "clientInfo": {"name": "gen-flip-gate", "version": "1"}},
         })
-        if self._read() is None:
+        if self._read(expect_id=self._next_id) is None:
+            # KILL BEFORE READING STDERR. This is the TIMEOUT path, and a child
+            # that is hung but still alive never closes stderr — so the
+            # unbounded `stderr.read()` that used to sit here blocked forever
+            # and re-introduced the exact hang this class exists to prevent,
+            # ONE LINE AFTER the bound had worked correctly. It also meant the
+            # `except BaseException` guard below never ran, because
+            # `_handshake` could not raise until that read returned. Found by
+            # RG-E reviewer 1 with a stack-dump watchdog (nexus-utpuw.25).
+            #
+            # Killing first closes the pipe, so the read is bounded by
+            # construction and still yields whatever the child managed to say.
+            # Reaping happens AFTER the read, never before: `wait()` on a child
+            # whose stderr pipe is full would deadlock on the buffer we are
+            # about to drain.
+            self.proc.kill()
             stderr = self.proc.stderr.read()[-2000:] if self.proc.stderr else ""
+            self._reap()
             fail(f"holder {self.label} never completed MCP initialize:\n{stderr}")
         self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
@@ -174,7 +209,7 @@ class Holder:
             "jsonrpc": "2.0", "id": self._next_id, "method": "tools/call",
             "params": {"name": tool, "arguments": arguments},
         })
-        response = self._read()
+        response = self._read(expect_id=self._next_id)
         if response is None:
             fail(f"holder {self.label} did not answer tools/call {tool}")
         blocks = response.get("result", {}).get("content", [])
@@ -184,9 +219,17 @@ class Holder:
     def pid(self) -> int:
         return self.proc.pid
 
+    def _reap(self) -> None:
+        """Wait after a kill. `kill()` alone leaves a zombie until this process
+        exits, and this gate spawns several holders."""
+        try:
+            self.proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+            pass
+
     def stop(self) -> None:
         self.proc.kill()
-        self.proc.wait(timeout=30)
+        self._reap()
 
 
 def fabricate_retirement_generation(stamp: str) -> Path:

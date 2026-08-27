@@ -139,7 +139,12 @@ def test_the_generated_activate_clears_the_generation_root() -> None:
     """``sandbox.sh`` writes the ``activate`` that ``release-sandbox.sh``
     sources, so the sourced-activate exemption above is only honest while that
     file actually clears the pair. This is what makes it honest."""
-    body = (_E2E / "sandbox.sh").read_text()
+    # Through _code_only like everything else in this module. It was NOT, and
+    # the docstring above claimed it was — the same comment-vulnerability class
+    # this module exists to close, left dormant twenty lines from the fix for
+    # it (RG-E reviewer 2, nexus-utpuw.25). Dormant rather than live, since
+    # sandbox.sh's unset really is code; the claim was the defect.
+    body = _code_only((_E2E / "sandbox.sh").read_text())
     unset_lines = [ln for ln in body.splitlines() if "unset" in ln and "NX_SESSION_ID" in ln]
     assert unset_lines, "sandbox.sh no longer writes the targeted-unset line"
     joined = "\n".join(unset_lines)
