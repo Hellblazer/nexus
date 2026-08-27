@@ -4251,6 +4251,54 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
     return _cap_text_result("\n".join(lines), "store_list")
 
 
+def _verify_t2_write_landed(
+    *, project: str, title: str, content: str, row_id: object,
+) -> tuple[str, str]:
+    """Re-read a just-written T2 row and report whether it ACTUALLY landed.
+
+    nexus-zra63 (nexus-piqm5 Layer 2). ``db.put`` returning a row id proves
+    the call returned, not that a row exists: a store that silently no-ops
+    hands back the same success shape as one that wrote. Layer 1
+    (``subagent-stop-writes-scan.py``) catches writes that REPORTED failure by
+    reading the agent's transcript; it structurally cannot see this case,
+    because the transcript records the success string. So the only way to tell
+    them apart is to read the value back.
+
+    Modelled on :func:`nexus.catalog.store_hook` 's manifest verification
+    (nexus-b6enc F2, "never trust a silent path"), which writes, re-reads, and
+    treats an unavailable verifier as a hard stop rather than a pass.
+
+    THREE-STATE, and the third state is the point. A read-back needs a live
+    read path, so when the store is unreachable the check cannot run -- and a
+    check that reports SUCCESS when persistence is unavailable is the same
+    defect one level up, which nexus-piqm5 explicitly forbids. ``unreachable``
+    is therefore neither ``verified`` nor a failure; the caller is told the
+    write is unconfirmed in both directions.
+
+    Returns ``(verdict, detail)`` with verdict one of ``verified`` /
+    ``missing`` / ``mismatch`` / ``unreachable``.
+    """
+    try:
+        with _t2_ctx() as db:
+            landed, _candidates = db.resolve_title(project=project, title=title)
+    except Exception as exc:  # noqa: BLE001 — verifier outage is a VERDICT, not a crash; see three-state note above
+        return "unreachable", f"{type(exc).__name__}: {exc}"
+
+    if landed is None:
+        return "missing", (
+            f"re-read of {project}/{title} found NO row, after a write that "
+            f"reported success as id {row_id}"
+        )
+    got = landed.get("content")
+    if got != content:
+        return "mismatch", (
+            f"re-read of {project}/{title} returned {len(got or '')} chars "
+            f"but {len(content)} were written; a concurrent upsert of the same "
+            f"(project, title) is one possible cause"
+        )
+    return "verified", ""
+
+
 @mcp.tool(
     title="Store Memory Entry",
     annotations={"readOnlyHint": False, "destructiveHint": False},
@@ -4329,6 +4377,30 @@ def memory_put(
             tool="memory_put", tier="T2",
             agent=agent_arg, project=project, target_title=title,
         )
+        # nexus-zra63 (piqm5 Layer 2): verify the row is READABLE before
+        # claiming it was stored. See _verify_t2_write_landed for why a
+        # returned row id is not evidence and why "unreachable" is its own
+        # verdict rather than a pass.
+        verdict, detail = _verify_t2_write_landed(
+            project=project, title=title, content=content, row_id=row_id,
+        )
+        if verdict == "unreachable":
+            return (
+                f"Stored (UNVERIFIED): [{row_id}] {project}/{title}\n"
+                f"The write reported success but could NOT be read back: the "
+                f"verification path is unavailable ({detail}). This is neither "
+                f"a confirmed success nor a confirmed failure — re-read before "
+                f"relying on this entry."
+            )
+        if verdict != "verified":
+            # Raised, not returned, so it funnels through _mcp_tool_error and
+            # carries the shared "Error: " prefix — which is also what Layer 1's
+            # transcript scan keys on, so a silent no-op becomes visible to BOTH
+            # layers instead of only this caller.
+            raise RuntimeError(
+                f"memory_put reported success but the row did not land "
+                f"({verdict}): {detail}"
+            )
         return f"Stored: [{row_id}] {project}/{title}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("memory_put", e)
