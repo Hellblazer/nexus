@@ -1472,7 +1472,7 @@ _TIDY_MAX_ENTRIES = 30
 _TIDY_MAX_CHARS_PER_ENTRY = 2000
 
 
-def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int]:
+def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
     """Retrieve + hydrate the entries to consolidate, server-side.
 
     nexus-mawqw / Fix A. The MCP server holds direct T3 access, so the
@@ -1482,9 +1482,19 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int]:
     post-CC-2.1.162 MCP-server-approval gate that broke the old
     subprocess-calls-MCP-tools design.
 
-    Returns ``(entries_block, n_entries)``. Degrades to ``("", 0)`` on any
-    retrieval failure or empty result so the caller still dispatches a
-    well-formed (entry-free) prompt rather than raising.
+    Returns ``(entries_block, n_entries, reason, genuine_miss)``. ``reason`` is
+    ``""`` when entries were retrieved, and otherwise says WHY there are none.
+    ``genuine_miss`` is True for EXACTLY ONE branch — the collection really had
+    nothing near the topic — so the caller can never report a failure as an
+    empty result.
+
+    nexus-1obui: this previously collapsed six distinct outcomes to ``("", 0)``
+    — search raised, search returned an unstructured payload, zero ids, hydrate
+    raised, hydrate returned a structured error, zero non-empty bodies — and the
+    caller rendered all six as "nothing to consolidate". A T3 outage mid-tidy was
+    indistinguishable from a genuinely empty topic, and a threshold drop (the
+    common case, since consolidation wants a WIDER net than lookup does) read as
+    proof the collection held nothing. Every branch now names itself.
     """
     try:
         hits = search(
@@ -1493,16 +1503,22 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int]:
             limit=_TIDY_MAX_ENTRIES,
             structured=True,
         )
-    except Exception:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+    except Exception as exc:  # noqa: BLE001 — best-effort path; must not crash caller
         import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
         structlog.get_logger().debug("tidy_prefetch_search_failed", exc_info=True)
-        return "", 0
+        return "", 0, f"retrieval FAILED ({type(exc).__name__}: {exc})", False
     if not isinstance(hits, dict):
         # search() returns a human-readable string on no-match / error.
-        return "", 0
+        return "", 0, f"retrieval returned an unstructured payload: {str(hits)[:300]}", False
     ids = hits.get("ids") or []
     if not ids:
-        return "", 0
+        # nexus-1obui: the uro6c threshold diagnostic now rides along on the
+        # structured zero-hit, so a drop can be reported as a drop.
+        reason = hits.get("no_results_reason") or "no entries matched the topic"
+        dropped = bool(hits.get("threshold_dropped"))
+        if dropped:
+            reason = f"RETRIEVAL THRESHOLD DROPPED every candidate — {reason}"
+        return "", 0, str(reason), not dropped
     cols = hits.get("chunk_collections") or hits.get("collections") or [collection]
 
     try:
@@ -1512,10 +1528,13 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int]:
             max_chars_per_doc=_TIDY_MAX_CHARS_PER_ENTRY,
             structured=True,
         )
-    except Exception:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
+    except Exception as exc:  # noqa: BLE001 — best-effort path; must not crash caller
         import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
         structlog.get_logger().debug("tidy_prefetch_hydrate_failed", exc_info=True)
-        return "", 0
+        return "", 0, (
+            f"matched {len(ids)} entries but HYDRATION FAILED "
+            f"({type(exc).__name__}: {exc})"
+        ), False
     if isinstance(hydrated, dict) and hydrated.get("error"):
         # store_get_many caught an internal error and returned it as a
         # structured field rather than raising. Surface it at DEBUG so a
@@ -1526,8 +1545,11 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int]:
         )
     contents = hydrated.get("contents") if isinstance(hydrated, dict) else None
     if not contents:
-        return "", 0
-
+        err = hydrated.get("error") if isinstance(hydrated, dict) else None
+        return "", 0, (
+            f"matched {len(ids)} entries but HYDRATION RETURNED NO CONTENT"
+            + (f" ({err})" if err else "")
+        ), False
     blocks: list[str] = []
     for i, (doc_id, body) in enumerate(zip(ids, contents), start=1):
         body = (body or "").strip()
@@ -1535,8 +1557,10 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int]:
             continue
         blocks.append(f"--- Entry {i} (id={doc_id}) ---\n{body}")
     if not blocks:
-        return "", 0
-    return "\n\n".join(blocks), len(blocks)
+        return "", 0, (
+            f"matched and hydrated {len(ids)} entries but every body was EMPTY"
+        ), False
+    return "\n\n".join(blocks), len(blocks), "", False
 
 
 # ── Tier-discipline telemetry (Phase 1A nexus-kren) ─────────────────────────
@@ -1671,6 +1695,42 @@ def _no_results_message(diagnostics: list, *, base: str = "No results.") -> str:
         f"threshold={top_distance + 0.05:.2f} (or higher) to include it."
         + suffix
     )
+
+
+def _structured_no_results(diagnostics: list, *, base: str = "No results.") -> dict:
+    """Zero-hit STRUCTURED payload that carries the uro6c diagnostic (nexus-1obui).
+
+    ``_no_results_message`` has surfaced a threshold drop on the prose path since
+    nexus-uro6c, expressly so a caller can "relax the ``threshold`` knob rather
+    than conclude 'nothing matched'". ``structured=True`` discarded it and
+    returned bare empty lists, so every programmatic consumer — ``nx_tidy``, the
+    plan-runner step-output contract, anything reading ``ids``/``distances`` —
+    could not tell "the threshold dropped every candidate" from "this topic is
+    genuinely absent". Measured 2026-08-27: ``nx_tidy`` reported "nothing to
+    consolidate" on a topic whose two nearest entries had been dropped at 0.629
+    and 0.645, and which a plain prose ``search`` returned.
+
+    Additive only. The six original keys keep their exact shape and meaning, so
+    existing consumers are unaffected; the new keys are present on zero-hit
+    payloads for callers that want to discriminate.
+    """
+    worst = diagnostics[0].worst_offender() if diagnostics else None
+    out: dict = {
+        "ids": [], "tumblers": [], "distances": [],
+        "collections": [], "chunk_collections": [], "chunk_text_hash": [],
+        "no_results_reason": _no_results_message(diagnostics, base=base),
+        # A caller must not have to parse prose to branch on this.
+        "threshold_dropped": worst is not None,
+    }
+    if worst is not None:
+        name, threshold, top_distance = worst
+        out["closest_dropped"] = {
+            "collection": name,
+            "threshold": threshold,
+            "distance": top_distance,
+            "retry_threshold": round(top_distance + 0.05, 2),
+        }
+    return out
 
 
 # Note: catalog server also registers a "search" tool. No collision — Claude Code
@@ -1851,24 +1911,17 @@ def _search_render(
             _page_cache_put(cache_key, results, fetch_n, diag)
         if not results:
             if structured:
-                return {
-                    "ids": [], "tumblers": [], "distances": [],
-                    "collections": [], "chunk_collections": [],
-                    "chunk_text_hash": [],
-                }
+                return _structured_no_results(diag)
             return _no_results_message(diag)
 
         # Apply pagination
         total = len(results)
         page = results[offset:offset + limit]
         if not page:
+            _off_msg = f"No results at offset {offset} (total {total})."
             if structured:
-                return {
-                    "ids": [], "tumblers": [], "distances": [],
-                    "collections": [], "chunk_collections": [],
-                    "chunk_text_hash": [],
-                }
-            return f"No results at offset {offset} (total {total})."
+                return _structured_no_results(diag, base=_off_msg)
+            return _off_msg
 
         # Record search trace for RDR-061 E2 retrieval feedback correlation.
         # Non-fatal — session may be unavailable in test contexts.
@@ -8614,7 +8667,9 @@ async def nx_tidy(
     # nexus-mawqw / Fix A: pre-fetch the entries server-side and inline
     # them. The child claude -p then consolidates LLM-only with NO tools,
     # so it can never trip the post-CC-2.1.162 MCP-server-approval gate.
-    entries_block, n_entries = _tidy_prefetch(topic, collection)
+    entries_block, n_entries, prefetch_reason, genuine_miss = _tidy_prefetch(
+        topic, collection,
+    )
     capped = n_entries >= _TIDY_MAX_ENTRIES
     if capped:
         import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
@@ -8628,10 +8683,24 @@ async def nx_tidy(
             "Work ONLY from these entries; do NOT call any tools:\n\n"
             f"{entries_block}"
         )
-    else:
+    elif genuine_miss:
         entries_section = (
-            "\n\nNo matching entries were retrieved from the collection. "
-            "Report that there is nothing to consolidate. Do NOT call any tools."
+            "\n\nNo matching entries were retrieved from the collection "
+            f"({prefetch_reason}). Report that there is nothing to consolidate. "
+            "Do NOT call any tools."
+        )
+    else:
+        # nexus-1obui: retrieval did not merely come back empty, it came back
+        # BROKEN (threshold drop, search failure, hydration failure). Reporting
+        # that as "nothing to consolidate" is the false-absence bug this bead
+        # closes: an operator who trusts it writes the duplicate entry that
+        # tidy exists to prevent. Say what actually happened instead.
+        entries_section = (
+            "\n\nRetrieval did NOT complete, so the collection's contents are "
+            f"UNKNOWN — {prefetch_reason}. State plainly that this is a "
+            "RETRIEVAL FAILURE and that no conclusion about duplicates or "
+            "contradictions can be drawn. Do NOT say there is nothing to "
+            "consolidate, and do NOT call any tools."
         )
     prompt = (
         "You are the `tidy` knowledge consolidation operator. You have NO "
@@ -8656,6 +8725,10 @@ async def nx_tidy(
             "the collection may contain additional matching content not seen "
             "by this consolidation pass."
         )
+    if prefetch_reason and not genuine_miss:
+        # Belt and braces: the child is instructed to report this, but the
+        # tool's own return value must not depend on the model complying.
+        lines.append(f"\nRETRIEVAL FAILURE — {prefetch_reason}")
     return "\n".join(lines)
 
 

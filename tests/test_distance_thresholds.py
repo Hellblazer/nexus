@@ -172,6 +172,130 @@ class TestNoResultsMessage:
         assert _no_results_message([diag]) == "No results."
 
 
+class TestStructuredNoResultsCarriesDiagnostic:
+    """nexus-1obui: ``structured=True`` used to return bare empty lists on a
+    zero-hit and DISCARD the uro6c diagnostic, so every programmatic consumer
+    (nx_tidy, the plan-runner step-output contract) could not tell a threshold
+    drop from a genuinely empty topic. Measured 2026-08-27: nx_tidy reported
+    "nothing to consolidate" on a topic whose two nearest entries had been
+    dropped at 0.629 and 0.645 and which a prose search returned."""
+
+    def test_threshold_drop_is_visible_and_machine_readable(self) -> None:
+        from nexus.mcp.core import _structured_no_results
+        from nexus.search_engine import SearchDiagnostics
+
+        diag = SearchDiagnostics(
+            per_collection={"knowledge__papers": (3, 3, 0.65, 0.5515)},
+            total_dropped=3, total_raw=3,
+        )
+        out = _structured_no_results([diag])
+        # The six original keys keep their exact shape — additive change only.
+        for k in ("ids", "tumblers", "distances", "collections",
+                  "chunk_collections", "chunk_text_hash"):
+            assert out[k] == [], f"{k} must stay an empty list"
+        # A caller must not have to parse prose to branch on this.
+        assert out["threshold_dropped"] is True
+        assert out["closest_dropped"]["collection"] == "knowledge__papers"
+        assert out["closest_dropped"]["distance"] == 0.5515
+        assert out["closest_dropped"]["threshold"] == 0.65
+        assert out["closest_dropped"]["retry_threshold"] == 0.60
+        assert "0.5515" in out["no_results_reason"]
+
+    def test_genuine_miss_is_distinguishable_from_a_drop(self) -> None:
+        from nexus.mcp.core import _structured_no_results
+        from nexus.search_engine import SearchDiagnostics
+
+        diag = SearchDiagnostics(per_collection={"code__x": (0, 0, 0.45, None)})
+        out = _structured_no_results([diag])
+        assert out["threshold_dropped"] is False
+        assert "closest_dropped" not in out
+        assert out["no_results_reason"] == "No results."
+
+    def test_offset_base_message_is_preserved(self) -> None:
+        from nexus.mcp.core import _structured_no_results
+
+        out = _structured_no_results([], base="No results at offset 50 (total 3).")
+        assert out["no_results_reason"] == "No results at offset 50 (total 3)."
+        assert out["threshold_dropped"] is False
+
+
+class TestTidyPrefetchNamesItsFailures:
+    """nexus-1obui: _tidy_prefetch collapsed six outcomes to ("", 0) and the
+    caller rendered all six as "nothing to consolidate" — so a T3 outage was
+    indistinguishable from an empty topic. Exactly one branch is a genuine
+    miss; every other branch must refuse that framing."""
+
+    def _prefetch(self, monkeypatch, *, hits=None, exc=None):
+        from nexus.mcp import core
+
+        def fake_search(**_kw):
+            if exc is not None:
+                raise exc
+            return hits
+        monkeypatch.setattr(core, "search", fake_search)
+        return core._tidy_prefetch("some topic", "knowledge")
+
+    def test_threshold_drop_is_not_a_genuine_miss(self, monkeypatch) -> None:
+        block, n, reason, genuine = self._prefetch(monkeypatch, hits={
+            "ids": [], "threshold_dropped": True,
+            "no_results_reason": "No results. Closest candidate was dropped "
+                                 "at distance 0.6290 ...",
+        })
+        assert (block, n) == ("", 0)
+        assert genuine is False, "a drop must never read as an empty collection"
+        assert "THRESHOLD DROPPED" in reason
+        assert "0.6290" in reason
+
+    def test_empty_collection_is_a_genuine_miss(self, monkeypatch) -> None:
+        block, n, reason, genuine = self._prefetch(monkeypatch, hits={
+            "ids": [], "threshold_dropped": False,
+            "no_results_reason": "No results.",
+        })
+        assert (block, n) == ("", 0)
+        assert genuine is True
+        assert "THRESHOLD DROPPED" not in reason
+
+    def test_search_failure_is_not_a_genuine_miss(self, monkeypatch) -> None:
+        block, n, reason, genuine = self._prefetch(
+            monkeypatch, exc=RuntimeError("T3 unreachable"),
+        )
+        assert (block, n) == ("", 0)
+        assert genuine is False
+        assert "retrieval FAILED" in reason
+        assert "T3 unreachable" in reason
+
+    def test_hydration_failure_is_not_a_genuine_miss(self, monkeypatch) -> None:
+        from nexus.mcp import core
+
+        monkeypatch.setattr(core, "search", lambda **_k: {
+            "ids": ["a", "b"], "chunk_collections": ["c", "c"],
+        })
+
+        def boom(*_a, **_k):
+            raise RuntimeError("hydrate exploded")
+        monkeypatch.setattr(core, "store_get_many", boom)
+        block, n, reason, genuine = core._tidy_prefetch("t", "knowledge")
+        assert (block, n) == ("", 0)
+        assert genuine is False, "an outage must not read as an empty collection"
+        assert "HYDRATION FAILED" in reason
+        assert "matched 2 entries" in reason
+
+    def test_successful_retrieval_reports_no_reason(self, monkeypatch) -> None:
+        from nexus.mcp import core
+
+        monkeypatch.setattr(core, "search", lambda **_k: {
+            "ids": ["a"], "chunk_collections": ["c"],
+        })
+        monkeypatch.setattr(core, "store_get_many", lambda *_a, **_k: {
+            "contents": ["real body text"],
+        })
+        block, n, reason, genuine = core._tidy_prefetch("t", "knowledge")
+        assert n == 1
+        assert "real body text" in block
+        assert reason == ""
+        assert genuine is False
+
+
 class TestNoResultsMessageFailedCollections:
     """nexus-pebfx.8: a zero-hit where collections were excluded by service
     errors must say so — otherwise a partial outage reads as a genuine miss."""
