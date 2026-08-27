@@ -399,7 +399,21 @@ class TestRequiredEngineVersion:
         # cc5/cc6 populations, cloud-count-3 deploy-window verify ZERO.
         # Client halves (memory_put ttl contract, frecency write-path
         # rejection + $gt:0) ride 7.13.0 per ledger f2d979113/6a7ff9915.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 85)
+        # BUMPED to (0,1,86) 2026-08-27: conexus paired bump for
+        # engine-service-v0.1.86, cut from b881fbc07 (develop tip). Carries
+        # nexus-lgiqw (reap expired scope=data service tokens) plus a
+        # raw-SQL gate; 1 changeset (service-tokens-005-data-expiry-index),
+        # an ADDITIVE partial index with rollback. Gated BEFORE this bump:
+        # engine suite 2225/0/0/7skip (201 suites), --shakeout PASSED
+        # (incl. Phase F native-smoke probe set), --candidate-migration
+        # PASSED 0 FAIL/41 PASS (v0.1.85 populated floor store, delta=1
+        # matching EXPECT_NEW_CHANGESETS=1, invariants EXACT),
+        # published-client write gate PASSED (published 7.18.0 x candidate,
+        # exact manifest counts, non-vacuous). NOT run at bump time, by
+        # design: --acquire on the published bytes, and the deploy +
+        # STEP-6 cloud gates -- the deploy fires at the client tag push
+        # (paired-release choreography), so those follow this bump.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 86)
 
 
 class TestParseEngineVersion:
