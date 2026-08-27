@@ -55,7 +55,7 @@ jobs:
     name: pinned-tag freshness
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Fetch exactly the pinned release tags
         env:
@@ -122,7 +122,7 @@ jobs:
           done
           git tag -l
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
 
       - name: Run the ledger contract
         env:
