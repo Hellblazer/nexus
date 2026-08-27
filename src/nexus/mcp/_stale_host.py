@@ -25,12 +25,37 @@ used, verified against mcp 1.27.1) and, per Hal's g6vb4 decision
   undecorated);
 - **never refuses a call**: a stale host mostly works (cached modules keep
   serving); refusing would brick every live session on every upgrade.
+
+TWO LAYOUTS, TWO REGIMES (nexus-utpuw.12)
+-----------------------------------------
+Everything above describes IN-PLACE replacement, and under the side-by-side
+generation layout that premise dies: the running generation's files are never
+touched by a flip, so the dist-info mtime detector reports ``stale=False``
+forever on every migrated box. The replacement is exact --
+``sys.prefix != readlink(<tools>/current)`` -- and it carries a DIFFERENT
+verdict, so the two regimes are kept apart rather than blended:
+
+* **Generation host.** Skew is real but BENIGN: the tree is intact, the module
+  graph is coherent, and the host converges at its next spawn. One
+  informational note, and the GH #1414 decoration is SUPPRESSED -- there, an
+  ImportError is an ordinary defect, and "almost certainly upgrade skew, not a
+  code defect" would send someone chasing a restart for a real bug.
+* **Legacy uv tree** (an un-migrated box, or a migrated one where a stray
+  ``uv tool upgrade conexus`` rebuilt the tree under a live holder --
+  nexus-utpuw.7's recorded accepted risk). In-place replacement still really
+  happens, so the mtime detector and the decoration below are still correct
+  and are kept verbatim.
+
+Observably, this ADDS the note on a generation host and changes nothing else:
+that host previously read fresh forever, so it was never decorated either.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import structlog
 
-from nexus import upgrade_finish
+from nexus import install_layout, upgrade_finish
 
 _log = structlog.get_logger(__name__)
 
@@ -51,6 +76,16 @@ def _warn(**kw: object) -> None:
     _log.warning("mcp_host_stale", **kw)
 
 
+def _note_skew(**kw: object) -> None:
+    """Seam for tests; emits the one-shot generation-skew note.
+
+    INFO, not WARNING, and deliberately: under generations a skewed holder
+    is consistent, and the nexus-utpuw acceptance criterion says the only
+    output about live holders is informational.
+    """
+    _log.info("mcp_host_generation_skew", **kw)
+
+
 def _stale_note(st: "upgrade_finish.SelfStaleness") -> str:
     return (
         f"[stale MCP host: this nx-mcp process started under conexus "
@@ -66,25 +101,35 @@ def _stale_note(st: "upgrade_finish.SelfStaleness") -> str:
 
 def install_stale_host_hook(server: object) -> bool:
     """Wrap the MCP server's CallToolRequest handler with the staleness
-    check. Returns False (logged at debug) when the baseline cannot be
-    captured (source checkout without dist-info) or the FastMCP internals
-    moved — MCP boot is never blocked.
+    check, in whichever regime this host's layout calls for (module
+    docstring). Returns False (logged at debug) when the LEGACY regime's
+    baseline cannot be captured (source checkout without dist-info) or the
+    FastMCP internals moved — MCP boot is never blocked. A generation host
+    needs no dist-info and so installs regardless.
 
     FRAGILE COUPLING: reaches into ``server._mcp_server`` and patches
     ``request_handlers[CallToolRequest]`` — private FastMCP internals,
     verified against mcp 1.27.1. ``tests/test_stale_host.py`` exercises the
     real FastMCP path and goes red if they move.
     """
-    try:
-        baseline_mtime, baseline_version, dist_info = (
-            upgrade_finish.install_dist_info()
-        )
-        baseline = (baseline_mtime, baseline_version)
-    except Exception as exc:  # noqa: BLE001 — no dist-info: nothing to compare against
-        _log.debug(
-            "stale_host_hook_no_baseline", error=f"{type(exc).__name__}: {exc}"
-        )
-        return False
+    generation = upgrade_finish.running_generation()
+    baseline_mtime, baseline_version = 0.0, ""
+    dist_info = None
+    if generation is None:
+        # LEGACY regime only. The generation regime compares sys.prefix
+        # against the pointer and needs no dist-info at all; gating it behind
+        # this baseline would leave the reframe disabled on exactly the
+        # layout it was written for — the silent-rot shape this arc is about.
+        try:
+            baseline_mtime, baseline_version, dist_info = (
+                upgrade_finish.install_dist_info()
+            )
+        except Exception as exc:  # noqa: BLE001 — no dist-info: nothing to compare against
+            _log.debug(
+                "stale_host_hook_no_baseline", error=f"{type(exc).__name__}: {exc}"
+            )
+            return False
+    baseline = (baseline_mtime, baseline_version)
     try:
         from mcp import types  # type: ignore[import-not-found]  # noqa: PLC0415 — deferred heavy dep; mcp SDK loaded only when patching handler
 
@@ -94,7 +139,9 @@ def install_stale_host_hook(server: object) -> bool:
         if original is None:
             return False
 
-        state = {"stale": None, "warned": False}  # per-install, not module-global
+        state = {  # per-install, not module-global
+            "stale": None, "warned": False, "noted": False,
+        }
 
         def _check() -> "upgrade_finish.SelfStaleness | None":
             """Evaluate (or replay) staleness; never raises.
@@ -138,6 +185,66 @@ def install_stale_host_hook(server: object) -> bool:
             except Exception:  # noqa: BLE001 — decoration must never break the error path
                 return None
 
+        def _check_skew() -> Path | None:
+            """The CURRENT generation when this host is no longer running it;
+            None when it matches, or when the layout cannot answer.
+
+            NOT cached, unlike the legacy verdict beside it. The obvious
+            rationale for caching — "the pointer only ever moves forward, so
+            a host that has fallen behind never catches up" — is FALSE in
+            this repo: ``nx_rollback_current`` in ``_install/flip.sh`` (.3)
+            repoints ``current`` at ``previous``, and a rolled-back pointer
+            can land back on this host's own generation. A cache would then
+            hold a verdict the disk has retracted. Recomputing costs ONE
+            ``readlink``, which is also why this regime needs no equivalent
+            of the legacy fast path (critic MEDIUM-2): what that path exists
+            to avoid is an ``importlib.metadata`` resolution per tool call,
+            and there is none here to avoid. Substantive-critic, 2026-08-26.
+
+            An ABSENT ``current`` (``is_stale`` raises) is not a verdict this
+            formula can make, and a tool call is not the place to surface it
+            — it reads as "no skew known", never as an error.
+            """
+            try:
+                if not install_layout.is_stale(generation):
+                    return None
+                return install_layout.current_generation()
+            except Exception:  # noqa: BLE001 — the check must never break a tool call
+                return None
+
+        async def _wrapped_generation(req: object) -> object:
+            """Generation regime: note once, decorate NEVER, refuse never.
+
+            No decoration here is the whole point (module docstring): this
+            host's tree was not touched by the flip, so an import-shaped
+            failure is a real defect and labelling it upgrade skew would
+            misdirect the reader.
+
+            The note DOES promise convergence, which ``spawn_tripwire``
+            deliberately does not, and the difference is real rather than
+            sloppiness: an MCP host is long-lived and launched by BARE
+            COMMAND NAME (``conexus/.mcp.json`` runs ``nx-mcp`` /
+            ``nx-mcp-catalog``), so it resolves through the shim and its skew
+            comes from a flip landing after startup — which the next respawn
+            does clear. A hand-configured client pointing at an absolute
+            generation path would not converge; that is outside how this
+            project launches its servers.
+            """
+            current = _check_skew()
+            if current is not None and not state["noted"]:
+                state["noted"] = True
+                _note_skew(
+                    running=str(generation),
+                    current=str(current),
+                    detail=(
+                        f"this MCP host is running generation "
+                        f"{generation.name}; current is {current.name}. Its "
+                        f"tree is intact — it is serving coherent code and "
+                        f"converges when the session next respawns it."
+                    ),
+                )
+            return await original(req)
+
         async def _wrapped(req: object) -> object:
             st = _check()
             if st is not None and st.stale and not state["warned"]:
@@ -174,7 +281,9 @@ def install_stale_host_hook(server: object) -> bool:
                     )
             return result
 
-        low.request_handlers[key] = _wrapped
+        low.request_handlers[key] = (
+            _wrapped_generation if generation is not None else _wrapped
+        )
         return True
     except Exception as exc:  # noqa: BLE001 — never block boot on the staleness hook
         _log.debug(

@@ -320,6 +320,94 @@ def test_a_keep_of_zero_is_refused(env) -> None:
     assert _names(tools) == {g.name for g in gens}, "a refused GC deleted something"
 
 
+# --------------------------------------------------------------------------
+# symlinked entries: .7's legacy pseudo-generation
+# --------------------------------------------------------------------------
+
+def test_a_symlinked_pseudo_generation_reaps_its_real_target(env) -> None:
+    """.7 registers the legacy uv-tool tree as a pseudo-generation: a symlink
+    named gen-legacy-uv-tool pointing OUTSIDE tools/ at the real uv-managed
+    tree. It is always receipt-less (nothing ever writes nexus-install.json
+    into a tree this project does not own), so it is never protected by
+    keep-last-N -- but a REAP of it must delete the REAL tree, not just
+    unlink the pointer. Plain `rm -rf` on a symlink only removes the link
+    and leaves its target on disk untouched, which would silently defeat
+    the bead's 'plain rm -rf of the legacy dir' requirement."""
+    tools, stub_bin = env
+    legacy_real = tools.parent / "uv-tool-dir" / "conexus"
+    (legacy_real / "bin").mkdir(parents=True)
+    # A uv-managed venv always carries pyvenv.cfg (PEP 405), and the reap
+    # requires it as proof the ledger target really is a venv and not an
+    # arbitrary path someone pointed the pointer at.
+    (legacy_real / "pyvenv.cfg").write_text("home = /opt/py/bin\n")
+    (legacy_real / "bin" / "nx").write_text("legacy nx")
+    # A uv-managed venv always carries this, and the reap requires it as proof
+    # that the ledger target really is a venv rather than an arbitrary path.
+    (legacy_real / "pyvenv.cfg").write_text("home = /opt/py/bin\n")
+    pseudo = tools / "gen-legacy-uv-tool"
+    pseudo.symlink_to(legacy_real)
+    current = _gen(tools, "00")
+    _point(tools, "current", current)
+
+    result = _sh("nx_gc_generations --keep 2", tools, stub_bin)
+
+    assert result.returncode == 0, result.stderr
+    assert not legacy_real.exists(), "the real legacy tree survived its own reap"
+    assert not pseudo.exists() and not pseudo.is_symlink(), (
+        "the now-dangling pseudo-generation pointer was left behind"
+    )
+
+
+def test_a_symlinked_pseudo_generation_with_a_live_holder_is_not_reaped(env) -> None:
+    tools, stub_bin = env
+    legacy_real = tools.parent / "uv-tool-dir" / "conexus"
+    (legacy_real / "bin").mkdir(parents=True)
+    # A uv-managed venv always carries pyvenv.cfg (PEP 405), and the reap
+    # requires it as proof the ledger target really is a venv and not an
+    # arbitrary path someone pointed the pointer at.
+    (legacy_real / "pyvenv.cfg").write_text("home = /opt/py/bin\n")
+    (legacy_real / "bin" / "nx").write_text("legacy nx")
+    # A uv-managed venv always carries this, and the reap requires it as proof
+    # that the ledger target really is a venv rather than an arbitrary path.
+    (legacy_real / "pyvenv.cfg").write_text("home = /opt/py/bin\n")
+    pseudo = tools / "gen-legacy-uv-tool"
+    pseudo.symlink_to(legacy_real)
+    current = _gen(tools, "00")
+    _point(tools, "current", current)
+    _stub_ps(stub_bin, [f"  909 {legacy_real}/bin/python {legacy_real}/bin/nx-mcp"])
+
+    result = _sh("nx_gc_generations --keep 2", tools, stub_bin)
+
+    assert result.returncode == 0, result.stderr
+    assert legacy_real.exists(), (
+        "a legacy tree a live process is running from was reaped -- the exact "
+        "nexus-q3xrx failure the pseudo-generation registration exists to prevent"
+    )
+    assert pseudo.is_symlink()
+
+
+def test_a_symlinked_pseudo_generation_never_counts_toward_keep_last_n(env) -> None:
+    """Permanently receipt-less by construction, so it must never shield a
+    real generation from retention -- the same non-vacuity concern the
+    receipt-less-wreckage test above pins for a crashed build."""
+    tools, stub_bin = env
+    legacy_real = tools.parent / "uv-tool-dir" / "conexus"
+    (legacy_real / "bin").mkdir(parents=True)
+    # A uv-managed venv always carries pyvenv.cfg (PEP 405), and the reap
+    # requires it as proof the ledger target really is a venv and not an
+    # arbitrary path someone pointed the pointer at.
+    (legacy_real / "pyvenv.cfg").write_text("home = /opt/py/bin\n")
+    pseudo = tools / "gen-legacy-uv-tool"
+    pseudo.symlink_to(legacy_real)
+    gens = [_gen(tools, f"{i:02d}") for i in range(3)]
+    _point(tools, "current", gens[2])
+
+    _sh("nx_gc_generations --keep 2", tools, stub_bin)
+
+    assert not legacy_real.exists(), "the pseudo-generation was wrongly protected"
+    assert gens[1].is_dir() and gens[2].is_dir()
+
+
 def test_gc_never_follows_the_current_symlink_when_deleting(env) -> None:
     """rm -rf through a symlink would delete the TARGET's contents. The
     pointers live in the same directory being swept."""
@@ -332,3 +420,97 @@ def test_gc_never_follows_the_current_symlink_when_deleting(env) -> None:
 
     assert (gens[3] / "bin" / "nx").exists(), "current's target lost its contents"
     assert (gens[2] / "bin" / "nx").exists(), "previous's target lost its contents"
+
+
+# --------------------------------------------------------------------------
+# the ONLY route out of tools/ -- fenced, and tested in the dangerous direction
+# --------------------------------------------------------------------------
+
+def test_a_gen_symlink_that_is_not_the_reserved_ledger_is_never_followed(env) -> None:
+    """TRIPWIRE, and it is here because the capability was added without it.
+
+    .7 taught GC to follow a gen-* symlink so the legacy uv-tool tree could be
+    reaped through a ledger pointer. That is the only way this sweep can delete
+    anything outside the tools root, and it originally arrived guarded only by
+    "the target is not literally /". Measured against that version: a
+    `gen-rogue` symlink pointing at an unrelated directory caused rm -rf of
+    that directory. One value out of infinitely many dangerous ones is not a
+    guard.
+    """
+    tools, stub_bin = env
+    precious = tools.parent / "PRECIOUS_USER_DATA"
+    precious.mkdir()
+    (precious / "thesis.txt").write_text("irreplaceable")
+
+    gens = [_gen(tools, f"{i:02d}") for i in range(3)]
+    _point(tools, "current", gens[2])
+    (tools / "gen-rogue").symlink_to(precious)
+
+    result = _sh("nx_gc_generations --keep 1", tools, stub_bin)
+
+    assert (precious / "thesis.txt").read_text() == "irreplaceable", (
+        "GC followed an unrecognised gen-* symlink out of the tools root and "
+        "deleted what it pointed at"
+    )
+    assert (tools / "gen-rogue").is_symlink(), "the rogue pointer was silently removed"
+    assert "refusing to reap through an unrecognised generation symlink" in result.stderr
+    assert gens[0].name not in _names(tools), (
+        "NON-VACUITY: nothing was reaped at all, so the survival above proves nothing"
+    )
+
+
+def test_the_reserved_ledger_pointing_at_a_non_venv_unlinks_but_does_not_delete(env) -> None:
+    """Right name, wrong target. A home directory or a checkout has no
+    pyvenv.cfg, so the pointer goes and the tree stays. Failing this way leaves
+    litter; failing the other way deletes data."""
+    tools, stub_bin = env
+    not_a_venv = tools.parent / "not-a-venv"
+    not_a_venv.mkdir()
+    (not_a_venv / "important.txt").write_text("keep me")
+
+    gens = [_gen(tools, f"{i:02d}") for i in range(2)]
+    _point(tools, "current", gens[1])
+    (tools / "gen-legacy-uv-tool").symlink_to(not_a_venv)
+
+    result = _sh("nx_gc_generations --keep 1", tools, stub_bin)
+
+    assert (not_a_venv / "important.txt").read_text() == "keep me"
+    assert not (tools / "gen-legacy-uv-tool").exists()
+    assert "not a venv" in result.stderr
+
+
+def test_the_reserved_ledger_pointing_at_a_real_venv_is_reaped(env) -> None:
+    """The intended case still works: a genuine uv-managed venv, carrying
+    pyvenv.cfg, is deleted through the ledger pointer."""
+    tools, stub_bin = env
+    legacy = tools.parent / "uv-tools" / "conexus"
+    (legacy / "bin").mkdir(parents=True)
+    (legacy / "pyvenv.cfg").write_text("home = /opt/py/bin\n")
+    (legacy / "bin" / "nx").write_text("#!/bin/sh\nexit 0\n")
+
+    gens = [_gen(tools, f"{i:02d}") for i in range(2)]
+    _point(tools, "current", gens[1])
+    (tools / "gen-legacy-uv-tool").symlink_to(legacy)
+
+    _sh("nx_gc_generations --keep 1", tools, stub_bin)
+
+    assert not legacy.exists(), "the legacy tree was not reaped through its ledger"
+    assert not (tools / "gen-legacy-uv-tool").exists()
+
+
+def test_rule_c_holds_when_the_holders_argv_contains_the_word_grep(env) -> None:
+    """RG-B Critical (nexus-qzawu), at the layer where it does the damage. The
+    census dropped holders whose argv contained the word 'grep', so rule (c) saw
+    an unheld generation and reaped it out from under a live process. Rule (c) is
+    absolute; it cannot depend on what a holder happens to be searching for."""
+    tools, stub_bin = env
+    gens = [_gen(tools, f"{i:02d}") for i in range(8)]
+    _point(tools, "current", gens[7])
+    _stub_ps(stub_bin, [f"  101 {gens[0]}/bin/python {gens[0]}/bin/nx search grep"])
+
+    _sh("nx_gc_generations --keep 2", tools, stub_bin)
+
+    assert gens[0].is_dir(), (
+        "a generation a live process is running from was deleted because that "
+        "process's argv contained the word 'grep' -- nexus-q3xrx via the census"
+    )

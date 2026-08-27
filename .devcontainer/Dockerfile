@@ -56,7 +56,13 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 # Install uv (Python toolchain manager)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Install Python 3.12 and conexus (provides the nx CLI)
+# Install Python 3.12 and conexus (provides the nx CLI).
+# First-install bootstrap: this image starts from nothing, so uv is how the
+# box gets its first tree. A later `nx self install` migrates it to the
+# side-by-side generation layout (~/.local/share/nexus/tools/gen-<stamp>
+# plus a `current` pointer) and writes its shims into ~/.local/bin — the
+# same directory already on PATH above, under different ownership. Keep
+# that PATH entry when editing: it serves both layouts.
 RUN /home/node/.local/bin/uv python install 3.12 \
     && /home/node/.local/bin/uv tool install conexus --python 3.12
 

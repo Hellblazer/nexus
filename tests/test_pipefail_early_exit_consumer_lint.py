@@ -992,8 +992,8 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # dist-info sniffing. The former third entry (the `--version`
         # banner sniff) was FIXED rather than exempted -- it needed no
         # live infra, being a plain capture-then-parameter-expansion.
-        "tests/e2e/fresh-install-mvv.sh:512",
-        "tests/e2e/fresh-install-mvv.sh:538",
+        "tests/e2e/fresh-install-mvv.sh:516",
+        "tests/e2e/fresh-install-mvv.sh:542",
         # --- tests/e2e/local-index-memory-gate.sh (1 entry): owned by a
         # concurrent agent in the authoring session (nexus-wbeyi itself)
         # -- reported to that hand-off, not fixed here. This is a
@@ -1192,9 +1192,13 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         # edits shifted the file; same 3 sites, same rationale.
         #   Retargeted AGAIN (7.15.0 release fix a1f6bf7c4 shifted the
         #   file +7 lines): :1103 -> :1110, :1107 -> :1114, :1155 -> :1162.
-        "tests/e2e/release-sandbox.sh:1110",
-        "tests/e2e/release-sandbox.sh:1114",
-        "tests/e2e/release-sandbox.sh:1162",
+        #   Retargeted AGAIN (nexus-utpuw.8 rewrote the comment explaining
+        #   why the sandbox activates $HOME first, +6 lines): :1110 -> :1116,
+        #   :1114 -> :1120, :1162 -> :1168. Same 3 sites, same rationale --
+        #   only the prose above them changed.
+        "tests/e2e/release-sandbox.sh:1116",
+        "tests/e2e/release-sandbox.sh:1120",
+        "tests/e2e/release-sandbox.sh:1168",
     }
 )
 _PIPEFAIL_OR_TRUE_SITES_CEILING = 9

@@ -165,10 +165,31 @@ class StrandedInstall:
 
     @property
     def message(self) -> str:
-        """The literal two-hop redirect (bead nexus-gynt2 spec), with
-        appended clauses (order: verification-unavailable note, THEN the
-        ack escape) when the corresponding field is set — see
-        :attr:`verification_unavailable` / :attr:`ack_eligible`."""
+        """The two-hop redirect with the FIRST HOP in uv vocabulary.
+
+        Kept as the default because this module is a stdlib-only leaf
+        (:class:`TestLeafContract`) and cannot ask
+        :mod:`nexus.install_advice` which layout the box has. Callers that
+        CAN ask should use :meth:`message_for` — see nexus-utpuw.13. Under
+        the generation layout the uv form is wrong advice, and a box with
+        unmigrated pre-PG data is USUALLY still on the uv tree, but "usually"
+        is not a reason for two surfaces to print different commands for one
+        procedure.
+        """
+        return self.message_for(f"uv tool install conexus=={self.pinned_release}")
+
+    def message_for(self, first_hop: str) -> str:
+        """:attr:`message` with the first hop expressed as *first_hop*.
+
+        The leaf formats; the caller decides the vocabulary. That keeps the
+        import contract intact without stranding this banner on advice that
+        the layout-aware surfaces have already outgrown.
+
+        The pin must be INSIDE *first_hop*: hop one is a downgrade to the
+        last migration-capable release, and a caller that passes a bare
+        upgrade command silently turns a recovery procedure into "install
+        the newest release", which is the hop it exists to avoid.
+        """
         era_clause = (
             f"conexus {self.era}" if self.era else "an earlier, pre-PG conexus release"
         )
@@ -179,7 +200,7 @@ class StrandedInstall:
             f"migration tool, so it cannot read or migrate that data — proceeding "
             f"would look like an empty install, not data loss; nothing has been "
             f"touched. Two-hop upgrade: (1) install conexus=={pin} "
-            f"(`uv tool install conexus=={pin}` or `pip install conexus=={pin}`), "
+            f"(`{first_hop}` or `pip install conexus=={pin}`), "
             f"(2) run `nx upgrade` there to migrate the data, "
             f"(3) upgrade back to this version."
         )

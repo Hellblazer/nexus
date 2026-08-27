@@ -76,6 +76,36 @@ All agents SHOULD use these tags when writing to scratch:
 
 Tags are comma-separated. Combine with domain tags: `failed-approach,auth,retry`.
 
+### RESERVED — never write `review-completed`
+
+`review-completed` is not a note tag. It is the token
+`pre_close_verification_hook.sh` reads to decide whether a bead may close, and
+it matches by SUBSTRING over T1 tags/content and T2 title/content. Any entry
+carrying that token plus a bead id IS that bead's review coverage, whatever the
+entry meant to say.
+
+**No agent writes it. Only the session that owns the gate does, once, after
+every mandated reviewer has run and any resulting fixes have landed.**
+
+This is not hypothetical. On 2026-08-26 a dispatched reviewer finished the FIRST
+of a two-reviewer gate and left a handoff note for its sibling beginning
+`review-completed bead=nexus-utpuw.23 (RG-C reviewer 1/2: ...)`. It was honest
+and it said "1/2" — and the hook cannot read that. The gate would have closed
+with the critic never dispatched, on a gate whose own text says the critic is
+never optional (nexus-e3mak).
+
+The failure is structural, not a lapse of care: a gate whose evidence is written
+by one of the parties it gates cannot distinguish coverage from a progress
+report. The same shape is filed as nexus-1f98p, where a scope audit read an
+allowlist typed by the agent whose commits it audited.
+
+To hand findings to a sibling reviewer or to the dispatcher, write to T2 with a
+descriptive title and no reserved token, and return them in your response text:
+
+```
+nx memory put - -p <project> -t "<gate>-review-<role>-findings"   # no reserved token
+```
+
 **T1 MCP Tools:**
 ```
 mcp__plugin_conexus_nexus__scratch(action="put", content="<content>", tags="TAG1,TAG2")
@@ -92,6 +122,84 @@ The SessionEnd hook runs automatically at session close and auto-promotes flagge
 - Hypothesis validated (worth preserving across sessions)
 - Interim findings that a future session may need
 - Working notes that inform future work
+
+### Parallel dispatch that MUTATES needs a mutex
+
+A fan-out of agents is safe while they READ. The moment their task involves
+changing the tree — mutating a file to check whether an assertion can fail,
+running a build, restoring afterwards — concurrent agents collide, and the
+collision does not read as a collision.
+
+**The caller hands out the lock at dispatch time**, in the prompt, alongside
+the task (orchestration stays with the caller — see RELAY below). Alternatively
+give each agent its own worktree; the lock is cheaper when the fan-out is
+short-lived.
+
+**RETROFITTING IT DOES NOT RELIABLY WORK, and an agent is right to refuse.** An
+out-of-band message that arrives mid-task, contradicts the original briefing,
+and asks the recipient to adopt a new protocol is exactly the shape of a prompt
+injection. Measured on the RG-E run below: the lock was sent to all three
+agents mid-flight, and one correctly declined it as a likely injection — then
+went on to observe the very collision it was meant to prevent (a shared file
+transiently carrying a peer's mutation, self-resolving ~50s later), avoiding
+corrupted findings only because it had sourced its restore from git HEAD rather
+than trusting its own earlier copy.
+
+So after dispatch the honest options are: let the run finish and re-run
+serially, or kill and re-dispatch. "I will just message them" is not one. If
+you must send such a message anyway, give the recipient a fact it can verify in
+the repo — authority cannot be asserted over that channel.
+
+    until mkdir /tmp/<gate>.lock 2>/dev/null; do sleep 2; done
+    # mutate -> run -> RESTORE -> confirm `git status --short` is clean
+    rmdir /tmp/<gate>.lock
+
+**PREFER NOT SHARING THE TREE AT ALL — the lock is the fallback.** Ranked:
+give each agent its own `git worktree` (full isolation, the real suite still
+runs); or, when the check is pure logic, extract what you need with
+`git show <rev>:<path>` into a private temp copy and mutate that, which needs no
+lock because nothing shared is written; and only then a mutex on the shared
+tree, for mutations that must be visible to code resolving from the worktree.
+Measured on the RG-E run below: the agent that declined the lock and worked from
+`git show` copies reproduced the finding exactly and hit none of the collisions
+the lock-holders did.
+
+**Every agent that mutates the SHARED tree:**
+
+- Take the lock before the first mutation. `mkdir` is atomic, so it is a real
+  mutex.
+- Hold it for mutate → run → restore → verify, and nothing else. Never across
+  analysis, write-up, or a full suite run you did not need under mutation.
+- Restore from a copy you took yourself, never by hand-reconstructing — and
+  **namespace the backup path** (`/tmp/$$-layout.sh.orig`, not
+  `/tmp/layout.sh.orig`). Measured on the same RG-E run: an agent that DID hold
+  the lock still restored a SIBLING's backup from the shared unnamespaced path,
+  leaving its own mutation in place after a "successful" restore. Prefer
+  `git checkout -- <path>` for a tracked file — there is nothing to namespace.
+- **Verify the restore against the repo, not against your own copy.** Diffing
+  against the backup you just restored from is a tautology. `git status --short`
+  is the check; that is how the above was caught.
+- **An unexpectedly dirty tree is a COLLISION, not a finding.** Release, wait,
+  re-check, and report it as a collision. Never draw a conclusion from it, and
+  re-run any ambiguous result under the lock before reporting — an
+  unreproducible mutation result is not evidence.
+- Report positively whether you observed a collision, so an undetected one does
+  not pass silently.
+
+WHY THIS IS WORSE THAN AN ORDINARY RACE, and why it belongs in the gate
+protocol rather than in general hygiene: a peer restoring the tree mid-run is
+indistinguishable from *the assertion under test flipping colour*. On a gate
+whose entire output is "can this check fail?", that yields a confident **"this
+assertion cannot fail"** derived purely from an artifact — the wrong answer,
+stated with evidence, to the exact question the gate exists to answer.
+
+Origin: RG-E (nexus-utpuw.25) on 2026-08-26 dispatched three agents
+concurrently — both reviewers plus test-validator, which that gate mandates
+"because the arc's whole safety claim rests on these tests being non-vacuous" —
+every one of them instructed to mutate the same four files. The lock was
+retrofitted mid-run. Same family as the RESERVED section above: a gate whose
+evidence is produced by parties that can interfere with each other cannot
+distinguish a result from an artifact.
 
 ## Storage Tier Quick Reference
 

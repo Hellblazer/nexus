@@ -43,10 +43,28 @@ reproducing nexus-q3xrx by way of the mechanism meant to prevent it. So the
 shim resolves the pointer into ``NX_GEN`` first and execs the real path. It
 is one line of difference and it is the whole design.
 
-This module defines the contract only. Resolving the current generation,
-enumerating generations, reading receipts off disk and answering "am I
-stale?" belong to ``nexus-utpuw.9``, which extends this module once there is
-a real layout to query.
+``nexus-utpuw.9`` (P5a) extends this module with the runtime half: resolving
+the current generation, enumerating generations, reading receipts off disk,
+and answering "am I stale?" -- :func:`current_generation`, :func:`is_stale`,
+:func:`list_generations`, :func:`read_receipt`.
+
+STALENESS IS EXACT
+
+    stale  <=>  Path(sys.prefix) != os.readlink(<tools>/current)
+
+One readlink. No filesystem-clock inference, no false positives or false
+negatives. Today ``upgrade_finish.py``'s ``self_staleness()`` infers
+staleness from dist-info mtime, which only worked because uv replaced
+site-packages IN PLACE; under side-by-side generations the old tree is never
+replaced, so that detector would report ``stale=False`` forever. This is a
+deliberate replacement, not a casualty (see nexus-utpuw.12).
+
+:func:`is_stale` is ALSO design point 6 of nexus-utpuw: a new spawn LOGS
+(never fails) when its own baked generation differs from current. The
+detector and the tripwire are the same call -- a caller either lets the
+baseline default to its own ``sys.prefix`` (a short-lived spawn) or supplies
+one captured earlier (a long-lived host comparing against its startup
+state) -- so the rule is implemented once, not twice.
 """
 from __future__ import annotations
 
@@ -54,6 +72,7 @@ import dataclasses
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -69,6 +88,20 @@ BIN_DIR_ENV = "NX_BIN_DIR"
 #: ``<tools>/gen-<stamp>``. A prefix rather than a bare stamp so that a GC
 #: pass can tell a generation from anything else that lands in the root.
 GENERATION_PREFIX = "gen-"
+
+#: Names that live in a venv's ``bin/`` but are NEVER shimmed into the shared
+#: bin dir. The Python twin of ``NX_NEVER_SHIM`` in ``_install/shims.sh``,
+#: pinned by ``tests/test_install_layout_twins_agree.py``.
+#:
+#: This exists because ``~/.local/bin`` is SHARED. pyenv, asdf and homebrew all
+#: leave a ``python`` symlink there, so anything deriving "the names nexus owns"
+#: from a generation's ``bin/`` must subtract these or it will mistake another
+#: tool's symlink for evidence that uv reclaimed our shims (RG-C, nexus-utpuw.11).
+NEVER_SHIM = frozenset({
+    "python", "python3", "pip", "pip3",
+    "activate", "activate.csh", "activate.fish",
+    "uv", "uvx",
+})
 
 #: The pointer every shim resolves. Always an ABSOLUTE symlink, so that plain
 #: ``readlink`` suffices -- ``readlink -f`` is macOS >= 12.3 only.
@@ -397,3 +430,101 @@ def render_shim(command: str, *, tools: Path | None = None) -> str:
         f'exec "$NX_GEN/bin/{command}" "$@"',
         "",
     ])
+
+
+def current_generation(*, tools: Path | None = None) -> Path:
+    """The generation ``<tools>/current`` points at, via one ``readlink``.
+
+    Raises :class:`InstallLayoutError` rather than a bare ``OSError`` when
+    the pointer is absent or not a symlink -- "no current generation" is a
+    named, catchable state, not an accident of how the filesystem call
+    happened to fail. Deliberately does NOT stat the target: ``readlink(2)``
+    reads the link's content only, so a pointer at a reaped generation (the
+    ordinary state between a GC pass and the next flip) resolves cleanly
+    rather than raising. The contract (module docstring) is that ``current``
+    is always an ABSOLUTE symlink; a relative target is refused rather than
+    silently resolved against the reader's cwd.
+    """
+    link = current_link(tools=tools)
+    try:
+        raw = os.readlink(link)
+    except OSError as exc:
+        raise InstallLayoutError(f"no current generation at {link}: {exc}") from exc
+    target = Path(raw)
+    if not target.is_absolute():
+        raise InstallLayoutError(
+            f"{link} must be an absolute symlink, got {raw!r}"
+        )
+    return target
+
+
+def is_stale(baked: Path | None = None, *, tools: Path | None = None) -> bool:
+    """Exact staleness: *baked* (default this process's ``sys.prefix``) is
+    compared against the CURRENT generation on disk.
+
+        stale  <=>  Path(sys.prefix) != os.readlink(<tools>/current)
+
+    One readlink. No filesystem-clock inference, no false positives or false
+    negatives. This is ALSO nexus-utpuw design point 6's spawn-time tripwire:
+    a new spawn logs (never fails) when its own baked generation differs
+    from current. Implemented once -- a short-lived spawn calls this with no
+    *baked* argument and gets its own live ``sys.prefix``; a long-lived host
+    captures ``sys.prefix`` at startup and passes that captured value back in
+    later, to compare against what it started with rather than what it is
+    running as now.
+
+    Propagates :class:`InstallLayoutError` when :func:`current_generation`
+    cannot resolve a pointer at all (no symlink present) -- that is not a
+    stale/fresh verdict this formula can make, so it is surfaced rather than
+    coerced into an unconditional answer. A DANGLING pointer (symlink
+    present, target absent) is not that case: it resolves to a path that can
+    never equal a live baseline, so it reports stale rather than raising.
+    """
+    baseline = Path(sys.prefix) if baked is None else baked
+    return baseline != current_generation(tools=tools)
+
+
+def list_generations(*, tools: Path | None = None) -> list[Path]:
+    """Complete generations under *tools*, oldest first.
+
+    A generation is a ``gen-*`` directory CONTAINING a receipt -- the
+    completion marker the builder (.2) writes last. A receipt-less ``gen-*``
+    directory is wreckage from a build that died before finishing; nothing
+    ever pointed ``current`` at it, so it is not a generation at all. This is
+    the SAME completeness rule ``nexus-utpuw.6``'s GC pass applies (see
+    ``src/nexus/_install/gc.sh``), so the two halves can never disagree
+    about what exists. Stamps sort chronologically as plain strings by
+    construction (``install_generation.sh``), so a plain name sort is
+    creation order.
+
+    A *tools* root that does not exist at all, or exists with nothing built
+    in it yet, returns an empty list -- an ordinary state, not the error
+    :func:`current_generation` raises for a missing pointer.
+    """
+    root = _root(tools)
+    if not root.is_dir():
+        return []
+    candidates = [
+        entry for entry in root.iterdir()
+        if entry.is_dir()
+        and entry.name.startswith(GENERATION_PREFIX)
+        and (entry / RECEIPT_NAME).is_file()
+    ]
+    return sorted(candidates, key=lambda p: p.name)
+
+
+def read_receipt(generation: Path) -> Receipt:
+    """Read and parse *generation*'s receipt.
+
+    Raises :class:`InstallLayoutError` when the receipt is missing --
+    :meth:`Receipt.from_json` already raises the same error for corrupt or
+    unrecognised JSON, so both failure modes reach a caller as one named,
+    catchable exception rather than a bare ``OSError`` for one and a
+    ``json.JSONDecodeError`` for the other.
+    """
+    path = receipt_path(generation)
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        raise InstallLayoutError(f"no receipt at {path}: {exc}") from exc
+    return Receipt.from_json(text)

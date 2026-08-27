@@ -101,8 +101,17 @@ start" and continues. Point the launcher at an interpreter that has `mcp`:
     "env": { "STUB_LOG": "...", "STUB_NAME": "stub" } } } }
 ```
 
-Use `$REPO_ROOT/.venv/bin/python` (or the installed-tool venv
-`~/.local/share/uv/tools/conexus/bin/python3`), never bare `python3`.
+Use `$REPO_ROOT/.venv/bin/python`, never bare `python3`.
+
+A managed install works too, but resolve the pointer first —
+`"$(readlink ~/.local/share/nexus/tools/current)"/bin/python3`, never
+`~/.local/share/nexus/tools/current/bin/python3` itself. CPython looks for
+`pyvenv.cfg` next to the executable **as invoked**, before resolving symlinks,
+so going through `current` puts that component into `sys.prefix` and the next
+install flips the pointer out from under a running process (nexus-q3xrx; the
+shims exist to make that unconstructible, and `python` is deliberately never
+shimmed). The old text here named `~/.local/share/uv/tools/conexus/bin/python3`,
+which is the pre-generation layout (nexus-utpuw.19).
 
 **This applies to agent-frontmatter inline `mcpServers` too — and the
 `--mcp-config` wrapper does NOT reach them.** The wrapper normalizes

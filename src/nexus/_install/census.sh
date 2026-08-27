@@ -65,6 +65,39 @@ nx_generation_holder_pids() {
             ;;
     esac
 
+    # A generation entry MAY be a symlink rather than a real directory --
+    # .7's legacy pseudo-generation, registered by nx_register_legacy_generation
+    # to point OUTSIDE tools/ at a uv-managed tree this project does not own.
+    # A live holder's argv names the REAL path it exec'd from, never our
+    # ledger pointer, so attribution must grep for the resolved target. One
+    # level of readlink is enough: everything that registers a pseudo-
+    # generation writes a direct absolute symlink, never a chain.
+    _nx_hp_match="$1"
+    if [ -L "$1" ]; then
+        _nx_hp_resolved="$(readlink "$1")"
+        [ -n "$_nx_hp_resolved" ] && _nx_hp_match="$_nx_hp_resolved"
+    fi
+
+    # NORMALISE A TRAILING SLASH -- on the argument and on a resolved ledger
+    # target alike, which is why this sits after the readlink and not in the
+    # case above. The match below appends '/' as a path boundary, so a value
+    # that already ends in one builds '<gen>//': a pattern no ps line can ever
+    # contain, so a held tree reports ZERO holders and rule (c) waves the reap
+    # through. Neither call site can produce it today -- both pass a value from
+    # "$root"/"$prefix"* glob expansion, which bash never suffixes with '/' --
+    # and that is exactly the reason to normalise here rather than note it: an
+    # unreachable false negative in the under-reporting direction is a landmine
+    # waiting for a third caller. Found by the RG-B re-review of nexus-qzawu.
+    while [ "${_nx_hp_match%/}" != "$_nx_hp_match" ]; do
+        _nx_hp_match="${_nx_hp_match%/}"
+    done
+    if [ -z "$_nx_hp_match" ]; then
+        # "/" normalises to empty, and an empty match would make the boundary
+        # pattern "/" -- every process on the machine a holder of everything.
+        echo "nexus: refusing to census the filesystem root as a generation" >&2
+        return "$NX_LAYOUT_USAGE_EXIT"
+    fi
+
     # PROVIDED-BUT-EMPTY is not the same as NOT PROVIDED, and testing the value
     # conflates them: a snapshot with no matching processes is empty, so the
     # falsy check re-took one PER GENERATION -- ps ran N+1 times for one census
@@ -76,13 +109,33 @@ nx_generation_holder_pids() {
         _nx_hp_snapshot="$(_nx_ps_snapshot)"
     fi
 
-    # The transient-grep exclusion is preserved from live_venv_processes(): a
-    # grep whose own argv contains the search string counts as a holder
-    # otherwise, and every generation looks permanently occupied.
+    # ATTRIBUTION IS STRUCTURAL, NEVER A DENYLIST ON ARGV TEXT. What stood here
+    # was inherited from live_venv_processes(): a grep -v dropping any line with
+    # the word "grep" in it, to shed the self-match that `ps ax | grep <pattern>`
+    # produced. It dropped real holders too -- `nx search grep` censused as zero
+    # holders, so GC's rule (c) reaped the tree that process was running from
+    # (nexus-qzawu; nexus-q3xrx reached without any symlink trickery). It is the
+    # nexus-xk7g2 pathology once more: a guard naming known-bad strings instead
+    # of accepting only what is provably right.
+    #
+    # Two structural properties replace it, and neither can drop a real holder.
+    # The pattern travels in the ENVIRONMENT rather than argv -- `ps -eo command`
+    # reports argv, so this pipeline cannot appear in its own snapshot and there
+    # is nothing left to exclude. And the match demands a trailing '/', so a
+    # generation cannot borrow the holders of its same-second stamp-collision
+    # sibling (install_generation.sh creates gen-<stamp> and gen-<stamp>a by
+    # design).
+    #
+    # A process that merely NAMES a path inside the tree without running from it
+    # is still counted. That is a deliberate choice of failure direction, not an
+    # oversight: narrowing to argv[0] would end the over-attribution and buy
+    # under-reporting instead, and under-reporting is what deletes a tree
+    # somebody is still running from. Retaining a tree nobody holds costs disk
+    # until the next pass. Pinned by
+    # test_a_process_merely_naming_a_path_inside_a_generation_counts_as_a_holder.
     printf '%s\n' "$_nx_hp_snapshot" \
-        | grep -F -- "$1" \
-        | grep -v -e '[[:space:]]grep[[:space:]]' -e '[[:space:]]grep$' \
-        | awk '{print $1}' \
+        | NX_HP_MATCH="$_nx_hp_match" \
+          awk 'index($0, ENVIRON["NX_HP_MATCH"] "/") { print $1 }' \
         || true
 }
 

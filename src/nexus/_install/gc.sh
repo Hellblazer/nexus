@@ -149,10 +149,59 @@ $_nx_gc_self"
         if [ "$_nx_gc_dry" -eq 1 ]; then
             printf 'would reap %s\n' "$_nx_gc_dir"
         else
-            # -rf on the directory itself, never through a pointer: the
-            # pointers live in this same directory, and following one would
-            # empty the generation it names rather than removing a link.
-            rm -rf -- "$_nx_gc_dir"
+            if [ -L "$_nx_gc_dir" ]; then
+                # SCOPING GUARD. Following a gen-* symlink is the ONLY way this
+                # sweep can delete anything outside the tools root, so it is
+                # fenced twice rather than trusted.
+                #
+                # Measured before this guard existed: a `gen-rogue` symlink
+                # pointing at an unrelated directory caused `rm -rf` of that
+                # directory. The only check was that the target was not
+                # literally "/" — one value out of infinitely many dangerous
+                # ones, which is the shape of a guard that reads as protection
+                # without being any.
+                #
+                # (1) Only the reserved ledger name may be a symlink at all.
+                # (2) Its target must look like the uv-managed venv it claims
+                #     to be — a directory carrying pyvenv.cfg. A wrong target
+                #     (a home directory, a checkout) has none, so the pointer
+                #     is unlinked and the tree is left alone. Failing that way
+                #     leaves litter; failing the other way deletes data.
+                if [ "${_nx_gc_dir##*/}" != "$NX_GENERATION_PREFIX$NX_LEGACY_GENERATION_NAME" ]; then
+                    echo "nexus: refusing to reap through an unrecognised generation symlink: $_nx_gc_dir" >&2
+                    continue
+                fi
+                # A pseudo-generation (.7's legacy uv-tool bridge): this
+                # entry is only our LEDGER pointer, never the tree itself.
+                # `rm -rf` on a symlink unlinks the pointer and leaves its
+                # target untouched -- exactly backwards for a reap, whose
+                # entire job here is deleting the legacy tree. Resolve one
+                # level (registration only ever writes a direct absolute
+                # symlink, never a chain) and remove both: the real tree,
+                # then the now-dangling pointer.
+                _nx_gc_real="$(readlink "$_nx_gc_dir")"
+                case "$_nx_gc_real" in
+                    /*) ;;
+                    *)
+                        echo "nexus: ledger target is not an absolute path, refusing: '$_nx_gc_real'" >&2
+                        continue
+                        ;;
+                esac
+                if [ ! -d "$_nx_gc_real" ] || [ ! -f "$_nx_gc_real/pyvenv.cfg" ]; then
+                    echo "nexus: ledger target is not a venv, unlinking the pointer only: $_nx_gc_real" >&2
+                    rm -f -- "$_nx_gc_dir"
+                    printf 'reaped %s\n' "$_nx_gc_dir"
+                    continue
+                fi
+                rm -rf -- "$_nx_gc_real"
+                rm -f -- "$_nx_gc_dir"
+            else
+                # -rf on the directory itself, never through a pointer: the
+                # pointers live in this same directory, and following one
+                # would empty the generation it names rather than removing a
+                # link.
+                rm -rf -- "$_nx_gc_dir"
+            fi
             printf 'reaped %s\n' "$_nx_gc_dir"
         fi
     done

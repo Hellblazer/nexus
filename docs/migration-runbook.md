@@ -49,8 +49,16 @@ reflexively — each one names its own remedy.
 A pre-PG install is DETECTED and refused with a two-hop redirect, because the
 machinery that performed that migration no longer ships:
 
-1. `uv tool install conexus==6.18.1` — the pinned last migration-capable
-   release (`nexus.stranded_install.LAST_MIGRATION_CAPABLE`)
+1. install the pinned last migration-capable release, `conexus==6.18.1`
+   (`nexus.stranded_install.LAST_MIGRATION_CAPABLE`). The command depends on
+   the layout this box has: `nx self install --version 6.18.1` on a
+   generation install (one where `~/.local/share/nexus/tools/current`
+   resolves), `uv tool install conexus==6.18.1` on a box still on the legacy
+   uv tree — which is the usual state for one carrying unmigrated pre-PG
+   data. `nexus.install_advice.pinned_install_command` is what picks between
+   them, so the refusal banner that sent you here already names the right
+   one. The pin has to be IN the command: a bare `nx self install` installs
+   the newest release, which is the hop this procedure exists to avoid
 2. `nx upgrade` there, which performs the Chroma to PG copy (copy-not-move;
    the Chroma directory is left intact as a rollback artifact)
 3. upgrade to current normally

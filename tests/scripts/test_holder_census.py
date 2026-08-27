@@ -238,6 +238,46 @@ def test_holder_pids_refuses_a_relative_generation(env) -> None:
     assert "absolute" in result.stderr.lower()
 
 
+# --------------------------------------------------------------------------
+# symlinked entries: .7's legacy pseudo-generation
+# --------------------------------------------------------------------------
+
+def test_a_symlinked_generation_entry_is_censused_by_its_real_target(env) -> None:
+    """.7 registers the legacy uv-tool tree as a pseudo-generation: a symlink
+    inside tools/ pointing OUTSIDE it, at $(uv tool dir)/conexus. A holder's
+    ps argv names that real path, never our synthetic pointer -- so census
+    must resolve one level of symlink before grepping, or a live legacy
+    holder reads as zero holders and GC's rule (c) would not protect it."""
+    tools, stub_bin, bin_dir = env
+    legacy_real = tools.parent / "uv-tool-dir" / "conexus"
+    legacy_real.mkdir(parents=True)
+    pseudo = tools / "gen-legacy-uv-tool"
+    pseudo.symlink_to(legacy_real)
+    _stub_ps(stub_bin, [f"  909 {legacy_real}/bin/python {legacy_real}/bin/nx-mcp"])
+
+    result = _sh(f'nx_generation_holder_pids "{pseudo}"', tools, stub_bin, bin_dir)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["909"], (
+        "a live holder of the legacy tree was not attributed to its pseudo-"
+        "generation pointer"
+    )
+
+
+def test_a_symlinked_generation_entry_with_no_holders_reports_none(env) -> None:
+    tools, stub_bin, bin_dir = env
+    legacy_real = tools.parent / "uv-tool-dir" / "conexus"
+    legacy_real.mkdir(parents=True)
+    pseudo = tools / "gen-legacy-uv-tool"
+    pseudo.symlink_to(legacy_real)
+    _stub_ps(stub_bin, ["  101 /usr/bin/vim x"])
+
+    result = _sh(f'nx_generation_holder_pids "{pseudo}"', tools, stub_bin, bin_dir)
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == ""
+
+
 def test_one_ps_snapshot_serves_the_whole_census(env) -> None:
     """Attribution must come from a SINGLE snapshot. Calling ps per generation
     lets a process exit between calls and appear to hold two trees, or none --
@@ -254,3 +294,145 @@ def test_one_ps_snapshot_serves_the_whole_census(env) -> None:
 
     calls = counter.read_text().count("x") if counter.exists() else 0
     assert calls == 1, f"ps was invoked {calls} times for one census; expected 1"
+
+
+# --------------------------------------------------------------------------
+# attribution is structural, not a denylist on argv text (nexus-qzawu)
+# --------------------------------------------------------------------------
+
+def test_a_holder_whose_argv_contains_the_word_grep_is_still_a_holder(env) -> None:
+    """RG-B Critical. The transient-grep exclusion was a DENYLIST on argv text
+    (``grep -v -e '[[:space:]]grep[[:space:]]' -e '[[:space:]]grep$'``), so it
+    dropped every process whose argv merely contained the word -- ``nx search
+    grep`` is a live holder that reported as none. GC's rule (c) then reaped the
+    tree that process was running from: nexus-q3xrx, reachable with no symlink
+    trickery. Reproduced against the real scripts before this test existed."""
+    tools, stub_bin, bin_dir = env
+    (a,) = _make_gens(tools, "A")
+    _stub_ps(stub_bin, [f"  101 {a}/bin/python {a}/bin/nx search grep"])
+
+    result = _sh(f'nx_generation_holder_pids "{a}"', tools, stub_bin, bin_dir)
+
+    assert result.stdout.split() == ["101"], (
+        "a live holder was dropped because its argv contained the word 'grep'; "
+        "GC will reap the tree it is running from"
+    )
+
+
+def test_a_stamp_collision_sibling_does_not_borrow_its_neighbours_holders(env) -> None:
+    """install_generation.sh suffixes a same-second stamp collision, so
+    ``gen-<stamp>`` and ``gen-<stamp>a`` coexist by design. Substring matching
+    made every holder of the suffixed tree count as a holder of the bare one."""
+    tools, stub_bin, bin_dir = env
+    base, suffixed = _make_gens(tools, "20260825", "20260825a")
+    _stub_ps(stub_bin, [f"  202 {suffixed}/bin/python {suffixed}/bin/nx-mcp"])
+
+    result = _sh(f'nx_generation_holder_pids "{base}"', tools, stub_bin, bin_dir)
+
+    assert result.stdout.strip() == "", (
+        f"gen-20260825 borrowed a holder of gen-20260825a: {result.stdout.split()}"
+    )
+
+
+def test_a_process_merely_naming_a_path_inside_a_generation_counts_as_a_holder(env) -> None:
+    """DELIBERATE, and pinned here so it cannot be 'fixed' by accident. An editor
+    with a file inside the tree open is not running from it, yet it is counted.
+
+    Narrowing attribution to argv[0] would end this over-attribution and buy
+    under-reporting instead. The failure directions are not symmetric: this way
+    GC retains a tree nobody holds, which wastes disk until the next pass; the
+    other way GC deletes a tree somebody is running from. Retention is the
+    direction to fail in."""
+    tools, stub_bin, bin_dir = env
+    (a,) = _make_gens(tools, "A")
+    _stub_ps(stub_bin, [f"  303 /usr/bin/vim {a}/README.txt"])
+
+    result = _sh(f'nx_generation_holder_pids "{a}"', tools, stub_bin, bin_dir)
+
+    assert result.stdout.split() == ["303"], (
+        "attribution narrowed to argv[0]; that trades over-retention for "
+        "under-reporting, which is the direction that deletes data"
+    )
+
+
+def test_a_trailing_slash_on_the_generation_does_not_hide_its_holders(env) -> None:
+    """The match appends '/' as a path boundary, so an argument that already ends
+    in one builds '<gen>//' -- a pattern no ps line can contain, and a held tree
+    reports zero holders. Neither call site can produce it today (both pass a
+    glob expansion, which bash never suffixes with '/'), which is precisely why
+    it would have waited here for a third caller. Under-reporting is the
+    direction that lets GC delete a tree somebody is running from, so the
+    function normalises rather than trusting its callers. RG-B re-review."""
+    tools, stub_bin, bin_dir = env
+    (a,) = _make_gens(tools, "A")
+    _stub_ps(stub_bin, [f"  101 {a}/bin/python {a}/bin/nx-mcp"])
+
+    result = _sh(f'nx_generation_holder_pids "{a}/"', tools, stub_bin, bin_dir)
+
+    assert result.stdout.split() == ["101"], (
+        "a trailing slash on the generation path hid a live holder"
+    )
+
+
+def test_the_filesystem_root_is_refused_not_censused_as_empty(env) -> None:
+    """Normalising trailing slashes turns "/" into the empty string, and an empty
+    match would make the boundary pattern "/" -- every process on the machine a
+    holder of everything. Refuse instead. Reporting zero holders would be worse
+    still: it is the answer that invites a reap."""
+    tools, stub_bin, bin_dir = env
+    _make_gens(tools, "A")
+    _stub_ps(stub_bin, ["  101 /usr/bin/vim notes.txt"])
+
+    result = _sh('nx_generation_holder_pids "/"', tools, stub_bin, bin_dir)
+
+    assert result.returncode != 0, (
+        "the filesystem root was accepted as a generation and censused"
+    )
+    assert result.stdout.strip() == "", "root census produced holder output"
+
+
+# --------------------------------------------------------------------------
+# EVERY daemon class counts, not just the MCP servers (nexus-103v2 descendant)
+# --------------------------------------------------------------------------
+
+# Verbatim from tests/scripts/test_reinstall_tool_cycle_mcp.py's holder-shape
+# builders, which nexus-utpuw.8 deletes along with the choreography they fed.
+# The shapes outlive the choreography: they are what these processes actually
+# look like in ps, and inventing them here instead of carrying them over is how
+# a fixture stops resembling the system it stands for.
+_DAEMON_SHAPES = [
+    pytest.param("{gen}/bin/nx daemon service start --foreground", id="storage-service"),
+    pytest.param("{gen}/bin/nx daemon aspect-worker start --tenant default", id="aspect-worker"),
+    pytest.param("{gen}/bin/mineru-api --port 8899", id="mineru"),
+    pytest.param("{gen}/bin/python3 {gen}/bin/nx-mcp", id="shebang-wrapped-mcp"),
+]
+
+
+@pytest.mark.parametrize("shape", _DAEMON_SHAPES)
+def test_every_daemon_class_counts_as_a_holder(env, shape) -> None:
+    """A substantive-critic CRITICAL (nexus-103v2) once caught the storage
+    service silently missing from the holder set, because the old code carried a
+    per-class list and the service was not on it. Under generations the census
+    has no class list to omit anything from -- attribution is one structural
+    match on the generation path -- so every class is counted BY CONSTRUCTION.
+
+    That is exactly why this test exists. The guarantee is now a property of the
+    shape of the code rather than of an inventory somebody maintains, and a
+    property nobody asserts is one refactor away from being an inventory again.
+    Before this, the census suite exercised only nx-mcp, nx-mcp-catalog, nx
+    doctor, vim and grep: the class that was dropped once was again the only
+    class with no test.
+
+    mineru is the load-bearing row. It is the only canonical holder whose argv
+    does not begin `<gen>/bin/nx`, so any reintroduced class list drops it
+    first."""
+    tools, stub_bin, bin_dir = env
+    (a,) = _make_gens(tools, "A")
+    _stub_ps(stub_bin, [f"  404 {shape.format(gen=a)}"])
+
+    result = _sh(f'nx_generation_holder_pids "{a}"', tools, stub_bin, bin_dir)
+
+    assert result.stdout.split() == ["404"], (
+        f"a live holder of shape '{shape.format(gen='<gen>')}' was not counted; "
+        "GC's rule (c) will reap the tree it is running from"
+    )

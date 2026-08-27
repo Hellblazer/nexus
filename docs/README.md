@@ -15,7 +15,7 @@ Start with [Getting Started](getting-started.md) for installation. Then find you
 - **Back up my knowledge store** — [Storage Tiers § T3 Backup and Migration](storage-tiers.md#t3-backup-and-migration-exportimport) — `nx store export`/`import`, live T3, `.nxexp` format
 - **Fix empty search results after upgrading** — [Getting Started § Troubleshooting](getting-started.md#troubleshooting) (`nx search` returns no results); if you upgraded straight from a pre-PG install, see [Upgrading an existing install](getting-started.md#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) for the two-hop path
 - **Check my install's health** — `nx doctor`, see [CLI Reference — nx doctor](cli-reference.md#nx-doctor)
-- **Upgrade an existing install** — [Getting Started § Upgrading an existing install](getting-started.md#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) — `uv tool upgrade conexus` + `nx upgrade`; installs still on ChromaDB (5.x, or 6.x that never migrated) need a two-hop through `conexus==6.18.1` first, since the Chroma-era migration machinery retired at RDR-155 P4b
+- **Upgrade an existing install** — [Getting Started § Upgrading an existing install](getting-started.md#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) — [`nx self install`](cli-reference.md#nx-self-install) + `nx upgrade`; installs still on ChromaDB (5.x, or 6.x that never migrated) need a two-hop through `conexus==6.18.1` first, since the Chroma-era migration machinery retired at RDR-155 P4b
 
 ## Operator reference
 

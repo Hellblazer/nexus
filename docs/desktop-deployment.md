@@ -10,11 +10,13 @@ Nexus runs in three Claude surfaces, all backed by shared host state so it round
 > instead of migrating anything. If you are on a pre-6.0 install (or still
 > carry `chroma.sqlite3` / `t2.db` / `memory.db` on disk), do NOT run a bare
 > `nx upgrade` on this version expecting it to migrate you: install the
-> pinned `conexus==6.18.1` (`uv tool install conexus==6.18.1`), run
-> `nx upgrade` **there** to migrate the data (copy-not-move — the Chroma
-> files stay behind as a rollback source), then upgrade back to this
-> version. See [migration-runbook.md](migration-runbook.md) for the
-> operator's manual order of operations if the guided path blocks.
+> pinned `conexus==6.18.1`, run `nx upgrade` **there** to migrate the data
+> (copy-not-move — the Chroma files stay behind as a rollback source),
+> then upgrade back to this version.
+> [migration-runbook.md § Installs that predate Postgres](migration-runbook.md#installs-that-predate-postgres)
+> carries that procedure — including the exact first-hop command, which
+> **differs by install layout**, so do not assume the one you last used —
+> and the operator's manual order of operations if the guided path blocks.
 >
 > **On an install that is already PG-backed**, `nx upgrade` is the one
 > trigger: it provisions and verifies the service if needed, then walks
@@ -88,7 +90,7 @@ Service lifecycle: `nx daemon service status` / `start` / `stop` are the canonic
 
 ## Drift detection
 
-After upgrading conexus (`uv tool upgrade conexus`) or after the plugin rename (`nx` → `conexus` at v5.0.0), `nx doctor` surfaces two kinds of drift:
+After upgrading conexus or after the plugin rename (`nx` → `conexus` at v5.0.0), `nx doctor` surfaces two kinds of drift:
 
 - **Plugin name drift**: the installed Claude Code plugin still has `name: "nx"` but the CLI expects `conexus`. Fix is two commands:
 
@@ -131,7 +133,7 @@ So the update is a manual, idempotent re-install:
 
 What the update does **not** touch: the host storage service (`nexus-service` + Postgres), the T3 store, the catalog, and all stored data are owned by the OS / user account and shared across the CLI, the Claude Code plugin, and the Desktop extension. Re-installing the bundle swaps only the bundle files and its venv. The service is not restarted by an extension update.
 
-**Version skew is expected and tolerated.** The Desktop connector (its venv) and the host CLI are independent installs that can briefly differ, since they update on different triggers (a `.mcpb` re-install vs `uv tool upgrade conexus` / a CLI reinstall). Both are clients of the same `nexus-service` over HTTP — since `nexus-i711w` there is no T2 daemon and no daemon RPC — so align them by updating whichever is behind. After a release, update both: the CLI via `uv tool upgrade conexus`, and the Desktop extension via the re-install above. The engine itself is a separate artifact on its own release cadence; `nx doctor` reports when it is below the identity this client expects.
+**Version skew is expected and tolerated.** The Desktop connector (its venv) and the host CLI are independent installs that can briefly differ, since they update on different triggers (a `.mcpb` re-install vs a CLI reinstall). Both are clients of the same `nexus-service` over HTTP — since `nexus-i711w` there is no T2 daemon and no daemon RPC — so align them by updating whichever is behind. After a release, update both: the CLI via `nx self install`, and the Desktop extension via the re-install above. `nx self install` builds a new `~/.local/share/nexus/tools/gen-<stamp>`, flips the `current` pointer and rewrites the shims; `uv tool upgrade conexus` does not touch a generation install at all, and is the right command only on a box still on the legacy uv tree. The engine itself is a separate artifact on its own release cadence; `nx doctor` reports when it is below the identity this client expects.
 
 ## Uninstall
 

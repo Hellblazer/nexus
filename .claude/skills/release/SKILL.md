@@ -227,7 +227,7 @@ Required for any change touching `pyproject.toml`, `uv.lock`, `src/nexus/mcp/**`
 
 Must end with `[done]` and confirm the new schema version. Halt on any failure.
 
-This reinstall is genuinely isolated (fixed 2026-07-01, `137d2688`) — safe to run with live Claude Code sessions/MCP servers active, no `--force`/`--cycle-daemons` needed. If it ever refuses with a live-holder error again, suspect a step-ordering regression in `release-sandbox.sh` (sandbox `HOME` must activate *before* the reinstall, since `uv tool install` resolves its install location off `$HOME`) before reaching for `--force`.
+This reinstall is genuinely isolated (fixed 2026-07-01, `137d2688`) — safe to run with live Claude Code sessions/MCP servers active. A live-holder refusal is no longer possible: installs land in a fresh generation and holders keep running from their own tree (nexus-utpuw.8), and `--force` / `--cycle-daemons` no longer exist. The step ordering still matters for ISOLATION — sandbox `HOME` must activate *before* the reinstall, because the generation root resolves off `$HOME` (`nx_tools_dir`), not because of anything `uv` does.
 
 ### 6b. Run upgrade-shakeout (~3-5 min, EVERY RELEASE)
 
@@ -480,7 +480,7 @@ scripts/reinstall-tool.sh    # preserves [local] and other extras (mineru is now
 nx --version                 # must print X.Y.Z
 ```
 
-`pyproject.toml` bumps the project version but the local `nx` shim keeps the old wheel until `scripts/reinstall-tool.sh` runs. Caught on v4.9.11: `nx --version` reported 4.9.10 even after PyPI showed 4.9.11.
+`pyproject.toml` bumps the project version, but the local `nx` shim does not point at a wheel: it resolves `<tools>/current` at spawn time and execs the generation that pointer names, so until this step flips `current` every new spawn still lands in the old generation (and existing holders keep running from theirs afterwards). Caught on v4.9.11: `nx --version` reported 4.9.10 even after PyPI showed 4.9.11.
 
 ## Common Mistakes
 
