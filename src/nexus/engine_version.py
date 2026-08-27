@@ -379,7 +379,7 @@ from __future__ import annotations
 #: engine below this floor lacks the ttl_days schema those clients bind.
 #: Schema note: v0.1.84's renames are forward-only — a v0.1.83 image cannot
 #: write against the walked schema.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 86)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 87)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

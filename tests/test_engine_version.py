@@ -413,7 +413,24 @@ class TestRequiredEngineVersion:
         # design: --acquire on the published bytes, and the deploy +
         # STEP-6 cloud gates -- the deploy fires at the client tag push
         # (paired-release choreography), so those follow this bump.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 86)
+        # BUMPED to (0,1,87) 2026-08-27, SAME DAY as (0,1,86) and superseding
+        # it: v0.1.86 was tagged and published but NEVER DEPLOYED. It shipped
+        # the scope=data reaper with a failure path that fails politely forever
+        # (nexus-4tosp) -- a timeout caught, logged at WARN, retried every 6h
+        # indefinitely, no escalation, /health green. Found by conexus-a4
+        # building the DATA EFFECTS row, not by any gate here, because the
+        # failure path IS tested and the tests bless it.
+        # v0.1.87 = v0.1.86 + that fix, Java only: 0 changelog files differ, so
+        # the v0.1.86 fork rehearsal (1 changeset from a v0.1.85 cluster,
+        # 12,683 sweepable rows) carries forward unchanged.
+        # Gated BEFORE this bump: JVM 201 suites/2226 tests/0 failures/0 errors,
+        # --shakeout PASSED (incl. Phase F), --candidate-migration PASSED with
+        # delta=1 matching an EXPECT pin (a bare run would have merely REPORTED
+        # it), published-client write gate PASSED with exact manifest counts,
+        # and the new test verified non-vacuous by surgical mutation.
+        # NOT run at bump time, by design: --acquire on the published bytes and
+        # the deploy + STEP-6 cloud gates, which follow the client tag push.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 87)
 
 
 class TestParseEngineVersion:
