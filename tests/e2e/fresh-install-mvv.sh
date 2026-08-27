@@ -36,7 +36,11 @@
 #                       (T1) or ad hoc verification of what PyPI is
 #                       actually serving. Omitted version = latest.
 #
-# Both layers run the SAME 9 journey legs after install; only the install
+# Both layers run the SAME journey legs after install; only the install
+# (NO COUNT here on purpose: this said "9" while the headings below said
+# /10, because nexus-utpuw.19 added a leg and renumbered the headings but
+# not this sentence. A tally in prose beside numbered headings is a
+# second place for the same fact to live, and it is the copy that rots.)
 # step (and the mode-aware bits called out inline) differs. The final
 # PASSED line always names which layer ran, so a transcript can never be
 # mistaken for the other (a shakedown that silently ran the local-wheel

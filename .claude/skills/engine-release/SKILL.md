@@ -170,8 +170,15 @@ the unit suites missed (nexus-h8rf6).
 Notes:
 - The host JVM suite (`scripts/mvnw-leased.sh -q test`, Step 2) validates the Java
   on the JVM; `--shakeout` adds the native-image build + serve + drive.
-- **Do NOT use `release-sandbox.sh`** — it swaps the uv tool venv and can break
-  the live install. The container rehearsal is the safe, isolated one.
+- **Prefer the container rehearsal over `release-sandbox.sh`** for engine work —
+  it is the isolated harness for a NATIVE build, and it owns its own image.
+  (The old reason given here — that release-sandbox.sh "swaps the uv tool venv
+  and can break the live install" — is no longer true and was contradicted by
+  this repo's own release skill. Installs are side-by-side generations: the
+  sandbox activates its `HOME` before reinstalling, so generations land in
+  `$SANDBOX/.local/{share/nexus/tools,bin}`, nothing is swapped under a live
+  holder, and `--force`/`--cycle-daemons` no longer exist — nexus-utpuw.8.
+  Recommendation unchanged, mechanism corrected: nexus-utpuw.20.)
 - When the two-hop stranded-redirect rehearsal lands (nexus-8nlj4) it becomes
   the acceptance journey that replaced the retired guided legs; add it here
   then, alongside `--shakeout` rather than instead of it.

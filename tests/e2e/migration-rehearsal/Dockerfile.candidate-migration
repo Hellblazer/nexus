@@ -45,7 +45,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Non-root user — initdb (run by `nx init --service`) refuses to run as root.
 RUN useradd -m -s /bin/bash nexus
-# ~/.local/bin is where `uv tool install` links the nx executable.
+# ~/.local/bin is where the nx executable lives. Under the legacy uv tree
+# `uv tool install` LINKS it there; under the generation layout nexus writes
+# its own SHIM there, which readlinks <tools>/current and execs the resolved
+# generation. Either way this PATH entry is the right one and must stay
+# (nexus-utpuw.20).
 ENV PATH="/home/nexus/.local/bin:${PATH}"
 
 RUN pip3 install --no-cache-dir --break-system-packages uv

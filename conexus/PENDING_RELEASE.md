@@ -72,6 +72,18 @@ fail" that is purely an artifact of a peer's restore. Meanwhile the orchestratin
 session must put the mutex in each dispatch prompt by hand — which is what
 RG-E did, mid-run, on 2026-08-26.
 
+- `conexus/skills/upgrade/SKILL.md` (nexus-utpuw.20) — the code-update step is
+  `nx self install` rather than `uv tool upgrade conexus`, which does not touch a
+  generation install; the uv form is now named only as the not-yet-migrated
+  fallback.
+
+**What is NOT protected until this ships.** The upgrade skill loads from the
+pinned tag, so until the pin advances a session invoking it is still told to run
+`uv tool upgrade conexus`. On today's boxes that is harmless — nothing calls the
+migration yet, so essentially every user is still on the legacy uv tree, where
+that command is correct. It becomes wrong for exactly the users a release
+creates.
+
 **What is NOT protected until this ships.** `pre_close_verification_hook.sh`
 matches `review-completed` by substring across T1 and T2, so a reviewer's
 handoff note carrying that token plus a bead id closes the gate it is only half

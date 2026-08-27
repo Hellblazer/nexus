@@ -327,7 +327,12 @@ Every step below is **required**. Missing any one of them has caused problems in
    The virgin-journey gate (nexus-nolqs): wheel under test → scrubbed-env
    virgin HOME → local init (ladder converged) → store/index with
    engine-catalog registration asserted → search → doctor (zero ✗,
-   warnings allowlist reviewed for new drift). Complements the upgrade-axis
+   warnings allowlist reviewed for new drift) → a generation install on that
+   same virgin HOME (leg 9 of 10, nexus-utpuw.19: the only fresh-journey
+   coverage of the `<tools>/gen-<stamp>` + shim path, and the only proof the
+   built WHEEL actually ships `nexus/_install/*.sh` — every other test of
+   `packaged_install_dir()` runs against an editable checkout, where that
+   path exists because the repo does). Complements the upgrade-axis
    gates (rehearsal, era-hop, guided) which all start from a populated
    install — the 2026-07-21 fresh-box defect class was invisible to every
    one of them. Must end `FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL,
@@ -362,9 +367,13 @@ Every step below is **required**. Missing any one of them has caused problems in
    `.claude-plugin/**`, or `src/nexus/commands/{doctor,upgrade}.py` — which
    a release always does (the version bumps alone qualify). The reinstall it
    drives is genuinely isolated and runs cleanly with live Claude Code
-   sessions/MCP servers active; if it ever refuses with a live-holder error,
-   suspect a step-ordering regression before reaching for `--force`
-   (AGENTS.md § Cutting a release, step 6).
+   sessions/MCP servers active. There is no live-holder refusal to get past:
+   an install builds a new `<tools>/gen-<stamp>` and flips `current`, so
+   holders keep running from the tree they resolved at spawn and converge on
+   their next one (nexus-utpuw.8). What still matters here is ISOLATION —
+   the sandbox `HOME` must be activated *before* the reinstall runs, because
+   the generation root resolves off `$HOME`; get that wrong and the sandbox
+   writes into the live install (AGENTS.md § Cutting a release, step 6).
 
 7c. **Run the sandbox shakedown** (~5-10 min warm cache, +10-15 min cold)
    ```bash
@@ -426,6 +435,32 @@ Every step below is **required**. Missing any one of them has caused problems in
    `UPGRADE-SHAKEOUT PASSED — steps=12 skipped=0`; a non-zero `skipped` is a
    finding, not a pass. `./tests/e2e/upgrade-shakeout.sh reset` cleans the
    sandbox.
+
+7f. **Run the generation-flip live-holder gate** (~30s; conditional)
+   ```bash
+   bash tests/e2e/gen-flip-live-holder.sh
+   ```
+   Required for any change touching `src/nexus/_install/**`,
+   `src/nexus/install_layout.py`, `src/nexus/install_census.py`, or anything
+   else in the shim / flip / GC machinery (nexus-utpuw.17). It builds TWO real
+   conexus generations from this checkout, spawns an actual `nx-mcp` holder
+   THROUGH the shim, flips `current` underneath it, and then asserts all three
+   parts of the side-by-side promise: the running holder still answers a real
+   MCP tools/call out of its ORIGINAL generation, a fresh spawn lands in the
+   NEW one, and GC refuses to reap the held tree. Hermetic (`env -i`, virgin
+   HOME, its own `NEXUS_CONFIG_DIR`), and it asserts its own seal: the sandbox
+   has no backend, so a green run REQUIRES that tool call to fail for want of
+   a BACKEND — a call that SUCCEEDS means the holder reached the operator's
+   real collections and fails the gate, and an import-shaped failure after the
+   flip is nexus-q3xrx itself. Must end `GEN-FLIP LIVE-HOLDER PASSED`.
+
+   The fast-loop half of the pair (`tests/scripts/test_generation_flip_live_holder.py`,
+   nexus-utpuw.16) runs on every `pytest -n auto`, but against a fixture
+   package. This one is the only thing that guards the ARTIFACT — real console
+   scripts, the real dependency graph, the real certifi path whose failure was
+   the concrete nexus-q3xrx symptom (95 cacert tracebacks). Nothing in the fast
+   gates exercises shim/current/GC at all. Kept in sync with AGENTS.md
+   § Cutting a release, step 1c.
 
 8. **Commit on a release branch and PR to `main`** (branch protection requires a PR; do NOT direct-push).
    Base the release branch on **develop**, not main — a release PROMOTES develop's accumulated
@@ -532,9 +567,13 @@ Every step below is **required**. Missing any one of them has caused problems in
     scripts/reinstall-tool.sh    # preserves [local] and other extras
     nx --version                 # must print X.Y.Z
     ```
-    `pyproject.toml` bumps the project version but the local `nx` shim
-    keeps the old wheel until this runs — caught on v4.9.11 (`nx
-    --version` reported 4.9.10 even after PyPI showed 4.9.11).
+    `pyproject.toml` bumps the project version, but the local `nx` shim
+    does not point at a wheel — it resolves `<tools>/current` at spawn
+    time and execs the generation that pointer names. Until this runs,
+    `current` still names the old generation and every new spawn lands
+    there; once it runs, new spawns land in the newly flipped generation
+    while existing holders keep running from theirs. Caught on v4.9.11
+    (`nx --version` reported 4.9.10 even after PyPI showed 4.9.11).
 
 ### Plugin channel cut (RDR-197)
 

@@ -132,11 +132,24 @@ Common flags: `-n 20` (result count), `--json`, `--files` (paths only), `-c` (sh
 ### Upgrade local embedding quality (optional)
 
 For the Python-side bge-768 embedder (used by non-service local indexing paths;
-the `nx init` service stack already embeds with bge-768 server-side):
+the `nx init` service stack already embeds with bge-768 server-side). Ask for the
+extra when you install the CLI:
 
 ```bash
-uv tool install --reinstall "conexus[local]"
+uv tool install "conexus[local]"
 ```
+
+The extra then travels with the install and you do not ask for it again: on the
+generation layout it is recorded in the generation's receipt and `nx self install`
+carries it into every later generation; on the older uv-tool layout `uv tool
+upgrade conexus` retains the spec you installed with. What loses it is re-running
+a bare `uv tool install conexus` — see the warning under
+[Upgrading an existing install](#upgrading-an-existing-install-skip-this-if-this-is-your-first-install).
+
+Adding the extra to an install that did not ask for it is a uv-tool-layout
+operation — `uv tool install --reinstall "conexus[local]"`. On a generation box
+that command rebuilds the uv tree and takes the shims back, so run it only if
+`nx doctor` reports no generation install.
 
 To force local mode even when cloud credentials exist: `NX_LOCAL=1`.
 
@@ -154,22 +167,45 @@ taxonomy:
 
 ## Troubleshooting
 
-**`nx` command not found** — Make sure `~/.local/bin` is on your PATH. Run `uv tool install conexus` again and check the output for the install location.
+**`nx` command not found** — Make sure `~/.local/bin` is on your PATH; that is
+where both layouts put the `nx` entry point (`NX_BIN_DIR` overrides it on the
+generation layout). If it is on PATH and `nx` still does not resolve, `ls -l
+~/.local/bin/nx` says which layout you are on: a small shell script is a
+nexus-owned generation shim, a symlink into `~/.local/share/uv/tools/` is the
+uv-tool layout. Reinstall accordingly — `nx self install` from any working `nx`,
+`scripts/reinstall-tool.sh` from a checkout, or `uv tool install conexus` if
+nothing is installed yet.
 
-**Crash on startup (Python 3.14)** — Nexus requires Python 3.12–3.13. Check your nx install's Python with: `head -1 $(which nx)`. If it shows `python3.14`, the tool was installed under the wrong Python. Fix:
+**`nx` resolves but nothing starts** — On the generation layout every command
+resolves `~/.local/share/nexus/tools/current` at spawn, so a missing or dangling
+`current` breaks all of them at once (the shims exit 70 to say so). `nx doctor`'s
+*Generation layout* row names the fault; `scripts/reinstall-tool.sh` from a
+checkout rebuilds a generation and repoints `current`.
+
+**Crash on startup (Python 3.14)** — Nexus requires Python 3.12–3.13. This is a
+uv-tool-layout symptom: a generation install builds its own virtualenv at a
+supported Python every time, so it cannot land on 3.14. Check which interpreter
+your install actually uses with `nx doctor`, or `head -1 $(which nx)` on the
+uv-tool layout. If it reports 3.14, rebuild the uv environment:
 
 ```bash
 uv python install 3.13
 uv tool install conexus --force --python 3.13   # use "conexus[local]" here if you rely on the bge-768 embedder
 ```
 
-Note: `uv tool upgrade` reuses the existing environment's Python — it won't switch from 3.14 to 3.13 automatically. You must use `--force --python 3.13` to rebuild the environment. Because `--force` rebuilds from scratch it drops optional extras, so re-include `[local]` (i.e. install `"conexus[local]"`) if you use the bge-768 embedder.
+Note: `uv tool upgrade` reuses the existing environment's Python — it won't
+switch from 3.14 to 3.13 automatically, which is why this one case wants
+`--force`. Because `--force` rebuilds from scratch it drops optional extras, so
+re-include `[local]` (i.e. install `"conexus[local]"`) if you use the bge-768
+embedder. Do not reach for this on a generation box: it rebuilds the uv tree and
+takes the shims back without fixing anything, since the generation's own
+interpreter is already supported.
 
 **`nx doctor` reports credentials not set** — Expected for local mode. Only needed for managed-cloud mode — export `NX_SERVICE_URL` + `NX_SERVICE_TOKEN` in the environment.
 
 **`nx index repo .` fails with a service-auth error** — In managed-cloud mode, indexing requires a reachable service and a valid `NX_SERVICE_TOKEN`. Export the token (`export NX_SERVICE_TOKEN=…`) and confirm the endpoint with `nx doctor`, or use local mode (run `nx daemon service start`, no token needed).
 
-**`import voyageai` or Pydantic v1 error** — The tool is running under Python 3.14. Fix: `uv tool install conexus --force --python 3.13` (install 3.13 first with `uv python install 3.13` if needed; re-include `[local]` — `"conexus[local]"` — if you use the bge-768 embedder, since `--force` drops extras).
+**`import voyageai` or Pydantic v1 error** — The tool is running under Python 3.14, so this is the same uv-tool-layout case as *Crash on startup* above and takes the same fix: `uv tool install conexus --force --python 3.13` (install 3.13 first with `uv python install 3.13` if needed; re-include `[local]` — `"conexus[local]"` — if you use the bge-768 embedder, since `--force` drops extras).
 
 **First index is slow or hits a rate limit** — Large repos may take a few minutes. Add `--monitor` for per-file progress. Re-running is safe — unchanged files are skipped.
 
@@ -207,9 +243,23 @@ Upgrading nexus is **two steps — both required on every upgrade**: update the
 code, then converge the data.
 
 ```bash
-uv tool upgrade conexus       # 1. update the code (preserves your extras, e.g. [local])
+nx self install               # 1. update the code (preserves your extras, e.g. [local])
 nx upgrade                    # 2. converge the data — walks the upgrade ladder
 ```
+
+Step 1 does not replace the install you are running. `nx self install` builds a
+new generation under `~/.local/share/nexus/tools/gen-<stamp>`, repoints the
+`current` symlink and rewrites the `~/.local/bin` shims — so it succeeds with
+Claude Code sessions open, the storage service up, and an `nx index` in flight.
+Live processes keep executing from the tree they resolved at spawn and converge
+at their next spawn; older generations are reaped once nothing is bound to them.
+The install source and any extras travel in the generation's receipt, which is
+what makes a `[local]` install stay `[local]`.
+
+If `nx self install` reports that this nx is not running from a generation, the
+box is still on the older uv-tool layout and step 1 is `uv tool upgrade conexus`
+instead. `nx doctor`'s *Generation layout* row is the discriminator; the two
+steps are otherwise identical.
 
 `nx upgrade` is the single trigger that converges everything else — it brings the
 package, engine, and process preconditions current, then walks the upgrade
@@ -226,13 +276,26 @@ at startup and print this exact path, but do NOT block on it, so know it up
 front:
 
 ```bash
-uv tool install conexus==6.18.1   # 1. hop to the last migration-capable release
+nx self install --version 6.18.1  # 1. hop to the last migration-capable release
 nx upgrade                        # 2. migrate there: ChromaDB → Postgres+pgvector
                                   #    (copy-not-move; Chroma left byte-untouched
                                   #    as the rollback source)
-uv tool upgrade conexus           # 3. hop forward to current and converge the rest
+nx self install                   # 3. hop forward to current and converge the rest
 nx upgrade
 ```
+
+Hop 1 is a deliberate downgrade, and under the generation layout that is safe by
+construction: it builds 6.18.1 as a new generation and flips to it, leaving the
+newer tree on disk for hop 3 rather than overwriting anything. Keep the
+`--version` pin — a bare `nx self install` installs the newest release, which is
+the hop this procedure exists to avoid.
+
+A box on the older uv-tool layout runs the same sequence in uv vocabulary —
+`uv tool install conexus==6.18.1` for hop 1 and `uv tool upgrade conexus` for
+hop 3, with `nx upgrade` unchanged in between and after. The startup banner picks
+hop 1's form to match the layout it finds, so the command it prints is the one to
+run; it describes hop 3 only as "upgrade back to this version", which is step 1
+of this section.
 
 Running plain `nx upgrade` on a current release over a pre-PG store migrates
 nothing — searches then look empty because reads target the (empty) PG
@@ -248,22 +311,30 @@ yours to invoke and never automatic. On a validation block the migration state i
 left `migrated-failed`, reads stay loudly degraded rather than silently empty, and
 the rollback command is printed as the remedy.
 
-**Always upgrade with `uv tool upgrade conexus` for step 1.** It preserves the
-spec you installed with, so a `[local]` install stays `[local]`. **Do not** re-run
-`uv tool install conexus` (or `--force`) just to upgrade: that resets the
-environment and **drops `[local]`**, silently downgrading the embedder 768→384-dim,
-which dimension-mismatches existing 768-dim collections and makes search return
-nothing. To recover: `uv tool install --reinstall "conexus[local]"`.
+**Use step 1's command for your layout and nothing else.** Both `nx self install`
+and `uv tool upgrade conexus` preserve the spec you installed with, so a `[local]`
+install stays `[local]`. **Do not** re-run `uv tool install conexus` (or
+`--force`) just to upgrade: that resets the environment and **drops `[local]`**,
+silently downgrading the embedder 768→384-dim, which dimension-mismatches existing
+768-dim collections and makes search return nothing. On a uv-tool box, recover
+with `uv tool install --reinstall "conexus[local]"`. On a generation box that
+command does a second kind of damage — it rebuilds the uv tree and re-symlinks
+over the nexus-owned shims, so `nx` resolves through uv instead of through
+`current`. `nx doctor` reports the reclaimed shims and `nx self install` rewrites
+them.
 
-After step 1, restart the storage service so it picks up the new binary
-(step 2's `nx upgrade` then converges the data):
+Step 1 leaves running processes on their old code by design, so after it, restart
+the storage service to move it onto the new generation (step 2's `nx upgrade`
+then converges the data):
 
 ```bash
 nx daemon service stop && nx daemon service start
 ```
 
-`nx upgrade` also cycles a stale supervisor for you, so this is the manual
-form. (The T2 daemon that used to need its own restart here is retired.)
+`nx upgrade` also cycles a stale supervisor for you, so this is the manual form.
+Claude Code sessions and other holders need no intervention — they converge when
+they next spawn, and `nx doctor` lists any that are still bound to an older
+generation. (The T2 daemon that used to need its own restart here is retired.)
 
 When you update the Claude Code plugin (`/plugin update`), run **both** upgrade
 steps above so the CLI stays in lockstep with the plugin version.
