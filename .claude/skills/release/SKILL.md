@@ -480,7 +480,7 @@ scripts/reinstall-tool.sh    # preserves [local] and other extras (mineru is now
 nx --version                 # must print X.Y.Z
 ```
 
-`pyproject.toml` bumps the project version but the local `nx` shim keeps the old wheel until `scripts/reinstall-tool.sh` runs. Caught on v4.9.11: `nx --version` reported 4.9.10 even after PyPI showed 4.9.11.
+`pyproject.toml` bumps the project version, but the local `nx` shim does not point at a wheel: it resolves `<tools>/current` at spawn time and execs the generation that pointer names, so until this step flips `current` every new spawn still lands in the old generation (and existing holders keep running from theirs afterwards). Caught on v4.9.11: `nx --version` reported 4.9.10 even after PyPI showed 4.9.11.
 
 ## Common Mistakes
 
