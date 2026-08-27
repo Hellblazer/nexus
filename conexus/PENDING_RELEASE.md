@@ -31,4 +31,18 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.18.0)
 
-_None. Every declared entry shipped; the pin advanced, so drift is zero._
+Reviewer-agent guidance only — no hooks, no commands, no executable surface.
+Three defect classes that a strict, fully-green gate does not catch (PR #1480).
+Until the pin advances, reviews in every running session are still done by the
+v7.18.0 agents and will keep missing these.
+
+- `conexus/agents/code-review-expert.md`: nexus-csrto — three additions to the
+  shipped-past-green-suites list: a statistic that can exceed its own maximum, a
+  quantity obtained by subtracting an assumed constant, and an assumption stated
+  in prose that nothing enforces.
+- `conexus/agents/test-validator.md`: nexus-csrto — new section for a test that
+  MEASURES rather than asserts: gate the setup (coverage, identity, isolation,
+  well-formedness), not only the result.
+- `conexus/agents/substantive-critic.md`: nexus-csrto — premise check placed
+  ahead of every other deconstruction method, plus unenforced-prose-assumptions
+  as the critic's highest-yield target.

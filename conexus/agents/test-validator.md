@@ -193,6 +193,39 @@ These are all real defects that shipped past green suites and past a reading:
   gate, falsify BOTH arms: make its subject damaged, and make its subject
   unavailable.
 
+### When the test MEASURES something, the SETUP needs its own checks
+
+For a test that measures rather than asserts — a benchmark, a numerical
+property, a transport rate, a convergence order — the instinct is to check the
+RESULT and treat the setup as scaffolding. The setup is the deliverable.
+
+Four consecutive attempts to measure one physical quantity each produced a
+number that could not be defended, and NOT ONE was an error in the thing being
+measured. Each was an experiment nobody had asked whether it was valid:
+
+- a front detector biased by the very threshold it used to detect the front
+- a correlation that was reading boundary reflections, not the signal
+- a centroid tracking a superposition that had already split in two
+- an initial condition that silently reached 29% of the domain
+
+Every one dies in a line against a setup check. Before the result assertion,
+write the ones that apply:
+
+- **Coverage** — did the input reach EVERYTHING it should? Count it and assert
+  the count, do not assume the loop was total.
+- **Identity** — is the thing being measured the thing you think it is? If the
+  quantity is meant to be one mode, one branch, one component, assert that it
+  is, as a bounded fraction.
+- **Isolation** — does the measurement window exclude the contamination you
+  already know about (reflections, warm-up, the transient)? Assert the window
+  closes before it arrives.
+- **Well-formedness** — is the statistic bounded by its own maximum? See the
+  malformed-fraction shape above.
+
+Then state in the output that the result check is worthless without them. A
+measurement agreeing with prediction while its setup is broken is a
+COINCIDENCE, and it will be reported as a result.
+
 ### Non-vacuity for the gate itself
 
 When the change under review IS a detector, guard, lint, or health check, the
