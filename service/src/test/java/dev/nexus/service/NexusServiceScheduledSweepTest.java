@@ -229,6 +229,89 @@ class NexusServiceScheduledSweepTest {
         deleteTokens(tenant);
     }
 
+    /**
+     * nexus-4tosp. The sibling test above proves a blocked arm does not STALL the
+     * cycle, and its own assertion message names the hazard exactly: "silently, on
+     * a daemon thread, with no alarm". That was written about the UNBOUNDED case.
+     * The BOUNDED case has the same property: the timeout is caught, logged at
+     * WARN, and the scheduler re-fires in six hours, forever, making no progress,
+     * on a service whose /health stays green.
+     *
+     * <p>So "survives a blocked arm" and "reaps nothing, permanently" were
+     * indistinguishable from outside the logs. This asserts the VALUE of the
+     * counter in both directions -- it must climb while the arm keeps failing
+     * and reset the moment one succeeds -- rather than asserting the absence of
+     * a stall, which is what let this ship. Delete the counter and this test
+     * fails; it cannot pass vacuously.
+     *
+     * <p>SCOPE, so this test is not mistaken for more than it is: the counter is
+     * DIAGNOSIS, not detection. It sees "installed but never reaping". It is
+     * BLIND to "scheduler never fired" -- no cycles means no failures to count,
+     * so it reads zero, which looks healthy. Detection is the absence of the
+     * unconditional t1_scheduled_sweep_complete heartbeat, alarmed over a window
+     * longer than one period, which no unit test can assert because it lives in
+     * the deployment's metric filter. Do not extend this test to claim it.
+     */
+    @Test
+    @Timeout(value = 90, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void runScheduledSweep_repeatedArmFailure_climbsACounter_andResetsOnRecovery() throws Exception {
+        String tenant = "sched-sweep-stall-" + System.nanoTime();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        insertDataToken(tenant, "long-expired", now.toInstant().minus(Duration.ofDays(30)));
+
+        // try/finally, NOT a trailing deleteTokens: this row is deliberately
+        // sweepable and runScheduledSweep is fleet-wide, so a mid-assert failure
+        // that skipped cleanup would surface as a phantom extra deletion in
+        // whichever test ran next -- turning one red into two and pointing the
+        // second one at innocent code. Measured: proving this test non-vacuous
+        // by mutation did exactly that to
+        // runScheduledSweep_reapsExpiredDataTokens_andReportsTheCount.
+        try {
+        assertThat(service.consecutiveDataSweepFailures())
+            .as("precondition: a service that has never failed reports zero")
+            .isEqualTo(0);
+        assertThat(service.dataSweepStalled())
+            .as("precondition: not stalled before anything has failed")
+            .isFalse();
+
+        try (Connection blocker = pg.createConnection("")) {
+            blocker.setAutoCommit(false);
+            try (Statement st = blocker.createStatement()) {
+                st.execute("LOCK TABLE nexus.service_tokens IN SHARE MODE");
+            }
+
+            for (int cycle = 1; cycle <= NexusService.DATA_SWEEP_STALL_CYCLES; cycle++) {
+                service.runScheduledSweep(now, Duration.ofMillis(500));
+                assertThat(service.consecutiveDataSweepFailures())
+                    .as("cycle %s failed to reap anything; the counter must record that, "
+                        + "because the log line alone is what nobody reads", cycle)
+                    .isEqualTo(cycle);
+            }
+
+            assertThat(service.dataSweepStalled())
+                .as("at %s consecutive failed cycles the arm is not 'surviving', it is "
+                    + "not reaping -- and the difference must be recoverable from state, "
+                    + "not only inferable by someone already reading WARN lines",
+                    NexusService.DATA_SWEEP_STALL_CYCLES)
+                .isTrue();
+
+            blocker.rollback();
+        }
+
+        // Recovery must clear it, or the flag latches and becomes noise that gets
+        // blessed reflexively -- the failure mode on the other side of this fix.
+        service.runScheduledSweep(now, Duration.ofMillis(500));
+        assertThat(service.consecutiveDataSweepFailures())
+            .as("one successful cycle resets the counter")
+            .isEqualTo(0);
+        assertThat(service.dataSweepStalled())
+            .as("and clears the stalled state; a latched flag is a wolf-crier")
+            .isFalse();
+        } finally {
+            deleteTokens(tenant);
+        }
+    }
+
     @Test
     @Timeout(value = 60, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     void runScheduledSweep_boundsTenantEnumerationToo() throws Exception {

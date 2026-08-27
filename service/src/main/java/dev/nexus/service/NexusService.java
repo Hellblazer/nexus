@@ -93,6 +93,16 @@ public final class NexusService {
      */
     private static final long SWEEP_DATA_TOKEN_GRACE_DAYS = 7L;
 
+    /**
+     * nexus-4tosp. Consecutive cycles whose data-token arm reaped nothing AND
+     * failed for every tenant, before the arm is reported stalled. Three, not
+     * one: at {@link #SWEEP_INTERVAL_HOURS} that is 18h, so a single transient
+     * DB blip does not raise a wolf — and a check that cries wolf gets blessed
+     * reflexively and stops meaning anything, which is the failure mode on the
+     * far side of this fix.
+     */
+    static final int DATA_SWEEP_STALL_CYCLES = 3;
+
     /** Always-swept tenant; the sweeper additionally loops every token-bearing tenant (nexus-4qq1m). */
     private static final String DEFAULT_TENANT = "default";
 
@@ -104,6 +114,9 @@ public final class NexusService {
      *  can reach it — the scratch arm of the sweep loop (nexus-lgiqw). */
     private final ScratchRepository scratchRepo;
     private final TokenCache tokenCache;
+    /** nexus-4tosp: consecutive cycles the data-token arm failed outright. */
+    private final java.util.concurrent.atomic.AtomicInteger consecutiveDataSweepFailures =
+        new java.util.concurrent.atomic.AtomicInteger();
 
     /**
      * nexus-tyxnh: owns the post-commit purge-trash VACUUM executor; shut down in
@@ -484,6 +497,11 @@ public final class NexusService {
         int total = 0;
         int totalSessionTokens = 0;
         int totalDataTokens = 0;
+        // nexus-4tosp: a cycle counts as a data-arm failure only when NO tenant
+        // succeeded. One bad tenant among healthy ones is the case the per-tenant
+        // catch already handles correctly and must not trip the stall counter.
+        boolean dataArmSucceededForAnyTenant = false;
+        boolean dataArmFailedForAnyTenant = false;
         for (String tenant : tenants) {
             try {
                 int deleted = scratchRepo.sweepTenant(tenant, cutoff, statementTimeout);
@@ -528,7 +546,9 @@ public final class NexusService {
                     tenant, now.toInstant(), Duration.ofDays(SWEEP_DATA_TOKEN_GRACE_DAYS),
                     statementTimeout);
                 totalDataTokens += dataDeleted;
+                dataArmSucceededForAnyTenant = true;
             } catch (Exception ex) {
+                dataArmFailedForAnyTenant = true;
                 log.warn("event=t1_scheduled_data_token_sweep_tenant_failed tenant={} error={}",
                     tenant, ex.getMessage(), ex);
             }
@@ -546,11 +566,69 @@ public final class NexusService {
         log.info("event=t1_scheduled_sweep_complete tenants={} total_deleted={} "
                 + "total_session_tokens_deleted={} total_data_tokens_deleted={}",
             tenants.size(), total, totalSessionTokens, totalDataTokens);
+
+        // nexus-4tosp. The per-tenant catch above is correct and stays: one
+        // tenant's failure must not starve the fleet. What was missing is any
+        // consequence for it happening EVERY cycle.
+        //
+        // THIS IS DIAGNOSIS, NOT DETECTION -- do not mistake it for the alarm.
+        // There are three failure modes and this counter sees exactly one:
+        //   reaped                      sweep_complete present, counts sane
+        //   installed but never reaping failure events every cycle   <- this
+        //   scheduler never fired       NOTHING at all               <- BLIND
+        // If the sweep thread dies or the JVM wedges there are no failures to
+        // count, so this counter reads ZERO -- indistinguishable from healthy,
+        // silent in the reassuring direction, which is the same shape as the
+        // bug it is fixing. The DETECTOR is the ABSENCE of the unconditional
+        // t1_scheduled_sweep_complete heartbeat below, alarmed over a window
+        // longer than one period; that covers all three modes. This counter
+        // only tells you WHICH one, once that alarm fires.
+        // (Design credit: conexus-a4, 2026-08-27, who caught that the counter
+        // alone reproduces the defect one level up.)
+        if (dataArmFailedForAnyTenant && !dataArmSucceededForAnyTenant) {
+            int streak = consecutiveDataSweepFailures.incrementAndGet();
+            // ERROR only on the crossing, not every cycle after: a line repeated
+            // forever is noise, and noise is how a real signal gets blessed away.
+            if (streak == DATA_SWEEP_STALL_CYCLES) {
+                log.error("event=t1_scheduled_data_token_sweep_stalled consecutive_cycles={} "
+                        + "tenants={} — the data-token arm has reaped NOTHING for {} "
+                        + "consecutive cycles; expired tokens are accruing unreaped",
+                    streak, tenants.size(), streak);
+            }
+        } else if (dataArmSucceededForAnyTenant) {
+            consecutiveDataSweepFailures.set(0);
+        }
         return new SweepCounts(tenants.size(), total, totalSessionTokens, totalDataTokens);
     }
 
     /** Per-arm deletion counts from one {@link #runScheduledSweep} cycle. */
     record SweepCounts(int tenants, int scratch, int sessionTokens, int dataTokens) { }
+
+    /**
+     * nexus-4tosp: consecutive cycles whose data-token arm failed for every
+     * tenant. Zero whenever any tenant last succeeded.
+     *
+     * <p>Package-private ON PURPOSE. It exists so the threshold behaviour is
+     * assertable by value rather than by the absence of a stall, which is what
+     * let the original defect ship. It is NOT a production surface: nothing in
+     * the deployment reads the engine's /health body (the ALB probes the edge's
+     * own /healthz -- fan-out was deliberately rejected, conexus-dn4; the
+     * redeploy poll hits /version and discards the body), so publishing this
+     * there would have been an inert guard wearing the look of a live one.
+     */
+    int consecutiveDataSweepFailures() {
+        return consecutiveDataSweepFailures.get();
+    }
+
+    /**
+     * nexus-4tosp: true once the data-token arm has failed outright for
+     * {@link #DATA_SWEEP_STALL_CYCLES} consecutive cycles. Clears on the first
+     * cycle that reaps for any tenant — a latched flag would be a wolf-crier.
+     * Package-private for the same reason as above: assertable, not published.
+     */
+    boolean dataSweepStalled() {
+        return consecutiveDataSweepFailures.get() >= DATA_SWEEP_STALL_CYCLES;
+    }
 
 
     /** Stop the HTTP server, TTL sweep scheduler, and purge-trash VACUUM
