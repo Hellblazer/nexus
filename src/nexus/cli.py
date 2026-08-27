@@ -59,6 +59,7 @@ from nexus.commands.mineru import mineru_group
 from nexus.commands.plan import plan as plan_group
 from nexus.commands.rdr import rdr as rdr_group
 from nexus.commands.scratch import scratch
+from nexus.commands.self_cmd import self_group
 from nexus.commands.search_cmd import search_cmd
 from nexus.commands.service_cmd import service
 from nexus.commands.store import store
@@ -105,6 +106,18 @@ def main(ctx: click.Context, verbose: bool) -> None:
     ctx.obj["verbose"] = verbose
     configure_logging("cli", verbose=verbose)
 
+    # nexus-utpuw.12 / design point 6: one readlink at spawn. A shim-launched
+    # process is silent by construction (the shim execs the generation the
+    # pointer names); this fires only when something BYPASSED the shim and
+    # bound to a generation that is no longer current. Informational —
+    # the tree it is running is intact and converges at the next spawn.
+    try:
+        from nexus.upgrade_finish import spawn_tripwire  # noqa: PLC0415 — deferred import
+
+        spawn_tripwire()
+    except Exception:  # noqa: BLE001 — the tripwire must never break CLI startup
+        pass
+
     # nexus-gynt2: stranded-install detector. Disarmed (a pure constant
     # check, no filesystem access) on every migration-capable release; at
     # N+1 it trips a LOUD stderr banner on EVERY invocation while pre-PG
@@ -119,7 +132,19 @@ def main(ctx: click.Context, verbose: bool) -> None:
 
         _stranded = detect_stranded_install_default()
         if _stranded is not None:
-            click.echo(f"[stranded-install] {_stranded.message}", err=True)
+            # The leaf cannot ask which layout this box has (its import
+            # contract forbids it), and the CLI can — so the banner names the
+            # same first hop nx doctor names, rather than the two surfaces
+            # printing different commands for one procedure (nexus-utpuw.13).
+            from nexus import install_advice  # noqa: PLC0415 — deferred import
+
+            _hop = install_advice.pinned_install_command(
+                _stranded.pinned_release,
+                legacy=f"uv tool install conexus=={_stranded.pinned_release}",
+            )
+            click.echo(
+                f"[stranded-install] {_stranded.message_for(_hop)}", err=True
+            )
     except Exception:  # noqa: BLE001 — the detector must never break CLI startup
         import structlog  # noqa: PLC0415 — deferred import
         structlog.get_logger(__name__).warning(
@@ -169,6 +194,7 @@ main.add_command(plan_group, name="plan")
 main.add_command(rdr_group, name="rdr")
 main.add_command(scratch)
 main.add_command(search_cmd, name="search")
+main.add_command(self_group, name="self")
 main.add_command(service, name="service")
 main.add_command(store)
 main.add_command(stranded_group, name="stranded")

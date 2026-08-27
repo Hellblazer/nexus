@@ -10,9 +10,16 @@ Upgrading nexus is: update the code, then run `nx upgrade`. There is no
 sequence to hold and no era to identify.
 
 ```bash
-uv tool upgrade conexus    # 1. update the code (PRESERVES extras like [local])
+nx self install            # 1. update the code (PRESERVES extras like [local])
 nx upgrade                 # 2. converge the data
 ```
+
+`nx self install` builds a new side-by-side generation and flips the `current`
+symlink the `nx` shims resolve through, so it is safe with live sessions
+attached — holders keep running from their own generation and converge at their
+next spawn. `uv tool upgrade conexus` does not touch a generation install; it is
+the code-update step only on a box that has not migrated to generations yet,
+where `nx self install` refuses rather than doing the wrong thing.
 
 `nx upgrade` brings the package, engine, process, and provisioning
 preconditions current, then walks one ordered ladder that auto-applies whichever

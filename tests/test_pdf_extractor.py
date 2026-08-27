@@ -426,6 +426,29 @@ class TestAutoDetectRouting:
         assert "--extractor docling" in msg  # opt-out hint
         assert isinstance(excinfo.value.__cause__, ImportError)
 
+    def test_the_formula_reinstall_hint_follows_the_layout(
+        self, extractor, dummy_pdf, tmp_path, monkeypatch
+    ):
+        """nexus-utpuw.13. A DISTINCT call site from the one in
+        test_mineru_extractor.py — same helper, separate wiring, so it needs
+        its own falsifier or a mutation that unwires just this one passes.
+        conftest fences $HOME, so the test above only sees the legacy branch.
+        """
+        from tests import _generation_layout
+
+        _generation_layout.build(tmp_path, monkeypatch)
+        with (
+            patch("nexus.pdf_extractor._has_formulas_quick", return_value=10),
+            patch.object(extractor, "_extract_with_docling", return_value=self._docling_f),
+            patch.object(extractor, "_extract_with_mineru", side_effect=ImportError("No module named 'mineru'")),
+        ):
+            with pytest.raises(RuntimeError) as excinfo:
+                extractor.extract(dummy_pdf, extractor="auto")
+        msg = str(excinfo.value)
+        assert "nx self install" in msg
+        assert "uv tool" not in msg
+        assert "--extractor docling" in msg  # the opt-out must survive
+
     def test_auto_raises_when_mineru_runtime_fails_on_formula_pdf(self, extractor, dummy_pdf):
         """nexus-2fyb code-review C1: non-import failures (subprocess timeout,
         OOM kill, mineru-api 5xx, httpx errors) MUST NOT advise reinstalling

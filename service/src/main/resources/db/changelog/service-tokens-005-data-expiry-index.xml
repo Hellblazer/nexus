@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-lgiqw — index for the scope=data reaper.
+
+    The baseline changeset deliberately shipped NO expiry index on service_tokens.
+    The PRECEDENT for adding one now is the sibling table, inline in that same
+    changeset at service-tokens-001-baseline.xml:117-118, where
+    idx_session_tokens_expires ships with a comment naming the exact sweep query it
+    serves. This index does the same thing for the same shape of query.
+
+    (An earlier version of this comment cited the baseline's line "Active-token
+    listing/sweep indexes ... are added by Phase C alongside the queries that need
+    them (avoid speculative indexes here)" as a general house rule. That elides the
+    qualifier: the sentence reads "for the Phase C CLI" and is scoped to a deferred
+    feature, not to sweep indexes at large. The conclusion was right and the citation
+    was not, and an ellipsis that drops a scoping clause is how a comment starts
+    asserting more than its source does.)
+
+    PARTIAL, on scope='data', because only data rows are ever swept — root, tenant,
+    mint and mint-locked are long-lived operator artifacts the reaper never touches.
+
+    On the write cost, since it was argued: the mint path inserts ~313 rows/day
+    (measured on the live estate 2026-08-25) — roughly one every five minutes. That
+    is not a hot path, and an index maintained at that rate is free. The earlier
+    objection ("do not index, it costs the hot mint path") came from reasoning about
+    a relative claim without dividing by the day.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="service-tokens-005-1" author="nexus-lgiqw">
+        <comment>
+            Partial index supporting the scope=data reaper's predicate.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+-- Data-token reaper (TokenStore.sweepExpiredDataTokens):
+--   DELETE FROM nexus.service_tokens
+--    WHERE tenant_id = ? AND scope = 'data' AND expires_at &lt; now() - '7 days'::interval
+CREATE INDEX IF NOT EXISTS idx_service_tokens_data_expires
+    ON nexus.service_tokens (expires_at) WHERE scope = 'data';
+        </sql>
+        <rollback>
+DROP INDEX IF EXISTS nexus.idx_service_tokens_data_expires;
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

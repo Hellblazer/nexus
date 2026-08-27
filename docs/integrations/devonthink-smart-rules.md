@@ -66,6 +66,7 @@ setups. Common locations:
 
 | Install method | Path |
 | --- | --- |
+| `nx self install` (generation install) | `~/.local/bin/nx` (a shim) |
 | `uv tool install conexus` | `~/.local/bin/nx` |
 | Homebrew (Apple Silicon) | `/opt/homebrew/bin/nx` |
 | Homebrew (Intel) | `/usr/local/bin/nx` |
@@ -74,6 +75,14 @@ setups. Common locations:
 Run `which nx` from your shell once and paste the result. AppleScript's
 `PATH` is bare, so the absolute path avoids the "command not found"
 silent failure when you run `nx` from a `.zshrc`-style shell.
+
+Paste that path verbatim. On a generation install `~/.local/bin/nx` is a
+nexus-owned shim that resolves `~/.local/share/nexus/tools/current` and then
+execs the real binary, which is exactly what makes it survive an install —
+so do not substitute a path under `~/.local/share/nexus/tools/` for it.
+A `gen-<stamp>/bin/nx` baked into the rule is reaped by a later GC pass, and
+going through `current/bin/...` puts a pointer that moves into the resolved
+interpreter path (nexus-q3xrx). The shim is the supported entry point.
 
 ### 2. Save location
 

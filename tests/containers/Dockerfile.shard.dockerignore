@@ -18,9 +18,19 @@
 !.claude-plugin
 !service/src
 !service/target/nexus-service-1.0-SNAPSHOT.jar
+# .github (304K): conftest.py itself reads it, plus the release-drift,
+# eval-corpus, mode-declaration and cut-plugin-release lints. Omitting it
+# errored those at setup with FileNotFoundError on /work/.github/workflows.
+!.github
 # Re-excludes (must come after the ! lines):
 **/__pycache__
 **/.pytest_cache
 **/.DS_Store
-scripts/spikes
+# scripts/spikes is 128M, but 125M of that is ONE build tree and the suite
+# only reads two .py files from the directory (test_spike_rdr094_observer,
+# test_rdr155_p4b_deletion_gate). Excluding the whole tree cost 11 setup
+# errors; excluding just the build tree costs nothing and keeps the context
+# at ~3M. Do not widen this back to `scripts/spikes` without re-checking
+# who reads it.
+scripts/spikes/s04-build
 tests/containers/out

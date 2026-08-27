@@ -190,6 +190,325 @@ def _check_python() -> list[HealthResult]:
     return [r]
 
 
+def _install_advice():
+    """The advice module, deferred (health is imported early and widely)."""
+    from nexus import install_advice  # noqa: PLC0415 — deferred import
+
+    return install_advice
+
+
+def _upgrade_advice(fallback: str) -> str:
+    """How to upgrade THIS box. MOVED to :mod:`nexus.install_advice` (.13).
+
+    The rule was born here in .11 and is needed by callers that cannot import
+    ``health`` — ``stranded_install`` records at its own line 102 that it is a
+    leaf with import constraints, and ``pdf_extractor`` and ``mcp_infra`` were
+    each carrying their own hardcoded uv string. One answer, one module.
+
+    This wrapper stays because it reads better at the call sites here. Note the
+    generation branch now names ``nx self install`` rather than
+    ``scripts/reinstall-tool.sh``: .11 predates .14, and the packaged installer
+    needs no checkout (see the module docstring there for the full reason).
+    """
+    from nexus import install_advice  # noqa: PLC0415 — deferred import
+
+    return install_advice.upgrade_advice(fallback)
+
+
+def _check_generation_layout() -> list[HealthResult]:
+    """The generation layout itself: is there a working install to run from?
+
+    nexus-utpuw.11. health.py carried ZERO references to install_layout, so
+    every way the layout can break was invisible to the one command whose job
+    is noticing. Three things can go wrong and they are not the same severity:
+
+    * ``current`` missing or dangling is a HARD failure. Every shim resolves it
+      at spawn, so nothing starts. Not a warning.
+    * A shim that uv has taken back is a FAILURE, and it is nexus-utpuw.7's
+      accepted risk realised: between migration and reap uv still holds a valid
+      receipt, so a stray ``uv tool upgrade conexus`` re-symlinks over the
+      nexus-owned shim files and live sessions resolve through uv's tree again.
+      The mitigation is that re-running the installer repairs it, which only
+      helps if somebody is told.
+    * A ``gen-*`` directory with no receipt is NOT a fault. It is a build that
+      died before finishing; nothing ever pointed ``current`` at it and GC reaps
+      it. Reporting wreckage as breakage trains the operator to ignore this row,
+      which is how a real fault gets missed.
+
+    The shim names are DERIVED from ``<current>/bin`` rather than hardcoded. A
+    hardcoded inventory is the failure class this whole arc removes, and doctor
+    is the last place to reintroduce one.
+    """
+    label = "Generation layout"
+    try:
+        from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+        tools = install_layout.tools_dir()
+        bin_dir = install_layout.bin_dir()
+
+        # WHAT MATTERS IS NOT PRESENT-VS-ABSENT, IT IS WHETHER ANYTHING WAS EVER
+        # INSTALLED. Generations on disk with no pointer is a BROKEN install;
+        # an empty tools root is a box that has not installed yet, and
+        # hard-failing that would fail every fresh machine (RG-C).
+        link = install_layout.current_link(tools=tools)
+        if not link.is_symlink() and not link.exists():
+            generations = install_layout.list_generations(tools=tools)
+            if not generations:
+                return [HealthResult(
+                    label=label, ok=True,
+                    detail="no generation install on this box (nothing to check)",
+                )]
+            return [HealthResult(
+                label=label, ok=False, fatal=True,
+                detail=(
+                    f"{len(generations)} generation(s) exist but current does "
+                    "not — nothing resolves, so nothing will start"
+                ),
+                fix_suggestions=["scripts/reinstall-tool.sh"],
+            )]
+
+        current = install_layout.current_generation()
+    except Exception as exc:  # noqa: BLE001 — never crash doctor
+        # UNCERTAIN MEANS SAY SO. Returning ok here would be the silent green
+        # this bead exists to remove, relocated one function over.
+        _log.warning("doctor_generation_layout_check_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"could not check the generation layout — {exc}",
+        )]
+
+    if not current.is_dir():
+        return [HealthResult(
+            label=label, ok=False, fatal=True,
+            detail=(
+                f"current points at {current}, which does not exist — every "
+                "shim resolves current at spawn, so nothing will start"
+            ),
+            fix_suggestions=["scripts/reinstall-tool.sh"],
+        )]
+
+    if not install_layout.receipt_path(current).is_file():
+        return [HealthResult(
+            label=label, ok=False, fatal=True,
+            detail=(
+                f"current points at {current.name}, which has no receipt — that "
+                "is an unfinished build, not a generation"
+            ),
+            fix_suggestions=["scripts/reinstall-tool.sh"],
+        )]
+
+    # SUBTRACT THE NAMES NEXUS NEVER OWNS. A venv's bin/ holds python, pip and
+    # activate; nx_write_shims explicitly never shims them. ~/.local/bin is a
+    # SHARED directory — pyenv, asdf and homebrew all leave a `python` symlink
+    # there — so deriving the owned set from <current>/bin without this
+    # subtraction hard-fails a healthy install on a common machine
+    # configuration (RG-C). A row that cries wolf is this check's own docstring
+    # warning inverted: it trains the operator to ignore the row, which is how
+    # the real reclaim gets missed.
+    reclaimed = [
+        entry.name
+        for entry in sorted((current / "bin").iterdir())
+        if entry.name not in install_layout.NEVER_SHIM
+        and (bin_dir / entry.name).is_symlink()
+    ] if (current / "bin").is_dir() else []
+    if reclaimed:
+        return [HealthResult(
+            label=label, ok=False, fatal=True,
+            detail=(
+                f"{', '.join(reclaimed)} in {bin_dir} are symlinks, not "
+                "nexus-owned shims — uv has taken them back (a stray "
+                "`uv tool upgrade conexus` does this), so those commands "
+                "resolve through uv's tree instead of current"
+            ),
+            fix_suggestions=["scripts/reinstall-tool.sh"],
+        )]
+
+    generations = install_layout.list_generations(tools=tools)
+    results = [HealthResult(
+        label=label, ok=True,
+        detail=(
+            f"current -> {current.name}, {len(generations)} complete "
+            f"generation(s), shims owned by nexus"
+        ),
+    )]
+    results.extend(_check_shims_match_template(current, bin_dir, tools))
+    results.extend(_check_base_interpreters(current, generations))
+    results.extend(_check_orphan_uv_install())
+    results.extend(_check_generation_holders(current, generations))
+    return results
+
+
+def _check_shims_match_template(current, bin_dir, tools) -> list[HealthResult]:
+    """A shim must match the template, not merely be a regular file.
+
+    The not-a-symlink check catches uv reclaiming a name. It does NOT catch a
+    shim with the right SHAPE and the wrong CONTENT: one baked before
+    NX_TOOLS_DIR moved, or hand-edited, resolves a pointer that is not this
+    layout's and sends every spawn somewhere else. The template is rendered by
+    install_layout.render_shim, which is the same function the writer uses, so
+    this compares against the source of truth rather than a restatement of it.
+    """
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    if not (current / "bin").is_dir():
+        return []
+    mismatched = []
+    checked = 0
+    for entry in sorted((current / "bin").iterdir()):
+        if entry.name in install_layout.NEVER_SHIM:
+            continue
+        shim = bin_dir / entry.name
+        if not shim.is_file() or shim.is_symlink():
+            continue  # absent or reclaimed — the row above owns those
+        try:
+            expected = install_layout.render_shim(entry.name, tools=tools)
+        except Exception:  # noqa: BLE001 — a name the template refuses is not ours to judge here
+            continue
+        checked += 1
+        if shim.read_text() != expected:
+            mismatched.append(entry.name)
+    if not mismatched:
+        # Emit the PASS too. Every other row in this group does, and a check
+        # that is silent when healthy cannot be distinguished from one that did
+        # not run -- which is the exact confusion this bead exists to remove.
+        return [HealthResult(
+            label="Shim contents", ok=True,
+            detail=f"{checked} shim(s) match the current template",
+        )]
+    return [HealthResult(
+        label="Shim contents", ok=False, fatal=True,
+        detail=(
+            f"{', '.join(mismatched)} in {bin_dir} do not match the current "
+            "shim template — they resolve a different pointer than this layout, "
+            "so spawns go somewhere else"
+        ),
+        fix_suggestions=["scripts/reinstall-tool.sh"],
+    )]
+
+
+def _check_base_interpreters(current, generations) -> list[HealthResult]:
+    """Every retained generation's base interpreter still exists.
+
+    A generation's venv does NOT contain its interpreter: pyvenv.cfg records a
+    ``home =`` pointing at one uv manages elsewhere, and uv prunes those. When
+    it prunes the one a generation points at, that tree stops working and
+    nothing here can prevent it — the research amendment calls this "the one
+    failure we can only detect, never prevent", which is the whole reason to
+    detect it.
+
+    On CURRENT it is fatal: nothing will start. On an older generation it is a
+    warning — that tree is a rollback target, not the running install, and
+    failing a working box over a dead rollback target is how this row gets
+    ignored.
+    """
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    missing_current = None
+    missing_old: list[str] = []
+    for gen in generations:
+        try:
+            base = Path(install_layout.read_receipt(gen).base_interpreter)
+        except Exception:  # noqa: BLE001 — an unreadable receipt is the layout row's business
+            continue
+        if base.exists():
+            continue
+        if gen == current:
+            missing_current = base
+        else:
+            missing_old.append(gen.name)
+
+    if missing_current is not None:
+        return [HealthResult(
+            label="Base interpreter", ok=False, fatal=True,
+            detail=(
+                f"current ({current.name}) records base interpreter "
+                f"{missing_current}, which no longer exists — uv prunes managed "
+                "interpreters, and this generation cannot run without it"
+            ),
+            fix_suggestions=["scripts/reinstall-tool.sh"],
+        )]
+    if missing_old:
+        return [HealthResult(
+            label="Base interpreter", ok=False, warn=True,
+            detail=(
+                f"{', '.join(missing_old)} record base interpreters that no "
+                "longer exist — those generations are no longer usable as "
+                "rollback targets (uv pruned the interpreter)"
+            ),
+        )]
+    return [HealthResult(
+        label="Base interpreter", ok=True,
+        detail="every retained generation's base interpreter is present",
+    )]
+
+
+def _check_orphan_uv_install() -> list[HealthResult]:
+    """A uv-managed conexus alive alongside the generation layout.
+
+    Expected DURING the migration window — nexus-utpuw.7 leaves the legacy tree
+    in place until it has zero holders. What makes it worth naming is that uv
+    still holds a valid receipt for it, so a stray ``uv tool upgrade conexus``
+    rebuilds that tree and re-symlinks over the shims (.7's accepted risk).
+    """
+    import os  # noqa: PLC0415 — deferred, module already imports it lazily elsewhere
+
+    tool_dir = os.environ.get("UV_TOOL_DIR")
+    root = Path(tool_dir) if tool_dir else Path.home() / ".local" / "share" / "uv" / "tools"
+    legacy = root / "conexus"
+    if not (legacy / "bin").is_dir():
+        return [HealthResult(
+            label="Orphan uv install", ok=True,
+            detail="no uv-managed conexus alongside the generation layout",
+        )]
+    return [HealthResult(
+        label="Orphan uv install", ok=False, warn=True,
+        detail=(
+            f"a uv-managed conexus is still present at {legacy} — uv holds a "
+            "valid receipt for it, so `uv tool upgrade conexus` will rebuild it "
+            "and re-symlink over the nexus shims"
+        ),
+        fix_suggestions=[
+            "scripts/reinstall-tool.sh    # rewrites the shims if uv has taken them",
+            f"uv tool uninstall conexus    # once nothing is running from {legacy}",
+        ],
+    )]
+
+
+def _check_generation_holders(current, generations) -> list[HealthResult]:
+    """Who is still running from an older generation. INFORMATIONAL.
+
+    Holders are a fact, not a fault: they keep running from their own tree and
+    converge at their next spawn. A row that failed on them would contradict
+    the acceptance criterion this whole arc exists to satisfy, which is that a
+    live session stops being an obstacle to installing.
+    """
+    from nexus import install_census  # noqa: PLC0415 — deferred import
+
+    snapshot = install_census.ps_snapshot()
+    held = []
+    for gen in generations:
+        if gen == current:
+            continue
+        try:
+            pids = install_census.generation_holder_pids(gen, snapshot=snapshot)
+        except Exception:  # noqa: BLE001 — a census failure is not a layout fault
+            continue
+        if pids:
+            held.append(f"{gen.name}: {len(pids)} ({', '.join(str(p) for p in pids[:4])})")
+    if not held:
+        return [HealthResult(
+            label="Holders", ok=True,
+            detail="nothing is still bound to an older generation",
+        )]
+    return [HealthResult(
+        label="Holders", ok=True,
+        detail=(
+            "still bound to an older generation, converging at their next "
+            f"spawn — {'; '.join(held)}"
+        ),
+    )]
+
+
 def _check_process_skew() -> list[HealthResult]:
     """nexus-4xgfy: the disk can be upgraded while every running process
     still executes the old code from memory — three live incidents
@@ -202,6 +521,7 @@ def _check_process_skew() -> list[HealthResult]:
     try:
         from nexus.upgrade_finish import (  # noqa: PLC0415 — deferred import
             detect_stale_processes,
+            enumerate_processes,
             install_source,
         )
 
@@ -221,15 +541,40 @@ def _check_process_skew() -> list[HealthResult]:
             detail=f"could not check — probe failed: {exc}",
         )]
     if not report.stale:
-        return [HealthResult(
-            label="Process freshness",
-            ok=True,
-            detail=(
-                f"all running conexus processes match the installed "
+        # A GREEN MUST STATE WHAT IT EXAMINED. This row used to say "all running
+        # conexus processes match the installed version" whether it had looked
+        # at twelve processes or none, and under the generation layout it was
+        # always none: the markers were pinned to the CURRENT generation while a
+        # stale process by definition runs from a different one, so report.stale
+        # was empty by construction (nexus-utpuw.10). The sentence was a vacuous
+        # truth dressed as a positive finding, on the one check whose whole
+        # purpose is noticing that the machine is stale.
+        #
+        # Two ps views rather than one: the count is display-only and never
+        # gates a decision, so a process starting between them can make the
+        # count off by one but cannot make this row wrong.
+        try:
+            examined = len(enumerate_processes())
+        except Exception:  # noqa: BLE001 — a display count must never fail the row
+            examined = -1
+
+        if examined == 0:
+            detail = (
+                "no running conexus processes found — nothing to compare "
+                f"against the installed {report.installed_version}"
+            )
+        elif examined < 0:
+            detail = (
+                f"no stale processes found against the installed "
+                f"{report.installed_version}; could not count how many were examined"
+            )
+        else:
+            detail = (
+                f"{examined} running conexus process(es) all match the installed "
                 f"{report.installed_version} (install source: "
                 f"{install_source().split(' — ')[0]})"
-            ),
-        )]
+            )
+        return [HealthResult(label="Process freshness", ok=True, detail=detail)]
     names = ", ".join(
         f"{p.kind} pid {p.pid}" for p in report.stale[:6]
     )
@@ -299,7 +644,9 @@ def _check_cli_version() -> list[HealthResult]:
         detail=f"{current} → {latest} available",
     )
     r.fix_suggestions = [
-        f"uv tool upgrade conexus    # → {latest}",
+        _install_advice().upgrade_advice(
+            "uv tool upgrade conexus", note=f"→ {latest}"
+        ),
     ]
     return [r]
 
@@ -3960,13 +4307,26 @@ def _check_stranded_install() -> list[HealthResult]:
     stranded = detect_stranded_install_default()
     if stranded is None:
         return [HealthResult(label=label, ok=True, detail="no unmigrated pre-PG data")]
+    # THE PIN IS THE POINT. The detail used to come from stranded.message,
+    # whose first hop is uv-shaped because that module is a stdlib-only leaf,
+    # and the suggestion used to route the whole sentence through
+    # _upgrade_advice — which on a generation box replaced it wholesale with
+    # the generic installer, dropping both the pinned version and the "last
+    # migration-capable release" framing, and so advising the NEWEST release:
+    # the exact hop this procedure exists to avoid. doctor can ask which
+    # layout the box has, so it asks, once, and the banner and the suggestion
+    # now name the same command (nexus-utpuw.13).
+    first_hop = _install_advice().pinned_install_command(
+        stranded.pinned_release,
+        legacy=f"uv tool install conexus=={stranded.pinned_release}",
+    )
     return [HealthResult(
         label=label,
         ok=False,
         fatal=True,
-        detail=stranded.message,
+        detail=stranded.message_for(first_hop),
         fix_suggestions=[
-            f"Install the last migration-capable release: uv tool install conexus=={stranded.pinned_release}",
+            f"Install the last migration-capable release: {first_hop}",
             "Run: nx upgrade (the ladder converges the pre-PG data migration)",
             "Then upgrade back to this version",
         ],
@@ -5527,6 +5887,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
 
     results.extend(_check_python())
     results.extend(_check_cli_version())
+    results.extend(_check_generation_layout())
     results.extend(_check_process_skew())
     results.extend(_check_plugin_name())
     results.extend(_check_credential_persistence())

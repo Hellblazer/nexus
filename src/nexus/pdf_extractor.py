@@ -951,12 +951,17 @@ class PDFExtractor:
                 formula_count=formula_count,
                 path=str(pdf_path),
             )
+            from nexus import install_advice  # noqa: PLC0415 — deferred import
+
+            reinstall = install_advice.upgrade_command(
+                "uv tool install --reinstall conexus"
+            )
             raise RuntimeError(
                 f"PDF {pdf_path.name} contains formulas (detected {formula_count}) "
                 f"but MinerU is not importable: {exc}. "
                 f"MinerU is a required dependency since nexus-2fyb; if it is "
                 f"missing your conexus install is corrupt — reinstall with "
-                f"`uv tool install --reinstall conexus`. To bypass formula "
+                f"`{reinstall}`. To bypass formula "
                 f"extraction entirely, rerun with `--extractor docling`."
             ) from exc
         except Exception as exc:
@@ -1211,9 +1216,14 @@ class PDFExtractor:
         page index, the batch markdown, and metadata.
         """
         if do_parse is None:
+            from nexus import install_advice  # noqa: PLC0415 — deferred import
+
+            reinstall = install_advice.upgrade_command(
+                "uv tool install --reinstall conexus"
+            )
             raise ImportError(
                 "MinerU is not importable but is a required dependency since "
-                "nexus-2fyb. Reinstall conexus: `uv tool install --reinstall conexus`."
+                f"nexus-2fyb. Reinstall conexus: `{reinstall}`."
             )
 
         import pymupdf  # lightweight — only used for page count  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local

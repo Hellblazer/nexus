@@ -169,7 +169,7 @@ Most PDFs work fine with the default (`auto`). You only need to think about this
 - Large PDFs are automatically split into 5-page batches, each processed in
   an isolated subprocess to prevent OOM on formula-dense documents
 
-**MinerU is included by default** since nexus-2fyb. Previously gated behind a `[mineru]` extra; the extras gate produced silent formula loss because fresh installs never picked it up. First use of `auto` or `mineru` modes downloads the unimernet model (~2-3 GB). If MinerU is missing at runtime, your install is corrupt — reinstall with `uv tool install --reinstall conexus`.
+**MinerU is included by default** since nexus-2fyb. Previously gated behind a `[mineru]` extra; the extras gate produced silent formula loss because fresh installs never picked it up. First use of `auto` or `mineru` modes downloads the unimernet model (~2-3 GB). If MinerU is missing at runtime, your install is corrupt — reinstall with [`nx self install`](#nx-self-install) (from a dev checkout, `scripts/reinstall-tool.sh`). The runtime error prints the command for the layout it finds, so a box still on the legacy uv tree is told the uv form instead.
 
 **Setting a default backend (sticky config):**
 
@@ -2034,9 +2034,14 @@ headless host where the unit can't activate) a session supervisor starts instead
 
 When `bge-768` is chosen, `nx init` also:
 
-1. **Adds the `[local]` extra** if missing. For a `uv tool` install it runs an
-   extras-preserving reinstall; in a dev/editable checkout it prints the manual
-   command instead of touching the tree.
+1. **Does NOT add the `[local]` extra.** It once did, right here, via an
+   extras-preserving `uv tool` reinstall — that step went with the RDR-144
+   embedder picker at RDR-174 P1.3. Extras are fixed when the install is
+   created and travel in the generation's install receipt, which every
+   [`nx self install`](#nx-self-install) carries forward, so an upgrade never
+   silently drops the 768-dim embedder. `nx doctor` flags the case where
+   `local.embed_model` is bge-768 but the extra is absent (search silently
+   falls back to 384-dim).
 2. **Pre-fetches the model** into the stable cache (`local.fastembed_cache_path`,
    default `~/.local/share/nexus/fastembed_cache`). Offline failures print an
    actionable message and retry on the next local search.
@@ -2598,7 +2603,12 @@ service, so there is no separate T2 install step — the `nx daemon t2` verb
 group is retired (see below). The deprecated `nx init --service` flag still
 works but plain `nx init` is the path now.
 
-Upgrade later with `uv tool upgrade conexus` (preserves extras like `[local]`); avoid `uv tool install --force`, which resets the environment and drops them.
+Upgrade later with [`nx self install`](#nx-self-install): it builds a new
+generation beside the running one, carries the extras recorded in the install
+receipt (`[local]` included), and never swaps a tree underneath a live session.
+`uv tool upgrade conexus` and `uv tool install --reinstall conexus` do **not**
+touch a generation install — the latter rebuilds the legacy uv tree and
+re-symlinks over the nexus-owned shims.
 
 T3 (the permanent vector store) serves through the native nexus-service over
 Postgres + pgvector in **both** local and cloud mode (`nx daemon service`); the
@@ -2616,15 +2626,33 @@ that verb group (see below).
 nx daemon restart-stale [--dry-run]
 ```
 
-Finish an upgrade: after `uv tool upgrade conexus` the disk holds the new
-version but every long-lived process (MCP hosts, the aspect-worker, MinerU)
-keeps executing the old code from memory. This verb detects every conexus
-process whose start time predates the installed distribution, restarts the
-classes that are safe to cycle (aspect-worker — respawns on demand; MinerU —
-cycled via its own lifecycle verbs), and names the ones only you can close
-(MCP hosts belong to live Claude sessions). It also reports the install's
-uv-receipt source (local checkout / pinned / PyPI-unpinned), which explains
-why `uv tool upgrade` sometimes reports "Nothing to upgrade".
+Finish an upgrade: after [`nx self install`](#nx-self-install) the new generation
+is `current`, but every long-lived process (MCP hosts, the aspect-worker, MinerU)
+keeps executing from the generation it resolved at spawn — by design, not by
+fault. This verb reports every conexus process still bound to an older
+generation, restarts the classes that are safe to cycle (aspect-worker —
+respawns on demand; MinerU — cycled via its own lifecycle verbs), and names the
+ones only you can close (MCP hosts belong to live Claude sessions).
+
+A process that attributes to a generation is judged by IDENTITY — stale exactly
+when its prefix differs from `readlink(current)`, no clock inference (this is
+what catches a shim bypass: a process bound to an old generation but *started*
+after the new one was installed, which the old start-time heuristic read as
+fresh). Anything that attributes to no generation keeps the age heuristic
+(started before the install's mtime), which is the only discriminator available
+on a box that never migrated off the legacy uv tree — where in-place replacement
+really does happen.
+
+It also reports where this install came from, which explains why an upgrade did
+or did not move. On a generation install that answer comes from the CURRENT
+generation's own receipt (nexus-0za6e) and reads one of: `local checkout
+(<path>)` — `nx self install` rebuilds from that checkout, so a new PyPI release
+will not move it; `PyPI, built with --version X` — that pin was one-shot, `nx
+self install` resolves the current release; or plain `PyPI` — `nx self install`
+upgrades normally. Only when no generation receipt is readable does it fall back
+to uv's receipt in uv's own vocabulary (`local checkout` / `PyPI, PINNED (==X)`,
+where `uv tool upgrade` will never move past the pin / `PyPI, unpinned`) — the
+answer a box that has not migrated actually needs.
 
 **Engine convergence (nexus-cfgo9).** The same pass also converges the
 installed engine-service binary to this release's engine — the exact
@@ -2832,11 +2860,59 @@ process precisely so that inheritance happens.
 
 ---
 
+## nx self install
+
+```
+nx self install [--keep N] [--version X.Y.Z] [--dry-run]
+```
+
+Upgrade this install of `nx`. Installs are **side-by-side generations**: the
+command builds a NEW generation at `<tools>/gen-<stamp>` from the receipt of the
+generation this process is running from, flips the `<tools>/current` symlink,
+rewrites the shims in `<bin>`, then reaps old generations. Nothing is ever
+swapped underneath a running process — a live holder keeps executing its own
+generation byte-identically and converges at its next spawn, so no session has
+to be closed and there is nothing to force.
+
+`<tools>` defaults to `~/.local/share/nexus/tools` (`NX_TOOLS_DIR`) and `<bin>`
+to `~/.local/bin` (`NX_BIN_DIR`). A generation is a `gen-*` directory containing
+a valid `nexus-install.json` receipt; the receipt is written last, so a
+half-built tree is never mistaken for a working one.
+
+| Flag | Description |
+|------|-------------|
+| `--keep N` | Generations to retain (default 3). The four never-delete rules still apply on top of it: the generation `current` points at, the previous one (free rollback), any generation with a live holder, and the generation hosting the running installer. |
+| `--version X.Y.Z` | Install this version instead of whatever the source resolves to. **One-shot** — the pin is not sticky, and the next bare `nx self install` resolves the current release. Downgrades are safe by construction here: they build a new generation and flip, leaving the old tree for its holders. |
+| `--dry-run` | Print the build command and stop. |
+
+Extras travel in the generation's receipt and are threaded into the build
+explicitly, so an upgrade never silently drops `[local]` (and with it the
+768-dim embedder). There is no flag that *adds* an extra to an existing
+generation — extras are fixed when the install is created.
+
+Run from a dev checkout's `.venv` the command refuses, naming
+`scripts/reinstall-tool.sh` instead — a thin repo wrapper around the same
+packaged scripts (`nexus/_install/*.sh`). One installer, not two.
+
+This upgrades the BINARY only. [`nx upgrade`](#nx-upgrade) walks the migration
+ladder; they are two commands on purpose (RDR-143 CA-2) and `nx upgrade` never
+invokes uv or pip.
+
+**Relationship to uv.** `uv tool install conexus` is still how a box with no
+`nx` at all gets its first tree. After that, `uv tool upgrade conexus` and
+`uv tool install --reinstall conexus` do **not** touch a generation install; the
+latter rebuilds the legacy uv tree and re-symlinks over the nexus-owned shims,
+which `nx self install` (or `scripts/reinstall-tool.sh`) rewrites. `uv tool
+uninstall conexus` remains the way to reap a legacy uv tree once nothing is
+running from it.
+
+---
+
 ## nx upgrade
 
 The single trigger for the upgrade ladder ([RDR-185](rdr/rdr-185-single-ladder-convergent-upgrade.md)).
 
-Upgrading nexus is: update the code, then run `nx upgrade`. That single trigger
+Upgrading nexus is: update the code ([`nx self install`](#nx-self-install)), then run `nx upgrade`. That single trigger
 converges everything else — it brings the package, engine, and process
 preconditions current, then walks one ordered ladder that auto-applies whichever
 data migrations your install actually needs (the pre-RDR-108 chunk-identity

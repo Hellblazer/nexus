@@ -244,3 +244,135 @@ class TestStaleHostHook:
         assert len(warned) == 1
         assert warned[0]["started_version"] == "6.14.0"
         assert warned[0]["installed_version"] == "6.15.0"
+
+
+# ── the generation layout: exact signal, informational note ─────────────────
+#
+# nexus-utpuw.12. Under side-by-side generations the mtime premise above DIES
+# -- the running generation's files are never replaced -- so the detector said
+# "fresh" forever on every migrated box. The replacement is exact
+# (``sys.prefix != readlink(current)``), and it carries a DIFFERENT verdict:
+# a skewed holder is CONSISTENT, its tree intact, converging at its next
+# spawn. So the GH #1414 decoration is scoped to the layout where in-place
+# replacement can still really happen (the legacy uv tree -- an un-migrated
+# box, or a stray ``uv tool upgrade`` rebuilding it under a live holder), and
+# is SUPPRESSED under a generation, where "this is almost certainly upgrade
+# skew, not a code defect" would be active misinformation about a real bug.
+
+
+import sys as _sys
+from pathlib import Path as _Path
+
+from nexus import install_layout
+
+
+def _gen(tools: _Path, stamp: str) -> _Path:
+    g = tools / f"gen-{stamp}"
+    (g / "bin").mkdir(parents=True)
+    (g / "nexus-install.json").write_text("{}")
+    return g
+
+
+@pytest.fixture
+def generation_host(tmp_path, monkeypatch):
+    """This process IS ``old``; ``current`` starts as ``old`` too (fresh)."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    old = _gen(tools, "20260826T010000Z")
+    new = _gen(tools, "20260826T020000Z")
+    (tools / "current").symlink_to(old)
+    monkeypatch.setenv(install_layout.TOOLS_DIR_ENV, str(tools))
+    monkeypatch.setattr(_sys, "prefix", str(old))
+
+    def flip() -> None:
+        link = tools / "current"
+        tmp = tools / ".current.tmp"
+        tmp.symlink_to(new)
+        tmp.replace(link)
+
+    return {"tools": tools, "old": old, "new": new, "flip": flip}
+
+
+class TestStaleHostUnderGenerations:
+    def test_installs_without_dist_info(self, generation_host, monkeypatch):
+        """The exact rule needs sys.prefix, not dist-info. Gating the
+        generation branch behind the OLD baseline would leave the reframe
+        half-disabled on exactly the layout it was written for."""
+        def _boom():
+            raise RuntimeError("no dist-info")
+
+        monkeypatch.setattr(upgrade_finish, "install_dist_info", _boom)
+        assert _stale_host.install_stale_host_hook(_mk_server()) is True
+
+    def test_a_matching_generation_is_silent(self, generation_host, monkeypatch):
+        noted: list[dict] = []
+        monkeypatch.setattr(
+            _stale_host, "_note_skew", lambda **kw: noted.append(kw)
+        )
+        server = _mk_server()
+        assert _stale_host.install_stale_host_hook(server) is True
+        result = _call(server, "echo")
+        assert not result.root.isError
+        assert noted == []
+
+    def test_skew_notes_once_and_names_both_generations(
+        self, generation_host, monkeypatch
+    ):
+        noted: list[dict] = []
+        monkeypatch.setattr(
+            _stale_host, "_note_skew", lambda **kw: noted.append(kw)
+        )
+        server = _mk_server()
+        assert _stale_host.install_stale_host_hook(server) is True
+        generation_host["flip"]()
+        r1 = _call(server, "echo")
+        r2 = _call(server, "echo")
+        # never refuses: both calls still serve
+        assert "hi" in r1.root.content[0].text
+        assert "hi" in r2.root.content[0].text
+        assert len(noted) == 1
+        assert noted[0]["running"] == str(generation_host["old"])
+        assert noted[0]["current"] == str(generation_host["new"])
+
+    def test_a_skewed_generation_host_does_not_decorate_an_import_error(
+        self, generation_host, monkeypatch
+    ):
+        """THE falsifier for the scoping decision. Under generations the
+        running tree is intact, so an ImportError is an ordinary defect.
+        Decorating it as upgrade skew would send someone chasing a restart
+        for a real bug.
+
+        The ``noted`` assertion is load-bearing, not colour: without it this
+        test passes on a host that simply read FRESH, which is the state the
+        old mtime detector reports forever under generations -- it would go
+        green with the scoping deleted. Asserting the skew WAS detected is
+        what makes the absent decoration mean something."""
+        noted: list[dict] = []
+        monkeypatch.setattr(
+            _stale_host, "_note_skew", lambda **kw: noted.append(kw)
+        )
+        server = _mk_server()
+        assert _stale_host.install_stale_host_hook(server) is True
+        generation_host["flip"]()
+        result = _call(server, "boom")
+        inner = result.root
+        assert inner.isError
+        assert len(noted) == 1, "skew must be DETECTED for this test to mean anything"
+        assert "cannot import name" in inner.content[0].text
+        assert "stale MCP host" not in inner.content[0].text
+        assert "restart" not in inner.content[0].text.lower()
+
+    def test_an_absent_current_pointer_does_not_break_a_call(
+        self, generation_host, monkeypatch
+    ):
+        server = _mk_server()
+        assert _stale_host.install_stale_host_hook(server) is True
+        (generation_host["tools"] / "current").unlink()
+        noted: list[dict] = []
+        monkeypatch.setattr(
+            _stale_host, "_note_skew", lambda **kw: noted.append(kw)
+        )
+        result = _call(server, "echo")
+        assert not result.root.isError
+        assert "hi" in result.root.content[0].text
+        assert noted == []

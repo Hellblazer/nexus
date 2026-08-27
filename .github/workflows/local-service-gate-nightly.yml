@@ -317,7 +317,7 @@ jobs:
         # reddens every release. Do not fold the pytest twin in here
         # without also adding the HF cache step ci.yml already carries.
         #
-        # FIRST-NIGHTLY-RUN VERIFICATION (manual, once, after this merges): confirm this step exits 0; the non-vacuity step below prints exactly 6 (floor=6); slow-s6dei.xml contains no test_mineru_path_preserves_formulas testcase; and -rs prints no unexpected skip lines beyond legitimately-conditional ones.
+        # FIRST-NIGHTLY-RUN VERIFICATION (manual, once, after this merges): confirm this step exits 0; the non-vacuity step below prints exactly 7 (floor=7); slow-s6dei.xml contains no test_mineru_path_preserves_formulas testcase; and -rs prints no unexpected skip lines beyond legitimately-conditional ones.
         run: |
           set -euo pipefail
           uv run pytest \
@@ -328,15 +328,20 @@ jobs:
       - name: Non-vacuity — slow tests actually ran (nexus-s6dei)
         # Same shape as the nexus-5opzu guard above: a gate that skip-passes
         # on a missing prerequisite reads as a broken gate, not a pass.
-        # Floor pinned to the 6 currently slow-marked, non-MinerU tests;
-        # bump consciously (same change that adds the new slow test) if it
-        # ever needs to move.
+        # Floor pinned to the currently slow-marked, non-MinerU tests; bump
+        # consciously (same change that adds the new slow test) if it ever
+        # needs to move. 6 -> 7 for nexus-utpuw.3's flip-window measurement
+        # (tests/scripts/test_flip_current.py), which is slow-marked because it
+        # cannot calibrate on every machine and starves neighbouring shards.
+        # RG-A caught that the floor was NOT bumped in the commit that added
+        # it, which would have left this guard silent about that test's
+        # deletion -- the exact thing it exists to notice.
         run: |
           uv run python - <<'PY'
           import sys
           import xml.etree.ElementTree as ET
 
-          FLOOR = 6
+          FLOOR = 7
           root = ET.parse("slow-s6dei.xml").getroot()
           ran = 0
           for case in root.iter("testcase"):

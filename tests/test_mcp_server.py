@@ -1792,7 +1792,13 @@ async def test_mcp_catalog_server_round_trip():
 
     nx_mcp_catalog = Path(sys.executable).parent / "nx-mcp-catalog"
     if not nx_mcp_catalog.exists():
-        pytest.skip("nx-mcp-catalog entry point not found; run 'uv sync && scripts/reinstall-tool.sh'")
+        pytest.skip(
+            f"nx-mcp-catalog entry point not found next to {sys.executable}; "
+            "run 'uv sync' in a dev checkout, or 'nx self install' if this "
+            "interpreter is a generation (nexus-utpuw.19: the old message "
+            "named scripts/reinstall-tool.sh, which installs the TOOL and so "
+            "would not have fixed a dev venv missing its entry points)"
+        )
 
     # Same child-env discipline as test_mcp_server_round_trip: the SDK's
     # default env strips os.environ, so forward the isolation vars

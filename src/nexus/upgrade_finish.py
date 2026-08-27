@@ -18,8 +18,9 @@ the finish choreography triggers from the product side:
 - :func:`restart_stale` — restarts the classes that are SAFE to cycle
   (detached daemons: aspect-worker, MinerU); reports the ones only the
   human can close (MCP hosts belong to live Claude sessions).
-- :func:`install_source` — reads the uv receipt so "``uv tool upgrade``
-  did nothing" is self-explanatory (directory-tracking vs pinned vs PyPI).
+- :func:`install_source` — reads the CURRENT generation's receipt, else
+  the uv receipt, so "the upgrade did nothing" is self-explanatory
+  (directory-tracking vs pinned vs PyPI).
 - The version stamp (:func:`check_version_transition`) — called at CLI
   startup; on the first invocation after a version change it runs the safe
   finish pass automatically and prints one summary line.
@@ -32,6 +33,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -64,6 +66,9 @@ from nexus.daemon.service_registry import (
 from nexus.daemon.service_registry import pid_alive as _pid_alive
 from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
+if TYPE_CHECKING:
+    from nexus import install_layout
+
 _log = structlog.get_logger(__name__)
 
 #: Fallback marker substrings identifying conexus processes in `ps`
@@ -84,11 +89,169 @@ def _install_root() -> Path:
 
 
 def running_from_tool_install() -> bool:
-    """True when this interpreter IS the uv tool install (vs a dev
-    checkout venv). The restart pass only ever acts from the tool
-    install — a dev venv's mtime says nothing about production
-    processes and must never kill them."""
-    return "uv/tools/conexus" in str(_install_root())
+    """True when this interpreter IS a MANAGED install (vs a dev checkout venv).
+
+    The pass only ever acts from a managed install — a dev venv's mtime says
+    nothing about the production processes on this box, and measuring, let
+    alone killing, them from there is the cross-venv confusion class. That
+    property is why this cannot simply return True.
+
+    Two shapes are managed, and both must answer yes:
+
+    * a GENERATION, ``<tools>/gen-<stamp>`` (nexus-utpuw)
+    * the LEGACY uv tool tree, for a box that has not migrated yet. The
+      migration window is deliberately long — .7 leaves the old tree in place
+      until it has zero holders — so dropping this would turn the pass off on
+      every un-migrated box, trading one silent no-op for another.
+
+    THIS USED TO BE ``"uv/tools/conexus" in str(_install_root())``. Under the
+    generation layout the install root is ``<tools>/gen-<stamp>/lib/...``, so it
+    was False on every migrated box — and the ``return None`` it guards sits
+    upstream of restart-stale, converge_engine, the diag-view heal, both
+    launchagent unloads and the pending-data-rung callout. The whole finish pass
+    went quiet, and nothing said so. nexus-p78a0 already fixed this exact
+    coupling one leg down, for a ps-less box; the gate above it kept doing it.
+    """
+    root = _install_root()
+
+    try:
+        venv_root = root.parents[2]
+    except IndexError:  # a root too shallow to be a venv layout
+        return False
+
+    if generation_of(venv_root) is not None:
+        return True
+
+    return "uv/tools/conexus" in str(root)
+
+
+def generation_of(venv_root: Path) -> Path | None:
+    """*venv_root* itself when it is a generation, else ``None``.
+
+    The single predicate behind two questions that legitimately differ in
+    WHICH path they ask about: :func:`running_from_tool_install` asks about
+    the venv the running DISTRIBUTION resolves from, while
+    :func:`running_generation` asks about ``sys.prefix``. Under a
+    shim-launched generation those coincide; they are still different facts,
+    and nexus-utpuw.10 has a recorded reason for its choice (a dev-checkout
+    invocation must not measure production processes). So the basis stays
+    with each caller and only the RULE is shared -- one vocabulary for "is
+    this a generation", never two that can drift apart.
+
+    A RECEIPT-LESS ``gen-*`` tree answers YES here, which is deliberate and
+    is NOT a third definition of "generation". Contract 4 -- a ``gen-*``
+    directory CONTAINING a receipt -- governs ENUMERATION, what
+    :func:`install_layout.list_generations` reports and what ``gc.sh`` may
+    reap, and those two must agree exactly. This asks something else: is the
+    tree being RUN FROM part of the side-by-side layout. It is, whether or
+    not its build finished writing the receipt, and answering "no" would
+    fail CLOSED -- the silent no-op shape nexus-utpuw.10 exists to close.
+
+    Never raises: an unreadable layout answers ``None`` and the caller falls
+    through to whatever it does for a non-generation.
+    """
+    try:
+        from nexus import install_layout  # noqa: PLC0415 — deferred, avoids an import cycle
+
+        if venv_root.parent == install_layout.tools_dir() and venv_root.name.startswith(
+            install_layout.GENERATION_PREFIX
+        ):
+            return venv_root
+    except Exception:  # noqa: BLE001 — layout unreadable: not a generation we can name
+        pass
+    return None
+
+
+def running_generation() -> Path | None:
+    """The generation THIS interpreter runs from, or ``None``.
+
+    ``sys.prefix``-based, matching the nexus-utpuw.9 staleness contract
+    (``stale <=> sys.prefix != readlink(current)``) so the tripwire and the
+    comparison it feeds cannot disagree about what "this generation" means.
+    """
+    return generation_of(Path(sys.prefix))
+
+
+#: Design point 6: the spawn tripwire logs at most once per process.
+#: Tests reset it with ``monkeypatch.setattr(upgrade_finish,
+#: "_TRIPWIRE_FIRED", False)``.
+_TRIPWIRE_FIRED = False
+
+
+def _tripwire_log(**kw: object) -> None:
+    """Seam for tests; emits the spawn-time generation-skew line."""
+    _log.info("spawn_generation_skew", **kw)
+
+
+def spawn_tripwire() -> None:
+    """nexus-utpuw design point 6: log (NEVER fail) when this spawn is not
+    running the current generation. One readlink at startup.
+
+    WHAT IT CATCHES, because a reader who works this out later will
+    otherwise delete it as dead code: a shim-launched entry point readlinks
+    ``current`` and execs ``<gen>/bin/<cmd>``, so ``sys.prefix == current``
+    and this is silent BY CONSTRUCTION. It fires exactly when something
+    BYPASSED the shim -- a PATH entry pointing straight into a generation, a
+    stale wrapper, an absolute generation path baked into a launchd plist or
+    a hook config. That is the nexus-q3xrx leak shape, and nothing else on
+    this box reports it.
+
+    Long-lived hosts are the other half of design point 6 and are NOT this
+    function's job: they start fresh and go stale later, which the per-call
+    MCP hook catches (:mod:`nexus.mcp._stale_host`).
+
+    The line is INFORMATIONAL, per the nexus-utpuw acceptance criterion: the
+    bound tree is intact and serving coherent code, so nothing here is
+    breakage and saying otherwise would contradict the zero-flag promise the
+    whole arc is built on.
+
+    It deliberately does NOT promise convergence. Design point 6's phrasing
+    ("converges at next spawn") is true of a LONG-LIVED holder that went
+    stale under a flip -- which is the MCP hook's case, not this one. Here
+    the process has only just bound, so the two causes are a flip landing
+    mid-startup (transient) and a launcher resolving a generation path
+    outside the shim (persistent, recurs every spawn). One observation
+    cannot tell them apart, so the line names both rather than asserting the
+    happier one. Substantive-critic, 2026-08-26.
+
+    "Intact" is not free-standing either: it holds because GC never reaps a
+    generation with a live holder (nexus-utpuw.5/.6, and the census fence
+    re-proved by execution at the top of this session). If that fence ever
+    breaks, this line becomes a lie before anything else does.
+
+    Absorbs everything, including a failing emit: a spawn is never failed by
+    its own tripwire. The once-flag is set AFTER a successful emit, so a
+    transient logging failure cannot silently consume the only notice.
+    """
+    global _TRIPWIRE_FIRED
+    if _TRIPWIRE_FIRED:
+        return
+    try:
+        from nexus import install_layout  # noqa: PLC0415 — deferred, avoids an import cycle
+
+        generation = running_generation()
+        if generation is None:
+            return  # a checkout, or the legacy tree: not this rule's business
+        if not install_layout.is_stale(generation):
+            return
+        current = install_layout.current_generation()
+        _tripwire_log(
+            running=str(generation),
+            current=str(current),
+            detail=(
+                f"this process is bound to generation {generation.name}; "
+                f"current is {current.name}. Its tree is intact, so it is "
+                f"running coherent code. Two causes produce this and they "
+                f"need different responses: a flip that landed during this "
+                f"process's startup is transient and the next spawn binds to "
+                f"current, while a launcher that resolves a generation path "
+                f"directly instead of going through the shim will reproduce "
+                f"it on every spawn until that launcher is fixed."
+            ),
+        )
+        _TRIPWIRE_FIRED = True
+    except Exception:  # noqa: BLE001 — a spawn is never failed by its own tripwire
+        return
 
 #: Filename of the version stamp inside the nexus config dir.
 STAMP_FILENAME = "last_seen_version"
@@ -195,14 +358,45 @@ def self_staleness(baseline: tuple[float, str]) -> SelfStaleness:
 
 
 def _classify(command: str) -> str:
-    if "aspect-worker" in command:
-        return "aspect-worker"
-    if "mineru" in command:
+    """What KIND of process this is, from its argv structure.
+
+    This decides who gets a SIGTERM, so a false positive is not cosmetic. It
+    used to ask whether a word appeared ANYWHERE in the command line, which made
+    ``nx index /papers/mineru-benchmarks/`` a mineru daemon and
+    ``nx search aspect-worker`` an aspect-worker. Worse, the aspect-worker
+    TOCTOU re-verify re-checks the SAME predicate, so a misclassified process
+    passes the one check placed there to catch exactly this -- and the mineru
+    branch has no pid re-verify at all before running a 300s stop/start.
+
+    Structural instead: the EXECUTABLE decides, and for `nx` the verb sequence
+    decides. An argument is not a daemon.
+    """
+    parts = command.split()
+    if not parts:
+        return "other"
+
+    exe = os.path.basename(parts[0])
+    rest = parts[1:]
+    # A shebang-wrapped entry point: the kernel rewrites argv to
+    # [python, script, ...], so the SCRIPT is the real executable.
+    if exe.startswith("python") and rest:
+        exe = os.path.basename(rest[0])
+        rest = rest[1:]
+
+    if exe in ("mineru", "mineru-api"):
         return "mineru"
-    if "nx-mcp" in command:
+    if exe in ("nx-mcp", "nx-mcp-catalog"):
         return "mcp-host"
-    if "daemon service" in command or "nexus-service" in command:
+    # The engine ships as a native binary and as a jar; both name themselves.
+    if exe.startswith("nexus-service") or any(
+        os.path.basename(tok).startswith("nexus-service") for tok in rest
+    ):
         return "service"
+    if exe == "nx":
+        if rest[:2] == ["daemon", "aspect-worker"]:
+            return "aspect-worker"
+        if rest[:2] == ["daemon", "service"]:
+            return "service"
     return "other"
 
 
@@ -255,6 +449,41 @@ def install_mtime_and_version() -> tuple[float, str]:
 #: primitive, not duplicated.
 
 
+def _process_markers() -> tuple[str, ...]:
+    """Every substring that marks a command as belonging to a conexus venv.
+
+    ONE definition, because two of them drifted and the drift was silent.
+    nexus-utpuw.10 rewired :func:`enumerate_processes` onto the layout-derived
+    markers and left :func:`restart_stale`'s pre-kill re-check on the hardcoded
+    :data:`_PROC_MARKERS` -- which .10's own audit (finding F5) had called out
+    as a SEPARATE must-fix item with its own test. The result on a migrated box:
+    every stale aspect-worker was enumerated, reported by ``nx doctor``, and
+    then skipped as "gone or recycled" at the instant of signalling, so both
+    ``nx daemon restart-stale`` and the automatic finish pass silently restarted
+    nothing (nexus-mjhwk). That is the exact silent-no-op class this arc exists
+    to close, surviving in the one call site that does the actual work.
+
+    Order matters and is not arbitrary. The layout-derived markers come first
+    because on a generation box they are the only ones that can match; the
+    running install's venv root is the pre-generation box's answer; and
+    :data:`_PROC_MARKERS` is the last resort for a box whose metadata will not
+    resolve at all. Returning empty is deliberately NOT possible -- an empty
+    marker set makes ``any(...)`` False for every row, which reads as "nothing
+    is ours" and is the under-reporting direction.
+    """
+    from nexus import install_census  # noqa: PLC0415 — deferred, avoids an import cycle
+
+    markers: tuple[str, ...] = install_census.generation_match_prefixes()
+    if markers:
+        return markers
+    try:
+        # No generation layout readable: the venv root of the running install,
+        # which is what a pre-generation box carries.
+        return (str(_install_root().parents[2]),)
+    except Exception:  # noqa: BLE001 — metadata unavailable: conventional layout
+        return _PROC_MARKERS
+
+
 def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, str]]:
     """``[(pid, age_s, command)]`` for every running conexus-VENV process.
 
@@ -265,12 +494,20 @@ def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, st
     """
     rows = all_process_rows(ps_output)
     me = os.getpid()
-    try:
-        # site-packages -> lib/pythonX.Y -> lib -> THE VENV ROOT: the one
-        # path every process launched from this install carries.
-        markers: tuple[str, ...] = (str(_install_root().parents[2]),)
-    except Exception:  # noqa: BLE001 — metadata unavailable: fall back to the conventional layout
-        markers = _PROC_MARKERS
+    # EVERY GENERATION, not the current one. A stale process runs from a
+    # generation that is NOT current -- that is what makes it stale -- so a
+    # filter pinned to the current install excludes precisely the processes
+    # this pass exists to find, and report.stale is empty by construction.
+    #
+    # Not a typo but a design inversion: the old layout kept the path CONSTANT
+    # across upgrades (in-place swap), so mtime was the only discriminator.
+    # Generations make the path itself the version.
+    #
+    # The prefixes come from install_census so there is ONE definition of what
+    # marks a holder, shared with the shell half and pinned by
+    # tests/test_install_census_twins_agree.py. Giving this function its own
+    # notion is how the markers it used to carry drifted into matching nothing.
+    markers = _process_markers()
     return [
         (pid, age, command)
         for pid, age, command in rows
@@ -278,18 +515,76 @@ def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, st
     ]
 
 
+def _current_generation() -> Path | None:
+    """``<tools>/current``'s target, or ``None`` when the layout cannot say."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred, avoids an import cycle
+
+    try:
+        return install_layout.current_generation()
+    except Exception:  # noqa: BLE001 — no resolvable pointer: no identity verdict
+        return None
+
+
 def detect_stale_processes(
     ps_output: str | None = None,
     *,
     now: float | None = None,
 ) -> SkewReport:
-    """Every conexus process older than the installed distribution."""
+    """Every conexus process executing code older than the install.
+
+    TWO REGIMES, PER ROW, and they answer with different evidence
+    (nexus-ycw67). nexus-utpuw.10 moved the ENUMERATION half onto the layout;
+    the VERDICT half stayed on ``started < install_mtime``, which under
+    side-by-side generations is not merely imprecise but WRONG IN A DIRECTION:
+    a process bound to ``gen-00`` and STARTED AFTER ``gen-01`` was installed
+    reads FRESH, because its start time is newer than the current generation's
+    dist-info mtime. That is precisely the shim-bypass shape -- a stale
+    wrapper, a PATH entry into a generation, an absolute generation path in a
+    launchd plist (the nexus-q3xrx class) -- so the one check meant to catch
+    it was blind to it.
+
+    * A row that ATTRIBUTES to a generation is judged by IDENTITY, which is
+      the arc's own contract (nexus-utpuw.9 / :func:`install_layout.is_stale`,
+      ``stale <=> prefix != readlink(current)``). Exact: no clock inference,
+      no false positives or negatives. A holder of the legacy uv tree
+      attributes here too -- .7 registers that tree as a ``gen-*`` pointer --
+      and correctly reads stale on a migrated box.
+    * Anything else keeps the AGE heuristic: an un-migrated box, where
+      in-place replacement really does happen and mtime is the only
+      discriminator there has ever been. .7 leaves boxes in that state until
+      their legacy tree has zero holders, so this branch is live in the field
+      and is not a fallback for the paranoid.
+
+    ONE ``readlink`` FOR THE WHOLE SCAN, hoisted out of the loop deliberately
+    rather than for speed: per-row resolution could straddle a flip and
+    produce a report whose rows disagree about what ``current`` is, which is a
+    state the machine never occupied at any instant. One snapshot of the
+    pointer is the honest basis for one snapshot of the process table.
+
+    WIDENING NOTE: :func:`restart_stale` SIGTERMs what this reports, so the
+    identity regime also widens what gets cycled -- to processes that are
+    genuinely running old code and were previously missed. Only the
+    restartable classes are cycled; session-bound ones are still reported for
+    a human.
+    """
+    from nexus import install_census  # noqa: PLC0415 — deferred, avoids an import cycle
+
     mtime, version = install_mtime_and_version()
     report = SkewReport(installed_version=version, install_mtime=mtime)
     now = time.time() if now is None else now
+
+    pairs = install_census.generation_match_pairs()
+    current = _current_generation()
+
     for pid, age_s, command in enumerate_processes(ps_output):
-        started = now - age_s
-        if started < mtime:
+        generation = next(
+            (gen for marker, gen in pairs if marker in command), None
+        )
+        if generation is not None and current is not None:
+            stale = generation != current
+        else:
+            stale = (now - age_s) < mtime
+        if stale:
             report.stale.append(StaleProcess(
                 pid=pid, kind=_classify(command),
                 command=command, age_s=age_s,
@@ -318,7 +613,7 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                 # the same convention as t2_daemon's pre-kill re-check.
                 current = process_command(proc.pid)
                 if "aspect-worker" not in current or not any(
-                    k in current for k in _PROC_MARKERS
+                    k in current for k in _process_markers()
                 ):
                     actions.append(
                         f"{proc.kind} pid {proc.pid}: gone or recycled; skipped"
@@ -399,14 +694,102 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
     return actions
 
 
-def install_source() -> str:
-    """Human-readable uv-receipt source: directory / pinned / PyPI.
+def _current_generation_receipt() -> "install_layout.Receipt | None":
+    """The CURRENT generation's receipt, or ``None`` when there is none to read.
 
-    Explains why ``uv tool upgrade`` may report "Nothing to upgrade":
-    a directory-tracking install never consults PyPI, and an ==-pinned
-    one never moves past its pin (both live incidents, 2026-07-13).
+    CURRENT rather than the RUNNING generation, and the difference is not
+    academic: ``perform_self_install`` reproduces THIS process's install and so
+    reads the running one, while this string answers the forward-looking
+    question ("why did my upgrade not move?"). The next ``nx`` a user types
+    resolves through the shim to ``current``, so ``current`` is the tree whose
+    source governs what that invocation will do.
+
+    Never raises. A dangling pointer, an absent layout, a receipt written by a
+    schema this nx does not read -- all of them mean "no generation answer
+    available here", and the uv receipt is the better of two imperfect answers.
+    """
+    from nexus import install_layout  # noqa: PLC0415 — deferred, avoids an import cycle
+
+    try:
+        return install_layout.read_receipt(install_layout.current_generation())
+    except Exception:  # noqa: BLE001 — no readable generation receipt: fall back to uv
+        return None
+
+
+def install_source() -> str:
+    """Human-readable install source: directory / pinned / PyPI.
+
+    Explains why an upgrade may report "Nothing to upgrade": a
+    directory-tracking install never consults an index, and an ==-pinned uv
+    one never moves past its pin (both live incidents, 2026-07-13). Rendered
+    by ``nx doctor``'s Process-freshness row and by ``nx daemon
+    finish-upgrade``.
+
+    TWO LAYOUTS, AND THE GENERATION WINS (nexus-0za6e). This read the uv
+    receipt and nothing else, which is wrong twice under the generation
+    layout. During the migration window .7 leaves the legacy tree in place
+    until it has zero holders, so the uv receipt stays READABLE and a
+    directory-tracking legacy install migrated onto a PyPI generation reported
+    the legacy source -- a confident wrong answer on the one string whose job
+    is explaining an upgrade that did or did not move. After the legacy tree is
+    reaped it said "unknown" forever. The right answer was already on disk and
+    unused: the receipt the builder writes for every generation.
+
+    THE VOCABULARY IS NOT MIRRORED ACROSS THE BRANCHES, deliberately (contract
+    12). "``uv tool upgrade`` will never move past the pin" is TRUE on a uv
+    tree and FALSE under generations: ``perform_self_install`` passes
+    ``--source`` and ``--extras`` and OMITS the version, so a generation built
+    with ``--version X`` upgrades normally at the next ``nx self install``
+    (verified by execution, 2026-08-26). ``health.py`` renders only the part
+    before the em-dash, so a summary that claimed stickiness would assert it
+    standing alone.
+
+    FORMAT: ``<summary> — <explanation>``. ``health.py`` splits on the
+    separator to render the summary alone; keep both halves true in isolation.
+    """
+    receipt = _current_generation_receipt()
+    if receipt is not None:
+        from nexus.install_advice import (  # noqa: PLC0415 — deferred, avoids an import cycle
+            GENERATION_INSTALLER,
+        )
+
+        if receipt.source_kind == "directory":
+            return (
+                f"local checkout ({receipt.source}) — `{GENERATION_INSTALLER}` "
+                f"rebuilds from that checkout, so a new PyPI release will not "
+                f"move it"
+            )
+        if receipt.version:
+            return (
+                f"PyPI, built with --version {receipt.version} — that pin was "
+                f"one-shot; `{GENERATION_INSTALLER}` resolves the current release"
+            )
+        return f"PyPI — `{GENERATION_INSTALLER}` upgrades normally"
+
+    return _uv_install_source()
+
+
+def _uv_install_source() -> str:
+    """The legacy uv-tree answer, in uv's own vocabulary.
+
+    Kept verbatim rather than paraphrased: a box that has not migrated really
+    does upgrade through uv, and .7 leaves boxes in that state until their
+    legacy tree has zero holders. Telling such a user to run the generation
+    installer is a different wrong answer (contract 12).
+
+    The REMEDIATION inside it is a separate question from the DESCRIPTION
+    around it, and the two are answered by different classifiers on purpose.
+    Reaching this function means no generation RECEIPT was readable; it does
+    NOT mean the box has no generation layout -- a resolvable ``current`` whose
+    receipt is corrupt lands here. On that box ``uv tool install --reinstall
+    conexus`` would rebuild the uv tree and re-symlink over the nexus-owned
+    shims (nexus-utpuw.7's accepted risk), so the commands go through
+    ``install_advice``, which asks the layout rather than the receipt. On a
+    genuinely un-migrated box every one of them returns its uv form unchanged.
     """
     import tomllib  # noqa: PLC0415 — stdlib, deferred for startup cost
+
+    from nexus import install_advice  # noqa: PLC0415 — deferred, avoids an import cycle
 
     receipt = Path.home() / ".local/share/uv/tools/conexus/uv-receipt.toml"
     try:
@@ -421,17 +804,20 @@ def install_source() -> str:
     if req.get("directory"):
         return (
             f"local checkout ({req['directory']}) — `uv tool upgrade` never "
-            "consults PyPI for this install; use scripts/reinstall-tool.sh "
-            "or reinstall from PyPI"
+            f"consults PyPI for this install; use "
+            f"{install_advice.upgrade_command('scripts/reinstall-tool.sh')} "
+            f"or reinstall from PyPI"
         )
     spec = str(req.get("specifier", ""))
     if spec.startswith("=="):
+        reinstall = install_advice.upgrade_command("uv tool install --reinstall conexus")
         return (
             f"PyPI, PINNED ({spec}) — `uv tool upgrade` will never move "
-            "past the pin; reinstall unpinned "
-            "(`uv tool install --reinstall conexus`)"
+            f"past the pin; reinstall unpinned "
+            f"(`{reinstall}`)"
         )
-    return "PyPI, unpinned — `uv tool upgrade conexus` upgrades normally"
+    upgrade = install_advice.upgrade_command("uv tool upgrade conexus")
+    return f"PyPI, unpinned — `{upgrade}` upgrades normally"
 
 
 # ── nexus-cfgo9: ONE-engine model — converge the installed engine ─────────

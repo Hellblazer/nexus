@@ -362,6 +362,26 @@ _step "2/12 uv tool install conexus==$FROM_VERSION (the OLD version)"
 export UV_TOOL_DIR="$SANDBOX/uv_tools"
 export UV_TOOL_BIN_DIR="$SANDBOX/uv_bin"
 export PATH="$UV_TOOL_BIN_DIR:$PATH"
+
+# THE NEXUS-NATIVE OVERRIDES, and they are NOT redundant with the $HOME
+# discipline below (nexus-utpuw.18). Under the generation layout the install
+# root is <tools>/gen-<stamp>, resolved by `nx_tools_dir`, and that resolver
+# honours NX_TOOLS_DIR *over* the $HOME-derived default. So an operator who
+# has NX_TOOLS_DIR exported in their shell defeats HOME isolation entirely:
+# every generation this harness builds would land in their REAL tool root
+# while every `nx` call still looked correctly fenced. Setting them here both
+# isolates the generation paths and OVERRIDES any ambient value, which is the
+# same reason UV_TOOL_DIR is pinned explicitly two lines up rather than left
+# to $HOME (fresh-install-mvv.sh reaches for `env -i` for the identical
+# reason; this script cannot, because it deliberately runs the sandbox `nx`
+# off PATH).
+#
+# These are ADDED, not swapped in. `uv tool install` is still how steps 2 and
+# 5 install, so dropping the UV_* pair would send those at the developer's
+# real uv tool tree — the exact non-isolation this block exists to prevent.
+# Both mechanisms are live here, so both are pinned.
+export NX_TOOLS_DIR="$SANDBOX/nx_tools"
+export NX_BIN_DIR="$SANDBOX/nx_bin"
 # HOME is NOT exported globally here (uv resolves its tool dir off $HOME and
 # this script pins UV_TOOL_BIN_DIR explicitly), so every `nx` call below must
 # carry its own HOME="$SANDBOX". Four `nx --version` calls did not, and on

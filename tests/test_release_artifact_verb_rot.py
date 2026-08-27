@@ -390,7 +390,15 @@ _ANCHOR_MIN_COUNTS: dict[str, int] = {
     # is silencing an empty scan.
     "tests/e2e/migration-rehearsal/rehearse.sh": 20,
     # nexus-zmfan widening (hand-verified 2026-08-07):
-    "scripts/reinstall-tool.sh": 2,
+    # scripts/reinstall-tool.sh was an anchor here (2 invocations) until
+    # nexus-utpuw.8. Its `nx daemon service start` / `nx mineru start` /
+    # `nx daemon aspect-worker start` calls existed to restart daemons the
+    # script had just killed to clear the venv for an in-place swap. Installs
+    # are side-by-side now, nothing is killed, and those calls are gone -- so
+    # the file genuinely contains no nx verb invocation and there is nowhere
+    # to retarget the anchor to. Removed rather than lowered to 0: an anchor
+    # asserting ">= 0 invocations" proves nothing about the extractor, which
+    # is the one thing an anchor is for. The remaining 11 anchors still do.
     "conexus/hooks/hooks.json": 1,
     "conexus/hooks/scripts/subagent-start.sh": 3,
     "conexus/README.md": 5,

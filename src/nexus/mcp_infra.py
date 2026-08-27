@@ -2120,7 +2120,15 @@ def check_version_compatibility() -> None:
                     if cli_t > plugin_t:
                         hint = f"plugin is older — run '/plugin update {EXPECTED_PLUGIN_NAME}@nexus-plugins' in Claude Code"
                     else:
-                        hint = "CLI is older — run 'uv tool upgrade conexus'"
+                        from nexus import install_advice  # noqa: PLC0415 — deferred import
+
+                        hint = (
+                            "CLI is older — run '"
+                            + install_advice.upgrade_command(
+                                "uv tool upgrade conexus"
+                            )
+                            + "'"
+                        )
                     log.warning(
                         "plugin_cli_version_mismatch",
                         cli_version=cli_ver,

@@ -82,7 +82,18 @@ echo '{"hasCompletedOnboarding":true}' > "$SANDBOX/.claude.json"
     # user's real environment), so env -i wholesale isn't available here;
     # if a third leaked var ever bites, that is the signal to split the
     # battery env (allowlisted) from the interactive env (targeted).
-    printf '%s\n' 'unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID NX_SESSION_ID'
+    # NX_TOOLS_DIR / NX_BIN_DIR are the third leaked var this comment
+    # anticipated (nexus-utpuw.18). They are UNSET rather than pinned, and the
+    # direction is the point: `nx_tools_dir` honours them OVER the
+    # $HOME-derived default, so an operator with either exported would have
+    # this sandbox build its generations straight into their REAL tool root
+    # while every command still looked correctly fenced by $HOME. Clearing
+    # them restores the single source of truth this harness already documents
+    # -- "$SANDBOX/.local/{share/nexus/tools,bin}", recomputed per call so the
+    # $HOME redirection cannot be outrun (release-sandbox.sh, step 1). Pinning
+    # them to sandbox paths would work too and would be worse: a second place
+    # for the sandbox root to be defined, able to disagree with $HOME.
+    printf '%s\n' 'unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID NX_SESSION_ID NX_TOOLS_DIR NX_BIN_DIR'
     printf '%s\n' 'echo "sandbox active — HOME=$HOME"'
     printf '%s\n' 'echo "deactivate: export HOME=$SANDBOX_ORIG_HOME"'
 } > "$SANDBOX/activate"
