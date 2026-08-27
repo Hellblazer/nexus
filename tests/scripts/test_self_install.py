@@ -234,6 +234,13 @@ def test_it_refuses_clearly_from_a_dev_checkout(bed, monkeypatch, tmp_path) -> N
     checkout_venv = tmp_path / "checkout" / ".venv"
     checkout_venv.mkdir(parents=True)
     monkeypatch.setattr(sys, "prefix", str(checkout_venv))
+    # nexus-gu9zo made "not a generation" a two-way branch: a PACKAGED
+    # non-generation now converges instead of refusing. So this test has to say
+    # which of the two it is, rather than inheriting the answer from whatever
+    # shape the test runner itself was installed in — otherwise it silently
+    # becomes a test of the developer's own install.
+    import nexus.upgrade_finish as _uf
+    monkeypatch.setattr(_uf, "running_from_tool_install", lambda: False)
 
     with pytest.raises(click.ClickException) as exc:
         perform_self_install()
@@ -243,3 +250,162 @@ def test_it_refuses_clearly_from_a_dev_checkout(bed, monkeypatch, tmp_path) -> N
     assert "reinstall-tool.sh" in message, (
         f"refused without naming what to run instead: {message!r}"
     )
+
+
+# ── nexus-gu9zo: the three-site classification ──────────────────────────────
+#
+# The original guard asked ONE path-shape question and treated every No as a
+# dev checkout, which is wrong for the commonest install in existence. These
+# pin all three arms, and — critically — pin them WITHOUT depending on what
+# shape of install the test runner itself happens to be, which would make the
+# whole family ambient.
+
+
+def _not_a_generation(tmp_path, monkeypatch) -> Path:
+    """A venv root that is real but is not under <tools> and is not gen-*."""
+    site = tmp_path / "uv-tools" / "conexus"
+    (site / "bin").mkdir(parents=True)
+    (site / "pyvenv.cfg").write_text("home = /opt/py/bin\n")
+    monkeypatch.setattr(sys, "prefix", str(site))
+    return site
+
+
+def _set_site_kind(monkeypatch, *, packaged: bool) -> None:
+    """Pin the packaged-vs-dev-checkout answer instead of inheriting it.
+
+    perform_self_install consults upgrade_finish.running_from_tool_install.
+    Left unpatched these tests would pass or fail according to how THIS
+    checkout was installed, which is precisely the ambient-state dependency
+    that makes a gate stop meaning anything.
+    """
+    import nexus.upgrade_finish as uf
+    monkeypatch.setattr(uf, "running_from_tool_install", lambda: packaged)
+
+
+def test_a_packaged_uv_tool_install_converges_instead_of_refusing(
+    bed, monkeypatch, tmp_path,
+) -> None:
+    """THE BEAD. A fresh `uv tool install conexus` lands on the legacy layout;
+    before this it got "nothing to do from a dev checkout" and a pointer to a
+    repo script it has no copy of."""
+    tools, _, _ = bed
+    _not_a_generation(tmp_path, monkeypatch)
+    _set_site_kind(monkeypatch, packaged=True)
+
+    seen = {}
+
+    def _fake_run(argv, **kw):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=f"{tools}/gen-20260827T000000Z\n", stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    result = _run_self_install()
+
+    assert result is not None, "converge returned nothing"
+    assert seen["argv"][0] == "bash"
+    assert seen["argv"][1].endswith("migrate_legacy.sh"), seen["argv"]
+    assert "--source" in seen["argv"]
+    assert seen["argv"][seen["argv"].index("--source") + 1] == "conexus"
+
+
+def test_converge_does_not_thread_extras_itself(bed, monkeypatch, tmp_path) -> None:
+    """A legacy box has no receipt — that is what makes it legacy. Extras must
+    come from migrate_legacy.sh reading the legacy uv-receipt.toml one last
+    time; passing --extras from here would mean inventing them."""
+    _not_a_generation(tmp_path, monkeypatch)
+    _set_site_kind(monkeypatch, packaged=True)
+    seen = {}
+
+    def _fake_run(argv, **kw):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, stdout="/t/gen-x\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    _run_self_install()
+    assert "--extras" not in seen["argv"], seen["argv"]
+
+
+def test_converge_never_reaps_in_the_same_pass(bed, monkeypatch, tmp_path) -> None:
+    """migrate_legacy.sh never sources gc.sh so a reap cannot fire while the
+    legacy tree still has live holders. This caller must not add one back."""
+    _not_a_generation(tmp_path, monkeypatch)
+    _set_site_kind(monkeypatch, packaged=True)
+    calls = []
+
+    def _fake_run(argv, **kw):
+        calls.append(" ".join(str(a) for a in argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="/t/gen-x\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    _run_self_install()
+    assert not any("nx_gc_generations" in c for c in calls), calls
+
+
+def test_a_real_dev_checkout_still_refuses(bed, monkeypatch, tmp_path) -> None:
+    """The arm that must NOT change. A checkout has no receipt and this
+    command does not apply there."""
+    _not_a_generation(tmp_path, monkeypatch)
+    _set_site_kind(monkeypatch, packaged=False)
+
+    with pytest.raises(click.ClickException) as exc:
+        _run_self_install()
+    assert "reinstall-tool.sh" in str(exc.value)
+
+
+def test_a_migration_that_migrated_nothing_is_not_reported_as_success(
+    bed, monkeypatch, tmp_path,
+) -> None:
+    """migrate_legacy.sh's clean no-op is empty stdout. Reaching it HERE is a
+    contradiction — we only got here because this looked like a legacy tool
+    install — so it must be surfaced, not returned as a successful converge
+    that moved nothing."""
+    _not_a_generation(tmp_path, monkeypatch)
+    _set_site_kind(monkeypatch, packaged=True)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+    )
+
+    with pytest.raises(click.ClickException) as exc:
+        _run_self_install()
+    assert "no legacy tree" in str(exc.value).lower(), str(exc.value)
+
+
+def test_converge_failure_surfaces_stderr(bed, monkeypatch, tmp_path) -> None:
+    _not_a_generation(tmp_path, monkeypatch)
+    _set_site_kind(monkeypatch, packaged=True)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda argv, **kw: subprocess.CompletedProcess(
+            argv, 64, stdout="", stderr="migrate_legacy: uv not resolvable"),
+    )
+
+    with pytest.raises(click.ClickException) as exc:
+        _run_self_install()
+    assert "uv not resolvable" in str(exc.value)
+
+
+def test_converge_dry_run_builds_no_generation(bed, monkeypatch, tmp_path) -> None:
+    _not_a_generation(tmp_path, monkeypatch)
+    _set_site_kind(monkeypatch, packaged=True)
+    calls = []
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda argv, **kw: calls.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""),
+    )
+    assert _run_self_install(dry_run=True) is None
+    assert not calls, "dry run executed something"
+
+
+def test_the_migration_machinery_also_ships_in_the_wheel() -> None:
+    """The converge path execs migrate_legacy.sh from the PACKAGE. Nothing
+    asserted it ships — only install_generation.sh and layout.sh were pinned —
+    and per that test's own docstring the failure would appear only after
+    release. legacy.sh rides along because migrate_legacy.sh sources it."""
+    from nexus.commands.self_cmd import packaged_install_dir
+
+    d = packaged_install_dir()
+    assert (d / "migrate_legacy.sh").is_file(), f"not shipped: {d}"
+    assert (d / "legacy.sh").is_file(), f"not shipped: {d}"
