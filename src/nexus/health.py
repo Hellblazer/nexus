@@ -2115,66 +2115,125 @@ def _check_orphan_pipelines() -> list[HealthResult]:
 
 
 def _check_mineru_server() -> list[HealthResult]:
-    """nexus-h1jk: surface MinerU server reachability in the default
-    doctor flow.
+    """nexus-far1c: report whether math PDFs will GET a MinerU server —
+    not whether one happens to be running at this instant.
 
-    Math-heavy PDFs (papers with dense formula notation) accumulate per-
-    page tensor state in MinerU's formula-detection pass and routinely
-    OOM-kill the in-process subprocess fallback. The HTTP server avoids
-    that by running MinerU as a long-lived dedicated worker. The
-    configured URL silently goes stale: ``_restart_mineru_server`` in
-    ``pdf_extractor.py`` writes the live port to
-    ``~/.config/nexus/config.yml`` after a mid-run recovery, but if
-    that server later dies the URL points at a dead port across every
-    subsequent session. ``nx doctor`` is the natural place to surface
-    that drift.
+    nexus-h1jk wrote this check against the pre-nexus-1qdb9 model, in
+    which MinerU was a long-lived server the operator started by hand
+    and kept up; "not reachable" therefore meant "the in-process
+    subprocess fallback will run, and math PDFs will OOM". nexus-1qdb9
+    made the server spawn ON DEMAND during extraction
+    (``ensure_mineru_running``) and this check was never reconciled with
+    it. A correctly-idle server rendered a red ✗ asserting a fallback
+    that would never be taken. nexus-9xfx5 patched the fresh-install
+    symptom (unprovisioned → no row) without touching the model, so the
+    class survived on every box that had ever provisioned a server —
+    including, via a pre-nexus-oa7r ephemeral port fossilised in
+    ``pdf.mineru_server_url``, boxes whose on-demand path was healthy.
+
+    What actually decides the OOM risk is whether a server will be there
+    when a math PDF arrives: a live one, OR a spawn this box is
+    permitted and equipped to perform. Only when NEITHER holds is the
+    fallback claim true, and only then is this a failure.
     """
     from nexus.config import get_mineru_server_url, mineru_server_provisioned  # noqa: PLC0415 — heavy/optional dependency deferred to call time
     import httpx as _httpx  # noqa: PLC0415 — heavy/optional dependency deferred to call time
 
     try:
-        # nexus-9xfx5 (reviewer-3modes H1): never probe the built-in default
-        # URL on a box where no server was ever provisioned — every fresh
-        # install rendered a red ✗ ("unreachable ... OOM-risk") in the
-        # DEFAULT doctor flow. Unprovisioned → no result row (MinerU is
-        # opt-in); a ✗ now means a PROVISIONED server went stale — exactly
-        # the drift this check exists to surface.
-        if not mineru_server_provisioned():
-            return []
+        provisioned = mineru_server_provisioned()
         url = get_mineru_server_url()
     except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
         return []
     if not url:
         return []
 
-    health_url = f"{url}/health"
+    # A provisioned URL is worth probing: either a live pid-file server or
+    # explicit operator intent (RDR-148 Gap 1) points at it. An UP-but-sick
+    # server is a real failure no on-demand spawn will paper over, because
+    # the election short-circuits on a live pid.
+    if provisioned:
+        try:
+            resp = _httpx.get(f"{url}/health", timeout=2.0)
+        except (_httpx.ConnectError, _httpx.TimeoutException):
+            pass  # not up — fall through to the on-demand assessment
+        else:
+            if resp.status_code == 200:
+                return [HealthResult(
+                    label="MinerU server", ok=True,
+                    detail=f"reachable at {url}",
+                )]
+            return [HealthResult(
+                label="MinerU server", ok=False,
+                detail=f"{url} returned HTTP {resp.status_code}",
+                fix_suggestions=["Restart the server: nx mineru stop && nx mineru start"],
+            )]
+
+    # Nothing is up. The question is no longer "is it reachable" but "can
+    # one come up" — the two conditions ensure_mineru_running() itself
+    # gates on, asked without spawning anything.
     try:
-        resp = _httpx.get(health_url, timeout=2.0)
-    except (_httpx.ConnectError, _httpx.TimeoutException) as exc:
+        from nexus._mineru_spawn import _resolve_mineru_api_bin  # noqa: PLC0415 — deferred; lower layer, per nexus-8g79.10
+        from nexus.daemon.mineru_lifecycle import spawn_policy_allows  # noqa: PLC0415 — deferred
+
+        binary = _resolve_mineru_api_bin()
+        may_spawn = spawn_policy_allows(url)
+    except Exception:  # noqa: BLE001 — never let the health probe raise
+        return []
+
+    if not provisioned:
+        # Nothing up, nothing configured. Whether the spawn path is armed is
+        # real information, but emitting it here would add a row to every
+        # `conexus[local]` install and change nexus-9xfx5's fresh-install
+        # contract (and the nexus-nolqs virgin-journey gate) for a case that
+        # was never broken. Deliberately still silent; see nexus-far1c for
+        # the "armed and idle is indistinguishable from absent" follow-up.
+        return []
+
+    if binary is not None and may_spawn:
+        # The on-demand path is armed. Idle is the correct steady state for
+        # this subsystem — NOT a failure, which is the whole of nexus-far1c.
         return [HealthResult(
-            label="MinerU server",
-            ok=False,
+            label="MinerU server", ok=True,
+            detail="not running; spawns on demand during extraction",
+        )]
+
+    if binary is None:
+        # Operator pointed at something and it is not answering, and no
+        # local spawn can cover for it.
+        return [HealthResult(
+            label="MinerU server", ok=False,
             detail=(
-                f"{url} unreachable ({type(exc).__name__}); falling back to "
-                "in-process subprocess on math PDFs (OOM-risk)"
+                f"{url} unreachable and mineru-api is not installed here; "
+                "math PDFs fall back to the in-process subprocess (OOM-risk)"
             ),
             fix_suggestions=[
-                "Start the server: nx mineru start",
-                f"Or confirm the URL in ~/.config/nexus/config.yml "
+                "Install the local extras: uv tool install 'conexus[local]'",
+                f"Or point pdf.mineru_server_url at a reachable server "
                 f"(currently: {url})",
             ],
         )]
-    if resp.status_code != 200:
-        return [HealthResult(
-            label="MinerU server",
-            ok=False,
-            detail=f"{url} returned HTTP {resp.status_code}",
-            fix_suggestions=["Restart the server: nx mineru stop && nx mineru start"],
-        )]
+
+    # Binary present, spawn refused by policy — the fallback claim is true,
+    # and the operator asked for it. Name the reason rather than the symptom.
+    from nexus.config import get_pdf_config  # noqa: PLC0415 — deferred
+
+    env_override = os.environ.get("NX_MINERU_AUTOSTART", "").strip()
+    if env_override:
+        reason = f"autostart disabled by NX_MINERU_AUTOSTART={env_override!r}"
+    elif not get_pdf_config().mineru_autostart:
+        reason = "autostart disabled by pdf.mineru_autostart: false"
+    else:
+        reason = f"{url} is remote — a local spawn must not shadow it"
     return [HealthResult(
-        label="MinerU server",
-        ok=True,
-        detail=f"reachable at {url}",
+        label="MinerU server", ok=False,
+        detail=(
+            f"not running and will not autostart ({reason}); math PDFs "
+            "fall back to the in-process subprocess (OOM-risk)"
+        ),
+        fix_suggestions=[
+            "Start it explicitly: nx mineru start",
+            "Or re-enable on-demand spawn: pdf.mineru_autostart: true",
+        ],
     )]
 
 
