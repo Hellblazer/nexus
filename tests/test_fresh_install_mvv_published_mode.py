@@ -68,8 +68,15 @@ def test_published_mode_uses_uv_tool_install_not_local_wheel() -> None:
     # ``text.index()`` anchored on the `if [ "$PUBLISHED_MODE" = 1 ]; then`
     # line, which is NOT unique on its own (the arg-parsing banner above
     # also branches on PUBLISHED_MODE with the identical literal text).
-    published_marker = 'echo "── 1/9 Install PUBLISHED artifact from PyPI (uv-tool resolution layer) ──"'
-    local_marker = 'echo "── 1/9 Build the wheel under test'
+    # The LEG NUMBER is deliberately excluded from both markers (nexus-utpuw.19).
+    # These used to read `── 1/9 ...`, which coupled this test to the gate's
+    # total leg COUNT: adding a leg renumbered every banner and turned both
+    # counts to zero, so the failure surfaced as "banner must be unique" —
+    # a message pointing at uniqueness when the real cause was arithmetic.
+    # The leg TITLES are what identify the branches, and they are unique on
+    # their own.
+    published_marker = 'Install PUBLISHED artifact from PyPI (uv-tool resolution layer) ──"'
+    local_marker = 'Build the wheel under test ──"'
     assert text.count(published_marker) == 1, "published-leg banner must be unique to slice on"
     assert text.count(local_marker) == 1, "local-wheel-leg banner must be unique to slice on"
     published_block_start = text.index(published_marker)

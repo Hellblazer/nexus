@@ -6,8 +6,14 @@ The §D.4 analytics quartet (``operator_filter`` / ``operator_groupby`` /
 ``operator_aggregate``) on RDR-088 + RDR-093 dispatch to the Claude CLI
 per call. When the inputs are documents that have already had aspects
 extracted into T2 ``document_aspects`` (RDR-089), the same query can
-run as a SQLite SELECT and complete in milliseconds. This module is
-the substrate.
+run as a SQL SELECT against PostgreSQL and complete in milliseconds.
+This module is the substrate.
+
+Said SQLite until nexus-dpe79. The local-SQLite leg died with the
+``=sqlite`` opt-out (RDR-158 P3, nexus-7bomn) and every execution path
+below now goes through ``HttpDocumentAspectsStore`` -- the comments at
+the service call sites say so explicitly, so this docstring was
+contradicting the code three screens beneath it.
 
 Design choices:
 

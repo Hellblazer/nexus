@@ -60,7 +60,7 @@ jobs:
       PGVECTOR_VERSION: "v0.8.2"
       MANYLINUX_IMAGE: "quay.io/pypa/manylinux_2_28_x86_64"
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           # Scheduled workflows execute from the DEFAULT branch (main), but the
           # tree worth gating nightly is develop — the integration branch where
@@ -94,7 +94,7 @@ jobs:
           enable-cache: false
 
       - name: Cache uv wheel cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ${{ runner.temp }}/setup-uv-cache
           key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
@@ -102,7 +102,7 @@ jobs:
             uv-${{ runner.os }}-3.12-
 
       - name: Cache ChromaDB ONNX model
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ~/.cache/chroma
           key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
@@ -113,13 +113,13 @@ jobs:
         # The gate rebuilds the dev jar; the runner's default JDK 17 cannot run
         # the jOOQ codegen (class-file 65 = Java 21+). Same toolchain as ci.yml's
         # write-seam job / service-ci.
-        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
         with:
           java-version: "25.0.3"
           distribution: "graalvm"
 
       - name: Cache Maven local repo (dev-jar build)
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ~/.m2/repository
           key: maven-${{ runner.os }}-${{ hashFiles('service/pom.xml') }}
@@ -139,7 +139,7 @@ jobs:
         # PG17 + pgvector for the throwaway cluster AND unlocks the CA-3
         # bundle test family inside the gate run.
         id: pg-bundle-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: bundle
           key: pg-bundle-linux-amd64-ubuntu-latest-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ env.MANYLINUX_IMAGE }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}
@@ -317,7 +317,7 @@ jobs:
         # reddens every release. Do not fold the pytest twin in here
         # without also adding the HF cache step ci.yml already carries.
         #
-        # FIRST-NIGHTLY-RUN VERIFICATION (manual, once, after this merges): confirm this step exits 0; the non-vacuity step below prints exactly 6 (floor=6); slow-s6dei.xml contains no test_mineru_path_preserves_formulas testcase; and -rs prints no unexpected skip lines beyond legitimately-conditional ones.
+        # FIRST-NIGHTLY-RUN VERIFICATION (manual, once, after this merges): confirm this step exits 0; the non-vacuity step below prints exactly 7 (floor=7); slow-s6dei.xml contains no test_mineru_path_preserves_formulas testcase; and -rs prints no unexpected skip lines beyond legitimately-conditional ones.
         run: |
           set -euo pipefail
           uv run pytest \
@@ -328,15 +328,20 @@ jobs:
       - name: Non-vacuity — slow tests actually ran (nexus-s6dei)
         # Same shape as the nexus-5opzu guard above: a gate that skip-passes
         # on a missing prerequisite reads as a broken gate, not a pass.
-        # Floor pinned to the 6 currently slow-marked, non-MinerU tests;
-        # bump consciously (same change that adds the new slow test) if it
-        # ever needs to move.
+        # Floor pinned to the currently slow-marked, non-MinerU tests; bump
+        # consciously (same change that adds the new slow test) if it ever
+        # needs to move. 6 -> 7 for nexus-utpuw.3's flip-window measurement
+        # (tests/scripts/test_flip_current.py), which is slow-marked because it
+        # cannot calibrate on every machine and starves neighbouring shards.
+        # RG-A caught that the floor was NOT bumped in the commit that added
+        # it, which would have left this guard silent about that test's
+        # deletion -- the exact thing it exists to notice.
         run: |
           uv run python - <<'PY'
           import sys
           import xml.etree.ElementTree as ET
 
-          FLOOR = 6
+          FLOOR = 7
           root = ET.parse("slow-s6dei.xml").getroot()
           ran = 0
           for case in root.iter("testcase"):

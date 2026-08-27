@@ -292,7 +292,23 @@ public final class ScratchRepository {
      * cross-tenant backstop needs no BYPASSRLS connection this way.
      */
     public int sweepTenant(String tenant, OffsetDateTime cutoff) {
+        return sweepTenant(tenant, cutoff, null);
+    }
+
+    /**
+     * As {@link #sweepTenant(String, OffsetDateTime)}, bounded by {@code
+     * statementTimeout} (nexus-lgiqw).
+     *
+     * <p>Only the SCHEDULED sweep task passes a timeout; {@code ScratchHandler}'s
+     * request-path sweep keeps the unbounded overload deliberately. The bound is a
+     * property of the shared single-threaded background loop — where one blocked
+     * statement stalls every other tenant's sweep — not of this repository.
+     *
+     * @param statementTimeout per-statement ceiling, or null for none
+     */
+    public int sweepTenant(String tenant, OffsetDateTime cutoff, java.time.Duration statementTimeout) {
         return tenantScope.withTenant(tenant, T1_TENANT_GUC, dsl -> {
+            SweepBounds.applyStatementTimeout(dsl, statementTimeout);
             int deleted = dsl.deleteFrom(SCRATCH)
                 .where(SCRATCH.TS.lt(cutoff))
                 .execute();

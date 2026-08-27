@@ -149,6 +149,45 @@ def log_event(event: str, **fields: str) -> None:
         debug(f"log_event failed (non-fatal): {exc}")
 
 
+#: The generation root's env override and default, DUPLICATED FROM
+#: ``nexus.install_layout`` by necessity: this hook runs under a bare python3
+#: (``_run_python_hook.sh`` probes python3.13, python3.12, then bare python3)
+#: and cannot import the conexus package -- the same constraint that already
+#: forces ``uv_receipt_present`` to be inline rather than shared.
+#:
+#: Duplication that cannot be removed can still be PINNED.
+#: ``TestInlineLayoutKnowledgeMatchesThePackage`` runs in the normal test
+#: interpreter, imports both halves, and fails if they drift. Without that, the
+#: hook would eventually look for the layout somewhere it is not -- and the
+#: symptom would be this exact bug again: a silent no-op.
+TOOLS_DIR_ENV = "NX_TOOLS_DIR"
+_DEFAULT_TOOLS_SUBPATH = (".local", "share", "nexus", "tools")
+
+
+def default_tools_dir() -> Path:
+    """The generation root, honouring the env override."""
+    override = os.environ.get(TOOLS_DIR_ENV)
+    if override:
+        return Path(override)
+    return Path.home().joinpath(*_DEFAULT_TOOLS_SUBPATH)
+
+
+def generation_install_present() -> bool:
+    """True iff this box has a working side-by-side generation install.
+
+    ``<tools>/current`` must resolve to a real directory. A dangling pointer is
+    NOT a managed install: fail-safe to False, matching
+    ``uv_receipt_present``'s posture, so a broken layout is never something the
+    hook tries to upgrade through.
+    """
+    try:
+        current = default_tools_dir() / "current"
+        return current.is_dir()
+    except OSError as exc:  # unreadable HOME, permissions
+        debug(f"generation probe failed: {exc}")
+        return False
+
+
 def uv_receipt_present() -> bool:
     """True iff conexus was installed via ``uv tool`` (receipt present).
 
@@ -262,8 +301,18 @@ def main(argv: list[str]) -> None:
         target = argv[1].strip()
 
         # 1. Editable gate first: never touch a dev/editable tree.
-        if not uv_receipt_present():
-            debug("no uv-tool receipt (dev/editable tree or no uv); skipping")
+        # GATE 1, nexus-utpuw.15. This used to be `uv_receipt_present()` alone,
+        # which is False FOREVER under the generation layout -- so the whole
+        # auto-upgrade no-opped silently: no error, no nudge-loop escape, the
+        # marker stayed stale and the hook re-nudged forever while this did
+        # nothing.
+        #
+        # Both shapes are managed installs. A box that has not migrated is
+        # still upgradable through uv, and .7 leaves boxes in that state
+        # deliberately until the legacy tree has zero holders.
+        generation = generation_install_present()
+        if not generation and not uv_receipt_present():
+            debug("no generation layout and no uv-tool receipt (dev tree); skipping")
             return
 
         # 2. No-op fast path: CLI already at or above target -> record
@@ -288,7 +337,22 @@ def main(argv: list[str]) -> None:
         log_event(
             "lockstep_upgrade_started", target=target, installed=str(before),
         )
-        if not run_cmd(["uv", "tool", "upgrade", "conexus"], timeout=_UV_TIMEOUT):
+        # GATE 3's FIRST command follows the layout. On a generation box
+        # `uv tool upgrade conexus` would REBUILD THE LEGACY UV TREE and
+        # re-symlink over the nexus-owned shims -- nexus-utpuw.7's accepted
+        # risk, fired automatically on every session start. That is why gate 1
+        # and gate 3 had to move together: fixing detection alone would have
+        # converted a silent no-op into an automated shim clobber, which is
+        # strictly worse than the bug.
+        #
+        # `nx self install` (.14) carries extras forward out of
+        # nexus-install.json, which is the property `uv tool upgrade` was
+        # chosen for in the first place.
+        upgrade_cmd = (
+            ["nx", "self", "install"] if generation
+            else ["uv", "tool", "upgrade", "conexus"]
+        )
+        if not run_cmd(upgrade_cmd, timeout=_UV_TIMEOUT):
             debug("uv tool upgrade failed; leaving marker stale for retry")
             log_event("lockstep_upgrade_result", target=target, outcome="uv_upgrade_failed")
             return

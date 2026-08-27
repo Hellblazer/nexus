@@ -170,8 +170,15 @@ the unit suites missed (nexus-h8rf6).
 Notes:
 - The host JVM suite (`scripts/mvnw-leased.sh -q test`, Step 2) validates the Java
   on the JVM; `--shakeout` adds the native-image build + serve + drive.
-- **Do NOT use `release-sandbox.sh`** — it swaps the uv tool venv and can break
-  the live install. The container rehearsal is the safe, isolated one.
+- **Prefer the container rehearsal over `release-sandbox.sh`** for engine work —
+  it is the isolated harness for a NATIVE build, and it owns its own image.
+  (The old reason given here — that release-sandbox.sh "swaps the uv tool venv
+  and can break the live install" — is no longer true and was contradicted by
+  this repo's own release skill. Installs are side-by-side generations: the
+  sandbox activates its `HOME` before reinstalling, so generations land in
+  `$SANDBOX/.local/{share/nexus/tools,bin}`, nothing is swapped under a live
+  holder, and `--force`/`--cycle-daemons` no longer exist — nexus-utpuw.8.
+  Recommendation unchanged, mechanism corrected: nexus-utpuw.20.)
 - When the two-hop stranded-redirect rehearsal lands (nexus-8nlj4) it becomes
   the acceptance journey that replaced the retired guided legs; add it here
   then, alongside `--shakeout` rather than instead of it.
@@ -408,6 +415,12 @@ Full rationale and evidence citations: `docs/contributing.md` § Schema/data-mig
 ### 6. Relay deploy + post-deploy cloud validation to conexus (passive bus)
 
 Deploy and cloud-validation are **conexus-side operations** — the bus is passive, so surface an explicit relay to Hal; never frame the cross-instance deploy as autonomous:
+
+> **Before the relay, when this tag carries a changeset: ask conexus to run the PITR-fork walk rehearsal.** conexus can restore a Crunchy fork of production to a point in time (~6 min, `deploy/RESTORE.md`) and replay the Liquibase walk against the real row set before it runs live. That is the pre-deploy gate for a schema-carrying tag, and it is the one this skill used to omit. It caught `v0.1.78`'s zero-grant `nexus_diag` regression. The walk is CUMULATIVE — it replays everything the target cluster is behind on — so confirm the cloud's live `release_version` from the engine and size the walk from THAT, not from how many changesets you added.
+>
+> Also confirm with conexus before the window opens: (a) the per-release PRE-DEPLOY prerequisites table — some changesets need a Crunchy-superuser grant to EXIST before boot migration, and its absence is a loud failure on the live engine; (b) the per-release DATA EFFECTS table — anything the walk deletes is acknowledged in advance, never discovered mid-deploy; (c) the image is cosign-signed, since under `enable_image_verification=true` an unsigned image BRICKS BOOT; (d) the current image tag is captured FIRST as the rollback target, and the rollback floor is `nexus-service-0.1.84`.
+>
+> What conexus does NOT have is a staged/shadow deploy of the BINARY — one environment, and it is the live estate (conexus-vbti). State that narrowly. On 2026-08-27 this checklist's post-deploy-only gate list was read as "the cutover is unvalidated by construction" and reported to Hal; the binary half was right and the WALK half was wrong.
 
 > relay: deploy `engine-service-vX.Y.Z` to `api.conexus-nexus.com` + re-run the cloud gate (recall + hybrid parity, xr7.8.9-style).
 

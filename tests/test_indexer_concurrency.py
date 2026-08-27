@@ -413,11 +413,31 @@ class TestRunFileLoop:
         from nexus.indexer_utils import run_file_loop
 
         started: list[str] = []
+        lock = threading.Lock()
+        # nexus-lptgd. run_file_loop submits ALL 50 futures upfront
+        # (indexer_utils.py) and cancels the not-yet-started ones after
+        # wait(FIRST_EXCEPTION). A queued future is only cancellable while it has
+        # not started, so with an instant index_one the two workers can drain the
+        # whole queue before the main thread wakes and cancels -- and the old
+        # `assert len(started) < 50` then read `assert 50 < 50`. That is a race
+        # asserted as a bound: it failed on CI's py3.13 shard while passing
+        # locally, so it was neither reliably red when the contract broke nor
+        # reliably green when it held.
+        #
+        # Parking every non-raising file INVERTS the race instead of narrowing
+        # it: both workers are occupied when f0 raises, so the queue physically
+        # cannot drain and cancellation wins by construction rather than by
+        # being faster. The park is bounded because ThreadPoolExecutor's
+        # __exit__ joins running workers -- an unbounded wait would hang the
+        # run rather than fail it.
+        release = threading.Event()
 
         def index_one(file, score, timers):
-            started.append(file.name)
+            with lock:
+                started.append(file.name)
             if file.name == "f0.py":
                 raise CredentialsMissingError("voyage API key missing mid-run")
+            release.wait(timeout=5.0)
             return 1
 
         with pytest.raises(CredentialsMissingError, match="voyage API key missing"):
@@ -425,7 +445,15 @@ class TestRunFileLoop:
                 self._files(50), index_one, concurrency=2,
                 on_file=None, on_stage_timers=None,
             )
-        assert len(started) < 50
+        release.set()
+
+        # Assert the CONTRACT positively, not "fewer than all": with 2 workers,
+        # at most the raising file plus one parked per worker can ever start.
+        assert len(started) <= 3, started
+        # And name a file that must never have run. This is the assertion that
+        # actually fails if cancel-pending regresses -- a count alone would
+        # still pass if the loop simply ran slower.
+        assert "f49.py" not in started, started
 
     def test_unclassified_exception_sequential_still_fails_immediately(self):
         from nexus.errors import CredentialsMissingError

@@ -74,7 +74,7 @@ jobs:
       # this identically for the same reason.
       NX_TEST_T2_SUBSTRATE: "none"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Derive and fetch the base client tag
         env:
@@ -102,7 +102,7 @@ jobs:
           # and the drift-ledger contract's own anchored-window checks.
           git fetch --depth=1 origin "refs/tags/$base:refs/tags/$base"
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
 
       - name: Install project + dev deps
         run: uv sync --group dev

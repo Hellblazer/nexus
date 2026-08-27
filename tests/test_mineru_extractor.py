@@ -267,3 +267,18 @@ class TestMineruErrorHandling:
         with patch("nexus.pdf_extractor.do_parse", None):
             with pytest.raises(ImportError, match="uv tool install --reinstall conexus"):
                 extractor._extract_with_mineru(dummy_pdf)
+
+    def test_the_reinstall_hint_follows_the_layout(
+        self, extractor, dummy_pdf, tmp_path, monkeypatch
+    ):
+        """nexus-utpuw.13. The uv form above is right for an un-migrated box
+        and does nothing to a generation install. conftest fences $HOME, so
+        the test above exercises ONLY the legacy branch — without this one the
+        retargeting is unfalsified on the layout it exists for.
+        """
+        from tests import _generation_layout
+
+        _generation_layout.build(tmp_path, monkeypatch)
+        with patch("nexus.pdf_extractor.do_parse", None):
+            with pytest.raises(ImportError, match="nx self install"):
+                extractor._extract_with_mineru(dummy_pdf)

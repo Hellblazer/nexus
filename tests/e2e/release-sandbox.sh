@@ -622,16 +622,22 @@ if [[ ! -d "$SANDBOX" ]]; then
 fi
 
 # Activate the sandbox HOME/PATH BEFORE the reinstall below (not after, as
-# this script did until nexus-h9f1w-follow-up): `uv tool install` resolves
-# its default install location off $HOME (~/.local/share/uv/tools,
-# ~/.local/bin — confirmed via `HOME=X uv tool dir`), so activating first
-# makes the reinstall land entirely inside $SANDBOX/.local/{share/uv/tools,
-# bin} — genuinely isolated from the live global conexus venv. Running the
-# reinstall against the REAL $HOME (the old order) swapped the live venv
-# out from under every concurrent Claude Code session's nx-mcp servers +
-# T2/service daemons, tripping reinstall-tool.sh's live-holder guard with
-# no safe remedy short of --force (unsafe) or --cycle-daemons (which can't
-# even touch MCP-server subprocesses, only nx-managed daemons).
+# this script did until nexus-h9f1w-follow-up): the generation root resolves
+# off $HOME ($HOME/.local/share/nexus/tools via nx_tools_dir, $HOME/.local/bin
+# via nx_bin_dir), so activating first makes the reinstall land entirely inside
+# $SANDBOX/.local/{share/nexus/tools,bin} — genuinely isolated from the live
+# global install. layout.sh recomputes both on EVERY call rather than caching,
+# specifically so this harness's $HOME redirection cannot be outrun.
+#
+# The ordering used to matter for a second, louder reason: running against the
+# REAL $HOME swapped the live venv out from under every concurrent Claude Code
+# session's nx-mcp servers and daemons, tripping a live-holder guard whose only
+# remedies were --force (unsafe) or --cycle-daemons (which could not touch
+# MCP-server subprocesses anyway). That failure mode is GONE — installs are
+# side-by-side generations now and nothing is swapped underneath a holder
+# (nexus-utpuw.8), and those flags no longer exist. Isolation is still the
+# reason to activate first, and it is reason enough: get it wrong and the
+# sandbox writes its generations into the developer's live install.
 # shellcheck source=/dev/null
 . "$SANDBOX/activate"
 

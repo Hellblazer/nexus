@@ -49,11 +49,11 @@ jobs:
       PG_VERSION: "17.5"
       PGVECTOR_VERSION: "v0.8.2"
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
       - name: Restore/claim cache slot
         id: pg-bundle-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: bundle
           key: pg-bundle-${{ matrix.target.arch }}-${{ matrix.target.runner }}-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ matrix.target.image || 'native' }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}

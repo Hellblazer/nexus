@@ -116,6 +116,9 @@ def _wire(mod, monkeypatch, *, receipt: bool, installed_versions, run_results):
                  and records the call order in the returned list.
     """
     monkeypatch.setattr(mod, "uv_receipt_present", lambda: receipt)
+    # Default the generation probe OFF so every pre-existing test keeps
+    # exercising the uv-tool branch it was written against (nexus-utpuw.15).
+    monkeypatch.setattr(mod, "generation_install_present", lambda: False)
 
     versions = list(installed_versions)
 
@@ -451,3 +454,144 @@ class TestVersionParsing:
     def test_installed_nx_version_none_when_absent(self, mod, monkeypatch) -> None:
         monkeypatch.setattr(mod.shutil, "which", lambda c: None)
         assert mod.installed_nx_version() is None
+
+
+class TestGenerationLayout:
+    """nexus-utpuw.15: the hook died SILENTLY under the generation layout.
+
+    Gate 1 was ``uv_receipt_present()`` — shutil.which('uv'), `uv tool dir`,
+    then <dir>/conexus/uv-receipt.toml must exist. Under generations that is
+    False FOREVER, so the entire auto-upgrade no-opped: no error, no nudge-loop
+    escape, the marker stayed stale and the hook re-nudged forever while the
+    action did nothing.
+
+    FIXING GATE 1 ALONE WOULD HAVE BEEN WORSE THAN THE BUG. Gate 3 ran
+    ``uv tool upgrade conexus``, which on a generation box rebuilds the legacy
+    uv tree and re-symlinks over the nexus-owned shims — nexus-utpuw.7's
+    accepted risk, fired automatically by our own hook on every session start.
+    The silent no-op was accidentally protective. Both gates move together or
+    neither does.
+    """
+
+    def test_a_generation_install_is_detected_as_managed(self, mod, tmp_path, monkeypatch) -> None:
+        tools = tmp_path / "tools"
+        gen = tools / "gen-20260826T010000Z"
+        gen.mkdir(parents=True)
+        (tools / "current").symlink_to(gen)
+        monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
+
+        assert mod.generation_install_present() is True
+
+    def test_a_dangling_current_is_not_a_managed_install(self, mod, tmp_path, monkeypatch) -> None:
+        """Fail-safe, matching uv_receipt_present's own posture: every edge
+        case resolves to False rather than proceeding on a broken layout."""
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        (tools / "current").symlink_to(tools / "gen-gone")
+        monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
+
+        assert mod.generation_install_present() is False
+
+    def test_no_layout_at_all_is_not_a_managed_install(self, mod, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("NX_TOOLS_DIR", str(tmp_path / "nothing"))
+        assert mod.generation_install_present() is False
+
+    def test_a_generation_box_upgrades_via_nx_self_install(
+        self, mod, marker, monkeypatch
+    ) -> None:
+        """THE REWIRE. `uv tool upgrade conexus` is replaced by the packaged
+        installer (.14), which is safe under live sessions and carries extras
+        forward out of nexus-install.json."""
+        calls = _wire(
+            mod, monkeypatch, receipt=False,
+            installed_versions=["5.6.2", "5.7.0"], run_results={},
+        )
+        monkeypatch.setattr(mod, "generation_install_present", lambda: True)
+
+        mod.main(["action", "5.7.0"])
+
+        joined = [" ".join(c) for c in calls]
+        assert any("nx self install" in j for j in joined), (
+            f"the generation box did not use the packaged installer: {joined}"
+        )
+        assert not any("uv tool upgrade" in j for j in joined), (
+            f"`uv tool upgrade` ran on a generation box — that rebuilds the "
+            f"legacy uv tree and re-symlinks over the shims: {joined}"
+        )
+
+    def test_an_unmigrated_box_still_upgrades_via_uv(
+        self, mod, marker, monkeypatch
+    ) -> None:
+        """NOT a blanket replacement. .7 leaves a box on the uv layout until
+        its legacy tree has zero holders, and `uv tool upgrade conexus` remains
+        the correct mechanism there. Replacing it unconditionally would break
+        auto-upgrade on every un-migrated box — trading one silent failure for
+        another."""
+        calls = _wire(
+            mod, monkeypatch, receipt=True,
+            installed_versions=["5.6.2", "5.7.0"], run_results={},
+        )
+
+        mod.main(["action", "5.7.0"])
+
+        joined = [" ".join(c) for c in calls]
+        assert any("uv tool upgrade conexus" in j for j in joined), joined
+
+    def test_the_migration_ladder_still_runs_in_both_shapes(
+        self, mod, marker, monkeypatch
+    ) -> None:
+        """CA-2's second command is untouched by this bead. Binary upgrade and
+        migration ladder stay two commands."""
+        calls = _wire(
+            mod, monkeypatch, receipt=False,
+            installed_versions=["5.6.2", "5.7.0"], run_results={},
+        )
+        monkeypatch.setattr(mod, "generation_install_present", lambda: True)
+
+        mod.main(["action", "5.7.0"])
+
+        assert ["nx", "upgrade"] in calls, calls
+
+    def test_raw_uv_tool_install_never_appears(self, mod, marker, monkeypatch) -> None:
+        """THE ANTI-FOOTGUN CONTRACT, ported rather than dropped. A raw
+        `uv tool install` / `--reinstall` / `--force` strips the [local] extra
+        and reintroduces the 5.6.2 local-search P0 (768-dim embedder silently
+        replaced by 384-dim against collections built at 768). It must never
+        appear in either shape."""
+        for generation in (True, False):
+            calls = _wire(
+                mod, monkeypatch, receipt=not generation,
+                installed_versions=["5.6.2", "5.7.0"], run_results={},
+            )
+            monkeypatch.setattr(mod, "generation_install_present", lambda g=generation: g)
+            mod.main(["action", "5.7.0"])
+            joined = " ".join(" ".join(c) for c in calls)
+            assert "uv tool install" not in joined, joined
+            assert "--reinstall" not in joined, joined
+            assert "--force" not in joined, joined
+
+
+class TestInlineLayoutKnowledgeMatchesThePackage:
+    """The hook runs under a BARE python3 (_run_python_hook.sh probes 3.13,
+    3.12, then bare) and CANNOT import nexus, so its layout knowledge is
+    duplicated inline by necessity — the bead says so explicitly and forbids
+    "fixing" it with an import.
+
+    Duplication that cannot be removed can still be PINNED. This test runs in
+    the normal test interpreter, which can import both halves, and fails if
+    they drift — the same discipline as install_layout's twins.
+    """
+
+    def test_the_default_tools_dir_matches_install_layout(self, mod, monkeypatch) -> None:
+        from nexus import install_layout
+
+        monkeypatch.delenv("NX_TOOLS_DIR", raising=False)
+        assert mod.default_tools_dir() == install_layout.tools_dir(), (
+            "the hook's inline tools-dir default has drifted from the package's; "
+            "the hook would look for the layout somewhere it is not"
+        )
+
+    def test_the_env_override_name_matches(self, mod) -> None:
+        from nexus import install_layout
+
+        assert mod.TOOLS_DIR_ENV == install_layout.TOOLS_DIR_ENV

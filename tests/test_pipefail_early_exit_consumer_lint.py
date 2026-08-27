@@ -992,8 +992,8 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # dist-info sniffing. The former third entry (the `--version`
         # banner sniff) was FIXED rather than exempted -- it needed no
         # live infra, being a plain capture-then-parameter-expansion.
-        "tests/e2e/fresh-install-mvv.sh:512",
-        "tests/e2e/fresh-install-mvv.sh:538",
+        "tests/e2e/fresh-install-mvv.sh:516",
+        "tests/e2e/fresh-install-mvv.sh:542",
         # --- tests/e2e/local-index-memory-gate.sh (1 entry): owned by a
         # concurrent agent in the authoring session (nexus-wbeyi itself)
         # -- reported to that hand-off, not fixed here. This is a
@@ -1140,13 +1140,24 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         "scripts/rdr152-sandbox/prod-copy.sh:148",
         "scripts/rdr152-sandbox/prod-copy.sh:159",
         "scripts/rdr152-sandbox/prod-copy.sh:169",
-        # tests/containers/fanout.sh:158 (1 entry): extracts a junit
-        # <testsuite> attribute string purely to accumulate cosmetic
-        # TOTAL_T/TOTAL_P/... summary counters printed at the end of the
-        # run; the actual pass/fail decision (`FAIL=1`) is computed a
-        # few lines below from each shard's own `$rc` exit code, never
-        # from this.
-        "tests/containers/fanout.sh:158",
+        # tests/containers/lib/verdict.sh:40 (1 entry): extracts a junit
+        # <testsuite> attribute string to accumulate the run's test totals.
+        #
+        # Moved here from tests/containers/fanout.sh:158 when the verdict
+        # logic was extracted so its tests could drive the real aggregation
+        # (nexus-uq3xs). The rationale ALSO changed and the old one is not
+        # merely relocated: it said these counters were "cosmetic" and that
+        # the pass/fail decision came only from each shard's `$rc`. That is
+        # no longer true -- `total_t` is now load-bearing for the
+        # non-vacuity check and the NX_FANOUT_MIN_TESTS floor.
+        #
+        # The `|| true` is still correct, for a different reason. A missing
+        # or malformed junit yields an empty `suite_tag`, so nothing is
+        # added to the totals -- and a run whose totals are short is exactly
+        # what the zero-tests check, the reported-shard-count check, and the
+        # floor exist to fail on. Swallowing the grep's status cannot hide a
+        # short run; it produces one, and the checks below catch it.
+        "tests/containers/lib/verdict.sh:40",
         # tests/e2e/migration-rehearsal/rehearse_shakeout.sh (2 entries):
         #
         #   :264 -- prints staleness/skip diagnostic lines for human
@@ -1181,9 +1192,13 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         # edits shifted the file; same 3 sites, same rationale.
         #   Retargeted AGAIN (7.15.0 release fix a1f6bf7c4 shifted the
         #   file +7 lines): :1103 -> :1110, :1107 -> :1114, :1155 -> :1162.
-        "tests/e2e/release-sandbox.sh:1110",
-        "tests/e2e/release-sandbox.sh:1114",
-        "tests/e2e/release-sandbox.sh:1162",
+        #   Retargeted AGAIN (nexus-utpuw.8 rewrote the comment explaining
+        #   why the sandbox activates $HOME first, +6 lines): :1110 -> :1116,
+        #   :1114 -> :1120, :1162 -> :1168. Same 3 sites, same rationale --
+        #   only the prose above them changed.
+        "tests/e2e/release-sandbox.sh:1116",
+        "tests/e2e/release-sandbox.sh:1120",
+        "tests/e2e/release-sandbox.sh:1168",
     }
 )
 _PIPEFAIL_OR_TRUE_SITES_CEILING = 9
