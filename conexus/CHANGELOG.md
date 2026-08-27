@@ -4,6 +4,28 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.19.0] - 2026-08-27
+
+Plugin version aligned with conexus 7.19.0. This release DOES carry plugin-
+surface changes: ten ledger entries that were merged but inert become live as
+the pin advances.
+
+- **Version-lockstep hook rewired for the generation layout (nexus-utpuw.15).**
+  Gate 1 accepts a generation layout or a legacy uv receipt; gate 3 runs
+  `nx self install` on a generation box and `uv tool upgrade conexus` on a
+  uv-tool one. `hooks.json`'s failure message no longer names only the uv verb.
+- **Reviewer agents gain three defect classes that survive a green gate
+  (nexus-csrto).** A statistic that can exceed its own maximum; a quantity
+  obtained by subtracting an assumed constant; an assumption stated in prose
+  that nothing enforces. `test-validator` gains a section on tests that measure
+  rather than assert. `substantive-critic` puts the premise check first.
+- **The `review-completed` marker is reserved to the session that owns the gate
+  (nexus-e3mak)** -- no reviewer agent may write the token for a gate it is
+  only one half of.
+- **Parallel dispatch that mutates needs a mutex (nexus-utpuw.25).** A fan-out
+  that changes a shared tree gets a lock at dispatch time, and a mutating agent
+  treats an unexpectedly dirty tree as a collision, not a finding.
+
 ## [7.18.0] - 2026-08-24
 
 Plugin version aligned with conexus 7.18.0. No plugin-surface changes this

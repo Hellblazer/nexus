@@ -6,6 +6,71 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.19.0] - 2026-08-27
+
+Installs are now side-by-side. An upgrade builds a new generation directory
+next to the existing one and flips a `current` symlink, instead of reinstalling
+in place over a venv a running process may still be using. Engine identity
+moves to `engine-service-v0.1.87`.
+
+### Changed
+
+- **Side-by-side generation installs (nexus-utpuw).** `nx self install` is the
+  packaged installer: it builds `<tools>/gen-<stamp>`, then flips `current`
+  atomically. nexus-owned shims in `~/.local/bin` bind a spawn to the
+  generation it started under, so a process launched before an upgrade keeps
+  running against the tree it was launched with. Old generations are reaped
+  under four never-delete rules (current, previous, live-holder, `--self`).
+  The shims resolve `pyvenv.cfg` next to the executable AS INVOKED rather than
+  through `realpath`, matching CPython's own `getpath` behaviour.
+- **Engine floor -> `engine-service-v0.1.87`.** One additive Liquibase
+  changeset (a partial index on `service_tokens`, transactional, with
+  rollback). `PINNED_SERVICE_TAG` is derived from the floor, so fresh local
+  installs move with it. (`v0.1.86` was tagged and published earlier the same
+  day but never deployed; `v0.1.87` is that tag plus the reaper fix below, with
+  no schema difference between them.)
+
+  **This release DELETES DATA.** The engine introduces the `scope=data` token
+  reaper, unconditionally -- no flag, no env gate. It is new in this tag, so
+  the first cycle reaps the ENTIRE accrued backlog at once rather than an
+  increment: measured at **12,683 sweepable rows** on a point-in-time fork of
+  the managed estate (2026-08-27), with rows inside the 7-day grace window
+  retained. The reaper runs on a 6-hour period AND a 6-hour initial delay, so
+  **the first sweep fires ~6 hours after the engine boots**, not at boot. On a
+  managed deployment that is after the deploy window closes. The line to watch
+  is `event=t1_scheduled_sweep tenant=<t> deleted=<n>`; its ABSENCE at T+6h is
+  as informative as its content. Re-derive the count against the live estate
+  at deploy time -- the projection from an earlier census understated the
+  measured figure by ~580 rows.
+
+### Fixed
+
+- **The `scope=data` reaper no longer fails politely forever (nexus-4tosp).**
+  A sweep whose statement exceeded its 30s bound was caught, logged at WARN,
+  and retried every six hours indefinitely -- making no progress, on a service
+  whose `/health` stayed green. "Reaping normally", "installed and never
+  reaping", and "scheduler never fired" were indistinguishable from outside the
+  logs. There is now a consecutive-failure counter and an ERROR event on the
+  threshold crossing.
+
+  Read the scope precisely: this is **diagnosis, not detection, and it is
+  observable but NOT alarmed.** The counter sees "installed but never reaping"
+  and is blind to "scheduler never fired" -- no cycles means no failures to
+  count, so it reads zero, which looks healthy. Detection is the absence of the
+  unconditional `t1_scheduled_sweep_complete` heartbeat over a window longer
+  than one period; that alarm does not exist yet. Until it does, the signal is
+  a log line, and this project's own note about its sibling line applies: it
+  "makes that diagnosis possible for someone already looking; it does not
+  detect anything on its own."
+
+- **The SessionStart version-lockstep hook no longer dies silently under the
+  generation layout (nexus-utpuw.15).** Its first gate required a uv receipt,
+  which never exists under the new layout, so auto-upgrade became a permanent
+  no-op with no error and no nudge-loop escape. Detection now accepts either
+  shape, and the upgrade mechanism follows the shape it found. This ships live
+  in installed sessions only because this release advances the plugin pin.
+
+
 ## [7.18.0] - 2026-08-24
 
 One user-visible change: `nx enrich aspects` no longer re-extracts a whole
