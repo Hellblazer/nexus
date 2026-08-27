@@ -193,9 +193,16 @@ class Holder:
             #
             # Killing first closes the pipe, so the read is bounded by
             # construction and still yields whatever the child managed to say.
-            # Reaping happens AFTER the read, never before: `wait()` on a child
-            # whose stderr pipe is full would deadlock on the buffer we are
-            # about to drain.
+            #
+            # The read/reap ORDER is not load-bearing, and this comment used to
+            # claim it was — that `wait()` on a child with a full stderr pipe
+            # would deadlock on the buffer about to be drained. MEASURED FALSE
+            # (RG-E third pass, reproduced here): after SIGKILL the child is
+            # already dead, so `wait()` returns in ~2ms with 200KB sitting
+            # undrained in stderr. The deadlock is real for a LIVE child and
+            # simply cannot arise once the kill has landed. Kept in this order
+            # because capturing the diagnostic before anything else is the
+            # clearer read, not because the alternative is unsafe.
             self.proc.kill()
             stderr = self.proc.stderr.read()[-2000:] if self.proc.stderr else ""
             self._reap()
@@ -225,7 +232,13 @@ class Holder:
         try:
             self.proc.wait(timeout=30)
         except subprocess.TimeoutExpired:  # pragma: no cover - defensive
-            pass
+            # SAY SO. `stop()` used to let this raise; folding it into a
+            # helper made it silent, which hides the one case worth seeing —
+            # a child that survived SIGKILL (uninterruptible sleep, a wedged
+            # kernel path). Swallowing is right in a teardown, disappearing is
+            # not (RG-E third pass, informational note).
+            print(f"  ! holder {self.label} (pid {self.proc.pid}) did not exit "
+                  f"30s after SIGKILL — it is wedged, not slow", flush=True)
 
     def stop(self) -> None:
         self.proc.kill()
