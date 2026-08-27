@@ -60,6 +60,18 @@ start (nexus-utpuw.7's accepted risk, automated).
 - `conexus/agents/substantive-critic.md` (nexus-e3mak) — same, for the other
   half of the gate.
 
+- `conexus/agents/_shared/CONTEXT_PROTOCOL.md` (nexus-utpuw.25 follow-up) — adds
+  "Parallel dispatch that MUTATES needs a mutex": the caller hands a lock out at
+  dispatch time when a fan-out will change the tree, and a mutating agent must
+  treat an unexpectedly dirty tree as a COLLISION rather than a finding.
+
+**What is NOT protected until this ships.** Review gates dispatch two or three
+agents at one worktree and tell them to mutate it, so until the pin advances
+every such gate is one collision away from a confident "this assertion cannot
+fail" that is purely an artifact of a peer's restore. Meanwhile the orchestrating
+session must put the mutex in each dispatch prompt by hand — which is what
+RG-E did, mid-run, on 2026-08-26.
+
 **What is NOT protected until this ships.** `pre_close_verification_hook.sh`
 matches `review-completed` by substring across T1 and T2, so a reviewer's
 handoff note carrying that token plus a bead id closes the gate it is only half

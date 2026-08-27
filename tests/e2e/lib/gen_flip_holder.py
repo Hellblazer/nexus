@@ -237,8 +237,13 @@ class Holder:
             # a child that survived SIGKILL (uninterruptible sleep, a wedged
             # kernel path). Swallowing is right in a teardown, disappearing is
             # not (RG-E third pass, informational note).
+            # stderr, not stdout: this reports a LEAKED resource, so it
+            # belongs on the stream `fail()` uses rather than the one `step()`
+            # narrates on — and it survives a truncated stdout (RG-E third
+            # pass, style note).
             print(f"  ! holder {self.label} (pid {self.proc.pid}) did not exit "
-                  f"30s after SIGKILL — it is wedged, not slow", flush=True)
+                  f"30s after SIGKILL — it is wedged, not slow",
+                  file=sys.stderr, flush=True)
 
     def stop(self) -> None:
         self.proc.kill()
