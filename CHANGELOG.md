@@ -6,6 +6,37 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`nx index repo` names the three catalog-linking sub-phases (nexus-jg3x5).**
+  `Catalog: linking N new entries…` was followed by tens of seconds of silence
+  while rdr, prose, and pdf link generation ran — each already timed into
+  `catalog_hook_stage_timing`, none emitted. Each generator that can do work
+  for the batch now prints `[post] Catalog linking: <kind>…` on entry and
+  `[post] Catalog linking: <kind> done (Ns)` on exit with the measured
+  duration; a generator with no qualifying new document emits no pair.
+- **`nx dt index`'s refusal footer is arithmetically honest in a mixed batch
+  (nexus-l6tr7).** A batch mixing a flush-grain refusal (counted in
+  `indexed`) with a propagating one (bucketed into `failed`) printed
+  "2 of the 1 indexed above had completion refused". The footer now states
+  the split: "N completion refusal(s) …: K of the M indexed above and J
+  listed under failed"; a bucket count the run-wide collector cannot
+  account for is reported as recording drift, never clamped.
+- **`nx t3 gc` writes its `gc_audit` row (nexus-fduai).** The verb's
+  comment deferred the audit to "the engine's gc-audit surface (next
+  engine tag)"; that surface shipped in v0.1.62 with a client-facing
+  producer (`POST /v1/catalog/gc_audit/record`) built for exactly this
+  verb, and nothing ever called it — the engine only sees the deletes it
+  performs itself, so an operator-driven gc left `nexus.gc_audit` at zero
+  rows. A successful `--no-dry-run --yes` run now records one row
+  (`operation=t3_gc`, `actor="nx t3 gc"`, the full chash list, counts and
+  an id sample in `details`) and mirrors it as a structured
+  `t3_gc_chunks_deleted` event carrying the row id. An audit write that
+  fails after the delete is warned and fails the exit code; dry runs
+  record nothing. New `nx catalog gc-audit list [--collection] [--operation]
+  [--limit] [--offset] [--json]` reads the trail — until now `nx doctor`'s
+  pass/fail non-empty check was its only reader.
+
 ## [7.21.0] - 2026-08-28
 
 ### Changed
