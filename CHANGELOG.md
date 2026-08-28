@@ -90,6 +90,23 @@ that tag is gated and paired with a client release.
 
 ### Fixed
 
+- **S-batch: seven groomed live defects, one review pass (nexus-50l6y,
+  von7f, z0idx, mqm5w, tl5qh, hbgso, hj7mg).** Builtin plans now pass the
+  arg names their operators accept — hybrid-factual-lookup's generate step
+  could not dispatch at all — held by a census lint that resolves every
+  builtin step's operator through the runtime's own dispatch tables and
+  checks its args against the real signature. `nx search --json` emits
+  valid JSON on zero hits at all three exit points. Thirteen structlog
+  calls across six files passed the reserved `message=` kwarg (a KeyError
+  the moment the event fires under stdlib routing); renamed to each
+  file's own convention and held at zero by a repo-wide AST lint.
+  `upgrade_finish` probes the running engine before declaring NEEDS
+  HUMAN. The superseded-vector sweep stops over-reporting deletes. The
+  degraded-embedder advisory and `nx enrich aspects-show` recommend only
+  remedies that actually work on this install — or say plainly that none
+  exists — instead of plausible dead commands.
+
+
 - **`nx index pdf --dry-run` writes nothing, enforced rather than assumed
   (nexus-uxg4u).** The dry-run path used to register a catalog document
   before any work; when the completion fence then correctly refused the
