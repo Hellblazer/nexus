@@ -4,6 +4,20 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The MCP auto-approvers now work under `defaultMode: auto` (nexus-qs1g6).**
+  Both plugins' approvers (nexus tools, and Serena + Context7 in the `sn`
+  plugin) were registered only on `PermissionRequest`, which auto mode's
+  classifier never consults — so a directive-mandated tool could be
+  classifier-denied with the approver installed. The same scripts, with the
+  same explicit allowlists, are now also registered on `PreToolUse`, emitting
+  `permissionDecision: allow`, which lands before the classifier. Confirmed
+  live by cc-validation scenario 28: allow ran the tool, deny blocked it, with
+  no `permissions.allow` rule present.
+
 ## [7.21.0] - 2026-08-28
 
 Plugin version aligned with conexus 7.21.0. No plugin-side changes.
