@@ -29,6 +29,26 @@ that tag is gated and paired with a client release.
   rides the next `engine-service` tag; until it is deployed the
   `relevance_log` row reads UNAVAILABLE naming the reason.
 
+- **`nx catalog reconcile-stale --execute drop-orphan-collections`, and the
+  host-harness scratch-scope lint (nexus-8tnz2).** T3 collections that hold
+  chunks but have no catalog documents (benchmark and gate debris) are now
+  classified by ONE function shared with `nx catalog doctor --t3-vs-catalog`
+  and `nx catalog verify`'s new `orphan_collections` field, split into
+  `orphan` (never had documents) and `tombstoned-only` (documents soft-deleted,
+  restorable until purge-trash). The arm lists both in dry-run and drops only
+  `orphan`, through the cascaded API delete path, with the write-time guard
+  line every mutation arm prints. The tombstone count comes from a NEW engine
+  route, `GET /v1/catalog/docs/collection-counts-all`; on an engine that
+  predates it the read 404s, the arm reports INCOMPLETE, and `--execute`
+  refuses rather than reading live-only counts as "no tombstones". A new
+  repo-wide lint (`tests/test_host_harness_scratch_scope_lint.py`) holds an
+  exact allowlist over every tracked shell and Python harness that writes into
+  a service (34 files / 150 sites, each with the isolation pattern that makes
+  it safe); `scripts/validate/01-mcp-core.py` now refuses to run outside
+  `NX_LOCAL=1`, and `scripts/spikes/spike_rdr089_delos.py`, a spike that wrote
+  into the live store with no sandbox, is deleted. `delete_collection` joins the
+  service writer whitelist with its per-entry test.
+
 ### Fixed
 
 - **Engine: `databasechangelog.dateexecuted` reads as UTC (nexus-rph82).**

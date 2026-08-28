@@ -1145,14 +1145,47 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             return "", ""
         return result.get("owner_id", ""), result.get("repo_root", "")
 
-    def collection_doc_counts(self) -> dict[str, int]:
+    def collection_doc_counts(self, *, include_deleted: bool = False) -> dict[str, int]:
         """Return {physical_collection: doc_count} for all non-empty collections.
 
         Backs commands/catalog.py _check_collection_health which needs per-collection
         doc counts to identify T3 orphans.
-        Uses GET /v1/catalog/docs/collection-counts (nexus-xnz0o).
+        Uses GET /v1/catalog/docs/collection-counts (nexus-xnz0o) when
+        ``include_deleted`` is False.
+
+        ``include_deleted`` (nexus-8tnz2 fix-round CRITICAL 2, fix-round-2
+        EXTENSION): default False matches the pre-existing, tombstone-aware
+        behavior (the engine's ``collection_doc_counts`` security_invoker
+        view, ``deleted_at IS NULL``) -- LIVE documents only. Pass True to
+        additionally count soft-tombstoned documents (still restorable
+        until ``purge_trash``, RDR-156 D6): ``classify_t3_orphan_collections``
+        needs BOTH counts to tell a genuine orphan (no catalog doc ever
+        registered) apart from a collection whose catalog docs are merely
+        tombstoned, not gone.
+
+        True routes to the BRAND-NEW ``GET /v1/catalog/docs/collection-
+        counts-all`` path rather than a query param on the existing route
+        (fix-round-2: a query param on an existing route is
+        indistinguishable from "old engine silently ignored it" -- an old
+        engine would return HTTP 200 with the SAME live-only map, no error,
+        no signal, and every tombstoned-only collection would misclassify
+        as a genuine orphan and become a real hard-delete target). A new
+        path 404s cleanly on an engine below the required floor, matching
+        the established convention already used by
+        :meth:`manifest_null_collection_report` /
+        ``CatalogRepository#manifestNullCollectionReport`` for exactly this
+        problem.
+
+        Unlike :meth:`manifest_null_collection_report`, a failure here
+        (404 or any other ``httpx`` error) is NOT caught and degraded to an
+        empty/zero result -- it propagates as the store's normal error.
+        ``classify_t3_orphan_collections`` calls both counts uncaught by
+        design (see its docstring): an unreadable all-rows count must
+        surface as the caller's INCOMPLETE condition, never silently read
+        as "0 tombstoned, therefore orphan."
         """
-        result = self._get("/docs/collection-counts")
+        path = "/docs/collection-counts-all" if include_deleted else "/docs/collection-counts"
+        result = self._get(path)
         return {k: int(v) for k, v in result.get("counts", {}).items()}
 
     def coverage_by_content_type(self, owner_prefix: str = "") -> list[dict]:

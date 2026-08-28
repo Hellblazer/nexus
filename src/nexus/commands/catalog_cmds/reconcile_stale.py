@@ -188,6 +188,11 @@ from nexus.commands.catalog_cmds.integrity import (
 # unchanged.
 from nexus.repo_identity import is_worktree_or_tempdir_path
 
+# nexus-8tnz2: shared T3-orphan-collection classification -- the SAME
+# function `nx catalog doctor --t3-vs-catalog` (t3_orphans) and `nx catalog
+# verify` (orphan_collections) consume, so all three agree by construction.
+from nexus.commands.catalog_cmds.t3_orphans import classify_t3_orphan_collections
+
 _log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
@@ -195,7 +200,7 @@ if TYPE_CHECKING:
 
 _ACTIONS = (
     "recount", "tombstone-vanished", "tombstone-orphaned", "tombstone-zero-content",
-    "tombstone-ghost-notes",
+    "tombstone-ghost-notes", "drop-orphan-collections",
 )
 
 # reconcile_cmd's convention (catalog.py): actionable findings cap at 20,
@@ -508,15 +513,34 @@ _WRITE_TIME_GUARDS: dict[str, dict] = {
         "residual_beads": ["nexus-wu8s1"],
     },
     "tombstone-vanished": {
-        "status": "UNGUARDED",
-        "guard": "nothing keeps benchmark/gate debris collections out of the production namespace — "
-                 "the DOMINANT vanished population (7,142 of 13,279 zero-count docs in the 2026-08 "
-                 "census). The API delete/rename path IS cascaded (delete-path incompleteness, "
-                 "fixed), but debris collections never pass through it",
-        "where": "cascade: engine CatalogDeleteCollectionCascadeTest / CatalogRenameCollectionTest; "
-                 "debris namespace isolation: no code, no owner bead (playbook §5.4)",
-        "residual_beads": [],
-        "unowned_residual": "benchmark/gate debris collections need namespace isolation, not artifact gating",
+        "status": "shipped-with-residuals",
+        "guard": "SCOPED, not root-cause: this repo's OWN tracked host-run harnesses are "
+                 "guarded from reintroducing this class, via an exact-allowlist lint over every "
+                 "nx index/nx store/nx collection/store_put site under tests/e2e/** and "
+                 "scripts/** (tests/test_host_harness_scratch_scope_lint.py, nexus-8tnz2 census: "
+                 "all 34 existing files/150 sites are already read-only, container-isolated, or NX_LOCAL "
+                 "under a sandboxed HOME/config dir — a NEW site must be reviewed rather than "
+                 "silently joining the census). This does NOT address the OBSERVED live "
+                 "population's root cause: the design-of-record itself found no producer of the "
+                 "actual debris names (code__test-repo-<hex>, docs__hotfix_smoke, "
+                 "docs__local_smoketest_336, knowledge__val530, docs__1-2188) anywhere in this "
+                 "repo — that producer is external and remains completely UNGUARDED by this "
+                 "lint or anything else here. A future in-repo site that genuinely needs the "
+                 "operator's live service has two conforming routes named in the lint's own "
+                 "directive text: self-provision an engine and mint its own tenant "
+                 "(POST /v1/tenants/create under the boot bearer, the tests/_engine_substrate.py "
+                 "mint_test_tenant precedent), or the throughput bench's marker-scoped-owner + "
+                 "before/after collection-list snapshot + EXIT-time teardown shape. The API "
+                 "delete/rename path IS cascaded (delete-path incompleteness, fixed); the sweep "
+                 "arm that cleans the SYMPTOM — both the already-landed population and whatever "
+                 "the still-unidentified external producer adds next — is "
+                 "`nx catalog reconcile-stale --execute drop-orphan-collections`",
+        "where": "write-time (this repo's own harnesses only): "
+                 "tests/test_host_harness_scratch_scope_lint.py; cascade: engine "
+                 "CatalogDeleteCollectionCascadeTest / CatalogRenameCollectionTest; sweep "
+                 "(symptom, any producer): reconcile_stale.py's drop-orphan-collections arm via "
+                 "classify_t3_orphan_collections()",
+        "residual_beads": ["nexus-8tnz2"],
     },
     "tombstone-orphaned": {
         "status": "shipped-with-residuals",
@@ -538,6 +562,24 @@ _WRITE_TIME_GUARDS: dict[str, dict] = {
         "guard": "store_put notes get a title-derived identity at write time (NULL-identity class, fixed)",
         "where": "nexus.catalog.store_hook (uri_for(collection, title)); nx catalog doctor --store-put-integrity",
         "residual_beads": [],
+    },
+    "drop-orphan-collections": {
+        "status": "shipped-with-residuals",
+        "guard": "SCOPED, not root-cause (same honesty note as tombstone-vanished above): the "
+                 "same lint (tests/test_host_harness_scratch_scope_lint.py, nexus-8tnz2) prevents "
+                 "THIS repo's own tracked harnesses from creating new T3-orphan collections "
+                 "(chunks present in T3, zero catalog documents — live or tombstoned — "
+                 "referencing them). It does nothing about the observed live population's actual, "
+                 "external, still-unidentified producer. This arm is the sweep for the SYMPTOM "
+                 "regardless of source — already-accumulated debris, or whatever an unguarded "
+                 "external producer adds next — via the SAME classify_t3_orphan_collections() "
+                 "function `nx catalog doctor --t3-vs-catalog` and `nx catalog verify` also "
+                 "consume. Never drops a tombstoned-only collection (nexus-8tnz2 fix-round "
+                 "CRITICAL 2) — only a confirmed 'orphan' (zero live AND zero tombstoned docs).",
+        "where": "write-time (this repo's own harnesses only): "
+                 "tests/test_host_harness_scratch_scope_lint.py; classification: "
+                 "src/nexus/commands/catalog_cmds/t3_orphans.py::classify_t3_orphan_collections",
+        "residual_beads": ["nexus-8tnz2"],
     },
 }
 
@@ -1147,6 +1189,126 @@ def _run_tombstone_ghost_notes(
     )
 
 
+def _run_drop_orphan_collections(
+    cat: "CatalogReader", t3: object, *, will_act: bool, dry_run: bool,
+) -> None:
+    """drop-orphan-collections (nexus-8tnz2): T3 collections with chunks
+    but ZERO catalog documents -- the reverse-direction sibling of
+    tombstone-vanished's population (there, catalog docs point at a T3
+    collection that no longer exists; here, a T3 collection exists and the
+    catalog never registered a document for it at all -- benchmark/gate
+    debris, T2 nexus/catalog-cleanup-2026-08-03-executed-and-prevention
+    [21385] item 3).
+
+    Consumes the SAME classification ``nx catalog doctor --t3-vs-catalog``
+    reports as ``t3_orphans`` and ``nx catalog verify`` reports as
+    ``orphan_collections`` -- ``classify_t3_orphan_collections`` is the ONE
+    definition all three call, so they agree by construction (nexus-8tnz2
+    locked invariant).
+
+    A row whose chunk count could not be read (an ``error`` key -- the
+    nexus-pyv0e class of T3 read failure) is NEVER a delete target: an
+    unresolvable count is not confirmed orphan-hood, the same discipline
+    every other arm in this module applies to its own candidates. A
+    failure classifying the population AT ALL (T3's collection listing, or
+    EITHER catalog doc-count read -- live-only or ``include_deleted=True``)
+    refuses outright -- the same INCOMPLETE contract as the base census
+    (``_raise_if_unreadable``); an unavailable tombstone count is exactly
+    such a failure (nexus-8tnz2 fix-round CRITICAL 2) -- this arm refuses
+    ``--execute`` rather than guess whether a zero-live-doc collection is a
+    genuine orphan or merely tombstoned-only.
+
+    Only ``class == "orphan"`` rows are ever a delete target.
+    ``class == "tombstoned-only"`` rows (every referencing catalog document
+    is soft-deleted, still restorable until ``purge_trash``, RDR-156 D6)
+    are listed distinctly, with their ``tombstoned_count``, and NEVER
+    dropped -- hard-deleting a T3 collection whose catalog documents are
+    merely tombstoned would destroy still-recoverable content and bypass
+    ``purge_trash``'s own grace window.
+
+    Drops go through the cascaded API delete path only
+    (``HttpCatalogClient.delete_collection`` -- the tombstone-vanished
+    guard row calls this cascade "fixed"), never a raw vector-store
+    delete, never psql.
+    """
+    _echo_write_time_guard("drop-orphan-collections")
+    try:
+        classified = classify_t3_orphan_collections(cat, t3)
+    except Exception as exc:  # noqa: BLE001 — boundary catch; refused below, never silently treated as zero orphans
+        raise click.ClickException(
+            "reconcile-stale INCOMPLETE: could not classify T3 orphan collections "
+            f"({type(exc).__name__}: {exc}) — a read this arm depends on could not "
+            "be trusted (this includes the tombstoned-vs-orphan disambiguation read); "
+            "refusing to act (same INCOMPLETE contract as the census)."
+        ) from exc
+
+    targets = [o for o in classified if o.get("class") == "orphan"]
+    tombstoned_only = [o for o in classified if o.get("class") == "tombstoned-only"]
+    unresolvable = [o for o in classified if "error" in o]
+
+    click.echo(
+        f"\ndrop-orphan-collections: {len(targets)} candidate(s) "
+        "(T3 collection has chunks; zero catalog documents -- live or tombstoned -- "
+        "reference it)."
+    )
+    for row in targets[:_CAP_ACTION]:
+        click.echo(f"    {row['name']:<50} chunks={row['chunk_count']}")
+    if len(targets) > _CAP_ACTION:
+        click.echo(f"    ... and {len(targets) - _CAP_ACTION} more")
+    if tombstoned_only:
+        click.echo(
+            f"  {len(tombstoned_only)} collection(s) are tombstoned-only -- every "
+            "referencing catalog document is soft-deleted (restorable until "
+            "`nx catalog purge-trash --execute`), NOT gone. NEVER a delete target "
+            "for this arm:"
+        )
+        _echo_sample(
+            tombstoned_only, _CAP_INFO,
+            lambda r: f"{r['name']:<50} chunks={r['chunk_count']} tombstoned_docs={r['tombstoned_count']}",
+        )
+    if unresolvable:
+        click.echo(
+            f"  skipped {len(unresolvable)} whose chunk count could not be read from T3 "
+            "(unresolvable — never a delete target): "
+            + ", ".join(f"{o['name']} ({o['error']})" for o in unresolvable[:5])
+            + (" ..." if len(unresolvable) > 5 else "")
+        )
+    if not will_act:
+        if dry_run:
+            click.echo("\n(dry-run — no catalog writes performed.)")
+        return
+    if not targets:
+        click.echo("\nNothing to drop.")
+        return
+
+    from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
+    writer = _cat_cmd._get_catalog_writer()
+    n_dropped = 0
+    failures: list[dict] = []
+    try:
+        for row in targets:
+            try:
+                response = writer.delete_collection(row["name"])
+                n_dropped += 1
+                click.echo(
+                    f"  dropped {row['name']} (chunk_count={row['chunk_count']} before; "
+                    f"response={response})"
+                )
+            except Exception as exc:  # noqa: BLE001 — isolated per-collection: continue, report at end
+                failures.append({"name": row["name"], "error": str(exc)})
+                _log.warning(
+                    "reconcile_stale_drop_orphan_failed", name=row["name"], error=str(exc),
+                )
+    finally:
+        writer.close()
+
+    click.echo(f"\nDone: dropped {n_dropped} orphan collection(s).")
+    if failures:
+        click.echo(f"\n{len(failures)} failure(s):")
+        _echo_sample(failures, _CAP_INFO, lambda r: f"{r['name']}: {r['error']}")
+        raise click.exceptions.Exit(1)
+
+
 @click.command("reconcile-stale")
 @click.option(
     "--execute", "action",
@@ -1214,6 +1376,17 @@ def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_o
                              are manifest-only gaps and are never
                              tombstoned; rows whose T3 probe fails are
                              skipped. Reversible until ``purge-trash``.
+      drop-orphan-collections  delete whole T3 collections that have
+                             chunks but ZERO catalog documents referencing
+                             them (nexus-8tnz2: benchmark/gate debris --
+                             the reverse direction of tombstone-vanished).
+                             Consumes the same classification as
+                             ``nx catalog doctor --t3-vs-catalog``
+                             (``t3_orphans``); a collection whose chunk
+                             count could not be read is never a delete
+                             target. Goes through the cascaded API delete
+                             (``HttpCatalogClient.delete_collection``),
+                             never a raw vector-store delete.
 
     \\b
     Examples:
@@ -1268,6 +1441,8 @@ def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_o
         )
     elif action == "tombstone-ghost-notes":
         _run_tombstone_ghost_notes(report, t3, will_act=will_act, dry_run=dry_run)
+    elif action == "drop-orphan-collections":
+        _run_drop_orphan_collections(cat, t3, will_act=will_act, dry_run=dry_run)
 
 
 def register(group: click.Group) -> None:

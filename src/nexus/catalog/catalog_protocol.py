@@ -65,7 +65,7 @@ class CatalogReader(Protocol):
     def close(self) -> object:  # canonical
         ...
 
-    def collection_doc_counts(self) -> object:  # canonical
+    def collection_doc_counts(self, *, include_deleted: bool = ...) -> object:  # canonical
         ...
 
     def collection_for(self, content_type, owner, embedding_model, *, bump=...) -> object:  # canonical DIVERGENT

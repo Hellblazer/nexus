@@ -56,7 +56,11 @@ class _FakeCat:
         # collection-less rows included (nexus-cwhci anchor).
         return {"doc_count": len(self._entries)}
 
-    def collection_doc_counts(self):
+    def collection_doc_counts(self, *, include_deleted=False):
+        # nexus-8tnz2 fix-round: no tombstone population is modeled by this
+        # fake (every fixture in this file is live-only) -- include_deleted
+        # returns the SAME dict, which keeps every zero-live-doc row
+        # classifying as "orphan" (never "tombstoned-only") unchanged.
         return dict(self._doc_counts)
 
     def owners_with_roots(self):
@@ -1253,6 +1257,7 @@ class TestWriteTimeGuardCensus:
         assert set(mod._WRITE_TIME_GUARDS) == {
             "recount", "tombstone-vanished", "tombstone-orphaned",
             "tombstone-zero-content", "tombstone-ghost-notes",
+            "drop-orphan-collections",
         }
         for verb, g in mod._WRITE_TIME_GUARDS.items():
             assert g["status"] in {"shipped", "shipped-with-residuals", "UNGUARDED", "n/a"}, verb
@@ -1260,10 +1265,11 @@ class TestWriteTimeGuardCensus:
 
     @pytest.mark.parametrize("verb,expect", [
         ("recount", "UNGUARDED — the chunk_count desync writer (the wu8s1/94fxl class) is still unfound"),
-        ("tombstone-vanished", "UNGUARDED — nothing keeps benchmark/gate debris collections out of the production namespace"),
+        ("tombstone-vanished", "shipped-with-residuals — SCOPED, not root-cause: this repo's OWN tracked host-run harnesses"),
         ("tombstone-orphaned", "shipped-with-residuals — worktree/temp indexing refused at registration"),
         ("tombstone-zero-content", "shipped — unchunkable sources"),
         ("tombstone-ghost-notes", "shipped — store_put notes get a title-derived identity"),
+        ("drop-orphan-collections", "shipped-with-residuals — SCOPED, not root-cause (same honesty note as tombstone-vanished above)"),
     ])
     def test_each_arm_prints_its_guard_before_acting(self, monkeypatch, verb, expect):
         runner = CliRunner()
@@ -1276,15 +1282,24 @@ class TestWriteTimeGuardCensus:
             assert "yx75p" not in result.output  # the enqueue-side gap is not this arm's population
         if verb == "recount":
             assert "residuals: nexus-wu8s1" in result.output
+        if verb in ("tombstone-vanished", "drop-orphan-collections"):
+            assert "residuals: nexus-8tnz2" in result.output
         # the guard line precedes the arm's candidate report
         assert result.output.index("Write-time guard") < result.output.index(f"\n{verb}:")
 
-    def test_unowned_residual_is_named_on_every_run(self, monkeypatch):
+    def test_tombstone_vanished_no_longer_carries_an_unowned_residual(self, monkeypatch):
+        """nexus-8tnz2: the write-time guard (the scratch-scope lint) now
+        exists, so this row's ``unowned_residual`` key -- "benchmark/gate
+        debris collections need namespace isolation, not artifact gating,
+        no bead names it" -- is REMOVED (the design of record's Task C).
+        Flips the pre-nexus-8tnz2
+        test_unowned_residual_is_named_on_every_run."""
         runner = CliRunner()
         _patch(monkeypatch, self._cat(), _FakeT3({"knowledge__live"}), _FakeWriter())
         result = runner.invoke(main, ["catalog", "reconcile-stale", "--execute", "tombstone-vanished"])
-        assert "UNOWNED residual: benchmark/gate debris collections need namespace isolation" in result.output
-        assert "no bead names it" in result.output
+        assert result.exit_code == 0, result.output
+        assert "UNOWNED residual" not in result.output
+        assert "nexus-8tnz2" in result.output
 
     def test_json_census_carries_the_table(self, monkeypatch):
         runner = CliRunner()
@@ -1294,7 +1309,10 @@ class TestWriteTimeGuardCensus:
         payload = json.loads(result.stdout)
         assert payload["write_time_guards_as_of"] == "2026-08-28"
         table = payload["write_time_guards"]
-        assert table["tombstone-vanished"]["status"] == "UNGUARDED"
+        assert table["tombstone-vanished"]["status"] == "shipped-with-residuals"
+        assert table["tombstone-vanished"]["residual_beads"] == ["nexus-8tnz2"]
+        assert "unowned_residual" not in table["tombstone-vanished"]
+        assert table["drop-orphan-collections"]["status"] == "shipped-with-residuals"
+        assert table["drop-orphan-collections"]["residual_beads"] == ["nexus-8tnz2"]
         assert table["tombstone-orphaned"]["residual_beads"] == ["nexus-rng8r"]
         assert table["recount"]["status"] == "UNGUARDED" and table["recount"]["residual_beads"] == ["nexus-wu8s1"]
-        assert "unowned_residual" in table["tombstone-vanished"]

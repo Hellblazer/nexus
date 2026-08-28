@@ -1216,9 +1216,12 @@ class _FakeFullCat:
     def all_documents(self, limit=0):
         return list(self._entries)
 
-    def collection_doc_counts(self):
+    def collection_doc_counts(self, *, include_deleted=False):
         if self._doc_counts_exc is not None:
             raise self._doc_counts_exc
+        # nexus-8tnz2 fix-round: no tombstone population modeled -- same
+        # dict for both live-only and include_deleted=True, so every
+        # zero-live-doc row keeps classifying as "orphan" unchanged.
         return dict(self._doc_counts)
 
     def manifest_verify_all(self):
@@ -1916,7 +1919,7 @@ class TestVerifyCommand:
             def all_documents(self, limit=0):
                 return list(self._entries)
 
-            def collection_doc_counts(self):
+            def collection_doc_counts(self, *, include_deleted=False):
                 return dict(self._doc_counts)
 
             def manifest_verify_all(self):

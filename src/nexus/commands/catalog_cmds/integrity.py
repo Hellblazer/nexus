@@ -1037,6 +1037,7 @@ def _emit_verify_report(
     mode: str,
     unverifiable_rows: list[dict] | None = None,
     ghosts: dict | None = None,
+    orphan_collections: list[dict] | None = None,
     raise_on_dirty: bool = True,
 ) -> None:
     """Shared renderer for full-catalog and ``--collection``-scoped verify.
@@ -1077,6 +1078,14 @@ def _emit_verify_report(
         # `exit` or any clean-percent math (see the docstring above and
         # _census_ghosts): a ghost is a census entry, never a finding.
         summary["ghost_docs"] = ghosts["count"]
+    if orphan_collections is not None:
+        # nexus-8tnz2: same treatment as ghosts — count-only, never rolled
+        # into `exit` or clean-percent. This is a T3-side finding (a whole
+        # collection, not a catalog document) that ``nx catalog
+        # reconcile-stale --execute drop-orphan-collections`` acts on;
+        # ``nx catalog verify`` surfaces it purely so S5 stops hand-
+        # counting `nx catalog doctor --t3-vs-catalog` output.
+        summary["orphan_collections"] = len(orphan_collections)
 
     if json_out:
         payload = {
@@ -1091,6 +1100,8 @@ def _emit_verify_report(
             payload["unverifiable_rows"] = unverifiable_rows
         if ghosts is not None:
             payload["ghosts"] = ghosts
+        if orphan_collections is not None:
+            payload["orphan_collections"] = orphan_collections
         click.echo(json.dumps(payload, indent=2))
     else:
         click.echo(f"Verified {total_docs} catalog document(s).")
@@ -1200,6 +1211,27 @@ def _emit_verify_report(
                 click.echo(
                     f"    ... and {ghosts['count'] - len(ghosts['sample_tumblers'])} more"
                 )
+        if orphan_collections:
+            click.echo(
+                f"\nT3 orphan collections ({len(orphan_collections)} — chunks present "
+                "in T3, zero catalog documents reference them; benchmark/gate debris "
+                "candidate for `nx catalog reconcile-stale --execute "
+                "drop-orphan-collections`; never affects exit code, see `nx catalog "
+                "doctor --t3-vs-catalog` for the FAIL verdict):"
+            )
+            for o in orphan_collections[:_CAP_GHOST_SAMPLE]:
+                if "error" in o:
+                    click.echo(f"    {o['name']}  ERROR: {o['error']}")
+                elif o.get("class") == "tombstoned-only":
+                    click.echo(
+                        f"    {o['name']}  chunks={o['chunk_count']}  "
+                        f"TOMBSTONED-ONLY (tombstoned_docs={o['tombstoned_count']}, "
+                        "restorable, NOT a drop-orphan-collections target)"
+                    )
+                else:
+                    click.echo(f"    {o['name']}  chunks={o['chunk_count']}  class=orphan")
+            if len(orphan_collections) > _CAP_GHOST_SAMPLE:
+                click.echo(f"    ... and {len(orphan_collections) - _CAP_GHOST_SAMPLE} more")
         if unreadable:
             # nexus-ou4tb: a verify that could not read part of the store must
             # say so. Reporting a clean verdict over collections/checks it
@@ -1320,6 +1352,23 @@ def _verify_full(cat: "CatalogReader", *, json_out: bool) -> None:
     # exit_dirty; see _census_ghosts docstring.
     ghosts = _census_ghosts(ghost_entries)
 
+    # nexus-8tnz2: T3 orphan collections — shared classification with
+    # `nx catalog doctor --t3-vs-catalog` and the reconcile-stale sweep
+    # arm (classify_t3_orphan_collections is the ONE definition all three
+    # consume). Global-catalog concept, computed regardless of whether
+    # this run found any catalog documents at all (an empty catalog with
+    # a populated T3 is exactly the orphan case). A classification failure
+    # is reported via `unreadable`, never silently treated as "no
+    # orphans" (the nexus-pyv0e false-PASS class).
+    from nexus.commands.catalog_cmds.t3_orphans import classify_t3_orphan_collections  # noqa: PLC0415 — command-local import
+    orphan_collections: list[dict] = []
+    try:
+        t3_for_orphans = t3 if t3 is not None else _cat_cmd._make_t3()
+        orphan_collections = classify_t3_orphan_collections(cat, t3_for_orphans)
+    except Exception as exc:  # noqa: BLE001 — boundary catch; reported via `unreadable`, not swallowed
+        unreadable.append("t3:orphan_collections")
+        _log.warning("catalog_verify_orphan_collections_failed", error=str(exc))
+
     exit_dirty = bool(vanished_collections or damaged or lost)
     _emit_verify_report(
         total_docs=total_docs,
@@ -1333,6 +1382,7 @@ def _verify_full(cat: "CatalogReader", *, json_out: bool) -> None:
         mode="full",
         unverifiable_rows=unverifiable_rows,
         ghosts=ghosts,
+        orphan_collections=orphan_collections,
     )
 
 

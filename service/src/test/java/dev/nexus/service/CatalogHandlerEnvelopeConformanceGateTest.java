@@ -314,6 +314,13 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         // ── Analytics queries (nexus-xnz0o CLI port helpers) ─────────────
         collectionExempt("/docs/distinct-collections", "handleDocsDistinctCollections", ADMIN_SCALE),
         neither("/docs/collection-counts", "handleDocsCollectionCounts"),
+        // nexus-8tnz2 fix-round-2 EXTENSION: brand-new route (not a query
+        // param on the route above) so an old engine 404s cleanly instead
+        // of silently returning live-only data under an ignored
+        // ?include_deleted=true. Same envelope shape as its sibling --
+        // {"counts": {...}} keyed by an already-bounded set of physical
+        // collection names, not a server-side page.
+        neither("/docs/collection-counts-all", "handleDocsCollectionCountsAll"),
         collectionExempt("/docs/orphaned", "handleDocsOrphaned", UNBOUNDED_NOT_PAGED),
         collectionExempt("/docs/absolute-paths", "handleDocsAbsolutePaths", UNBOUNDED_NOT_PAGED),
         collectionExempt("/owners/all-with-roots", "handleOwnersWithRoots", ADMIN_SCALE),

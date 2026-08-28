@@ -420,8 +420,28 @@ def make_catalog_writer(
 #: nexus-fduai: ``record_gc_audit`` is the client-facing gc_audit producer
 #: (``POST /v1/catalog/gc_audit/record``) ``nx t3 gc`` reports its own T3
 #: delete through — append-only, engine-side, no local equivalent ever.
+#: nexus-8tnz2: ``delete_collection`` (RDR-164 P2, http_catalog_client.py's
+#: atomic single-transaction collection delete) was reachable on
+#: ``HttpCatalogClient`` since its own introduction, and it was ALREADY
+#: fully reachable — ungated — through ``_get_catalog()`` /
+#: ``make_catalog_reader()`` the whole time: ``_SharedServiceCatalogHandle.
+#: __getattr__`` (the reader's proxy) forwards ANY attribute name to the
+#: underlying client with no whitelist at all (see that class's own
+#: docstring). This frozenset gates ONLY the ``_get_catalog_writer()`` /
+#: ``_ServiceCatalogWriter`` path — it is not, and has never been, a
+#: safety boundary on the reader side. What this entry actually fixes:
+#: ``delete_collection`` was simply ABSENT from this WRITER-side whitelist
+#: — the exact nexus-jk88j/nexus-67qsd omission class this module's own
+#: comments warn about — unexercised only because nothing called it
+#: through the writer until the reconcile-stale ``drop-orphan-collections``
+#: arm chose to route through ``_get_catalog_writer()`` deliberately
+#: (matching the writer-vs-reader discipline every other mutation in this
+#: codebase already follows) rather than through the always-open reader.
+#: No SQLite/daemon-mode equivalent (the local catalog is gone, RDR-158
+#: P4) — same rationale as ``delete_many``/``purge_trash`` above.
 _SERVICE_ONLY_WRITE_OPS: frozenset[str] = frozenset({
     "update_many", "delete_many", "purge_trash", "record_gc_audit",
+    "delete_collection",
 })
 
 

@@ -233,6 +233,7 @@ public final class CatalogHandler implements HttpHandler {
                 // ── Analytics queries (nexus-xnz0o CLI port helpers) ─────────
                 case "/docs/distinct-collections" -> handleDocsDistinctCollections(exchange, tenant, method);
                 case "/docs/collection-counts"    -> handleDocsCollectionCounts(exchange, tenant, method);
+                case "/docs/collection-counts-all" -> handleDocsCollectionCountsAll(exchange, tenant, method);
                 case "/docs/orphaned"             -> handleDocsOrphaned(exchange, tenant, method);
                 case "/docs/absolute-paths"       -> handleDocsAbsolutePaths(exchange, tenant, method);
                 case "/owners/all-with-roots"     -> handleOwnersWithRoots(exchange, tenant, method);
@@ -2069,6 +2070,31 @@ public final class CatalogHandler implements HttpHandler {
     private void handleDocsCollectionCounts(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         var counts = repo.collectionDocCounts(tenant);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("counts", counts)));
+    }
+
+    /**
+     * GET /v1/catalog/docs/collection-counts-all — {physical_collection: doc_count}
+     * for all non-empty collections, INCLUDING soft-tombstoned documents (still
+     * restorable until {@code purge_trash}) — see {@link
+     * CatalogRepository#collectionDocCountsIncludingDeleted}.
+     *
+     * <p>nexus-8tnz2 fix-round-2 EXTENSION: this is a brand-new route path,
+     * not a query param on {@link #handleDocsCollectionCounts}, precisely
+     * because a query param bolted onto an EXISTING route is
+     * indistinguishable from "old engine ignored it" — an old engine would
+     * return HTTP 200 with silently live-only data, and the client has no
+     * way to detect it was talking to a pre-upgrade engine. A new path
+     * cleanly 404s on an old engine instead, matching the established
+     * convention already used by {@link #handleManifestNullCollection} /
+     * {@link CatalogRepository#manifestNullCollectionReport} for exactly
+     * this problem. Callers (t3_orphans.py's orphan-vs-tombstoned
+     * classifier) MUST treat a 404 here as "engine below the required
+     * floor" and refuse to classify, never fall back to live-only counts.
+     */
+    private void handleDocsCollectionCountsAll(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var counts = repo.collectionDocCountsIncludingDeleted(tenant);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("counts", counts)));
     }
 

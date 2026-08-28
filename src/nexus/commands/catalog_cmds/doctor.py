@@ -742,21 +742,36 @@ def _run_t3_vs_catalog() -> dict:
     """Bridge T3 vs catalog: surface 3 drift classes (nexus-6dan).
 
     Reports:
-      - ``t3_orphans``: T3 collections with chunks but no catalog
-        documents at all (no row referencing the collection).
+      - ``t3_orphans``: T3 collections with chunks but no LIVE catalog
+        documents at all (no live row referencing the collection) --
+        ``class == "orphan"`` rows plus any unreadable-count ``error``
+        rows. Shared classification (nexus-8tnz2):
+        ``classify_t3_orphan_collections`` is the SAME function
+        ``nx catalog reconcile-stale --execute drop-orphan-collections``
+        and ``nx catalog verify`` consume, so all three agree by
+        construction.
+      - ``t3_tombstoned_only`` (nexus-8tnz2 fix-round CRITICAL 2): T3
+        collections with chunks whose catalog documents are ALL
+        soft-tombstoned (still restorable until ``purge_trash``, RDR-156
+        D6) rather than genuinely absent -- ``class == "tombstoned-only"``
+        rows. Reported separately; never counted toward ``pass``, and
+        never a target for ``drop-orphan-collections``.
       - ``zombies``: collections in the catalog projection that have
         a T3 collection but with 0 chunks.
       - ``docs_pointing_at_missing_t3``: catalog documents whose
         ``physical_collection`` value is not in T3 (e.g. T3 collection
         was deleted out from under the catalog).
 
-    All read-only. PASS when all three lists are empty. Bypass-schema
-    collections (``taxonomy__*``) are skipped from all three.
+    All read-only. PASS when ``t3_orphans``/``zombies``/
+    ``docs_pointing_at_missing_t3`` are all empty (``t3_tombstoned_only``
+    never affects pass -- it is not debris, just data pending purge).
+    Bypass-schema collections (``taxonomy__*``) are skipped from all.
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
+    from nexus.commands.catalog_cmds.t3_orphans import classify_t3_orphan_collections  # noqa: PLC0415 — command-local import
     cat = _cat_cmd._get_catalog()
     try:
         t3_db = make_t3()
@@ -768,7 +783,7 @@ def _run_t3_vs_catalog() -> dict:
         return {
             "pass": False,
             "error": f"Failed to list T3 collections: {exc}",
-            "t3_orphans": [], "zombies": [],
+            "t3_orphans": [], "t3_tombstoned_only": [], "zombies": [],
             "docs_pointing_at_missing_t3": [],
         }
 
@@ -776,26 +791,15 @@ def _run_t3_vs_catalog() -> dict:
     # nexus-xnz0o: use collection_doc_counts() (uniform API).
     docs_per_coll: dict[str, int] = cat.collection_doc_counts()
 
-    # T3 collections with chunks but zero catalog docs:
-    t3_orphans = []
-    for name in sorted(t3_names):
-        if docs_per_coll.get(name, 0) > 0:
-            continue
-        # Only flag if the T3 collection actually has chunks; an empty
-        # T3 collection with no docs is the zombie class below.
-        try:
-            col = t3_db.get_collection(name=name)
-            count = col.count()
-        except Exception as exc:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
-            # nexus-pyv0e sibling: this used to reach into t3_db._client
-            # (Chroma-only), which raised AttributeError in service mode
-            # and got silently swallowed here into count=0 — a false PASS
-            # with zero detection capability, not a loud error. Record the
-            # failure instead of pretending the collection is empty.
-            t3_orphans.append({"name": name, "error": str(exc)})
-            continue
-        if count > 0:
-            t3_orphans.append({"name": name, "chunk_count": count})
+    # T3 collections with chunks but zero LIVE catalog docs (nexus-8tnz2:
+    # shared classification, consumed identically by the reconcile-stale
+    # sweep arm and by `nx catalog verify`). Split by class: a genuine
+    # orphan (or an unreadable count -- never silently dropped) counts
+    # toward t3_orphans/FAIL; a tombstoned-only collection is reported
+    # separately and never affects pass (fix-round CRITICAL 2).
+    classified = classify_t3_orphan_collections(cat, t3_db)
+    t3_orphans = [r for r in classified if r.get("class") == "orphan" or "error" in r]
+    t3_tombstoned_only = [r for r in classified if r.get("class") == "tombstoned-only"]
 
     # Zombies: in catalog projection AND in T3 BUT 0 chunks in T3.
     projection = cat.list_collections()
@@ -831,6 +835,7 @@ def _run_t3_vs_catalog() -> dict:
     return {
         "pass": overall_pass,
         "t3_orphans": t3_orphans,
+        "t3_tombstoned_only": t3_tombstoned_only,
         "zombies": zombies,
         "zombie_errors": zombie_errors,
         "docs_pointing_at_missing_t3": docs_missing,
@@ -853,6 +858,16 @@ def _print_t3_vs_catalog_text(report: dict) -> None:
                 click.echo(f"    {o['name']}  ERROR: {o['error']}")
             else:
                 click.echo(f"    {o['name']}  chunks={o['chunk_count']}")
+    if report.get("t3_tombstoned_only"):
+        click.echo(
+            f"  T3 collections whose catalog documents are ALL tombstoned, not gone "
+            f"(restorable until `nx catalog purge-trash --execute`; never FAILs, "
+            f"never a drop-orphan-collections target) ({len(report['t3_tombstoned_only'])}):"
+        )
+        for o in report["t3_tombstoned_only"][:20]:
+            click.echo(
+                f"    {o['name']}  chunks={o['chunk_count']} tombstoned_docs={o['tombstoned_count']}"
+            )
     if report["zombies"]:
         click.echo(
             f"  Zombie collections (registered, 0 chunks in T3) "

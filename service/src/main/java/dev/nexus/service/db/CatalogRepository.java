@@ -7263,6 +7263,40 @@ public final class CatalogRepository {
         });
     }
 
+    /**
+     * Return {physical_collection -> doc_count} for all non-empty collections,
+     * INCLUDING soft-tombstoned documents (nexus-8tnz2 fix-round CRITICAL 2).
+     *
+     * <p>{@link #collectionDocCounts} reads the tombstone-aware
+     * {@code collection_doc_counts} security_invoker view (catalog-019-
+     * tombstone-aware-read-views.xml: {@code deleted_at IS NULL}) — a T3
+     * collection whose catalog documents are ALL soft-tombstoned (still
+     * restorable until {@code purge_trash}, RDR-156 D6) is therefore
+     * indistinguishable, via that view alone, from a collection that never
+     * had any catalog document registered at all. This method reads
+     * {@code catalog_documents} directly with NO {@code deleted_at} filter,
+     * so a caller can compute the tombstoned-only count as
+     * {@code collectionDocCountsIncludingDeleted(t) - collectionDocCounts(t)}
+     * per collection and distinguish "orphan" (both zero) from
+     * "tombstoned-only" (live zero, all-rows nonzero) before deciding
+     * whether a collection is safe to hard-delete.
+     */
+    public Map<String, Long> collectionDocCountsIncludingDeleted(String tenant) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rows = ctx.select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, DSL.count().cast(Long.class))
+                          .from(CATALOG_DOCUMENTS)
+                          .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.isNotNull()
+                                 .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.ne("")))
+                          .groupBy(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                          .fetch();
+            Map<String, Long> result = new LinkedHashMap<>();
+            for (var r : rows) {
+                result.put(r.value1(), r.value2());
+            }
+            return result;
+        });
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // COVERAGE ANALYTICS (nexus-3cwnx)
     // ══════════════════════════════════════════════════════════════════════════
