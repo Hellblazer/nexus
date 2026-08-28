@@ -472,9 +472,12 @@ def _classify(cat: "CatalogReader", t3: object) -> tuple[dict, list[str]]:
             "physical_collection": e.physical_collection,
             "manifest_len": manifest_len,
             "chunk_count": e.chunk_count,
-            # The chunk natural id, if the registration recorded one: the
-            # first key tombstone-ghost-notes probes T3 by (nexus-1uekf).
+            # The chunk natural id, if the registration recorded one, and
+            # the file path: together they are the note-shaped predicate
+            # (no file_path, a chash) tombstone-ghost-notes selects on and
+            # the first key it probes T3 by (nexus-1uekf).
             "chash": (getattr(e, "meta", None) or {}).get("doc_id") or "",
+            "file_path": e.file_path or "",
         }
 
         if e.physical_collection in vanished_names:
@@ -829,21 +832,35 @@ def _run_tombstone_ghost_notes(
 ) -> None:
     """tombstone-ghost-notes (nexus-1uekf): store_put notes with NO content in T3.
 
-    The target set is ``zero_count_rdr145_exempt`` narrowed TWICE, per row,
-    at execution time: (1) the manifest is still empty (the invariant
-    re-check every tombstone arm runs), and (2) T3 has no chunk under the
-    note's chash OR its title -- ``note_chunks_present``, the same lookup
-    ``nx catalog verify`` and ``--store-put-integrity`` report by. Never
-    off the classification alone, never off a previous census: the
-    2026-08-27 census counted 228 and this arm re-proves each one before
-    it acts.
+    The candidate set is every zero-count row that is NOTE-SHAPED -- no
+    file_path and a recorded chash, the same predicate
+    ``--store-put-integrity`` scans by -- drawn from every ``zero_count_*``
+    bucket rather than one shape sub-class: the first cut of this arm took
+    only ``rdr145_exempt`` (knowledge__ collections) and left two ghosts
+    behind that a store_put had registered into an ``rdr__`` collection.
+    Which collection a note was put in says nothing about whether its
+    content survives.
+
+    The set is then narrowed TWICE, per row, at execution time: (1) the
+    manifest is still empty (the invariant re-check every tombstone arm
+    runs), and (2) T3 has no chunk under the note's chash OR its title --
+    ``note_chunks_present``, the lookup ``nx catalog verify`` and
+    ``--store-put-integrity`` report by. Never off the classification
+    alone, never off a previous census.
 
     A note whose chunks ARE present is a manifest-only gap (RDR-145's
     actual case; backfillable) and is never tombstoned. A row whose probe
     raises is unverifiable and is never tombstoned. Tombstones are
     reversible until ``purge-trash``.
     """
-    candidates, invariant_skipped = _assert_empty_manifest(report["zero_count_rdr145_exempt"])
+    note_shaped = [
+        row
+        for key, rows in report.items()
+        if key.startswith("zero_count_")
+        for row in rows
+        if row.get("chash") and not row.get("file_path")
+    ]
+    candidates, invariant_skipped = _assert_empty_manifest(note_shaped)
     targets: list[dict] = []
     with_content: list[dict] = []
     unverifiable: list[dict] = []
@@ -959,15 +976,15 @@ def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_o
                              nexus-rqsh1): re-indexing can never produce a
                              chunk for these, so re-index is never the
                              correct remedy, only tombstone.
-      tombstone-ghost-notes  delete store_put-origin notes (RDR-145 shape:
-                             knowledge__ collection, no file_path, no
-                             source_uri) that have NO chunk in T3 under
-                             their chash OR their title, proved per row at
-                             execution time (nexus-1uekf). Notes whose
-                             chunks are present are manifest-only gaps and
-                             are never tombstoned; rows whose T3 probe
-                             fails are skipped. Reversible until
-                             ``purge-trash``.
+      tombstone-ghost-notes  delete store_put-origin notes (note-shaped: no
+                             file_path, a recorded chash -- whatever
+                             collection they were put in) that have NO
+                             chunk in T3 under their chash OR their title,
+                             proved per row at execution time
+                             (nexus-1uekf). Notes whose chunks are present
+                             are manifest-only gaps and are never
+                             tombstoned; rows whose T3 probe fails are
+                             skipped. Reversible until ``purge-trash``.
 
     \\b
     Examples:

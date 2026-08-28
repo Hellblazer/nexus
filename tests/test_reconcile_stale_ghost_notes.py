@@ -2,9 +2,11 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """``nx catalog reconcile-stale --execute tombstone-ghost-notes``. nexus-1uekf.
 
-The arm's target set is ``zero_count_rdr145_exempt`` narrowed PER ROW at
-execution time by two facts it re-proves itself: the manifest is still
-empty, and T3 has no chunk under the note's chash OR its title
+The arm's candidate set is every zero-count NOTE-SHAPED row (no file_path,
+a recorded chash -- the predicate ``--store-put-integrity`` scans by) from
+any collection, narrowed PER ROW at execution time by two facts it
+re-proves itself: the manifest is still empty, and T3 has no chunk under
+the note's chash OR its title
 (``integrity.note_chunks_present``, the lookup both integrity instruments
 report by). A note with chunks under either key is a manifest-only gap and
 is never tombstoned; a note whose probe raises is never tombstoned.
@@ -20,13 +22,17 @@ from click.testing import CliRunner
 from nexus.cli import main
 
 COL = "knowledge__knowledge__voyage-context-3__v1"
+RDR_COL = "rdr__1-1__voyage-context-3__v1"
 
 
 class _Entry:
-    def __init__(self, tumbler, title, *, chash="", chunk_count=0, file_path="", source_uri=""):
+    def __init__(
+        self, tumbler, title, *, chash="", chunk_count=0, file_path="", source_uri="",
+        collection=COL,
+    ):
         self.tumbler = tumbler
         self.title = title
-        self.physical_collection = COL
+        self.physical_collection = collection
         self.chunk_count = chunk_count
         self.alias_of = ""
         self.file_path = file_path
@@ -43,7 +49,10 @@ class _Cat:
         return list(self._entries)
 
     def collection_doc_counts(self):
-        return {COL: len(self._entries)}
+        counts: dict[str, int] = {}
+        for e in self._entries:
+            counts[e.physical_collection] = counts.get(e.physical_collection, 0) + 1
+        return counts
 
     def owners_with_roots(self):
         return {}
@@ -58,7 +67,7 @@ class _T3:
         self.probed: list[tuple[str, str]] = []
 
     def list_collections(self):
-        return [{"name": COL}]
+        return [{"name": COL}, {"name": RDR_COL}]
 
     def get_by_id(self, collection, doc_id):
         self.probed.append(("chash", doc_id))
@@ -102,12 +111,16 @@ def world():
     """Five exempt-shaped notes, one outcome each, plus a non-exempt control."""
     entries = [
         _Entry("1.11.1", "gone-by-both-keys", chash="a" * 32),          # ghost
-        _Entry("1.11.2", "gone-no-chash"),                               # ghost (title only)
+        _Entry("1.11.2", "gone-no-chash"),                               # NOT note-shaped (no chash): left alone
         _Entry("1.11.3", "kept-title-chunks", chash="b" * 32),          # chunks by title
         _Entry("1.11.4", "kept-chash-chunk", chash="c" * 64),           # chunk by chash
         _Entry("1.11.5", "probe-fails", chash="d" * 32),                # unverifiable
         _Entry("1.11.6", "manifest-resurfaced", chash="e" * 32),        # invariant skip
-        _Entry("1.11.7", "file-backed", file_path="/p.md"),             # not exempt at all
+        _Entry("1.11.7", "file-backed", file_path="/p.md"),             # not note-shaped
+        # A store_put note registered into an rdr__ collection: not the
+        # RDR-145 shape class, still note-shaped, still a ghost. The first
+        # cut of the arm left exactly two of these behind on production.
+        _Entry("1.11.8", "gone-in-rdr-collection", chash="f" * 32, collection=RDR_COL),
     ]
     manifests = {"1.11.6": [{"chash": "e" * 32, "position": 0}]}
     t3 = _T3(chashes={"c" * 64}, titles={"kept-title-chunks"}, raise_for={"probe-fails"})
@@ -141,7 +154,7 @@ def test_confirmed_tombstones_exactly_the_proven_ghosts(world, monkeypatch) -> N
     ])
 
     assert result.exit_code == 0, result.output
-    assert {str(t) for t in writer.deleted} == {"1.11.1", "1.11.2"}, writer.deleted
+    assert {str(t) for t in writer.deleted} == {"1.11.1", "1.11.8"}, writer.deleted
     assert writer.closed
     assert "tombstoned 2 ghost note(s)" in result.output
 
@@ -158,10 +171,12 @@ def test_every_candidate_is_probed_in_t3_before_the_write(world, monkeypatch) ->
     ])
 
     probed_titles = {t for kind, t in t3.probed if kind == "title"}
-    assert {"gone-by-both-keys", "gone-no-chash", "kept-title-chunks", "probe-fails"} <= probed_titles
+    assert {"gone-by-both-keys", "kept-title-chunks", "probe-fails", "gone-in-rdr-collection"} <= probed_titles
     assert ("chash", "c" * 64) in t3.probed, "a chash is tried before the title"
     # The manifest-resurfaced note never reaches T3: the invariant skip is first.
     assert "manifest-resurfaced" not in probed_titles
+    # A row with no chash is not note-shaped and is never a candidate.
+    assert "gone-no-chash" not in probed_titles
 
 
 def test_no_exempt_notes_means_nothing_to_do(monkeypatch) -> None:
