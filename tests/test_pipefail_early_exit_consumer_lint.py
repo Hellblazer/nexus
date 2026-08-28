@@ -1196,9 +1196,9 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         #   why the sandbox activates $HOME first, +6 lines): :1110 -> :1116,
         #   :1114 -> :1120, :1162 -> :1168. Same 3 sites, same rationale --
         #   only the prose above them changed.
-        "tests/e2e/release-sandbox.sh:1116",
-        "tests/e2e/release-sandbox.sh:1120",
-        "tests/e2e/release-sandbox.sh:1168",
+        "tests/e2e/release-sandbox.sh:1130",
+        "tests/e2e/release-sandbox.sh:1134",
+        "tests/e2e/release-sandbox.sh:1182",
     }
 )
 _PIPEFAIL_OR_TRUE_SITES_CEILING = 9

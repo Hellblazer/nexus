@@ -1,7 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import pytest
 
-from nexus.health import HealthResult, format_health_for_cli
+from nexus.health import (
+    EXIT_FAILURES,
+    EXIT_FATAL,
+    EXIT_HEALTHY,
+    HealthResult,
+    format_health_for_cli,
+    health_exit_code,
+)
 
 
 def test_health_result_fields():
@@ -838,3 +845,45 @@ def test_check_dimension_orphans_wired_into_run_health_checks() -> None:
 
     src = inspect.getsource(health.run_health_checks)
     assert "_check_dimension_orphans" in src
+
+
+# ── exit code: the glyphs and $? say the same thing (nexus-be6x8) ────────────
+# Measured 2026-08-27: a sweep that printed two genuine ✗ lines exited 0,
+# because only 2 of 78 checks carried fatal=True and both were green.
+
+
+def test_exit_code_healthy_when_every_check_is_ok():
+    assert health_exit_code([HealthResult(label="a", ok=True)]) == EXIT_HEALTHY == 0
+
+
+def test_exit_code_ignores_soft_warnings():
+    """RDR-129 B4: a ⚠ never moves the exit code."""
+    results = [HealthResult(label="a", ok=True), HealthResult(label="b", ok=False, warn=True)]
+    assert health_exit_code(results) == EXIT_HEALTHY
+
+
+def test_exit_code_is_one_for_a_hard_failure():
+    """THE case: a non-fatal ✗ used to leave $? at 0."""
+    results = [HealthResult(label="a", ok=True), HealthResult(label="b", ok=False)]
+    assert health_exit_code(results) == EXIT_FAILURES == 1
+
+
+def test_exit_code_is_two_for_a_fatal_failure_even_beside_hard_ones():
+    results = [
+        HealthResult(label="hard", ok=False),
+        HealthResult(label="fatal", ok=False, fatal=True),
+    ]
+    assert health_exit_code(results) == EXIT_FATAL == 2
+
+
+def test_fatal_flag_on_a_passing_check_does_not_fail():
+    """fatal describes what a FAILURE of this check would mean, not the result."""
+    assert health_exit_code([HealthResult(label="a", ok=True, fatal=True)]) == EXIT_HEALTHY
+
+
+def test_the_old_failed_flag_still_means_fatal_only():
+    """format_health_for_cli's `failed` keeps its footer semantics; callers
+    that pinned it as the FATAL signal are unchanged."""
+    _, failed = format_health_for_cli([HealthResult(label="b", ok=False)], local_mode=False)
+    assert failed is False
+    assert health_exit_code([HealthResult(label="b", ok=False)]) == EXIT_FAILURES

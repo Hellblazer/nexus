@@ -195,6 +195,13 @@ $_nx_gc_self"
                 fi
                 rm -rf -- "$_nx_gc_real"
                 rm -f -- "$_nx_gc_dir"
+                # Reaping the tree IS what closes uv's door: measured against
+                # uv 0.8 (2026-08-28), with the venv gone `uv tool list` says
+                # "No tools installed" and `uv tool upgrade conexus` REFUSES
+                # ("not installed") rather than rebuilding. Never advise
+                # `uv tool uninstall` here -- also measured: it deletes a
+                # nexus-owned regular-file shim sitting at its bin path.
+                echo "nexus: reaped the legacy uv tree $_nx_gc_real; uv no longer lists it and 'uv tool upgrade conexus' will now refuse rather than rebuild it" >&2
             else
                 # -rf on the directory itself, never through a pointer: the
                 # pointers live in this same directory, and following one

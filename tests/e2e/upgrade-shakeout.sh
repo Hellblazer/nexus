@@ -321,21 +321,39 @@ fi
 # MODE == "run" — guaranteed by the guard above (every other value exited
 # already, lock-free); no redundant re-check needed here.
 
-# Resolve FROM_VERSION default — latest stable on PyPI.
-if [[ -z "$FROM_VERSION" ]]; then
-    FROM_VERSION=$(
-        curl -s "https://pypi.org/pypi/conexus/json" \
-        | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['version'])"
-    )
-    [[ -z "$FROM_VERSION" ]] && _die "could not resolve latest conexus version from PyPI"
-fi
-
 # Pipe-free tail (nexus-i66g4/wbeyi class): take the first line via
 # parameter expansion instead of `| head -1` -- under this script's
 # `set -o pipefail`, a still-writing grep closed early by head risks its
 # SIGPIPE getting promoted over head's own (successful) exit status.
 REPO_PKG_VERSION_ALL="$(grep '^version' "$REPO_ROOT/pyproject.toml" | cut -d'"' -f2)"
 REPO_PKG_VERSION="${REPO_PKG_VERSION_ALL%%$'\n'*}"
+[[ -n "$REPO_PKG_VERSION" ]] || _die "could not read version from $REPO_ROOT/pyproject.toml"
+
+# Resolve FROM_VERSION default — the highest published release STRICTLY BELOW
+# the tree under test. It used to be PyPI's latest, which after a release IS
+# the tree under test: baseline == target, step 5's "never exercised the
+# upgrade path" assert fires (correctly), and the script's own default form
+# could not pass in the one situation a post-release shakedown runs it
+# (nexus-hibpr, 2026-08-27). Stable releases only (digits and dots), un-yanked.
+if [[ -z "$FROM_VERSION" ]]; then
+    FROM_VERSION=$(
+        curl -s "https://pypi.org/pypi/conexus/json" \
+        | NX_TARGET="$REPO_PKG_VERSION" python3 -c "
+import json, os, re, sys
+def key(v):
+    return tuple(int(p) for p in v.split('.'))
+target = key(os.environ['NX_TARGET'])
+releases = json.load(sys.stdin)['releases']
+stable = [
+    v for v, files in releases.items()
+    if re.fullmatch(r'\d+(\.\d+)*', v) and files and not all(f.get('yanked') for f in files)
+]
+below = [v for v in stable if key(v) < target]
+print(max(below, key=key) if below else '')
+"
+    )
+    [[ -z "$FROM_VERSION" ]] && _die "could not resolve a published conexus release below $REPO_PKG_VERSION from PyPI"
+fi
 echo "Upgrade-shakeout: $FROM_VERSION  →  ${REPO_PKG_VERSION} (REPO_ROOT)"
 echo "Sandbox: $SANDBOX"
 

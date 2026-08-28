@@ -1120,6 +1120,27 @@ def enrich_aspects(
         )
 
 
+def _aspect_identity(entry) -> str:
+    """The ONE key a catalog entry is matched to ``document_aspects.source_path`` by.
+
+    nexus-bocft. Two verbs asked "does this entry have an aspect row" with
+    two different keys: the gap-fill used ``file_path or title``, the
+    ``--missing`` audit used ``file_path and ...`` -- which silently drops
+    every title-only entry. On knowledge__knowledge (2026-08-27): 416
+    entries, 10 with a file_path; gap-fill would dispatch 407, the audit
+    reported 1, and that "1" was the number the 7.18.0 changelog cited as
+    proof the gap-fill worked. The audit verb could not see the population
+    the billing verb charges for.
+
+    ``file_path or title`` is the WRITER's rule, not an arbitrary choice:
+    ``catalog/store_hook.py`` mints a store_put document's identity from its
+    title (``uri_for(collection, title)``; single-chunk store_put callers
+    carry no source_path), and file-backed knowledge documents carry their
+    path. Both verbs must call this, never restate it.
+    """
+    return entry.file_path or entry.title or ""
+
+
 def _select_entries(
     *,
     collection: str,
@@ -1167,8 +1188,8 @@ def _select_entries(
             # below any version).
             entries = [
                 e for e in entries
-                if (e.file_path or e.title) in outdated_paths
-                or (e.file_path or e.title) not in existing_paths
+                if _aspect_identity(e) in outdated_paths
+                or _aspect_identity(e) not in existing_paths
             ]
         else:
             # nexus-ym9ey: gap-fill is the DEFAULT. Before this, a bare
@@ -1182,7 +1203,7 @@ def _select_entries(
             before = len(entries)
             entries = [
                 e for e in entries
-                if (e.file_path or e.title) not in existing_paths
+                if _aspect_identity(e) not in existing_paths
             ]
             skipped = before - len(entries)
             if skipped:
@@ -1193,6 +1214,12 @@ def _select_entries(
                 )
 
     return entries
+
+
+#: How many entries the dry-run's read-side prediction actually reads. Each
+#: is a vector-service round-trip; in cloud mode ~0.5-1s. 25 keeps a dry-run
+#: under half a minute on any collection and is enough to project a skip rate.
+_DRY_RUN_PREDICT_SAMPLE = 25
 
 
 def _dry_run_predict_skips(
@@ -1232,10 +1259,26 @@ def _dry_run_predict_skips(
     # post-RDR-108 Phase 3 (chunk_index dropped from metadata).
     manifest_lookup = _build_catalog_manifest_lookup()
 
+    # BOUNDED. One read_source per entry is one HTTPS round-trip to the
+    # vector service per entry, serially, with nothing printed in between.
+    # On knowledge__knowledge (407 entries, cloud mode) that ran past 300s
+    # and was killed twice as a "hang" (nexus-bocft, 2026-08-27) -- a
+    # dry-run that takes longer than the operator will wait is not a
+    # dry-run. Predict from a fixed-size prefix and project; the exact
+    # per-entry verdicts come from the real run, which reads each document
+    # anyway.
+    sample = entries[:_DRY_RUN_PREDICT_SAMPLE]
+    if len(sample) < len(entries):
+        click.echo(
+            f"  Read-side prediction samples the first {len(sample)} of "
+            f"{len(entries)} entries (one round-trip each); the skip rate "
+            f"is projected onto the rest."
+        )
+
     planned: dict[str, int] = {}
     skip_lines: list[str] = []
     by_host: dict[str, int] = {}
-    for entry in entries:
+    for entry in sample:
         sp = _chroma_source_id_for_entry(entry)
         if not sp:
             continue
@@ -1266,14 +1309,28 @@ def _dry_run_predict_skips(
                 by_host[host_key] = by_host.get(host_key, 0) + 1
             skip_lines.append(line)
 
-    skipped = sum(planned.values())
-    if skipped == 0:
-        click.echo("  All entries readable; full extraction would proceed.")
+    skipped_in_sample = sum(planned.values())
+    if skipped_in_sample == 0:
+        click.echo(
+            "  All sampled entries readable; full extraction would proceed."
+            if len(sample) < len(entries)
+            else "  All entries readable; full extraction would proceed."
+        )
         return
-    click.echo(
-        f"  Planned skips: {skipped} of {len(entries)} document(s) "
-        f"would skip on read failure:"
-    )
+    # Project the sampled skip rate onto the whole population. When the
+    # sample IS the population this is exact.
+    skipped = round(skipped_in_sample * len(entries) / len(sample))
+    if len(sample) < len(entries):
+        click.echo(
+            f"  Planned skips: {skipped_in_sample} of {len(sample)} sampled "
+            f"document(s) would skip on read failure — projected "
+            f"~{skipped} of {len(entries)}:"
+        )
+    else:
+        click.echo(
+            f"  Planned skips: {skipped} of {len(entries)} document(s) "
+            f"would skip on read failure:"
+        )
     # Cap output so a 500-entry collection doesn't flood the terminal.
     for line in skip_lines[:20]:
         click.echo(line)
@@ -2122,31 +2179,61 @@ def aspects_list_cmd(
                     collection,
                 )
             }
-        gaps = [e for e in entries if e.file_path and e.file_path not in existing]
+        # THE SAME KEY THE GAP-FILL USES (nexus-bocft). This read
+        # `e.file_path and e.file_path not in existing`, which is not a gap
+        # test -- it is a gap test over the subset of entries that happen to
+        # have a file_path, and for a knowledge collection that subset is
+        # almost nothing. The number it printed was cited as evidence.
+        gaps = [e for e in entries if _aspect_identity(e) not in existing]
+        # Aspect rows no current entry claims. A large count here is the
+        # signature of an identity-era change (paths or hashes recorded
+        # under an older registration rule) and is what explains "437 rows
+        # but 407 gaps" -- the audit is not complete without it.
+        claimed = {_aspect_identity(e) for e in entries}
+        orphaned = sorted(p for p in existing if p not in claimed)
         if as_json:
-            click.echo(json.dumps([
-                {
-                    "tumbler": str(e.tumbler),
-                    "title": e.title,
-                    "file_path": e.file_path,
-                }
-                for e in gaps
-            ], indent=2))
+            click.echo(json.dumps({
+                "collection": collection,
+                "entries": len(entries),
+                "aspect_rows": len(existing),
+                "gaps": [
+                    {
+                        "tumbler": str(e.tumbler),
+                        "title": e.title,
+                        "file_path": e.file_path,
+                        "identity": _aspect_identity(e),
+                    }
+                    for e in gaps
+                ],
+                "orphaned_aspect_rows": orphaned,
+            }, indent=2))
             return
-        if not gaps:
+        if not gaps and not orphaned:
             click.echo(
                 f"No missing aspects in '{collection}': every catalog "
                 f"row has an extracted aspect record."
             )
             return
-        click.echo(
-            f"{len(gaps)} catalog row(s) in '{collection}' have no "
-            f"aspect record:"
-        )
-        for e in gaps[:limit] if limit else gaps:
-            click.echo(f"  {e.tumbler}  {e.file_path}")
-        if limit and len(gaps) > limit:
-            click.echo(f"  ... and {len(gaps) - limit} more.")
+        if gaps:
+            click.echo(
+                f"{len(gaps)} of {len(entries)} catalog row(s) in '{collection}' "
+                f"have no aspect record:"
+            )
+            for e in gaps[:limit] if limit else gaps:
+                click.echo(f"  {e.tumbler}  {_aspect_identity(e)}")
+            if limit and len(gaps) > limit:
+                click.echo(f"  ... and {len(gaps) - limit} more.")
+        else:
+            click.echo(
+                f"No missing aspects in '{collection}': every catalog "
+                f"row has an extracted aspect record."
+            )
+        if orphaned:
+            click.echo(
+                f"{len(orphaned)} aspect row(s) in '{collection}' match no "
+                f"current catalog entry (identities from an earlier "
+                f"registration rule; they do not cover the gaps above)."
+            )
         return
 
     with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)

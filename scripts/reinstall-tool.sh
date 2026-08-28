@@ -54,6 +54,8 @@ _INSTALL="$_here/../src/nexus/_install"
 . "$_INSTALL/census.sh"
 # shellcheck source=/dev/null
 . "$_INSTALL/gc.sh"
+# shellcheck source=/dev/null
+. "$_INSTALL/legacy.sh"
 
 SOURCE="."
 ALLOW_DOWNGRADE=0
@@ -204,6 +206,23 @@ _build_args=(--source "$SOURCE")
 GEN="$("$_INSTALL/install_generation.sh" "${_build_args[@]}")"
 nx_flip_current "$GEN" "$TOOLS_DIR"
 nx_write_shims "$GEN" "$BIN_DIR"
+
+# ── Register a legacy uv tree, if one exists, in the GC ledger ───────────────
+# Every checkout-driven generation box is a HYBRID: this script builds a
+# generation beside whatever `uv tool install conexus` left behind, and until
+# nexus-hibpr nothing on this path told gc.sh about that tree. migrate_legacy.sh
+# registers it; this path never ran migrate_legacy.sh. So the tree sat outside
+# the ledger for good -- never reaped once its holders left, invisible to the
+# holder census, and still a valid target for a stray `uv tool upgrade conexus`
+# (the box this was measured on had 8 processes bound to an unregistered
+# 7.19.0 tree). Registration is the whole fix: gc.sh already reaps a
+# registered pseudo-generation once nothing holds it. Nothing is deleted here.
+_legacy="$(nx_legacy_venv_dir "" 2>/dev/null)" || _legacy=""
+if [ -n "$_legacy" ] && [ -d "$_legacy/bin" ]; then
+    if nx_register_legacy_generation "$_legacy" "$TOOLS_DIR"; then
+        echo "Registered the legacy uv tree for reap once nothing runs from it: $_legacy"
+    fi
+fi
 
 "${GEN}/bin/nx" --version || true
 

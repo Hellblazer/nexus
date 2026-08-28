@@ -646,7 +646,13 @@ fi
 if (( SKIP_INSTALL == 0 )); then
     echo "[2/3] Reinstalling nx CLI from $REPO_ROOT (isolated: HOME=$SANDBOX) ..."
     (cd "$REPO_ROOT" && uv sync >/dev/null 2>&1)
-    "$REPO_ROOT/scripts/reinstall-tool.sh" >/dev/null
+    # THE SOURCE IS NAMED, NEVER DEFAULTED (nexus-hibpr). reinstall-tool.sh's
+    # default source is "." -- the CALLER's cwd -- and this script never cds
+    # into $REPO_ROOT before invoking it. Measured 2026-08-27: pointed at a
+    # v7.20.0 worktree from another directory, this line installed the primary
+    # checkout at 7.18.0 and the run still ended "SMOKE PASSED: all steps
+    # green". A gate that can green a tree it never installed is not a gate.
+    "$REPO_ROOT/scripts/reinstall-tool.sh" "$REPO_ROOT" >/dev/null
     # gap-8 (T2 [22511]): this used to be `nx --version 2>/dev/null ||
     # echo 'nx --version failed'` -- a broken reinstall printed a friendly
     # string and the script CONTINUED into smoke/shakedown against a dead
@@ -655,6 +661,14 @@ if (( SKIP_INSTALL == 0 )); then
     NX_VER_OUT="$(nx --version 2>&1)" \
         || _die "reinstall-tool.sh exited 0 but 'nx --version' failed afterward (broken install): $NX_VER_OUT"
     echo "      $NX_VER_OUT"
+    # ...and the version it reports must be $REPO_ROOT's, or every verdict
+    # below is about a tree nobody asked this run to test. Pipe-free
+    # first-line extraction (the pipefail/SIGPIPE class).
+    _expected_all="$(sed -n "s/^version *= *[\"']\([^\"']*\)[\"']/\1/p" "$REPO_ROOT/pyproject.toml")"
+    _expected_ver="${_expected_all%%$'\n'*}"
+    [[ -n "$_expected_ver" ]] || _die "could not read version from $REPO_ROOT/pyproject.toml"
+    [[ "$NX_VER_OUT" == *"$_expected_ver"* ]] \
+        || _die "installed '$NX_VER_OUT' is not $REPO_ROOT's $_expected_ver — the sandbox installed a different tree (nexus-hibpr)"
 else
     echo "[2/3] Skipping reinstall (--skip-install). nx version: $(nx --version 2>/dev/null || echo 'unknown')"
 fi

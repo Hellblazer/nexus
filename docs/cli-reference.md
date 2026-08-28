@@ -587,7 +587,7 @@ nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku
 |------|-------------|
 | `COLLECTION` (positional) | Must be a `knowledge__*` collection (Phase 1 scope). Other prefixes return a "no extractor config" error |
 | `--all` | Re-extract EVERY document, including ones that already have an aspect row. The pre-7.18.0 default; now opt-in because it re-spends on the whole corpus. Without it, only documents with NO aspect row are processed |
-| `--dry-run` | Report document count + cost estimate (Haiku-class). No API calls, no T2 writes |
+| `--dry-run` | Report document count + cost estimate (Haiku-class). No API calls, no T2 writes. The read-side skip prediction samples the first 25 entries (one vector-service round-trip each) and projects the skip rate onto the rest (7.21.0, nexus-bocft: one round-trip per entry ran a 407-entry cloud dry-run past five minutes with nothing printed); the exact per-entry verdicts come from the real run |
 | `--validate-sample N` | Validate N% of newly-extracted aspects via `operator_verify` against the document text. Disagreements append to `./validation_failures.jsonl`. Pass 0 to skip. Default 5 |
 | `--re-extract` | Re-run only on rows whose `model_version` is strictly less than `--extractor-version` (and rows that are missing entirely) |
 | `--extractor-version v` | Threshold for `--re-extract` (lexicographic STRICT-less-than) |
@@ -623,11 +623,13 @@ nx enrich aspects-list --collection knowledge__delos --json --limit 0
 
 Companion to `aspects-show` at the collection level (preview / audit shape) instead of single-record detail. With `--missing` the verb inverts to gap detection: catalog rows in the collection that do not have a matching aspect row.
 
+**`--missing` uses the gap-fill's own key (7.21.0, nexus-bocft).** A catalog entry is matched to `document_aspects.source_path` by `file_path or title` — the identity the store hook mints and the identity `nx enrich aspects` bills by. Before 7.21.0 the audit keyed on `file_path` alone and so silently dropped every title-only note: on a 416-entry knowledge collection with 10 file-path entries it reported 1 gap where the gap-fill would dispatch 407. The audit also reports **orphaned aspect rows** — rows in T2 that no current catalog entry claims (identities recorded under an earlier registration rule); a large count there is why "437 rows but 407 gaps" can both be true, and those rows never cover a gap. `--json` emits `{collection, entries, aspect_rows, gaps: [{tumbler, title, file_path, identity}], orphaned_aspect_rows: [...]}`.
+
 | Flag | Description |
 |------|-------------|
 | `--collection NAME` (required) | T3 collection to inspect (e.g. `knowledge__delos`) |
 | `--limit N` | Maximum rows to display (default: 20; use 0 for unlimited) |
-| `--missing` | Flip output: list catalog rows with NO aspect record (gap detection after partial enrichment) |
+| `--missing` | Flip output: list catalog rows with NO aspect record, keyed by `file_path or title` (the gap-fill's key), plus any orphaned aspect rows no current entry claims |
 | `--json` | Emit JSON array instead of human-readable form |
 
 ### nx enrich list
@@ -1222,7 +1224,7 @@ Reconcile the catalog against T3 on the RDR-108/180 chash identity (rebuilt by n
 - **vanished collections** — a `physical_collection` with catalog docs that T3 no longer knows about at all (deleted, renamed). FINDING, both modes.
 - **lost documents** — `chunk_count > 0` but the manifest has fewer rows than that (including none). FINDING, both modes.
 - **damaged manifests** (`--collection` scoped mode ONLY) — a document's manifest references chashes T3 does not have, reported per DOCUMENT via a direct `get_manifests` + T3 `existing_ids` read (no engine-side anti-join function involved). Full mode never reports this — see above.
-- **never-chunked** — `chunk_count == 0` and no manifest, split into `rdr145_exempt` (`knowledge__*` store_put notes with no file_path/source_uri — legitimate by design; **not** a claim of unrepairability — `chunk_count` is a cached value that can be stale, so this sub-block also carries a `note` naming `nx t3 backfill-manifest --dry-run --only-gapped` as the actual repairability authority, nexus-0y0gk critique fix-round) and `unclassified` (candidate data loss, see nexus-cdypx and `nx catalog reconcile-stale`). Report-only; never affects the exit code. Both modes.
+- **never-chunked** — `chunk_count == 0` and no manifest, split into `rdr145_exempt` (`knowledge__*` store_put notes with no file_path/source_uri whose chunks ARE in T3 — a manifest-only gap, legitimate by design and backfillable via `nx t3 backfill-manifest --dry-run --only-gapped`), `rdr145_ghost` (7.21.0, nexus-1uekf: the same shape with NO chunk in T3 under the note's chash or title — nothing to backfill, the title is the only surviving record; `tumblers` listed, and `nx catalog doctor --store-put-integrity` reports the same population by the same lookup), `rdr145_unverified` (a count of exempt-shaped notes whose T3 probe failed; counted as exempt, never as ghosts), `zero_content_by_design`, and `unclassified` (candidate data loss, see nexus-cdypx and `nx catalog reconcile-stale`). Before 7.21.0 the exempt class was a pure shape test that rendered "legitimate by design" over 226 rows whose content was gone. In full-catalog mode the split is decided by a live T3 lookup per exempt-shaped row; in `--collection` scoped mode, or when T3 is unreachable, the shape class stands alone. Report-only; never affects the exit code. Both modes.
 - **ghosts** (full mode ONLY, nexus-xeux8) — a read-only CENSUS of documents with a blank/NULL `physical_collection`. This population is dropped outright by BOTH `verify`'s own health classification above (no owning-collection identity for a chunk_count-vs-manifest comparison to mean anything) AND by `nx catalog reconcile-stale`'s candidate filter — so before this section, nothing sized it at all. Computed from the SAME full-catalog document sweep `verify` already does for the classes above (no extra engine round trip, so it stays cheap even when the surrounding sweep is already minutes-scale). Reports `count`, a `by_owner` breakdown (tumbler 2-segment owner address), `by_tenant` (`{"available": false, "reason": ...}` — this client's reads are already single-tenant scoped via RLS and `CatalogEntry` carries no per-row tenant id to break out by even if it were), and a capped `sample_tumblers` list (with `sample_truncated` when the population exceeds the cap). A ghost is UNREPAIRABLE without a manual `physical_collection` assignment — this section never changes what `verify`/`reconcile-stale` repair, and it NEVER affects the exit code or the `docs`/`never_chunked_docs`/etc. counts above. Absent entirely in `--collection` scoped mode (a ghost has no collection to scope into by definition).
 
 Exit code: 0 when clean (never-chunked and ghosts alone still exit 0); 1 on any vanished/lost finding (plus damaged, in `--collection` mode). A check or collection that could not be read at all (degraded T3, pre-fence engine, un-backfilled manifest rows) is INCOMPLETE, not clean — that raises a distinct, louder error regardless of findings.
@@ -1239,17 +1241,18 @@ nx catalog verify --collection knowledge__foo --heal   # interactive fix
 ### nx catalog reconcile-stale
 
 ```
-nx catalog reconcile-stale [--execute recount|tombstone-vanished|tombstone-orphaned|tombstone-zero-content] [--dry-run/--no-dry-run] [--confirm] [--json]
+nx catalog reconcile-stale [--execute recount|tombstone-vanished|tombstone-orphaned|tombstone-zero-content|tombstone-ghost-notes] [--dry-run/--no-dry-run] [--confirm] [--json]
 ```
 
 Classify — and optionally repair — catalog documents with unreliable `chunk_count`/manifest state (nexus-cdypx: 61.2% of production catalog docs carried `chunk_count == 0`, so catalog-aware routing ranked over a corpus where most docs had no retrievable content). The default invocation is a pure read-only census: it constructs NO catalog writer. Exit 0 means the report was produced; a nonzero exit (the INCOMPLETE guard shared with `nx catalog verify`) means part of the classification could not be trusted and none of the findings should be acted on. This command is not itself a correctness gate over the findings — `nx catalog verify` is that gate.
 
-Four mutation arms, each printing the classification report first, then its own target list, then acting only with `--no-dry-run --confirm` (the same double gate as `purge-trash`):
+Five mutation arms, each printing the classification report first, then its own target list, then acting only with `--no-dry-run --confirm` (the same double gate as `purge-trash`):
 
 - **recount** — resync `chunk_count` for zero-count docs whose manifest is actually non-empty. Restores the COUNT, not verified content; re-run `nx catalog verify` afterward.
 - **tombstone-vanished** — delete zero-manifest docs in vanished collections. Non-empty-manifest vanished docs are NEVER touched by this arm (nexus-3ck2g).
 - **tombstone-orphaned** — delete zero-count docs whose confirmed on-disk location is gone (file missing, or the owner's repo_root/worktree itself deleted). Docs whose absence could not be CONFIRMED (no repo_root, malformed tumbler, a non-file source_uri, or no provenance at all) are never in this arm's target set — see `unresolvable_provenance` in the report. `store_put_origin` docs (see below) are also never in this arm's target set.
 - **tombstone-zero-content** (nexus-rqsh1) — delete docs classified `zero_content_by_design`: the source file verifiably CAN never chunk (zero bytes by `stat`, or binary content by the same `looks_like_binary_content` sniff the indexer's registration guard uses). These docs never drain via re-indexing (the producer no longer registers such files at all), so without this arm they reappear in every census forever. A source that is merely unreadable (permission error) or missing is NEVER classified into this bucket — absence of proof is not proof of zero content. The bucket also appears as its own count + sample listing in `nx catalog verify` and this census, and stays counted until actually tombstoned (an honest bucket, not a suppression).
+- **tombstone-ghost-notes** (7.21.0, nexus-1uekf) — delete store_put-origin notes whose content is gone from T3. Candidates are every zero-count row that is *note-shaped* (no `file_path`, a recorded chash — the same predicate `nx catalog doctor --store-put-integrity` scans by), from any `zero_count_*` bucket and any collection; which collection a note was put in says nothing about whether its content survives. Each candidate is then re-proved **per row at execution time**: the manifest is still empty (the invariant re-check every tombstone arm runs) AND T3 has no chunk under the note's chash OR its title (`note_chunks_present`, the lookup `verify` and `--store-put-integrity` report by). A note whose chunks are present under either key is a manifest-only gap (a `nx t3 backfill-manifest` candidate) and is never tombstoned; a row whose T3 probe fails is skipped and named, never tombstoned. Reversible until `purge-trash`. First production run 2026-08-28: 226 + 2 tombstoned, one live note correctly skipped; `--store-put-integrity` went from 228 ghosts to 0.
 
 The `dishonest` bucket (`chunk_count > 0` but the manifest is empty; diagnosis only, never auto-swept per nexus-wq1e4) carries an `origin` field per document (nexus-0y0gk), checked in this order:
 
@@ -1269,6 +1272,7 @@ nx catalog reconcile-stale                          # census
 nx catalog reconcile-stale --json                   # CI-friendly
 nx catalog reconcile-stale --execute recount --no-dry-run --confirm
 nx catalog reconcile-stale --execute tombstone-vanished --no-dry-run --confirm
+nx catalog reconcile-stale --execute tombstone-ghost-notes             # dry-run plan
 ```
 
 ### nx catalog purge-trash
@@ -2256,6 +2260,15 @@ Health check for all dependencies.
 nx doctor
 ```
 
+**Exit codes (7.21.0, nexus-be6x8).** The exit code says what the glyphs
+say: `0` — every check is ✓ or ⚠ (soft warnings never move it, RDR-129 B4);
+`1` — at least one hard ✗, something needs fixing; `2` — at least one fatal
+✗, nexus cannot function (a broken generation layout, a missing base
+interpreter). Before 7.21.0 only the two `fatal` checks could move the code,
+so a sweep that printed genuine ✗ lines exited `0` and any script gating on
+`$?` read a constant. Automation that wants "healthy or only warnings" tests
+`== 0`; automation that only cares whether nexus will run at all tests `< 2`.
+
 **Supplementary checks (new in 7.11.0).** After the default sweep prints its
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
@@ -2873,6 +2886,21 @@ rewrites the shims in `<bin>`, then reaps old generations. Nothing is ever
 swapped underneath a running process — a live holder keeps executing its own
 generation byte-identically and converges at its next spawn, so no session has
 to be closed and there is nothing to force.
+
+**A uv takeover self-repairs (7.21.0).** Measured against uv 0.8: on a
+generation box a plain `uv tool install conexus` rebuilds uv's tree (a
+`[local]`-less copy) but refuses to overwrite the nexus shims; `--force`
+takes them, and then every spawn resolves through uv's tree — wrong install,
+maybe wrong version, wrong extras. `nx self install` run from that state (and
+`nx upgrade`, which the SessionStart hook runs, so a box heals at its next
+session with nothing to do) puts it back: shims rewritten to `current`, uv's
+tree registered for reap, and — when uv's tree is the *newer* version, i.e.
+you meant to upgrade — a generation built at that version from `current`'s
+own receipt, so `[local]` survives. A pure uv-tool box (no generation layout)
+is not a takeover; that is the convergence path above. Never run
+`uv tool uninstall conexus` on a generation box: it deletes the nexus shims
+at those paths. A reaped tree is what makes uv refuse to rebuild
+(`uv tool upgrade conexus` → "not installed").
 
 `<tools>` defaults to `~/.local/share/nexus/tools` (`NX_TOOLS_DIR`) and `<bin>`
 to `~/.local/bin` (`NX_BIN_DIR`). A generation is a `gen-*` directory containing

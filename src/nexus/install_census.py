@@ -42,6 +42,7 @@ __all__ = [
     "generation_holder_pids",
     "generation_match_pairs",
     "generation_match_prefixes",
+    "legacy_tree_candidates",
     "PS_COMMAND",
 ]
 
@@ -162,7 +163,65 @@ def generation_match_pairs(
             pairs.append((_match_prefix(gen), gen))
         except ValueError:
             continue
+
+    # THE LEGACY uv TREE IS PART OF THE POPULATION. ``list_generations`` requires
+    # a receipt, and the legacy tree never has one (legacy.sh: "PERMANENTLY
+    # receipt-less"), so the ledger pointer .7 registers -- the very symlink
+    # ``_match_prefix`` above was written to resolve -- was filtered out before
+    # it ever got here, and an UNREGISTERED tree (every checkout-driven box
+    # before nexus-hibpr) was never in scope at all. Measured 2026-08-27
+    # (nexus-k52g0): 9 processes running from the 7.19.0 uv tree, 8 MCP servers
+    # and the aspect-worker daemon, while doctor reported "nothing is still
+    # bound to an older generation" and "all match the installed 7.20.0".
+    # The census that exists to notice a stale box reported clean over the
+    # exact population that made it stale.
+    #
+    # Both forms are enumerated here BY STRUCTURE -- the ledger name, and uv's
+    # own tool root -- never by a process-name vocabulary, and deduplicated on
+    # the real path so a registered tree is not counted twice.
+    seen = {gen for _, gen in pairs}
+    for candidate in legacy_tree_candidates(tools=tools):
+        if candidate in seen:
+            continue
+        try:
+            pairs.append((_match_prefix(candidate), candidate))
+        except ValueError:
+            continue
+        seen.add(candidate)
     return tuple(pairs)
+
+
+def legacy_tree_candidates(*, tools: Path | None = None) -> list[Path]:
+    """The legacy ``uv tool install`` tree(s) live processes may run from.
+
+    Two structural locations, in ledger-first order: the target of the
+    registered pseudo-generation pointer (``install_layout.legacy_generation_link``),
+    and uv's own ``<tool root>/conexus`` whether or not anyone registered it.
+    A path appears once. A location whose ``bin/`` is missing is not a tree
+    anything can be running from and is not returned.
+
+    Returns empty when nothing legacy exists OR when the layout cannot be
+    read; callers that need to tell those apart should ask ``install_layout``
+    directly, exactly as :func:`generation_match_pairs` documents.
+    """
+    from nexus import install_layout  # noqa: PLC0415 — deferred, avoids an import cycle
+
+    out: list[Path] = []
+    try:
+        link = install_layout.legacy_generation_link(tools=tools)
+        if link.is_symlink():
+            target = Path(os.readlink(link))
+            if target.is_absolute() and (target / "bin").is_dir():
+                out.append(target)
+    except Exception:  # noqa: BLE001 — an unreadable ledger is "cannot tell", not "none"
+        pass
+    try:
+        venv = install_layout.uv_conexus_venv()
+        if (venv / "bin").is_dir() and venv not in out:
+            out.append(venv)
+    except Exception:  # noqa: BLE001 — same posture
+        pass
+    return out
 
 
 def generation_match_prefixes(*, tools: Path | None = None) -> tuple[str, ...]:

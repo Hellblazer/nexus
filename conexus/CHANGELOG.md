@@ -4,6 +4,10 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.21.0] - 2026-08-28
+
+Plugin version aligned with conexus 7.21.0. No plugin-side changes.
+
 ## [7.20.0] - 2026-08-28
 
 Plugin version aligned with conexus 7.20.0. This release DOES carry plugin-
