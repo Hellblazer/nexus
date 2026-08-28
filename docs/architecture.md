@@ -248,6 +248,54 @@ follow the corrected reap-then-delete order; see
 [cli-reference.md § nx store](cli-reference.md#nx-store) for the resulting
 user-facing exit-code and reported-count contract.
 
+**Tumbler grammar (nexus-v3w9n, catalog-034, 2026-08-28; amended twice same
+day — segment COUNT not numeric content, then boundary not schema).** An
+owner prefix (`catalog_owners.tumbler_prefix`) is exactly 2 dot-separated,
+non-empty, non-blank, dot-free segments (e.g. `1.7`, `bt.1`); a document
+tumbler (`catalog_documents.tumbler`) is 3 or more. Segment CONTENT need
+not be numeric on the ENGINE side — numeric-ness is the Python client's
+`Tumbler.parse` concern (int-segmented), enforced there, unchanged, and
+narrower: `nx catalog show` / `catalog_show`'s depth-2-is-owner branch
+only fires for a numeric tumbler, so a mnemonic owner prefix (`bt.1`) is
+invisible to it. This is disclosure, not a live gap: mnemonic owner
+prefixes exist only in the engine's own Java test fixtures — the
+2026-08-28 production census found 72 owners, every one shaped `1.N`. See
+[`src/nexus/catalog/AGENTS.md`](../src/nexus/catalog/AGENTS.md)'s grammar
+bullet for the full disclosure. Never widen the engine grammar.
+
+Enforced at the engine's HTTP API boundary (`CatalogHandler`'s
+`TumblerGrammar` validator, HTTP 400 `{"rule": "tumbler-grammar", "field",
+"value"}`), NOT by a schema `CHECK` — Amendment 2 (owner decision) deferred
+the two `CHECK` constraints (`catalog_owners_prefix_grammar_ck` /
+`catalog_documents_tumbler_grammar_ck`) to **nexus-ia69x** after the full
+engine-suite measurement showed the test corpus itself is shaped
+1-segment-owner / 2-segment-document throughout — raw-SQL fixtures and
+shared scaffolding included, well beyond what a syntactic census could
+find (1959 tests, 331 broken across 46+ classes). Every external producer
+enters through `CatalogHandler`'s HTTP routes (legacy `/register`,
+`/owners/upsert`, `/import/owner`, `/import/document`, `/doc/register`,
+`/doc/register_many` — see `TumblerGrammar`'s own javadoc for the full
+route-by-route VALIDATED/LOOKUP-ONLY table; `/import/document` was a
+ship-blocker gap closed in fix round 1); internal minting (`ownerPrefix +
+"." + seq`) already conforms by construction, so the boundary is where an
+illegal shape can actually be introduced today. The two batch routes
+(`/import/owner`, `/import/document`, `/doc/register_many`) validate every
+row before the single repository call — one bad row anywhere refuses the
+whole batch with zero partial writes. Fix round 1 also closed a
+whitespace-only-segment gap (`"1. "` validated as conforming under a bare
+`isEmpty()` check) — `TumblerGrammar` now rejects blank segments too, and
+the deferred `CHECK` predicates named in catalog-034's header carry the
+same `\s`-excluding fix so nexus-ia69x inherits the closed gap.
+`catalog-034-tumbler-grammar.xml` still carries the data changeset that
+tombstones the two live 2026-05-22 phantom registrations (`1.1`/`1.2`,
+registered under a nonexistent 1-segment owner) — that step is
+independent of the deferred `CHECK`s and ships regardless. `nx catalog
+show` / `catalog_show` resolve a depth-2 tumbler as an owner card rather
+than a document lookup (see [cli-reference.md § nx catalog show](cli-reference.md#nx-catalog-show));
+the JSON form carries an explicit `"kind": "owner"` discriminator (fix
+round 1) so a consumer never has to infer owner-vs-document from key
+shape.
+
 **Tumbler allocation and next_seq.** A tumbler's trailing segment is a
 sequential number allocated per owner via `SELECT ... FOR UPDATE` on
 `catalog_owners.next_seq` (`CatalogHandler.java`); the column tracks the

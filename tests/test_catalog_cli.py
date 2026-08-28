@@ -167,6 +167,7 @@ class TestRegisterAndShow:
         assert result.exit_code == 0
         data = json.loads(result.stdout)
         assert data["title"] == "Test Paper"
+        assert "kind" not in data
 
     def test_register_with_explicit_source_uri(
         self, initialized_catalog, catalog_env,
@@ -205,6 +206,44 @@ class TestRegisterAndShow:
         # renders ClickException via echo, not via stderr/exception).
         assert result.exit_code != 0
         assert "no scheme" in result.output
+
+    def test_show_depth_two_tumbler_renders_owner_card(
+        self, initialized_catalog, catalog_env,
+    ):
+        """nexus-v3w9n: catalog-034 grammar makes a depth-2 tumbler an OWNER
+        address, not a document one. Pre-fix this rendered an
+        undifferentiated "Not found" for a perfectly valid owner prefix.
+        """
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register", "--title", "Test Paper", "--owner", "1.1",
+        ])
+        result = runner.invoke(main, ["catalog", "show", "1.1"])
+        assert result.exit_code == 0, result.output
+        assert "Owner:" in result.output
+        assert "Documents:  1" in result.output
+
+    def test_show_depth_two_tumbler_json(
+        self, initialized_catalog, catalog_env,
+    ):
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register", "--title", "Test Paper", "--owner", "1.1",
+        ])
+        result = runner.invoke(main, ["catalog", "show", "1.1", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["kind"] == "owner"
+        assert data["tumbler_prefix"] == "1.1"
+        assert data["document_count"] == 1
+
+    def test_show_depth_two_unknown_owner_prefix_not_found(
+        self, initialized_catalog, catalog_env,
+    ):
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "show", "1.999"])
+        assert result.exit_code != 0
+        assert "Not found" in result.output
 
     def test_show_omits_uri_line_when_empty(
         self, initialized_catalog, catalog_env,

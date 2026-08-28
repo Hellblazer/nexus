@@ -71,6 +71,36 @@ def test_register_ghost(cat) -> None:
     assert catalog_register(title="Ghost", owner="1.1", physical_collection="")["tumbler"] == "1.1.1"
 
 
+def test_show_depth_two_tumbler_returns_owner_card(cat) -> None:
+    """nexus-v3w9n: catalog-034 grammar makes a depth-2 tumbler an OWNER
+    address. cat.resolve() never consults owners, so pre-fix this returned
+    an undifferentiated {"error": "Not found: 1.1"} for a perfectly valid
+    owner prefix.
+    """
+    catalog_register(title="Doc A", owner="1.1", content_type="paper")
+    result = catalog_show(tumbler="1.1")
+    assert "error" not in result, result
+    assert result["kind"] == "owner"
+    assert result["tumbler_prefix"] == "1.1"
+    assert result["owner_type"] == "repo"
+    assert result["document_count"] == 1
+
+
+def test_show_depth_two_unknown_owner_prefix_not_found(cat) -> None:
+    result = catalog_show(tumbler="1.999")
+    assert "error" in result
+    assert "Not found" in result["error"]
+
+
+def test_show_depth_three_tumbler_unchanged(cat) -> None:
+    """Depth >= 3 still resolves as a document (unchanged behavior)."""
+    catalog_register(title="Doc B", owner="1.1", content_type="paper")
+    result = catalog_show(tumbler="1.1.1")
+    assert result["title"] == "Doc B"
+    assert "tumbler_prefix" not in result
+    assert "kind" not in result
+
+
 class TestCatalogRegisterEphemeralPathGuard:
     """nexus-u8n4r review fix C1 (code-review-expert Critical): the MCP
     ``catalog_register`` tool must refuse a worktree/tempdir path using

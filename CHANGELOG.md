@@ -70,6 +70,24 @@ that tag is gated and paired with a client release.
   (gap-fill: nexus-bocft). Frecency-boosted rank, the fifth D5 shape, is retired
   as not a combined query (RDR-156 §Decision 5 disposition).
 
+- **Tumbler grammar enforced at the engine's API boundary; `nx catalog show`
+  renders an owner card for a two-segment tumbler (nexus-v3w9n).** An owner
+  prefix is exactly two non-blank, dot-free segments and a document tumbler
+  three or more, so the two namespaces cannot overlap. `TumblerGrammar`
+  validates every route that accepts an explicit address, before any write
+  and all-or-nothing on batch routes (`/register`, `/owners/upsert`,
+  `/import/owner`, `/import/document`, `/doc/register`, `/doc/register_many`),
+  answering HTTP 400 `{"error", "rule": "tumbler-grammar", "field", "value"}`;
+  ten lookup-only routes are tabled in its javadoc. `catalog-034` tombstones
+  the two 2026-05-22 phantom registrations (`1.1`, `1.2`) that sat under a
+  nonexistent owner `1`. The table CHECK constraints are deferred: the engine
+  test corpus builds one-segment owners with two-segment documents throughout
+  (331 tests across 46 classes broke under the CHECKs), so they land behind
+  nexus-ia69x once the fixtures conform; the changeset header carries the exact
+  predicates. On the read side, `nx catalog show 1.2` and MCP `catalog_show`
+  now render the owner (`"kind": "owner"`, name, type, document count) for a
+  numeric depth-2 tumbler instead of a phantom document; depth 3+ is unchanged.
+
 ### Fixed
 
 - **Engine: `databasechangelog.dateexecuted` reads as UTC (nexus-rph82).**

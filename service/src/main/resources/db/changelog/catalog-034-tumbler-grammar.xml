@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-v3w9n — tumbler grammar data remediation (Sam decision,
+    2026-08-28, T1 scratch cb2f86a6 design-of-record).
+
+    PROBLEM: owner prefixes ("1.N") and document tumblers share a namespace
+    only when a document carries a 2-segment tumbler. Live census
+    2026-08-28 (all 19,201 documents): exactly two exist, 1.1 and 1.2,
+    registered 2026-05-22 under nonexistent owner "1" (no owner has a
+    1-segment prefix), chunk_count 0, no collection, legacy 32-hex
+    t3_chunk_id, one `cites` link 1.2 -> 1.1 — phantom registrations. The
+    minting path (CatalogRepository#registerDocumentWithOutcome,
+    `ownerPrefix + "." + claimed`) cannot produce them; the only routes
+    that could are the legacy POST /v1/catalog/register raw upsert
+    (CatalogHandler#handleRegister -> upsertDocument, honouring an
+    explicit `tumbler`) and an explicit 1-segment `tumbler_prefix` on
+    owner register (CatalogRepository#upsertOwner, honoured for
+    ETL/import, no shape validation). No CHECK existed on either column
+    before this changelog.
+
+    DECISION: forbid both illegal shapes at the grammar, declaratively
+    (RDR-154 discipline; precedent catalog-016's UNIQUE index). Owner
+    prefix: exactly 2 dot-separated segments. Document tumbler: 3 or
+    more dot-separated segments. Never widen (LOCKED INVARIANT).
+
+    AMENDMENT 1 (orchestrator, 2026-08-28; T1 scratch 4cd73175): the
+    owner's decision was a SEGMENT-COUNT grammar, not a numeric one — the
+    original `[0-9]+` predicates were the orchestrator's own
+    over-specification, not something Sam decided. Numeric-ness of
+    segments is the Python client's `Tumbler.parse` concern (int-
+    segmented) and stays enforced there, unchanged; the schema only
+    counts segments (non-empty, dot-free). Evidence for the correction:
+    the developer's Java-suite census found ~220 non-conforming literals
+    across 10 test files under the numeric predicate, the overwhelming
+    majority of them mnemonic-prefixed shapes (e.g. "bt.1.5",
+    "cov2.1.1") that satisfy the count grammar and only ever failed the
+    numeric one.
+
+    AMENDMENT 2 (orchestrator, 2026-08-28; T1 scratch 6ba1a27d; owner
+    decision after the full-suite measurement — 1959 tests, 331 broken
+    across 46+ classes, T1 58945409): the schema CHECK constraints are
+    DEFERRED. The engine test corpus is shaped 1-segment-owner /
+    2-segment-document throughout — raw-SQL fixtures and shared test
+    scaffolding included, not just the ~13 files a syntactic-context
+    census could find — so landing the CHECKs now would require a
+    fixture-normalization effort far larger than this bead, discovered
+    only via the actual failing-suite count, not by inspection. The
+    grammar is enforced at the engine's HTTP API boundary INSTEAD (see
+    CatalogHandler's `TumblerGrammar` validator, nexus-v3w9n) — every
+    EXTERNAL producer enters through the HTTP handlers, and internal
+    minting (`ownerPrefix + "." + seq`) already conforms, so the boundary
+    is where an illegal shape can actually be introduced today. This
+    file therefore keeps ONLY the data remediation (034-0 below); the
+    two CHECK constraints are deferred to **nexus-ia69x** (the fixture-
+    normalization bead), which re-adds them verbatim once the engine
+    test suite conforms:
+
+        catalog_owners_prefix_grammar_ck:
+            ALTER TABLE nexus.catalog_owners
+                ADD CONSTRAINT catalog_owners_prefix_grammar_ck
+                CHECK (tumbler_prefix ~ '^[^.\s]+\.[^.\s]+$')
+                NOT VALID;
+            then: ALTER TABLE nexus.catalog_owners
+                      VALIDATE CONSTRAINT catalog_owners_prefix_grammar_ck;
+
+        catalog_documents_tumbler_grammar_ck:
+            ALTER TABLE nexus.catalog_documents
+                ADD CONSTRAINT catalog_documents_tumbler_grammar_ck
+                CHECK (deleted_at IS NOT NULL OR tumbler ~ '^[^.\s]+(\.[^.\s]+){2,}$')
+                NOT VALID;
+            then: ALTER TABLE nexus.catalog_documents
+                      VALIDATE CONSTRAINT catalog_documents_tumbler_grammar_ck;
+
+        Both NOT VALID -> VALIDATE, matching catalog-029's three-step
+        shape; the document CHECK's `deleted_at IS NOT NULL OR ...` exempts
+        tombstoned rows because VALIDATE CONSTRAINT scans every row
+        including tombstoned ones, and 034-0 below tombstones (never
+        deletes) any pre-existing violator, leaving its original 2-segment
+        shape in place as forensic history — a bare `tumbler ~ regex`
+        CHECK would fail VALIDATE on the very rows this changelog fixed.
+        catalog_owners_prefix_grammar_ck needs no remediation step (the
+        2026-08-28 census found zero violating owners in production); the
+        document CHECK's VALIDATE must run strictly after 034-0.
+
+        FIX ROUND 1 (code-review-expert Important finding): both predicates
+        above carry `\s` in the negated character class (`[^.\s]+`, not
+        `[^.]+`) — a bare `[^.]+` accepts a whitespace-only segment (e.g.
+        `"1. "` or `"1.\t"`), which the HTTP boundary validator
+        (`TumblerGrammar`, CatalogHandler's live enforcement point today)
+        was fixed to reject in the same round. nexus-ia69x must inherit
+        the closed gap, not the original text.
+
+    ONE CHANGESET remains in this file:
+
+      034-0 (DATA): tombstone the two live ghost rows (and any other live
+        catalog_documents row with fewer than three NON-EMPTY dot-separated
+        segments — fix round 1, substantive-critic Significant finding: the
+        predicate also catches a nominally-3+-segment tumbler carrying an
+        empty segment, e.g. "1.2." or "1..3"; the comment previously said
+        "sub-3-segment", which undersold what the shipped SQL actually
+        matches) — tombstone, never physically delete (RDR-156 D6; the catalog-003
+        trash flow). RLS toggle-wrapped (nexus-1wjmq shape, catalog-016-0
+        / catalog-029-1 precedent): catalog_documents carries FORCE ROW
+        LEVEL SECURITY (catalog-001-baseline.xml) and Liquibase's
+        nexus_admin owner is NOT BYPASSRLS, so an untoggled UPDATE would
+        silently affect ZERO rows in production. On every FRESH install /
+        test container this is a genuine no-op: no non-conforming row can
+        exist before this changeset runs — it only does real work against
+        the one production database carrying 1.1/1.2. This step is
+        independent of the deferred CHECKs (tombstoning phantom rows is
+        correct regardless of whether a CHECK enforces the shape) and
+        ships now rather than waiting on nexus-ia69x.
+        INTENTIONALLY IRREVERSIBLE (catalog-016-0 precedent): empty
+        <rollback/> declares that explicitly rather than leaving it
+        implied — there is no schema change left in this file to revert
+        around it.
+
+    Placed after telemetry-007-nx-answer-steps.xml (current tail) and
+    before the grants-nexus-svc.xml runAlways block, matching the
+    established late-append convention (D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 034-0: tombstone fewer-than-3-non-empty-segment documents (data) ────────── -->
+    <changeSet id="catalog-034-0" author="nexus-v3w9n">
+        <comment>
+            Tombstone every LIVE catalog_documents row whose tumbler has fewer
+            than three NON-EMPTY dot-separated segments (the 2026-08-28 census
+            found exactly two: 1.1 and 1.2, phantom registrations under a
+            nonexistent 1-segment owner). Segment-count grammar (AMENDMENT 1)
+            — segments need not be numeric. The predicate below also catches
+            a nominally-3+-segment tumbler with an empty segment (e.g.
+            "1.2." or "1..3") — fix round 1: the comment now says exactly
+            what the predicate matches, not "sub-3-segment"; no live row of
+            that shape exists today (verified against the 19,201-doc
+            2026-08-28 census). RLS toggle-wrapped: catalog_documents is
+            FORCE ROW LEVEL SECURITY and the Liquibase role is not
+            BYPASSRLS.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_tombstoned_count BIGINT;
+BEGIN
+    UPDATE nexus.catalog_documents
+       SET deleted_at = NOW()
+     WHERE deleted_at IS NULL
+       AND tumbler !~ '^[^.]+(\.[^.]+){2,}$';
+    GET DIAGNOSTICS v_tombstoned_count = ROW_COUNT;
+    RAISE NOTICE 'nexus-v3w9n catalog-034 tumbler-grammar remediation: tombstoned % live catalog_documents row(s) with fewer than 3 non-empty tumbler segments', v_tombstoned_count;
+END $$;
+
+ALTER TABLE nexus.catalog_documents FORCE ROW LEVEL SECURITY;
+        </sql>
+        <!--
+            INTENTIONALLY IRREVERSIBLE (catalog-016-0 precedent): the rows
+            tombstoned here are phantom registrations no live write path can
+            reproduce; a schema rollback must not resurrect them, and this
+            changeset records nothing about which rows it touched, so there is
+            no honest inverse.
+        -->
+        <rollback/>
+    </changeSet>
+
+</databaseChangeLog>

@@ -325,11 +325,48 @@ public final class CatalogHandler implements HttpHandler {
     // DOCUMENTS
     // ══════════════════════════════════════════════════════════════════════════
 
+    /**
+     * nexus-v3w9n Amendment 2: tumbler grammar is enforced HERE, at the HTTP
+     * boundary, not by a schema CHECK (deferred to nexus-ia69x — see {@link
+     * TumblerGrammar}'s own javadoc for the full rationale). Every route that
+     * accepts an explicit {@code tumbler_prefix} or {@code tumbler} from
+     * outside validates it BEFORE any repository call; repository methods
+     * themselves are untouched. On violation, sends a 400 naming the rule,
+     * the offending field, and the value, and returns true so the caller can
+     * return immediately without ever reaching the DB.
+     */
+    private boolean rejectIfBadOwnerPrefix(HttpExchange exchange, String value) throws IOException {
+        // Blank/absent is the auto-mint path (server allocates a conforming
+        // "1.N" prefix itself) — only a genuinely present value is checked.
+        if (value == null || value.isBlank() || TumblerGrammar.isOwnerPrefix(value)) {
+            return false;
+        }
+        sendTumblerGrammarViolation(exchange, "tumbler_prefix", value);
+        return true;
+    }
+
+    private boolean rejectIfBadDocumentTumbler(HttpExchange exchange, String value) throws IOException {
+        if (value == null || value.isBlank() || TumblerGrammar.isDocumentTumbler(value)) {
+            return false;
+        }
+        sendTumblerGrammarViolation(exchange, "tumbler", value);
+        return true;
+    }
+
+    private void sendTumblerGrammarViolation(HttpExchange exchange, String field, String value) throws IOException {
+        log.warn("event=catalog_handler_tumbler_grammar_violation field={} value={}", field, value);
+        HttpUtil.send(exchange, 400,
+            "{\"error\":\"tumbler grammar violation\",\"rule\":\"tumbler-grammar\",\"field\":"
+            + MAPPER.writeValueAsString(field) + ",\"value\":" + MAPPER.writeValueAsString(value) + "}");
+    }
+
     /** POST /v1/catalog/register — upsert owner + document row. */
     private void handleRegister(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
         // body may contain both owner fields and document fields; repo handles the split
+        if (rejectIfBadOwnerPrefix(exchange, (String) body.get("tumbler_prefix"))) return;
+        if (rejectIfBadDocumentTumbler(exchange, (String) body.get("tumbler"))) return;
         // Owner upsert (if tumbler_prefix present)
         if (body.containsKey("tumbler_prefix")) {
             repo.upsertOwner(tenant, body);
@@ -1376,6 +1413,7 @@ public final class CatalogHandler implements HttpHandler {
     private void handleOwnerUpsert(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
+        if (rejectIfBadOwnerPrefix(exchange, (String) body.get("tumbler_prefix"))) return;
         repo.upsertOwner(tenant, body);
         HttpUtil.send(exchange, 200, "{\"ok\":true}");
     }
@@ -1841,6 +1879,15 @@ public final class CatalogHandler implements HttpHandler {
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
+        // nexus-v3w9n Amendment 2: the ETL import path is the "+ any import
+        // route carrying tumbler_prefix" case named in the design of record —
+        // an explicit tumbler_prefix here is just as much an external producer
+        // as /owners/upsert. ALL-OR-NOTHING: every row is validated before the
+        // single batch repository call below, so one bad row anywhere refuses
+        // the whole import with zero partial writes.
+        for (Map<String, Object> row : rows) {
+            if (rejectIfBadOwnerPrefix(exchange, (String) row.get("tumbler_prefix"))) return;
+        }
         repo.importOwnersBatch(tenant, rows);
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
     }
@@ -1852,6 +1899,17 @@ public final class CatalogHandler implements HttpHandler {
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
+        // nexus-v3w9n Amendment 2 fix round 1 (substantive-critic ship-blocker):
+        // this route writes an explicit per-row "tumbler" verbatim, exactly the
+        // legacy /register document-half shape that produced the 1.1/1.2 phantom
+        // rows the bead exists to fix — it was missing from every enumeration of
+        // validated routes. ALL-OR-NOTHING: every row is validated before the
+        // single batch repository call, so one bad row anywhere in the batch
+        // refuses the whole import with zero partial writes (same invariant as
+        // handleImportOwner / handleRegisterMany below).
+        for (Map<String, Object> row : rows) {
+            if (rejectIfBadDocumentTumbler(exchange, (String) row.get("tumbler"))) return;
+        }
         repo.importDocumentsBatch(tenant, rows);
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
     }
@@ -1954,6 +2012,13 @@ public final class CatalogHandler implements HttpHandler {
         if (ownerPrefix == null || ownerPrefix.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"'owner_prefix' required\"}"); return;
         }
+        // nexus-v3w9n Amendment 2: owner_prefix is ALWAYS an explicit,
+        // required, externally-supplied prefix on this route (never the
+        // owners/upsert auto-mint path), so it is validated unconditionally;
+        // an explicit "tumbler" in the body is optional (the mint path
+        // ignores it) but validated too when present.
+        if (rejectIfBadOwnerPrefix(exchange, ownerPrefix)) return;
+        if (rejectIfBadDocumentTumbler(exchange, (String) body.get("tumbler"))) return;
         var outcome = repo.registerDocumentWithOutcome(tenant, ownerPrefix, body);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
             Map.of("tumbler", outcome.tumbler(), "created", outcome.created())));
@@ -1990,6 +2055,16 @@ public final class CatalogHandler implements HttpHandler {
         if (docs.size() > MAX_BATCH_DOC_IDS) {
             HttpUtil.send(exchange, 400, "{\"error\":\"too many docs (max "
                 + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        // nexus-v3w9n Amendment 2: same validation as the single-doc route —
+        // owner_prefix unconditionally, each doc's optional explicit
+        // "tumbler" when present. ALL-OR-NOTHING: every doc is validated
+        // before the single batch repository call below, so one bad doc
+        // anywhere in the batch refuses the whole call with zero partial
+        // writes.
+        if (rejectIfBadOwnerPrefix(exchange, ownerPrefix)) return;
+        for (Map<String, Object> doc : docs) {
+            if (rejectIfBadDocumentTumbler(exchange, (String) doc.get("tumbler"))) return;
         }
         var outcomes = repo.registerDocumentManyWithOutcome(tenant, ownerPrefix, docs);
         List<String> tumblers = outcomes.stream()

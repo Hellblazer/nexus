@@ -793,6 +793,8 @@ nx catalog show TUMBLER_OR_TITLE [--json]
 
 Full document metadata, physical collection, and all links in and out. Accepts tumblers or titles.
 
+**Owner prefixes (nexus-v3w9n, catalog-034):** the tumbler grammar is enforced at the engine's API boundary (HTTP 400, rule `tumbler-grammar`) — a schema CHECK follows once the engine test fixtures conform (nexus-ia69x). On the ENGINE side an owner prefix is exactly 2 dot-separated segments (e.g. `1.7` or `bt.1`; segment content need not be numeric), a document tumbler is 3 or more. Passing a depth-2 NUMERIC tumbler to `nx catalog show` renders an owner card (`"kind": "owner"` in `--json`; name, type, repo hash, next sequence number, document count in text) instead of a document; depth 3+ is unchanged. An unknown depth-2 prefix still reports `Not found: <value>`. This CLI/MCP feature is numeric-only — `Tumbler.parse` (the Python client) is int-segmented, so a mnemonic owner prefix like `bt.1` falls through to title-fallback resolution instead of an owner card; production owner prefixes are always numeric (`1.N`) in practice, so this does not affect real usage.
+
 ### nx catalog manifest-verify — RETIRED
 
 **RETIRED, RDR-191 Phase 6 (bead nexus-o8dil.33), 2026-08-15.** Both modes

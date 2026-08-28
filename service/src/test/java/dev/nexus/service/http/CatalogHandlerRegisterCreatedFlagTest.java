@@ -119,13 +119,13 @@ class CatalogHandlerRegisterCreatedFlagTest {
     @Test
     void docRegister_freshDoc_envelopeCarriesCreatedTrue() throws Exception {
         CapturingExchange ex = post("/v1/catalog/doc/register",
-            "{\"owner_prefix\":\"regcf-1\",\"title\":\"fresh\",\"content_type\":\"code\","
+            "{\"owner_prefix\":\"regcf.1\",\"title\":\"fresh\",\"content_type\":\"code\","
             + "\"corpus\":\"code\",\"file_path\":\"fresh.py\"}");
         handleWithTenant(ex);
         assertThat(ex.status).as("response body: %s", ex.bodyString()).isEqualTo(200);
         Map<String, Object> body = MAPPER.readValue(ex.bodyString(), Map.class);
         assertThat(body).containsKey("tumbler");
-        assertThat(body.get("tumbler")).isEqualTo("regcf-1.1");
+        assertThat(body.get("tumbler")).isEqualTo("regcf.1.1");
         assertThat(body.get("created")).as("additive created field, fresh insert").isEqualTo(true);
     }
 
@@ -133,7 +133,7 @@ class CatalogHandlerRegisterCreatedFlagTest {
     void docRegister_sourceUriIdempotencyHit_envelopeCarriesCreatedFalse() throws Exception {
         final String uri = "file:///regcf/srcuri-hit.md";
         CapturingExchange first = post("/v1/catalog/doc/register",
-            "{\"owner_prefix\":\"regcf-2\",\"title\":\"orig\",\"content_type\":\"rdr\","
+            "{\"owner_prefix\":\"regcf.2\",\"title\":\"orig\",\"content_type\":\"rdr\","
             + "\"corpus\":\"rdr\",\"file_path\":\"orig.md\",\"source_uri\":\"" + uri + "\"}");
         handleWithTenant(first);
         assertThat(first.status).isEqualTo(200);
@@ -142,7 +142,7 @@ class CatalogHandlerRegisterCreatedFlagTest {
 
         // Same source_uri, different file_path -> idempotency-leg hit, not a mint.
         CapturingExchange second = post("/v1/catalog/doc/register",
-            "{\"owner_prefix\":\"regcf-2\",\"title\":\"renamed\",\"content_type\":\"rdr\","
+            "{\"owner_prefix\":\"regcf.2\",\"title\":\"renamed\",\"content_type\":\"rdr\","
             + "\"corpus\":\"rdr\",\"file_path\":\"renamed.md\",\"source_uri\":\"" + uri + "\"}");
         handleWithTenant(second);
         assertThat(second.status).isEqualTo(200);
@@ -157,12 +157,12 @@ class CatalogHandlerRegisterCreatedFlagTest {
     void registerMany_mixedNewAndExisting_createdArrayAlignsWithTumblers() throws Exception {
         // Pre-register one doc directly through the repo so the batch call
         // below resolves it via the pre-batch idempotency lookup.
-        var pre = repo.registerDocumentWithOutcome(TENANT, "regcf-3", Map.of(
+        var pre = repo.registerDocumentWithOutcome(TENANT, "regcf.3", Map.of(
             "title", "keep", "content_type", "code", "corpus", "code", "file_path", "keep.py"));
         assertThat(pre.created()).isTrue();
 
         CapturingExchange ex = post("/v1/catalog/doc/register_many",
-            "{\"owner_prefix\":\"regcf-3\",\"docs\":["
+            "{\"owner_prefix\":\"regcf.3\",\"docs\":["
             + "{\"title\":\"keep-again\",\"content_type\":\"code\",\"corpus\":\"code\",\"file_path\":\"keep.py\"},"
             + "{\"title\":\"new1\",\"content_type\":\"code\",\"corpus\":\"code\",\"file_path\":\"new1.py\"}"
             + "]}");

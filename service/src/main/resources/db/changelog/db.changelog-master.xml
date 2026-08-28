@@ -924,6 +924,22 @@
          field allowlist, join identity, and REJECTED alternatives. -->
     <include file="db/changelog/vectors-008-aspect-scoped.xml"/>
 
+    <!-- nexus-v3w9n (Sam decision 2026-08-28; Amendment 2): tumbler grammar
+         (owner prefix exactly 2 segments, document tumbler >= 3, content
+         need not be numeric) is enforced at the engine's HTTP API boundary
+         (CatalogHandler's TumblerGrammar validator), NOT by a schema CHECK
+         yet — this file carries only the data changeset that tombstones
+         the two live 2026-05-22 phantom registrations (1.1/1.2). The two
+         CHECK constraints are deferred to nexus-ia69x (fixture-
+         normalization bead) once the engine test suite conforms; see this
+         file's own header for the exact predicates ia69x re-adds. Placed
+         after telemetry-007-nx-answer-steps.xml (current tail) and before
+         the grants-nexus-svc.xml runAlways block, matching the established
+         late-append convention (D0.1; see telemetry-007's own <include>
+         comment for the identical reasoning; lands after the nexus-ubnwk pair
+         above, which it does not depend on). -->
+    <include file="db/changelog/catalog-034-tumbler-grammar.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
