@@ -941,8 +941,16 @@ def _catalog_hook(
     on_locked: str = "wait",
     skip_housekeeping: bool = False,
     stale_fence_doc_ids: set[str] | None = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> dict[Path, str]:
     """Register/update indexed files in catalog. Silently skipped if catalog absent.
+
+    ``on_phase`` (nexus-jg3x5): the orchestrator's ``[post]`` phase channel.
+    When supplied, each link generator that can do work for this batch
+    emits ``Catalog linking: <kind>…`` on entry and ``Catalog linking:
+    <kind> done (<s>s)`` on exit, carrying the SAME measured duration the
+    ``catalog_hook_stage_timing`` event records. ``None`` (every other
+    caller) emits nothing.
 
     Returns a ``{abs_path: doc_id}`` map (empty when the catalog is absent
     or cannot be opened) so the orchestrator can build a
@@ -1482,31 +1490,57 @@ def _catalog_hook(
                 generate_pdf_corpus_links,
                 generate_prose_filepath_links,
                 generate_rdr_filepath_links,
+                incremental_generator_applies,
             )
             # nexus-oub13 critique M5: per-generator wall so the "linking"
             # stage bucket names WHICH generator owns it, not just that
-            # linking in aggregate is slow.
-            _lg_t = time.monotonic()
-            fp_count = generate_rdr_filepath_links(
-                cat, writer=writer, new_tumblers=new_tumblers,
-                new_content_types=new_content_types,
-            )
-            _stage_s["linking_rdr"] = time.monotonic() - _lg_t
-            # nexus-sob9: prose + pdf coverage. Run with the same
-            # incremental scope so a single bulk-index pass closes
-            # the prose/pdf 0% gap from the 2026-05-08 prod shakeout.
-            _lg_t = time.monotonic()
-            prose_count = generate_prose_filepath_links(
-                cat, writer=writer, new_tumblers=new_tumblers,
-                new_content_types=new_content_types,
-            )
-            _stage_s["linking_prose"] = time.monotonic() - _lg_t
-            _lg_t = time.monotonic()
-            pdf_count = generate_pdf_corpus_links(
-                cat, writer=writer, new_tumblers=new_tumblers,
-                new_content_types=new_content_types,
-            )
-            _stage_s["linking_pdf"] = time.monotonic() - _lg_t
+            # linking in aggregate is slow. nexus-sob9: prose + pdf run
+            # with the same incremental scope so a single bulk-index pass
+            # closes the prose/pdf 0% gap from the 2026-05-08 prod shakeout.
+            # nexus-jg3x5: each generator is also its own [post] sub-phase
+            # on the orchestrator's on_phase channel — start marker on
+            # entry, done marker carrying the SAME duration the stage
+            # event below records. A generator the seed predicate says
+            # cannot link anything in this batch (no new tumbler of its
+            # source type) still runs (it returns 0 without fetching) but
+            # emits no pair: claiming a phase that never ran is the
+            # honesty defect this emission exists to fix.
+            _link_counts: dict[str, int] = {}
+            for _kind, _gen in (
+                ("rdr", generate_rdr_filepath_links),
+                ("prose", generate_prose_filepath_links),
+                ("pdf", generate_pdf_corpus_links),
+            ):
+                _announce = on_phase is not None and incremental_generator_applies(
+                    _kind, new_tumblers, new_content_types,
+                )
+                if _announce:
+                    on_phase(f"Catalog linking: {_kind}…")
+                _lg_t = time.monotonic()
+                try:
+                    _link_counts[_kind] = _gen(
+                        cat, writer=writer, new_tumblers=new_tumblers,
+                        new_content_types=new_content_types,
+                    )
+                except Exception:
+                    # Close the phase before the outer handler logs and
+                    # audits the failure: the phase heartbeat repeats the
+                    # LAST on_phase label, and the next one would only
+                    # fire after housekeeping — a "still running" tick for
+                    # a phase that already died (code-review-expert).
+                    if _announce:
+                        on_phase(
+                            f"Catalog linking: {_kind} failed "
+                            f"({time.monotonic() - _lg_t:.1f}s)"
+                        )
+                    raise
+                _lg_s = time.monotonic() - _lg_t
+                _stage_s[f"linking_{_kind}"] = _lg_s
+                if _announce:
+                    on_phase(f"Catalog linking: {_kind} done ({_lg_s:.1f}s)")
+            fp_count = _link_counts["rdr"]
+            prose_count = _link_counts["prose"]
+            pdf_count = _link_counts["pdf"]
             links_created = fp_count + prose_count + pdf_count
             if links_created:
                 _log.info(
@@ -4273,6 +4307,7 @@ def _run_index(
         # every unvisited doc as missing and mass-delete after two runs.
         skip_housekeeping=delta_changed is not None,
         stale_fence_doc_ids=_stale_fence_doc_ids,
+        on_phase=on_phase,
     )
     if on_phase is not None:
         on_phase(

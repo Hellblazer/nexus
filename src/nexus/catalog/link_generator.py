@@ -102,6 +102,39 @@ _RDR_FILEPATH_SOURCE_TYPES = frozenset({"rdr"})
 _PROSE_FILEPATH_SOURCE_TYPES = frozenset({"prose", "markdown", "docs"})
 _PDF_CORPUS_SOURCE_TYPES = frozenset({"pdf", "paper"})
 
+_INCREMENTAL_SOURCE_TYPES: dict[str, frozenset[str]] = {
+    "rdr": _RDR_FILEPATH_SOURCE_TYPES,
+    "prose": _PROSE_FILEPATH_SOURCE_TYPES,
+    "pdf": _PDF_CORPUS_SOURCE_TYPES,
+}
+
+
+def incremental_generator_applies(
+    kind: str,
+    new_tumblers: list[Tumbler] | None,
+    new_content_types: frozenset[str] | set[str] | None,
+) -> bool:
+    """True when the *kind* incremental generator (``"rdr"`` / ``"prose"``
+    / ``"pdf"``) can do work for this batch — the inverse of the seed
+    predicate each generator applies before fetching (nexus-jg3x5).
+
+    The indexer's catalog hook uses it to decide whether a generator gets
+    its own ``[post]`` sub-phase pair: a generator with no qualifying new
+    tumbler returns 0 without fetching, and announcing a phase that never
+    ran is the honesty defect this exists to avoid. The contract mirrors
+    the seed predicate exactly: ``new_tumblers is None`` is the full-scan
+    shape, where every generator runs unconditionally, so it applies;
+    an EMPTY list has nothing to link, so it does not; unknown content
+    types (``None``) cannot prove a generator idle, so it applies.
+    """
+    if new_tumblers is None:
+        return True
+    if not new_tumblers:
+        return False
+    return not _no_qualifying_seed(
+        new_tumblers, new_content_types, _INCREMENTAL_SOURCE_TYPES[kind],
+    )
+
 
 def generate_citation_links(cat: CatalogReader, *, writer: CatalogWriter | None = None) -> int:
     """Auto-create 'cites' links via bib ID cross-matching.
