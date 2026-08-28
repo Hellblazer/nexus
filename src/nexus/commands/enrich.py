@@ -1120,6 +1120,27 @@ def enrich_aspects(
         )
 
 
+def _aspect_identity(entry) -> str:
+    """The ONE key a catalog entry is matched to ``document_aspects.source_path`` by.
+
+    nexus-bocft. Two verbs asked "does this entry have an aspect row" with
+    two different keys: the gap-fill used ``file_path or title``, the
+    ``--missing`` audit used ``file_path and ...`` -- which silently drops
+    every title-only entry. On knowledge__knowledge (2026-08-27): 416
+    entries, 10 with a file_path; gap-fill would dispatch 407, the audit
+    reported 1, and that "1" was the number the 7.18.0 changelog cited as
+    proof the gap-fill worked. The audit verb could not see the population
+    the billing verb charges for.
+
+    ``file_path or title`` is the WRITER's rule, not an arbitrary choice:
+    ``catalog/store_hook.py`` mints a store_put document's identity from its
+    title (``uri_for(collection, title)``; single-chunk store_put callers
+    carry no source_path), and file-backed knowledge documents carry their
+    path. Both verbs must call this, never restate it.
+    """
+    return entry.file_path or entry.title or ""
+
+
 def _select_entries(
     *,
     collection: str,
@@ -1167,8 +1188,8 @@ def _select_entries(
             # below any version).
             entries = [
                 e for e in entries
-                if (e.file_path or e.title) in outdated_paths
-                or (e.file_path or e.title) not in existing_paths
+                if _aspect_identity(e) in outdated_paths
+                or _aspect_identity(e) not in existing_paths
             ]
         else:
             # nexus-ym9ey: gap-fill is the DEFAULT. Before this, a bare
@@ -1182,7 +1203,7 @@ def _select_entries(
             before = len(entries)
             entries = [
                 e for e in entries
-                if (e.file_path or e.title) not in existing_paths
+                if _aspect_identity(e) not in existing_paths
             ]
             skipped = before - len(entries)
             if skipped:
@@ -2122,31 +2143,61 @@ def aspects_list_cmd(
                     collection,
                 )
             }
-        gaps = [e for e in entries if e.file_path and e.file_path not in existing]
+        # THE SAME KEY THE GAP-FILL USES (nexus-bocft). This read
+        # `e.file_path and e.file_path not in existing`, which is not a gap
+        # test -- it is a gap test over the subset of entries that happen to
+        # have a file_path, and for a knowledge collection that subset is
+        # almost nothing. The number it printed was cited as evidence.
+        gaps = [e for e in entries if _aspect_identity(e) not in existing]
+        # Aspect rows no current entry claims. A large count here is the
+        # signature of an identity-era change (paths or hashes recorded
+        # under an older registration rule) and is what explains "437 rows
+        # but 407 gaps" -- the audit is not complete without it.
+        claimed = {_aspect_identity(e) for e in entries}
+        orphaned = sorted(p for p in existing if p not in claimed)
         if as_json:
-            click.echo(json.dumps([
-                {
-                    "tumbler": str(e.tumbler),
-                    "title": e.title,
-                    "file_path": e.file_path,
-                }
-                for e in gaps
-            ], indent=2))
+            click.echo(json.dumps({
+                "collection": collection,
+                "entries": len(entries),
+                "aspect_rows": len(existing),
+                "gaps": [
+                    {
+                        "tumbler": str(e.tumbler),
+                        "title": e.title,
+                        "file_path": e.file_path,
+                        "identity": _aspect_identity(e),
+                    }
+                    for e in gaps
+                ],
+                "orphaned_aspect_rows": orphaned,
+            }, indent=2))
             return
-        if not gaps:
+        if not gaps and not orphaned:
             click.echo(
                 f"No missing aspects in '{collection}': every catalog "
                 f"row has an extracted aspect record."
             )
             return
-        click.echo(
-            f"{len(gaps)} catalog row(s) in '{collection}' have no "
-            f"aspect record:"
-        )
-        for e in gaps[:limit] if limit else gaps:
-            click.echo(f"  {e.tumbler}  {e.file_path}")
-        if limit and len(gaps) > limit:
-            click.echo(f"  ... and {len(gaps) - limit} more.")
+        if gaps:
+            click.echo(
+                f"{len(gaps)} of {len(entries)} catalog row(s) in '{collection}' "
+                f"have no aspect record:"
+            )
+            for e in gaps[:limit] if limit else gaps:
+                click.echo(f"  {e.tumbler}  {_aspect_identity(e)}")
+            if limit and len(gaps) > limit:
+                click.echo(f"  ... and {len(gaps) - limit} more.")
+        else:
+            click.echo(
+                f"No missing aspects in '{collection}': every catalog "
+                f"row has an extracted aspect record."
+            )
+        if orphaned:
+            click.echo(
+                f"{len(orphaned)} aspect row(s) in '{collection}' match no "
+                f"current catalog entry (identities from an earlier "
+                f"registration rule; they do not cover the gaps above)."
+            )
         return
 
     with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
