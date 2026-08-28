@@ -856,7 +856,7 @@ def _never_chunked_breakdown(
 
 
 def _census_lost_and_never_chunked(
-    cat: "CatalogReader", entries: list, unreadable: list[str],
+    cat: "CatalogReader", entries: list, unreadable: list[str], *, t3=None,
 ) -> tuple[list[dict], dict, dict[str, int]]:
     """Class C: chunk_count vs manifest-length census (manifest_heal.py semantics).
 
@@ -943,7 +943,13 @@ def _census_lost_and_never_chunked(
         elif e.chunk_count == 0 and not rows:
             never_chunked_entries.append(e)
     owner_roots = _owner_roots_for_zero_content_check(cat, never_chunked_entries)
-    return lost, _never_chunked_breakdown(never_chunked_entries, owner_roots), manifest_row_totals
+    # *t3* threads through to the rdr145 title probe (nexus-1uekf). This is
+    # the FULL-catalog path's breakdown; the scoped path computes its own.
+    return (
+        lost,
+        _never_chunked_breakdown(never_chunked_entries, owner_roots, t3=t3),
+        manifest_row_totals,
+    )
 
 
     # _class_c_unverifiable_rows RETIRED (RDR-191 Phase 6, nexus-o8dil.33) —
@@ -1306,7 +1312,7 @@ def _verify_full(cat: "CatalogReader", *, json_out: bool) -> None:
         # otherwise unconsumed now that _class_c_unverifiable_rows (its
         # only consumer) is retired alongside Class B.
         lost, never_chunked, _manifest_row_totals = _census_lost_and_never_chunked(
-            cat, census_entries + ghost_entries, unreadable,
+            cat, census_entries + ghost_entries, unreadable, t3=t3,
         )
 
     # nexus-xeux8: ghost census — from the all_documents() sweep already
