@@ -16,8 +16,11 @@ applies, using a classmethod-inclusive predicate
 such as ``CatalogTaxonomy.compute_cross_links`` are captured, not silently
 dropped. RF-158-1: nine strict pairs, originally ``_EXCLUSIONS={}`` and
 ``_PARAM_DRIFT_OK={}`` — zero exemptions. RDR-182 P1.2 (nexus-ykzbj.6) added
-the first documented exclusion (``telemetry.record_consent``, SQLite-only by
-design); see ``test_http_t2_store_parity.py`` for the written reason.
+a documented exclusion for ``telemetry.record_consent``/``list_consents``
+(SQLite-only by design), which nexus-ng2sy later closed by adding engine-side
+parity; both methods and their contract entries were deleted outright
+(nexus-lqqb2, 2026-08-28) once the ``nx remediate`` consent-audit surface
+that was their only caller was removed with no replacement.
 
 REGENERATE this artifact whenever an ``Http*`` store legitimately gains,
 renames, or re-signatures a public method (re-run the generator against the
@@ -76,8 +79,6 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
         'log_relevance_batch': ['rows'],
         'log_search_batch': ['rows'],
         'query_collection_stats': ['collection', 'days'],
-        'list_consents': [],
-        'record_consent': ['scope', 'ts', 'granted'],
         'record_hook_failure': ['doc_id', 'collection', 'hook_name', 'error',
                                 'chain', 'batch_doc_ids', 'is_batch',
                                 'occurred_at'],
@@ -402,12 +403,10 @@ T2_STORE_RETURNS: dict[str, dict[str, str]] = {
         'expire_relevance_log': 'int',
         'get_relevance_log': 'list[dict[str,Any]]',
         'get_retention_markers': 'dict[str,int]',
-        'list_consents': 'list[dict[str,Any]]',
         'log_relevance': 'int',
         'log_relevance_batch': 'int',
         'log_search_batch': 'int',
         'query_collection_stats': 'dict[str,Any]',
-        'record_consent': 'None',
         'record_hook_failure': 'None',
         'record_nx_answer_run': 'None',
         'record_tier_write': 'None',

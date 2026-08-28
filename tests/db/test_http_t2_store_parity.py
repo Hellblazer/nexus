@@ -96,6 +96,12 @@ _STORE_PAIRS = [
 # list_consents exclusions were removed 2026-07-13 when nexus-ng2sy landed the
 # engine-side consent table + /consents/{record,list} routes + the
 # HttpTelemetryStore twins — the parity tripwire is strict again.
+#
+# nexus-lqqb2 (2026-08-28): record_consent/list_consents are gone from BOTH
+# T2_STORE_CONTRACT and every store, client and engine alike — the consent-audit
+# telemetry was dead wire (its only producer, ``nx remediate``, was deleted at
+# v7.15.0). Deleted, not excluded: an exclusion would imply a live method the
+# HTTP store legitimately omits, which no longer describes this pair.
 _EXCLUSIONS: dict[str, dict[str, str]] = {}
 
 # Per-(store, method) param-drift exemptions: the method exists on both the

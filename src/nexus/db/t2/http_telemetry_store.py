@@ -300,34 +300,6 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         inherits another target's watermark."""
         return self._base_url or ""
 
-    def record_consent(self, *, scope: str, ts: str, granted: bool) -> None:
-        """Record a consent grant/revoke. Calls ``POST /v1/telemetry/consents/record``.
-
-        Append-only; ``granted`` distinguishes a grant from a revoke.
-
-        Introduced for RDR-182's ``remediate`` consent audit (nexus-ng2sy).
-        That surface is deleted, so this method has NO production caller.
-        It survives because ``tests/db/t2_store_contract.py`` requires it of
-        every telemetry store — the HTTP/engine parity contract owns it now,
-        not RDR-182. Removing it is a parity-suite change, not a cleanup.
-        """
-        self._post("/v1/telemetry/consents/record", {
-            "scope":   scope,
-            "ts":      ts,
-            "granted": granted,
-        })
-
-    def list_consents(self) -> list[dict[str, Any]]:
-        """Read the tenant's consent-audit trail (grants and revokes, in
-        insertion order). Calls ``GET /v1/telemetry/consents/list``.
-
-        No production caller: the ``nx remediate --history`` surface this
-        read was built for is deleted. Kept by the same parity contract as
-        ``record_consent`` above.
-        """
-        data = self._get("/v1/telemetry/consents/list")
-        return data if isinstance(data, list) else []
-
     def get_retention_markers(self, relations: list[str]) -> dict[str, int]:
         """Cumulative-deletes retention markers for *relations* (nexus-24p05)
         — the verify-fill watermark's rollback detector. Calls

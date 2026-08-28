@@ -40,7 +40,6 @@ _relevance_log: list[dict[str, Any]] = []
 _search_telemetry: list[dict[str, Any]] = []
 _tier_writes: list[dict[str, Any]] = []
 _retention_markers: dict[str, int] = {}
-_consents: list[dict[str, Any]] = []
 _nx_answer_runs: list[dict[str, Any]] = []
 _hook_failures: list[dict[str, Any]] = []
 _frecency: dict[str, dict[str, Any]] = {}  # keyed by chunk_id
@@ -64,7 +63,6 @@ def _clear_all() -> None:
         _relevance_log.clear()
         _search_telemetry.clear()
         _tier_writes.clear()
-        _consents.clear()
         _retention_markers.clear()
         _nx_answer_runs.clear()
         _hook_failures.clear()
@@ -193,15 +191,6 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                     "agent":        body.get("agent"),
                     "project":      body.get("project"),
                     "target_title": body.get("target_title"),
-                })
-            self._send(200, {"ok": True})
-
-        elif pp == "/v1/telemetry/consents/record":
-            with _STORE_LOCK:
-                _consents.append({
-                    "scope":   body.get("scope", ""),
-                    "ts":      body.get("ts", ""),
-                    "granted": bool(body.get("granted")),
                 })
             self._send(200, {"ok": True})
 
@@ -467,11 +456,6 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                 "total": total,
             }
             self._send(200, out)
-            return
-
-        elif pp == "/v1/telemetry/consents/list":
-            with _STORE_LOCK:
-                self._send(200, list(_consents))
             return
 
         elif pp == "/v1/telemetry/retention/markers":
@@ -1298,37 +1282,6 @@ class TestQueryNxAnswerRuns:
             "avg_cost_usd must ignore the null row (0.02 averaged over the "
             "1 non-null row, not 0.01 over both)"
         )
-
-
-class TestConsentAudit:
-    """RDR-182 nexus-ng2sy: the service-mode consent-audit twin routes through
-    HTTP to /v1/telemetry/consents/{record,list}."""
-
-    def test_record_and_list_grant_revoke_in_order(self, client):
-        client.record_consent(
-            scope="flag:claude_assisted_remediation",
-            ts="2026-07-13T00:00:00Z", granted=True,
-        )
-        client.record_consent(
-            scope="remediate:chash-poison",
-            ts="2026-07-13T00:01:00Z", granted=True,
-        )
-        client.record_consent(
-            scope="flag:claude_assisted_remediation",
-            ts="2026-07-13T00:02:00Z", granted=False,
-        )
-        rows = client.list_consents()
-        assert rows == [
-            {"scope": "flag:claude_assisted_remediation",
-             "ts": "2026-07-13T00:00:00Z", "granted": True},
-            {"scope": "remediate:chash-poison",
-             "ts": "2026-07-13T00:01:00Z", "granted": True},
-            {"scope": "flag:claude_assisted_remediation",
-             "ts": "2026-07-13T00:02:00Z", "granted": False},
-        ]
-
-    def test_empty_trail_returns_empty_list(self, client):
-        assert client.list_consents() == []
 
 
 class TestTrimHookFailures:

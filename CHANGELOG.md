@@ -105,6 +105,18 @@ that tag is gated and paired with a client release.
   [--limit] [--offset] [--json]` reads the trail — until now `nx doctor`'s
   pass/fail non-empty check was its only reader.
 
+### Removed
+
+- **The dead consent-audit telemetry wire (nexus-lqqb2).**
+  `HttpTelemetryStore.record_consent` / `list_consents`, the engine's
+  `/v1/telemetry/consents/{record,list}` routes and handlers, and
+  `TelemetryRepository.recordConsent` / `listConsents` are gone, with the
+  tests that exercised them. Their only producer, `nx remediate`, was
+  removed at v7.15.0 and no caller remained; the writer family the
+  shakedown playbook counts is three, not four. The `consent_audit` table
+  and its Liquibase changeset are untouched (a drop is its own changeset,
+  if ever).
+
 ## [7.21.0] - 2026-08-28
 
 ### Changed
