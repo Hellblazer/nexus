@@ -176,6 +176,7 @@ from nexus.commands.catalog_cmds.integrity import (
     _class_a_vanished_collections,
     _classify_never_chunked,
     _is_zero_content_by_design,
+    note_chunks_present,
 )
 
 # nexus-u8n4r: the worktree/tempdir predicate moved to nexus.repo_identity
@@ -192,7 +193,10 @@ _log = structlog.get_logger(__name__)
 if TYPE_CHECKING:
     from nexus.catalog.catalog_protocol import CatalogReader  # noqa: F401 — PEP 563 deferred annotation use
 
-_ACTIONS = ("recount", "tombstone-vanished", "tombstone-orphaned", "tombstone-zero-content")
+_ACTIONS = (
+    "recount", "tombstone-vanished", "tombstone-orphaned", "tombstone-zero-content",
+    "tombstone-ghost-notes",
+)
 
 # reconcile_cmd's convention (catalog.py): actionable findings cap at 20,
 # report-only/diagnosis-only findings cap at 5.
@@ -468,6 +472,9 @@ def _classify(cat: "CatalogReader", t3: object) -> tuple[dict, list[str]]:
             "physical_collection": e.physical_collection,
             "manifest_len": manifest_len,
             "chunk_count": e.chunk_count,
+            # The chunk natural id, if the registration recorded one: the
+            # first key tombstone-ghost-notes probes T3 by (nexus-1uekf).
+            "chash": (getattr(e, "meta", None) or {}).get("doc_id") or "",
         }
 
         if e.physical_collection in vanished_names:
@@ -817,6 +824,83 @@ def _run_tombstone(report: dict, class_key: str, *, will_act: bool, dry_run: boo
     click.echo(f"\nDone: tombstoned {n_deleted} catalog entr{'y' if n_deleted == 1 else 'ies'}.")
 
 
+def _run_tombstone_ghost_notes(
+    report: dict, t3, *, will_act: bool, dry_run: bool,
+) -> None:
+    """tombstone-ghost-notes (nexus-1uekf): store_put notes with NO content in T3.
+
+    The target set is ``zero_count_rdr145_exempt`` narrowed TWICE, per row,
+    at execution time: (1) the manifest is still empty (the invariant
+    re-check every tombstone arm runs), and (2) T3 has no chunk under the
+    note's chash OR its title -- ``note_chunks_present``, the same lookup
+    ``nx catalog verify`` and ``--store-put-integrity`` report by. Never
+    off the classification alone, never off a previous census: the
+    2026-08-27 census counted 228 and this arm re-proves each one before
+    it acts.
+
+    A note whose chunks ARE present is a manifest-only gap (RDR-145's
+    actual case; backfillable) and is never tombstoned. A row whose probe
+    raises is unverifiable and is never tombstoned. Tombstones are
+    reversible until ``purge-trash``.
+    """
+    candidates, invariant_skipped = _assert_empty_manifest(report["zero_count_rdr145_exempt"])
+    targets: list[dict] = []
+    with_content: list[dict] = []
+    unverifiable: list[dict] = []
+    for row in candidates:
+        try:
+            present, verified_by = note_chunks_present(
+                t3, row["physical_collection"], row.get("chash", ""), row.get("title") or "",
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed probe is a skip, never a delete
+            unverifiable.append({**row, "reason": str(exc)[:160]})
+            continue
+        (targets if not present else with_content).append({**row, "verified_by": verified_by})
+
+    click.echo(
+        f"\ntombstone-ghost-notes: {len(targets)} candidate(s) "
+        "(empty manifest; no chunk in T3 under chash or title)."
+    )
+    _echo_sample(targets, _CAP_ACTION, _label_zero_count)
+    if with_content:
+        click.echo(
+            f"  skipped {len(with_content)} whose chunks ARE in T3 (manifest-only "
+            "gap — a backfill candidate, never tombstoned)."
+        )
+    if invariant_skipped:
+        click.echo(
+            f"  skipped {len(invariant_skipped)} whose manifest was non-empty "
+            "(classification invariant re-check; never auto-tombstoned)."
+        )
+    if unverifiable:
+        click.echo(
+            f"  skipped {len(unverifiable)} whose T3 probe FAILED (unverifiable — "
+            "never tombstoned): "
+            + ", ".join(r["tumbler"] for r in unverifiable[:5])
+            + (" ..." if len(unverifiable) > 5 else "")
+        )
+    if not will_act:
+        if dry_run:
+            click.echo("\n(dry-run — no catalog writes performed.)")
+        return
+    if not targets:
+        click.echo("\nNothing to tombstone.")
+        return
+
+    from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
+    writer = _cat_cmd._get_catalog_writer()
+    try:
+        tumblers = [Tumbler.parse(row["tumbler"]) for row in targets]
+        n_deleted = len(writer.delete_many(tumblers))
+    finally:
+        writer.close()
+    click.echo(
+        f"\nDone: tombstoned {n_deleted} ghost note(s). Reversible until "
+        "`nx catalog purge-trash --execute`; the title list is in T2 "
+        "nexus/ghost-notes-knowledge__knowledge-2026-08-28-titles."
+    )
+
+
 @click.command("reconcile-stale")
 @click.option(
     "--execute", "action",
@@ -875,6 +959,15 @@ def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_o
                              nexus-rqsh1): re-indexing can never produce a
                              chunk for these, so re-index is never the
                              correct remedy, only tombstone.
+      tombstone-ghost-notes  delete store_put-origin notes (RDR-145 shape:
+                             knowledge__ collection, no file_path, no
+                             source_uri) that have NO chunk in T3 under
+                             their chash OR their title, proved per row at
+                             execution time (nexus-1uekf). Notes whose
+                             chunks are present are manifest-only gaps and
+                             are never tombstoned; rows whose T3 probe
+                             fails are skipped. Reversible until
+                             ``purge-trash``.
 
     \\b
     Examples:
@@ -882,6 +975,7 @@ def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_o
       nx catalog reconcile-stale --json                                  # CI-friendly
       nx catalog reconcile-stale --execute recount --no-dry-run --confirm
       nx catalog reconcile-stale --execute tombstone-vanished --no-dry-run --confirm
+      nx catalog reconcile-stale --execute tombstone-ghost-notes         # dry-run plan
     """
     if json_out and action is not None:
         raise click.ClickException(
@@ -925,6 +1019,8 @@ def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_o
             report, "zero_count_zero_content_by_design",
             will_act=will_act, dry_run=dry_run, verb="tombstone-zero-content",
         )
+    elif action == "tombstone-ghost-notes":
+        _run_tombstone_ghost_notes(report, t3, will_act=will_act, dry_run=dry_run)
 
 
 def register(group: click.Group) -> None:
