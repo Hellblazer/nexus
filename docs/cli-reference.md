@@ -587,7 +587,7 @@ nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku
 |------|-------------|
 | `COLLECTION` (positional) | Must be a `knowledge__*` collection (Phase 1 scope). Other prefixes return a "no extractor config" error |
 | `--all` | Re-extract EVERY document, including ones that already have an aspect row. The pre-7.18.0 default; now opt-in because it re-spends on the whole corpus. Without it, only documents with NO aspect row are processed |
-| `--dry-run` | Report document count + cost estimate (Haiku-class). No API calls, no T2 writes |
+| `--dry-run` | Report document count + cost estimate (Haiku-class). No API calls, no T2 writes. The read-side skip prediction samples the first 25 entries (one vector-service round-trip each) and projects the skip rate onto the rest (7.21.0, nexus-bocft: one round-trip per entry ran a 407-entry cloud dry-run past five minutes with nothing printed); the exact per-entry verdicts come from the real run |
 | `--validate-sample N` | Validate N% of newly-extracted aspects via `operator_verify` against the document text. Disagreements append to `./validation_failures.jsonl`. Pass 0 to skip. Default 5 |
 | `--re-extract` | Re-run only on rows whose `model_version` is strictly less than `--extractor-version` (and rows that are missing entirely) |
 | `--extractor-version v` | Threshold for `--re-extract` (lexicographic STRICT-less-than) |
@@ -623,11 +623,13 @@ nx enrich aspects-list --collection knowledge__delos --json --limit 0
 
 Companion to `aspects-show` at the collection level (preview / audit shape) instead of single-record detail. With `--missing` the verb inverts to gap detection: catalog rows in the collection that do not have a matching aspect row.
 
+**`--missing` uses the gap-fill's own key (7.21.0, nexus-bocft).** A catalog entry is matched to `document_aspects.source_path` by `file_path or title` — the identity the store hook mints and the identity `nx enrich aspects` bills by. Before 7.21.0 the audit keyed on `file_path` alone and so silently dropped every title-only note: on a 416-entry knowledge collection with 10 file-path entries it reported 1 gap where the gap-fill would dispatch 407. The audit also reports **orphaned aspect rows** — rows in T2 that no current catalog entry claims (identities recorded under an earlier registration rule); a large count there is why "437 rows but 407 gaps" can both be true, and those rows never cover a gap. `--json` emits `{collection, entries, aspect_rows, gaps: [{tumbler, title, file_path, identity}], orphaned_aspect_rows: [...]}`.
+
 | Flag | Description |
 |------|-------------|
 | `--collection NAME` (required) | T3 collection to inspect (e.g. `knowledge__delos`) |
 | `--limit N` | Maximum rows to display (default: 20; use 0 for unlimited) |
-| `--missing` | Flip output: list catalog rows with NO aspect record (gap detection after partial enrichment) |
+| `--missing` | Flip output: list catalog rows with NO aspect record, keyed by `file_path or title` (the gap-fill's key), plus any orphaned aspect rows no current entry claims |
 | `--json` | Emit JSON array instead of human-readable form |
 
 ### nx enrich list
