@@ -4,6 +4,46 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.20.0] - 2026-08-28
+
+Plugin version aligned with conexus 7.20.0. This release DOES carry plugin-
+surface changes: three ledger entries that were merged but inert become live as
+the pin advances. Both are guards against a subagent's own output being mistaken
+for evidence about itself.
+
+- **A subagent's failed write is no longer visible only in prose
+  (nexus-piqm5).** A dispatched agent's T1/T2/T3 write could fail for its entire
+  session with the only signal being whether the agent happened to narrate it.
+  On 2026-08-25 two reviewers produced six findings including two critical and
+  had every persistence call fail on a 401; the findings survived solely because
+  both volunteered the outage. The SubagentStop hook now reads the finished
+  agent's own transcript, correlates each storage write to its result, and
+  stamps an `UNLANDEDWRITE` row when one came back an error — blocking once, for
+  agents already inside the owes-report allowlist, in the
+  reported-but-writes-failed case. It reads the TRANSCRIPT rather than the
+  tier_writes ledger deliberately: the ledger read goes through the service, so
+  when persistence is broken that read fails too and "no rows" is
+  indistinguishable from "wrote nothing". The transcript is a local file,
+  readable exactly when the store is not.
+- **A review marker must name the whole reviewer set (nexus-e3mak).** The close
+  gate matched on the literal string `review-completed` plus a bead id, so any
+  entry carrying both was coverage — including one written by a reviewer that is
+  half of the review being gated. On 2026-08-26 a dispatched code-review-expert
+  finished reviewer 1 of 2 and left a handoff note for its sibling; the close
+  would have passed with the substantive-critic never dispatched, on a gate
+  whose own text says the critic is never optional. A marker now counts only
+  when it names both required reviewers, and the remedy the hook prints teaches
+  that form.
+- **The code-review skill stopped teaching the opposite (nexus-e3mak).** It
+  still instructed the reviewer to write the gate's marker — contradicting the
+  three agent definitions that already forbid exactly that. The session that
+  owns the gate writes the marker, once, after every reviewer has run.
+
+Neither guard makes its gate unforgeable, and the release notes say so rather
+than implying otherwise: a reviewer can still name both reviewers, and the
+unlanded-write scan cannot see a store that returns success while landing
+nothing. Both raise the bar on the failure that was actually observed.
+
 ## [7.19.0] - 2026-08-27
 
 Plugin version aligned with conexus 7.19.0. This release DOES carry plugin-

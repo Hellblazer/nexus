@@ -178,17 +178,32 @@ The code-review-expert agent uses hypothesis-driven review:
 
 ## On Completion (Mandatory)
 
-On successful review completion, write a T1 scratch marker so the PreToolUse verification hook can confirm review happened this session:
+**A REVIEWER NEVER WRITES THE `review-completed` MARKER.** This section used to
+instruct exactly that, and it was wrong: the marker is what
+`pre_close_verification_hook.sh` reads to let a bead close, so a reviewer that
+writes one closes the gate it is only half of. On 2026-08-26 a dispatched
+reviewer finished the first of a two-reviewer gate and left a handoff note
+beginning `review-completed bead=nexus-utpuw.23 (RG-C reviewer 1/2: ...)` — it
+was honest, it said "1/2", and the gate could not read that. The close would
+have passed with the substantive-critic never dispatched (nexus-e3mak).
+
+`conexus/agents/code-review-expert.md`, `conexus/agents/substantive-critic.md`
+and `conexus/agents/_shared/CONTEXT_PROTOCOL.md` all carry this prohibition; this
+skill was the last place still teaching the opposite.
+
+What a reviewer does instead:
+
+- report findings in the response text, and
+- persist them to T2 under a descriptive title that does **not** contain the
+  token `review-completed` (the hook matches by substring over T1 tags/content
+  and T2 title/content, so the token in a title is a marker whatever it meant).
+
+**The session that owns the gate writes the marker, once, after EVERY reviewer
+has run**, and it must name the full required set — the hook refuses a marker
+that does not (nexus-e3mak):
 
 ```bash
-nx scratch put "review-completed bead={bead-id} at={ISO-timestamp}" --tags "review,{bead-id}"
+nx scratch put "review-completed: {bead-id} reviewers=code-review-expert,substantive-critic" --tags "review-completed,{bead-id}"
 ```
 
-Replace `{bead-id}` with the bead ID from the relay (e.g., `nexus-4yit`). Replace `{ISO-timestamp}` with the current UTC time in ISO 8601 format (e.g., `2026-04-01T16:00:00Z`).
-
-**No bead context**: If invoked without a bead ID (ad-hoc review), write the marker with `bead=none`:
-```bash
-nx scratch put "review-completed bead=none at={ISO-timestamp}" --tags "review"
-```
-
-The `--tags` flag format is a comma-separated string: `--tags "review,{bead-id}"` (not `--tags review --tags {bead-id}`).
+The `--tags` flag format is a comma-separated string: `--tags "review-completed,{bead-id}"` (not `--tags review-completed --tags {bead-id}`).

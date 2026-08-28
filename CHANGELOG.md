@@ -6,6 +6,81 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.20.0] - 2026-08-28
+
+Five instruments that reported absence when the truth was failure. Each said
+"nothing here" — no MinerU, no search results, no stored row, no existing
+document, no generation layout — while the real answer was that something had
+broken, or that the question had been asked in a place it could not be
+answered. `nx self install` also gains the route that makes the side-by-side
+generation layout reachable from a packaged install at all.
+
+### Added
+
+- **`nx self install` converges a legacy uv-tool box (nexus-gu9zo).** It now
+  distinguishes three sites rather than two: a generation (build the next one),
+  a legacy `uv tool install conexus` layout (CONVERGE it), and a genuine dev
+  checkout (refuse, naming `scripts/reinstall-tool.sh`). Before this, the
+  command refused everywhere that was not already a generation, so it could
+  upgrade a generation box and never create the first one — and it told
+  packaged users to run a repo script they have no copy of. Measured on a fresh
+  `uv tool install conexus` of 7.19.0: uv-owned symlinks, no `gen-*`, no
+  `current`, no `<tools>` directory at all. No packaged install of any age had
+  the layout; every generation box in existence was checkout-driven, and
+  commit 047dd80e7's migration had no caller anywhere in the tree. The converge
+  never uninstalls: the legacy tree is registered as a pseudo-generation and
+  reaped by a later, separate pass once nothing holds it, and extras bridge
+  across from the legacy `uv-receipt.toml` — the only path by which `[local]`
+  survives the move.
+
+### Fixed
+
+- **doctor's MinerU check asked "is it up", not "will it be there"
+  (nexus-far1c).** The check encoded the pre-nexus-1qdb9 model where MinerU was
+  a long-lived server, so a correctly-idle on-demand service read as a hard
+  failure, and its failure text asserted a fallback the module owning that
+  fallback prevents. It now asks whether the server can come up when needed;
+  reachability is informational, and an unprovisioned box still emits no row.
+- **A threshold drop is not an empty collection (nexus-1obui).** `search`'s
+  zero-hit branch returned the nexus-uro6c diagnostic only on the prose path,
+  so every programmatic caller — `nx_tidy`, the plan-runner step contract,
+  anything reading `ids`/`distances` — could not tell "the threshold dropped
+  every candidate" from "the collection is empty on this topic". The
+  `structured=True` payload now carries it additively, and `_tidy_prefetch`
+  names all six failure modes instead of collapsing them to "nothing to
+  consolidate", so a T3 outage mid-tidy is no longer indistinguishable from a
+  clean empty topic.
+- **`memory_put` reads the row back before claiming it stored (nexus-zra63).**
+  A returned row id proves the call returned, not that a row exists: a store
+  that silently no-ops hands back the same shape as one that wrote. The write
+  is now verified by re-reading and comparing, with three outcomes — verified,
+  failed, and `Stored (UNVERIFIED)` when the read path itself is unavailable.
+  That third state is the point: a check that reports success when persistence
+  is unavailable is the same defect one level up.
+- **A curator-side reindex no longer forks a repo-owner document
+  (nexus-tqudo).** `nx index repo` registers under a repo owner while the
+  doc_indexer family resolves a curator owner, and `by_file_path` is
+  owner-scoped — so the curator-side lookup could never see the repo-owner row,
+  structurally, and minted a second catalog Document for one physical file.
+  `--force` was never causally involved. The lookup now checks the file's repo
+  owner before minting.
+- **One rule resolves uv's tool directory (nexus-orhp5).** Four separate rules
+  answered "where is uv's tool dir" and disagreed — a substring test, a
+  `UV_TOOL_DIR`-only reader, two shell-outs to `uv tool dir`, and a hardcoded
+  `~/.local/share/uv/tools/...`. `install_layout.uv_tool_root()` is now the
+  single Python answer, implementing uv's own precedence (`UV_TOOL_DIR` >
+  `$XDG_DATA_HOME/uv/tools` > `~/.local/share/uv/tools`, measured against uv
+  0.8.0), and the substring test became a real containment check. This stopped
+  being cosmetic when the weakest of those rules began routing install
+  convergence.
+
+### Documentation
+
+- `nx self install`'s three sites, the converge route and its live-holder
+  guarantee are documented in `docs/cli-reference.md`; README's upgrade section
+  no longer tells uv-tool users to run `uv tool upgrade conexus` instead, which
+  would have kept them on the legacy layout permanently.
+
 ## [7.19.0] - 2026-08-27
 
 Installs are now side-by-side. An upgrade builds a new generation directory
