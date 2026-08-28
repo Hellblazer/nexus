@@ -216,7 +216,15 @@ def _warn_skip_existing_deprecated() -> None:
     _skip_existing_deprecation_logged = True
     _log.warning(
         "http_vector_skip_existing_deprecated",
-        message=(
+        # NOTE: kwarg is "detail", not "message" — stdlib logging's
+        # LogRecord reserves the "message" attribute name (set internally
+        # by getMessage()); passing message= as an extra kwarg raises
+        # KeyError("Attempt to overwrite 'message' in LogRecord") the
+        # moment structlog is configured to render through stdlib logging
+        # (structlog.stdlib.render_to_log_kwargs), which production
+        # configs do (nexus-z0idx; twin of the fix already applied to
+        # _warn_update_chunks_missing_unreported above).
+        detail=(
             "skip_existing / NX_UPSERT_SKIP_EXISTING=1 is deprecated "
             "(RDR-181): the client-side existence probe it drove is "
             "redundant now that server-side embed-skip is authoritative. "

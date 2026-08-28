@@ -1747,6 +1747,37 @@ class TestSkipExistingDeprecationNotice:
             client.upsert_chunks("col", ["a"], ["ta"], force_re_embed=True)
         assert self._deprecation_events(logs) == []
 
+    def test_fires_without_raising_under_stdlib_routing(self, monkeypatch, caplog):
+        """nexus-z0idx: ``_warn_skip_existing_deprecated`` used to pass
+        ``message=`` — a reserved ``LogRecord`` attribute — which raises
+        ``KeyError("Attempt to overwrite 'message' in LogRecord")`` the
+        moment structlog is configured to render through stdlib logging
+        (``structlog.stdlib.render_to_log_kwargs``), the configuration
+        production uses. Every other test in this class uses
+        ``structlog.testing.capture_logs()``, which bypasses stdlib
+        rendering entirely and never observed the crash — this test
+        routes through stdlib logging instead, the way the bead's
+        analysis says production actually configures it."""
+        import logging
+
+        import structlog
+
+        self._reset_dedup_flag(monkeypatch)
+        client = self._client_with_fake_post(monkeypatch)
+        structlog.configure(
+            processors=[structlog.stdlib.render_to_log_kwargs],
+            wrapper_class=structlog.stdlib.BoundLogger,
+            logger_factory=structlog.stdlib.LoggerFactory(),
+        )
+        try:
+            with caplog.at_level(logging.WARNING, logger="nexus.db.http_vector_client"):
+                client.upsert_chunks("col", ["a"], ["ta"], skip_existing=True)
+        finally:
+            structlog.reset_defaults()
+        assert any(
+            r.msg == "http_vector_skip_existing_deprecated" for r in caplog.records
+        ), f"expected http_vector_skip_existing_deprecated WARNING, got: {[(r.levelname, r.msg) for r in caplog.records]}"
+
 
 class TestForceReEmbed:
     """RDR-181 bead nexus-f0r8p.3: plumbing-only — thread force_re_embed onto

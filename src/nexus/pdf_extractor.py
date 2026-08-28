@@ -131,7 +131,10 @@ def _progress(msg: str) -> None:
     ``print()`` which violated the project's no-print-in-library-code
     rule and made tests that captured stderr brittle.
     """
-    _log.info("pdf_extractor_progress", message=msg.strip())
+    # nexus-z0idx follow-on: NOT "message" (stdlib logging reserves that
+    # name on LogRecord) — "reason" here to match this file's OWN
+    # established kwarg for this semantic (7 pre-existing uses).
+    _log.info("pdf_extractor_progress", reason=msg.strip())
     if _os.environ.get("NEXUS_PDF_PROGRESS_QUIET") != "1":
         print(msg, file=sys.stderr, flush=True)  # noqa: T201 — gated interactive stderr progress; structured event emitted above via _log.info
 

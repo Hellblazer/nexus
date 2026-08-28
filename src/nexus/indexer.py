@@ -757,7 +757,12 @@ def _migrate_legacy_collections(
                 _log.warning(
                     "phase4_migration_candidate_tombstoned",
                     repo=str(repo), ct=ct, candidate=candidate,
-                    message=(
+                    # nexus-z0idx follow-on: NOT "message" (stdlib logging
+                    # reserves that name on LogRecord) — "reason" here to
+                    # match this file's OWN established kwarg for this
+                    # semantic (11 pre-existing uses), not http_vector_
+                    # client.py's "detail" convention.
+                    reason=(
                         "candidate has physical chunk rows but every one "
                         "belongs to a trashed document; not treated as "
                         "migratable (skipping to the next candidate / "
@@ -779,7 +784,7 @@ def _migrate_legacy_collections(
             _log.warning(
                 "phase4_migration_conformant_tombstoned",
                 repo=str(repo), ct=ct, conformant=conformant,
-                message=(
+                reason=(
                     "target collection has physical chunk rows but every "
                     "one belongs to a trashed document; treated as NOT "
                     "present so a fresh write is not silently merged with "
@@ -805,7 +810,7 @@ def _migrate_legacy_collections(
                 rename_collection_data_plane(
                     legacy, conformant, t3_db=t3_db, catalog=w,
                     on_warn=lambda msg: _log.warning(
-                        "phase4_migration_cascade_warn", message=msg,
+                        "phase4_migration_cascade_warn", reason=msg,
                     ),
                 )
                 data_plane_succeeded = True
@@ -4165,7 +4170,7 @@ def _run_index(
             _migrate_writer = make_catalog_writer()
 
         def _emit_migration_msg(msg: str) -> None:
-            _log.info("phase4_migration", message=msg)
+            _log.info("phase4_migration", reason=msg)
             if on_phase is not None:
                 on_phase(msg)
 

@@ -147,7 +147,9 @@ def apply_stranded_notice(server: object) -> bool:
         return False
     if stranded is None:
         return False
-    _log.error("stranded_install_detected", message=stranded.message)
+    # nexus-z0idx follow-on: "detail", not "message" — stdlib logging
+    # reserves "message" on LogRecord.
+    _log.error("stranded_install_detected", detail=stranded.message)
     try:
         low = server._mcp_server  # type: ignore[attr-defined]  # noqa: SLF001 — the writable instructions surface (P5b spike)
         notice = f"nexus STRANDED INSTALL — relay this to the user verbatim: {stranded.message}"
