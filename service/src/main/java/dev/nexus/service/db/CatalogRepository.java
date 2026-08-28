@@ -7281,6 +7281,13 @@ public final class CatalogRepository {
      * "tombstoned-only" (live zero, all-rows nonzero) before deciding
      * whether a collection is safe to hard-delete.
      */
+    // TOMBSTONE-EXEMPT (nexus-8tnz2): counting tombstoned rows IS this method's
+    // contract -- the drop-orphan-collections classifier subtracts the
+    // tombstone-aware collectionDocCounts from this all-rows count to tell
+    // "orphan" (safe to drop) from "tombstoned-only" (restorable; never drop).
+    // Adding DELETED_AT.isNull() here would collapse the two classes and
+    // resurrect the exact hard-delete-of-restorable-data hazard the method
+    // exists to prevent (substantive-critic round 2, T1 1922bd4b).
     public Map<String, Long> collectionDocCountsIncludingDeleted(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
             var rows = ctx.select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, DSL.count().cast(Long.class))

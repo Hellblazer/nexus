@@ -239,6 +239,12 @@ class TombstoneFilterGateTest {
             + "explicit re-register clears deleted_at via the ON CONFLICT DO UPDATE arm, "
             + "deliberately unconditional — updateDocument refuses tombstoned targets outright "
             + "so an incidental field write can never resurrect one"),
+        new ExemptEntry("CatalogRepository.java", "collectionDocCountsIncludingDeleted",
+            "counting tombstoned rows IS the contract (nexus-8tnz2): the drop-orphan-collections "
+            + "classifier subtracts the tombstone-aware collectionDocCounts from this all-rows "
+            + "count to tell orphan (safe to drop) from tombstoned-only (restorable; never drop) "
+            + "-- a deleted_at filter here would collapse the two classes and resurrect the "
+            + "hard-delete-of-restorable-data hazard the method exists to prevent"),
         new ExemptEntry("CatalogRepository.java", "manifestRowCount",
             "A-1 constraint: a correlated SELECT count(*) used ONLY as a SET expression inside "
             + "an already tombstone-guarded UPDATE (the enclosing update's own WHERE carries "
