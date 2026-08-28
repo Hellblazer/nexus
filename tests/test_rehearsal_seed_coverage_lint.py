@@ -376,6 +376,17 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # catalog document (tumbler 1.1.204); effect-asserted (doc_id is
         # stamped to 1.1.204 post-hop, FORCE restored on both tables).
         ("aspects-004-1", "nexus-ubnwk"),
+        # nexus-v3w9n (Sam decision, tumbler-grammar data remediation):
+        # catalog-034-0's own NO FORCE/FORCE toggle wraps an UPDATE
+        # tombstoning every live catalog_documents row with fewer than 3
+        # non-empty dot-separated tumbler segments (the 2026-08-28 census's
+        # two phantom registrations, "1.1"/"1.2"). Seeded as a fresh
+        # 2-segment ghost tumbler ("1.5", the DELETE/tombstone arm) plus a
+        # conforming 3-segment control row ("1.1.205", the KEEP arm);
+        # effect-asserted (the ghost row is tombstoned, the control row
+        # survives untouched, FORCE restored on catalog_documents via the
+        # existing generic check aspects-004-1 already exercises).
+        ("catalog-034-0", "nexus-v3w9n"),
     }
 )
 

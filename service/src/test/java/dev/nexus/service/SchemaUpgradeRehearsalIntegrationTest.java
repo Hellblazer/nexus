@@ -349,6 +349,11 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("old tag %s must PREDATE aspects-004's doc_id backfill — otherwise "
                             + "seeding a legacy NULL-doc_id aspects row exercises nothing", OLD_TAG)
                         .isFalse();
+                    assertThat(changesetApplied(conn, "catalog-034-0", "nexus-v3w9n"))
+                        .as("old tag %s must PREDATE catalog-034's tumbler-grammar data "
+                            + "remediation — otherwise seeding a legacy sub-3-segment "
+                            + "tumbler row exercises nothing", OLD_TAG)
+                        .isFalse();
                 }
 
                 // ── SEED, as superuser (implicit BYPASSRLS): models rows written
@@ -386,6 +391,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   telemetry-006-1 nexus-tk070.p6b
                 //   telemetry-006-2 nexus-tk070.p6b
                 //   aspects-004-1 nexus-ubnwk
+                //   catalog-034-0 nexus-v3w9n
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -474,6 +480,26 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         "file:///seed/ubnwk-aspect.md", 1);
                     seedAspectRow(su, "t1", "code__x", "seed/ubnwk-aspect.md",
                         "file:///seed/ubnwk-aspect.md");
+
+                    // catalog-034-0 (nexus-v3w9n): the segment-count tumbler-grammar
+                    // data remediation's own input shape — the real 2026-08-28
+                    // production census found exactly two live catalog_documents
+                    // rows with a 2-segment tumbler ("1.1"/"1.2"), phantom
+                    // registrations under a nonexistent 1-segment owner. "1.5"
+                    // mirrors that shape (2 dot-separated segments) -- the DELETE
+                    // (tombstone) arm. A conforming 3-segment control row
+                    // ("1.1.205", next free in the 20x family this leg already
+                    // uses for catalog-016-0/aspects-004-1's dedup/aspect
+                    // fixtures) proves the predicate is selective, not a blanket
+                    // tombstone -- the KEEP arm. RLS toggle-wrapped: catalog_documents
+                    // is FORCE ROW LEVEL SECURITY and the Liquibase role is not
+                    // BYPASSRLS, the same silent-no-op hazard as catalog-014-0/
+                    // catalog-016-0/catalog-025-0/aspects-004-1 -- its FORCE-restored
+                    // state is proven by the existing generic catalog_documents check
+                    // below (aspects-004-1's own toggle-wrap block), no duplicate
+                    // FORCE-restored assertion needed.
+                    seedDocument(su, "t1", "1.5", "ghost 2-segment tumbler", "code__x");
+                    seedDocument(su, "t1", "1.1.205", "conforming control doc", "code__x");
 
                     // vectors-004-1 / taxonomy-007-1 (nexus-97gii seed-coverage
                     // follow-up, RDR-191 Phase 4 unify): straddling per-dim
@@ -1523,6 +1549,30 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("staging.frecency must carry NO CHECK constraint -- typeless "
                             + "landing by design, matching legacy-001-3's identical exemption")
                         .isEqualTo(0);
+
+                    // catalog-034-0 leg (nexus-v3w9n, tumbler-grammar data
+                    // remediation, seed-coverage lint follow-up): the seeded
+                    // 2-segment ghost tumbler must be TOMBSTONED (deleted_at set),
+                    // never physically deleted, under FORCE-RLS -- the same
+                    // silent-no-op hazard as catalog-014-0/catalog-016-0/
+                    // catalog-025-0/aspects-004-1 (catalog_documents is FORCE ROW
+                    // LEVEL SECURITY and the Liquibase role is not BYPASSRLS). The
+                    // conforming 3-segment control row must survive UNTOUCHED,
+                    // proving the predicate is selective, not a blanket tombstone.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.catalog_documents "
+                        + "WHERE tenant_id = 't1' AND tumbler = '1.5' "
+                        + "AND deleted_at IS NOT NULL"))
+                        .as("catalog-034-0 must tombstone the seeded 2-segment ghost "
+                            + "tumbler under FORCE-RLS, not silently no-op")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.catalog_documents "
+                        + "WHERE tenant_id = 't1' AND tumbler = '1.1.205' "
+                        + "AND deleted_at IS NULL"))
+                        .as("the conforming 3-segment control row must survive "
+                            + "catalog-034-0 untouched -- the KEEP arm")
+                        .isEqualTo(1);
                 }
             }
         } finally {
