@@ -89,6 +89,15 @@ BIN_DIR_ENV = "NX_BIN_DIR"
 #: pass can tell a generation from anything else that lands in the root.
 GENERATION_PREFIX = "gen-"
 
+#: The one pseudo-generation: ``<tools>/gen-legacy-uv-tool``, the GC-ledger
+#: pointer ``legacy.sh`` writes for a legacy ``uv tool install conexus`` tree.
+#: Permanently receipt-less by design, so :func:`list_generations` never
+#: returns it -- which is why anything that needs the legacy tree in its
+#: population must ask for it by this name (``install_census``). Pinned
+#: against the shell half's ``NX_LEGACY_GENERATION_NAME`` by
+#: ``tests/test_install_layout_legacy_name_pin.py``.
+LEGACY_GENERATION_NAME = "legacy-uv-tool"
+
 #: Names that live in a venv's ``bin/`` but are NEVER shimmed into the shared
 #: bin dir. The Python twin of ``NX_NEVER_SHIM`` in ``_install/shims.sh``,
 #: pinned by ``tests/test_install_layout_twins_agree.py``.
@@ -300,6 +309,19 @@ def _root(tools: Path | None) -> Path:
 def generation_dir(stamp: str, *, tools: Path | None = None) -> Path:
     """``<tools>/gen-<stamp>``, the directory one install builds and owns."""
     return _root(tools) / f"{GENERATION_PREFIX}{_require_component('generation stamp', stamp)}"
+
+
+def legacy_generation_link(*, tools: Path | None = None) -> Path:
+    """Where the legacy uv tree's ledger pointer lives -- whether or not it exists.
+
+    A symlink at this path, targeting the uv venv, means the tree is REGISTERED:
+    ``gc.sh`` will reap it once nothing runs from it. No symlink means a
+    hybrid box (generation layout beside an unregistered uv tree) that will
+    never converge on its own -- the state every checkout-driven box was in
+    before nexus-hibpr, because only ``migrate_legacy.sh`` registered and the
+    checkout path never ran it.
+    """
+    return _root(tools) / f"{GENERATION_PREFIX}{LEGACY_GENERATION_NAME}"
 
 
 def current_link(*, tools: Path | None = None) -> Path:

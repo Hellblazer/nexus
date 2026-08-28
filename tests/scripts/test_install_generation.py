@@ -246,8 +246,8 @@ def test_a_failed_install_leaves_no_generation(env, tmp_path) -> None:
          "conexus[local]==7.18.0", "registry"),
         (("--source", "conexus", "--version", "7.18.0", "--extras", "local,dev"),
          "conexus[dev,local]==7.18.0", "registry"),
-        (("--source", "."), ".", "directory"),
-        (("--source", ".", "--extras", "local"), ".[local]", "directory"),
+        (("--source", "."), "{cwd}", "directory"),
+        (("--source", ".", "--extras", "local"), "{cwd}[local]", "directory"),
     ],
 )
 def test_spec_reaches_uv_with_extras_before_the_pin(
@@ -255,7 +255,14 @@ def test_spec_reaches_uv_with_extras_before_the_pin(
 ) -> None:
     """``conexus==7.18.0[local]`` is not a valid requirement. Asserted on uv's
     RECORDED ARGV rather than on the receipt, so this tests what uv was handed
-    rather than the builder agreeing with itself."""
+    rather than the builder agreeing with itself.
+
+    A directory source reaches uv ABSOLUTE (nexus-hibpr): ``.`` is resolved
+    against this process's cwd before the spec is built, so the receipt can
+    never say ``"."`` and a later ``nx self install`` from another directory
+    rebuilds from the right checkout. ``{cwd}`` in the table stands for that
+    resolved directory."""
+    expected_spec = expected_spec.format(cwd=Path.cwd().resolve())
     tools, uv_bin, argv_log = env
     result = _run(tools, *args, uv_bin=uv_bin)
     assert result.returncode == 0, result.stderr

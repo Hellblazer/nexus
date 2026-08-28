@@ -48,6 +48,21 @@ MARKER_RX = re.compile("|".join(MARKERS), re.IGNORECASE)
 DATE_RX = re.compile(r"Deferred: (\d{4}-\d{2}-\d{2})")
 ID_RX = re.compile(r"(nexus-[a-z0-9.]+)")
 
+# A "Deferral-sweep verdict" note suppresses marker findings for its bead --
+# but only for VERDICT_TTL_DAYS from the date the note carries. A judgment
+# recorded once and honoured forever re-creates, one level up, the exact
+# failure this sweep exists for (a condition judged once and never
+# re-examined; nexus-arsjx). An undated verdict cannot age, so it does not
+# suppress at all.
+VERDICT_RX = re.compile(r"Deferral-sweep verdict[^\n]{0,40}?(\d{4}-\d{2}-\d{2})")
+VERDICT_TTL_DAYS = 90
+
+# The open-bead scan reads one page. A page that comes back FULL may have
+# been truncated, and a truncated scan that exits 0 is the vacuous-gate
+# shape (nexus-moht0) inside the script written to prevent it. Sized well
+# above the population (415 on 2026-08-27) and asserted below.
+OPEN_SCAN_LIMIT = 5000
+
 
 def _bd(*args: str) -> str:
     r = subprocess.run(["bd", *args], capture_output=True, text=True, timeout=120)
@@ -82,14 +97,29 @@ def main() -> int:
         # verdict; expired-date findings are NEVER suppressed (a date is a
         # promise, not a judgment).
         if "Deferral-sweep verdict" in body:
-            continue
+            m_verdict = VERDICT_RX.search(body)
+            verdict_date = dt.date.fromisoformat(m_verdict.group(1)) if m_verdict else None
+            if verdict_date and (today - verdict_date).days <= VERDICT_TTL_DAYS:
+                continue
+            findings.append(
+                f"{bid}: Deferral-sweep verdict is "
+                + (f"older than {VERDICT_TTL_DAYS} days ({verdict_date})" if verdict_date else "undated")
+                + " — re-verify the block and re-record the verdict with today's date"
+            )
         for m in MARKER_RX.finditer(body):
             findings.append(
                 f"{bid}: deferred bead carries contradiction marker {m.group(0)!r} — "
                 "verify the block still holds"
             )
 
-    open_listing = _bd("list", "--status=open", "--limit=500")
+    open_listing = _bd("list", "--status=open", f"--limit={OPEN_SCAN_LIMIT}")
+    open_rows = [line for line in open_listing.splitlines() if ID_RX.search(line)]
+    if len(open_rows) >= OPEN_SCAN_LIMIT:
+        print(
+            f"SWEEP UNRUNNABLE: the open-bead listing filled --limit={OPEN_SCAN_LIMIT} "
+            "— the WORLD-BLOCKED scan would silently under-scan; raise OPEN_SCAN_LIMIT"
+        )
+        return 2
     for line in open_listing.splitlines():
         if re.search(r"WORLD-BLOCKED", line, re.IGNORECASE):
             ids = ID_RX.findall(line)

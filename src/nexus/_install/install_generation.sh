@@ -80,8 +80,24 @@ SOURCE_KIND="$(nx_source_kind "$SOURCE")"
 
 # Shape decides the KIND; existence is still checked so a mistyped path fails
 # here with a clear message rather than inside uv.
-if [ "$SOURCE_KIND" = "directory" ] && [ ! -e "$SOURCE" ]; then
-    _die "directory source does not exist: $SOURCE"
+#
+# A directory source is then made ABSOLUTE before anything records it. The
+# receipt this script writes is read back by `nx self install` from whatever
+# cwd THAT process has -- the SessionStart lockstep hook is one such caller --
+# so a receipt saying `"source": "."` describes the reader's directory, not
+# the checkout the generation was built from. Measured 2026-08-27
+# (nexus-hibpr): the live receipt read `"source": "."`, `"spec": "."`, and
+# `nx self install --dry-run` run from $HOME re-emitted `--source .`. SPEC is
+# derived from SOURCE below, so absolutizing at this single origin fixes both
+# fields. A file source (a wheel path) resolves through its parent.
+if [ "$SOURCE_KIND" = "directory" ]; then
+    [ -e "$SOURCE" ] || _die "directory source does not exist: $SOURCE"
+    if [ -d "$SOURCE" ]; then
+        SOURCE="$(cd "$SOURCE" && pwd -P)" || _die "cannot resolve directory source: $SOURCE"
+    else
+        _src_dir="$(cd "$(dirname "$SOURCE")" && pwd -P)" || _die "cannot resolve the parent of source: $SOURCE"
+        SOURCE="$_src_dir/$(basename "$SOURCE")"
+    fi
 fi
 
 SPEC="$(nx_build_spec "$SOURCE" "$EXTRAS" "$VERSION")" || exit $?

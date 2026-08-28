@@ -334,7 +334,7 @@ def _check_generation_layout() -> list[HealthResult]:
     results.extend(_check_shims_match_template(current, bin_dir, tools))
     results.extend(_check_base_interpreters(current, generations))
     results.extend(_check_orphan_uv_install())
-    results.extend(_check_generation_holders(current, generations))
+    results.extend(_check_generation_holders(current, generations, tools=tools))
     return results
 
 
@@ -461,21 +461,46 @@ def _check_orphan_uv_install() -> list[HealthResult]:
             label="Orphan uv install", ok=True,
             detail="no uv-managed conexus alongside the generation layout",
         )]
+    # REGISTERED OR NOT is the fact that decides whether this box converges.
+    # A registered tree is in gc.sh's ledger and is reaped by the next
+    # `nx self install` once nothing runs from it. An unregistered one is
+    # never reaped by anything -- the state every checkout-driven box sat in
+    # until nexus-hibpr -- and the row used to render both identically.
+    from nexus.install_layout import legacy_generation_link  # noqa: PLC0415 — deferred import
+
+    link = legacy_generation_link()
+    registered = link.is_symlink() and link.resolve() == legacy.resolve()
+    if registered:
+        return [HealthResult(
+            label="Orphan uv install", ok=False, warn=True,
+            detail=(
+                f"a uv-managed conexus at {legacy} is registered for reap and "
+                "goes away at the next `nx self install` once nothing runs "
+                "from it — until then uv still holds a valid receipt for it, "
+                "so `uv tool upgrade conexus` would rebuild it and re-symlink "
+                "over the nexus shims"
+            ),
+            fix_suggestions=[
+                "nx self install    # reaps it once its holders are gone",
+            ],
+        )]
     return [HealthResult(
         label="Orphan uv install", ok=False, warn=True,
         detail=(
-            f"a uv-managed conexus is still present at {legacy} — uv holds a "
-            "valid receipt for it, so `uv tool upgrade conexus` will rebuild it "
-            "and re-symlink over the nexus shims"
+            f"a uv-managed conexus at {legacy} is NOT in the generation ledger — "
+            "nothing will ever reap it, and `uv tool upgrade conexus` would "
+            "rebuild it and re-symlink over the nexus shims"
         ),
         fix_suggestions=[
-            "scripts/reinstall-tool.sh    # rewrites the shims if uv has taken them",
-            f"uv tool uninstall conexus    # once nothing is running from {legacy}",
+            "nx self install    # registers it for reap, then reaps once its holders are gone",
+            "scripts/reinstall-tool.sh    # same, from a checkout",
         ],
     )]
 
 
-def _check_generation_holders(current, generations) -> list[HealthResult]:
+def _check_generation_holders(
+    current, generations, *, tools: Path | None = None,
+) -> list[HealthResult]:
     """Who is still running from an older generation. INFORMATIONAL.
 
     Holders are a fact, not a fault: they keep running from their own tree and
@@ -496,6 +521,20 @@ def _check_generation_holders(current, generations) -> list[HealthResult]:
             continue
         if pids:
             held.append(f"{gen.name}: {len(pids)} ({', '.join(str(p) for p in pids[:4])})")
+    # The legacy uv tree is an "older generation" too -- the oldest one there
+    # is -- and it is receipt-less, so it is never in *generations*. Ask the
+    # census for it by structure (nexus-k52g0: 9 processes on the 7.19.0 uv
+    # tree rendered as "nothing is still bound to an older generation").
+    for legacy in install_census.legacy_tree_candidates(tools=tools):
+        try:
+            pids = install_census.generation_holder_pids(legacy, snapshot=snapshot)
+        except Exception:  # noqa: BLE001 — a census failure is not a layout fault
+            continue
+        if pids:
+            held.append(
+                f"legacy uv tree {legacy}: {len(pids)} "
+                f"({', '.join(str(p) for p in pids[:4])})"
+            )
     if not held:
         return [HealthResult(
             label="Holders", ok=True,

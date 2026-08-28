@@ -172,7 +172,43 @@ def perform_self_install(
         f'nx_gc_generations --keep {int(keep)} --self "{host}" "{tools}"',
         check=False,
     )
+
+    # A HYBRID BOX CONVERGES HERE, NOT IN THE elif ABOVE. A generation layout
+    # beside a legacy `uv tool install` tree takes the generation branch every
+    # time, so `_converge_legacy_install` -- the only thing that ever put the
+    # legacy tree in gc.sh's ledger -- was unreachable on exactly the boxes
+    # that have one. Every checkout-driven generation box is that box
+    # (nexus-hibpr; measured 2026-08-27 with 8 processes still bound to an
+    # unregistered 7.19.0 tree while doctor reported nothing older than
+    # current). Registration is the whole convergence: the NEXT install's reap
+    # removes it the moment nothing runs from it.
+    #
+    # AFTER the reap above, deliberately. .7's two-pass rule -- register on
+    # one pass, reap on a later, separate one -- is what keeps "zero holders
+    # right now" from being read as "safe to delete right now" (the accepted
+    # stray-`uv tool upgrade` window). Registering first would let this very
+    # reap delete the tree in the same process that just discovered it; the
+    # test for this ordering reaped a free tree exactly that way.
+    _register_legacy_tree_if_present(install_dir, tools)
     return generation
+
+
+def _register_legacy_tree_if_present(install_dir: Path, tools: Path) -> Path | None:
+    """Put an existing legacy uv tree in the GC ledger. Returns it, or None.
+
+    Idempotent: ``nx_register_legacy_generation`` is a no-op when the pointer
+    already names this tree. Resolves uv's tool root through
+    ``install_layout.uv_conexus_venv`` (UV_TOOL_DIR > XDG > default,
+    nexus-orhp5) rather than shelling ``uv tool dir``, so it answers the same
+    way ``nx doctor`` does and needs no uv on PATH.
+    """
+    from nexus.install_layout import uv_conexus_venv  # noqa: PLC0415 — deferred import
+
+    legacy = uv_conexus_venv()
+    if not (legacy / "bin").is_dir():
+        return None
+    _sh(install_dir, f'nx_register_legacy_generation "{legacy}" "{tools}"')
+    return legacy
 
 
 def _running_from_legacy_tool_install() -> bool:
@@ -275,7 +311,7 @@ def _sh(install_dir: Path, snippet: str, *, check: bool = True) -> None:
         ["bash", "-c",
          f'. "{install_dir}/layout.sh"; . "{install_dir}/flip.sh"; '
          f'. "{install_dir}/shims.sh"; . "{install_dir}/census.sh"; '
-         f'. "{install_dir}/gc.sh"; {snippet}'],
+         f'. "{install_dir}/gc.sh"; . "{install_dir}/legacy.sh"; {snippet}'],
         capture_output=True, text=True, check=False,
     )
     if check and r.returncode != 0:

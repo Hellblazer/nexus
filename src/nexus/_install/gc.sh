@@ -195,6 +195,13 @@ $_nx_gc_self"
                 fi
                 rm -rf -- "$_nx_gc_real"
                 rm -f -- "$_nx_gc_dir"
+                # uv's own registry still names this tool, and a dangling
+                # entry is what lets a stray `uv tool upgrade conexus`
+                # rebuild the tree and retake the shims (.7's accepted-risk
+                # window, made permanent). Not run from here: uv's uninstall
+                # also removes the executables its receipt names, which are
+                # now nexus-owned shims at those very paths. Say it instead.
+                echo "nexus: reaped the legacy uv tree $_nx_gc_real; run 'uv tool uninstall ${_nx_gc_real##*/}' to clear uv's now-dangling registry entry (nothing runs from it any more)" >&2
             else
                 # -rf on the directory itself, never through a pointer: the
                 # pointers live in this same directory, and following one
