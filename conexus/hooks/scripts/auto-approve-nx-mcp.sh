@@ -54,14 +54,22 @@ case "$TOOL_NAME" in
   mcp__plugin_conexus_nexus-catalog__resolve|\
   mcp__plugin_conexus_nexus-catalog__stats|\
   mcp__plugin_conexus_sequential-thinking__sequentialthinking)
-    python3 -c "
-import json
-print(json.dumps({
-    'hookSpecificOutput': {
-        'hookEventName': 'PermissionRequest',
-        'decision': {'behavior': 'allow'}
-    }
-}))
+    # Event-aware output. PermissionRequest fires only when a PROMPT would be
+    # shown; under defaultMode:auto the classifier decides first and never
+    # consults it (cc-validation scenario 16, measured), so the same allowlist
+    # is also registered on PreToolUse, where permissionDecision=allow lands
+    # BEFORE the classifier. Same script, one allowlist, two events.
+    echo "$INPUT" | python3 -c "
+import json, sys
+event = json.loads(sys.stdin.read()).get('hook_event_name', 'PermissionRequest')
+if event == 'PreToolUse':
+    out = {'hookEventName': 'PreToolUse',
+           'permissionDecision': 'allow',
+           'permissionDecisionReason': 'plugin allowlist (auto-approve)'}
+else:
+    out = {'hookEventName': 'PermissionRequest',
+           'decision': {'behavior': 'allow'}}
+print(json.dumps({'hookSpecificOutput': out}))
 "
     ;;
 esac

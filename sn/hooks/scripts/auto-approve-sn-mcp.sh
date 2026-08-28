@@ -33,14 +33,22 @@ case "$TOOL_NAME" in
   mcp__plugin_sn_serena__write_memory|\
   mcp__plugin_sn_context7__resolve-library-id|\
   mcp__plugin_sn_context7__query-docs)
-    python3 -c "
-import json
-print(json.dumps({
-    'hookSpecificOutput': {
-        'hookEventName': 'PermissionRequest',
-        'decision': {'behavior': 'allow'}
-    }
-}))
+    # Event-aware output. PermissionRequest fires only when a PROMPT would be
+    # shown; under defaultMode:auto the classifier decides first and never
+    # consults it (cc-validation scenario 16, measured), so the same allowlist
+    # is also registered on PreToolUse, where permissionDecision=allow lands
+    # BEFORE the classifier. Same script, one allowlist, two events.
+    echo "$INPUT" | python3 -c "
+import json, sys
+event = json.loads(sys.stdin.read()).get('hook_event_name', 'PermissionRequest')
+if event == 'PreToolUse':
+    out = {'hookEventName': 'PreToolUse',
+           'permissionDecision': 'allow',
+           'permissionDecisionReason': 'plugin allowlist (auto-approve)'}
+else:
+    out = {'hookEventName': 'PermissionRequest',
+           'decision': {'behavior': 'allow'}}
+print(json.dumps({'hookSpecificOutput': out}))
 "
     ;;
 esac

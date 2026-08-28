@@ -150,6 +150,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "mcp__plugin_conexus_.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PLUGIN_ROOT/hooks/scripts/auto-approve-nx-mcp.sh",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PostToolUse": [
