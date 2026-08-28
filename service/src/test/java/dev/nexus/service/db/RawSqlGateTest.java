@@ -343,7 +343,17 @@ class RawSqlGateTest {
             // SOURCE — the fingerprint is a source-level construct, not a runtime count.
             "preflightChashConstraints", Map.of(
                 ".execute(\"ALTER TABLE nexus.\" + table + \" NO FORCE ROW LEVEL SECURITY\")", 1,
-                ".execute(\"ALTER TABLE nexus.\" + table + \" FORCE ROW LEVEL SECURITY\")", 1))),
+                ".execute(\"ALTER TABLE nexus.\" + table + \" FORCE ROW LEVEL SECURITY\")", 1),
+            // SANCTIONED RAW (nexus-rph82): SET TIME ZONE is PostgreSQL session
+            // syntax with no jOOQ typed-DSL form. Pins the migration connection's
+            // session zone to UTC so databasechangelog.dateexecuted (stamped via
+            // the server's now() rendered in the SESSION zone) is not JVM-local
+            // against a GMT database — pgjdbc negotiates the session zone from
+            // the JVM default at CONNECT time, so a pool opened before
+            // pinJvmTimeZoneToUtc() still carries the old zone; this pins the
+            // session directly. One statement, executed once per migrate() call.
+            "migrate", Map.of(
+                ".execute(\"SET TIME ZONE 'UTC'\")", 1))),
         Map.entry("TaxonomyRepository.java", Map.of(
             // SANCTIONED RAW (rdr155-p4b F-C): setval / pg_get_serial_sequence /
             // sequence last_value are sequence-state functions with no generated
