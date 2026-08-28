@@ -7641,37 +7641,55 @@ public final class CatalogRepository {
             for (int start = 0; start < rows.size(); start += chunkSize) {
                 var batch = rows.subList(start, Math.min(start + chunkSize, rows.size()));
                 requireImportLinkEndpointsExist(ctx, tenant, batch);
-                var insert = ctx.insertInto(CATALOG_LINKS,
-                        CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
-                        CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META);
-                for (var lnk : batch) {
-                    String metaJson = jsonOrNull(lnk.get("metadata"));
-                    insert = insert.values(DSL.val(tenant),
-                            DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
-                            DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
-                            DSL.val(nne(s(lnk,"created_by"))), DSL.val(tsOrNull(s(lnk,"created_at"))),
-                            jsonbVal(metaJson));
-                }
-                try {
-                    insert.onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
-                          .doNothing()
-                          .execute();
-                } catch (org.jooq.exception.DataAccessException e) {
-                    if (!SqlConstraints.violatesAnyFk(e,
-                            "fk_catalog_links_from_document", "fk_catalog_links_to_document")) {
-                        throw e;
-                    }
-                    String constraint = SqlConstraints.violated(e);
-                    List<String> missing = "fk_catalog_links_from_document".equals(constraint)
-                        ? List.of("from_tumbler") : List.of("to_tumbler");
-                    throw new DanglingEndpointException(missing,
-                        "dangling link endpoint in import batch (endpoint removed between "
-                        + "precheck and insert): " + String.join(", ", missing)
-                        + " does not resolve to any catalog document.");
-                }
+                insertImportLinkChunkUnchecked(ctx, tenant, batch);
             }
             return rows.size();
         });
+    }
+
+
+    /**
+     * The INSERT half of {@link #importLinksBatch}: one multi-row INSERT for
+     * {@code batch}, with the raw SQLSTATE 23503 backstop that covers the
+     * precheck-vs-insert TOCTOU window (a document hard-deleted between
+     * {@link #requireImportLinkEndpointsExist}'s SELECT and this INSERT).
+     *
+     * <p><b>Unchecked</b>: it does NOT run the precheck. Public only so the
+     * nexus-ndwzk test can drive the backstop directly — provoking the real
+     * {@code fk_catalog_links_*_document} violation with the precheck bypassed
+     * is the only deterministic way to prove the catch maps it to the same
+     * {@link DanglingEndpointException} wire shape. Production callers go
+     * through {@link #importLinksBatch}.
+     */
+    public void insertImportLinkChunkUnchecked(DSLContext ctx, String tenant, List<Map<String, Object>> batch) {
+        var insert = ctx.insertInto(CATALOG_LINKS,
+                CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
+                CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META);
+        for (var lnk : batch) {
+            String metaJson = jsonOrNull(lnk.get("metadata"));
+            insert = insert.values(DSL.val(tenant),
+                    DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
+                    DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
+                    DSL.val(nne(s(lnk,"created_by"))), DSL.val(tsOrNull(s(lnk,"created_at"))),
+                    jsonbVal(metaJson));
+        }
+        try {
+            insert.onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
+                  .doNothing()
+                  .execute();
+        } catch (org.jooq.exception.DataAccessException e) {
+            if (!SqlConstraints.violatesAnyFk(e,
+                    "fk_catalog_links_from_document", "fk_catalog_links_to_document")) {
+                throw e;
+            }
+            String constraint = SqlConstraints.violated(e);
+            List<String> missing = "fk_catalog_links_from_document".equals(constraint)
+                ? List.of("from_tumbler") : List.of("to_tumbler");
+            throw new DanglingEndpointException(missing,
+                "dangling link endpoint in import batch (endpoint removed between "
+                + "precheck and insert): " + String.join(", ", missing)
+                + " does not resolve to any catalog document.");
+        }
     }
 
     /**
@@ -7684,6 +7702,11 @@ public final class CatalogRepository {
      * identity, without ever provoking the real constraint violation (see
      * {@link #importLinksBatch}'s javadoc for why a post-hoc diagnostic
      * query is not safe here).
+     *
+     * <p>nexus-ndwzk: parsing the PG 23503 DETAIL text to name the missing
+     * endpoint from the backstop catch was considered and rejected — the DETAIL
+     * wording is locale- and version-dependent, so the backstop names only the
+     * SIDE (from/to) and this precheck stays the path that names the identity.
      */
     private static void requireImportLinkEndpointsExist(DSLContext ctx, String tenant, List<Map<String, Object>> batch) {
         var referenced = new LinkedHashSet<String>();
