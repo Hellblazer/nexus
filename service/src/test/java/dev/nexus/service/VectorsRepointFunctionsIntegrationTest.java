@@ -423,7 +423,7 @@ class VectorsRepointFunctionsIntegrationTest {
         }
     }
 
-    // ── Test 2b: the nine combined-query functions still number NINE ────────
+    // ── Test 2b: the combined-query functions now number TWELVE ─────────────
     //
     // RDR-191 Phase 6 (nexus-o8dil.33) mechanical-exclusion pin, Decision
     // item 4 / F7 risk 4: "the 9 combined-query stored functions do not
@@ -434,10 +434,15 @@ class VectorsRepointFunctionsIntegrationTest {
     // pattern directly, on the SAME post-catalog-030 HEAD schema (Class B/
     // manifest_orphans/manifest_verify_all/manifest_backfill are dropped by
     // that changeset; these nine are explicitly NOT).
+    //
+    // RDR-156 Decision 5 (bead nexus-ubnwk) added a FOURTH combined-query
+    // shape, search_aspect_scoped_<dim> (vectors-008-aspect-scoped.xml) — the
+    // census grows from 9 to 12 (4 verbs x 3 dims), not a re-baseline: the
+    // original nine are unchanged, three new facades join them.
 
     @Test
-    void combinedQueryFunctions_stillNumberNine() throws Exception {
-        Rig rig = newRig("ninecount");
+    void combinedQueryFunctions_stillNumberTwelve() throws Exception {
+        Rig rig = newRig("twelvecount");
         try {
             SchemaMigrator.migrate(rig.adminDs());
             applyFullBatch(rig.adminDs());
@@ -449,25 +454,29 @@ class VectorsRepointFunctionsIntegrationTest {
                             + "WHERE n.nspname = 'nexus' AND ("
                             + "p.proname LIKE 'search_metadata_scoped_%' "
                             + "OR p.proname LIKE 'search_topic_scoped_%' "
-                            + "OR p.proname LIKE 'search_graph_hop_%') "
+                            + "OR p.proname LIKE 'search_graph_hop_%' "
+                            + "OR p.proname LIKE 'search_aspect_scoped_%') "
                             + "ORDER BY p.proname")) {
                     var names = new java.util.ArrayList<String>();
                     while (rs.next()) names.add(rs.getString("proname"));
                     assertThat(names)
-                        .as("the 9 combined-query facades (3 verbs x 3 dims) must "
-                            + "still number 9 post-RDR-191-Phase-6 — the dim "
-                            + "COUNT does not collapse (F7 risk 4), only "
+                        .as("the 12 combined-query facades (4 verbs x 3 dims) must "
+                            + "number 12 post-RDR-156-Decision-5 — the original 9 "
+                            + "(F7 risk 4) plus the 3 new search_aspect_scoped_<dim> "
+                            + "facades (nexus-ubnwk); only "
                             + "manifest_orphans/manifest_verify_all/"
                             + "manifest_backfill are dropped by catalog-030: %s",
                             names)
-                        .hasSize(9)
+                        .hasSize(12)
                         .containsExactlyInAnyOrder(
                             "search_metadata_scoped_384", "search_metadata_scoped_768",
                             "search_metadata_scoped_1024",
                             "search_topic_scoped_384", "search_topic_scoped_768",
                             "search_topic_scoped_1024",
                             "search_graph_hop_384", "search_graph_hop_768",
-                            "search_graph_hop_1024");
+                            "search_graph_hop_1024",
+                            "search_aspect_scoped_384", "search_aspect_scoped_768",
+                            "search_aspect_scoped_1024");
                 }
             }
         } finally {

@@ -36,6 +36,7 @@ import java.util.Map;
  *   POST /v1/vectors/search-metadata-scoped  combined catalog-metadata-scoped query — RDR-156 P4
  *   POST /v1/vectors/search-topic-scoped     combined topic-scoped query (chunk-level) — RDR-156 P4
  *   POST /v1/vectors/search-graph-hop        combined graph-hop query (catalog BFS + rank) — RDR-156 P4
+ *   POST /v1/vectors/search-aspect-scoped    combined aspect-filtered query (vector rank + document_aspects predicate) — RDR-156 D5
  *   POST /v1/vectors/store-put       single-chunk put (MCP store_put path)
  *   POST /v1/vectors/get             get chunks by metadata where-filter (incremental-sync staleness check)
  *   POST /v1/vectors/get-all-metadata  ids+metadata for an ENTIRE collection in one round trip (nexus-duoak)
@@ -165,6 +166,7 @@ public final class VectorHandler implements HttpHandler {
                 case "/search-metadata-scoped" -> handleSearchMetadataScoped(exchange, method);  // RDR-156 P4
                 case "/search-topic-scoped"    -> handleSearchTopicScoped(exchange, method);     // RDR-156 P4
                 case "/search-graph-hop"       -> handleSearchGraphHop(exchange, method);        // RDR-156 P4 (houg9)
+                case "/search-aspect-scoped"   -> handleSearchAspectScoped(exchange, method);    // RDR-156 D5 (ubnwk)
                 case "/store-put"     -> handleStorePut(exchange, method);
                 case "/get"           -> handleGet(exchange, method);
                 case "/get-all-metadata" -> handleGetAllMetadata(exchange, method);
@@ -521,6 +523,44 @@ public final class VectorHandler implements HttpHandler {
         var graphResult = repo.searchGraphHopWithTokens(
             tenant, queryText, seeds, collections, linkType, depth, direction, where, nResults);
         sendSearchResult(ex, body, queryText, graphResult);
+    }
+
+    /**
+     * POST /v1/vectors/search-aspect-scoped (RDR-156 Decision 5, bead nexus-ubnwk).
+     *
+     * <p>The combined aspect-filtered query that retires the {@code search} +
+     * {@code operator_filter(source="aspects")} app-side two-step for the case where
+     * the aspect predicate is selective. Request:
+     * {@code {"query": "...", "collections": [...], "field": "proposed_method",
+     * "pattern": "gradient descent", "min_confidence": 0.5, "where": {...},
+     * "n_results": 10}} — field/pattern/min_confidence/where may all be omitted (no
+     * filter on that dimension). {@code field}, when present, must be one of
+     * {@link PgVectorRepository#ASPECT_SCOPED_FIELD_ALLOWLIST} — an unrecognized value
+     * 400s here, before the SQL function is ever called (the function's own CASE
+     * fallthrough is a second, independent line of defense, not the primary contract).
+     * Returns document-level rows, same envelope as {@code /search-metadata-scoped}.
+     */
+    private void handleSearchAspectScoped(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String queryText         = requireString(body, "query");
+        List<String> collections = requireStringList(body, "collections");
+        String field             = optString(body, "field");
+        String pattern           = optString(body, "pattern");
+        Double minConfidence     = optDoubleOrNull(body, "min_confidence");
+        Map<String, Object> where = optMap(body, "where");
+        int nResults              = optInt(body, "n_results", 10);
+        if (field != null && !PgVectorRepository.ASPECT_SCOPED_FIELD_ALLOWLIST.contains(field)) {
+            throw new IllegalArgumentException(
+                "unknown aspect field '" + field + "' - must be one of "
+                + PgVectorRepository.ASPECT_SCOPED_FIELD_ALLOWLIST);
+        }
+
+        var aspectResult = repo.searchAspectScopedWithTokens(
+            tenant, queryText, collections, field, pattern, minConfidence, where, nResults);
+        sendSearchResult(ex, body, queryText, aspectResult);
     }
 
     /**
@@ -1136,6 +1176,17 @@ public final class VectorHandler implements HttpHandler {
     private double optDouble(Map<String, Object> body, String key, double defaultValue) {
         Object val = body.get(key);
         if (val == null) return defaultValue;
+        if (val instanceof Number n) return n.doubleValue();
+        try { return Double.parseDouble(val.toString()); }
+        catch (NumberFormatException e) {
+            throw new IllegalArgumentException("field '" + key + "' must be a number");
+        }
+    }
+
+    /** Optional double field; null → null (no-filter semantics, e.g. min_confidence). */
+    private Double optDoubleOrNull(Map<String, Object> body, String key) {
+        Object val = body.get(key);
+        if (val == null) return null;
         if (val instanceof Number n) return n.doubleValue();
         try { return Double.parseDouble(val.toString()); }
         catch (NumberFormatException e) {

@@ -372,6 +372,23 @@ population reached zero, so `chash_alias` and the whole legacy-reference
 resolution route are DROPPED — a legacy 32-hex reference is no longer
 resolvable at all; re-index the source to mint a canonical 64-hex chash.
 
+### Combined-query shapes ([RDR-156](rdr/rdr-156-vector-store-capability-leverage.md) Decision 5)
+
+Four MCP tools unify an app-side stitch (vector search, then a second round trip against the catalog or aspects store) into ONE planner-optimizable SQL statement, each backed by a per-embedding-dim `LANGUAGE sql STABLE SECURITY INVOKER` Postgres function (`nexus.search_<shape>_384/768/1024`) that takes the query vector as a plan-time argument so the HNSW index survives the join:
+
+| Tool | Function | Joins in | Retires |
+|---|---|---|---|
+| `search_metadata_scoped` | `search_metadata_scoped_<dim>` | `catalog_document_chunks` + `catalog_documents` | `query`'s catalog-routing dance (`content_type`/`author`/`year`/`corpus`/`subtree`/chunk `where`) |
+| `search_topic_scoped` | `search_topic_scoped_<dim>` | `topic_assignments` + `topics` | app-side topic-label filter-then-rank |
+| `search_graph_hop` | `search_graph_hop_<dim>` | a `WITH RECURSIVE` BFS over `catalog_links`, then the two tables above | `query`'s `follow_links` app-side graph BFS + per-collection search + re-join |
+| `search_aspect_scoped` | `search_aspect_scoped_<dim>` | the two tables above + `document_aspects` (on `doc_id = tumbler`) | `search` + `operator_filter(source="aspects")`, for the case where the aspect predicate is selective — that two-step path filters AFTER the vector top-N truncation and can silently miss a distant match the predicate would otherwise keep |
+
+`search_aspect_scoped`'s join runs on `document_aspects.doc_id`, not `source_uri` — a precondition the other three shapes don't share. A document whose aspects row has no `doc_id` never joins and is silently excluded from this shape — by design, not a bug; those rows remain reachable through the older `operator_filter(source="aspects")` path, which is keyed on `source_uri` and unaffected. Its field allowlist (`problem_formulation`, `proposed_method`, `experimental_datasets`, `experimental_baselines`, `experimental_results`) deliberately excludes `extras` and `salient_sentences`: both were converted `TEXT` -> `jsonb` by `aspects-003-type-hygiene.xml` ([RDR-194](rdr/rdr-194-fk-census-structural-schema-warts.md)), so a five-field allowlist, not the seven `aspects-001-baseline.xml` originally defined as `TEXT`, is correct here — matching the pre-existing `AspectRepository.ALLOWED_ASPECT_COLUMNS` precedent.
+
+**`doc_id` coverage is real, not edge-case drift.** `doc_id` is populated by the one-time `aspects-004-doc-id-backfill.xml` changeset, which attributes a row only when `document_aspects.source_uri` is byte-for-byte equal to the catalog document's own `source_uri`. That holds for file-keyed corpora (`code__`/`docs__`/`rdr__`, both sides key off the same `file://` path). For `knowledge__` collections — the dominant aspects corpus — it structurally does NOT hold: the catalog registers those documents' `source_uri` from the document **title** (`src/nexus/catalog/store_hook.py:286`), while the aspect extractor's `source_uri` is built from **`source_path`** (`src/nexus/aspect_readers.py:172`), often itself a content-hash string. Title and `source_path` are two different identity fields for the same document family, not the same field spelled two ways, so an exact match essentially never occurs there — the large majority of `knowledge__` `document_aspects` rows stay `doc_id` NULL after the backfill and are invisible to `search_aspect_scoped` until re-extracted under `nexus-x1de2`'s go-forward stamping (which keys off the extraction queue's own `doc_id`, not `source_uri`, so it does not retroactively fix these rows either). Gap-fill for the `knowledge__` family is tracked as `nexus-bocft`.
+
+A frecency-boosted fifth shape named in the RDR was retired before implementation (2026-08-28 disposition) — frecency boosting is a ranking adjustment, not a combined *query* in this family's sense.
+
 ### Metadata field semantics (chunk vs document level)
 
 Two hash fields look similar but mean very different things. Confusing them produces false-positive panic findings (e.g. "94% redundancy across the corpus" turns out to be 94% of chunks share a doc-level hash, which is correct: every chunk of one paper has the same `content_hash`). The table below locks the contract; consult before drawing conclusions from a metadata distribution.

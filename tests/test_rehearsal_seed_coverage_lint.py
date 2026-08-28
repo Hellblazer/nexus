@@ -367,6 +367,15 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # and the DROP DEFAULT/DROP NOT NULL shape (with no CHECK, staging
         # stays typeless) lands at HEAD.
         ("telemetry-006-2", "nexus-tk070.p6b"),
+        # nexus-ubnwk (RDR-156 Decision 5): aspects-004-1's doc_id backfill —
+        # its own NO FORCE/FORCE toggle wraps an UPDATE joining
+        # nexus.document_aspects to nexus.catalog_documents on exact
+        # source_uri equality (both tables toggled, the catalog-014-0
+        # both-tables lesson). Seeded as a legacy NULL-doc_id
+        # document_aspects row whose source_uri exactly matches a fresh
+        # catalog document (tumbler 1.1.204); effect-asserted (doc_id is
+        # stamped to 1.1.204 post-hop, FORCE restored on both tables).
+        ("aspects-004-1", "nexus-ubnwk"),
     }
 )
 

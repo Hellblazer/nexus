@@ -18,6 +18,7 @@ from nexus.db.http_vector_client import HttpVectorClient
 META_PATH = "/v1/vectors/search-metadata-scoped"
 TOPIC_PATH = "/v1/vectors/search-topic-scoped"
 GRAPH_PATH = "/v1/vectors/search-graph-hop"
+ASPECT_PATH = "/v1/vectors/search-aspect-scoped"
 
 
 def _patch_post(monkeypatch, handler) -> list[tuple[str, dict]]:
@@ -190,3 +191,77 @@ class TestSearchGraphHop:
         _patch_post(monkeypatch, lambda p, b: [])
         assert HttpVectorClient().search_graph_hop(
             "q", ["1.1"], ["rdr__a__model-x__v1"]) == []
+
+
+class TestSearchAspectScoped:
+    """RDR-156 Decision 5 (bead nexus-ubnwk): the fourth combined-query shape."""
+
+    def test_posts_to_aspect_route_with_filters(self, monkeypatch):
+        rows = [{"id": "1.2.3", "content": "x", "distance": 0.1,
+                 "collection": "knowledge__a__voyage-context-3__v1", "chash": "ab"}]
+        calls = _patch_post(monkeypatch, lambda p, b: rows)
+
+        got = HttpVectorClient().search_aspect_scoped(
+            "gradient descent", ["knowledge__a__voyage-context-3__v1"],
+            field="proposed_method", pattern="gradient", min_confidence=0.5,
+            n_results=5)
+
+        assert got == rows
+        assert len(calls) == 1
+        path, body = calls[0]
+        assert path == ASPECT_PATH
+        assert body == {
+            "query": "gradient descent",
+            "collections": ["knowledge__a__voyage-context-3__v1"],
+            "field": "proposed_method",
+            "pattern": "gradient",
+            "min_confidence": 0.5,
+            "n_results": 5,
+        }
+
+    def test_omits_none_filters_from_body(self, monkeypatch):
+        calls = _patch_post(monkeypatch, lambda p, b: [])
+
+        HttpVectorClient().search_aspect_scoped(
+            "q", ["knowledge__a__voyage-context-3__v1"])
+
+        _, body = calls[0]
+        assert body == {
+            "query": "q",
+            "collections": ["knowledge__a__voyage-context-3__v1"],
+            "n_results": 10,
+        }
+        assert "field" not in body
+        assert "pattern" not in body
+        assert "min_confidence" not in body
+        assert "where" not in body
+
+    def test_where_forwarded_and_empty_where_omitted(self, monkeypatch):
+        calls = _patch_post(monkeypatch, lambda p, b: [])
+        HttpVectorClient().search_aspect_scoped(
+            "q", ["knowledge__a__voyage-context-3__v1"], where={"lang": "java"})
+        _, body = calls[0]
+        assert body["where"] == {"lang": "java"}
+
+        calls2 = _patch_post(monkeypatch, lambda p, b: [])
+        HttpVectorClient().search_aspect_scoped(
+            "q", ["knowledge__a__voyage-context-3__v1"], where={})
+        _, body2 = calls2[0]
+        assert "where" not in body2
+
+    def test_returns_empty_list_passthrough(self, monkeypatch):
+        _patch_post(monkeypatch, lambda p, b: [])
+        assert HttpVectorClient().search_aspect_scoped(
+            "q", ["knowledge__a__voyage-context-3__v1"]) == []
+
+    def test_field_allowlist_matches_locked_wire_contract(self):
+        # Locked wire contract (RDR-156 D5): FIVE fields, not the seven
+        # aspects-001-baseline.xml originally defined as TEXT — extras/
+        # salient_sentences are jsonb since aspects-003-type-hygiene.xml.
+        assert HttpVectorClient.ASPECT_SCOPED_FIELD_ALLOWLIST == frozenset({
+            "problem_formulation",
+            "proposed_method",
+            "experimental_datasets",
+            "experimental_baselines",
+            "experimental_results",
+        })

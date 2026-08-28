@@ -20,13 +20,16 @@ class _FakeServiceT3:
 
     def __init__(self, meta_rows: list[dict] | None = None,
                  topic_rows_by_col: dict[str, list[dict]] | None = None,
-                 graph_rows: list[dict] | None = None) -> None:
+                 graph_rows: list[dict] | None = None,
+                 aspect_rows: list[dict] | None = None) -> None:
         self.meta_rows = meta_rows or []
         self.topic_rows_by_col = topic_rows_by_col or {}
         self.graph_rows = graph_rows or []
+        self.aspect_rows = aspect_rows or []
         self.meta_calls: list[tuple] = []
         self.topic_calls: list[tuple] = []
         self.graph_calls: list[tuple] = []
+        self.aspect_calls: list[tuple] = []
 
     def search_metadata_scoped(self, query, collection_names, *, content_type=None,
                                author=None, year=None, corpus=None, subtree=None,
@@ -44,6 +47,13 @@ class _FakeServiceT3:
         self.graph_calls.append((query, list(seeds), list(collection_names),
                                  link_type, depth, direction, where, n_results))
         return self.graph_rows
+
+    def search_aspect_scoped(self, query, collection_names, *, field=None,
+                             pattern=None, min_confidence=None, where=None,
+                             n_results=10):
+        self.aspect_calls.append((query, list(collection_names), field, pattern,
+                                  min_confidence, where, n_results))
+        return self.aspect_rows
 
 
 def _wire(monkeypatch, t3, target, *, service=True):
@@ -246,14 +256,94 @@ class TestSearchGraphHopTool:
         assert t3.graph_calls == []
 
 
+class TestSearchAspectScopedTool:
+    """RDR-156 Decision 5 (bead nexus-ubnwk): the fourth combined-query shape."""
+
+    def test_structured_doc_level_ids_are_tumblers(self, monkeypatch):
+        rows = [
+            {"id": "1.2.3", "content": "a", "distance": 0.1, "collection": "c1",
+             "chash": "a" * 32},
+            {"id": "1.2.4", "content": "b", "distance": 0.3, "collection": "c1",
+             "chash": "b" * 32},
+        ]
+        t3 = _FakeServiceT3(aspect_rows=rows)
+        _wire(monkeypatch, t3, ["c1"])
+
+        out = core.search_aspect_scoped(
+            "q", corpus="knowledge", field="proposed_method", pattern="gradient",
+            min_confidence=0.5, where="lang=java", limit=5, structured=True)
+
+        assert out == {
+            "ids": ["1.2.3", "1.2.4"],
+            "tumblers": ["1.2.3", "1.2.4"],   # document-level: tumblers == ids
+            "distances": [0.1, 0.3],
+            "collections": ["c1", "c1"],
+            "contents": ["a", "b"],
+            "chashes": ["a" * 32, "b" * 32],
+        }
+        assert t3.aspect_calls == [
+            ("q", ["c1"], "proposed_method", "gradient", 0.5, {"lang": "java"}, 5)]
+
+    def test_empty_filters_become_none(self, monkeypatch):
+        t3 = _FakeServiceT3(aspect_rows=[])
+        _wire(monkeypatch, t3, ["c1"])
+        core.search_aspect_scoped("q", corpus="knowledge", structured=True)
+        assert t3.aspect_calls == [("q", ["c1"], None, None, None, None, 10)]
+
+    def test_unknown_field_rejected_before_dispatch(self, monkeypatch):
+        t3 = _FakeServiceT3(aspect_rows=[])
+        _wire(monkeypatch, t3, ["c1"])
+        out = core.search_aspect_scoped("q", field="no_such_field", structured=True)
+        assert isinstance(out, str) and out.startswith("Error:")
+        assert "no_such_field" in out
+        assert t3.aspect_calls == []  # rejected before the network call
+
+    def test_extras_and_salient_sentences_rejected(self, monkeypatch):
+        # DEVIATION from the bead's design-of-record (which listed all seven
+        # aspects-001-baseline.xml TEXT columns): aspects-003-type-hygiene.xml
+        # converted extras/salient_sentences to jsonb, so they cannot appear
+        # in the SQL function's CASE — the allowlist excludes both.
+        t3 = _FakeServiceT3(aspect_rows=[])
+        _wire(monkeypatch, t3, ["c1"])
+        for field in ("extras", "salient_sentences"):
+            out = core.search_aspect_scoped("q", field=field, structured=True)
+            assert isinstance(out, str) and out.startswith("Error:")
+        assert t3.aspect_calls == []
+
+    def test_multichunk_doc_deduped_keeps_best_distance(self, monkeypatch):
+        rows = [
+            {"id": "1.2.3", "content": "near", "distance": 0.1, "collection": "c1",
+             "chash": "a" * 32},
+            {"id": "1.2.4", "content": "other", "distance": 0.2, "collection": "c1",
+             "chash": "c" * 32},
+            {"id": "1.2.3", "content": "far", "distance": 0.9, "collection": "c1",
+             "chash": "d" * 32},
+        ]
+        t3 = _FakeServiceT3(aspect_rows=rows)
+        _wire(monkeypatch, t3, ["c1"])
+        out = core.search_aspect_scoped("q", structured=True)
+        assert out["ids"] == ["1.2.3", "1.2.4"]
+        assert out["distances"] == [0.1, 0.2]
+        assert out["chashes"] == ["a" * 32, "c" * 32]  # best-distance row's chash
+
+    def test_non_service_mode_errors(self, monkeypatch):
+        t3 = _FakeServiceT3()
+        _wire(monkeypatch, t3, ["c1"], service=False)
+        out = core.search_aspect_scoped("q", structured=True)
+        assert isinstance(out, str) and out.startswith("Error:")
+        assert t3.aspect_calls == []
+
+
 class TestPlanRunnerRegistration:
     def test_tools_registered_as_retrieval(self):
         from nexus.plans.runner import _RETRIEVAL_TOOLS
         assert "search_metadata_scoped" in _RETRIEVAL_TOOLS
         assert "search_topic_scoped" in _RETRIEVAL_TOOLS
         assert "search_graph_hop" in _RETRIEVAL_TOOLS
+        assert "search_aspect_scoped" in _RETRIEVAL_TOOLS
 
     def test_tools_resolvable_on_core(self):
         assert callable(getattr(core, "search_metadata_scoped"))
         assert callable(getattr(core, "search_topic_scoped"))
         assert callable(getattr(core, "search_graph_hop"))
+        assert callable(getattr(core, "search_aspect_scoped"))

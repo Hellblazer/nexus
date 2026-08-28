@@ -345,6 +345,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "otherwise seeding duplicate live source_uri rows exercises nothing",
                             OLD_TAG)
                         .isFalse();
+                    assertThat(changesetApplied(conn, "aspects-004-1", "nexus-ubnwk"))
+                        .as("old tag %s must PREDATE aspects-004's doc_id backfill — otherwise "
+                            + "seeding a legacy NULL-doc_id aspects row exercises nothing", OLD_TAG)
+                        .isFalse();
                 }
 
                 // ── SEED, as superuser (implicit BYPASSRLS): models rows written
@@ -381,6 +385,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   plans-003-1 nexus-tk070.p6a
                 //   telemetry-006-1 nexus-tk070.p6b
                 //   telemetry-006-2 nexus-tk070.p6b
+                //   aspects-004-1 nexus-ubnwk
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -457,6 +462,18 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         "file:///seed/dup.md", 1);
                     seedDocumentWithUri(su, "t1", "1.1.202", "dup winner", "code__x",
                         "file:///seed/dup.md", 7);
+
+                    // aspects-004-1 (nexus-ubnwk, RDR-156 Decision 5): a legacy
+                    // document_aspects row whose doc_id predates fk-001-2's
+                    // go-forward stamping (NULL), with a source_uri that
+                    // EXACTLY matches a live, non-alias, non-tombstoned catalog
+                    // document — aspects-004-1's own join-and-stamp input
+                    // shape. 1.1.204 (next free in the 20x family this leg
+                    // already uses for catalog-016-0's dedup fixture).
+                    seedDocumentWithUri(su, "t1", "1.1.204", "aspect seed doc", "code__x",
+                        "file:///seed/ubnwk-aspect.md", 1);
+                    seedAspectRow(su, "t1", "code__x", "seed/ubnwk-aspect.md",
+                        "file:///seed/ubnwk-aspect.md");
 
                     // vectors-004-1 / taxonomy-007-1 (nexus-97gii seed-coverage
                     // follow-up, RDR-191 Phase 4 unify): straddling per-dim
@@ -685,6 +702,10 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("FORCE RLS must hide both seeded plans rows from the "
                             + "non-BYPASSRLS owner — plans-003-1's own toggle-wrap target")
                         .isEqualTo(0);
+                    assertThat(count(admin, "SELECT count(*) FROM nexus.document_aspects"))
+                        .as("FORCE RLS must hide the seeded document_aspects row from the "
+                            + "non-BYPASSRLS owner — aspects-004-1's own toggle-wrap target")
+                        .isEqualTo(0);
                 }
 
                 // ── HEAD LEG over a populated database. This is the leg the
@@ -794,6 +815,31 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         + "AND indexname = 'ux_catalog_documents_live_source_uri'"))
                         .as("catalog-016-1's partial unique index exists at HEAD")
                         .isEqualTo(1);
+
+                    // aspects-004-1 leg (nexus-ubnwk, RDR-156 Decision 5): the
+                    // seeded legacy NULL-doc_id row must be stamped with the
+                    // matching catalog document's tumbler under FORCE-RLS —
+                    // the exact silent-no-op hazard the changeset's own toggle
+                    // exists to defeat (nexus_admin is NOSUPERUSER/NOBYPASSRLS
+                    // and owns both FORCE-RLS tables; no nexus.tenant GUC is
+                    // set at migration time, so an untoggled UPDATE would
+                    // match zero rows for every tenant, silently).
+                    try (var ars = su.createStatement().executeQuery(
+                        "SELECT doc_id FROM nexus.document_aspects "
+                        + "WHERE tenant_id = 't1' AND source_path = 'seed/ubnwk-aspect.md'")) {
+                        assertThat(ars.next()).isTrue();
+                        assertThat(ars.getString("doc_id"))
+                            .as("aspects-004-1 must stamp doc_id = the matching catalog "
+                                + "document's tumbler under FORCE-RLS, not silently no-op")
+                            .isEqualTo("1.1.204");
+                    }
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
+                        + "'nexus.document_aspects'::regclass, "
+                        + "'nexus.catalog_documents'::regclass)"))
+                        .as("aspects-004-1 must RESTORE FORCE ROW LEVEL SECURITY on both "
+                            + "toggled tables within its own changeset")
+                        .isEqualTo(2);
 
                     // Both fixes must RESTORE FORCE within their own changeset.
                     // (chash_index left the toggled-set observation with the
@@ -1825,6 +1871,29 @@ class SchemaUpgradeRehearsalIntegrationTest {
             ps.setString(4, physicalCollection);
             ps.setString(5, sourceUri);
             ps.setInt(6, chunkCount);
+            ps.executeUpdate();
+        }
+    }
+
+    /**
+     * A legacy {@code nexus.document_aspects} row with {@code doc_id} NULL
+     * (nexus-ubnwk, aspects-004-1) — the pre-go-forward-stamp shape
+     * fk-001-2's nullable conversion allows. {@code sourceUri} should match
+     * a live catalog document's own {@code source_uri} exactly (aspects-004's
+     * join key) for the CONVERSION arm.
+     */
+    private static void seedAspectRow(Connection c, String tenant, String collection,
+                                      String sourcePath, String sourceUri) throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.document_aspects "
+            + "(tenant_id, collection, source_path, proposed_method, extracted_at, "
+            + "model_version, extractor_name, source_uri, doc_id) "
+            + "VALUES (?, ?, ?, 'rehearsal-seeded extraction', now(), "
+            + "'rehearsal-model', 'rehearsal-extractor', ?, NULL)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, collection);
+            ps.setString(3, sourcePath);
+            ps.setString(4, sourceUri);
             ps.executeUpdate();
         }
     }

@@ -8,14 +8,14 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 38 | Storage tiers, retrieval, operators, orchestration, diagnostics |
+| `nexus` | `nx-mcp` | 39 | Storage tiers, retrieval, operators, orchestration, diagnostics |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`) or the `.mcpb` extension. No separate install.
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
-## `nexus` — retrieval + storage (36 tools)
+## `nexus` — retrieval + storage (37 tools)
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
@@ -28,6 +28,7 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 | `search_metadata_scoped` | Combined-query (service mode): catalog-metadata-scoped vector search in one SQL statement (`content_type`, `author`, `year`, `subtree`, chunk-metadata `where`) |
 | `search_graph_hop` | Combined-query (service mode): BFS over `catalog_links` from seed tumblers + vector rank in one statement (`link_type`, `depth` ≤ 3, `direction`); `where` chunk-metadata equality filter applied post-BFS (catalog-012, equality-only — operator syntax rejected loudly) |
 | `search_topic_scoped` | Combined-query (service mode): topic-label-scoped chunk search via `topic_assignments` join |
+| `search_aspect_scoped` | Combined-query (service mode): vector rank + `document_aspects` predicate (`field`, `pattern`, `min_confidence`, chunk-metadata `where`) in one statement — retires the `search` + `operator_filter(source="aspects")` two-step for selective aspect predicates. Requires the doc's aspects row to carry a non-NULL `doc_id` (backfilled by exact `source_uri` match; legacy rows with no match are excluded, not a bug) |
 | `store_put` | Write a document into a T3 collection. Fires post-store hooks: batch chain auto-assigns to nearest topic; document-grain chain enqueues aspect extraction on `knowledge__*` (RDR-089) |
 | `store_get` | Retrieve a document by id from a T3 collection |
 | `store_get_many` | Batch hydration: given N ids, return N contents (with `missing` for not-found). Handles 300+ ids beyond the per-request 300-record limit |

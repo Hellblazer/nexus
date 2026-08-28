@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-156 Decision 5 (bead nexus-ubnwk) — one-time backfill of
+    nexus.document_aspects.doc_id for legacy rows that predate the
+    fk-001-2 nullable-FK conversion.
+
+    nexus-x1de2 (2026-08-28) made every NEW aspect upsert stamp doc_id
+    go-forward; this changeset repairs the PRE-EXISTING population so the
+    new search_aspect_scoped_&lt;dim&gt; function (vectors-008, this same
+    bead) has something to join against on day one. Join identity is
+    doc_id -&gt; catalog_documents.tumbler, the exact shape the shipped
+    combined-query functions already use — an exact source_uri match is
+    the only safe correlation key available (aspects has no tumbler
+    column of its own): a legacy row whose source_uri does not exactly
+    equal a live, non-alias, non-tombstoned catalog document's source_uri
+    stays doc_id IS NULL and simply never matches the new function's join
+    — correct, not a bug.
+
+    REAL COVERAGE (round-1 review disclosure, substantive-critic Critical
+    — this is NOT "some legacy notes predate URI normalization" edge-case
+    drift, it is a structural, permanent split by corpus): this backfill
+    only attributes rows whose document_aspects.source_uri is BYTE-FOR-
+    BYTE EQUAL to the catalog document's own source_uri. That holds for
+    file-keyed corpora (code__/docs__/rdr__, source_uri = file://...) —
+    both producers key off the same file path. For knowledge__
+    collections it structurally does NOT hold: the catalog registers
+    those documents' source_uri from TITLE
+    (src/nexus/catalog/store_hook.py:286, uri_for(collection, title)),
+    while the aspect extractor's source_uri is built from source_path
+    (src/nexus/aspect_readers.py:172, chroma://{collection}/
+    {source_path}) — often itself a content-hash string, not a
+    human-legible path. Title and source_path are two DIFFERENT identity
+    fields for the same document family, not the same field spelled two
+    ways, so an exact match essentially never occurs there. The large
+    majority of knowledge__ document_aspects rows (the dominant aspects
+    corpus) therefore stay doc_id NULL after this walk and are invisible
+    to search_aspect_scoped until they are RE-EXTRACTED under
+    nexus-x1de2's go-forward stamping (which keys off the extraction
+    queue's own doc_id, not source_uri, so it does not retroactively fix
+    these legacy rows either). A follow-up gap-fill for the knowledge__
+    family is tracked as nexus-bocft.
+
+    FORCE-RLS toggle (tests/test_changelog_rls_lint.py "Approved Shape 1"):
+    this UPDATE is tenant-spanning (repairs every tenant's rows in one
+    pass, matching fk-001-2's own tenant-spanning cleanup UPDATE) but,
+    unlike fk-001-2, has no immediately-valid ADD CONSTRAINT to fall back
+    on as a same-changeset backstop if the write silently no-ops under
+    FORCE ROW LEVEL SECURITY. nexus_admin (Liquibase's migration role,
+    src/nexus/db/pg_provision.py) is NOSUPERUSER/NOBYPASSRLS and owns
+    both tables, so FORCE applies to it too, and no nexus.tenant GUC is
+    set during migration (TenantScope only sets it per-request, never at
+    boot) — a bare UPDATE would match ZERO rows for EVERY tenant, silently.
+    Toggling NO FORCE for the statement's duration (catalog-014-0's exact
+    precedent: "BOTH tables need the FORCE toggle... toggling only the
+    target table leaves the join yielding zero rows for the non-bypass
+    owner") makes nexus_admin's ordinary table-owner RLS bypass apply, so
+    the UPDATE actually runs across every tenant, then FORCE is restored
+    on both tables before the changeset ends. Both nexus.document_aspects
+    (the UPDATE's target) and nexus.catalog_documents (joined via the FROM
+    clause) are toggled, in that order; restored in reverse (LIFO), same
+    as catalog-014-0.
+
+    Idempotent: doc_id IS NULL in the WHERE clause means a re-run only
+    ever touches rows a prior run left unmatched (there are none — a
+    matched row's doc_id is no longer NULL) or new legacy rows that
+    appeared since (there are none once nexus-x1de2's go-forward stamp is
+    live). No-op rollback: this is a repair of existing data, not new
+    data — a rolled-back cluster simply has doc_id NULL again for rows
+    this backfill would re-stamp identically on the next apply, mirroring
+    catalog-014-0's own "derived denormalization, nothing to restore"
+    rollback rationale.
+
+    Proof: AspectDocIdBackfillTest exercises this exact changeset's SQL
+    against a genuine PgContainerHelper.startDedicated() cluster carrying
+    a pre-seeded NULL-doc_id row with a matching catalog source_uri and
+    asserts the walk stamps it (see that test's own header for why a
+    dedicated, not shared-template, container is required).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="aspects-004-1" author="nexus-ubnwk">
+        <comment>One-time backfill: nexus.document_aspects.doc_id = catalog_documents.tumbler for legacy rows matched by exact source_uri (RDR-156 Decision 5, search_aspect_scoped's join precondition).</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.document_aspects  NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;
+
+UPDATE nexus.document_aspects a
+   SET doc_id = d.tumbler
+  FROM nexus.catalog_documents d
+ WHERE a.doc_id IS NULL
+   AND d.tenant_id = a.tenant_id
+   AND d.source_uri = a.source_uri
+   AND d.source_uri &lt;&gt; ''
+   AND d.alias_of = ''
+   AND d.deleted_at IS NULL;
+
+ALTER TABLE nexus.catalog_documents FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_aspects  FORCE ROW LEVEL SECURITY;
+        </sql>
+        <rollback>
+            <!-- Repair of pre-existing data, not new data: nothing to restore.
+                 A rolled-back cluster has doc_id NULL again for rows this
+                 backfill would re-stamp identically on the next apply
+                 (catalog-014-0's own "derived denormalization" rollback
+                 rationale). -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

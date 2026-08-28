@@ -2424,6 +2424,104 @@ class HttpVectorClient:
             body["where"] = where
         return _post("/v1/vectors/search-graph-hop", body, tenant=self._tenant)
 
+    #: Locked wire contract (RDR-156 Decision 5, bead nexus-ubnwk) — identical
+    #: to ``PgVectorRepository.ASPECT_SCOPED_FIELD_ALLOWLIST`` (Java) and the
+    #: SQL function's CASE expression. FIVE fields, not the seven
+    #: aspects-001-baseline.xml originally defined as TEXT: ``extras`` and
+    #: ``salient_sentences`` were converted TEXT -> jsonb by
+    #: aspects-003-type-hygiene.xml, and AspectRepository.ALLOWED_ASPECT_COLUMNS
+    #: (the pre-existing two-step operator-query fast path) already excludes
+    #: both from plain substring filtering for the same reason.
+    ASPECT_SCOPED_FIELD_ALLOWLIST = frozenset({
+        "problem_formulation",
+        "proposed_method",
+        "experimental_datasets",
+        "experimental_baselines",
+        "experimental_results",
+    })
+
+    def search_aspect_scoped(
+        self,
+        query: str,
+        collection_names: list[str],
+        *,
+        field: str | None = None,
+        pattern: str | None = None,
+        min_confidence: float | None = None,
+        where: dict | None = None,
+        n_results: int = 10,
+    ) -> list[dict]:
+        """Aspect-scoped combined search (RDR-156 Decision 5, bead nexus-ubnwk).
+
+        Routes to ``POST /v1/vectors/search-aspect-scoped`` —
+        ``nexus.search_aspect_scoped_<dim>``: joins the chunk table to the
+        catalog manifest + documents + ``document_aspects`` (on
+        ``doc_id = tumbler``) and applies an optional aspect-field substring
+        filter, an optional confidence floor, and the same chunk-metadata
+        ``where`` JSONB-containment predicate every sibling combined-query
+        method uses, all inside ONE statement before ranking by cosine
+        distance. Retires the two-step ``search`` + ``operator_filter(source=
+        "aspects")`` app-side path for the case where the aspect predicate is
+        selective: that path filters AFTER the vector top-N truncation and
+        can silently miss a distant match the aspect predicate would
+        otherwise have kept (RECALL loss exactly when the predicate is
+        selective); this method applies the predicate inside the same
+        statement as the rank, so selectivity gates the scan instead.
+
+        A document with no ``document_aspects`` row, or whose row's ``doc_id``
+        is still NULL, never joins and is excluded — by design, not a bug.
+        REAL COVERAGE OF THE doc_id BACKFILL (structural, by corpus):
+        aspects-004-doc-id-backfill.xml attributes a row only when
+        ``document_aspects.source_uri`` is byte-for-byte equal to the catalog
+        document's ``source_uri``. That holds for file-keyed corpora
+        (``code__``/``docs__``/``rdr__``). It does NOT hold for ``knowledge__``
+        collections, the dominant aspects corpus: the catalog's ``source_uri``
+        there is derived from the document title
+        (``src/nexus/catalog/store_hook.py``), while the extractor's is built
+        from ``source_path`` (``src/nexus/aspect_readers.py``, often a
+        content-hash string) — two different identity fields, not one field
+        spelled two ways. Most ``knowledge__`` rows therefore stay ``doc_id``
+        NULL after the backfill and only become visible here as they are
+        re-extracted under nexus-x1de2's go-forward stamping; gap-fill is
+        nexus-bocft. The two-step ``operator_filter(source="aspects")`` path
+        (keyed on ``source_uri``, not ``doc_id``) remains available for those
+        rows and is NOT retired by this method (RDR-156 D5's "separate commit
+        for the delete" rule is not triggered — the two shapes have different
+        coverage, not identical coverage with one strictly dominating).
+
+        ``field``, when given, MUST be one of
+        :data:`ASPECT_SCOPED_FIELD_ALLOWLIST` — the engine 400s on any other
+        value before the SQL function is ever called (this client does not
+        pre-validate; the engine's rejection propagates as an
+        :class:`HttpVectorClientError`). Returns the flat
+        ``{id, content, distance, collection, chash}`` row list; ``id`` is
+        the document tumbler (a document with multiple matching chunks can
+        appear more than once — de-dup per id is the caller's job, matching
+        every sibling combined-query method); ``chash`` is the matched
+        chunk's content hash.
+
+        RDR-097 plan-runner caveat (nexus-zekpl, same as
+        ``search_metadata_scoped``/``search_graph_hop``): the structured
+        ``ids``/``tumblers`` this method's ``structured=True`` sibling tools
+        return are document TUMBLERS, not chunk chashes — the plan runner's
+        chash-keyed auto-hydration (``store_get_many``) needs a
+        tumbler-aware hydration path to consume them directly.
+        """
+        body: dict[str, Any] = {
+            "query": query,
+            "collections": collection_names,
+            "n_results": n_results,
+        }
+        if field is not None:
+            body["field"] = field
+        if pattern is not None:
+            body["pattern"] = pattern
+        if min_confidence is not None:
+            body["min_confidence"] = min_confidence
+        if where:
+            body["where"] = where
+        return _post("/v1/vectors/search-aspect-scoped", body, tenant=self._tenant)
+
     def get_by_id(self, collection: str, doc_id: str) -> dict | None:
         """Fetch a single chunk by ID.
 

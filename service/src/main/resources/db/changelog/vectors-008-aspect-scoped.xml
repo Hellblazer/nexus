@@ -1,0 +1,258 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-156 Decision 5 (bead nexus-ubnwk) — nexus.search_aspect_scoped_&lt;dim&gt;,
+    the fourth combined-query shape (metadata-scoped, topic-scoped, graph-hop
+    already shipped; frecency-boosted RETIRED as not-a-combined-query per the
+    RDR's own 2026-08-28 disposition).
+
+    Today aspect-filtered retrieval is a SEPARATE two-step app-side path:
+    `search` (vector) then `operator_filter(source="aspects")` keyed on
+    (collection, source_path) -> source_uri -> POST /v1/aspects/operator-query
+    -> AspectRepository.filterBySourceUris. It never touches nexus.chunks or a
+    vector — a selective aspect predicate cannot gate the vector scan, so the
+    two-step path's own top-N vector truncation can silently drop a candidate
+    the aspect predicate would otherwise have kept (filter-after-rank loses
+    recall exactly when the predicate is selective). This function applies the
+    aspect predicate INSIDE the same statement as the vector rank, so
+    selectivity gates the scan rather than a post-hoc filter over an already-
+    truncated top-N.
+
+    Same shape as search_metadata_scoped_&lt;dim&gt; (vectors-005/006): chunks
+    JOIN catalog_document_chunks JOIN catalog_documents, tombstone + alias
+    guards, embedding_&lt;dim&gt; IS NOT NULL guard, query vector as the FIRST
+    argument (plan-time constant, HNSW-eligible), bare
+    ORDER BY embedding_&lt;dim&gt; &lt;=&gt; p_query LIMIT p_n. The ONE addition is an
+    INNER JOIN to nexus.document_aspects on
+    (tenant_id, doc_id = catalog_documents.tumbler) — the join identity
+    aspects-004-doc-id-backfill.xml (this same bead) stamps for pre-existing
+    rows and nexus-x1de2 stamps go-forward. A document with NO aspects row,
+    or an aspects row whose doc_id is still NULL (no matching source_uri at
+    backfill time), never joins — excluded, not a bug (see aspects-004's own
+    header).
+
+    Field allowlist (locked wire contract, identical in this SQL CASE, the
+    Java 400-guard, and the Python MCP tool docstring): problem_formulation,
+    proposed_method, experimental_datasets, experimental_baselines,
+    experimental_results — FIVE columns, NOT the seven aspects-001-
+    baseline.xml originally defined as TEXT. DEVIATION from the bead's
+    design-of-record (which listed all seven, including extras and
+    salient_sentences): aspects-003-type-hygiene.xml (epic nexus-cefa1)
+    already converted extras/salient_sentences from TEXT to jsonb, so a
+    CASE branch returning either of them cannot unify with the five
+    surviving TEXT branches ("CASE types text and jsonb cannot be matched",
+    confirmed by a real jOOQ-codegen migration run against this exact
+    changeset). Excluding them ALSO matches the established precedent this
+    function's own two-step predecessor already set:
+    AspectRepository.ALLOWED_ASPECT_COLUMNS (the operator-query fast path,
+    RDR-089/nexus-l9hd8) deliberately excludes bare `extras` as a filter
+    field — "direct use of the JSON object column is not meaningful as a
+    filter/groupby field", only `extras.&lt;key&gt;` sub-path extraction is —
+    and never listed `salient_sentences` as filterable at all. This
+    function's p_field allowlist now matches that precedent exactly (minus
+    `confidence`, which this function exposes separately as
+    p_min_confidence, a range predicate, not a text-substring one). p_field
+    NULL means "match on confidence/where only, ignore field text"; an
+    UNKNOWN p_field falls through the CASE to NULL, and `NULL ILIKE ...` is
+    NULL (never TRUE), so an unrecognized field name matches NOTHING rather
+    than raising or silently matching every row — the Java handler
+    additionally rejects an unrecognized field with a 400 before ever
+    reaching this function, so this fallthrough is a second, independent
+    line of defense, not the primary contract. A future bead can extend
+    p_field to `extras.&lt;key&gt;` sub-path matching (mirroring
+    AspectRepository.fieldExpression's `COALESCE(extras,'{}')::json#>>...`)
+    if a caller needs it; out of scope here (RDR-156 D5 named the shape,
+    not the full field surface).
+
+    p_min_confidence: NULL = no confidence floor; otherwise a.confidence must
+    be >= it (aspects extraction records confidence as a 0..1 float, same
+    column search_aspect_scoped's Java caller reads via AspectRepository
+    today).
+
+    p_where: chunk-metadata JSONB containment (c.metadata @&gt; p_where),
+    byte-for-byte the same predicate every other combined-query shape uses
+    (catalog-008/vectors-006/vectors-007) — this is CHUNK metadata, a
+    dimension orthogonal to the aspects predicate, not a substitute for it.
+
+    LANGUAGE sql STABLE SECURITY INVOKER (inlinable — EXPLAIN must show the
+    HNSW index survives the aspects join, CombinedQueryParityTest's EXPLAIN
+    group), FORCE RLS on chunks/catalog_document_chunks/catalog_documents/
+    document_aspects is the tenant-isolation boundary (SECURITY INVOKER
+    propagates the caller's RLS context, same as every sibling shape).
+
+    Rows are per-CHUNK (id = tumbler repeated once per matching chunk, same
+    as search_metadata_scoped_&lt;dim&gt;) — Python dedupes per tumbler exactly
+    as the metadata-scoped tool does; this function does not DISTINCT ON
+    (kept out of SQL by decision — one dedup shape, in Python, across every
+    combined-query tool, per RDR-156 D5's REJECTED-alternatives list).
+
+    Placed after telemetry-007-nx-answer-steps.xml (current tail) and before
+    the grants-nexus-svc.xml runAlways block — the established late-append
+    convention (D0.1; see taxonomy-013's / catalog-033's / fk-005's /
+    taxonomy-014's / migration-002's / memory-003's / plans-003's /
+    telemetry-006's / telemetry-007's own &lt;include&gt; comments for the
+    identical reasoning) rather than spliced back into the vectors-00N or
+    aspects-00N family's own block.
+
+    Grants: an explicit GRANT EXECUTE for nexus_svc, matching vectors-005-6's
+    defensive-grant precedent for the sibling combined-query functions (a
+    brand-new CREATE FUNCTION already carries the PostgreSQL default of
+    PUBLIC EXECUTE, so this is belt-and-suspenders consistency with the
+    sibling shapes' own explicit grant, not a functional requirement).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-008-1" author="nexus-ubnwk">
+        <comment>search_aspect_scoped_384/768/1024: combined vector + document_aspects predicate query, RDR-156 Decision 5.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.search_aspect_scoped_384(
+    p_query           vector(384),
+    p_collections     text[],
+    p_field           text,
+    p_pattern         text,
+    p_min_confidence  float8,
+    p_where           jsonb,
+    p_n               int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN nexus.document_aspects a
+        ON a.tenant_id = d.tenant_id AND a.doc_id = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND d.alias_of = ''
+       AND c.embedding_384 IS NOT NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_min_confidence IS NULL OR a.confidence >= p_min_confidence)
+       AND (p_field IS NULL OR CASE p_field
+               WHEN 'problem_formulation'    THEN a.problem_formulation
+               WHEN 'proposed_method'        THEN a.proposed_method
+               WHEN 'experimental_datasets'  THEN a.experimental_datasets
+               WHEN 'experimental_baselines' THEN a.experimental_baselines
+               WHEN 'experimental_results'   THEN a.experimental_results
+           END ILIKE '%' || p_pattern || '%')
+     ORDER BY c.embedding_384 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_aspect_scoped_768(
+    p_query           vector(768),
+    p_collections     text[],
+    p_field           text,
+    p_pattern         text,
+    p_min_confidence  float8,
+    p_where           jsonb,
+    p_n               int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN nexus.document_aspects a
+        ON a.tenant_id = d.tenant_id AND a.doc_id = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND d.alias_of = ''
+       AND c.embedding_768 IS NOT NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_min_confidence IS NULL OR a.confidence >= p_min_confidence)
+       AND (p_field IS NULL OR CASE p_field
+               WHEN 'problem_formulation'    THEN a.problem_formulation
+               WHEN 'proposed_method'        THEN a.proposed_method
+               WHEN 'experimental_datasets'  THEN a.experimental_datasets
+               WHEN 'experimental_baselines' THEN a.experimental_baselines
+               WHEN 'experimental_results'   THEN a.experimental_results
+           END ILIKE '%' || p_pattern || '%')
+     ORDER BY c.embedding_768 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.search_aspect_scoped_1024(
+    p_query           vector(1024),
+    p_collections     text[],
+    p_field           text,
+    p_pattern         text,
+    p_min_confidence  float8,
+    p_where           jsonb,
+    p_n               int
+) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT d.tumbler,
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 &lt;=&gt; p_query)::float8,
+           encode(c.chash, 'hex')
+      FROM nexus.chunks c
+      JOIN nexus.catalog_document_chunks m
+        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+      JOIN nexus.catalog_documents d
+        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+      JOIN nexus.document_aspects a
+        ON a.tenant_id = d.tenant_id AND a.doc_id = d.tumbler
+     WHERE c.collection = ANY(p_collections)
+       AND d.deleted_at IS NULL
+       AND d.alias_of = ''
+       AND c.embedding_1024 IS NOT NULL
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_min_confidence IS NULL OR a.confidence >= p_min_confidence)
+       AND (p_field IS NULL OR CASE p_field
+               WHEN 'problem_formulation'    THEN a.problem_formulation
+               WHEN 'proposed_method'        THEN a.proposed_method
+               WHEN 'experimental_datasets'  THEN a.experimental_datasets
+               WHEN 'experimental_baselines' THEN a.experimental_baselines
+               WHEN 'experimental_results'   THEN a.experimental_results
+           END ILIKE '%' || p_pattern || '%')
+     ORDER BY c.embedding_1024 &lt;=&gt; p_query
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.search_aspect_scoped_384(vector, text[], text, text, float8, jsonb, int);
+DROP FUNCTION IF EXISTS nexus.search_aspect_scoped_768(vector, text[], text, text, float8, jsonb, int);
+DROP FUNCTION IF EXISTS nexus.search_aspect_scoped_1024(vector, text[], text, text, float8, jsonb, int);
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-008-2" author="nexus-ubnwk">
+        <comment>Defensive GRANT EXECUTE on nexus_svc for the three new search_aspect_scoped facades, matching vectors-005-6's explicit-grant precedent for the sibling combined-query functions.</comment>
+        <sql splitStatements="true" stripComments="false">
+GRANT EXECUTE ON FUNCTION nexus.search_aspect_scoped_384(vector, text[], text, text, float8, jsonb, int)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_aspect_scoped_768(vector, text[], text, text, float8, jsonb, int)  TO nexus_svc;
+GRANT EXECUTE ON FUNCTION nexus.search_aspect_scoped_1024(vector, text[], text, text, float8, jsonb, int) TO nexus_svc;
+        </sql>
+        <rollback>
+            <!-- Revoke is a DBA operation; not automated (matches grants-nexus-svc.xml / vectors-005-6 precedent). -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

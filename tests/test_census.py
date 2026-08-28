@@ -144,6 +144,7 @@ def corpus(tmp_path: pathlib.Path) -> pathlib.Path:
         (NEX + "search_graph_hop", "search_query"),
         (NEX + "search_metadata_scoped", "search_query"),
         (NEX + "search_topic_scoped", "search_query"),
+        (NEX + "search_aspect_scoped", "search_query"),
         (NEX + "memory_put", "other_nx_mcp"),
         (NEX + "plan_search", "other_nx_mcp"),
         ("mcp__plugin_conexus_nexus-catalog__search", "search_query"),

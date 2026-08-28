@@ -49,6 +49,27 @@ that tag is gated and paired with a client release.
   into the live store with no sandbox, is deleted. `delete_collection` joins the
   service writer whitelist with its per-entry test.
 
+- **`search_aspect_scoped`, the fourth combined-query shape (RDR-156 D5,
+  nexus-ubnwk).** `nexus.search_aspect_scoped_<dim>` joins the chunk table to
+  the catalog manifest, documents, and `document_aspects` (on
+  `doc_id = tumbler`) and applies an aspect-field substring filter, a
+  confidence floor, and the chunk-metadata `where` predicate inside the same
+  statement as the vector rank, so a selective aspect predicate gates the scan
+  instead of filtering after the top-N truncation (the recall loss of the
+  two-step `search` + `operator_filter(source="aspects")` path, which stays
+  available: the two have different coverage). Exposed as
+  `POST /v1/vectors/search-aspect-scoped`, `HttpVectorClient.search_aspect_scoped`,
+  the `search_aspect_scoped` MCP tool, and a plan-runner retrieval step. The
+  field allowlist is the five text aspect columns, identical in the SQL CASE,
+  the engine's 400 guard, and the client (a test parses the changeset to keep
+  them from drifting). Engine: `aspects-004` backfills `document_aspects.doc_id`
+  from exact `source_uri` equality under the FORCE/NO-FORCE toggle; this
+  attributes file-keyed corpora only. `knowledge__` aspect rows are keyed on a
+  hashed `source_path` while their catalog URI derives from the title, so they
+  stay unattributed until re-extracted under nexus-x1de2's go-forward stamping
+  (gap-fill: nexus-bocft). Frecency-boosted rank, the fifth D5 shape, is retired
+  as not a combined query (RDR-156 §Decision 5 disposition).
+
 ### Fixed
 
 - **Engine: `databasechangelog.dateexecuted` reads as UTC (nexus-rph82).**

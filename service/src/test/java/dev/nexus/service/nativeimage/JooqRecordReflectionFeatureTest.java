@@ -147,7 +147,15 @@ class JooqRecordReflectionFeatureTest {
     // telemetry, child of nx_answer_runs), one generated Record type (+1),
     // NxAnswerStepsRecord. This is the deliberate bump the assertion message
     // demands.
-    private static final int EXPECTED_RECORD_TYPES = 65;
+    // 65 -> 68: RDR-156 Decision 5 (bead nexus-ubnwk,
+    // vectors-008-aspect-scoped.xml) added nexus.search_aspect_scoped_
+    // 384/768/1024 — three new RETURNS TABLE functions (the fourth
+    // combined-query shape: vector rank + document_aspects predicate),
+    // one generated Record type each (SearchAspectScoped_384Record/
+    // SearchAspectScoped_768Record/SearchAspectScoped_1024Record), +3.
+    // aspects-004-doc-id-backfill.xml (same bead) is DATA-only DML, no
+    // new relation, no further delta.
+    private static final int EXPECTED_RECORD_TYPES = 68;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {
