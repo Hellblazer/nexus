@@ -191,6 +191,32 @@ class TaxonomyCentroidRepositoryTest {
     }
 
     @Test
+    void upsert_dimTransition_replacesEmbedding() {
+        // nexus-2qryr: same key, new model, new dim — the documented contract is
+        // REPLACE (clear the other dim columns), never a CHECK violation and never
+        // a stranded old-dim vector.
+        repo.upsertCentroids(TENANT_A, List.of(
+            new CentroidRecord("knowledge__dimflip", 1L, unit(384, 1.0f, 0.0f), "v1", 1)));
+        repo.upsertCentroids(TENANT_A, List.of(
+            new CentroidRecord("knowledge__dimflip", 1L, unit(768, 0.0f, 1.0f), "v2", 2)));
+
+        assertThat(repo.count(TENANT_A, "knowledge__dimflip")).isEqualTo(1);
+        assertThat(repo.getByCollection(TENANT_A, "knowledge__dimflip")).singleElement().satisfies(r -> {
+            assertThat(r.embedding()).hasSize(768);
+            assertThat(r.label()).isEqualTo("v2");
+            assertThat(r.docCount()).isEqualTo(2);
+        });
+        // The old-dim query space no longer sees it; the new one does.
+        assertThat(repo.annQuery(TENANT_A, unit(384, 1.0f, 0.0f), "knowledge__dimflip", false, 1)).isEmpty();
+        assertThat(repo.annQuery(TENANT_A, unit(768, 0.0f, 1.0f), "knowledge__dimflip", false, 1)).hasSize(1);
+        // And on again — the transition is symmetric.
+        repo.upsertCentroids(TENANT_A, List.of(
+            new CentroidRecord("knowledge__dimflip", 1L, unit(1024, 1.0f, 0.0f), "v3", 3)));
+        assertThat(repo.getByCollection(TENANT_A, "knowledge__dimflip")).singleElement()
+            .satisfies(r -> assertThat(r.embedding()).hasSize(1024));
+    }
+
+    @Test
     void upsert_emptyIsNoOp_unknownDimFailsLoud() {
         repo.upsertCentroids(TENANT_A, List.of());  // no throw, no rows
 
