@@ -6,8 +6,49 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Engine-side fixes below ride the NEXT `engine-service` tag (not yet cut);
+the client's `REQUIRED_ENGINE_VERSION` stays `engine-service-v0.1.87` until
+that tag is gated and paired with a client release.
+
 ### Fixed
 
+- **Engine: `databasechangelog.dateexecuted` reads as UTC (nexus-rph82).**
+  Liquibase stamped it in the JVM's default zone; on the GMT-hosted managed
+  database a post-deploy audit windowing on it against `now()` reported
+  "nothing applied" for a walk that had completed sixty seconds earlier
+  (PITR fork, 2026-08-27). The migrator — and `Main`, before any datasource
+  is built — pin the JVM default zone to UTC and set the migration session
+  to UTC (Liquibase stamps the column from the server's `now()` in the
+  session zone). Service log timestamps are UTC as well, now explicitly in
+  the logback pattern rather than by whatever zone the box happened to run.
+- **Engine: a centroid re-upsert under a different dim replaces the
+  embedding (nexus-2qryr).** `upsertCentroids` set only the incoming dim's
+  column on conflict, so a re-embed under a new model tripped the unified
+  table's exactly-one-embedding CHECK (and, pre-unification, silently
+  orphaned the old row). The other dim columns are now cleared in the same
+  update; the contract is documented and pinned.
+- **Engine: the import-links FK backstop and the dangling-endpoint 400 are
+  tested (nexus-ndwzk).** The raw-23503 catch behind `importLinksBatch`'s
+  precheck now has a real-PG test that provokes the constraint with the
+  precheck bypassed, and both `POST /v1/catalog/link` and
+  `/v1/catalog/import/link` have HTTP-level tests of the machine-readable
+  `{error, code: "dangling_endpoint", missing}` body.
+- **New aspect rows are attributed to their catalog document (nexus-x1de2).**
+  The extractor builds an `AspectRecord` without a `doc_id`; the worker had
+  the identity on its queue row and `nx enrich aspects` had it on the
+  catalog entry, and both dropped it at completion, so every row landed
+  with `doc_id` NULL — a row the catalog foreign key can never join. Both
+  producers now stamp it (`with_doc_id`), an upsert that still lacks one
+  logs `document_aspects_upsert_unattributed` instead of writing silently,
+  and the engine's upsert keeps an existing `doc_id` when a later write
+  omits it. **Go-forward only:** rows written before this release keep
+  `doc_id` NULL until re-extracted (`nx enrich aspects --all`); this is a
+  different axis from nexus-bocft's "aspect rows no current entry claims",
+  which is keyed on `source_path`/title and is unchanged here. Also pinned:
+  `nx plan …` reports "plans service unavailable" cleanly, malformed engine
+  aspect bodies (NULL columns, garbage JSON) parse to empty fields; and the
+  plan cache's SQLite file-mtime refresh branch — unreachable since the
+  SQLite plan library was deleted — is gone.
 - **`nx index repo` names the three catalog-linking sub-phases (nexus-jg3x5).**
   `Catalog: linking N new entries…` was followed by tens of seconds of silence
   while rdr, prose, and pdf link generation ran — each already timed into
