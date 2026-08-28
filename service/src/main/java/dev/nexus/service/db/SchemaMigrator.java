@@ -16,6 +16,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.TimeZone;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -92,8 +93,18 @@ public final class SchemaMigrator {
      */
     public static void migrate(DataSource ds) {
         log.info("event=schema_migration_start changelog={}", MASTER_CHANGELOG);
+        pinJvmTimeZoneToUtc();
 
         try (Connection conn = ds.getConnection()) {
+            // nexus-rph82: Liquibase stamps databasechangelog.dateexecuted with the
+            // SERVER's now() rendered in the connection's SESSION zone — and pgjdbc
+            // negotiates that zone from the JVM default at CONNECT time, so a pool
+            // opened before the pin above still carries the old zone. Pin the
+            // session too; the JVM pin covers client-side formatting, this covers
+            // the stamp itself, and together they hold for every entry point.
+            try (var st = conn.createStatement()) {
+                st.execute("SET TIME ZONE 'UTC'");
+            }
             preflightChashConstraints(conn);
 
             Database database = DatabaseFactory.getInstance()
@@ -277,6 +288,37 @@ public final class SchemaMigrator {
                 + "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md"
                 + "#81-recovering-a-store-that-already-migrated-legacy-ids-nexus-pnwu0 before retrying.",
                 null);
+        }
+    }
+
+    /** The one zone this service's clocks agree on. */
+    static final String UTC_ID = "UTC";
+
+    /**
+     * Pin the JVM default time zone to UTC (nexus-rph82).
+     *
+     * <p>Liquibase writes {@code databasechangelog.dateexecuted} (a
+     * {@code TIMESTAMP WITHOUT TIME ZONE}) in the JVM's default zone. The
+     * managed database runs GMT and every post-deploy audit windows that
+     * column against {@code now()}, so a JVM-local write from a box seven
+     * hours behind reads as seven hours in the past and the audit reports
+     * "nothing was applied" for a walk that applied everything — measured
+     * 2026-08-27 on a PITR fork of production (conexus-a4, v0.1.86). The
+     * failure points the wrong way (towards a spurious rollback or re-run),
+     * which is why it is fixed at the source rather than documented.
+     *
+     * <p>Lives here, not only in {@code Main}, so every entry point that runs
+     * the changelog (the service, the migration rehearsals, the test suite)
+     * gets the same clock. Idempotent; logs the transition when it happens.
+     * {@code Main} also pins it before any datasource is built, because a
+     * pooled connection negotiates its session zone at connect time.
+     */
+    public static void pinJvmTimeZoneToUtc() {
+        TimeZone before = TimeZone.getDefault();
+        if (!UTC_ID.equals(before.getID())) {
+            TimeZone.setDefault(TimeZone.getTimeZone(UTC_ID));
+            System.setProperty("user.timezone", UTC_ID);
+            log.info("event=schema_migration_jvm_timezone_pinned from={} to={}", before.getID(), UTC_ID);
         }
     }
 

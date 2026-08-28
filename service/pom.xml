@@ -247,7 +247,10 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.2</version>
                 <configuration>
-                    <argLine>--enable-preview</argLine>
+                    <!-- nexus-rph82: every fork starts in UTC, so the migrator's
+                         pin (SchemaMigrator.pinJvmTimeZoneToUtc) is a no-op in the
+                         test JVM rather than an order-dependent side effect. -->
+                    <argLine>--enable-preview -Duser.timezone=UTC</argLine>
                     <excludedGroups>${test.excluded.groups}</excludedGroups>
                     <!-- nexus-1hj1d: deliberately NO rerunFailingTestsCount.
                          A blanket rerun retries EVERY failing test, so a racy

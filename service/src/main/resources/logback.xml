@@ -3,7 +3,9 @@
     <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
         <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
             <!-- Structured-ish: timestamp level logger event -->
-            <pattern>%d{ISO8601} %-5level [%thread] %logger{36} - %msg%n</pattern>
+            <!-- nexus-rph82: one clock for the service — log lines are UTC explicitly,
+                 the same zone databasechangelog.dateexecuted is stamped in. -->
+            <pattern>%d{ISO8601, UTC} %-5level [%thread] %logger{36} - %msg%n</pattern>
         </encoder>
     </appender>
 

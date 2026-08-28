@@ -45,6 +45,9 @@ public final class Main {
     private static final Logger log = LoggerFactory.getLogger(Main.class);
 
     public static void main(String[] args) throws Exception {
+        // nexus-rph82: one clock for the whole process, pinned before any
+        // datasource negotiates a session zone. See SchemaMigrator.pinJvmTimeZoneToUtc.
+        SchemaMigrator.pinJvmTimeZoneToUtc();
         int port   = intEnv("NX_SERVICE_PORT", 8080);
         // RDR-152 bead nexus-gmiaf.32.5: NX_SERVICE_TOKEN is the persistent random
         // root bearer token (minted + persisted by `nx init --service`). Auth resolves
