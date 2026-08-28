@@ -1395,14 +1395,19 @@ def _restart_and_verify(
     cycle_transcript = _cycle_transcript(stop, start)
     if sweep_note:
         cycle_transcript = f"{sweep_note} {cycle_transcript}"
-    if stop.returncode != 0 or start.returncode != 0:
-        actions.append(
-            "NEEDS HUMAN: the service restart did not report success — run "
-            "`nx daemon service stop && nx daemon service start` yourself, "
-            "then `nx doctor` to confirm the engine converged. "
-            + cycle_transcript
-        )
-        return actions
+    # nexus-mqm5w: a non-zero stop/start rc no longer short-circuits this
+    # function before convergence is ever checked. A returncode proves the
+    # commands RAN, not that the service failed to come up on the required
+    # engine — the nexus-4yf4u fallacy with the sign flipped (nexus-4yf4u
+    # was "rc==0 proves success"; this was "rc!=0 proves failure"). The
+    # v7.5.0 release battery hit exactly this: stop rc=1 from a stubborn-
+    # but-harmless survivor, yet the engine fully converged to the required
+    # version — this early return reported a false NEEDS HUMAN on a run
+    # that succeeded. rc_incomplete rides the eventual verdict line instead
+    # (success or genuine failure) so the condition stays visible without
+    # pre-empting the one check — `_running_engine` below — that actually
+    # knows whether convergence happened.
+    rc_incomplete = stop.returncode != 0 or start.returncode != 0
 
     # A freshly started service does not publish its lease instantly, so an
     # INSTANT verdict here would emit a NEEDS HUMAN on every healthy
@@ -1426,13 +1431,15 @@ def _restart_and_verify(
                 break
 
     if after.version is not None and after.version == REQUIRED_ENGINE_VERSION:
-        # The sweep note rides the SUCCESS line too: an incomplete `stop` is
-        # a real event even when the cycle then went on to converge, and
-        # silence here would hide the very condition that used to make this
-        # a coin flip.
+        # The cycle transcript rides the SUCCESS line too: an incomplete
+        # stop/start (non-zero rc) is a real event even when the cycle then
+        # went on to converge, and silence here would hide the very
+        # condition that used to make this a coin flip (nexus-mqm5w). The
+        # transcript already folds sweep_note in when present, so a single
+        # note covers both signals without duplicating either.
         actions.append(
             f"restarted the storage service — verified running v{req_s}"
-            + (f" ({sweep_note})" if sweep_note else "")
+            + (f" ({cycle_transcript})" if (sweep_note or rc_incomplete) else "")
         )
         return actions
     if after.version is not None:
