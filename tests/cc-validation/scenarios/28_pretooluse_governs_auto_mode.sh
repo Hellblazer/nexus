@@ -124,7 +124,7 @@ claude_start_auto
 # call after launch races tool-schema discovery. A throwaway list-tools turn
 # forces the model to load the mcp__stub__ schema first; the measured call
 # below is then deterministic (same fix as scenario 16).
-claude_prompt "List your available tools whose name starts with mcp__, one per line. If none, reply NO-MCP-TOOLS."
+claude_prompt "Use the ToolSearch tool with query select:mcp__stub__ping to load that tool's schema (MCP tools are deferred until loaded). When it is loaded reply LOADED; if ToolSearch does not exist or finds nothing, reply NO-MCP-TOOLS."
 claude_wait 30
 claude_prompt "Call mcp__stub__ping. Reply DONE."
 claude_wait 60
@@ -159,7 +159,7 @@ EOF
 claude_start_auto
 # Same warmup as 28a — the deny sub-run must race schema discovery identically
 # so a false "tool_ran=0" here can't be blamed on a slower connection.
-claude_prompt "List your available tools whose name starts with mcp__, one per line. If none, reply NO-MCP-TOOLS."
+claude_prompt "Use the ToolSearch tool with query select:mcp__stub__ping to load that tool's schema (MCP tools are deferred until loaded). When it is loaded reply LOADED; if ToolSearch does not exist or finds nothing, reply NO-MCP-TOOLS."
 claude_wait 30
 claude_prompt "Call mcp__stub__ping. Reply DONE."
 claude_wait 60

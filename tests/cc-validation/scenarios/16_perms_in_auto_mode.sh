@@ -71,9 +71,13 @@ send_keys "cd $TEST_HOME" Enter; sleep 0.3
 claude_start_auto
 # WARMUP (see VALIDITY NOTE on the verdict): MCP tools are deferred — the first
 # call after launch races tool-schema discovery, so a single direct call landed
-# tool_ran=0 intermittently. A throwaway list-tools turn forces the model to load
-# the mcp__stub__ schema first; the measured call below is then deterministic.
-claude_prompt "List your available tools whose name starts with mcp__, one per line. If none, reply NO-MCP-TOOLS."
+# tool_ran=0 intermittently. Since CC ~2.1.25x deferral is EXPLICIT: a deferred
+# tool must be loaded via ToolSearch("select:<name>") or a direct call fails
+# input validation before any hook or the server is reached (measured 2026-08-28:
+# the old list-tools warmup left tool_ran=0 in BOTH sub-runs and the verdict
+# vacuous). The warmup turn now instructs that load; the measured call below is
+# then deterministic.
+claude_prompt "Use the ToolSearch tool with query select:mcp__stub__ping to load that tool's schema (MCP tools are deferred until loaded). When it is loaded reply LOADED; if ToolSearch does not exist or finds nothing, reply NO-MCP-TOOLS."
 claude_wait 30
 claude_prompt "Call mcp__stub__ping. Reply DONE."
 claude_wait 60
@@ -105,7 +109,7 @@ EOF
 : > "$STUB_LOG"
 claude_start_auto
 # Same deferred-tool warmup as 16a.
-claude_prompt "List your available tools whose name starts with mcp__, one per line. If none, reply NO-MCP-TOOLS."
+claude_prompt "Use the ToolSearch tool with query select:mcp__stub__ping to load that tool's schema (MCP tools are deferred until loaded). When it is loaded reply LOADED; if ToolSearch does not exist or finds nothing, reply NO-MCP-TOOLS."
 claude_wait 30
 claude_prompt "Call mcp__stub__ping. Reply DONE."
 claude_wait 60
