@@ -24,7 +24,13 @@ claude_start_auto() {
             _trust_done=1; sleep 2
         elif echo "$pane" | grep -qiE "custom API key"; then
             _tmux send-keys -t "${TMUX_SESSION}" Enter; sleep 5
-        elif echo "$pane" | grep -qiE "Type a message|auto.*on|❯ "; then
+        # Readiness sentinel = the status bar's literal "auto mode on". The
+        # earlier `auto.*on|❯ ` pattern had NO readiness value (measured
+        # 2026-08-28): `auto.*on` matches the ECHOED COMMAND LINE itself
+        # ("...=auto --mcp-config ... --strict-mcp-con"), and `❯ ` matches an
+        # ordinary shell prompt, so the loop broke on its first poll whatever
+        # Claude was doing. Only the 8s+5s sleeps were holding it together.
+        elif echo "$pane" | grep -qiE "Type a message|auto mode on"; then
             break
         fi
         sleep 1

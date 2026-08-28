@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# UNVERIFIED on 2026-08-28 (nexus-qs1g6): written and self-checked (bash -n,
-# house conventions, non-vacuity guards) but never run to a live verdict on this
-# box — the harness's OAuth keychain entry ('Claude Code-credentials') carried
-# expiresAt: 0 and scenario 16 was blocked the same way. First real run:
-#   tests/cc-validation/runner.sh --scenario "16,28"   (after `claude /login`)
-# A pass here is what closes nexus-qs1g6's remaining finding (T1 b4aebceb).
+# VERIFIED LIVE 2026-08-28 (nexus-qs1g6) at Claude Code 2.1.251:
+#   28a (allow): hook_fired=1  tool_ran=1  server_connected=1
+#   28b (deny):  hook_fired=1  tool_ran=0  server_connected=1
+#   -> "PreToolUse permissionDecision GOVERNS in auto mode"
+# The earlier UNVERIFIED note here blamed a keychain entry carrying
+# expiresAt: 0. That observation was right and the diagnosis was incomplete:
+# the item with expiresAt 0 is a token-less HUSK that shares its service name
+# with the live one, and runner.sh was picking it by first-match. Fixed in
+# runner.sh::_cred_tool; see README § Auth.
 # Scenario 28 — does a PreToolUse hook's permissionDecision actually GOVERN
 # tool execution under `defaultMode: auto` (no --dangerously-skip-permissions)?
 #
@@ -64,7 +67,10 @@ claude_start_auto() {
             _trust_done=1; sleep 2
         elif echo "$pane" | grep -qiE "custom API key"; then
             _tmux send-keys -t "${TMUX_SESSION}" Enter; sleep 5
-        elif echo "$pane" | grep -qiE "Type a message|auto.*on|❯ "; then
+        # See scenario 16's copy of this loop: `auto.*on` matched the echoed
+        # command line and `❯ ` matched a shell prompt, so the old pattern was
+        # not a readiness signal at all. Anchor on the status bar's literal text.
+        elif echo "$pane" | grep -qiE "Type a message|auto mode on"; then
             break
         fi
         sleep 1
