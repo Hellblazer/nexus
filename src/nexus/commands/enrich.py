@@ -2121,11 +2121,29 @@ def aspects_show_cmd(tumbler_or_title: str, as_json: bool, field: str) -> None:
             )
 
     if record is None:
-        click.echo(
-            f"No aspect record extracted yet for tumbler "
-            f"{entry.tumbler} ({entry.title!r}). Run "
-            f"'nx enrich aspects {entry.physical_collection}' to extract."
-        )
+        # nexus-hj7mg: the remedy this used to print unconditionally
+        # ("Run 'nx enrich aspects <collection>'") aborts on any prefix
+        # the extractor-config registry doesn't cover (code__* is the
+        # large majority of the catalog — 15,428 of 19,328 documents,
+        # measured 2026-08-24). Consult the SAME registry `nx enrich
+        # aspects` itself uses so this can never drift out of sync with
+        # it, and say the actual fact for an unsupported prefix instead
+        # of naming a command that fails.
+        from nexus.aspect_extractor import registered_prefixes, select_config  # noqa: PLC0415 — circular-dep avoidance; command-local import
+
+        if select_config(entry.physical_collection) is None:
+            prefixes = ", ".join(f"{p}*" for p in registered_prefixes())
+            click.echo(
+                f"Aspects are not extracted for "
+                f"{entry.physical_collection!r} collections (tumbler "
+                f"{entry.tumbler}, {entry.title!r}). Supported: {prefixes}."
+            )
+        else:
+            click.echo(
+                f"No aspect record extracted yet for tumbler "
+                f"{entry.tumbler} ({entry.title!r}). Run "
+                f"'nx enrich aspects {entry.physical_collection}' to extract."
+            )
         return
 
     if as_json:
