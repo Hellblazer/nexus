@@ -191,10 +191,16 @@ def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypat
     fake_cat = MagicMock(spec=HttpCatalogClient)
     fake_cat.chashes_for_collection.return_value = set()
 
+    # nexus-fduai: the audit write goes through the catalog WRITER proxy,
+    # not the reader — fake it at the verb's own seam.
+    fake_writer = MagicMock()
+    fake_writer.record_gc_audit.return_value = 42
+
     monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
     with (
         patch("nexus.db.make_t3", return_value=real_client),
         patch("nexus.commands.t3._make_catalog", return_value=fake_cat),
+        patch("nexus.commands.t3._make_catalog_writer", return_value=fake_writer),
     ):
         result = runner.invoke(
             main,
@@ -209,6 +215,15 @@ def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypat
     assert "deleted 1 chunk(s)" in result.output
     deletes = [b for p, b in posted if p == "/v1/vectors/store-delete"]
     assert deletes == [{"collection": _KNOWLEDGE, "ids": ["orphan1"]}]
+    fake_writer.record_gc_audit.assert_called_once()
+    audit = fake_writer.record_gc_audit.call_args.kwargs
+    assert audit["operation"] == "t3_gc"
+    assert audit["collection"] == _KNOWLEDGE
+    assert audit["actor"] == "nx t3 gc"
+    assert audit["dry_run"] is False
+    assert audit["chashes"] == [chash]
+    assert audit["details"]["deleted"] == 1
+    fake_writer.close.assert_called_once()
 
 
 # ── nx t3 prune-stale (RETIRED, nexus-bm8dd) ─────────────────────────────────

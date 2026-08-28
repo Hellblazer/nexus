@@ -1529,6 +1529,47 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         )
         return (result or {}).get("entries", [])
 
+    def record_gc_audit(
+        self,
+        *,
+        operation: str,
+        collection: str | None = None,
+        actor: str | None = None,
+        dry_run: bool = False,
+        chashes: list[str] | tuple[str, ...] = (),
+        details: dict[str, Any] | None = None,
+    ) -> int:
+        """POST /v1/catalog/gc_audit/record — append ONE destructive-T3-op
+        audit row on the caller's say-so (nexus-jqvzk); returns its id.
+
+        The client-facing producer the engine built for ``nx t3 gc``
+        (nexus-fduai): the engine's own reap paths write their rows
+        server-side with ``actor="engine"``, but a T3 delete the CLIENT
+        performs is invisible to it until the client reports it here, in
+        the same breath as the delete. The engine truncates ``chashes`` at
+        its own cap (``GC_AUDIT_MAX_CHASHES``) while keeping ``chash_count``
+        exact, so pass the FULL list — never pre-sample it client-side.
+        ``chashes`` is what the caller REPORTS — the candidates it asked to
+        delete — not an engine-confirmed deleted set; put the confirmed
+        count in ``details`` (``nx t3 gc`` records ``details.deleted``).
+
+        A pre-nexus-jqvzk engine has no matching route and answers 404 —
+        propagated like :meth:`gc_audit_list`, never swallowed.
+        """
+        body: dict[str, Any] = {
+            "operation": operation,
+            "dry_run": dry_run,
+            "chashes": list(chashes),
+        }
+        if collection:
+            body["collection"] = collection
+        if actor:
+            body["actor"] = actor
+        if details:
+            body["details"] = details
+        result = self._post("/gc_audit/record", body) or {}
+        return int(result.get("id", 0))
+
     def find(
         self, query: str, *, content_type: str | None = None
     ) -> list[CatalogEntry]:

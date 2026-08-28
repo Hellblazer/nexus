@@ -417,7 +417,12 @@ def make_catalog_writer(
 #: mode. Reads never go through ``make_catalog_writer()`` — see the module
 #: docstring — so this whitelist entry does not create a reader-through-
 #: writer path; it just means the *dry-run preview itself* is a writer op.
-_SERVICE_ONLY_WRITE_OPS: frozenset[str] = frozenset({"update_many", "delete_many", "purge_trash"})
+#: nexus-fduai: ``record_gc_audit`` is the client-facing gc_audit producer
+#: (``POST /v1/catalog/gc_audit/record``) ``nx t3 gc`` reports its own T3
+#: delete through — append-only, engine-side, no local equivalent ever.
+_SERVICE_ONLY_WRITE_OPS: frozenset[str] = frozenset({
+    "update_many", "delete_many", "purge_trash", "record_gc_audit",
+})
 
 
 class _ServiceCatalogWriter:

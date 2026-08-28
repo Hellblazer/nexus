@@ -406,7 +406,23 @@ def test_gc_deletes_genuine_orphan_while_protecting_a_note_in_the_same_collectio
         chunk_text_hash=orphan_chash, indexed_at=long_ago,
     )
 
-    with patch("nexus.db.make_t3", return_value=t3_db):
+    # main() reconfigures structlog on every CLI invocation, so
+    # structlog.testing.capture_logs cannot see events emitted inside
+    # runner.invoke; record the module logger directly instead.
+    cap: list[dict] = []
+
+    class _Recorder:
+        def _rec(self, event, **kw):
+            cap.append({"event": event, **kw})
+        info = warning = error = debug = _rec
+
+        def bind(self, **kw):
+            return self
+
+    with (
+        patch("nexus.db.make_t3", return_value=t3_db),
+        patch("nexus.commands.t3._log", _Recorder()),
+    ):
         result = runner.invoke(
             main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes"],
         )
@@ -414,6 +430,92 @@ def test_gc_deletes_genuine_orphan_while_protecting_a_note_in_the_same_collectio
     assert result.exit_code == 0, result.output
     surviving = t3_db._client.get_collection(coll).get()["ids"]
     assert surviving == ["note1"]
+    # nexus-fduai: the delete is client-side, so the engine's gc_audit only
+    # knows about it because the verb reported it through the client-facing
+    # producer. Read the row back through the same route doctor uses.
+    rows = active_catalog.gc_audit_list(operation="t3_gc", collection=coll)
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["actor"] == "nx t3 gc"
+    assert row["dry_run"] is False
+    assert row["chash_count"] == 1
+    assert row["chashes"] == [orphan_chash]
+    assert row["details"]["deleted"] == 1
+    assert row["details"]["chunk_ids_sample"] == ["orphan1"]
+    # ...and the structured event mirrors it, carrying the row's id.
+    events = [e for e in cap if e.get("event") == "t3_gc_chunks_deleted"]
+    assert len(events) == 1, [e.get("event") for e in cap]
+    assert events[0]["collection"] == coll
+    assert events[0]["deleted"] == 1
+    assert events[0]["requested"] == 1
+    assert events[0]["chunk_ids_sample"] == ["orphan1"]
+    assert events[0]["chunk_ids_truncated"] == 0
+    assert events[0]["gc_audit_id"] == row["id"]
+    assert events[0]["gc_audit_error"] is None
+
+
+def test_gc_audit_write_failure_is_loud_and_fails_the_exit_code(
+    t3_db, active_catalog, runner, monkeypatch,
+):
+    """nexus-fduai: the delete already happened; a gc_audit write that then
+    fails must never be silent — WARNING on stderr, non-zero exit, the
+    event carries the error — and the delete itself is not rolled back."""
+    coll = "knowledge__test_gc_audit_write_fails"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="orphan1", content="stale",
+        chunk_text_hash="f" * 64, indexed_at=long_ago,
+    )
+
+    class _BrokenWriter:
+        def record_gc_audit(self, **kw):
+            raise RuntimeError("engine said no")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("nexus.commands.t3._make_catalog_writer", _BrokenWriter)
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes",
+                   "--allow-empty-manifest-set"],
+        )
+
+    assert result.exit_code == 1, result.output
+    assert "deleted 1 chunk(s)" in result.output
+    assert "gc_audit row recording it could NOT be written" in result.output
+    assert "RuntimeError: engine said no" in result.output
+    assert t3_db._client.get_collection(coll).get()["ids"] == []
+
+
+def test_gc_dry_run_records_no_audit_row(t3_db, active_catalog, runner, monkeypatch):
+    """A report-only run deletes nothing and must not write an audit row
+    either — dry runs would otherwise swamp the trail."""
+    coll = "knowledge__test_gc_dry_run_no_audit"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="orphan1", content="stale",
+        chunk_text_hash="f" * 64, indexed_at=long_ago,
+    )
+    calls: list[dict] = []
+
+    class _Writer:
+        def record_gc_audit(self, **kw):
+            calls.append(kw)
+            return 1
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("nexus.commands.t3._make_catalog_writer", _Writer)
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        result = runner.invoke(
+            main, ["t3", "gc", "-c", coll, "--allow-empty-manifest-set"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert calls == []
+    assert t3_db._client.get_collection(coll).get()["ids"] == ["orphan1"]
 
 
 def test_gc_dry_run_never_lists_a_protected_note_as_a_candidate(
