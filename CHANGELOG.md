@@ -33,6 +33,21 @@ that tag is gated and paired with a client release.
   precheck bypassed, and both `POST /v1/catalog/link` and
   `/v1/catalog/import/link` have HTTP-level tests of the machine-readable
   `{error, code: "dangling_endpoint", missing}` body.
+- **`nx catalog reconcile-stale` anchors its census to the substrate
+  (nexus-cwhci).** The shakedown playbook's §S4 required comparing the
+  census's examined count against a substrate-direct document count and
+  recorded that no such count is reachable on a managed box, so S4 sat as
+  an unowned "standing gap" for five cycles. It is reachable: the engine's
+  `catalog_stats.doc_count` is a server-side SQL count served by
+  `GET /v1/catalog/stats`. Every census now opens with
+  `Substrate anchor: OK|MISMATCH|UNAVAILABLE`, comparing that count (taken
+  before and after the walk, so writes landing mid-walk are corroborated
+  rather than mis-read) with the rows the walk saw; MISMATCH and UNAVAILABLE
+  exit non-zero as INCOMPLETE and every `--execute` arm refuses on them.
+  The anchor proves the walk saw every row the engine serves this caller;
+  it shares the caller's tenant scope, so rows hidden by scope stay a
+  server-operator check (playbook S4b). `--json` carries
+  `substrate_anchor`. Playbook amendment: T2 [23598] §S4.
 - **New aspect rows are attributed to their catalog document (nexus-x1de2).**
   The extractor builds an `AspectRecord` without a `doc_id`; the worker had
   the identity on its queue row and `nx enrich aspects` had it on the

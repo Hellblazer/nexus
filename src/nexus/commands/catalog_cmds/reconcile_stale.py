@@ -416,6 +416,108 @@ def _format_reason_counts(counts: dict[str, int]) -> str:
     return ", ".join(f"{reason}={n}" for reason, n in sorted(counts.items()))
 
 
+def _substrate_anchor(cat: "CatalogReader", *, walked: int, before: dict | None) -> dict:
+    """The S4 non-vacuity anchor (nexus-cwhci): the engine's own server-side
+    count of live catalog documents compared with the rows THIS walk paged
+    through.
+
+    ``catalog_stats.doc_count`` is a SECURITY INVOKER view over
+    ``catalog_documents WHERE deleted_at IS NULL`` (catalog-019), evaluated
+    by SQL on the substrate and served by ``GET /v1/catalog/stats`` — an
+    aggregate the engine computes in one statement, reachable on a
+    cloud-managed box through the public API with the store's own
+    credentials. No psql, no relay. ``all_documents`` reads the same
+    tombstone-aware views, so a walk that saw every live row matches it
+    exactly; aliases and rows without a collection are counted here too,
+    then excluded from ``total_docs`` by the classification.
+
+    WHAT IT CORROBORATES, AND WHAT IT CANNOT (substantive-critic,
+    2026-08-28): the aggregate and the walk are independent MECHANISMS
+    (one SQL ``count(*)`` versus an OFFSET-paged read materialised
+    client-side), so agreement proves the walk saw every row the engine
+    serves this caller — the paging, truncation and swallowed-read class
+    the playbook's §S4 calls a probe failure. They share the caller's
+    tenant scope and RLS, so agreement says nothing about rows the caller
+    cannot see: a document registered under another tenant, or hidden by
+    a scope defect, is invisible to both, and only a server-operator count
+    (psql on the substrate) can surface that class. The playbook records
+    that split as S4 (this anchor, every box) and S4b (scope divergence, a
+    conexus relay when suspected).
+
+    The walk is BRACKETED by two point-in-time counts (*before* it starts,
+    *after* it ends — code-review-expert, 2026-08-28): a live box indexes
+    while a census walks, so a single write landing mid-walk must not read
+    as a probe failure. ``ok`` when the walk equals both counts; ``ok`` with
+    ``moved_during_walk`` when the two counts differ and the walk landed
+    between them (the delta is explained by writes the walk straddled);
+    ``MISMATCH`` when the walk falls outside both (a probe failure, never a
+    clean census); ``unavailable`` when the reader cannot report a count at
+    all — unverifiable is never a pass, so ``MISMATCH`` and ``unavailable``
+    both make the run INCOMPLETE (see :func:`_raise_if_anchor_failed`).
+    """
+    base = {
+        "substrate_doc_count": None, "substrate_doc_count_before": None,
+        "substrate_doc_count_after": None, "walked_docs": walked, "delta": None,
+        "moved_during_walk": False,
+    }
+    if before is None or before.get("status") == "unavailable":
+        reason = (before or {}).get("reason", "no count taken before the walk")
+        return {**base, "status": "unavailable", "reason": reason}
+    after = _substrate_count(cat)
+    if after.get("status") == "unavailable":
+        return {**base, "substrate_doc_count_before": before["doc_count"],
+                "status": "unavailable", "reason": after["reason"]}
+    b, a = before["doc_count"], after["doc_count"]
+    lo, hi = min(b, a), max(b, a)
+    result = {
+        **base, "substrate_doc_count": a, "substrate_doc_count_before": b,
+        "substrate_doc_count_after": a, "delta": walked - a, "reason": None,
+    }
+    if lo <= walked <= hi:
+        return {**result, "status": "ok", "moved_during_walk": b != a}
+    return {**result, "status": "MISMATCH"}
+
+
+def _substrate_count(cat: "CatalogReader") -> dict:
+    """One point-in-time engine count (``catalog_stats.doc_count``), or an
+    ``unavailable`` record naming why."""
+    stats_fn = getattr(cat, "stats", None)
+    if not callable(stats_fn):
+        return {"status": "unavailable", "reason": "catalog reader exposes no stats()"}
+    try:
+        stats = stats_fn() or {}
+    except Exception as exc:  # noqa: BLE001 — boundary catch; the anchor reports the failure, the census still prints
+        return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
+    doc_count = stats.get("doc_count")
+    if doc_count is None:
+        return {"status": "unavailable", "reason": "engine stats carry no doc_count"}
+    return {"status": "ok", "doc_count": int(doc_count)}
+
+
+def _raise_if_anchor_failed(report: dict) -> None:
+    """nexus-cwhci: a walk the substrate count does not corroborate is not a
+    census — refuse the same way the unreadable guard does."""
+    anchor = report.get("substrate_anchor") or {}
+    status = anchor.get("status")
+    if status == "ok":
+        return
+    if status == "MISMATCH":
+        raise click.ClickException(
+            f"reconcile-stale INCOMPLETE: substrate anchor MISMATCH — the engine counted "
+            f"{anchor['substrate_doc_count_before']} live catalog document(s) before the walk "
+            f"and {anchor['substrate_doc_count_after']} after it; this walk saw "
+            f"{anchor['walked_docs']}, outside that bracket (delta {anchor['delta']:+d}). "
+            f"A census the substrate does not corroborate is a probe failure, not a clean "
+            f"result (playbook §S4); the mutation arms refuse on it too."
+        )
+    raise click.ClickException(
+        f"reconcile-stale INCOMPLETE: substrate anchor unavailable "
+        f"({anchor.get('reason', 'unknown')}) — the walk saw {anchor.get('walked_docs')} "
+        f"row(s) but nothing independent corroborates that count. Unverifiable is never "
+        f"a pass (playbook §S4)."
+    )
+
+
 def _classify(cat: "CatalogReader", t3: object) -> tuple[dict, list[str]]:
     """Build the full classification report. Returns ``(report, unreadable)``.
 
@@ -424,14 +526,19 @@ def _classify(cat: "CatalogReader", t3: object) -> tuple[dict, list[str]]:
     trusted — the caller must refuse to act on ANY of the findings below,
     same as ``catalog verify``'s INCOMPLETE contract.
     """
-    entries = [
-        e for e in cat.all_documents(limit=0)
-        if not e.alias_of and e.physical_collection
-    ]
+    before = _substrate_count(cat)  # nexus-cwhci: first bracket, taken BEFORE the walk
+    walked = list(cat.all_documents(limit=0))
+    entries = [e for e in walked if not e.alias_of and e.physical_collection]
     total_docs = len(entries)
+    alias_docs = sum(1 for e in walked if e.alias_of)
+    no_collection_docs = sum(1 for e in walked if not e.alias_of and not e.physical_collection)
 
     report = {
         "total_docs": total_docs,
+        "walked_docs": len(walked),
+        "alias_docs": alias_docs,
+        "no_collection_docs": no_collection_docs,
+        "substrate_anchor": _substrate_anchor(cat, walked=len(walked), before=before),
         "vanished_empty_manifest": [],
         "vanished_has_manifest": [],
         "zero_count_recount": [],
@@ -579,7 +686,41 @@ def _label_dishonest(row: dict) -> str:
     )
 
 
+def _echo_anchor(report: dict) -> None:
+    a = report.get("substrate_anchor") or {}
+    excluded = (
+        f"{report.get('alias_docs', 0)} alias, "
+        f"{report.get('no_collection_docs', 0)} without a collection excluded from examination"
+    )
+    if a.get("status") == "ok" and a.get("moved_during_walk"):
+        click.echo(
+            f"Substrate anchor: OK — the engine counted {a['substrate_doc_count_before']} live "
+            f"catalog document(s) before the walk and {a['substrate_doc_count_after']} after it; "
+            f"this walk saw {a['walked_docs']}, inside that bracket (writes landed during the "
+            f"walk; {excluded})."
+        )
+    elif a.get("status") == "ok":
+        click.echo(
+            f"Substrate anchor: OK — the engine counts {a['substrate_doc_count']} live catalog "
+            f"document(s) and this walk saw {a['walked_docs']} ({excluded})."
+        )
+    elif a.get("status") == "MISMATCH":
+        click.echo(
+            f"Substrate anchor: MISMATCH — the engine counted {a['substrate_doc_count_before']} "
+            f"live catalog document(s) before the walk and {a['substrate_doc_count_after']} after "
+            f"it; this walk saw {a['walked_docs']}, outside that bracket (delta {a['delta']:+d}; "
+            f"{excluded}). The census below is NOT a pass."
+        )
+    else:
+        click.echo(
+            f"Substrate anchor: UNAVAILABLE ({a.get('reason', 'unknown')}) — the walk saw "
+            f"{a.get('walked_docs')} row(s) with nothing independent to corroborate it. "
+            f"The census below is NOT a pass."
+        )
+
+
 def _echo_human_report(report: dict, unreadable: list[str]) -> None:
+    _echo_anchor(report)
     click.echo(f"Catalog reconcile-stale: {report['total_docs']} non-alias catalog document(s) examined.")
 
     vanished_empty = report["vanished_empty_manifest"]
@@ -734,6 +875,11 @@ def _json_payload(report: dict, unreadable: list[str]) -> dict:
         "dishonest": report["dishonest"],
         "dishonest_by_origin": _count_by_key(report["dishonest"], "origin"),
         "incomplete": unreadable,
+        # nexus-cwhci: the S4 anchor — engine server-side count vs this walk.
+        "substrate_anchor": report.get("substrate_anchor"),
+        "walked_docs": report.get("walked_docs"),
+        "alias_docs": report.get("alias_docs"),
+        "no_collection_docs": report.get("no_collection_docs"),
     }
 
 
@@ -1013,6 +1159,7 @@ def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_o
         _echo_human_report(report, unreadable)
 
     _raise_if_unreadable(unreadable)
+    _raise_if_anchor_failed(report)
 
     if action is None:
         return
