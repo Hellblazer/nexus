@@ -43,7 +43,10 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
-(none)
+- `bc1847e08` -- bead nexus-lqqb2 -- engine tag `TBD (next engine-service cut, not yet tagged; floor v0.1.87)` -- dead consent-audit wire DELETED both halves in one commit (client `record_consent`/`list_consents` + engine `/v1/telemetry/consents/{record,list}`). Deletion, so no released client calls it; an old client against a new engine gets 404 on a route nothing invokes.
+- `72d25594e` -- bead nexus-v0x32 -- engine tag `TBD (next engine-service cut, not yet tagged; floor v0.1.87)` -- `nx telemetry baseline`'s `GET /v1/telemetry/relevance/stats`; the client renders UNAVAILABLE-with-reason on an engine that lacks the route (fail-loud by design, no wedge).
+- `36fad4487` -- bead nexus-8tnz2 -- engine tag `TBD (next engine-service cut, not yet tagged; floor v0.1.87)` -- `GET /v1/catalog/docs/collection-counts-all` (all-rows counts for the drop-orphan-collections arm); an old engine 404s and the arm reports INCOMPLETE, refusing --execute (designed for exactly this window; extension pass a228e079).
+- `c2d9c4302` -- bead nexus-ubnwk -- engine tag `TBD (next engine-service cut, not yet tagged; floor v0.1.87)` -- `POST /v1/vectors/search-aspect-scoped` + `nexus.search_aspect_scoped_<dim>` (vectors-008) + aspects-004 doc_id backfill; the MCP tool fails loud through `_mcp_tool_error` on 404 until the tag deploys.
 
 ## Shipped
 
