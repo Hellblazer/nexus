@@ -708,6 +708,9 @@ def index_cmd(
     unchanged = 0
     skipped = 0
     stamp_failed = 0
+    # nexus-l6tr7: refusals that PROPAGATED (streaming/incremental path) and
+    # so landed in `failed`, never in `indexed` — the footer splits them out.
+    refused_in_failed = 0
     written_back = 0
     linked = 0
     content_extracted = 0
@@ -814,6 +817,7 @@ def index_cmd(
                             present=exc.present,
                             missing=exc.missing,
                         )
+                        refused_in_failed += 1
                         failed.append((uuid, path, _index_run_refused_message(exc, target_collection=dt_collection)))
                     elif isinstance(exc, ChunkLandingUnverifiedError):
                         _log.error(
@@ -921,6 +925,7 @@ def index_cmd(
                     present=exc.present,
                     missing=exc.missing,
                 )
+                refused_in_failed += 1
                 failed.append((uuid, path, _index_run_refused_message(exc, target_collection=resolved_collection)))
             elif isinstance(exc, ChunkLandingUnverifiedError):
                 _log.error(
@@ -1053,6 +1058,7 @@ def index_cmd(
     )
     if emit_identity_drop_summary(
         indexed_count=indexed,
+        refused_in_failed=refused_in_failed,
         # nexus-7f5qj code-review follow-up (T2 [21484]): preserve this
         # command's ORIGINAL print order exactly (refused, then
         # write-failed, then identity-drops) — the extraction's default
