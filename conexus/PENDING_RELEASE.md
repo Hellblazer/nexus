@@ -31,6 +31,13 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.19.0)
 
+- `conexus/hooks/scripts/pre_close_verification_hook.sh` — nexus-e3mak: a
+  review-completed marker now counts only when it NAMES the full required
+  reviewer set (code-review-expert AND substantive-critic). Previously the gate
+  matched the literal string plus the bead id, so one reviewer's handoff note
+  saying "reviewer 1/2" satisfied the gate it was half of, with the critic
+  never dispatched. Inert until the pin advances — the hook and the remedy text
+  it prints ship together, which is why no cross-version carve-out was needed.
 - `conexus/hooks/scripts/subagent-stop-writes-scan.py` (NEW) — nexus-piqm5
   Layer 1: the unlanded-write scan. Reads a finished subagent's transcript,
   correlates each storage-write tool_use to its tool_result by tool_use_id,

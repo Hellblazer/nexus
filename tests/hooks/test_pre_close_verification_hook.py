@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil as _shutil
 import subprocess
 import sys
@@ -218,14 +219,24 @@ def _get_reason(parsed: dict) -> str:
 
 # A marker entry pair in the exact `nx scratch list` shape
 # (src/nexus/commands/scratch.py list_cmd): two lines, header + content.
-def _marker(tags: str, content: str) -> str:
-    return f"[abcd1234] {tags}  flagged=False\n  {content}\n"
+#: nexus-e3mak: a marker counts only when it NAMES the full required
+#: reviewer set. Appended by default so the many call sites below keep
+#: expressing "a valid, complete marker" without each restating the roster;
+#: pass reviewers="" (or a partial string) to build the incomplete marker the
+#: gate must now refuse.
+_FULL_REVIEWERS = "reviewers=code-review-expert,substantive-critic"
+
+
+def _marker(tags: str, content: str, reviewers: str = _FULL_REVIEWERS) -> str:
+    body = f"{content} {reviewers}".rstrip()
+    return f"[abcd1234] {tags}  flagged=False\n  {body}\n"
 
 
 # A marker entry pair in the exact `nx memory search` shape
 # (src/nexus/commands/memory.py search_cmd): two lines, header + content.
-def _t2_marker(project_title: str, content: str) -> str:
-    return f"[1] {project_title}  (developer, 2026-08-06T00:00:00Z)\n  {content}\n"
+def _t2_marker(project_title: str, content: str, reviewers: str = _FULL_REVIEWERS) -> str:
+    body = f"{content} {reviewers}".rstrip()
+    return f"[1] {project_title}  (developer, 2026-08-06T00:00:00Z)\n  {body}\n"
 
 
 class TestRunHookIsolatesRoutingLog:
@@ -1135,16 +1146,37 @@ class TestF5RemedyRoundTripReal:
         write_env["NX_SESSION_ID"] = session_id
         write_env["NX_T1_ALLOW_SHARED_FALLBACK"] = "1"
 
-        if remedy_kind == "t1_scratch":
-            write_cmd = [
-                real_nx, "scratch", "put", f"review-completed: {bead_id}",
-                "--tags", f"review-completed,{bead_id}",
-            ]
-        else:
-            write_cmd = [
-                real_nx, "memory", "put", f"review-completed: {bead_id}",
-                "-p", "nexus-cr4lp-f5-close-test", "-t", f"review-{bead_id}",
-            ]
+        # nexus-e3mak: EXTRACT the command from what the hook actually
+        # PRINTS, rather than keeping a hand-copied duplicate of it here.
+        # This test's docstring already claimed it round-trips the printed
+        # remedy; it did not -- it re-stated the remedy, so the two could
+        # drift apart silently, and they DID the moment the required marker
+        # form changed. Parsing the real output makes the claim true and
+        # makes this test follow any future change to the remedy for free.
+        env0 = mock_config_env({"on_close": True})
+        probe = _run_hook(
+            _make_payload(command=f"bd close {bead_id}", session_id=session_id),
+            path_prefix=str(real_nx_dir),
+            env_overrides={**env0, "NX_T1_ALLOW_SHARED_FALLBACK": "1"},
+        )
+        reason = _get_reason(json.loads(probe.stdout))
+        assert _get_decision(json.loads(probe.stdout)) == "deny", (
+            "precondition: with no marker written the hook must deny, or this "
+            "test never exercises the remedy it is here to verify"
+        )
+
+        want = "nx scratch put" if remedy_kind == "t1_scratch" else "nx memory put"
+        line = next(
+            (ln.strip() for ln in reason.splitlines() if ln.strip().startswith(want)),
+            None,
+        )
+        assert line, f"the hook printed no {want!r} remedy to round-trip:\n{reason}"
+
+        project = "nexus-cr4lp-f5-close-test"
+        line = line.replace("<bead-id>", bead_id).replace("<project>", project)
+        write_cmd = shlex.split(line)
+        assert write_cmd[0] == "nx", write_cmd
+        write_cmd[0] = real_nx
 
         # The remedy write is ITS OWN subprocess call -- never bundled
         # with the gated `bd close`.
@@ -1322,3 +1354,148 @@ class TestMalformedQuotingNeverBypasses:
             env_overrides=env,
         )
         assert _get_decision(json.loads(result.stdout)) == "deny"
+
+
+class TestE3makCompleteReviewerSet:
+    """A marker must NAME the full required reviewer set (nexus-e3mak).
+
+    THE INCIDENT, 2026-08-26 (RG-C, nexus-utpuw.23). The dispatched
+    code-review-expert finished reviewer 1 of 2 and wrote a T1 handoff note for
+    its sibling. The gate matched on the literal string ``review-completed``
+    plus the bead id, so that note WAS coverage: ``bd close nexus-utpuw.23``
+    would have passed with the substantive-critic never dispatched, while the
+    gate's own text says the critic is never optional. The note was honest --
+    it said "reviewer 1/2" -- which is the point: honesty is not a property a
+    gate can rest on.
+
+    WHY POSITIVE NAMING RATHER THAN "REFUSE A PARTIAL CLAIM". A rule that
+    denied only when a marker named SOME of the roster was drafted and
+    discarded: the incident marker names reviewers by COUNT ("1/2"), not by
+    agent type, so such a rule would not have caught the very incident this
+    bead is about. ``test_the_verbatim_incident_marker_is_refused`` is the
+    guard against that mistake being made again.
+
+    NO CROSS-VERSION CARVE-OUT, and none is needed. Markers land in T1, which
+    is session-scoped, and the marker write and the ``bd close`` happen in one
+    session -- so a T1 marker is always written under whatever instructions
+    were live in that session, and the hook and the remedy text it prints ship
+    together in one pinned plugin. The only window at all is a durable T2
+    marker outliving a pin advance, and the T2 marker leg is itself a
+    workaround for the T1 lease split-brain rather than a designed path, so it
+    is not a case worth softening the rule for. Its cost is one denied close
+    carrying the exact command to rewrite.
+    """
+
+    def test_the_verbatim_incident_marker_is_refused(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        """The 2026-08-26 note, reproduced as written."""
+        env = mock_config_env({"on_close": True})
+        scratch = _marker(
+            "review-completed,nexus-utpuw.23",
+            "review-completed bead=nexus-utpuw.23 (RG-C reviewer 1/2: findings clean)",
+            reviewers="",
+        )
+        fake_nx_bin = fake_nx(scratch)
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-utpuw.23"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny", (
+            "the reviewer's own handoff note still satisfies the gate it is "
+            "one half of — this IS nexus-e3mak"
+        )
+        assert not log.exists() or log.read_text().strip() == "", (
+            "a denied close must acquire no verification record"
+        )
+
+    def test_naming_only_one_required_reviewer_is_refused(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        scratch = _marker(
+            "review-completed,nexus-e3m01",
+            "review-completed: nexus-e3m01",
+            reviewers="reviewers=code-review-expert",
+        )
+        fake_nx_bin = fake_nx(scratch)
+        fake_bd_bin, _log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-e3m01"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "deny", parsed
+        assert "substantive-critic" in _get_reason(parsed), (
+            "the refusal must name what is missing, not just refuse"
+        )
+
+    def test_naming_the_full_set_is_accepted(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        scratch = _marker("review-completed,nexus-e3m02", "review-completed: nexus-e3m02")
+        fake_nx_bin = fake_nx(scratch)
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-e3m02"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        assert _get_decision(json.loads(result.stdout)) == "allow"
+        assert log.exists(), "a passed close must acquire its verification record"
+
+    def test_a_t2_marker_must_also_name_the_full_set(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        """Parity, so the workaround is not a softer door.
+
+        The T2 marker leg is not a designed feature: the hook's own write-side
+        contract says "T2-alone is the correct choice specifically when the
+        CLI T1 lease is known-stale", i.e. it exists to route around the T1
+        CLI/MCP lease split-brain. It is enforced identically here for exactly
+        that reason — a leg added to dodge a T1 problem must not become the
+        cheap way past a review gate. Retiring it is tracked separately; while
+        it exists it holds the same bar."""
+        env = mock_config_env({"on_close": True})
+        fake_nx_bin = fake_nx(
+            "No scratch entries.",
+            memory_by_query={
+                "nexus-e3m03": _t2_marker(
+                    "nexus/review-nexus-e3m03",
+                    "review-completed: nexus-e3m03",
+                    reviewers="reviewers=substantive-critic",
+                ),
+            },
+        )
+        fake_bd_bin, _log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-e3m03"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        assert _get_decision(json.loads(result.stdout)) == "deny", (
+            "the T2 leg accepted a marker naming one reviewer"
+        )
+
+    def test_override_still_escapes_an_incomplete_marker(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        """The audited override must cover the new refusal too — otherwise a
+        genuine cross-version marker would have no escape at all."""
+        env = mock_config_env({"on_close": True})
+        scratch = _marker(
+            "review-completed,nexus-e3m04", "review-completed: nexus-e3m04", reviewers="",
+        )
+        fake_nx_bin = fake_nx(scratch)
+        fake_bd_bin, _log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-e3m04"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides={**env, "NX_REVIEW_GATE_OVERRIDE": "1"},
+        )
+        assert _get_decision(json.loads(result.stdout)) == "allow"
