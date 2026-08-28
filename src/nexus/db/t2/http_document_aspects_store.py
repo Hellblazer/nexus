@@ -169,6 +169,20 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             raise ValueError("model_version must not be empty")
         if not record.extractor_name:
             raise ValueError("extractor_name must not be empty")
+        if not record.doc_id:
+            # nexus-x1de2 (52): the engine stores a blank doc_id as NULL
+            # (fk-001) — a row no catalog document can claim. The schema
+            # permits it and the enqueue contract allows an empty doc_id,
+            # so this is not refused, but it is never silent: every
+            # producer that knows the identity stamps it (with_doc_id),
+            # and a write that still lacks one is the signal the
+            # attribution gap has reopened.
+            _log.warning(
+                "document_aspects_upsert_unattributed",
+                collection=record.collection,
+                source_path=record.source_path,
+                extractor_name=record.extractor_name,
+            )
         r = self._post("/upsert", _record_to_body(record))
         return bool(r.get("written", False))
 

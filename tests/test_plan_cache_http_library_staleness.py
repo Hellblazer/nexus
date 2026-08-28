@@ -32,6 +32,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nexus.mcp_infra import get_t1_plan_cache
+
 
 @pytest.fixture(autouse=True)
 def _reset_cache():
@@ -172,4 +174,40 @@ def test_reset_clears_bounded_staleness_clock():
 
     assert fake_cache.populate.call_count == 2, (
         "post-reset populate should fire even though the TTL has not elapsed"
+    )
+
+
+# ── ported from test_plan_cache_mtime_invalidation.py (nexus-x1de2 (54)) ──
+# The SQLite file-mtime branch those tests exercised is deleted; the two
+# contracts below never depended on it and keep their coverage here.
+
+
+def test_no_populate_without_populate_from_arg():
+    """Callers that don't pass populate_from never trigger populate."""
+    fake_cache = MagicMock()
+    with patch("nexus.mcp_infra.get_t1", return_value=_stub_t1()), \
+         patch("nexus.plans.session_cache.PlanSessionCache",
+               return_value=fake_cache):
+        get_t1_plan_cache()
+        get_t1_plan_cache()
+
+    assert fake_cache.populate.call_count == 0
+
+
+def test_populate_failure_does_not_suppress_retry():
+    """A transient populate failure must NOT permanently mark the cache
+    populated (code-review finding 2 on PR #881): bookkeeping is stamped
+    only on success, so the next call retries inside the same TTL window."""
+    lib = _FakeHttpPlanLibrary()
+    fake_cache = MagicMock()
+    fake_cache.populate.side_effect = [RuntimeError("transient"), 0]
+    with patch("nexus.mcp_infra.get_t1", return_value=_stub_t1()), \
+         patch("nexus.plans.session_cache.PlanSessionCache",
+               return_value=fake_cache):
+        get_t1_plan_cache(populate_from=lib)
+        get_t1_plan_cache(populate_from=lib)
+
+    assert fake_cache.populate.call_count == 2, (
+        f"expected retry on the second call after first failure, "
+        f"got {fake_cache.populate.call_count}"
     )

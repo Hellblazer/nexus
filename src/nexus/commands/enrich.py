@@ -1467,6 +1467,7 @@ def _run_extraction(
     # true for the raw AspectRecord arg, but complete_aspect(asdict(...))
     # IS routable (added in nexus-zir76) and is the correct path.
     import dataclasses as _dataclasses  # noqa: PLC0415 — stdlib deferred to call site (startup cost)
+    from nexus.db.t2.records import with_doc_id  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.records)
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.mcp_infra)
     with T2Database(db_path) as db:  # boundary-allow: read-only handle; the aspect WRITE routes via t2_index_write -> complete_aspect (nexus-hb99x)
         for i, entry in enumerate(entries, 1):
@@ -1528,6 +1529,9 @@ def _run_extraction(
             # row (idempotent no-op when the CLI batch path has no queued
             # row for this (collection, source_path)). Daemon path when
             # reachable; direct-T2Database fallback otherwise.
+            # nexus-x1de2 (52): the entry IS the catalog identity — stamp
+            # it so the row is attributable (the extractor never sets it).
+            record = with_doc_id(record, str(getattr(entry, "tumbler", "") or ""))
             try:
                 t2_index_write(
                     lambda t2db, _rec=record: t2db.complete_aspect(
