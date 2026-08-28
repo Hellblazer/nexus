@@ -2256,6 +2256,15 @@ Health check for all dependencies.
 nx doctor
 ```
 
+**Exit codes (7.21.0, nexus-be6x8).** The exit code says what the glyphs
+say: `0` — every check is ✓ or ⚠ (soft warnings never move it, RDR-129 B4);
+`1` — at least one hard ✗, something needs fixing; `2` — at least one fatal
+✗, nexus cannot function (a broken generation layout, a missing base
+interpreter). Before 7.21.0 only the two `fatal` checks could move the code,
+so a sweep that printed genuine ✗ lines exited `0` and any script gating on
+`$?` read a constant. Automation that wants "healthy or only warnings" tests
+`== 0`; automation that only cares whether nexus will run at all tests `< 2`.
+
 **Supplementary checks (new in 7.11.0).** After the default sweep prints its
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,

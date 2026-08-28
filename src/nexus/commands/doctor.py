@@ -2033,8 +2033,15 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
     # Gap-2 this RDR closes — and the bridge's ad-hoc re-sample is the third
     # DATA-rung mechanism the Gap-4 criterion bans.
 
-    if failed:
-        raise click.exceptions.Exit(1)
+    # nexus-be6x8: the exit code says what the glyphs say. 0 = healthy or
+    # soft warnings only; 1 = at least one hard ✗; 2 = fatal (nothing will
+    # start). `failed` (fatal-only) is still returned by format_health_for_cli
+    # for its own footer; the code below is the whole exit contract.
+    from nexus.health import health_exit_code  # noqa: PLC0415 — deferred local import, same reason as above
+
+    code = health_exit_code(results)
+    if code:
+        raise click.exceptions.Exit(code)
 
 
 def _probe_semaphore_namespace() -> tuple[bool, str]:

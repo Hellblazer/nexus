@@ -116,6 +116,34 @@ def format_health_for_cli(
     return "\n".join(lines), failed
 
 
+#: ``nx doctor`` exit codes. The glyph already tells a human "failure"; the
+#: exit code must tell a script the same thing, or the instrument lies to
+#: one of its two readers. Measured 2026-08-27 (nexus-be6x8): a sweep that
+#: printed two genuine ✗ lines exited 0, because only 2 of 78 checks carried
+#: ``fatal=True`` and both were green -- 97.4% of checks could not move rc.
+EXIT_HEALTHY = 0      # every check ok, or ⚠ (soft/benign, RDR-129 B4)
+EXIT_FAILURES = 1     # at least one hard ✗: something needs fixing
+EXIT_FATAL = 2        # at least one fatal ✗: nexus cannot function
+
+
+def health_exit_code(results: list[HealthResult]) -> int:
+    """The exit code the main sweep reports for *results*.
+
+    ``fatal`` keeps its distinct meaning (nothing will start) and its own
+    code, so a caller can tell "fix something" from "nothing works".
+    ``warn`` never moves the code (the RDR-129 B4 contract).
+    """
+    code = EXIT_HEALTHY
+    for r in results:
+        if r.ok:
+            continue
+        if r.fatal:
+            return EXIT_FATAL
+        if not r.warn:
+            code = EXIT_FAILURES
+    return code
+
+
 def format_health_for_json(
     results: list[HealthResult], *, local_mode: bool
 ) -> str:

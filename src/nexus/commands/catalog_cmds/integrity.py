@@ -731,7 +731,37 @@ _ZERO_CONTENT_BY_DESIGN_NOTE = (
 _CAP_ZERO_CONTENT_SAMPLE = _CAP_GHOST_SAMPLE
 
 
-def _never_chunked_breakdown(entries: list, owner_roots: dict[str, str] | None = None) -> dict:
+def note_chunks_present(t3, collection: str, chash: str, title: str) -> tuple[bool, str]:
+    """Does a store_put note have ANY chunk in T3? Returns ``(present, verified_by)``.
+
+    nexus-1uekf: THE ONE LOOKUP both integrity instruments use, so they can
+    never again disagree about a note by having looked at different things.
+    Two keys, in order:
+
+    * ``chash`` (``meta.doc_id``, the chunk natural id) -- exact, cheap;
+    * ``title`` -- the key a knowledge note's chunks carry. A note re-stored
+      under a NEW chash keeps its title (the nexus-5axey dedup shape), so a
+      chash miss alone is not "content is gone"; only a miss on both is.
+
+    ``verified_by`` names which key(s) were actually consulted, so a report
+    can say HOW a verdict was reached rather than merely that it was.
+    Raises whatever the T3 client raises: a transient failure must surface
+    as UNVERIFIABLE at the caller, never as a ghost.
+    """
+    if chash:
+        if t3.get_by_id(collection, chash) is not None:
+            return True, "chash"
+        if not title:
+            return False, "chash"
+        return bool(t3.find_ids_by_title(collection, title)), "chash+title"
+    if title:
+        return bool(t3.find_ids_by_title(collection, title)), "title"
+    return False, "no_identity"
+
+
+def _never_chunked_breakdown(
+    entries: list, owner_roots: dict[str, str] | None = None, *, t3=None,
+) -> dict:
     """Per-collection breakdown of never-chunked docs (nexus-sj4a3 CRIT-1).
 
     Replaces the old bare int: a reconciler cannot act on "N never-chunked
@@ -742,8 +772,23 @@ def _never_chunked_breakdown(entries: list, owner_roots: dict[str, str] | None =
     *owner_roots* is threaded through to :func:`_classify_never_chunked` —
     ``None`` (the default) skips zero-content-by-design detection, same as
     that function's own default.
+
+    *t3* (nexus-1uekf): given a T3 handle, every ``rdr145_exempt`` candidate
+    is PROBED by title -- the one key a legacy store_put note's chunks
+    carry -- and split: chunks present stays ``rdr145_exempt`` (a
+    manifest-only gap, backfillable, the case RDR-145 actually described);
+    no chunks becomes ``rdr145_ghost`` (nothing to backfill; the title is
+    the only surviving record). Without a handle the shape class stands
+    alone, exactly as before. The shape class rendered as "legitimate by
+    design" for 226 rows on 2026-08-27 whose content was gone from T3 --
+    the same 226 rows ``--store-put-integrity`` called ghosts -- so the two
+    instruments disagreed about one population without either having
+    looked at it. This is the lookup; the same lookup now backs both.
     """
     rdr145_counts: dict[str, int] = {}
+    rdr145_ghost_counts: dict[str, int] = {}
+    rdr145_ghost_tumblers: list[str] = []
+    rdr145_unverified = 0
     zero_content_counts: dict[str, int] = {}
     zero_content_tumblers: list[str] = []
     unclassified_counts: dict[str, int] = {}
@@ -751,6 +796,18 @@ def _never_chunked_breakdown(entries: list, owner_roots: dict[str, str] | None =
         cls = _classify_never_chunked(e, owner_roots)
         if cls == "rdr145_exempt":
             bucket = rdr145_counts
+            if t3 is not None:
+                chash = (getattr(e, "meta", None) or {}).get("doc_id", "") or ""
+                try:
+                    present, _ = note_chunks_present(
+                        t3, e.physical_collection, chash, e.title or "",
+                    )
+                except Exception:  # noqa: BLE001 — a probe failure keeps the safer class; it is never a ghost verdict
+                    rdr145_unverified += 1
+                else:
+                    if not present:
+                        bucket = rdr145_ghost_counts
+                        rdr145_ghost_tumblers.append(str(e.tumbler))
         elif cls == "zero_content_by_design":
             bucket = zero_content_counts
             zero_content_tumblers.append(str(e.tumbler))
@@ -765,15 +822,29 @@ def _never_chunked_breakdown(entries: list, owner_roots: dict[str, str] | None =
         ]
 
     rdr145_total = sum(rdr145_counts.values())
+    rdr145_ghost_total = sum(rdr145_ghost_counts.values())
     zero_content_total = sum(zero_content_counts.values())
     unclassified_total = sum(unclassified_counts.values())
     return {
-        "total": rdr145_total + zero_content_total + unclassified_total,
+        "total": rdr145_total + rdr145_ghost_total + zero_content_total + unclassified_total,
         "rdr145_exempt": {
             "total": rdr145_total,
             "by_collection": _rows(rdr145_counts),
             "note": _RDR145_EXEMPT_NOTE,
         },
+        "rdr145_ghost": {
+            "total": rdr145_ghost_total,
+            "by_collection": _rows(rdr145_ghost_counts),
+            "tumblers": sorted(rdr145_ghost_tumblers),
+            "note": (
+                "store_put-origin notes with NO chunks in T3 under their title "
+                "(nexus-1uekf): nothing to backfill -- the title is the only "
+                "surviving record. Disposition (re-create or tombstone) is a "
+                "human decision; `nx catalog doctor --store-put-integrity` "
+                "reports the same population by the same lookup."
+            ),
+        },
+        "rdr145_unverified": rdr145_unverified,
         "zero_content_by_design": {
             "total": zero_content_total,
             "by_collection": _rows(zero_content_counts),
@@ -1052,10 +1123,27 @@ def _emit_verify_report(
             if exempt["total"]:
                 click.echo(
                     f"  {exempt['total']} RDR-145 exempt (store_put-origin "
-                    "notes, legitimate by design):"
+                    "notes with chunks in T3 but no manifest — legitimate by "
+                    "design, backfillable):"
                 )
                 for row in exempt["by_collection"]:
                     click.echo(f"    {row['count']:5d}  {row['physical_collection']}")
+            ghost_notes = never_chunked.get("rdr145_ghost", {"total": 0})
+            if ghost_notes["total"]:
+                click.echo(
+                    f"  {ghost_notes['total']} store_put-origin note(s) with NO "
+                    "content in T3 (ghosts — nothing to backfill; the title is "
+                    "the only surviving record; see `nx catalog doctor "
+                    "--store-put-integrity`):"
+                )
+                for row in ghost_notes["by_collection"]:
+                    click.echo(f"    {row['count']:5d}  {row['physical_collection']}")
+            if never_chunked.get("rdr145_unverified"):
+                click.echo(
+                    f"  {never_chunked['rdr145_unverified']} store_put-origin "
+                    "note(s) could not be probed in T3 (counted as exempt, "
+                    "not as ghosts)"
+                )
             zero_content = never_chunked["zero_content_by_design"]
             if zero_content["total"]:
                 click.echo(
@@ -1200,6 +1288,7 @@ def _verify_full(cat: "CatalogReader", *, json_out: bool) -> None:
     never_chunked = _never_chunked_breakdown([])
     unverifiable_rows: list[dict] = []
 
+    t3 = None
     if all_entries:
         t3 = _cat_cmd._make_t3()
         vanished_collections, vanished_names = _class_a_vanished_collections(cat, t3, unreadable)
@@ -1336,7 +1425,7 @@ def _verify_scoped(cat: "CatalogReader", collection: str, *, heal: bool, json_ou
                 never_chunked_entries.append(e)
 
     owner_roots = _owner_roots_for_zero_content_check(cat, never_chunked_entries)
-    never_chunked = _never_chunked_breakdown(never_chunked_entries, owner_roots)
+    never_chunked = _never_chunked_breakdown(never_chunked_entries, owner_roots, t3=t3)
     exit_dirty = bool(damaged or lost)
     _emit_verify_report(
         total_docs=total_docs,

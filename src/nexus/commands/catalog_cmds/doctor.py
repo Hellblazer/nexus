@@ -1097,6 +1097,8 @@ def _run_store_put_integrity() -> dict:
     from nexus.db import make_t3  # noqa: PLC0415 — command-local import (nexus.db)
     from nexus.indexer_utils import is_note_shaped  # noqa: PLC0415 — command-local import (nexus.indexer_utils)
 
+    from nexus.commands.catalog_cmds.integrity import note_chunks_present  # noqa: PLC0415 — command-local import, same package
+
     try:
         cat = _cat_cmd._get_catalog()
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
@@ -1160,14 +1162,20 @@ def _run_store_put_integrity() -> dict:
                     "reason": f"T3 unavailable: {t3_error}",
                 })
                 continue
-            if not e.physical_collection or not chash:
-                # No collection/chash to look up — nothing can be in T3.
-                ghosts.append({"tumbler": tumbler, "title": e.title})
+            if not e.physical_collection:
+                # No collection to look in — nothing can be in T3.
+                ghosts.append({"tumbler": tumbler, "title": e.title, "verified_by": "no_collection"})
                 continue
+            # ONE LOOKUP, SHARED WITH `nx catalog verify` (nexus-1uekf). The
+            # two instruments called the same 226 rows "legitimate by
+            # design" and "ghost" respectively, because verify never looked
+            # and this check looked by chash only. A note re-stored under a
+            # new chash keeps its title, so a chash miss alone is not
+            # "content is gone" -- note_chunks_present tries the title too,
+            # and the report says which key(s) reached the verdict.
             try:
-                chunk_present = (
-                    t3_db.get_by_id(e.physical_collection, chash)
-                    is not None
+                chunk_present, verified_by = note_chunks_present(
+                    t3_db, e.physical_collection, chash, e.title or "",
                 )
             except Exception as exc:  # noqa: BLE001 — transient per-doc lookup failure: unverifiable, never a false "GONE" verdict
                 unverifiable.append({
@@ -1176,7 +1184,9 @@ def _run_store_put_integrity() -> dict:
                 })
                 continue
             if not chunk_present:
-                ghosts.append({"tumbler": tumbler, "title": e.title})
+                ghosts.append({
+                    "tumbler": tumbler, "title": e.title, "verified_by": verified_by,
+                })
 
     report = {
         "pass": not drift and not ghosts and not check_errors,

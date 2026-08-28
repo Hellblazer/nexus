@@ -479,6 +479,11 @@ class TestStorePutIntegrity:
         def get_by_id(self, collection, doc_id):
             return {"id": doc_id} if doc_id in self._present else None
 
+        def find_ids_by_title(self, collection, title):
+            # nexus-1uekf: a chash miss is followed by a title probe; this
+            # fake has no chunks under any title.
+            return []
+
     def test_clean_seeded_doc_passes_non_vacuous(
         self, isolated_nexus, runner, monkeypatch: pytest.MonkeyPatch,
     ):
@@ -552,7 +557,7 @@ class TestStorePutIntegrity:
         payload = json.loads(result.stdout)["store_put_integrity"]
         assert payload["pass"] is False
         assert payload["ghosts"] == [
-            {"tumbler": tumbler, "title": "ghost-note"}
+            {"tumbler": tumbler, "title": "ghost-note", "verified_by": "chash+title"}
         ]
 
     def test_orphan_chunk_without_manifest_is_not_a_ghost(
