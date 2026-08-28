@@ -42,6 +42,11 @@ class _FakeMemoryStore:
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
+        # nexus-zra63: rows actually retained, so resolve_title can serve a
+        # faithful read-back. A double that accepts writes but cannot read
+        # them back is not a store — and memory_put now (correctly) reports
+        # that shape as an unavailable verifier.
+        self.rows: dict[tuple[str, str], dict] = {}
 
     def put(
         self,
@@ -66,7 +71,16 @@ class _FakeMemoryStore:
                 request=req,
                 response=resp,
             )
+        self.rows[(project, title)] = {
+            "id": 42, "project": project, "title": title,
+            "content": content, "tags": tags, "timestamp": "",
+        }
         return 42
+
+    def resolve_title(self, *, project: str, title: str):
+        """The read half, so a written row can be read back (nexus-zra63)."""
+        row = self.rows.get((project, title))
+        return (row, []) if row is not None else (None, [])
 
 
 class _FakeT2Db:
@@ -75,6 +89,9 @@ class _FakeT2Db:
 
     def put(self, **kwargs):
         return self.memory.put(**kwargs)
+
+    def resolve_title(self, **kwargs):
+        return self.memory.resolve_title(**kwargs)
 
 
 class _FakeT2Ctx:

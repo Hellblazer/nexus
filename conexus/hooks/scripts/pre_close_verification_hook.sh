@@ -549,6 +549,43 @@ def _tags(tags_line):
     body = m.group(1) if m else tags_line
     return [t.strip().lower() for t in body.split(',') if t.strip()]
 
+#: nexus-e3mak: a marker counts as coverage only when it NAMES THE COMPLETE
+#: required reviewer set. The gate's own remedy calls them out --
+#: 'Run the stacked reviewers (code-review-expert + substantive-critic)' --
+#: and its text says the critic is never optional, but the match was on the
+#: literal string 'review-completed' plus the bead id, so ANY entry carrying
+#: those satisfied it.
+#:
+#: 2026-08-26 (RG-C, nexus-utpuw.23): the dispatched code-review-expert wrote
+#: a handoff note for its sibling beginning
+#:     review-completed bead=nexus-utpuw.23 (RG-C reviewer 1/2: ...)
+#: It was honest -- it said 'reviewer 1/2' -- and the gate would have passed
+#: the close with the substantive-critic never dispatched. Same pathology as
+#: nexus-1f98p: a guard whose evidence is produced by the party it checks.
+#:
+#: POSITIVE NAMING, no grace path for the older marker form. Plugins load
+#: from an immutable pinned tag, so there is no mixed-version population to
+#: keep working: when the pin advances, this hook and the remedy text it
+#: prints ship together. A 'names some but not all' carve-out was drafted and
+#: DISCARDED -- the incident marker names reviewers by COUNT ('1/2'), not by
+#: agent type, so a rule keyed on partial naming would not have caught the
+#: very incident this bead is about.
+#:
+#: This raises the bar; it does not make the gate unforgeable. A reviewer can
+#: still name both. Nothing available today is independent AND bead-keyed:
+#: T1/T2 rows do carry an 'agent' column, but NOTHING in production sets
+#: NX_AGENT (only tests do) and CONTEXT_PROTOCOL merely INSTRUCTS agents to
+#: pass agent= -- so refusing on a self-declared author would rest the gate
+#: on a claim by the party it gates, which is this bead one level down.
+_REQUIRED_REVIEWERS = ('code-review-expert', 'substantive-critic')
+
+def _named_reviewers(text):
+    low = (text or '').lower()
+    return [r for r in _REQUIRED_REVIEWERS if r in low]
+
+def _names_full_set(text):
+    return len(_named_reviewers(text)) == len(_REQUIRED_REVIEWERS)
+
 def _t1_covers(bead_id, tags_line, content_line):
     tags = _tags(tags_line)
     if 'review-completed' not in tags:
@@ -619,9 +656,16 @@ def _t2_lookup(query):
     return result
 
 status = {}
+seen_names = {}
 for bid in bead_ids:
-    if any(_t1_covers(bid, t, c) for t, c in t1_entries):
-        status[bid] = 'covered'
+    _t1_hits = [(t, c) for t, c in t1_entries if _t1_covers(bid, t, c)]
+    if _t1_hits:
+        _txt = ' '.join(t + ' ' + c for t, c in _t1_hits)
+        if _names_full_set(_txt):
+            status[bid] = 'covered'
+            continue
+        seen_names[bid] = _named_reviewers(_txt)
+        status[bid] = 'incomplete'
         continue
     if _deadline_exceeded():
         status[bid] = 'deadline'
@@ -633,12 +677,19 @@ for bid in bead_ids:
     reachable, entries = t2
     if not reachable:
         status[bid] = 'uncertain'
-    elif any(_t2_covers(bid, h, c) for h, c in entries):
-        status[bid] = 'covered'
     else:
-        status[bid] = 'missing'
+        _t2_hits = [(h, c) for h, c in entries if _t2_covers(bid, h, c)]
+        if _t2_hits:
+            _txt = ' '.join(h + ' ' + c for h, c in _t2_hits)
+            if _names_full_set(_txt):
+                status[bid] = 'covered'
+            else:
+                seen_names[bid] = _named_reviewers(_txt)
+                status[bid] = 'incomplete'
+        else:
+            status[bid] = 'missing'
 
-print(json.dumps({'t1_reachable': t1_reachable, 'status': status, 'deadline_seconds': DEADLINE_SECONDS}))
+print(json.dumps({'t1_reachable': t1_reachable, 'status': status, 'deadline_seconds': DEADLINE_SECONDS, 'seen_names': seen_names}))
 " 2>/dev/null || echo '{"t1_reachable": false, "status": {}, "deadline_seconds": 3.5}')
 
 _ids_with_status() {
@@ -656,6 +707,7 @@ COVERED_SPACE=$(_ids_with_status covered)
 MISSING_SPACE=$(_ids_with_status missing)
 UNCERTAIN_SPACE=$(_ids_with_status uncertain)
 DEADLINE_SPACE=$(_ids_with_status deadline)
+INCOMPLETE_SPACE=$(_ids_with_status incomplete)
 DEADLINE_SECONDS_DISPLAY=$(printf '%s' "$COVERAGE_RESULT" | python3 -c "
 import json, sys
 try:
@@ -670,9 +722,9 @@ except Exception:
 # because the underlying reason happened to be a capability gap or a
 # self-imposed time budget rather than a real absence. Checked FIRST,
 # before the deny path below.
-if [[ "$OVERRIDE" -eq 1 && ( -n "$MISSING_SPACE" || -n "$UNCERTAIN_SPACE" || -n "$DEADLINE_SPACE" ) ]]; then
+if [[ "$OVERRIDE" -eq 1 && ( -n "$MISSING_SPACE" || -n "$UNCERTAIN_SPACE" || -n "$DEADLINE_SPACE" || -n "$INCOMPLETE_SPACE" ) ]]; then
     _stamp_ids "$COVERED_SPACE" "passed" "review-completed marker verified at close"
-    NOT_COVERED_SPACE="$MISSING_SPACE $UNCERTAIN_SPACE $DEADLINE_SPACE"
+    NOT_COVERED_SPACE="$MISSING_SPACE $UNCERTAIN_SPACE $DEADLINE_SPACE $INCOMPLETE_SPACE"
     _stamp_ids "$NOT_COVERED_SPACE" "overridden" "NX_REVIEW_GATE_OVERRIDE=1; no confirmed review-completed coverage in T1 or T2 for: $NOT_COVERED_SPACE"
     # nexus-cr4lp F2: every override use is auditable, logged BEFORE the
     # allow (env-sourced OR inline-command-text-sourced -- both routes
@@ -681,7 +733,7 @@ if [[ "$OVERRIDE" -eq 1 && ( -n "$MISSING_SPACE" || -n "$UNCERTAIN_SPACE" || -n 
     allow "OVERRIDE (NX_REVIEW_GATE_OVERRIDE=1): no confirmed review-completed coverage in T1 scratch or T2 memory for $NOT_COVERED_SPACE — closing anyway. Stamped verification=overridden for those ids. This bypass is deliberate and audited."
 fi
 
-if [[ -n "$MISSING_SPACE" || -n "$DEADLINE_SPACE" ]]; then
+if [[ -n "$MISSING_SPACE" || -n "$DEADLINE_SPACE" || -n "$INCOMPLETE_SPACE" ]]; then
     # DENY — no _stamp_ids call on this path for ANY id, covered or not. A
     # blocked close must never acquire ANY verification record; that is
     # the false-record fix this bead exists for (datum 2). nexus-4av2n
@@ -690,15 +742,24 @@ if [[ -n "$MISSING_SPACE" || -n "$DEADLINE_SPACE" ]]; then
     # conditional message rather than bash string-splicing.
     export NX_HOOK_MISSING_SPACE="$MISSING_SPACE"
     export NX_HOOK_DEADLINE_SPACE="$DEADLINE_SPACE"
+    export NX_HOOK_INCOMPLETE_SPACE="$INCOMPLETE_SPACE"
     export NX_HOOK_DEADLINE_SECONDS_DISPLAY="$DEADLINE_SECONDS_DISPLAY"
     DENY_MSG=$(python3 -c "
 import os
 missing = os.environ.get('NX_HOOK_MISSING_SPACE', '').split()
 deadline_ids = os.environ.get('NX_HOOK_DEADLINE_SPACE', '').split()
+incomplete = os.environ.get('NX_HOOK_INCOMPLETE_SPACE', '').split()
 deadline_seconds = os.environ.get('NX_HOOK_DEADLINE_SECONDS_DISPLAY', '3.5')
 lines = []
 if missing:
     lines.append('Close blocked: no review-completed marker found in T1 scratch or T2 memory for: ' + ' '.join(missing) + '.')
+if incomplete:
+    lines.append(
+        'Close blocked: a review-completed marker exists but does NOT name the full required reviewer set for: '
+        + ' '.join(incomplete) + '. A marker must name BOTH code-review-expert AND substantive-critic '
+        '(nexus-e3mak: a reviewer left a handoff note saying \'reviewer 1/2\' and it satisfied this gate '
+        'with the critic never dispatched).'
+    )
 if deadline_ids:
     lines.append(
         f\"Close blocked: coverage could not be VERIFIED within the hook's {deadline_seconds}s wall-clock \"
@@ -712,8 +773,9 @@ lines.append(
     '(nexus-cr4lp F4). Run the stacked reviewers (code-review-expert + substantive-critic), then write the'
 )
 lines.append('marker to T1 scratch AND/OR T2 memory (write to T2 when the CLI T1 lease is known-stale), e.g.:')
-lines.append('  nx scratch put \"review-completed: <bead-id>\" --tags \"review-completed,<bead-id>\"')
-lines.append('  nx memory put \"review-completed: <bead-id>\" -p <project> -t review-<bead-id>')
+lines.append('  nx scratch put \"review-completed: <bead-id> reviewers=code-review-expert,substantive-critic\" --tags \"review-completed,<bead-id>\"')
+lines.append('  nx memory put \"review-completed: <bead-id> reviewers=code-review-expert,substantive-critic\" -p <project> -t review-<bead-id>')
+lines.append('The marker MUST name both reviewers; naming one (or neither) is refused.')
 lines.append('then re-run this close.')
 lines.append('Deliberate override (audited): set NX_REVIEW_GATE_OVERRIDE=1 and re-run.')
 print(chr(10).join(lines))

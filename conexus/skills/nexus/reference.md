@@ -3,9 +3,18 @@
 Nexus provides MCP tools for semantic search, persistent memory, and knowledge management across sessions.
 
 **Three storage tiers:**
-- **T1 scratch** — session-scoped (`scratch`, `scratch_manage` tools)
-- **T2 memory** — local SQLite, survives restarts (`memory_put`, `memory_get`, `memory_delete`, `memory_search` tools)
-- **T3 knowledge** — ChromaDB cloud + Voyage AI, permanent (`search`, `store_put`, `store_get`, `store_list` tools)
+- **T1 scratch** — session-scoped, service-backed Postgres (`scratch`,
+  `scratch_manage` tools)
+- **T2 memory** — service-backed Postgres, survives restarts (`memory_put`,
+  `memory_get`, `memory_delete`, `memory_search` tools)
+- **T3 knowledge** — pgvector via the nexus service, permanent (`search`,
+  `store_put`, `store_get`, `store_list` tools). Local mode embeds with the
+  bundled PG17+pgvector and bge-768; cloud mode uses the managed service and
+  Voyage.
+
+All three tiers are Postgres behind the engine. SQLite is retired (RDR-158 P4)
+and ChromaDB is not a live substrate in any mode (RDR-155 P4b — the dependency
+is gone from `uv.lock`); this section described both as current until 7.20.0.
 
 ## MCP Tool Reference
 
@@ -263,7 +272,7 @@ mcp__plugin_conexus_nexus__store_list(collection="knowledge__notes-1-1__voyage-c
 
 ### memory_put
 
-Store a memory entry in T2 (SQLite). Upserts by (project, title).
+Store a memory entry in T2 (service-backed Postgres). Upserts by (project, title).
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

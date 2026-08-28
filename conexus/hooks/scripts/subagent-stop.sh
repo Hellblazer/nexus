@@ -19,8 +19,17 @@
 #   BLOCKED row already present           -> resolution stamp*, exit 0  (once-guard belt)
 #   transcript missing/not-a-file/junk    -> exit 0        (fail-open; scan crash too)
 #   assistant SendMessage in transcript   -> REPORTED row, exit 0   (report sent)
+#   ...and writes failed, mode=block      -> UNLANDEDWRITE + BLOCKED + block  (piqm5 L1)
 #   otherwise, mode=observe               -> WOULDBLOCK row, exit 0   (.11 measurement)
 #   otherwise, mode=block                 -> BLOCKED row + {"decision":"block"}
+#
+# UNLANDED-WRITE ARM (nexus-piqm5 Layer 1, 2026-08-27). An UNLANDEDWRITE row
+# is stamped in BOTH modes whenever the transcript shows a storage write that
+# returned an error; it is independent of the report verdict. The only NEW
+# block is the reported-but-writes-failed case, and it fires only for agents
+# already inside the owes-report allowlist -- no dispatch that is unblockable
+# today becomes blockable. Same fail-open bias: only the literal UNLANDED
+# verdict is actionable; a scan crash reads as CLEAN. See _writes_verdict.
 #
 # *POST-BLOCK RESOLUTION STAMP (nexus-hybv1): before this fix, a BLOCKED
 # row was terminal FOREVER — the once-guard exits recorded nothing, so an
@@ -106,6 +115,49 @@ _scan_verdict() {
     python3 "$HERE/subagent-stop-scan.py" "$TRANSCRIPT" 2>/dev/null
 }
 
+# UNLANDED-WRITE SCAN (nexus-piqm5 Layer 1). Separate script, separate
+# contract: echoes CLEAN / "UNLANDED <n> <tools>" / SCANERROR. A subagent's
+# T1/T2/T3 write can fail for its entire session with the only signal being
+# whether the agent narrated it in prose -- on 2026-08-25 two reviewers'
+# findings survived only because both happened to mention the outage. Every
+# write failure returns a str starting "Error: " (mcp/core.py:72-124), the
+# same TYPE as a success string, so nothing downstream tells them apart.
+#
+# READS THE TRANSCRIPT, NOT THE tier_writes LEDGER, deliberately: the ledger
+# read goes through the service, so when persistence is broken -- the case
+# this exists to catch -- that read fails too and "no rows" is
+# indistinguishable from "wrote nothing". The transcript is a local file,
+# readable exactly when the store is not.
+#
+# POSITIVE EVIDENCE ONLY, so the fail-open contract above is preserved: only
+# the literal UNLANDED verdict is actionable. Missing/unreadable transcript,
+# SCANERROR, empty output, or python3 absent all fall through as CLEAN and
+# change no decision. This scan can add evidence, never invent it from
+# absence.
+#
+# SCOPE (documented narrowing, same posture as the report check): it runs
+# only for agents that already reached the owes-report gate below, i.e. the
+# population this hook already handles. A non-allowlisted or sync dispatch
+# is never scanned and stays unblockable BY CONSTRUCTION -- this change adds
+# no newly-blockable agent.
+#
+# CANNOT SEE a silent no-op (store returns success, lands nothing); the
+# transcript records the success string. That needs a live read-back and is
+# Layer 2, tracked separately. CLEAN means "no write reported failure", NOT
+# "the writes landed".
+_writes_verdict() {
+    if [[ -z "$TRANSCRIPT" || ! -f "$TRANSCRIPT" || ! -r "$TRANSCRIPT" ]]; then
+        echo "CLEAN"
+        return 0
+    fi
+    local v
+    v="$(python3 "$HERE/subagent-stop-writes-scan.py" "$TRANSCRIPT" 2>/dev/null)"
+    case "$v" in
+        UNLANDED\ *) printf '%s\n' "$v" ;;
+        *)           echo "CLEAN" ;;
+    esac
+}
+
 # _stamp_resolution_if_reported <strength> — nexus-hybv1: called from the
 # two once-guard exits. If THIS agent owes a report, has a BLOCKED row,
 # and its transcript NOW shows a SendMessage, append a REPORTED row so
@@ -164,6 +216,19 @@ if expectations_already_blocked "$SESSION_ID" "$AGENT_ID"; then
 fi
 
 VERDICT="$(_scan_verdict)"
+WRITES_VERDICT="$(_writes_verdict)"
+
+# nexus-piqm5 Layer 1: record the unlanded-write fact BEFORE any branch, so
+# it lands in the ledger under every mode and both report outcomes -- the
+# harm in the bead is that the failure is invisible unless the agent
+# narrated it, and a row that only appears on the blocking path would keep
+# it invisible in observe mode and for agents that did report. 4th TSV field
+# carries "<n> <tools>"; readers matching exact verbs ignore the row.
+if [[ "$WRITES_VERDICT" == UNLANDED\ * ]]; then
+    _expectations_append "$(expectations_file "$SESSION_ID")" \
+        "$(_expectations_ts)"$'\tUNLANDEDWRITE\t'"$AGENT_ID"$'\t'"${WRITES_VERDICT#UNLANDED }"
+fi
+
 case "$VERDICT" in
     FOUND)
         # .11 census raw material: EXPECT (dispatched) x REPORTED (scan
@@ -173,6 +238,20 @@ case "$VERDICT" in
         # orchestrator can cross-check against what it actually received.
         _expectations_append "$(expectations_file "$SESSION_ID")" \
             "$(_expectations_ts)"$'\tREPORTED\t'"$AGENT_ID"
+        # nexus-piqm5: reported-but-writes-failed is the EXACT 2026-08-25
+        # shape -- "review complete" delivered while every persistence call
+        # 401'd, findings surviving only because the agent volunteered it.
+        # Today this branch exits 0 and the loss is silent. Block ONCE so
+        # the agent retries or states the failure. The once-guard bounds a
+        # genuine outage to a single nudge (a retry cannot succeed while the
+        # store is down, and must not loop).
+        if [[ "$WRITES_VERDICT" == UNLANDED\ * && "$MODE" == "block" ]] \
+           && ! expectations_already_blocked "$SESSION_ID" "$AGENT_ID"; then
+            expectations_mark_blocked "$SESSION_ID" "$AGENT_ID" "unlanded-write"
+            printf '{"decision": "block", "reason": "%s"}\n' \
+                "You sent your completion report, but ${WRITES_VERDICT#UNLANDED } of your storage writes came back as errors, so those findings are NOT persisted -- a caller reading T1/T2/T3 will not see them. Retry the failed writes now. If they still fail, say so explicitly in a SendMessage and restate the findings inline so they are not lost. Then stop."
+            exit 0
+        fi
         exit 0
         ;;
     NOTFOUND)

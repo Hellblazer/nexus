@@ -2890,9 +2890,30 @@ explicitly, so an upgrade never silently drops `[local]` (and with it the
 768-dim embedder). There is no flag that *adds* an extra to an existing
 generation — extras are fixed when the install is created.
 
-Run from a dev checkout's `.venv` the command refuses, naming
+It distinguishes THREE sites, not two (nexus-gu9zo). From a generation it
+builds the next one, as above. From a **legacy `uv tool install conexus`
+layout** it CONVERGES that install onto the generation layout — this is the
+only supported route from a packaged install, and before 7.20.0 there was
+none: the command refused everywhere that was not already a generation, so it
+could upgrade a generation box and never create the first one. Measured on a
+fresh `uv tool install conexus` of 7.19.0: uv-owned symlinks, no `gen-*`, no
+`current`, no `<tools>` directory at all — i.e. no packaged install of any age
+had the layout, and every generation box in existence was checkout-driven.
+
+The converge builds the new generation side-by-side and never uninstalls: the
+legacy tree is registered as a pseudo-generation and reaped by a LATER, separate
+pass once nothing holds it, so live holders keep running from it and converge at
+their next spawn. Extras bridge across from the legacy `uv-receipt.toml` — that
+is the only path by which `[local]` survives the move.
+
+Run from a dev checkout's `.venv` the command still refuses, naming
 `scripts/reinstall-tool.sh` instead — a thin repo wrapper around the same
-packaged scripts (`nexus/_install/*.sh`). One installer, not two.
+packaged scripts (`nexus/_install/*.sh`). One installer, not two. A packaged
+install is no longer mistaken for a checkout: the packaged-vs-checkout question
+is answered by `upgrade_finish.running_from_tool_install()`, and "where is uv's
+tool dir" now has ONE resolver, `install_layout.uv_tool_root()`, honouring
+`UV_TOOL_DIR` then `$XDG_DATA_HOME/uv/tools` then `~/.local/share/uv/tools`
+(nexus-orhp5).
 
 This upgrades the BINARY only. [`nx upgrade`](#nx-upgrade) walks the migration
 ladder; they are two commands on purpose (RDR-143 CA-2) and `nx upgrade` never

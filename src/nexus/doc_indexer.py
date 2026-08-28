@@ -562,6 +562,57 @@ def _fence_complete(doc_id: str, content_hash: str, chunk_count: int) -> None:
         _log.debug("index_run_complete_pre_fence_engine", doc_id=doc_id)
 
 
+def _repo_owner_document_for(reader, abs_path):
+    """An existing catalog Document for *abs_path* under its REPO owner, if any.
+
+    nexus-tqudo. The doc_indexer family (``nx index rdr``, ``nx index md``,
+    ``nx collection reindex``) resolves a CURATOR owner; ``nx index repo``
+    registers under a REPO owner. ``by_file_path`` is owner-scoped, so a
+    curator-side lookup can NEVER see a repo-owner row — structurally, not
+    occasionally. A prior ``nx index repo`` therefore leaves a row a later
+    doc_indexer run cannot find, and it mints a SECOND Document for one
+    physical file.
+
+    THE UNSTATED ASSUMPTION THIS CLOSES. ``_catalog_markdown_hook``'s
+    nexus-3lswy docstring argues no double-registration exists because those
+    commands "never also run ``_catalog_hook``'s batched pass". That is true
+    WITHIN one invocation and silent about a PREVIOUS one. Measured
+    2026-08-27: two live forks on this install (rdr-167, rdr-182), each a
+    complete repo-owner row shadowed by a complete curator-owner row, four
+    days without self-healing.
+
+    NOT reachable by the overlap-based ``_check_document_fork``: that runs
+    AFTER the mint, is advisory, and compares manifests — so it is blind to a
+    fork against a document whose manifest is EMPTY (the rdr-195 case, which
+    forked against a chunk_count=0 row). Detection after the fact cannot
+    close this; the lookup has to.
+
+    BEST-EFFORT BY CONSTRUCTION: every failure returns ``None`` and the caller
+    proceeds exactly as before. A cross-owner probe that raises must never be
+    able to break indexing — this is a lookup widening, not a new gate.
+    """
+    try:
+        from pathlib import Path as _Path  # noqa: PLC0415 — stdlib, deferred
+        from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415 — circular-dep avoidance
+
+        p = _Path(abs_path)
+        probe = p.parent if p.parent != p else p
+        _name, repo_hash, main_repo = _repo_identity_with_main(probe)
+        owner = reader.owner_for_repo(repo_hash)
+        if owner is None:
+            return None
+        # The repo owner keys file_path relative to the REPO ROOT, which is
+        # not necessarily the curator side's base_path. Re-derive rather than
+        # reusing the caller's ``fp``.
+        try:
+            rel = str(p.resolve().relative_to(_Path(main_repo).resolve()))
+        except ValueError:
+            return None
+        return reader.by_file_path(owner, rel)
+    except Exception:  # noqa: BLE001 — boundary catch: a failed probe degrades to "no repo-owner row", never to a broken index
+        return None
+
+
 def _register_or_lookup_doc_id(
     file_path: Path,
     corpus: str,
@@ -722,6 +773,12 @@ def _register_or_lookup_doc_id(
             return str(existing_by_uri.tumbler)
 
         existing = reader.by_file_path(owner, fp)
+        if existing is None:
+            # nexus-tqudo: the curator namespace cannot see a row a
+            # prior `nx index repo` registered under the REPO owner.
+            # Look there before minting, or one physical file ends up
+            # with two catalog Documents.
+            existing = _repo_owner_document_for(reader, file_path)
         if existing is not None:
             # nexus-2t63u: reconcile a stale ``physical_collection`` EARLY,
             # before the tumbler is returned and threaded into this run's
@@ -2691,6 +2748,9 @@ def _catalog_markdown_hook(
         existing = reader.by_source_uri(source_uri) if source_uri else None
         if existing is None:
             existing = reader.by_file_path(owner, fp)
+        if existing is None:
+            # nexus-tqudo: same cross-owner blind spot as the pre-flight.
+            existing = _repo_owner_document_for(reader, md_path)
         if existing is not None:
             update_kwargs: dict = dict(
                 physical_collection=collection_name,

@@ -49,11 +49,22 @@ This file documents common error handling patterns for agents.
 
 ### T2 Memory Errors
 
-**SQLite locked**:
-- Error: `database is locked` from memory tools
-- Cause: Another process holds a write lock
-- Fix: Wait 1-2 seconds and retry; SQLite WAL mode minimizes this
-- Fallback: Use T1 scratch for writes, promote to T2 when lock clears
+**Write reported an error**:
+- Error: the tool returns a string beginning `Error: ` from a memory/store/scratch tool
+- Cause: the service backing that tier is unreachable, or the session's token
+  was rejected (a T1 401 says so explicitly and names reconnecting the MCP
+  server as the remedy)
+- Fix: retry once; if it persists, treat the write as NOT landed and say so in
+  your report rather than reporting the work as stored
+- **A failed write is never a silent condition to route around.** Do not fall
+  back to another tier and move on — findings that exist only in a tier nobody
+  will read are lost. State the failure in your final message and restate the
+  findings inline.
+
+  (Historical: this section described `database is locked` and SQLite WAL
+  retry semantics. There is no SQLite — T1/T2/T3 are all Postgres behind the
+  engine, RDR-158 P4 — so that error cannot occur and its retry advice was
+  guidance for a condition that no longer exists.)
 
 **TTL expiry edge case (permanent entries)**:
 - The `expires_at` field for permanent entries is `""` (empty string), not NULL

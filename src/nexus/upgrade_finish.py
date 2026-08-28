@@ -122,7 +122,14 @@ def running_from_tool_install() -> bool:
     if generation_of(venv_root) is not None:
         return True
 
-    return "uv/tools/conexus" in str(root)
+    # nexus-orhp5: containment against uv's ACTUAL tool root, not a
+    # substring. The old test answered No for the real tree under a
+    # relocated UV_TOOL_DIR — and this predicate now routes install
+    # convergence (nexus-gu9zo), so that miss sent a packaged box the
+    # dev-checkout refusal.
+    from nexus.install_layout import is_under_uv_tool_install  # noqa: PLC0415 — deferred, avoids an import cycle
+
+    return is_under_uv_tool_install(root)
 
 
 def generation_of(venv_root: Path) -> Path | None:
@@ -791,7 +798,12 @@ def _uv_install_source() -> str:
 
     from nexus import install_advice  # noqa: PLC0415 — deferred, avoids an import cycle
 
-    receipt = Path.home() / ".local/share/uv/tools/conexus/uv-receipt.toml"
+    # nexus-orhp5: was a hardcoded ~/.local/share/uv/tools/... — the
+    # FOURTH resolution rule, and the only one wrong for BOTH
+    # UV_TOOL_DIR and XDG_DATA_HOME.
+    from nexus.install_layout import uv_conexus_venv  # noqa: PLC0415 — deferred, avoids an import cycle
+
+    receipt = uv_conexus_venv() / "uv-receipt.toml"
     try:
         data = tomllib.loads(receipt.read_text())
     except (OSError, tomllib.TOMLDecodeError):

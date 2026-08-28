@@ -39,24 +39,84 @@ def test_check_mineru_server_pass_when_reachable() -> None:
     assert "8010" in results[0].detail
 
 
-def test_check_mineru_server_fail_when_unreachable() -> None:
-    """A PROVISIONED server that went stale must still render the red ✗ —
-    that drift is exactly what this check exists to surface."""
+def test_check_mineru_server_idle_but_armed_is_not_a_failure() -> None:
+    """nexus-far1c: this test previously asserted the DEFECT.
+
+    It read: "A PROVISIONED server that went stale must still render the
+    red ✗." That was written against the pre-nexus-1qdb9 model where the
+    server was long-lived and unreachable really did mean the in-process
+    OOM fallback. Once nexus-1qdb9 made the spawn on-demand, the
+    assertion locked in a lie: an idle server whose spawn path is armed
+    is the correct steady state, and ``ensure_mineru_running`` brings it
+    up before any math PDF touches the fallback. The check now asks the
+    question that decides the OOM risk — will a server BE there — rather
+    than whether one happens to be listening this second.
+    """
     with patch(
         "nexus.config.mineru_server_provisioned", return_value=True,
     ), patch(
         "nexus.config.get_mineru_server_url",
         return_value="http://127.0.0.1:49353",
     ), patch(
-        "httpx.get",
-        side_effect=httpx.ConnectError("connection refused"),
+        "httpx.get", side_effect=httpx.ConnectError("connection refused"),
+    ), patch(
+        "nexus._mineru_spawn._resolve_mineru_api_bin",
+        return_value="/opt/venv/bin/mineru-api",
+    ), patch(
+        "nexus.daemon.mineru_lifecycle.spawn_policy_allows", return_value=True,
+    ):
+        results = _check_mineru_server()
+    assert len(results) == 1
+    assert results[0].ok is True, (
+        "an idle server with an armed on-demand spawn is not a failure"
+    )
+    assert "on demand" in results[0].detail
+    assert "OOM" not in results[0].detail, (
+        "must not assert a fallback that ensure_mineru_running prevents"
+    )
+
+
+def test_check_mineru_server_fails_when_spawn_is_policy_disabled() -> None:
+    """The fallback claim is only TRUE when nothing will spawn. Then the ✗
+    is correct — and must name the reason, not just the symptom."""
+    with patch(
+        "nexus.config.mineru_server_provisioned", return_value=True,
+    ), patch(
+        "nexus.config.get_mineru_server_url",
+        return_value="http://127.0.0.1:49353",
+    ), patch(
+        "httpx.get", side_effect=httpx.ConnectError("connection refused"),
+    ), patch(
+        "nexus._mineru_spawn._resolve_mineru_api_bin",
+        return_value="/opt/venv/bin/mineru-api",
+    ), patch(
+        "nexus.daemon.mineru_lifecycle.spawn_policy_allows", return_value=False,
     ):
         results = _check_mineru_server()
     assert len(results) == 1
     assert results[0].ok is False
+    assert "will not autostart" in results[0].detail
+    assert "OOM-risk" in results[0].detail
+
+
+def test_check_mineru_server_fails_when_binary_absent_but_url_configured() -> None:
+    """Operator pointed at a server, it is not answering, and no local
+    spawn can cover for it — a genuine failure."""
+    with patch(
+        "nexus.config.mineru_server_provisioned", return_value=True,
+    ), patch(
+        "nexus.config.get_mineru_server_url",
+        return_value="http://127.0.0.1:49353",
+    ), patch(
+        "httpx.get", side_effect=httpx.ConnectError("connection refused"),
+    ), patch(
+        "nexus._mineru_spawn._resolve_mineru_api_bin", return_value=None,
+    ):
+        results = _check_mineru_server()
+    assert len(results) == 1
+    assert results[0].ok is False
+    assert "not installed" in results[0].detail
     assert "49353" in results[0].detail
-    assert any("mineru start" in s for s in results[0].fix_suggestions)
-    assert any("config.yml" in s for s in results[0].fix_suggestions)
 
 
 def test_check_mineru_server_skips_unprovisioned_fresh_box() -> None:
