@@ -33,6 +33,18 @@ that tag is gated and paired with a client release.
   precheck bypassed, and both `POST /v1/catalog/link` and
   `/v1/catalog/import/link` have HTTP-level tests of the machine-readable
   `{error, code: "dangling_endpoint", missing}` body.
+- **`nx catalog reconcile-stale` names the write-time guard before every
+  mutation arm (nexus-41zr9).** The shakedown playbook's §5.4 requires a
+  run that cleans a population to name the guard that stops it recurring
+  and to surface one that does not exist. Each `--execute` arm now prints
+  `Write-time guard (playbook §5.4): shipped | shipped-with-residuals |
+  UNGUARDED — …` with the guard's location, residual beads and an as-of
+  date. Two arms print UNGUARDED today: `recount` (the chunk_count desync
+  writer, nexus-wu8s1, is unfound) and `tombstone-vanished` (benchmark/gate
+  debris collections, the dominant vanished population, have no namespace
+  isolation and no owner bead — printed as an unowned residual on every
+  run). The census `--json` carries the table as `write_time_guards`; the
+  table in code is the record the playbook points at.
 - **`nx catalog reconcile-stale` anchors its census to the substrate
   (nexus-cwhci).** The shakedown playbook's §S4 required comparing the
   census's examined count against a substrate-direct document count and

@@ -1236,3 +1236,65 @@ class TestSubstrateAnchor:
         assert "INCOMPLETE: substrate anchor MISMATCH" in result.output
         assert "the mutation arms refuse on it too" in result.output
         assert writer.deleted == [] and writer.resynced == [], "no catalog write may follow an uncorroborated census"
+
+
+# ── nexus-41zr9: the §5.4 write-time guard census ─────────────────────────
+
+
+class TestWriteTimeGuardCensus:
+    def _cat(self):
+        return _AnchorCat(
+            [_FakeEntry("1.60.1", "live", physical_collection="knowledge__live", chunk_count=3)],
+            doc_counts={"knowledge__live": 1}, manifests={"1.60.1": ["a" * 64]},
+        )
+
+    def test_every_mutation_arm_has_a_row(self):
+        mod = reconcile_stale_mod
+        assert set(mod._WRITE_TIME_GUARDS) == {
+            "recount", "tombstone-vanished", "tombstone-orphaned",
+            "tombstone-zero-content", "tombstone-ghost-notes",
+        }
+        for verb, g in mod._WRITE_TIME_GUARDS.items():
+            assert g["status"] in {"shipped", "shipped-with-residuals", "UNGUARDED", "n/a"}, verb
+            assert g["guard"], verb
+
+    @pytest.mark.parametrize("verb,expect", [
+        ("recount", "UNGUARDED — the chunk_count desync writer (the wu8s1/94fxl class) is still unfound"),
+        ("tombstone-vanished", "UNGUARDED — nothing keeps benchmark/gate debris collections out of the production namespace"),
+        ("tombstone-orphaned", "shipped-with-residuals — worktree/temp indexing refused at registration"),
+        ("tombstone-zero-content", "shipped — unchunkable sources"),
+        ("tombstone-ghost-notes", "shipped — store_put notes get a title-derived identity"),
+    ])
+    def test_each_arm_prints_its_guard_before_acting(self, monkeypatch, verb, expect):
+        runner = CliRunner()
+        _patch(monkeypatch, self._cat(), _FakeT3({"knowledge__live"}), _FakeWriter())
+        result = runner.invoke(main, ["catalog", "reconcile-stale", "--execute", verb])  # dry-run default
+        assert result.exit_code == 0, result.output
+        assert "Write-time guard (playbook §5.4, as of 2026-08-28): " + expect in result.output
+        if verb == "tombstone-orphaned":
+            assert "residuals: nexus-rng8r" in result.output
+            assert "yx75p" not in result.output  # the enqueue-side gap is not this arm's population
+        if verb == "recount":
+            assert "residuals: nexus-wu8s1" in result.output
+        # the guard line precedes the arm's candidate report
+        assert result.output.index("Write-time guard") < result.output.index(f"\n{verb}:")
+
+    def test_unowned_residual_is_named_on_every_run(self, monkeypatch):
+        runner = CliRunner()
+        _patch(monkeypatch, self._cat(), _FakeT3({"knowledge__live"}), _FakeWriter())
+        result = runner.invoke(main, ["catalog", "reconcile-stale", "--execute", "tombstone-vanished"])
+        assert "UNOWNED residual: benchmark/gate debris collections need namespace isolation" in result.output
+        assert "no bead names it" in result.output
+
+    def test_json_census_carries_the_table(self, monkeypatch):
+        runner = CliRunner()
+        _patch(monkeypatch, self._cat(), _FakeT3({"knowledge__live"}))
+        result = runner.invoke(main, ["catalog", "reconcile-stale", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["write_time_guards_as_of"] == "2026-08-28"
+        table = payload["write_time_guards"]
+        assert table["tombstone-vanished"]["status"] == "UNGUARDED"
+        assert table["tombstone-orphaned"]["residual_beads"] == ["nexus-rng8r"]
+        assert table["recount"]["status"] == "UNGUARDED" and table["recount"]["residual_beads"] == ["nexus-wu8s1"]
+        assert "unowned_residual" in table["tombstone-vanished"]

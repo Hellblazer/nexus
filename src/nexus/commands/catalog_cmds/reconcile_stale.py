@@ -478,6 +478,83 @@ def _substrate_anchor(cat: "CatalogReader", *, walked: int, before: dict | None)
     return {**result, "status": "MISMATCH"}
 
 
+#: nexus-41zr9 — the write-time guard census the shakedown playbook's §5.4
+#: makes a precondition of every mutation arm ("each shakedown that runs a
+#: mutation arm must name the WRITE-TIME GUARD that would have prevented
+#: the population, and file it if it does not exist"). Keyed by arm. An arm
+#: prints its row before acting, and the census ``--json`` carries the whole
+#: table, so the shakedown record gets it without hand-assembly. An
+#: ``UNGUARDED`` row with no owner is the signal the doctrine asks for —
+#: printed on every run, never silent. Statuses: ``shipped`` (the guard is
+#: in the wheel), ``shipped-with-residuals`` (in the wheel, named holes
+#: still open), ``UNGUARDED`` (nothing prevents the population from
+#: recurring), ``n/a`` (reserved for an arm that repairs a cache whose
+#: writer is guarded; no arm qualifies today — recount's writer is not).
+#:
+#: THIS TABLE IS THE RECORD. The playbook amendment (T2 [23598] §5.4) points
+#: here rather than restating the rows, so there is one copy to rot. Rot
+#: is caught by hand, not by a test: the tests pin the residual bead ids and
+#: statuses as written, so closing a residual bead (or shipping a guard) is
+#: the moment to edit the row, and the playbook's §3.2 instrument-freshness
+#: census asks for exactly that check every shakedown. ``as_of`` is printed
+#: so a reader knows how old the claim is.
+_WRITE_TIME_GUARDS_AS_OF = "2026-08-28"
+_WRITE_TIME_GUARDS: dict[str, dict] = {
+    "recount": {
+        "status": "UNGUARDED",
+        "guard": "the chunk_count desync writer (the wu8s1/94fxl class) is still unfound, so "
+                 "stale counts keep being written; recount repairs the symptom",
+        "where": "no write-time guard exists yet",
+        "residual_beads": ["nexus-wu8s1"],
+    },
+    "tombstone-vanished": {
+        "status": "UNGUARDED",
+        "guard": "nothing keeps benchmark/gate debris collections out of the production namespace — "
+                 "the DOMINANT vanished population (7,142 of 13,279 zero-count docs in the 2026-08 "
+                 "census). The API delete/rename path IS cascaded (delete-path incompleteness, "
+                 "fixed), but debris collections never pass through it",
+        "where": "cascade: engine CatalogDeleteCollectionCascadeTest / CatalogRenameCollectionTest; "
+                 "debris namespace isolation: no code, no owner bead (playbook §5.4)",
+        "residual_beads": [],
+        "unowned_residual": "benchmark/gate debris collections need namespace isolation, not artifact gating",
+    },
+    "tombstone-orphaned": {
+        "status": "shipped-with-residuals",
+        "guard": "worktree/temp indexing refused at registration (nexus-u8n4r) — covers the "
+                 "owner_root_gone population; file_missing after a legitimate index is lifecycle, "
+                 "swept by housekeeping (miss_count), not a write-time gap",
+        "where": "nexus.repo_identity.should_skip_ephemeral_registration, wired at doc_indexer, indexer, pipeline_stages",
+        "residual_beads": ["nexus-rng8r"],
+    },
+    "tombstone-zero-content": {
+        "status": "shipped",
+        "guard": "unchunkable sources (zero-byte, binary) never registered (nexus-rqsh1)",
+        "where": "nexus.classifier.looks_like_binary_content at the indexer's registration guard; "
+                 "catalog_cmds.integrity._is_zero_content_by_design mirrors it",
+        "residual_beads": [],
+    },
+    "tombstone-ghost-notes": {
+        "status": "shipped",
+        "guard": "store_put notes get a title-derived identity at write time (NULL-identity class, fixed)",
+        "where": "nexus.catalog.store_hook (uri_for(collection, title)); nx catalog doctor --store-put-integrity",
+        "residual_beads": [],
+    },
+}
+
+
+def _echo_write_time_guard(verb: str) -> None:
+    """Print the §5.4 precondition for *verb* — before the arm's own report."""
+    g = _WRITE_TIME_GUARDS[verb]
+    line = f"Write-time guard (playbook §5.4, as of {_WRITE_TIME_GUARDS_AS_OF}): {g['status']} — {g['guard']}"
+    if g.get("where"):
+        line += f" [{g['where']}]"
+    if g.get("residual_beads"):
+        line += f"; residuals: {', '.join(g['residual_beads'])}"
+    if g.get("unowned_residual"):
+        line += f"; UNOWNED residual: {g['unowned_residual']} — no bead names it"
+    click.echo(line)
+
+
 def _substrate_count(cat: "CatalogReader") -> dict:
     """One point-in-time engine count (``catalog_stats.doc_count``), or an
     ``unavailable`` record naming why."""
@@ -877,6 +954,9 @@ def _json_payload(report: dict, unreadable: list[str]) -> dict:
         "incomplete": unreadable,
         # nexus-cwhci: the S4 anchor — engine server-side count vs this walk.
         "substrate_anchor": report.get("substrate_anchor"),
+        # nexus-41zr9: the §5.4 write-time guard census, keyed by mutation arm.
+        "write_time_guards": _WRITE_TIME_GUARDS,
+        "write_time_guards_as_of": _WRITE_TIME_GUARDS_AS_OF,
         "walked_docs": report.get("walked_docs"),
         "alias_docs": report.get("alias_docs"),
         "no_collection_docs": report.get("no_collection_docs"),
@@ -904,6 +984,7 @@ def _report_only_notice(dry_run: bool, confirm: bool) -> bool:
 
 
 def _run_recount(report: dict, *, will_act: bool, dry_run: bool) -> None:
+    _echo_write_time_guard("recount")
     targets = report["zero_count_recount"]
     click.echo(f"\nrecount: {len(targets)} candidate(s) (manifest non-empty despite chunk_count == 0).")
     _echo_sample(targets, _CAP_ACTION, _label_zero_count)
@@ -945,6 +1026,7 @@ def _run_recount(report: dict, *, will_act: bool, dry_run: bool) -> None:
 
 
 def _run_tombstone(report: dict, class_key: str, *, will_act: bool, dry_run: bool, verb: str) -> None:
+    _echo_write_time_guard(verb)
     targets, invariant_skipped = _assert_empty_manifest(report[class_key])
     click.echo(f"\n{verb}: {len(targets)} candidate(s) (empty manifest).")
     _echo_sample(targets, _CAP_ACTION, _label_vanished if class_key.startswith("vanished") else _label_zero_count)
@@ -999,6 +1081,7 @@ def _run_tombstone_ghost_notes(
     raises is unverifiable and is never tombstoned. Tombstones are
     reversible until ``purge-trash``.
     """
+    _echo_write_time_guard("tombstone-ghost-notes")
     note_shaped = [
         row
         for key, rows in report.items()
