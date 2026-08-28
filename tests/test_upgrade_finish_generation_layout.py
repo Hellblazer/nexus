@@ -80,7 +80,17 @@ def test_the_gate_is_still_true_for_a_legacy_uv_tool_install(tmp_path, monkeypat
     tools = tmp_path / "tools"
     tools.mkdir()
     monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
-    legacy = tmp_path / ".local" / "share" / "uv" / "tools" / "conexus"
+    uv_tools = tmp_path / ".local" / "share" / "uv" / "tools"
+    legacy = uv_tools / "conexus"
+    # nexus-orhp5: point uv's tool root AT this fixture. The gate now does a
+    # containment check against install_layout.uv_tool_root() rather than a
+    # substring match on "uv/tools/conexus", so a synthetic path that merely
+    # SPELLS those segments under tmp_path is no longer inside the uv tree —
+    # correctly, since the substring answered yes for decoys and no for the
+    # real tree under a relocated UV_TOOL_DIR. The scenario this test means is
+    # a genuine legacy install, so the fixture has to be one.
+    monkeypatch.setenv("UV_TOOL_DIR", str(uv_tools))
+    legacy.mkdir(parents=True)
     monkeypatch.setattr(
         upgrade_finish, "_install_root",
         lambda: legacy / "lib" / "python3.12" / "site-packages",

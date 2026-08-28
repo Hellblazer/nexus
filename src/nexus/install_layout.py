@@ -189,6 +189,75 @@ def tools_dir() -> Path:
     return _resolve_dir(TOOLS_DIR_ENV, Path.home().joinpath(*_DEFAULT_TOOLS_SUBPATH))
 
 
+#: uv's tool directory, and the conexus venv inside it. NOT ``tools_dir()``.
+#: ``tools_dir()`` above is the NEXUS GENERATION ROOT (``<tools>/gen-*``);
+#: these two are uv's own tree, where a ``uv tool install conexus`` lands.
+#: They are different directories answering different questions and a caller
+#: that confuses them gets a confidently wrong answer, which is why the names
+#: are deliberately not near-homonyms.
+def uv_tool_root() -> Path:
+    """Where uv keeps its tools, resolved the way UV ITSELF resolves it.
+
+    nexus-orhp5. Four rules in this tree answered this question and they
+    disagreed:
+
+      1. ``upgrade_finish.running_from_tool_install`` — substring test for
+         ``"uv/tools/conexus"``; wrong whenever ``UV_TOOL_DIR`` points
+         somewhere without that literal in it.
+      2. ``health._check_orphan_uv_install`` — honoured ``UV_TOOL_DIR`` but
+         not ``XDG_DATA_HOME``.
+      3. ``legacy.sh`` / ``version_lockstep_action`` — shell out to
+         ``uv tool dir``; correct by construction, but needs uv on PATH.
+      4. ``upgrade_finish``'s uv-receipt read — a HARDCODED
+         ``~/.local/share/uv/tools/conexus/uv-receipt.toml``, wrong for both
+         env vars. This one was found by the sweep the bead asked for; three
+         was an undercount.
+
+    The precedence below is MEASURED against uv 0.8.0, not inferred::
+
+        default           -> ~/.local/share/uv/tools
+        UV_TOOL_DIR=X     -> X
+        XDG_DATA_HOME=Y   -> Y/uv/tools
+        both              -> X            (UV_TOOL_DIR wins outright)
+
+    Deliberately does NOT shell out to ``uv tool dir``. Rules 3 and 5 already
+    do that and are right to — they are shell, and uv is a hard dependency
+    there. In Python this is on startup-adjacent paths (doctor, the finish
+    pass), a subprocess per call is real cost, and the resolution is three
+    lines of env lookup. The tradeoff is that an exotic future uv config
+    could drift from this; if that happens, the fix is here, in ONE place,
+    which is the entire point of the bead.
+    """
+    raw = os.environ.get("UV_TOOL_DIR")
+    if raw and raw.strip():
+        return Path(raw.strip()).expanduser()
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg and xdg.strip():
+        return Path(xdg.strip()).expanduser() / "uv" / "tools"
+    return Path.home() / ".local" / "share" / "uv" / "tools"
+
+
+def uv_conexus_venv() -> Path:
+    """The legacy ``uv tool install conexus`` venv root."""
+    return uv_tool_root() / "conexus"
+
+
+def is_under_uv_tool_install(path: Path | str) -> bool:
+    """True when *path* lies inside the uv-managed conexus tree.
+
+    Replaces the ``"uv/tools/conexus" in str(root)`` substring test. A
+    substring is not a containment check: it answers yes for a path that
+    merely spells those segments somewhere, and no for the real tree under a
+    relocated ``UV_TOOL_DIR``.
+    """
+    try:
+        target = Path(path).expanduser().resolve()
+        root = uv_conexus_venv().resolve()
+    except (OSError, RuntimeError):
+        return False
+    return target == root or root in target.parents
+
+
 def bin_dir() -> Path:
     """The directory shims are written into. Recomputed per call."""
     return _resolve_dir(BIN_DIR_ENV, Path.home().joinpath(*_DEFAULT_BIN_SUBPATH))

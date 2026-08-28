@@ -450,11 +450,12 @@ def _check_orphan_uv_install() -> list[HealthResult]:
     still holds a valid receipt for it, so a stray ``uv tool upgrade conexus``
     rebuilds that tree and re-symlinks over the shims (.7's accepted risk).
     """
-    import os  # noqa: PLC0415 — deferred, module already imports it lazily elsewhere
+    # nexus-orhp5: one resolver for "where is uv's tool dir". This site
+    # honoured UV_TOOL_DIR but not XDG_DATA_HOME, so it reported "no uv
+    # install" on an XDG-relocated box while one sat right there.
+    from nexus.install_layout import uv_conexus_venv  # noqa: PLC0415 — deferred, avoids an import cycle
 
-    tool_dir = os.environ.get("UV_TOOL_DIR")
-    root = Path(tool_dir) if tool_dir else Path.home() / ".local" / "share" / "uv" / "tools"
-    legacy = root / "conexus"
+    legacy = uv_conexus_venv()
     if not (legacy / "bin").is_dir():
         return [HealthResult(
             label="Orphan uv install", ok=True,

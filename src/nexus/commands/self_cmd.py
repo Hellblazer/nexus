@@ -189,14 +189,13 @@ def _running_from_legacy_tool_install() -> bool:
     time and the refusal simply never asked it; re-deriving it here would leave
     two copies to drift apart, and the stale one eventually wins an argument.
 
-    KNOWN GAP, and it is the delegated rule's, not this call's: that test is a
-    substring against the DEFAULT uv tools path, so a box with ``UV_TOOL_DIR``
-    pointed elsewhere reads as a dev checkout and still gets the refusal. That
-    is no worse than before this change (every packaged box got the refusal),
-    but it is not fixed either. ``health._check_orphan_uv_install`` honours
-    ``UV_TOOL_DIR`` and ``legacy.sh`` shells out to ``uv tool dir``, so there
-    are already three resolution rules for one question; unifying them is its
-    own bead, not a drive-by here.
+    The gap this used to carry is CLOSED (nexus-orhp5). It read as a dev
+    checkout on a box with ``UV_TOOL_DIR`` pointed elsewhere, because the
+    delegated rule was a substring against the default uv path. That rule now
+    does a CONTAINMENT check against ``install_layout.uv_tool_root()``, which
+    resolves the way uv itself does — UV_TOOL_DIR > $XDG_DATA_HOME/uv/tools >
+    ~/.local/share/uv/tools, measured against uv 0.8.0 rather than inferred.
+    The four rules that separately answered "where is uv's tool dir" are one.
     """
     from nexus.upgrade_finish import running_from_tool_install  # noqa: PLC0415 — deferred; avoids import cycle and lets tests patch at call time
 
@@ -254,10 +253,11 @@ def _converge_legacy_install(
         # so report it rather than returning a success that migrated nothing.
         raise click.ClickException(
             "this nx looks like a packaged uv-tool install, but "
-            "migrate_legacy.sh found no legacy tree to converge. The two "
-            "disagree, most likely because they resolve the uv tools "
-            "directory by different rules (UV_TOOL_DIR vs `uv tool dir`). "
-            "Nothing was changed."
+            "migrate_legacy.sh found no legacy tree to converge. Since "
+            "nexus-orhp5 both sides resolve the uv tools directory by the "
+            "same rule, so the likeliest causes are that `uv` is absent or "
+            "unresolvable here, or the tree was removed between the two "
+            "checks. Nothing was changed."
         )
 
     generation = Path(out.splitlines()[-1])
