@@ -2038,7 +2038,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         # `embed_unavailable` instead of doing that discarded work quietly.
         click.echo(f"Indexing {path}…")
         try:
-            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming, source_uri=source_uri or "", allow_degraded_extraction=allow_degraded_extraction)
+            n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming, source_uri=source_uri or "", allow_degraded_extraction=allow_degraded_extraction, dry_run=True)
         except (ImportError, RuntimeError, ExtractionQualityError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational

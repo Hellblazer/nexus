@@ -90,6 +90,23 @@ that tag is gated and paired with a client release.
 
 ### Fixed
 
+- **`nx index pdf --dry-run` writes nothing, enforced rather than assumed
+  (nexus-uxg4u).** The dry-run path used to register a catalog document
+  before any work; when the completion fence then correctly refused the
+  no-chunks run, the registration survived as a phantom entry claiming
+  chunks that do not exist (relayed from a live box, reproducible on any
+  machine without API keys — the exact case the flag advertises). An
+  explicit `dry_run` flag now threads from the CLI through the whole PDF
+  pipeline, gating every catalog registration, fence call, and post-store
+  hook (the hook gate is proven against the real default hook registry,
+  not the CLI's empty-registry convention). On a real run, any document
+  freshly minted during the call — pre-flight or any of the three
+  fallback registration sites — is rolled back automatically if the run
+  fails afterward, and the failure still propagates; a pre-existing
+  document is left exactly as the fence marked it. The fence itself is
+  untouched.
+
+
 - **Engine: `databasechangelog.dateexecuted` reads as UTC (nexus-rph82).**
   Liquibase stamped it in the JVM's default zone; on the GMT-hosted managed
   database a post-deploy audit windowing on it against `now()` reported

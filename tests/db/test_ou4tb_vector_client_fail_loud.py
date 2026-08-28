@@ -19,6 +19,8 @@ docstrings explicitly named ``get``/``delete`` as the holdouts from.
 """
 from __future__ import annotations
 
+import ast
+
 import pytest
 
 from nexus.db import http_vector_client as hvc
@@ -37,6 +39,41 @@ def failing_post(monkeypatch):
 
     monkeypatch.setattr(hvc, "_post", boom)
     return boom
+
+
+def _always_raises(stmts: "list[ast.stmt]") -> bool:
+    """True iff *stmts* is GUARANTEED to exit via ``raise`` on every
+    execution path — no fall-through, no ``return``/``continue``/``break``.
+
+    nexus-uxg4u round 2 (code-review-expert Finding C / substantive-critic
+    SIGNIFICANT): the prior version of
+    ``TestCallerLoopsIsolatePerItem::test_doc_indexer_registers_
+    unconditionally_at_small_doc_tail`` checked only "does an
+    ``ast.Raise`` node appear ANYWHERE in the handler's subtree" — the
+    reviewers' counterexample, ``except Exception as exc: if
+    isinstance(exc, KeyboardInterrupt): raise\\n _log.warning(...);
+    return 0``, contains a ``Raise`` node (so the old check passed it)
+    while still swallowing every non-``KeyboardInterrupt`` exception —
+    exactly the silent-strand shape this guard exists to catch.
+
+    Handles the shapes this codebase's except-handlers actually use: a
+    straight-line sequence ending in (or containing) an unconditional
+    ``raise``, or an ``if``/``else`` whose BOTH branches always raise.
+    Conservative elsewhere — a ``for``/``while``/``try``/``with`` in the
+    middle is treated as "does not itself guarantee raise" (scanning
+    continues past it), and a bare ``if`` with no ``else`` is never
+    exhaustive on its own; both bias the check toward FALSE (flagging a
+    handler as swallowing) rather than toward a false pass.
+    """
+    for stmt in stmts:
+        if isinstance(stmt, ast.Raise):
+            return True
+        if isinstance(stmt, (ast.Return, ast.Continue, ast.Break)):
+            return False
+        if isinstance(stmt, ast.If) and stmt.orelse:
+            if _always_raises(stmt.body) and _always_raises(stmt.orelse):
+                return True
+    return False
 
 
 class TestGetFailsLoud:
@@ -238,9 +275,28 @@ class TestCallerLoopsIsolatePerItem:
         no longer a prune failure mode to isolate registration from.
 
         This test pins the STRONGER surviving invariant directly:
-        registration runs unconditionally between the small-doc
-        branch's dead-prune-deletion marker and the completion stamp —
-        no intervening ``try``/``except`` can strand it.
+        registration must never be STRANDED — silently skipped while
+        the function carries on — by an intervening try/except between
+        the small-doc branch's dead-prune-deletion marker and the
+        completion stamp.
+
+        nexus-uxg4u (task 2, fresh-mint rollback on
+        ``IndexRunVerifyRefused``) added exactly one intervening
+        ``try``/``except`` in this span, around the ``_fence_complete``
+        completion-stamp call — but it re-raises unconditionally after
+        its rollback compensation, so it PROPAGATES rather than
+        SWALLOWS: registration is never reached on that path either way
+        (the bare, unwrapped call already aborted the function on this
+        exact exception before this fix), so the original invariant
+        still holds. A bare textual scan for ``try:``/``raise`` tokens
+        cannot tell a propagating guard from a swallowing one, so this
+        now parses the AST and checks every ``except`` handler in the
+        span for an UNCONDITIONAL ``raise`` on every execution path
+        through the handler (nexus-uxg4u round 2: a mere ``ast.Raise``
+        node ANYWHERE in the subtree is not enough — see
+        ``_always_raises``'s docstring for the counterexample this
+        closes) — silence, not the mere presence of a try/except, is
+        what would actually strand registration.
         """
         from pathlib import Path
 
@@ -253,10 +309,65 @@ class TestCallerLoopsIsolatePerItem:
             "nexus-tbkk1: stale-chunk prune via _identity_where's source_path"
         )
         register = src.index("_register_in_catalog(metadatas_list", marker)
-        between = src[marker:register]
-        assert "try:" not in between and "raise" not in between, (
-            "a try/except (or a raise) reappeared between the deleted "
-            "prune site and catalog registration in index_pdf's "
+        marker_line = src.count("\n", 0, marker) + 1
+        register_line = src.count("\n", 0, register) + 1
+
+        tree = ast.parse(src, filename="src/nexus/doc_indexer.py")
+        offending: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            if not (marker_line <= node.lineno <= register_line):
+                continue
+            for handler in node.handlers:
+                if not _always_raises(handler.body):
+                    offending.append(ast.dump(handler.type) if handler.type else "bare except")
+        assert not offending, (
+            "a SWALLOWING except (no raise in its body) reappeared between "
+            "the deleted prune site and catalog registration in index_pdf's "
             "small-doc branch — registration must run unconditionally, "
-            "never isolated behind a swallowable failure"
+            f"never isolated behind a swallowable failure: {offending}"
+        )
+
+    def test_always_raises_helper_rejects_the_reviewers_counterexample(self) -> None:
+        """Self-falsification (nexus-uxg4u round 2, code-review-expert
+        Finding C): proves ``_always_raises`` actually has teeth against
+        the exact counterexample the review named — a handler that
+        contains an ``ast.Raise`` node somewhere, yet still swallows the
+        exception on the common path. Guards against this test file's
+        OWN guard regressing back to a bare "raise anywhere" check."""
+        counterexample = ast.parse(
+            "try:\n"
+            "    risky()\n"
+            "except Exception as exc:\n"
+            "    if isinstance(exc, KeyboardInterrupt):\n"
+            "        raise\n"
+            "    _log.warning('swallowed')\n"
+            "    return 0\n",
+            mode="exec",
+        )
+        handler = counterexample.body[0].handlers[0]  # type: ignore[attr-defined]
+        assert not _always_raises(handler.body), (
+            "_always_raises must reject a handler that only raises on "
+            "SOME paths (here: KeyboardInterrupt only) and swallows + "
+            "returns on every other exception — a bare 'is there a raise "
+            "node anywhere' check passes this counterexample; this "
+            "guard must not"
+        )
+
+        # Sibling positive case: an unconditional raise (this bead's own
+        # rollback-then-re-raise shape) must still pass.
+        propagating = ast.parse(
+            "try:\n"
+            "    risky()\n"
+            "except Exception as exc:\n"
+            "    compensate(exc)\n"
+            "    raise\n",
+            mode="exec",
+        )
+        prop_handler = propagating.body[0].handlers[0]  # type: ignore[attr-defined]
+        assert _always_raises(prop_handler.body), (
+            "_always_raises must accept a handler that unconditionally "
+            "re-raises after a best-effort compensation call — the exact "
+            "shape index_pdf's own rollback wiring uses"
         )
