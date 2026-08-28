@@ -477,6 +477,13 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"collections": ["code__test__voyage-code-3__v1"]})
         elif op == "/docs/collection-counts":
             self._send_json({"counts": {"code__test__voyage-code-3__v1": 2}})
+        elif op == "/docs/collection-counts-all":
+            # nexus-8tnz2: all-rows counts, INCLUDING soft-tombstoned docs
+            # still restorable until purge_trash — one more than the
+            # live-only "/docs/collection-counts" count above so a test
+            # exercising both through the live fake server can tell them
+            # apart.
+            self._send_json({"counts": {"code__test__voyage-code-3__v1": 3}})
         elif op == "/docs/orphaned":
             # nexus-8y1tm: CatalogRepository.orphanedDocs() narrow 4-key shape
             # (tumbler/title/content_type/file_path, all str) — NOT the full
