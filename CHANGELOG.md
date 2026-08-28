@@ -6,6 +6,76 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`nx doctor` exits non-zero on real failures (nexus-be6x8).** The exit code
+  now says what the glyphs say: `0` — every check ✓ or ⚠ (soft warnings never
+  move it); `1` — at least one hard ✗, something needs fixing; `2` — at least
+  one fatal ✗, nexus cannot function. Before, only two of 78 checks could move
+  the code, so a sweep that printed genuine ✗ lines exited `0` and any script
+  gating on `$?` read a constant. **If you gate automation on `nx doctor`'s
+  exit code, expect `1` where you used to get `0` until the reported reds are
+  fixed** — the remedy is printed under each. Measured on the dev box the
+  first time: two stale nexus git-hook stanzas in other repos, fixed with the
+  printed `nx hooks update <repo>`.
+
+### Fixed
+
+- **A uv takeover self-repairs.** On a generation box, `uv tool install
+  --force conexus` (or a stray upgrade) rebuilt uv's `[local]`-less tree and
+  re-pointed the shims at it, so every spawn ran the wrong install and only
+  `nx doctor` noticed. `nx upgrade` (which the SessionStart hook runs) and
+  `nx self install` now rewrite the shims back to `current`, register uv's
+  tree for reap, and — when uv's tree is the newer version — build a
+  generation at that version from `current`'s own receipt, so `[local]`
+  survives. Measured against uv 0.8: a plain install refuses to overwrite the
+  shims and a reaped tree makes `uv tool upgrade` refuse to rebuild;
+  `uv tool uninstall` deletes the shims, so it is never advised.
+- **`nx doctor` and `nx daemon restart-stale` see processes still running from
+  the legacy uv tree (nexus-k52g0).** The holder census enumerated only
+  receipted generations; the legacy tree is receipt-less by design, so nine
+  processes on the old tree rendered as "nothing is still bound to an older
+  generation" and the aspect worker kept running old code after an upgrade.
+  The Orphan-uv-install row now says whether the tree is registered for reap
+  or will never be reaped.
+- **A hybrid box converges (nexus-hibpr).** A generation layout beside a
+  legacy uv tree never registered that tree in the GC ledger — the
+  registration lived only in `migrate_legacy.sh`, which the checkout install
+  path never ran. `nx self install` and `scripts/reinstall-tool.sh` register
+  it (after the reap pass, per the two-pass rule); the next install reaps it
+  once nothing runs from it.
+- **The generation receipt records an absolute source (nexus-hibpr).**
+  `install_generation.sh` wrote `--source` verbatim, so a receipt could read
+  `"source": "."` and a later automatic `nx self install` rebuilt from
+  whatever directory the hook happened to stand in.
+- **`nx enrich aspects` audit and gap-fill agree (nexus-bocft).** `--missing`
+  keyed on `file_path` only and dropped every title-only store_put note; it
+  reported 1 gap on a collection where the gap-fill would dispatch 407. Both
+  now share one identity key, `--missing` reports the aspect rows no current
+  entry claims, and the dry-run's read-side prediction samples 25 entries
+  instead of one cloud round-trip per document (407 took over five minutes).
+- **`nx catalog verify` and `nx catalog doctor --store-put-integrity` agree on
+  ghost notes (nexus-1uekf).** verify called 226 rows "legitimate by design"
+  from a shape test alone while store-put-integrity called them ghosts by a
+  chash lookup that a 32-hex legacy id could never satisfy. Both now use one
+  lookup — chash, then title — and verify splits `rdr145_exempt` (chunks
+  present, manifest-only) from `rdr145_ghost` (no content; the title is the
+  only record).
+- **`tests/e2e/release-sandbox.sh` installs `$REPO_ROOT`, not the caller's
+  cwd**, and asserts the installed version; `upgrade-shakeout.sh` defaults to
+  the highest published release strictly below the tree under test.
+- The suite's `$HOME` fence now fences the install layout roots too
+  (`NX_TOOLS_DIR`, `NX_BIN_DIR`, `UV_TOOL_DIR`), so a dev box that has a
+  generation layout no longer leaks it into every layout-sensitive test.
+
+### Added
+
+- **`nx catalog reconcile-stale --execute tombstone-ghost-notes` (nexus-1uekf).**
+  Tombstones store_put-origin notes whose content is gone from T3, proved per
+  row at execution time (empty manifest, no chunk under chash or title);
+  notes with chunks present are manifest-only gaps and are never touched.
+  First production run: 228 ghost rows removed, one live note correctly kept.
+
 ## [7.20.0] - 2026-08-28
 
 Five instruments that reported absence when the truth was failure. Each said

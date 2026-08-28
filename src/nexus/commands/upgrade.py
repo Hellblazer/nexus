@@ -184,6 +184,23 @@ def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
     are still computed and reported (they are sub-ms on-disk reads); only
     the CONVERGE actions are suppressed.
     """
+    # A uv takeover is a precondition failure of its own kind: after a stray
+    # `uv tool install --force conexus` every spawn resolves through uv's
+    # rebuilt, [local]-less tree instead of `current`. The SessionStart
+    # lockstep hook runs this command, so repairing here means the box heals
+    # at the next session with nothing for the user to do (nexus-hibpr
+    # follow-on). Best-effort like everything else in this stage.
+    try:
+        from nexus.commands.self_cmd import repair_uv_takeover  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
+        for line in repair_uv_takeover():
+            if auto_mode:
+                _log.info("upgrade_precondition_action", axis="uv-takeover", action=line)
+            else:
+                click.echo(f"Precondition [uv-takeover]: {line}")
+    except Exception as exc:  # noqa: BLE001 — best-effort trigger stage; a repair failure must not block the walk
+        _log.warning("upgrade_uv_takeover_repair_failed", error=str(exc))
+
     try:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         from nexus.upgrade_ladder.preconditions import converge_preconditions  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start

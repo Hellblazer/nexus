@@ -106,6 +106,20 @@ def perform_self_install(
     if host.parent == tools and host.name.startswith(install_layout.GENERATION_PREFIX):
         pass  # a generation: fall through to the upgrade path below
     elif _running_from_legacy_tool_install():
+        # A uv tree beside an EXISTING generation layout is a takeover, not a
+        # box that never migrated: `uv tool install --force conexus` (or a
+        # stray upgrade) rebuilt the tree and re-pointed the shims, so this
+        # process is running from uv's tree while `current` still names the
+        # generation the user actually had -- extras included. Converging
+        # through migrate_legacy.sh here would bridge extras from the REBUILT
+        # uv receipt, which is exactly the receipt that dropped [local].
+        # Repair instead: shims back to current, tree registered for reap,
+        # and a generation at uv's version from current's OWN receipt when
+        # the user's intent was an upgrade (nexus-hibpr follow-on).
+        if _generation_layout_present(tools):
+            for line in repair_uv_takeover(dry_run=dry_run):
+                click.echo(line)
+            return None
         return _converge_legacy_install(
             install_dir, tools, version=version, dry_run=dry_run,
         )
@@ -126,43 +140,11 @@ def perform_self_install(
     # WHAT TO INSTALL comes from the receipt of the generation we are running
     # from, not from `current`: a self-install reproduces THIS process's
     # install, and on a box whose current has already moved those differ.
-    receipt = install_layout.read_receipt(host)
-
-    # EXTRAS ARE THREADED EXPLICITLY. This is the load-bearing reason the old
-    # hook chose `uv tool upgrade` over `uv tool install`: a raw install strips
-    # the [local] extra and reintroduces the 5.6.2 local-search P0 (a 768-dim
-    # embedder silently replaced by a 384-dim one, against collections built
-    # at 768). There is no uv receipt to re-derive them from any more, so they
-    # travel from nexus-install.json or they are lost.
-    build = [
-        "bash", str(install_dir / "install_generation.sh"),
-        "--source", receipt.source,
-    ]
-    if receipt.extras:
-        build += ["--extras", ",".join(receipt.extras)]
-    if version:
-        build += ["--version", version]
-
+    build = _build_argv(install_dir, install_layout.read_receipt(host), version=version)
     if dry_run:
         click.echo(" ".join(build))
         return None
-
-    # `bash <script>` rather than executing it directly: the wheel ships mode
-    # 755 today, but a mode bit lost in some install path would fail at exec
-    # with a permissions error rather than anything self-explanatory, and
-    # nothing about this command needs the bit.
-    tools.mkdir(parents=True, exist_ok=True)
-    built = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        build, capture_output=True, text=True, check=False,
-    )
-    if built.returncode != 0:
-        raise click.ClickException(
-            f"generation build failed:\n{built.stderr.strip()}"
-        )
-    generation = Path(built.stdout.strip().splitlines()[-1])
-
-    _sh(install_dir, f'nx_flip_current "{generation}" "{tools}"')
-    _sh(install_dir, f'nx_write_shims "{generation}" "{bin_dir}"')
+    generation = _build_flip_shims(build, install_dir=install_dir, tools=tools, bin_dir=bin_dir)
 
     # RULE (d) IS PASSED HERE. --self names the generation hosting this very
     # process; without it the reap below is free to delete the tree these
@@ -191,6 +173,175 @@ def perform_self_install(
     # test for this ordering reaped a free tree exactly that way.
     _register_legacy_tree_if_present(install_dir, tools)
     return generation
+
+
+def _build_argv(install_dir: Path, receipt, *, version: str | None) -> list[str]:
+    """The install_generation.sh argv that reproduces *receipt*'s install.
+
+    EXTRAS ARE THREADED EXPLICITLY. This is the load-bearing reason the old
+    hook chose `uv tool upgrade` over `uv tool install`: a raw install strips
+    the [local] extra and reintroduces the 5.6.2 local-search P0 (a 768-dim
+    embedder silently replaced by a 384-dim one, against collections built
+    at 768). There is no uv receipt to re-derive them from any more, so they
+    travel from nexus-install.json or they are lost.
+    """
+    build = [
+        "bash", str(install_dir / "install_generation.sh"),
+        "--source", receipt.source,
+    ]
+    if receipt.extras:
+        build += ["--extras", ",".join(receipt.extras)]
+    if version:
+        build += ["--version", version]
+    return build
+
+
+def _build_flip_shims(build: list[str], *, install_dir: Path, tools: Path, bin_dir: Path) -> Path:
+    """Run one generation build, flip ``current`` to it, write the shims.
+
+    No reap here: callers that reap do it afterwards and pass rule (d)
+    themselves. `bash <script>` rather than executing it directly: the wheel
+    ships mode 755 today, but a mode bit lost in some install path would fail
+    at exec with a permissions error rather than anything self-explanatory,
+    and nothing about this command needs the bit.
+    """
+    tools.mkdir(parents=True, exist_ok=True)
+    built = subprocess.run(  # noqa: S603 — fixed argv, no shell
+        build, capture_output=True, text=True, check=False,
+    )
+    if built.returncode != 0:
+        raise click.ClickException(
+            f"generation build failed:\n{built.stderr.strip()}"
+        )
+    generation = Path(built.stdout.strip().splitlines()[-1])
+    _sh(install_dir, f'nx_flip_current "{generation}" "{tools}"')
+    _sh(install_dir, f'nx_write_shims "{generation}" "{bin_dir}"')
+    return generation
+
+
+def _generation_layout_present(tools: Path) -> bool:
+    """True when ``<tools>/current`` names a generation -- the layout exists."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    try:
+        install_layout.current_generation(tools=tools)
+    except Exception:  # noqa: BLE001 — no pointer, dangling pointer, unreadable root: no layout
+        return False
+    return True
+
+
+def _installed_version(venv: Path) -> str | None:
+    """The conexus version installed in *venv*, read from its own metadata.
+
+    Asks the venv's interpreter rather than parsing dist-info paths, so the
+    answer is what that tree would report about itself. ``None`` when the
+    tree has no usable python or no conexus.
+    """
+    python = venv / "bin" / "python"
+    if not python.exists():
+        return None
+    r = subprocess.run(  # noqa: S603 — fixed argv, no shell
+        [str(python), "-c",
+         "import importlib.metadata as m; print(m.version('conexus'))"],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip() or None
+
+
+def _newer(candidate: str | None, than: str | None) -> bool:
+    if not candidate or not than:
+        return False
+    from packaging.version import InvalidVersion, Version  # noqa: PLC0415 — deferred import
+
+    try:
+        return Version(candidate) > Version(than)
+    except InvalidVersion:
+        return False
+
+
+def repair_uv_takeover(*, dry_run: bool = False) -> list[str]:
+    """Undo what a stray ``uv tool install --force conexus`` / upgrade did.
+
+    Measured against uv 0.8 in a sandbox (2026-08-28): a plain
+    ``uv tool install conexus`` on a generation box REBUILDS uv's tree (a
+    [local]-less copy, wasting disk) but refuses to overwrite a nexus-owned
+    shim ("Executable already exists"); ``--force`` takes the shims, and then
+    every spawn resolves through uv's tree instead of ``current`` -- the box
+    is silently on the wrong install, possibly at the wrong version, with the
+    wrong extras. ``uv tool uninstall conexus`` DELETES the shims at those
+    paths, so it is never the remedy; a reaped tree (``rm -rf``) is what
+    makes uv say "not installed" and refuse to rebuild.
+
+    Three steps, each only when needed, returned as lines for the caller to
+    print (``dry_run`` describes without doing):
+
+    1. uv's tree is NEWER than ``current`` -> the user meant to upgrade.
+       Build a generation at that version from ``current``'s OWN receipt
+       (its source, its extras -- never the rebuilt uv receipt), flip, shims.
+    2. shims at ``bin_dir`` are symlinks (uv's) -> rewrite them to the
+       generation (the new one from step 1, else ``current``).
+    3. uv's tree exists -> register it for reap (idempotent); the next
+       ``nx self install`` reaps it once nothing runs from it.
+
+    Returns ``[]`` when there is no generation layout (a pure uv box is not
+    a takeover; ``nx self install`` converges it) or nothing is wrong.
+    """
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    tools = install_layout.tools_dir()
+    bin_dir = install_layout.bin_dir()
+    if not _generation_layout_present(tools):
+        return []
+    current = install_layout.current_generation(tools=tools)
+    install_dir = packaged_install_dir()
+    legacy = install_layout.uv_conexus_venv()
+    legacy_present = (legacy / "bin").is_dir()
+
+    taken = [
+        entry.name
+        for entry in sorted((current / "bin").iterdir())
+        if entry.name not in install_layout.NEVER_SHIM
+        and (bin_dir / entry.name).is_symlink()
+    ] if (current / "bin").is_dir() else []
+    if not taken and not legacy_present:
+        return []
+
+    lines: list[str] = []
+    target = current
+    if legacy_present:
+        uv_version = _installed_version(legacy)
+        cur_version = _installed_version(current)
+        if _newer(uv_version, cur_version):
+            receipt = install_layout.read_receipt(current)
+            lines.append(
+                f"uv's tree is at {uv_version}, newer than current ({cur_version}): "
+                f"building a generation at {uv_version} from current's receipt "
+                f"(source {receipt.source}, extras {','.join(receipt.extras) or 'none'})"
+            )
+            if not dry_run:
+                target = _build_flip_shims(
+                    _build_argv(install_dir, receipt, version=uv_version),
+                    install_dir=install_dir, tools=tools, bin_dir=bin_dir,
+                )
+                lines.append(f"installed {target.name}")
+                taken = []  # _build_flip_shims wrote the shims
+    if taken:
+        lines.append(
+            f"shims {', '.join(taken)} in {bin_dir} were uv symlinks: rewriting "
+            f"them to {target.name}"
+        )
+        if not dry_run:
+            _sh(install_dir, f'nx_write_shims "{target}" "{bin_dir}"')
+    if legacy_present:
+        lines.append(
+            f"uv's tree at {legacy} is registered for reap; the next `nx self "
+            "install` removes it once nothing runs from it"
+        )
+        if not dry_run:
+            _register_legacy_tree_if_present(install_dir, tools)
+    return lines
 
 
 def _register_legacy_tree_if_present(install_dir: Path, tools: Path) -> Path | None:

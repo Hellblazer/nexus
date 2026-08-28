@@ -415,6 +415,9 @@ def test_an_orphan_uv_install_is_reported_with_the_fix_named(layout, tmp_path, m
     uv_conexus.mkdir(parents=True)
     (uv_conexus / "nx").write_text("#!/bin/sh\n")
     monkeypatch.setenv("HOME", str(home))
+    # This test models uv's root UNDER $HOME; the suite fence pins UV_TOOL_DIR
+    # to an empty fenced root (tests/_fence_home.py), which would hide it.
+    monkeypatch.delenv("UV_TOOL_DIR", raising=False)
 
     row = _result(health._check_generation_layout(), "uv install")
 

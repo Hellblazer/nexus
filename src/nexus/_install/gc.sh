@@ -195,13 +195,13 @@ $_nx_gc_self"
                 fi
                 rm -rf -- "$_nx_gc_real"
                 rm -f -- "$_nx_gc_dir"
-                # uv's own registry still names this tool, and a dangling
-                # entry is what lets a stray `uv tool upgrade conexus`
-                # rebuild the tree and retake the shims (.7's accepted-risk
-                # window, made permanent). Not run from here: uv's uninstall
-                # also removes the executables its receipt names, which are
-                # now nexus-owned shims at those very paths. Say it instead.
-                echo "nexus: reaped the legacy uv tree $_nx_gc_real; run 'uv tool uninstall ${_nx_gc_real##*/}' to clear uv's now-dangling registry entry (nothing runs from it any more)" >&2
+                # Reaping the tree IS what closes uv's door: measured against
+                # uv 0.8 (2026-08-28), with the venv gone `uv tool list` says
+                # "No tools installed" and `uv tool upgrade conexus` REFUSES
+                # ("not installed") rather than rebuilding. Never advise
+                # `uv tool uninstall` here -- also measured: it deletes a
+                # nexus-owned regular-file shim sitting at its bin path.
+                echo "nexus: reaped the legacy uv tree $_nx_gc_real; uv no longer lists it and 'uv tool upgrade conexus' will now refuse rather than rebuild it" >&2
             else
                 # -rf on the directory itself, never through a pointer: the
                 # pointers live in this same directory, and following one

@@ -82,3 +82,29 @@ def test_the_builder_absolutizes_a_directory_source() -> None:
     assert 'SOURCE="$(cd "$SOURCE" && pwd -P)"' in text, (
         "install_generation.sh writes the source verbatim again; a receipt can read \"source\": \".\""
     )
+
+
+def test_nx_upgrade_repairs_a_uv_takeover_as_a_precondition() -> None:
+    """The SessionStart lockstep hook runs `nx upgrade --auto`; the repair must
+    sit on that path or a box never heals by itself."""
+    text = _text("src/nexus/commands/upgrade.py")
+    body = text[text.index("def _converge_preconditions"):text.index("def _run_ladder")]
+    assert "repair_uv_takeover(" in body
+
+
+def test_self_install_repairs_rather_than_migrating_when_a_layout_exists() -> None:
+    """Running from uv's tree beside an existing generation layout is a
+    takeover; converging through migrate_legacy.sh would bridge extras from
+    the rebuilt uv receipt -- the one that dropped [local]."""
+    text = _text("src/nexus/commands/self_cmd.py")
+    body = text[text.index("def perform_self_install"):text.index("def _build_argv")]
+    assert "_generation_layout_present(tools)" in body
+    assert "repair_uv_takeover(" in body
+
+
+def test_doctor_points_a_reclaimed_shim_at_nx_self_install_not_a_repo_script() -> None:
+    """A packaged install has no scripts/reinstall-tool.sh (the nexus-gu9zo shape)."""
+    text = _text("src/nexus/health.py")
+    body = text[text.index("uv has taken them back"):text.index("def _check_shims_match_template")]
+    assert "nx self install" in body
+    assert "reinstall-tool" not in body

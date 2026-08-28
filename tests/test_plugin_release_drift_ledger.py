@@ -1418,15 +1418,3 @@ def test_mixed_state_truth_table(
     """
     world = _channel_state(state, tmp_path, monkeypatch)
     check(state, world)
-
-
-@pytest.fixture(autouse=True)
-def _pin_t2_substrate() -> None:
-    """Shadow conftest's autouse engine pin: these tests read files and git only.
-
-    Without this, the session-wide ``_pin_t2_substrate`` boots an engine the
-    file never touches, and on a box with a stale or absent service jar every
-    test here errors at setup and executes nothing -- 65 errors in 1.83s on
-    2026-08-27 (nexus-i0wsm), on exactly the machine that has an installed
-    plugin to check. A closer-scope fixture of the same name wins the lookup.
-    """

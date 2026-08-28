@@ -348,7 +348,9 @@ def _check_generation_layout() -> list[HealthResult]:
                 "`uv tool upgrade conexus` does this), so those commands "
                 "resolve through uv's tree instead of current"
             ),
-            fix_suggestions=["scripts/reinstall-tool.sh"],
+            fix_suggestions=[
+                "nx self install    # rewrites the shims to current and registers uv's tree for reap (nx upgrade --auto does the same)",
+            ],
         )]
 
     generations = install_layout.list_generations(tools=tools)
@@ -410,7 +412,7 @@ def _check_shims_match_template(current, bin_dir, tools) -> list[HealthResult]:
             "shim template — they resolve a different pointer than this layout, "
             "so spawns go somewhere else"
         ),
-        fix_suggestions=["scripts/reinstall-tool.sh"],
+        fix_suggestions=["nx self install    # rewrites the shims from the current template"],
     )]
 
 

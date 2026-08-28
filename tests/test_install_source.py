@@ -30,9 +30,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from nexus import install_advice, install_layout, upgrade_finish
 
 from tests._generation_layout import build as build_generation
+
+
+@pytest.fixture(autouse=True)
+def _uv_root_under_home(monkeypatch):
+    """These tests model a uv-tool box whose tool root is UNDER $HOME (they pin
+    HOME at a tmpdir holding a uv receipt). The suite-wide fence sets
+    UV_TOOL_DIR to an empty fenced root so a dev box's real layout cannot leak
+    in (tests/_fence_home.py); that override would hide this module's
+    deliberate under-HOME roots, so lift it here."""
+    monkeypatch.delenv("UV_TOOL_DIR", raising=False)
 
 
 def _write_receipt(

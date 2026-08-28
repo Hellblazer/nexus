@@ -88,6 +88,26 @@ def install_fence(gate_home: Path, shadow: str = ".config/nexus") -> Path | None
     os.environ[REAL_HOME_ENV] = str(real_home)
     os.environ[FENCED_HOME_ENV] = str(gate_home)
     os.environ["HOME"] = str(gate_home)
+    # THE INSTALL LAYOUT IS FENCED SEPARATELY. The wholesale `.local` link
+    # below shares the REAL layout too: <real>/.local/share/nexus/tools (the
+    # generations, since nexus-utpuw), <real>/.local/bin (the shims) and
+    # <real>/.local/share/uv/tools (uv's tree). The suite's contract is that
+    # install_layout resolves NO generation unless a test builds one (T2
+    # nexus/generation-layout-tests-are-blind-by-default); that held only
+    # while the dev box had no layout. Measured 2026-08-28, the first day it
+    # did: doctor's "Shim contents" row went FATAL inside the suite (the real
+    # shims are rendered for the real path, the fenced path differs), 31
+    # doctor tests read exit 2, every install-advice remedy string flipped
+    # to the generation wording, and enumerate_processes matched nothing.
+    # Three empty roots, set with setdefault so an explicit outer value wins.
+    for var, sub in (
+        ("NX_TOOLS_DIR", "nx-tools"),
+        ("NX_BIN_DIR", "nx-bin"),
+        ("UV_TOOL_DIR", "uv-tools"),
+    ):
+        root = gate_home / sub
+        root.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault(var, str(root))
     # uv resolves its cache off HOME at process start; pin it explicitly so the
     # mirror is not the only thing between the suite and a cold resolve.
     os.environ.setdefault("UV_CACHE_DIR", str(real_home / ".cache" / "uv"))

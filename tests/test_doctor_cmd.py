@@ -378,7 +378,8 @@ def test_doctor_python_version_too_old_fails(runner, mock_reg):
     result = _invoke(runner, mock_reg, extra_patches=[
         patch("nexus.health._python_ok", return_value=(False, "3.11.0")),
     ])
-    assert result.exit_code == 1
+    # nexus-be6x8 (7.21.0): the Python floor is a FATAL check -> exit 2.
+    assert result.exit_code == 2
     assert "\u2717" in result.output
     assert "3.12" in result.output
     assert "python.org" in result.output
@@ -472,7 +473,8 @@ def test_doctor_single_db_unreachable_fails(runner, mock_reg):
     result = _invoke(runner, mock_reg, cloud_client={
         "side_effect": RuntimeError("connection refused"),
     })
-    assert result.exit_code == 1
+    # nexus-be6x8 (7.21.0): an unreachable store is a FATAL check -> exit 2.
+    assert result.exit_code == 2
     assert "not reachable" in result.output
     assert "NX_SERVICE_URL" in result.output
 
@@ -1120,7 +1122,8 @@ class TestJsonMainSweep:
         result = _invoke(runner, mock_reg, extra_args=["--json"], extra_patches=[
             patch("nexus.health._python_ok", return_value=(False, "3.11.0")),
         ])
-        assert result.exit_code == 1, result.output
+        # nexus-be6x8 (7.21.0): fatal reds exit 2; hard non-fatal reds exit 1.
+        assert result.exit_code == 2, result.output
         data = _json.loads(result.stdout)
         assert data["summary"]["fail"] >= 1
         python_entries = [c for c in data["checks"] if "Python" in c["name"]]

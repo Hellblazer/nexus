@@ -122,7 +122,7 @@ def _missing_json(monkeypatch) -> dict:
         aspects_list_cmd, ["--collection", COLLECTION, "--missing", "--json"],
     )
     assert result.exit_code == 0, result.output
-    return json.loads(result.output)
+    return json.loads(result.stdout)
 
 
 def test_gap_fill_selects_the_title_only_notes_without_rows(wiring) -> None:

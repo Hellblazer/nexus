@@ -443,7 +443,10 @@ class TestDoctorCliMcpEntryPointComposition:
         ):
             result = runner.invoke(main, ["doctor"])
 
-        assert result.exit_code == 1
+        # nexus-be6x8 (7.21.0): a crashing MCP entry point is a FATAL red --
+        # nothing that spawns the server will work -- and fatal reds exit 2;
+        # hard non-fatal reds exit 1. Before, both were 1 and warns were 0.
+        assert result.exit_code == 2
         assert "MCP entry point (nx-mcp)" in result.output
         assert "✗" in result.output
         assert "ModuleNotFoundError" in result.output
