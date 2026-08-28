@@ -245,6 +245,155 @@ def test_unreferenced_chash_with_empty_ref_list_is_deleted() -> None:
     assert sorted(col.delete.call_args.kwargs["ids"]) == ["absent", "gone"]
 
 
+# ── nexus-tl5qh: report the server's ACTUAL delete count, not requested ────
+#
+# o8dil.45 fixed four call sites that discarded _ServiceCollectionStub.delete()'s
+# return and reported len(ids) unconditionally. These two sweep sites were
+# left unfixed there (outside that bead's declared file ownership) and carry
+# the identical defect: the engine's anti-join can legitimately delete fewer
+# chunks than requested (one still referenced by another live document's
+# manifest), and reporting the requested count over-states what actually
+# happened.
+
+
+def test_partial_delete_records_the_actual_swept_count_not_requested() -> None:
+    from nexus.mcp_infra import get_superseded_sweep_stats, reset_superseded_sweep_stats
+
+    reset_superseded_sweep_stats()
+    cat = _cat({"old1": ["doc-A"], "old2": ["doc-A"]})
+    col = MagicMock()
+    # Server's anti-join refuses one of the two candidates.
+    col.delete.return_value = 1
+    with patch("nexus.db.make_t3", return_value=MagicMock(
+            get_collection=MagicMock(return_value=col))):
+        _sweep_superseded_vectors(cat, "doc-A", {"old1", "old2", "keep"},
+                                  _chunks("keep", "new1"), "coll", reader=cat,
+                                  notes_provider=_notes())
+    stats = get_superseded_sweep_stats()
+    assert stats["swept"] == 1, (
+        f"expected the server's ACTUAL deleted count (1 of 2 requested), "
+        f"got {stats['swept']!r} — the requested candidate size must never "
+        f"stand in for what the server actually deleted"
+    )
+    reset_superseded_sweep_stats()
+
+
+def test_partial_delete_logs_a_warning_not_the_success_event() -> None:
+    import structlog
+
+    cat = _cat({"old1": ["doc-A"], "old2": ["doc-A"]})
+    col = MagicMock()
+    col.delete.return_value = 1
+    with structlog.testing.capture_logs() as logs, \
+            patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+        _sweep_superseded_vectors(cat, "doc-A", {"old1", "old2", "keep"},
+                                  _chunks("keep", "new1"), "coll", reader=cat,
+                                  notes_provider=_notes())
+    warnings = [l for l in logs if l.get("log_level") == "warning"]
+    assert any(l["event"] == "superseded_sweep_partial_delete" for l in warnings), (
+        f"expected a partial-delete warning, got events: {[l['event'] for l in logs]}"
+    )
+    assert not any(l["event"] == "superseded_vectors_swept" for l in logs), (
+        "a partial delete must not also emit the full-success event"
+    )
+
+
+def test_full_delete_records_requested_count_and_logs_no_partial_warning() -> None:
+    """Control: when the server deletes everything requested (the common
+    case), the actual count equals the requested count and no partial
+    warning fires."""
+    from nexus.mcp_infra import get_superseded_sweep_stats, reset_superseded_sweep_stats
+    import structlog
+
+    reset_superseded_sweep_stats()
+    cat = _cat({"old1": ["doc-A"], "old2": ["doc-A"]})
+    col = MagicMock()
+    col.delete.return_value = 2
+    with structlog.testing.capture_logs() as logs, \
+            patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+        _sweep_superseded_vectors(cat, "doc-A", {"old1", "old2", "keep"},
+                                  _chunks("keep", "new1"), "coll", reader=cat,
+                                  notes_provider=_notes())
+    stats = get_superseded_sweep_stats()
+    assert stats["swept"] == 2
+    assert not any(l.get("event") == "superseded_sweep_partial_delete" for l in logs)
+    reset_superseded_sweep_stats()
+
+
+# ── nexus-tl5qh, batch sibling: _sweep_superseded_vectors_many ─────────────
+
+
+def test_batch_partial_delete_records_the_actual_swept_count_not_requested() -> None:
+    from nexus.mcp_infra import _sweep_superseded_vectors_many, get_superseded_sweep_stats, reset_superseded_sweep_stats
+
+    reset_superseded_sweep_stats()
+    # Empty ref lists: genuinely unreferenced by any live document (the
+    # batch caller has already subtracted the batch's OWN live set before
+    # this function runs, so a residual reference here would mean a
+    # DIFFERENT document still needs it).
+    cat = _cat({"old1": [], "old2": []})
+    col = MagicMock()
+    col.delete.return_value = 1  # server refuses one of the two candidates
+    with patch("nexus.db.make_t3", return_value=MagicMock(
+            get_collection=MagicMock(return_value=col))):
+        _sweep_superseded_vectors_many(
+            cat, {"doc-A": {"old1"}, "doc-B": {"old2"}}, "coll",
+            reader=cat, notes_provider=_notes(),
+        )
+    stats = get_superseded_sweep_stats()
+    assert stats["swept"] == 1, (
+        f"expected the server's ACTUAL deleted count (1 of 2 requested), "
+        f"got {stats['swept']!r}"
+    )
+    reset_superseded_sweep_stats()
+
+
+def test_batch_partial_delete_logs_a_warning_not_the_success_event() -> None:
+    from nexus.mcp_infra import _sweep_superseded_vectors_many
+    import structlog
+
+    cat = _cat({"old1": [], "old2": []})
+    col = MagicMock()
+    col.delete.return_value = 1
+    with structlog.testing.capture_logs() as logs, \
+            patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+        _sweep_superseded_vectors_many(
+            cat, {"doc-A": {"old1"}, "doc-B": {"old2"}}, "coll",
+            reader=cat, notes_provider=_notes(),
+        )
+    warnings = [l for l in logs if l.get("log_level") == "warning"]
+    assert any(l["event"] == "superseded_sweep_batch_partial_delete" for l in warnings), (
+        f"expected a partial-delete warning, got events: {[l['event'] for l in logs]}"
+    )
+    assert not any(l["event"] == "superseded_vectors_swept_batch" for l in logs), (
+        "a partial delete must not also emit the full-success event"
+    )
+
+
+def test_batch_full_delete_records_requested_count_and_logs_no_partial_warning() -> None:
+    from nexus.mcp_infra import _sweep_superseded_vectors_many, get_superseded_sweep_stats, reset_superseded_sweep_stats
+    import structlog
+
+    reset_superseded_sweep_stats()
+    cat = _cat({"old1": [], "old2": []})
+    col = MagicMock()
+    col.delete.return_value = 2
+    with structlog.testing.capture_logs() as logs, \
+            patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+        _sweep_superseded_vectors_many(
+            cat, {"doc-A": {"old1"}, "doc-B": {"old2"}}, "coll",
+            reader=cat, notes_provider=_notes(),
+        )
+    stats = get_superseded_sweep_stats()
+    assert stats["swept"] == 2
+    assert not any(l.get("event") == "superseded_sweep_batch_partial_delete" for l in logs)
+    reset_superseded_sweep_stats()
+
+
 # ── nexus-kgos1: the CALL SITE, not the function ────────────────────────────
 #
 # Every test above drives _sweep_superseded_vectors DIRECTLY with a MagicMock
