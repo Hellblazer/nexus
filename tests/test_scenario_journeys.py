@@ -429,20 +429,15 @@ def test_index_repo_routes_code_to_code_corpus(t2_service_env, tmp_path: Path) -
         "--corpus", "knowledge", "--json",
     ])
     assert knowledge_search.exit_code == 0, knowledge_search.output
-    # `nx search --json` does NOT emit valid JSON on the zero-hits path —
-    # search_cmd.py's zero-result branches unconditionally `click.echo("No
-    # results.")` regardless of `--json` (known CLI --json-contract gap,
-    # T2 nexus/test-suite-compression-P2-reduced-critique FINDING IN
-    # PASSING; out of scope here). Assert the exact documented output
-    # shape rather than silently skipping the check on a non-JSON payload.
-    stripped = knowledge_search.stdout.strip()
-    if stripped == "No results.":
-        pass  # zero-hits contract, asserted explicitly above
-    else:
-        knowledge_hits = json.loads(stripped)
-        assert not any("ring_buffer.py" in h.get("title", "") for h in knowledge_hits), (
-            "code content leaked into the knowledge corpus"
-        )
+    # nexus-von7f: `nx search --json` now emits the same top-level shape
+    # (a JSON array) on the zero-hits path as on the populated path — an
+    # empty results set is `[]`, not the human-readable "No results."
+    # string. Parse unconditionally rather than special-casing the old
+    # broken contract.
+    knowledge_hits = json.loads(knowledge_search.stdout)
+    assert not any("ring_buffer.py" in h.get("title", "") for h in knowledge_hits), (
+        "code content leaked into the knowledge corpus"
+    )
 
 
 @pytest.mark.scenario

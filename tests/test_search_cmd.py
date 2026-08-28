@@ -256,6 +256,22 @@ def test_where_no_flag_passes_none(runner: CliRunner, search_ctx) -> None:
     assert captured[0] is None
 
 
+# ── --json zero-hit contract (nexus-von7f) ──────────────────────────────────
+
+
+def test_json_zero_hits_emits_valid_json(runner: CliRunner, search_ctx) -> None:
+    """A zero-hit `--json` search must emit the SAME top-level shape
+    (a JSON array) as the populated case with an empty results list —
+    not the human-readable 'No results.' string, which breaks every
+    JSON consumer of the flag."""
+    result = runner.invoke(
+        main, ["search", "query", "--corpus", "knowledge", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    hits = json.loads(result.stdout)
+    assert hits == []
+
+
 # ── -A / -B / -C context lines ──────────────────────────────────────────────
 
 
