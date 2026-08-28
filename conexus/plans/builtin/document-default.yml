@@ -49,5 +49,5 @@ plan_json:
       - $step2.collections
   - tool: compare
     args:
-      criterion: doc-coverage
+      focus: doc-coverage
       inputs: $step4.contents
