@@ -1216,6 +1216,12 @@ def _select_entries(
     return entries
 
 
+#: How many entries the dry-run's read-side prediction actually reads. Each
+#: is a vector-service round-trip; in cloud mode ~0.5-1s. 25 keeps a dry-run
+#: under half a minute on any collection and is enough to project a skip rate.
+_DRY_RUN_PREDICT_SAMPLE = 25
+
+
 def _dry_run_predict_skips(
     entries: list, collection: str, *, is_deterministic: bool = False,
 ) -> None:
@@ -1253,10 +1259,26 @@ def _dry_run_predict_skips(
     # post-RDR-108 Phase 3 (chunk_index dropped from metadata).
     manifest_lookup = _build_catalog_manifest_lookup()
 
+    # BOUNDED. One read_source per entry is one HTTPS round-trip to the
+    # vector service per entry, serially, with nothing printed in between.
+    # On knowledge__knowledge (407 entries, cloud mode) that ran past 300s
+    # and was killed twice as a "hang" (nexus-bocft, 2026-08-27) -- a
+    # dry-run that takes longer than the operator will wait is not a
+    # dry-run. Predict from a fixed-size prefix and project; the exact
+    # per-entry verdicts come from the real run, which reads each document
+    # anyway.
+    sample = entries[:_DRY_RUN_PREDICT_SAMPLE]
+    if len(sample) < len(entries):
+        click.echo(
+            f"  Read-side prediction samples the first {len(sample)} of "
+            f"{len(entries)} entries (one round-trip each); the skip rate "
+            f"is projected onto the rest."
+        )
+
     planned: dict[str, int] = {}
     skip_lines: list[str] = []
     by_host: dict[str, int] = {}
-    for entry in entries:
+    for entry in sample:
         sp = _chroma_source_id_for_entry(entry)
         if not sp:
             continue
@@ -1287,14 +1309,28 @@ def _dry_run_predict_skips(
                 by_host[host_key] = by_host.get(host_key, 0) + 1
             skip_lines.append(line)
 
-    skipped = sum(planned.values())
-    if skipped == 0:
-        click.echo("  All entries readable; full extraction would proceed.")
+    skipped_in_sample = sum(planned.values())
+    if skipped_in_sample == 0:
+        click.echo(
+            "  All sampled entries readable; full extraction would proceed."
+            if len(sample) < len(entries)
+            else "  All entries readable; full extraction would proceed."
+        )
         return
-    click.echo(
-        f"  Planned skips: {skipped} of {len(entries)} document(s) "
-        f"would skip on read failure:"
-    )
+    # Project the sampled skip rate onto the whole population. When the
+    # sample IS the population this is exact.
+    skipped = round(skipped_in_sample * len(entries) / len(sample))
+    if len(sample) < len(entries):
+        click.echo(
+            f"  Planned skips: {skipped_in_sample} of {len(sample)} sampled "
+            f"document(s) would skip on read failure — projected "
+            f"~{skipped} of {len(entries)}:"
+        )
+    else:
+        click.echo(
+            f"  Planned skips: {skipped} of {len(entries)} document(s) "
+            f"would skip on read failure:"
+        )
     # Cap output so a 500-entry collection doesn't flood the terminal.
     for line in skip_lines[:20]:
         click.echo(line)
