@@ -60,7 +60,7 @@ def test_filters_pass_through_and_json_shows_every_field(runner, monkeypatch):
     assert cat.calls == [{
         "collection": "knowledge__x", "operation": "t3_gc", "limit": 5, "offset": 10,
     }]
-    assert json.loads(result.output) == _ROWS
+    assert json.loads(result.stdout) == _ROWS  # stdout, never .output (nexus-84a6)
 
 
 def test_text_mode_one_line_per_row_with_paging_hint(runner, monkeypatch):
