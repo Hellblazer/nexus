@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.21.0] - 2026-08-28
+
 ### Changed
 
 - **`nx doctor` exits non-zero on real failures (nexus-be6x8).** The exit code
