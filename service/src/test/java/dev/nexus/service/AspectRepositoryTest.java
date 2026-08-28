@@ -199,6 +199,27 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(2)
+    void upsertAspect_reupsertWithoutDocId_keepsTheExistingAttribution() {
+        // nexus-x1de2 (52): the client stamps doc_id when it knows it; a later
+        // write that omits it (a null-fields retry, an older client) must not
+        // strip the attribution — COALESCE(excluded, existing), like the other
+        // two document_aspects writers already do.
+        var attributed = makeAspect("coll-coalesce", "keep.pdf");
+        assertThat(attributed.get("doc_id")).isEqualTo("1.2.3");
+        repo.upsertAspect(TENANT_A, attributed);
+
+        var idless = new java.util.HashMap<String, Object>(attributed);
+        idless.put("doc_id", "");
+        idless.put("model_version", "v3");
+        repo.upsertAspect(TENANT_A, idless);
+
+        Optional<Map<String, Object>> rec = repo.getAspect(TENANT_A, "coll-coalesce", "keep.pdf");
+        assertThat(rec).isPresent();
+        assertThat(rec.get().get("doc_id")).as("attribution survives an id-less re-upsert").isEqualTo("1.2.3");
+        assertThat(rec.get().get("model_version")).as("the rest of the row still updates").isEqualTo("v3");
+    }
+
+    @Test @Order(2)
     void upsertAspect_lowConfidence_rejected() {
         var body = makeAspect("coll-lowconf", "lowconf.pdf", 0.1, "v1", "bad-extractor");
         long id = repo.upsertAspect(TENANT_A, body);

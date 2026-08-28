@@ -246,7 +246,10 @@ public final class AspectRepository {
                 .set(DOCUMENT_ASPECTS.EXTRACTOR_NAME,         EX_EXTRACTOR_NAME)
                 .set(DOCUMENT_ASPECTS.SOURCE_URI,             EX_SOURCE_URI)
                 .set(DOCUMENT_ASPECTS.SALIENT_SENTENCES,      EX_SALIENT_SENTENCES)
-                .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID)
+                // nexus-x1de2 (52): an id-less re-upsert must never strip an
+                // attribution a previous write established — same COALESCE the
+                // other two writers already use.
+                .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID_COALESCE)
                 .returning(DOCUMENT_ASPECTS.ID)
                 .fetch();
             return result.isEmpty() ? -1L : result.get(0).get(DOCUMENT_ASPECTS.ID);
