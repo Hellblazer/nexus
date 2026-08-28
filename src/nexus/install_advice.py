@@ -105,3 +105,34 @@ def pinned_install_command(pin: str, *, legacy: str) -> str:
     if has_generation_layout():
         return f"{GENERATION_INSTALLER} --version {pin}"
     return legacy
+
+
+def local_extra_advice(
+    *, legacy: str = 'uv tool install --reinstall "conexus[local]"',
+) -> list[str]:
+    """How to get the ``[local]`` extra (bge-768) onto THIS box (nexus-hbgso).
+
+    Unlike :func:`upgrade_command`, a generation install has NO in-place
+    remedy here: extras are fixed at build time, and ``nx self install``'s
+    upgrade path bridges only the extras a generation ALREADY has --
+    ``commands/self_cmd.py``'s ``_converge_legacy_install`` / upgrade flow
+    is deliberately ``NO --extras``, since threading a *new* one would
+    require rebuilding from scratch rather than upgrading in place. So
+    unlike every other advice function here, the generation branch cannot
+    name a working command -- it states the limitation instead of a
+    plausible one that aborts (the failure mode nexus-hbgso exists to
+    close: ``nx init`` and bare ``pip install`` both look like remedies on
+    a generation box and neither does anything).
+
+    Until a real "rebuild with an extra" path exists, callers get an
+    honest sentence on a generation box and the still-correct legacy
+    command otherwise.
+    """
+    if has_generation_layout():
+        return [
+            "the [local] extra is fixed at install time and cannot be "
+            "added to an existing generation install -- there is no "
+            "in-place remedy yet; bge-768 requires a fresh install built "
+            "with the extra",
+        ]
+    return [legacy]

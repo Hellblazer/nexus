@@ -71,6 +71,41 @@ class TestState2DegradedBge:
         # state, not merely repeat the generic upgrade nudge.
         assert s1.detail != s2.detail
 
+    def test_legacy_uv_tree_recommends_the_reinstall_form(self, monkeypatch) -> None:
+        """nexus-hbgso: on a legacy uv tree the working remedy is
+        `uv tool install --reinstall "conexus[local]"` — NOT `nx init`
+        (the picker it once hosted was removed at RDR-174 P1.3) and NOT
+        bare `pip install conexus[local]` (no meaningful target under
+        either layout)."""
+        monkeypatch.setattr(
+            "nexus.install_advice.has_generation_layout", lambda: False,
+        )
+        r = local_embedder_advisory(_TIER1_MODEL, _TIER0_MODEL)
+        assert r is not None
+        joined = " ".join(r.fix_suggestions)
+        assert "nx init" not in joined
+        assert "pip install" not in joined
+        assert 'uv tool install --reinstall "conexus[local]"' in joined
+
+    def test_generation_box_states_the_limitation_not_a_dead_command(
+        self, monkeypatch,
+    ) -> None:
+        """On a generation install there is NO in-place remedy (extras are
+        fixed at build time; `nx self install`'s upgrade path bridges only
+        extras a generation already has). The advisory must say so plainly
+        rather than recommend `nx init` or `pip install`, both of which
+        abort or no-op on a generation box."""
+        monkeypatch.setattr(
+            "nexus.install_advice.has_generation_layout", lambda: True,
+        )
+        r = local_embedder_advisory(_TIER1_MODEL, _TIER0_MODEL)
+        assert r is not None
+        joined = " ".join(r.fix_suggestions)
+        assert "nx init" not in joined
+        assert "pip install" not in joined
+        assert "no in-place remedy" in joined
+        assert "[local]" in joined
+
 
 class TestResolverServiceModeWarning:
     """nexus-9xfx5 (fresh-install MVV finding #4): in service mode the
