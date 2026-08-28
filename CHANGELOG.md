@@ -10,6 +10,25 @@ Engine-side fixes below ride the NEXT `engine-service` tag (not yet cut);
 the client's `REQUIRED_ENGINE_VERSION` stays `engine-service-v0.1.87` until
 that tag is gated and paired with a client release.
 
+### Added
+
+- **`nx telemetry baseline [--json] [--since <iso>]` (nexus-v0x32).** The
+  shakedown playbook's §4.5 telemetry baseline as one command with a fixed
+  shape, in a fixed row order: `nx_answer` runs (total, since-window count,
+  the published latency buckets, plan-match hits vs inline fallback, newest
+  and oldest run), tier writes by tier / tool / agent, `relevance_log`
+  count / oldest / newest (server-side SQL via the new engine route
+  `GET /v1/telemetry/relevance/stats`) plus its retention marker,
+  `search_telemetry` global (rendered as the LOWER BOUND it is, with
+  per-collection `zero_hit_rate`), the drop meter, the literal
+  `consent: RETIRED` row, and the engine's catalog document count as
+  context. Every figure carries its own window (`--since` scopes only the
+  first two); a figure the client cannot obtain renders
+  `UNAVAILABLE: <reason>` and stays present in `--json`, never omitted and
+  never a fabricated zero. Engine: `TelemetryRepository.relevanceStats`
+  rides the next `engine-service` tag; until it is deployed the
+  `relevance_log` row reads UNAVAILABLE naming the reason.
+
 ### Fixed
 
 - **Engine: `databasechangelog.dateexecuted` reads as UTC (nexus-rph82).**

@@ -214,6 +214,42 @@ public final class TelemetryRepository {
     }
 
     /**
+     * Aggregate stats for relevance_log (nexus-v0x32, playbook §4.5 telemetry
+     * baseline): row count plus oldest/newest event timestamps, tenant-scoped
+     * exactly like {@link #getRelevanceLog}. An empty tenant (or one with no
+     * relevance_log rows at all) reports {@code count=0} and
+     * {@code oldest=newest=null} — never a fabricated epoch, never omitted.
+     *
+     * <p>Fix round 1 (nexus-v0x32): this is an UNBOUNDED, whole-tenant
+     * {@code count(*)}/{@code min}/{@code max} over {@code timestamp} —
+     * no {@code since}/window argument, by design (the §4.5 baseline wants
+     * exactly this figure, once per shakedown, not a rolling window). It
+     * rides {@code idx_relevance_log_ts ON nexus.relevance_log (tenant_id,
+     * timestamp DESC)} (telemetry-001-baseline.xml) — a tenant-leading
+     * composite index covering {@code timestamp}, so {@code min}/{@code max}
+     * resolve via an index scan and {@code count(*)} can be satisfied
+     * index-only (visibility-map permitting) rather than a full heap scan.
+     * At current shakedown-cadence call volume (once per run, not a hot
+     * path) this is not a concern; a future caller adding a since/window
+     * argument to this method should keep riding the same index.
+     */
+    public Map<String, Object> relevanceStats(String tenant) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var agg = ctx.select(count(), min(RELEVANCE_LOG.TIMESTAMP), max(RELEVANCE_LOG.TIMESTAMP))
+                .from(RELEVANCE_LOG)
+                .fetchOne();
+            int total = agg != null && agg.value1() != null ? agg.value1() : 0;
+            OffsetDateTime oldest = agg != null ? agg.value2() : null;
+            OffsetDateTime newest = agg != null ? agg.value3() : null;
+            Map<String, Object> out = new java.util.LinkedHashMap<>();
+            out.put("count", total);
+            out.put("oldest", oldest != null ? utcIso(oldest) : null);
+            out.put("newest", newest != null ? utcIso(newest) : null);
+            return out;
+        });
+    }
+
+    /**
      * Delete relevance_log entries older than {@code days} days.
      * Returns the number of rows deleted.
      */

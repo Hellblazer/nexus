@@ -3515,6 +3515,80 @@ a loud `model_family_drift` warning).
 
 ---
 
+## nx telemetry baseline
+
+```
+nx telemetry baseline [--since ISO8601] [--json]
+```
+
+Captures the shakedown playbook's §4.5 fixed-shape telemetry baseline
+snapshot (nexus-v0x32) — until this command existed, the same seven
+figures were hand-assembled by composing several existing readers on
+2026-08-04, -11, -19, and -27. Composes, never re-derives:
+
+1. **nx_answer runs** — all-time total, `--since`-scoped count, plan-match
+   hit vs. inline-planner fallback, the fixed-edge latency histogram
+   (`answer-runs`'s own `_BUCKET_ORDER` — one definition), and the
+   oldest/newest event timestamp — the instrument behind the 08-27
+   capture's headline "zero rows since \<ts\>" finding.
+2. **Tier writes** since `--since` (or all-time) — by tier, by tool, by
+   agent, plus the null-agent share as a number.
+3. **relevance_log** — row count, oldest/newest event timestamp (`GET
+   /v1/telemetry/relevance/stats`, new at this bead; a server-side SQL
+   `count`/`min`/`max` — this is the baseline's actual substrate-direct
+   TELEMETRY figure), plus the cumulative-deletes retention marker for
+   `nexus.relevance_log` (the existing `nexus-24p05` route). The two
+   reads fail independently — a pre-v0x32 engine 404s on the new route
+   but still answers the retention-marker one.
+4. **search_telemetry** global row count, collections examined, and
+   per-collection `zero_hit_rate` — looping the existing `search/stats`
+   route over every T3 collection (the same enumeration `nx collection
+   health` performs; `zero_hit_rate` costs no extra round trip — it is
+   already on every response). Always rendered as a **LOWER BOUND**: a
+   collection absent from the enumeration is invisible independent of
+   any per-call error, so the caveat is unconditional, not gated on
+   `errors > 0`. The text form prints the two worst (highest)
+   `zero_hit_rate` readings, matching the 08-27 capture's own vocabulary
+   (`zero_hit_rate 0.524 knowledge__dt-papers, 0.325 knowledge__knowledge`);
+   `--json` carries the full per-collection map.
+5. **Drop meter** — the RDR-129 B4 dropped-best-effort-write counter.
+6. **Consent** — the literal row `RETIRED (nexus-lqqb2, 2026-08-28)`: the
+   consent-audit telemetry writer family is dead wire, deleted in the
+   same session this bead was designed. Never omitted, never rendered
+   unavailable, never wrapped in a window — it is not a windowed read.
+7. **Substrate check** — one engine-side SQL count,
+   `catalog_stats.doc_count`, the same figure reconcile-stale's own
+   "Substrate anchor" reads. Labeled explicitly as **context, not a
+   telemetry anchor**: it is a catalog metric (`count(*)` over
+   `catalog_documents`) unrelated to any telemetry aggregate in this
+   block — it cross-checks neither search_telemetry's client-side sum
+   nor tier_writes' by-tier sum. Kept because it still satisfies the
+   playbook's §4.6 non-vacuity rule (one engine-side SQL count in the
+   block); figure 3 (relevance_log's count) is this baseline's actual
+   substrate-direct telemetry figure.
+
+**Window scoping.** `--since` applies ONLY to figures 1 and 2
+(nx_answer_runs, tier_writes); every other figure is always
+whole-tenant/all-time. Every figure — except the consent literal, which
+carries no window at all — reports its own window: `{"since": <iso>}` in
+`--json` when scoped, the literal string `"all-time"` otherwise; the text
+form prints the window on every line (`nx_answer runs: total N (+M since
+<since>); hit H / fallback F; newest <ts>; oldest <ts>` when scoped,
+`total N (all-time); ...` otherwise; `tier writes (since <since>): ...` /
+`tier writes (all-time): ...`; `relevance_log (all-time): count N
+(server-side SQL) ...`; `search_telemetry (all-time): ...`). No figure
+may imply a window it does not honour — there is no single top-level
+`since` key in `--json`, only `captured_at`.
+
+A figure that cannot be read renders as the literal string
+`"UNAVAILABLE: <reason>"` in place of its normal value — never omitted,
+never a fabricated zero. `--json` keeps every key present regardless;
+only the value's shape (number/dict vs. string) changes on failure. The
+text form is one line per figure, diffable against a previous run's
+output — "SAME QUERIES, SAME BUCKETS, EVERY TIME" (playbook §4.5).
+
+---
+
 ## nx census
 
 ```

@@ -28,6 +28,7 @@ import java.util.Map;
  *   POST /v1/telemetry/relevance/log           single relevance event
  *   POST /v1/telemetry/relevance/batch         batch relevance events
  *   GET  /v1/telemetry/relevance/query         query by filters
+ *   GET  /v1/telemetry/relevance/stats         count/oldest/newest (nexus-v0x32)
  *   POST /v1/telemetry/relevance/expire        expire old entries
  *   POST /v1/telemetry/search/batch            batch search telemetry
  *   GET  /v1/telemetry/search/stats            collection health stats
@@ -108,6 +109,7 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/relevance/log"          -> handleRelevanceLog(exchange, tenant, method);
                 case "/relevance/batch"        -> handleRelevanceBatch(exchange, tenant, method);
                 case "/relevance/query"        -> handleRelevanceQuery(exchange, tenant, method);
+                case "/relevance/stats"        -> handleRelevanceStats(exchange, tenant, method);
                 case "/relevance/expire"       -> handleRelevanceExpire(exchange, tenant, method);
                 case "/search/batch"           -> handleSearchBatch(exchange, tenant, method);
                 case "/search/stats"           -> handleSearchStats(exchange, tenant, method);
@@ -179,6 +181,18 @@ public final class TelemetryHandler implements HttpHandler {
         int limit = parseIntParam(params, "limit", 100);
         var rows = repo.getRelevanceLog(tenant, query, chunkId, action, sessionId, limit);
         HttpUtil.send(ex, 200, json(rows));
+    }
+
+    /**
+     * GET /v1/telemetry/relevance/stats (nexus-v0x32, playbook §4.5 telemetry
+     * baseline): {@code {count, oldest, newest}} for the tenant's whole
+     * relevance_log — no filters, no paging, so a single call answers the
+     * baseline's "row count, oldest surviving row timestamp" figures without
+     * paging through {@code /relevance/query}'s capped 300-row window.
+     */
+    private void handleRelevanceStats(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        HttpUtil.send(ex, 200, json(repo.relevanceStats(tenant)));
     }
 
     private void handleRelevanceExpire(HttpExchange ex, String tenant, String method) throws IOException {
