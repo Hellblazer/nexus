@@ -19,14 +19,16 @@ cwd" is to write NO row state and stand the worker down, leaving the claimed
 rows to ``reclaim_stale``.
 
 RECORDED TRAP, from the bead. ``_is_retryable`` is TYPE-based, not
-message-based: ``RuntimeError("database is locked")`` is NOT retryable, because
-the real ``sqlite3`` exception type is what matches. Nothing here reaches for a
-synthetic lookalike; the tests below use real ``sqlite3`` and real ``errno``.
+type-based: ``RuntimeError("connection refused")`` is NOT retryable, because the
+real ``httpx`` transport exception type is what matches. Nothing here reaches
+for a synthetic lookalike; the tests below use real ``httpx`` and real
+``errno``. (The SQLite "database is locked" example this file was written
+around is gone with that substrate, 2026-08-29.)
 """
 from __future__ import annotations
 
 import errno
-import sqlite3
+import httpx
 import subprocess
 import sys
 import textwrap
@@ -156,7 +158,7 @@ def test_predicate_fires_on_a_real_deleted_cwd() -> None:
             PermissionError(errno.EACCES, "Permission denied", "/locked.pdf"),
             id="eacces-this-row-is-unreadable",
         ),
-        pytest.param(sqlite3.OperationalError("database is locked"), id="db-locked"),
+        pytest.param(httpx.ConnectError("connection refused"), id="transport-error"),
     ],
 )
 def test_a_healthy_process_reports_no_self_fault(exc: BaseException) -> None:
@@ -240,10 +242,10 @@ def test_self_fault_writes_no_row_state_and_stands_the_worker_down(worker_and_db
 @pytest.mark.parametrize(
     ("exc", "retry_count", "expected"),
     [
-        pytest.param(sqlite3.OperationalError("database is locked"), 0, "retry", id="transient-remote"),
+        pytest.param(httpx.ConnectError("connection refused"), 0, "retry", id="transient-remote"),
         pytest.param(ValueError("malformed"), 0, "failed", id="bad-document"),
         pytest.param(
-            sqlite3.OperationalError("database is locked"), _RETRY_MAX_ATTEMPTS, "failed",
+            httpx.ConnectError("connection refused"), _RETRY_MAX_ATTEMPTS, "failed",
             id="budget-exhausted",
         ),
     ],

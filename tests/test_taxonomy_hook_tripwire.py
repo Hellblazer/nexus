@@ -128,7 +128,7 @@ def test_successful_assign_counts_attempt_but_not_failure(monkeypatch):
 
     monkeypatch.setattr(mcp_infra, "t2_index_write", _capture_write)
     mcp_infra.taxonomy_assign_batch_hook(
-        ["doc1"], "knowledge__tw__voyage-context-3__v1", ["c1"], [[0.1]], None,
+        ["doc1"], "knowledge__tw__minilm-l6-v2-384__v1", ["c1"], [[0.1]], None,
     )
 
     stats = mcp_infra.taxonomy_assign_run_stats()

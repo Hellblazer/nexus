@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import pytest
 
 from nexus.catalog.store_hook import _retract_manifest_rows_for_chash
 
@@ -87,14 +86,14 @@ def test_blank_physical_collection_falls_back_to_expected_collection() -> None:
     writer = _FakeWriter()
 
     _retract_manifest_rows_for_chash(
-        reader, writer, entry, "target", expected_collection="knowledge__fallback__voyage-context-3__v1",
+        reader, writer, entry, "target", expected_collection="knowledge__fallback__minilm-l6-v2-384__v1",
     )
 
     assert len(writer.calls) == 1, "the fallback collection must let retraction proceed"
     tumbler_str, remaining, collection = writer.calls[0]
     assert tumbler_str == "1.2.4"
     assert [r["chash"] for r in remaining] == ["keep-me"]
-    assert collection == "knowledge__fallback__voyage-context-3__v1", (
+    assert collection == "knowledge__fallback__minilm-l6-v2-384__v1", (
         "the retained row must be stamped with the expected_collection "
         "fallback, not the entry's own blank physical_collection"
     )
@@ -104,18 +103,18 @@ def test_non_blank_physical_collection_ignores_expected_collection_fallback() ->
     """Pre-existing, non-ghost behavior must be unaffected: a real
     physical_collection is used verbatim, even when an (irrelevant)
     expected_collection is also supplied."""
-    entry = _FakeEntry(tumbler="1.2.5", physical_collection="knowledge__real__voyage-context-3__v1")
+    entry = _FakeEntry(tumbler="1.2.5", physical_collection="knowledge__real__minilm-l6-v2-384__v1")
     reader = _FakeReader([_FakeRow(chash="target")])
     writer = _FakeWriter()
 
     _retract_manifest_rows_for_chash(
-        reader, writer, entry, "target", expected_collection="knowledge__should-be-ignored__voyage-context-3__v1",
+        reader, writer, entry, "target", expected_collection="knowledge__should-be-ignored__minilm-l6-v2-384__v1",
     )
 
     assert len(writer.calls) == 1
     _, remaining, collection = writer.calls[0]
     assert remaining == []
-    assert collection == "knowledge__real__voyage-context-3__v1"
+    assert collection == "knowledge__real__minilm-l6-v2-384__v1"
 
 
 def test_no_matching_chash_is_a_pure_noop() -> None:

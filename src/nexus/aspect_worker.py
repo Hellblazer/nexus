@@ -114,8 +114,9 @@ DEFAULT_POLL_INTERVAL_S: float = 30.0
 def _is_retryable(exc: BaseException) -> bool:
     """True if *exc* is a transient failure class worth a backoff retry.
 
-    Reuses BOTH ``retry.py`` transient predicates: the ChromaDB class
-    (sqlite3 'database is locked', transport errors, HTTP 429/502/503/504) AND
+    Reuses BOTH ``retry.py`` transient predicates: the vector-service class
+    (transport errors, HTTP 429/502/503/504; the SQLite 'database is locked'
+    leg is gone with the substrate) AND
     the Voyage class (API overload/timeout). Everything else — ValueError, type
     errors, malformed records, programming bugs — is non-retryable and
     terminal-fails immediately (no wasted retries). A classifier dependency that

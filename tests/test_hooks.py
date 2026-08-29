@@ -1,7 +1,4 @@
 """Session hook tests: session_start and session_end lifecycle."""
-import json
-import os
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -253,13 +250,13 @@ def test_session_end_db_error_doesnt_crash(tmp_path: Path) -> None:
     RDR-128 P3: session_end_flush now routes its writes through
     ``mcp_infra.t2_index_write``; force a storage error out of that path
     and assert the hook still returns its summary rather than crashing."""
-    import sqlite3
-
     sessions = tmp_path / "sessions"
     sessions.mkdir()
 
     def _boom(_write_fn):
-        raise sqlite3.OperationalError("disk I/O error")
+        # Any storage-class error; the SQLite one this test used to raise
+        # cannot occur any more (there is no path back to that substrate).
+        raise RuntimeError("storage unavailable: disk I/O error")
 
     with patch("nexus.mcp_infra.t2_index_write", _boom):
         output = session_end()

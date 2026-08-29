@@ -3,7 +3,6 @@
 """SessionStart and SessionEnd hook logic for Claude Code integration."""
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from pathlib import Path
@@ -476,7 +475,7 @@ def session_end_flush() -> str:
         # it is not merely borrowing the scope, it must not delete it.
         if t1 is not None:
             _t1_clear_if_owned(t1)
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 — session-end boundary: a storage error of ANY class must not crash the host (the SQLite-specific catch went with the substrate, 2026-08-29)
         _log.warning("session_end: storage error during flush/expire", error=str(exc))
 
     return f"Session ended. Flushed {flushed} scratch entries. Expired {expired} memory entries."

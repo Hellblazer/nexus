@@ -28,8 +28,6 @@ Worker contract:
 """
 from __future__ import annotations
 
-import os
-import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -1062,12 +1060,6 @@ class TestBatchPath:
 class TestRetryClassification:
     """`_is_retryable` reuses BOTH retry.py transient predicates."""
 
-    def test_db_locked_is_retryable(self) -> None:
-        import sqlite3
-
-        from nexus.aspect_worker import _is_retryable
-        assert _is_retryable(sqlite3.OperationalError("database is locked"))
-
     def test_transport_error_is_retryable(self) -> None:
         import httpx
 
@@ -1150,9 +1142,9 @@ class TestRetryLadderRouting:
         )
 
     def test_retryable_under_cap_marks_retry_with_backoff(self, monkeypatch) -> None:  # noqa: ANN001
-        import sqlite3
+        import httpx
         worker, db = self._worker_and_db(monkeypatch)
-        worker._mark_retry_or_fail_routed(self._row(0), sqlite3.OperationalError("database is locked"))
+        worker._mark_retry_or_fail_routed(self._row(0), httpx.ConnectError("connection refused"))
         assert len(db.aspect_queue.calls) == 1
         kind, _coll, _sp, interval = db.aspect_queue.calls[0]
         assert kind == "retry"
@@ -1165,11 +1157,11 @@ class TestRetryLadderRouting:
         assert db.aspect_queue.calls[0][0] == "failed"
 
     def test_retryable_at_cap_marks_failed(self, monkeypatch) -> None:  # noqa: ANN001
-        import sqlite3
+        import httpx
         from nexus.aspect_worker import _RETRY_MAX_ATTEMPTS
         worker, db = self._worker_and_db(monkeypatch)
         worker._mark_retry_or_fail_routed(
-            self._row(_RETRY_MAX_ATTEMPTS), sqlite3.OperationalError("database is locked"),
+            self._row(_RETRY_MAX_ATTEMPTS), httpx.ConnectError("connection refused"),
         )
         assert db.aspect_queue.calls[0][0] == "failed"
 
