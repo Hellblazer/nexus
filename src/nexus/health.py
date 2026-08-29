@@ -2516,9 +2516,10 @@ def _check_t2_schema_applied() -> list[HealthResult]:
             label=_LEGACY_T2_SOURCE_LABEL,
             ok=True,
             detail=(
-                f"frozen pre-migration SQLite file present at {db_path} — a "
-                "downgrade/rollback artifact, not live data; T2 is Postgres "
-                "in every mode since RDR-158 P4"
+                f"pre-migration SQLite file present at {db_path} — a relic: "
+                "nothing reads it and there is no path back to it (Hal, "
+                "2026-08-29); T2 is Postgres in every mode since RDR-158 P4. "
+                "Delete it when convenient."
             ),
         ))
 
@@ -4384,32 +4385,24 @@ def _check_catalog_legacy_file(*, config_dir: Path | None = None) -> list[Health
 
     legacy = config_dir / "catalog" / ".catalog.db"
     if legacy.is_file():
-        from nexus.db import (  # noqa: PLC0415 — deferred to avoid circular import
-            read_legacy_catalog_counts,
-        )
-
-        docs, links = read_legacy_catalog_counts(legacy)
-
         import datetime as _dt  # noqa: PLC0415 — deferred, formatting only
 
-        mtime = _dt.datetime.fromtimestamp(legacy.stat().st_mtime).strftime(
-            "%Y-%m-%d %H:%M"
-        )
+        st = legacy.stat()
+        mtime = _dt.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
         results.append(HealthResult(
             label="Legacy catalog file",
             ok=False,
             warn=True,
             detail=(
-                f"{legacy} is a FROZEN migration source, not a live mirror of "
-                f"the catalog. It holds {docs} document rows / {links} link "
-                f"rows, last written {mtime}. The authoritative catalog is in "
-                "Postgres and has moved on independently — these numbers will "
-                "drift further apart over time and that is expected."
+                f"{legacy} is a pre-migration relic ({st.st_size} bytes, last "
+                f"written {mtime}). Nothing reads it and there is no path back "
+                "to it (Hal, 2026-08-29); the authoritative catalog is Postgres."
             ),
             fix_suggestions=[
-                "Do NOT restore or recover from this file — it is a "
-                "pre-migration snapshot kept only as a rollback source. "
-                "Use `nx catalog stats` for the real counts.",
+                "Nothing to restore or recover from this file. Use `nx catalog "
+                "stats` for the real counts and delete the file when convenient. "
+                "If this install was never migrated, the stranded-install row is "
+                "the one to follow.",
             ],
         ))
 

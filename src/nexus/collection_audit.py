@@ -25,7 +25,6 @@ Four sections:
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -204,7 +203,7 @@ def compute_live_distance_histogram(
 
 
 def compute_orphan_chunks(
-    catalog_conn: sqlite3.Connection,
+    catalog_conn: Any,
     collection: str,
     *,
     age_days: int = 30,
@@ -233,7 +232,7 @@ def compute_orphan_chunks(
 # ── Section 4: hub-topic assignments ────────────────────────────────────────
 
 
-def _open_catalog_conn() -> sqlite3.Connection | None:
+def _open_catalog_conn() -> Any | None:
     """Return ``None`` — the local catalog cache DB no longer exists.
 
     nexus-e9ru2 / nexus-i711w: the catalog is service-owned; the audit's

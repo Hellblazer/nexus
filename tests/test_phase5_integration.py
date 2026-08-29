@@ -6,7 +6,6 @@ hooks.json validation, MCP version check, doctor --check-schema.
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -240,32 +239,6 @@ class TestDoctorCheckTaxonomy:
     ``topic_links`` ≡ aggregate of ``topic_assignments(assigned_by='projection')``.
     """
 
-    def _setup_db(self, tmp_path: Path) -> Path:
-        # RDR-158 P4 Stage 4 (nexus-i711w): frozen-DDL seed replaces the
-        # deleted apply_pending chain — same well-formed local schema.
-        from tests._t2_fixture_ops import bootstrap_migration_source
-
-        db_path = tmp_path / "memory.db"
-        bootstrap_migration_source(db_path)
-        return db_path
-
-    @staticmethod
-    def _no_service():
-        """Force the legacy-source branch (nexus-ypori).
-
-        --check-taxonomy asks the ENGINE first; these fixtures seed a local
-        SQLite file, so without this the service answers and the fixture is
-        never read. Patching the store to raise exercises the documented
-        fallback: no reachable service -> read the frozen migration source and
-        say so.
-        """
-        return patch(
-            "nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore",
-            side_effect=RuntimeError("no service in test"),
-        )
-
-    # ── the SERVICE branch (nexus-ypori) ────────────────────────────────────
-
     @staticmethod
     def _service_reports(report: dict):
         """Stub the engine's /links/drift answer."""
@@ -355,7 +328,7 @@ class TestDoctorCheckTaxonomy:
         """
         import httpx
 
-        db_path = self._setup_db(tmp_path)
+        db_path = tmp_path / "memory.db"  # unread since 2026-08-29: the check is engine-only
         store = MagicMock()
         store.get_link_drift.side_effect = httpx.HTTPStatusError(
             "HttpTaxonomyStore./v1/taxonomy/links/drift failed: HTTP 404: not found",
@@ -367,13 +340,37 @@ class TestDoctorCheckTaxonomy:
         ), patch("nexus.config.default_db_path", return_value=db_path):
             result = runner.invoke(main, ["doctor", "--check-taxonomy"])
 
-        assert result.exit_code == 0, result.output
+        # 2026-08-29: no frozen-source fallback exists any more (there is no
+        # path back to the Chroma/SQLite era) — an engine without the route is
+        # UNVERIFIABLE, exit 2, never a pass.
+        assert result.exit_code == 2, result.output
         assert "no /links/drift route" in result.output, result.output
         assert "suppress" not in result.output, (
             f"the cleanup error masked the real cause:\n{result.output}"
         )
-        # and it must still fall back rather than reporting nothing
-        assert "frozen SQLite migration source" in result.output
+        assert "frozen SQLite" not in result.output
+
+    def test_no_engine_at_all_is_unverifiable_exit_2(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """A transport failure (no engine answered) is exit 2 with a named
+        remedy. Before 2026-08-29 this branch read a frozen SQLite file and
+        could report 'nothing to check' at exit 0 on a fresh HOME."""
+        import httpx
+
+        db_path = tmp_path / "memory.db"  # unread since 2026-08-29: the check is engine-only
+        store = MagicMock()
+        store.get_link_drift.side_effect = httpx.ConnectError("connection refused", request=MagicMock())
+        with patch(
+            "nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore",
+            return_value=store,
+        ), patch("nexus.config.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+
+        assert result.exit_code == 2, result.output
+        assert "no engine answered" in result.output, result.output
+        assert "nothing to check" not in result.output
+        assert "frozen SQLite" not in result.output
 
     def test_engine_side_error_fails_loud_never_reads_as_clean(
         self, runner: CliRunner, tmp_path: Path
@@ -406,247 +403,6 @@ class TestDoctorCheckTaxonomy:
         # the false-green this test exists to close:
         assert "nothing to check" not in result.output, result.output
         assert "frozen SQLite migration source" not in result.output, result.output
-
-    def test_no_db_file(self, runner: CliRunner, tmp_path: Path) -> None:
-        db_path = tmp_path / "nonexistent" / "memory.db"
-        with self._no_service(), patch(
-            "nexus.config.default_db_path", return_value=db_path
-        ):
-            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
-        assert result.exit_code == 0
-        assert "not found" in result.output.lower()
-
-    def test_clean_db_no_assignments(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        """Empty taxonomy tables still satisfy the invariant vacuously."""
-        db_path = self._setup_db(tmp_path)
-        with self._no_service(), patch(
-            "nexus.config.default_db_path", return_value=db_path
-        ):
-            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
-        assert result.exit_code == 0
-        assert "invariant holds" in result.output
-
-    def test_drift_detected(self, runner: CliRunner, tmp_path: Path) -> None:
-        """Projection assignment with a co-occurring NON-projection partner but no
-        topic_links row → exit 1. nexus-346q: drift detection requires the
-        co-occurring partner since a link is structurally impossible without one."""
-        db_path = self._setup_db(tmp_path)
-        conn = sqlite3.connect(str(db_path))
-        conn.execute(
-            "INSERT INTO topics (id, label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (42, "orphan-topic", "docs__test", 0, "2026-01-01T00:00:00Z"),
-        )
-        conn.execute(
-            "INSERT INTO topics (id, label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (43, "partner-topic", "docs__other", 0, "2026-01-01T00:00:00Z"),
-        )
-        # projection + centroid on one doc — the shape refreshProjectionLinks
-        # actually emits a link for (nexus-ypori). This fixture said
-        # projection+projection until then, which produces NO link, so the
-        # test only passed because the check was inverted in the same
-        # direction. A topic_links pair is
-        # structurally possible here, so the absence of topic_links is real drift.
-        conn.execute(
-            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
-            "VALUES (?, ?, ?)",
-            ("doc-xyz", 42, "projection"),
-        )
-        conn.execute(
-            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
-            "VALUES (?, ?, ?)",
-            ("doc-xyz", 43, "centroid"),
-        )
-        conn.commit()
-        conn.close()
-
-        with self._no_service(), patch(
-            "nexus.config.default_db_path", return_value=db_path
-        ):
-            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
-
-        # The exit code is now scoped to the SERVICE verdict (nexus-ypori);
-        # the legacy-source census is a NOTE, so detection is asserted on the
-        # output rather than on $?. Exiting non-zero here would block a release
-        # on the frozen migration source.
-        assert result.exit_code == 0, result.output
-        assert "topic_links drift" in result.output
-        assert "orphan-topic" in result.output
-        # The `nx taxonomy project --backfill --persist` remedy must NOT be
-        # offered here. It rebuilds the POSTGRES materialized view and does
-        # nothing whatsoever to the frozen SQLite file this branch just read,
-        # so printing it would send an operator to run a verb that cannot
-        # change the thing they were shown.
-        assert "nx taxonomy project" not in result.output, result.output
-        assert "NOT the engine" in result.output
-
-    def test_isolated_projection_topic_not_flagged(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        """nexus-346q: a topic whose doc has exactly ONE projection assignment
-        cannot structurally produce a topic_links row (a link needs from + to).
-        The check must not flag these as drift — the 4.9.10 shakeout found 15
-        such false positives out of 20 residual after a backfill.
-        """
-        db_path = self._setup_db(tmp_path)
-        conn = sqlite3.connect(str(db_path))
-        conn.execute(
-            "INSERT INTO topics (id, label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (99, "solitary-topic", "docs__alone", 0, "2026-01-01T00:00:00Z"),
-        )
-        # Only ONE projection assignment for doc-solo — no pair possible.
-        conn.execute(
-            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
-            "VALUES (?, ?, ?)",
-            ("doc-solo", 99, "projection"),
-        )
-        conn.commit()
-        conn.close()
-
-        with self._no_service(), patch(
-            "nexus.config.default_db_path", return_value=db_path
-        ):
-            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
-
-        assert result.exit_code == 0, result.output
-        assert "invariant holds" in result.output
-        assert "solitary-topic" not in result.output
-
-    def test_co_occurring_non_projection_partner_IS_linkable(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        """A projection assignment co-occurring with a NON-projection one is
-        exactly what the materializer links — so a missing link IS drift.
-
-        This test asserted the opposite until nexus-ypori, and in doing so
-        pinned the bug: it seeded projection+centroid, the one shape
-        refreshProjectionLinks definitely emits a row for
-        (TaxonomyRepository:1609 joins ``src.ASSIGNED_BY.ne("projection")``
-        under ``tgt.ASSIGNED_BY.eq("projection")``), and asserted the
-        invariant held with no link present. The check's guard was the
-        logical complement of the materializer, so it reported unlinkable
-        topics as drift and suppressed the linkable ones.
-        """
-        db_path = self._setup_db(tmp_path)
-        conn = sqlite3.connect(str(db_path))
-        conn.execute(
-            "INSERT INTO topics (id, label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (100, "projection-side", "docs__x", 0, "2026-01-01T00:00:00Z"),
-        )
-        conn.execute(
-            "INSERT INTO topics (id, label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (101, "centroid-side", "docs__y", 0, "2026-01-01T00:00:00Z"),
-        )
-        conn.execute(
-            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
-            "VALUES (?, ?, ?)",
-            ("doc-mix", 100, "projection"),
-        )
-        conn.execute(
-            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
-            "VALUES (?, ?, ?)",
-            ("doc-mix", 101, "centroid"),
-        )
-        conn.commit()
-        conn.close()
-
-        with self._no_service(), patch(
-            "nexus.config.default_db_path", return_value=db_path
-        ):
-            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
-
-        assert result.exit_code == 0, result.output
-        assert "topic_links drift" in result.output, (
-            f"projection+centroid on one doc is linkable — a missing "
-            f"topic_links row must be REPORTED as drift:\n{result.output}"
-        )
-        assert "projection-side" in result.output, result.output
-
-    def test_co_occurring_projection_only_partner_is_NOT_linkable(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        """Two PROJECTION assignments on one doc produce no link at all.
-
-        The true complement of the case above, and the one the old guard
-        wrongly treated as the linkable shape. refreshProjectionLinks
-        requires the source partner to be non-projection, so a doc carrying
-        only projection assignments can never contribute a topic_links row —
-        flagging it would be the false positive the guard exists to prevent.
-        """
-        db_path = self._setup_db(tmp_path)
-        conn = sqlite3.connect(str(db_path))
-        for tid, label, coll in (
-            (110, "proj-a", "docs__x"),
-            (111, "proj-b", "docs__y"),
-        ):
-            conn.execute(
-                "INSERT INTO topics (id, label, collection, doc_count, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (tid, label, coll, 0, "2026-01-01T00:00:00Z"),
-            )
-        for tid in (110, 111):
-            conn.execute(
-                "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
-                "VALUES (?, ?, ?)",
-                ("doc-both-proj", tid, "projection"),
-            )
-        conn.commit()
-        conn.close()
-
-        with self._no_service(), patch(
-            "nexus.config.default_db_path", return_value=db_path
-        ):
-            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
-
-        assert result.exit_code == 0, result.output
-        assert "invariant holds" in result.output
-        assert "proj-a" not in result.output
-
-    def test_invariant_holds_with_matching_link(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        """Projection assignment + topic_links row referencing it → pass."""
-        db_path = self._setup_db(tmp_path)
-        conn = sqlite3.connect(str(db_path))
-        conn.execute(
-            "INSERT INTO topics (id, label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (7, "topic-a", "docs__a", 0, "2026-01-01T00:00:00Z"),
-        )
-        conn.execute(
-            "INSERT INTO topics (id, label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (8, "topic-b", "docs__b", 0, "2026-01-01T00:00:00Z"),
-        )
-        conn.execute(
-            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
-            "VALUES (?, ?, ?)",
-            ("doc-1", 7, "projection"),
-        )
-        conn.execute(
-            "INSERT INTO topic_links (from_topic_id, to_topic_id, link_count) "
-            "VALUES (?, ?, ?)",
-            (7, 8, 1),
-        )
-        conn.commit()
-        conn.close()
-
-        with self._no_service(), patch(
-            "nexus.config.default_db_path", return_value=db_path
-        ):
-            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
-
-        assert result.exit_code == 0
-        assert "invariant holds" in result.output
-
-
-# ── RDR-087 Phase 2.4: nx doctor --trim-telemetry ───────────────────────────
 
 
 class TestDoctorTrimTelemetry:

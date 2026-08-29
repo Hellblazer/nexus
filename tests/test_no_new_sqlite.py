@@ -156,8 +156,8 @@ def test_alter_table_only_at_named_pg_sites() -> None:
 def test_no_unallowlisted_sqlite_connect_anywhere() -> None:
     """RDR-186 P4 end-state D1/D6, connect axis: the AST scan (aliased
     forms included) over ALL of src/ — path prefixes disabled, so db/ is
-    in scope too — finds exactly the named read-only frozen-source
-    diagnostics and nothing else."""
+    in scope too — finds NO sqlite3.connect at all. The allowlist is empty
+    since 2026-08-29 (there is no path back to the Chroma/SQLite era)."""
     from nexus.storage_boundary_lint import (
         SQLITE_CONNECT_ALLOWLIST,
         scan_repo,
@@ -185,7 +185,11 @@ def test_no_unallowlisted_sqlite_connect_anywhere() -> None:
     )
     # The terminal survivor set is exactly the two read-only diagnostics
     # (3 -> 2 at nexus-ay18d).
-    assert sum(SQLITE_CONNECT_ALLOWLIST.values()) == 2
+    # RETIRED EMPTY 2026-08-29 (Hal: "there is no path back to chromadb
+    # sqlite"): the two frozen-source probes went with their RDR-176 Gap-2
+    # rationale. 3 -> 2 at nexus-ay18d, 2 -> 0 here; never up again without a
+    # fresh Hal decision on a bead.
+    assert sum(SQLITE_CONNECT_ALLOWLIST.values()) == 0
     # Liveness: an allowlist entry naming a dead file is a free slot a
     # future connect could squat in without review.
     dead = sorted(

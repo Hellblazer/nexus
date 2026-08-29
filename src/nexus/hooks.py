@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -477,7 +476,7 @@ def session_end_flush() -> str:
         # it is not merely borrowing the scope, it must not delete it.
         if t1 is not None:
             _t1_clear_if_owned(t1)
-    except (sqlite3.Error, OSError) as exc:
+    except OSError as exc:
         _log.warning("session_end: storage error during flush/expire", error=str(exc))
 
     return f"Session ended. Flushed {flushed} scratch entries. Expired {expired} memory entries."

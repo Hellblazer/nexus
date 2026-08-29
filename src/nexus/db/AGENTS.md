@@ -46,9 +46,10 @@ hard-errors with the stranded-install redirect (P3, nexus-7bomn).
 `migrations.py` — the `Migration` registry, `apply_pending()`, `T3UpgradeStep`,
 `bootstrap_schema`, the RDR-170 registry gating and the RDR-142 dry-run step
 resolver — was deleted in nexus-i711w Stage 4. There are NO client-side T2
-migrations in any mode: schema is engine-owned via Liquibase, and the local
-`.db` files are a frozen migration source (RDR-176 Gap 2) that this version
-never writes. Do not add a migration here; a schema change is a Liquibase
+migrations in any mode: schema is engine-owned via Liquibase, and any local
+`.db` file left from the pre-PG era is a relic this version never reads or
+writes (RDR-176 Gap 2's downgrade rationale was retired 2026-08-29 — there is
+no path back to the Chroma/SQLite era). Do not add a migration here; a schema change is a Liquibase
 changeset in the engine, and a new DATA-convergence axis is an upgrade-ladder
 rung (`src/nexus/upgrade_ladder/rungs/`, registered in `registry.py`).
 Installs still carrying pre-PG local data migrate via the pinned last

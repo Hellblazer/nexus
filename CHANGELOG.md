@@ -57,7 +57,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Catalog `find()` has an order contract and an exact-title sibling**
   (nexus-fgxmk). The engine's `/search` had no `ORDER BY`, so
   `find(title)[0]` was heap placement (measured reversing on a churned
-  database); it now orders by tumbler. Because the English tsquery drops
+  database); it now orders by tumbler as text (string order — stable, not
+  numeric, not relevance). Because the English tsquery drops
   stopwords, `find("Paper A")` legitimately matches "Paper B" too, so
   `HttpCatalogClient.find_by_title_exact(title)` is the promoted
   resolution entry point (the idiom two test files had grown locally);
@@ -67,18 +68,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (nexus-d9fwj). `store_hook._retract_manifest_rows_for_chash` guards a
   blank `physical_collection` (a ghost/sourceless document): it falls back
   to the caller's expected collection, else skips the retraction with a
-  structured warning, so `store_delete`'s `delete_document` always runs
-  and the reap tombstone proceeds instead of dying on the GATE-2 blank-
-  collection `ValueError`.
+  structured warning, so `delete_document` and the reap tombstone run
+  instead of dying on the GATE-2 blank-collection `ValueError`. Scope
+  caveat: the three production callers all pass a real
+  `expected_collection`, and the pre-existing nexus-c53hy mismatch guard
+  short-circuits a ghost (blank collection) BEFORE this retraction is
+  reached, so today the fix is exercised only by the
+  `expected_collection=None` calling shape; whether that guard should
+  admit ghosts is nexus-sz89e.
 - **`nx index` counts taxonomy-assign batch failures and says so**
   (nexus-7lw6a). `taxonomy_assign_batch_failed` (an HTTP 500 from the
   assign endpoint) was logged and then forgotten; a run that lost 1,254
   chunks' topic assignments reported `Done.` and exit 0. The run summary
   now carries `Warning: N/M taxonomy-assign batch(es) failed (K chunk(s)
   affected)` in the same shape as the flush-failure line, with no phantom
-  line on a clean run. Exit-code policy: partial loss stays exit 0 (the
-  summary is the signal); exit is non-zero only when every attempted
-  batch failed.
+  line on a clean run, and the run exits non-zero on ANY lost assignment
+  (a data-correctness event an exit-code-only consumer must not read as
+  success; total loss is named as such).
 - **`nx index` catalog-hook progress is TTY-gated** (nexus-c14zi). The
   `\r` repaint writes are routed through the phase channel when stderr
   is not a TTY, so a redirected log gets discrete lines instead of
@@ -87,6 +93,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
+- **Every read of the frozen pre-PG SQLite files** (Hal, 2026-08-29:
+  "there is no path back to chromadb sqlite"). `nx doctor
+  --check-taxonomy`'s SQLite census fallback and the legacy `.catalog.db`
+  row-count probe were the last two `sqlite3.connect` sites in `src/`,
+  kept under RDR-176 Gap 2's downgrade rationale; that rationale is
+  retired with them and `SQLITE_CONNECT_ALLOWLIST` is empty. The doctor
+  rows for a leftover `memory.db` / `.catalog.db` now name them as relics
+  to delete. `--check-taxonomy` is engine-only: exit 2 when no engine
+  answers or the route is missing, exit 1 on an engine error or drift.
+  The vestigial `sqlite3` imports in `retry.py` (the Chroma "database is
+  locked" retry leg), `hooks.py`, `collection_audit.py` and
+  `db/t2/__init__.py` are gone; `src/nexus` imports `sqlite3` nowhere.
 - **`chash_indexed_ratio` (`nx collection health`) and the identical
   `chash_index` coverage section (`nx collection audit`)** (nexus-70vpz):
   both compared a count served from the chunks tables to the chunks

@@ -584,8 +584,9 @@ def test_dual_population_baseline_locked():
 
     result = _check()
     # The default scan path-exempts db/ from nothing on the sqlite arm
-    # (RDR-186 P4), so the metric covers ALL of src/: the three read-only
-    # frozen-migration-source diagnostics and not one connect more.
+    # (RDR-186 P4), so the metric covers ALL of src/: zero connects since
+    # 2026-08-29 (the two frozen-source diagnostics went with their
+    # downgrade rationale — there is no path back to the Chroma/SQLite era).
     assert result.sqlite_allowlisted_connects == sum(
         SQLITE_CONNECT_ALLOWLIST.values()
     ), (
@@ -597,7 +598,10 @@ def test_dual_population_baseline_locked():
     # write-shaped probe was ported off SQLite entirely (asks the engine's
     # GET /version for the Liquibase changelog fingerprint instead), not
     # merely relabelled — one fewer sqlite3.connect site in src/.
-    assert sum(SQLITE_CONNECT_ALLOWLIST.values()) == 2
+    # 2 -> 0 on 2026-08-29 (Hal: there is no path back to the Chroma/SQLite
+    # era): the two frozen-source diagnostics went with their downgrade
+    # rationale. Never up again without a fresh Hal decision on a bead.
+    assert sum(SQLITE_CONNECT_ALLOWLIST.values()) == 0
     # ZERO violations: every direct construction / connect outside the
     # named allowlists fails CI here — the enforcement teeth.
     assert result.total_violations == 0, (

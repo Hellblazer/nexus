@@ -176,7 +176,7 @@ class TestCheckT2SchemaApplied:
         assert labels[_T2_SCHEMA_LABEL].ok is True
         advisory = labels[_LEGACY_T2_SOURCE_LABEL]
         assert advisory.ok is True  # purely informational — never gates
-        assert "rollback artifact" in advisory.detail
+        assert "relic" in advisory.detail and "no path back" in advisory.detail
         assert str(db_path) in advisory.detail
 
     def test_legacy_file_present_does_not_flip_a_failing_verdict(self, tmp_path, monkeypatch):
