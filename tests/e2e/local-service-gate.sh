@@ -343,6 +343,16 @@ if [ -n "${NEXUS_GATE_NO_VOYAGE:-}" ]; then
   echo "[gate] NEXUS_GATE_NO_VOYAGE=1 — voyage/CCE subset will SKIP (key masked)"
 fi
 
+# nexus-iws18: snapshot release.properties' ACTUAL BYTES now, and restore those
+# on every exit path. The old `git checkout -- <path>` reverted to HEAD, which
+# silently destroyed any UNCOMMITTED edit to that file on every gate run (it
+# bit the nexus-308ph implementer twice mid-verification). Same byte-snapshot
+# shape scripts/build-gate-jar.sh uses; the two stay separate because this
+# gate's restore choreography differs (mid-run _restore_props + EXIT backstop).
+RELEASE_PROPS="$REPO_ROOT/service/src/main/resources/META-INF/nexus/release.properties"
+RELEASE_PROPS_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/release.properties.snapshot.XXXXXX")"
+cp "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT"
+
 # shellcheck disable=SC2329  # invoked indirectly via the EXIT trap below
 cleanup() {
   set +e
@@ -357,7 +367,9 @@ cleanup() {
   rm -rf "$SCRATCH"
   # Backstop for a signal mid-jar-build: never leave a stamped
   # release.properties in the working tree (it bakes into later builds).
-  git checkout -- "service/src/main/resources/META-INF/nexus/release.properties" 2>/dev/null || true
+  # Restore the pre-invocation BYTES, never HEAD (nexus-iws18).
+  cp "$RELEASE_PROPS_SNAPSHOT" "$RELEASE_PROPS" 2>/dev/null || true
+  rm -f "$RELEASE_PROPS_SNAPSHOT"
   echo "[gate] cleaned up"
 }
 trap cleanup EXIT
@@ -411,7 +423,7 @@ NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx daemon service stop
 #    (step 5b) for no real reason. Stamp/restore release.properties around
 #    the build so the jar always carries exactly these two values.
 JAR="$REPO_ROOT/service/target/nexus-service-1.0-SNAPSHOT.jar"
-RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
+# RELEASE_PROPS + its byte snapshot are set once, above cleanup() (nexus-iws18).
 GATE_STAMP="$(python3 -c '
 import re, pathlib
 src = pathlib.Path("src/nexus/engine_version.py").read_text()
@@ -432,7 +444,9 @@ print(jar_freshness_skip_reason() or "")
   GATE_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
   GATE_BUILD_REF="${GATE_SHA}+$(date +%s)-$$"
   echo "[gate] rebuilding service jar (release_version=$GATE_STAMP build_ref=$GATE_BUILD_REF)..."
-  _restore_props() { git checkout -- "$RELEASE_PROPS" 2>/dev/null || true; }
+  # Pre-invocation bytes, never `git checkout` (nexus-iws18: HEAD is not
+  # what was in the tree when the gate started).
+  _restore_props() { cp "$RELEASE_PROPS_SNAPSHOT" "$RELEASE_PROPS"; }
   sed -e "s/^release_version=.*/release_version=${GATE_STAMP}/" \
       -e "s/^build_ref=.*/build_ref=${GATE_BUILD_REF}/" \
       "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp" \

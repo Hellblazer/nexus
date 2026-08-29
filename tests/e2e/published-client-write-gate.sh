@@ -175,13 +175,21 @@ cleanup() {
     source "$ENGINE_HOME/pg_credentials" >/dev/null 2>&1
     pg_ctl -D "$ENGINE_HOME/postgres" stop -m fast >/dev/null 2>&1
   fi
-  git checkout -- "service/src/main/resources/META-INF/nexus/release.properties" 2>/dev/null || true
+  # Backstop for a signal mid-jar-build: restore release.properties' pre-
+  # invocation BYTES, never `git checkout` to HEAD (nexus-iws18).
+  cp "$RELEASE_PROPS_SNAPSHOT" "service/src/main/resources/META-INF/nexus/release.properties" 2>/dev/null || true
+  rm -f "$RELEASE_PROPS_SNAPSHOT"
   if [ "$GATE_OK" = 1 ]; then
     rm -rf "$WORK"
   else
     echo "FAILURE EVIDENCE PRESERVED: $WORK" >&2
   fi
 }
+# nexus-iws18: snapshot release.properties' actual bytes before anything can
+# stamp it (build-gate-jar.sh stamps and restores on its own; this is the
+# gate's backstop for a signal mid-build).
+RELEASE_PROPS_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/release.properties.snapshot.XXXXXX")"
+cp "service/src/main/resources/META-INF/nexus/release.properties" "$RELEASE_PROPS_SNAPSHOT"
 trap cleanup EXIT
 
 # ── 1. Provision the candidate engine ───────────────────────────────────────

@@ -936,11 +936,11 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/run.sh:187",
         "tests/e2e/migration-rehearsal/run.sh:200",
         "tests/e2e/migration-rehearsal/run.sh:211",
-        "tests/e2e/migration-rehearsal/run.sh:623",
-        "tests/e2e/migration-rehearsal/run.sh:654",
-        "tests/e2e/migration-rehearsal/run.sh:709",
-        "tests/e2e/migration-rehearsal/run.sh:726",
-        "tests/e2e/migration-rehearsal/run.sh:774",
+        "tests/e2e/migration-rehearsal/run.sh:638",
+        "tests/e2e/migration-rehearsal/run.sh:669",
+        "tests/e2e/migration-rehearsal/run.sh:724",
+        "tests/e2e/migration-rehearsal/run.sh:741",
+        "tests/e2e/migration-rehearsal/run.sh:789",
         # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.

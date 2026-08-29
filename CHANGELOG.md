@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Gates restore `release.properties` bytes, never `git checkout` it to
+  HEAD** (nexus-iws18). `tests/e2e/local-service-gate.sh` (both restore
+  sites), `tests/e2e/migration-rehearsal/run.sh` (`_guided_restore`) and
+  `tests/e2e/published-client-write-gate.sh` (cleanup) now snapshot the
+  file at start and put those bytes back on exit, so a gate run no longer
+  destroys an uncommitted edit to that file. Pinned by
+  `tests/test_gate_release_props_restore_lint.py`.
+- **`run.sh --shakeout` refuses `--no-build`** like every other native
+  leg (nexus-mbeke): the pre-tag candidate gate can no longer be satisfied
+  by a stale binary. Pinned by
+  `tests/test_rehearsal_native_legs_refuse_no_build.py` across the live
+  native legs.
+
 ### Added
 
 - **`deployed-engine-version` tracker written from conexus's STEP-6 gate
