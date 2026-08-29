@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Aspect worker idle poll: 2 s -> 30 s** (`DEFAULT_POLL_INTERVAL_S`,
+  nexus-59611 stage 1). The `claim_batch` poll was ~45k requests/day,
+  ~80% of all edge traffic, 99% of them empty, against ~16 arrivals/hour
+  (conexus edge measurement, conexus-ppwe). 30 s cuts ~93% of that and
+  still samples ~8x faster than items arrive; extraction is async
+  (~26 s median) so the added claim latency is invisible to consumers.
+  No knob: stage 2 is event-driven wake-up. Explicit `poll_interval`
+  arguments are unchanged.
+
 ## [7.22.0] - 2026-08-28
 
 Paired release with `engine-service-v0.1.88` (tagged on `2ca52773f`;

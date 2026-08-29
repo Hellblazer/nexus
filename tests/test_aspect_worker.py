@@ -1236,3 +1236,45 @@ class TestEnqueueHookDocIdWiring:
             row = db.aspect_queue.claim_next()
         assert row is not None
         assert row.doc_id == ""
+
+
+class TestDefaultPollInterval:
+    """nexus-59611 stop-loss: the idle ``claim_batch`` poll is the dominant
+    edge load (measured 2026-08-28 by conexus: 99.05% of claim_batch
+    responses empty over 6h, ~45k requests/day, ~80% of ALL edge traffic,
+    against an arrival rate of ~16 items/hour). There is no server-held
+    long poll and no env/config override, so the constructor default IS
+    the production cadence. Pin it on every entry point that can build a
+    worker, and pin the floor with the measurement, so a future
+    "make it snappier" edit has to argue with the numbers.
+    """
+
+    def test_every_entry_point_shares_one_default(self) -> None:
+        import inspect
+
+        from nexus.aspect_worker import (
+            DEFAULT_POLL_INTERVAL_S,
+            AspectExtractionWorker,
+            ensure_worker_started,
+        )
+        from nexus.daemon.aspect_worker_daemon import _default_worker_factory
+
+        assert AspectExtractionWorker()._poll_interval == DEFAULT_POLL_INTERVAL_S
+        assert (
+            inspect.signature(ensure_worker_started).parameters["poll_interval"].default
+            == DEFAULT_POLL_INTERVAL_S
+        )
+        # The production constructor (RDR-173 leased daemon host).
+        assert _default_worker_factory()._poll_interval == DEFAULT_POLL_INTERVAL_S
+
+    def test_default_is_the_stop_loss_cadence(self) -> None:
+        from nexus.aspect_worker import DEFAULT_POLL_INTERVAL_S
+
+        # 30s cuts ~93% of the measured request volume and still samples
+        # ~8x faster than items arrive. Below this the poll re-becomes the
+        # edge's dominant load; a cut BELOW 30 needs a fresh measurement.
+        assert DEFAULT_POLL_INTERVAL_S >= 30.0
+        # Explicit overrides still work — tests drive the loop at 50 ms.
+        from nexus.aspect_worker import AspectExtractionWorker
+
+        assert AspectExtractionWorker(poll_interval=0.05)._poll_interval == 0.05

@@ -26,7 +26,8 @@ Worker contract:
   ``ensure_worker_started()``).
 * Daemon thread; dies with the process. Durable queue absorbs
   process death — the next worker run picks up unprocessed rows.
-* Polls every ``poll_interval`` seconds (default 2 s).
+* Polls every ``poll_interval`` seconds (default ``DEFAULT_POLL_INTERVAL_S``,
+  30 s — nexus-59611; the idle poll is edge load, see the constant).
 * Reclaims rows stuck in ``in_progress`` for > ``stale_timeout``
   seconds (default 300 s) before each poll, so worker process
   death does not wedge a row forever.
@@ -95,6 +96,19 @@ _ENQUEUE_TENANT: str = "default"
 _RETRY_MAX_ATTEMPTS: int = 5          # terminal mark_failed once retry_count >= cap
 _RETRY_BASE_SECONDS: float = 30.0     # interval = base * 2**retry_count, jittered
 _RETRY_JITTER_FRACTION: float = 0.2   # ±20% — spreads re-claims when a wide outage clears
+
+#: Idle ``claim_batch`` poll cadence (nexus-59611 stop-loss, 2026-08-28). This
+#: default IS the production cadence: the leased daemon host builds the worker
+#: zero-arg, there is no env/config override, and the engine holds no long
+#: poll (``AspectHandler`` reads ``limit`` and answers immediately). At the
+#: prior 2 s the poll was ~45k requests/day, ~80% of ALL edge traffic, 99.05%
+#: of them empty (conexus edge measurement, conexus-ppwe) against an arrival
+#: rate of ~16 items/hour — ~115x over-sampled. 30 s cuts ~93% of that and
+#: still samples ~8x faster than items arrive; extraction is async (~26 s
+#: median per doc) so a <=30 s claim latency is invisible to any consumer.
+#: Deliberately NOT a knob: stage 2 of nexus-59611 is event-driven wake-up
+#: (producer and consumer are both in nexus), which this forecloses nothing of.
+DEFAULT_POLL_INTERVAL_S: float = 30.0
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -276,7 +290,7 @@ class AspectExtractionWorker:
     def __init__(
         self,
         *,
-        poll_interval: float = 2.0,
+        poll_interval: float = DEFAULT_POLL_INTERVAL_S,
         stale_timeout_seconds: int = 60,
         batch_size: int = _DEFAULT_BATCH_SIZE,
         on_self_fault: Callable[[str], None] | None = None,
@@ -919,7 +933,7 @@ def _remove_worker_lock(locks_dir: Path | None = None) -> None:
 
 def ensure_worker_started(
     *,
-    poll_interval: float = 2.0,
+    poll_interval: float = DEFAULT_POLL_INTERVAL_S,
     stale_timeout_seconds: int = 60,
     _locks_dir: Path | None = None,
 ) -> AspectExtractionWorker:
