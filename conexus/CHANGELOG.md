@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.22.0] - 2026-08-28
+
 ### Fixed
 
 - **The MCP auto-approvers now work under `defaultMode: auto` (nexus-qs1g6).**

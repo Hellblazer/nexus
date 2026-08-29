@@ -6,9 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Engine-side fixes below ride the NEXT `engine-service` tag (not yet cut);
-the client's `REQUIRED_ENGINE_VERSION` stays `engine-service-v0.1.87` until
-that tag is gated and paired with a client release.
+## [7.22.0] - 2026-08-28
+
+Paired release with `engine-service-v0.1.88` (tagged on `2ca52773f`;
+`REQUIRED_ENGINE_VERSION` bumped in this release, deploy fires at the
+client-tag push). The engine tag carries the 4 changesets these features
+need — aspects-004 (doc_id backfill), catalog-034 (tumbler grammar
+tombstones), vectors-008 x2 (`search_aspect_scoped`) — pre-tag battery,
+`--acquire` on the published bytes, and a production PITR fork-walk
+rehearsal all green (walk: 4/4 changesets, backfill 487/487 with residual
+0, 2/2 phantom tombstones).
 
 ### Added
 
@@ -26,8 +33,9 @@ that tag is gated and paired with a client release.
   first two); a figure the client cannot obtain renders
   `UNAVAILABLE: <reason>` and stays present in `--json`, never omitted and
   never a fabricated zero. Engine: `TelemetryRepository.relevanceStats`
-  rides the next `engine-service` tag; until it is deployed the
-  `relevance_log` row reads UNAVAILABLE naming the reason.
+  ships in `engine-service-v0.1.88` (paired with this release); until that
+  tag is deployed the `relevance_log` row reads UNAVAILABLE naming the
+  reason.
 
 - **`nx catalog reconcile-stale --execute drop-orphan-collections`, and the
   host-harness scratch-scope lint (nexus-8tnz2).** T3 collections that hold

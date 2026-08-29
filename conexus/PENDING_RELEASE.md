@@ -29,18 +29,7 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release or plugin cut (pinned: v7.21.0)
+## Awaiting the next release or plugin cut (pinned: v7.22.0)
 
-- `conexus/hooks/hooks.json`, `conexus/hooks/scripts/auto-approve-nx-mcp.sh` (nexus-qs1g6) — the nexus MCP
-  auto-approver is ALSO registered on `PreToolUse` (`permissionDecision:
-  allow`, same explicit allowlists, same scripts). `PermissionRequest` fires
-  only when a prompt would be shown; under `defaultMode: auto` the classifier
-  decides first and never consults it (cc-validation scenario 16), so on an
-  auto-mode box both plugins' approvers were inert and sequential thinking was
-  classifier-denied on 2026-08-28. Until this ships, an auto-mode user needs a
-  `permissions.allow` entry per tool. Tests:
-  `tests/hooks/test_permission_request_hooks.py::TestPreToolUseApproval`.
-- `sn/hooks/hooks.json`, `sn/hooks/scripts/auto-approve-sn-mcp.sh` (nexus-qs1g6) — same change for
-  the Serena + Context7 approver: registered on `PreToolUse` with
-  `permissionDecision: allow`, same explicit allowlist, same script. Same
-  reason and same tests as the conexus entry above.
+Nothing pending. v7.22.0 advanced the pin, so everything previously
+listed here is live in installed sessions.
