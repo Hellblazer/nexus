@@ -502,7 +502,7 @@ public final class AspectRepository {
             // Conflict key: (tenant_id, collection, source_path). tenant constant.
             var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(kept.size());
             for (var body : kept) {
-                unique.put(body.get("collection") + " " + body.get("source_path"), body);
+                unique.put(body.get("collection") + "\u0000" + body.get("source_path"), body);
             }
             List<Map<String, Object>> deduped = List.copyOf(unique.values());
 

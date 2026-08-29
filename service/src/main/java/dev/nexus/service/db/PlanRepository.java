@@ -539,7 +539,7 @@ public final class PlanRepository {
             var unique = new java.util.LinkedHashMap<String, ImportRow>(rows.size());
             for (ImportRow r : rows) {
                 String proj = r.project() != null ? r.project() : "";
-                unique.put(proj + " " + r.query(), r);
+                unique.put(proj + "\u0000" + r.query(), r);
             }
             List<ImportRow> deduped = List.copyOf(unique.values());
 

@@ -20,6 +20,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   by a stale binary. Pinned by
   `tests/test_rehearsal_native_legs_refuse_no_build.py` across the live
   native legs.
+- **Engine sources are text again** (nexus-eeuyg): `AspectRepository.java`
+  and `PlanRepository.java` each embedded a raw NUL byte inside a
+  string-literal map key, so `file(1)` called them `data` and `grep -I`
+  zero-hit every audit over them. Both now use the Java unicode escape for
+  U+0000 (identical runtime bytes); `tests/test_java_sources_are_text.py`
+  scans every Java source for raw NULs.
 
 ### Added
 
