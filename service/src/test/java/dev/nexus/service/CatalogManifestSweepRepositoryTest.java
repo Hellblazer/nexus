@@ -1253,6 +1253,60 @@ class CatalogManifestSweepRepositoryTest {
         }
     }
 
+    // ── nexus-0cwre: Tier-1 protection on the sweep path ──────────────────────
+
+    /**
+     * A TOMBSTONED referrer still protects a shared chunk from the sweep (Tier 1 of the
+     * RDR-191 GATE-2 definition of record, T2 [22364]) — the same contract
+     * {@code PgVectorRepository#delete}'s anti-join (nexus-mmkqe) and
+     * {@code gc_expire_quarantine} (nexus-wnpet) already honour. Before nexus-0cwre the
+     * union guard carried {@code DELETED_AT.isNull()}, so A dropping a chash that only a
+     * soft-deleted B still named swept the chunk out from under B's restorable manifest
+     * row. Reverting the guard term turns this test's {@code swept} back to 1.
+     */
+    @Test @Order(34)
+    void writeManifestMany_sweepTrue_tombstonedReferrer_stillProtectsSharedChash() throws Exception {
+        String col = "code__swp34__minilm-l6-v2-384__v1";
+        String shared = ch("swp34-shared");
+        seedChunk384(TENANT_A, col, shared);
+        registerDoc(TENANT_A, "swp.34a", col);
+        registerDoc(TENANT_A, "swp.34b", col);
+        writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.34a", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", shared, "chunk_index", 0))),
+            Map.<String, Object>of("doc_id", "swp.34b", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", shared, "chunk_index", 0)))), col);
+
+        // B is soft-deleted: its manifest row stays (restorable) and must keep protecting.
+        assertThat(repo.deleteDocument(TENANT_A, "swp.34b")).isEqualTo(1);
+
+        // A drops `shared`; only the TOMBSTONED B still references it.
+        var result = writeManifestManySeeded(TENANT_A, List.of(
+            Map.<String, Object>of("doc_id", "swp.34a", "rows", List.<Map<String, Object>>of(
+                Map.<String, Object>of("position", 0, "chash", ch("swp34-new"), "chunk_index", 0)))), col,
+            null, true);
+
+        assertThat(result.get("swept"))
+            .as("a tombstoned referrer's manifest row must protect the shared chunk (Tier 1)")
+            .isEqualTo(0);
+        @SuppressWarnings("unchecked")
+        var detail = (List<Map<String, Object>>) result.get("sweep_detail");
+        assertThat(detail).singleElement().satisfies(d -> {
+            // errored=false is the discriminator: runSweepTransaction's catch path ALSO
+            // reports swept=0 / kept=dropped, and a test that cannot tell "the guard
+            // kept it" from "the sweep never ran" is vacuous (measured: the first cut of
+            // this test passed with the old guard term restored).
+            assertThat(d.get("errored")).as("the sweep must actually have run: " + d).isEqualTo(false);
+            assertThat(d).doesNotContainKey("reason");
+            assertThat(d.get("dropped")).isEqualTo(1);
+            assertThat(d.get("swept")).isEqualTo(0);
+            assertThat(d.get("kept")).isEqualTo(1);
+        });
+        assertThat(chunk384Exists(TENANT_A, col, shared))
+            .as("the chunk must survive until purge_trash reaps B's row and the chunk together")
+            .isTrue();
+    }
+
     /** Raw connection to the service role's own database (test-controlled transaction). */
     private Connection dsConnection() throws java.sql.SQLException {
         return svcDs.getConnection();

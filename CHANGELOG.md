@@ -26,6 +26,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   zero-hit every audit over them. Both now use the Java unicode escape for
   U+0000 (identical runtime bytes); `tests/test_java_sources_are_text.py`
   scans every Java source for raw NULs.
+- **Engine: the manifest-drop chunk sweep honours tombstoned referrers
+  (Tier 1)** (nexus-0cwre). `sweepChunksQuery`'s shared-chash union guard
+  carried `DELETED_AT IS NULL`, so a soft-deleted document's manifest row
+  did not count as a reference. Measured: the sweep then tried to delete
+  the chunk and failed on `fk_catalog_chunks_chunk`, ending every such
+  write with `errored=true, reason=sweep_failed` and the data saved only
+  by the constraint. The guard now matches `PgVectorRepository#delete`'s
+  anti-join and `gc_expire_quarantine`: a tombstoned owner still protects
+  until `purge_trash` reaps both together. The notes guard keeps its live
+  filter on purpose (a manifest-less tombstoned note has no row for
+  `purge_trash` to reap with; that is the Tier-2 side, unchanged).
 - **Ghost-document manifest retraction no longer aborts catalog cleanup**
   (nexus-d9fwj). `store_hook._retract_manifest_rows_for_chash` guards a
   blank `physical_collection` (a ghost/sourceless document): it falls back

@@ -4893,16 +4893,31 @@ public final class CatalogRepository {
             .where(CHUNKS.TENANT_ID.eq(tenant))
             .and(CHUNKS.COLLECTION.eq(collection))
             .and(CHUNKS_CHASH_HEX.in(dropped))
+            // SHARED-CHASH UNION GUARD. "Referenced" INCLUDES tombstoned owners
+            // (nexus-0cwre, Tier 1 of the RDR-191 GATE-2 definition of record,
+            // T2 [22364]): this sweep is an INDEPENDENT-DELETER surface, the same
+            // class as PgVectorRepository#delete's anti-join (nexus-mmkqe) and
+            // gc_expire_quarantine (nexus-wnpet), both made unconditional. A
+            // soft-deleted document deliberately keeps its manifest rows so a
+            // restore stays possible; those rows must go on protecting their
+            // chunk until purge_trash reaps BOTH together. The DELETED_AT.isNull()
+            // term this join used to carry let a tombstoned OTHER document's
+            // reference count for nothing — exactly where the guard matters,
+            // since on the primary path the caller's own rows are already gone.
             .and(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
                 .join(CATALOG_DOCUMENTS)
                   .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
                       .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
                 .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CHUNKS.TENANT_ID))
-                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS.CHASH))
-                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())))
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS.CHASH))))
             // nl3fn NOTES GUARD: is this chash a live note's OWN identity
             // chash (is_note_shaped mirror)? Collection-scoped, matching
-            // catalog_documents_for_collection's scope client-side.
+            // catalog_documents_for_collection's scope client-side. This guard
+            // KEEPS its DELETED_AT.isNull() on purpose (nexus-0cwre scope): a
+            // manifest-less note has no manifest row for purge_trash to reap
+            // with, so once tombstoned its chunk would strand forever if this
+            // sweep also refused it — that is the grace-window (Tier 2) side
+            // the bead says not to reconcile.
             .and(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENTS)
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
                 .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection))
