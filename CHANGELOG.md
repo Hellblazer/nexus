@@ -26,6 +26,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   zero-hit every audit over them. Both now use the Java unicode escape for
   U+0000 (identical runtime bytes); `tests/test_java_sources_are_text.py`
   scans every Java source for raw NULs.
+- **Ghost-document manifest retraction no longer aborts catalog cleanup**
+  (nexus-d9fwj). `store_hook._retract_manifest_rows_for_chash` guards a
+  blank `physical_collection` (a ghost/sourceless document): it falls back
+  to the caller's expected collection, else skips the retraction with a
+  structured warning, so `store_delete`'s `delete_document` always runs
+  and the reap tombstone proceeds instead of dying on the GATE-2 blank-
+  collection `ValueError`.
+
+### Removed
+
+- **`chash_indexed_ratio` (`nx collection health`) and the identical
+  `chash_index` coverage section (`nx collection audit`)** (nexus-70vpz):
+  both compared a count served from the chunks tables to the chunks
+  tables and read 1.000 on every collection, zombies included, since
+  RDR-187 dropped `chash_index`. A health signal that cannot signal is
+  deleted, not repointed. `HttpChashIndex.count_for_collection` now has no
+  application caller (kept; contract tests still exercise it).
 
 ### Added
 

@@ -1850,8 +1850,8 @@ nx collection list
 | `rename OLD NEW` | In-place metadata-only rename in the T3 vector store + T2 + catalog cascade (4.8.0, nexus-1ccq). Never re-embeds; same-prefix renames whose embedding-model segment differs are rejected (6.3.1, nexus-tcvpn) |
 | `re-embed NAME --to MODEL` | In-place re-embed for non-CCE Voyage models (nexus-bw65). Service mode: same-model only — the computed vectors ride the verbatim passthrough; a cross-model `--to` fails loud (server-side embedding routes by the collection NAME's model segment; cross-model moves are the migration pipeline's job). `--no-dry-run --yes` to apply (6.3.1, nexus-c9xr2/u37lw) |
 | `rewrite-metadata [NAME]` | Rewrite/repair chunk metadata in place; `--all` for every collection, `--source-path` to scope to one source, `--dry-run` to report counts only |
-| `audit NAME` | Deep-dive per-collection report: distance histogram, top-5 cross-projections, orphan chunks, hub topics, chash coverage (RDR-087 Phase 4) |
-| `health` | Composite per-collection health table — chunk counts (T3-sourced), staleness, hub score, chash coverage (RDR-087 Phase 3.4) |
+| `audit NAME` | Deep-dive per-collection report: distance histogram, top-5 cross-projections, orphan chunks, hub topics (RDR-087 Phase 4) |
+| `health` | Composite per-collection health table — chunk counts (T3-sourced), staleness, hub score (RDR-087 Phase 3.4) |
 | `merge-candidates` | Pair-wise cross-collection overlap ranking — surfaces collection pairs with high shared-topic similarity as merge/bridge candidates (RDR-087 Phase 4.3) |
 | `delete NAME` | Delete collection (irreversible) |
 | `prune` | List collections whose name-declared embedding dim mismatches the ACTIVE serving embedder — orphans from a prior embedder generation that every search silently skips (GH #1113, nexus-9tsdf). Fail-safe: no flags lists only; `--yes` deletes via the same cascade as `delete`; `--dry-run` always wins over `--yes`. An unresolved active-embedder probe lists nothing (never guesses). `nx doctor` names these orphans and points here |
@@ -1926,7 +1926,7 @@ Renames the collection in the T3 vector store via `t3.rename_collection` (a meta
 | `--live` | When the 30-day `search_telemetry` histogram is empty, sample live chunks from ChromaDB and derive the distance histogram from self-queries (4.8.0, nexus-fx2d). Budget ~10 s at default `--live-n` |
 | `--live-n N` | Number of live-probe samples when `--live` fires (default: 25) |
 
-Renders five sections: distance histogram, top-5 cross-projections, orphan chunks (>30d with no incoming links), top-10 cross-collection hub topics this collection contributes to, and `chash_index` coverage ratio + sample unindexed chunk IDs.
+Renders four sections: distance histogram, top-5 cross-projections, orphan chunks (>30d with no incoming links), and top-10 cross-collection hub topics this collection contributes to. (A fifth `chash_index` coverage section was removed at nexus-70vpz / RDR-187 — once RDR-187 dropped `chash_index`, the ratio it reported compared a chunk count to itself and could never read anything but 1.0.)
 
 **`health` flags:**
 
