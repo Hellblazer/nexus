@@ -38,6 +38,7 @@ from nexus.daemon.service_registry import (
     process_state,
 )
 from nexus.daemon.storage_service_daemon import (
+    HealthProbe,
     StopOutcome,
     StorageServiceStartError,
     StorageServiceSupervisor,
@@ -123,8 +124,17 @@ def _make_supervisor(
     binary_path: Path | None = None,
     supervised: bool = False,
     creds: dict[str, str] | None = None,
+    engine_liveness_scan: Any = None,
 ) -> StorageServiceSupervisor:
-    """Build a supervisor with injected clock and no real pg/service spawn."""
+    """Build a supervisor with injected clock and no real pg/service spawn.
+
+    ``engine_liveness_scan`` (nexus-8vp0i review round 2): when omitted,
+    defaults to a fake that always reports no live engine (``[]``) — NOT
+    the real process-table scan — so any test that reaches
+    ``_release_stale_changelog_lock`` without explicitly caring about the
+    liveness gate does not depend on ambient process-table state. Pass an
+    explicit fake to exercise the gate itself.
+    """
     if binary_path is None:
         binary_path = Path("/fake/nexus-service")
     if creds is None:
@@ -136,6 +146,8 @@ def _make_supervisor(
             # gmiaf.32.5: persistent root token, read from pg_credentials.
             "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef",
         }
+    if engine_liveness_scan is None:
+        engine_liveness_scan = lambda _config_dir, _binary_path: []  # noqa: E731
     return StorageServiceSupervisor(
         config_dir=config_dir,
         binary_path=binary_path,
@@ -144,6 +156,7 @@ def _make_supervisor(
         creds=creds,
         lease_clock=clock,
         supervised=supervised,
+        engine_liveness_scan=engine_liveness_scan,
     )
 
 
@@ -2807,3 +2820,366 @@ class TestStopDoesNotWaitOnAnAlreadyDeadSupervisor:
         assert outcome.stubborn == (), (
             f"a corpse is not a stubborn survivor: {outcome}"
         )
+
+
+# ---------------------------------------------------------------------------
+# nexus-8vp0i / GH #1486: migration-aware readiness wiring
+# ---------------------------------------------------------------------------
+
+
+class TestLogTailer:
+    """_LogTailer: respawn must never read the previous process's lines."""
+
+    def test_reads_new_lines_appended_after_offset(self, tmp_path: Path) -> None:
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        log_path = tmp_path / "svc.log"
+        log_path.write_text("old line one\nold line two\n")
+        start_offset = log_path.stat().st_size
+
+        tailer = ssd_mod._LogTailer(log_path, start_offset)
+        assert tailer() == []  # nothing new yet
+
+        with open(log_path, "a") as fh:
+            fh.write("new line one\nnew line two\n")
+        assert tailer() == ["new line one", "new line two"]
+        assert tailer() == []  # consumed; no duplicates
+
+    def test_respawn_offset_ignores_previous_process_tail(self, tmp_path: Path) -> None:
+        """The historical incident shape: a killed process's crash output
+        sits in the O_APPEND log; a respawned process's tailer, seeded at
+        the NEW spawn's offset, must not see any of it."""
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        log_path = tmp_path / "svc.log"
+        log_path.write_text("")
+        with open(log_path, "a") as fh:
+            fh.write("process A: booting\n")
+            fh.write("process A: FATAL crash\n")
+        offset_at_respawn = log_path.stat().st_size
+
+        # A fresh tailer built at the OLD offset (0) would see process A's
+        # lines — the bug this offset-capture prevents.
+        stale_tailer = ssd_mod._LogTailer(log_path, 0)
+        assert stale_tailer() == ["process A: booting", "process A: FATAL crash"]
+
+        # The correct tailer, seeded at spawn time for process B.
+        tailer = ssd_mod._LogTailer(log_path, offset_at_respawn)
+        assert tailer() == []
+        with open(log_path, "a") as fh:
+            fh.write("process B: booting\n")
+        assert tailer() == ["process B: booting"]
+
+    def test_partial_trailing_line_buffered_across_calls(self, tmp_path: Path) -> None:
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        log_path = tmp_path / "svc.log"
+        log_path.write_text("")
+        tailer = ssd_mod._LogTailer(log_path, 0)
+
+        with open(log_path, "a") as fh:
+            fh.write("event=schema_migration_start\nRunning Chang")
+        assert tailer() == ["event=schema_migration_start"]
+
+        with open(log_path, "a") as fh:
+            fh.write("eset: x::y::z\n")
+        assert tailer() == ["Running Changeset: x::y::z"]
+
+    def test_missing_file_reads_as_no_new_lines(self, tmp_path: Path) -> None:
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        tailer = ssd_mod._LogTailer(tmp_path / "does-not-exist.log", 0)
+        assert tailer() == []
+
+
+class TestStaleChangelogLockCleanup:
+    """_release_stale_changelog_lock / _migration_pg_probe: guarded to the
+    bundled cluster, best-effort, never block a service start."""
+
+    def test_cleanup_skipped_without_pg_data(self, config_dir: Path, clock: _FakeClock) -> None:
+        creds = {
+            "NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc", "NX_DB_PASS": "pass",
+            "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "admin",
+            "NX_DB_ADMIN_PASS": "adminpass", "PG_PORT": "15432",
+            "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef",
+            # no PG_DATA: managed/BYO Postgres
+        }
+        sup = _make_supervisor(config_dir, clock, creds=creds)
+
+        # Must not raise, and must not attempt any real psql invocation.
+        with patch("nexus.db.pg_provision.discover_pg_binaries") as discover:
+            sup._release_stale_changelog_lock(reason="test")
+            discover.assert_not_called()
+
+    def test_pg_probe_unavailable_without_pg_data(self, config_dir: Path, clock: _FakeClock) -> None:
+        import nexus.daemon.readiness as readiness
+
+        creds = {
+            "NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc", "NX_DB_PASS": "pass",
+            "NX_DB_ADMIN_URL": "jdbc:...", "NX_DB_ADMIN_USER": "admin",
+            "NX_DB_ADMIN_PASS": "adminpass", "PG_PORT": "15432",
+            "NX_SERVICE_TOKEN": "root-token-from-creds-deadbeef",
+        }
+        sup = _make_supervisor(config_dir, clock, creds=creds)
+        assert sup._migration_pg_probe() is readiness.PgActivity.UNAVAILABLE
+
+    def test_skips_when_a_live_engine_is_found(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """nexus-8vp0i review round 2 (substantive-critic Critical 1): the
+        liveness gate must skip BEFORE any psql call when the injected scan
+        reports a live engine — no terminate, no release, WARNING logged."""
+        scan_calls: list[tuple[Path, Path]] = []
+
+        def fake_scan(cd: Path, bp: Path) -> list[tuple[int, str]]:
+            scan_calls.append((cd, bp))
+            return [(99999, "/fake/nexus-service --port 18080")]
+
+        sup = _make_supervisor(config_dir, clock, engine_liveness_scan=fake_scan)
+
+        with patch("nexus.db.pg_provision.discover_pg_binaries") as discover:
+            sup._release_stale_changelog_lock(reason="test")
+            discover.assert_not_called()
+        assert scan_calls == [(config_dir, Path("/fake/nexus-service"))]
+
+    def test_skips_when_pg_probe_reports_executing(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """The process-table scan can miss a live holder outside this
+        config_dir's own stack (e.g. a standalone engine run against the
+        same cluster) — the PG probe is the second, independent check."""
+        import nexus.daemon.readiness as readiness
+
+        sup = _make_supervisor(config_dir, clock)  # default scan: no live engine
+
+        with patch.object(sup, "_migration_pg_probe", return_value=readiness.PgActivity.EXECUTING), \
+             patch("nexus.db.pg_provision.discover_pg_binaries") as discover:
+            sup._release_stale_changelog_lock(reason="test")
+            discover.assert_not_called()
+
+    def test_scan_failure_does_not_proceed(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """A liveness-scan failure is NOT evidence of 'no live engine' — it
+        must degrade to skipping cleanup, not to proceeding as if the scan
+        had come back clean."""
+        def failing_scan(cd: Path, bp: Path) -> list[tuple[int, str]]:
+            raise RuntimeError("process table unreadable")
+
+        sup = _make_supervisor(config_dir, clock, engine_liveness_scan=failing_scan)
+
+        with patch("nexus.db.pg_provision.discover_pg_binaries") as discover:
+            sup._release_stale_changelog_lock(reason="test")  # must not raise
+            discover.assert_not_called()
+
+    def test_proceeds_and_logs_terminated_pids_when_gate_clears(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """nexus-8vp0i review round 2 (code-review-expert Significant 2):
+        once the liveness gate clears (no live engine, probe not
+        EXECUTING), the terminate/release SQL runs and the WARNING names
+        exactly which pids were terminated — not discarded."""
+        import nexus.daemon.readiness as readiness
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        def fake_run_psql(psql_bin, host, port, dbname, user, password, sql, *, psql_runner=None):
+            import subprocess as _sp
+            if "SELECT lockedby, lockgranted" in sql:
+                return _sp.CompletedProcess(
+                    args=[], returncode=0, stdout="svc@host|2026-08-29 12:00:00\n", stderr="",
+                )
+            if "pg_terminate_backend" in sql:
+                return _sp.CompletedProcess(
+                    args=[], returncode=0, stdout="4242|t\n4343|t\n", stderr="",
+                )
+            if "UPDATE databasechangeloglock" in sql:
+                return _sp.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+        sup = _make_supervisor(config_dir, clock)  # default: no live engine
+
+        with patch.object(sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE), \
+             patch("nexus.db.pg_provision.discover_pg_binaries") as discover, \
+             patch("nexus.health._run_psql", side_effect=fake_run_psql), \
+             patch.object(ssd_mod, "_log") as log_mock:
+            discover.return_value.psql = Path("/fake/psql")
+            sup._release_stale_changelog_lock(reason="test_reason")
+
+        released_calls = [
+            call for call in log_mock.warning.call_args_list
+            if call.args and call.args[0] == "storage_service_stale_changelog_lock_released"
+        ]
+        assert len(released_calls) == 1
+        assert released_calls[0].kwargs["terminated_pids"] == [4242, 4343]
+        assert released_calls[0].kwargs["lockedby"] == "svc@host"
+        assert released_calls[0].kwargs["reason"] == "test_reason"
+
+
+class TestWaitForServiceReadyMigrationAware:
+    """_wait_for_service_ready: end-to-end wiring of the readiness monitor
+    into the supervisor (nexus-8vp0i / GH #1486). Real wall-clock, kept to
+    sub-second budgets exactly like the pre-existing
+    test_loud_failure_when_service_unreachable (timeout=0.5) — only the
+    module-level MIGRATING bounds are monkeypatched down so a migration
+    stall test does not take 600 real seconds.
+    """
+
+    def test_healthy_fast_boot_returns_without_raising(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        sup = _make_supervisor(config_dir, clock)
+        fake_proc = _FakeProc(pid=51000)
+        with patch.object(sup, "_probe_service_health", return_value=HealthProbe.OK):
+            sup._wait_for_service_ready(fake_proc, 19999, timeout=0.5)  # must not raise
+
+    def test_process_exit_keeps_the_historical_message(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        sup = _make_supervisor(config_dir, clock)
+        fake_proc = _FakeProc(pid=51001, returncode=7)
+        with patch.object(sup, "_probe_service_health", return_value=HealthProbe.UNKNOWN), \
+             patch.object(sup, "_release_stale_changelog_lock"):
+            with pytest.raises(StorageServiceStartError, match="exited with code 7"):
+                sup._wait_for_service_ready(fake_proc, 19999, timeout=0.5)
+
+    def test_process_exit_triggers_stale_lock_cleanup(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """nexus-8vp0i review round 2 (code-review-expert Significant 1): a
+        JVM crash mid-changeset is exactly the exit shape that leaves
+        databasechangeloglock stuck — process-exit must trigger cleanup
+        too, not only a readiness-timeout kill."""
+        sup = _make_supervisor(config_dir, clock)
+        fake_proc = _FakeProc(pid=51001, returncode=137)
+
+        cleanup_calls: list[str] = []
+        with patch.object(sup, "_probe_service_health", return_value=HealthProbe.UNKNOWN), \
+             patch.object(
+                 sup, "_release_stale_changelog_lock",
+                 side_effect=lambda reason: cleanup_calls.append(reason),
+             ):
+            with pytest.raises(StorageServiceStartError, match="exited with code 137"):
+                sup._wait_for_service_ready(fake_proc, 19999, timeout=0.5)
+
+        assert cleanup_calls == ["process_exited"]
+
+    def test_plain_timeout_keeps_the_historical_message(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """No migration marker ever seen -> PRE_MIGRATION stall -> the exact
+        pre-nexus-8vp0i wording (operators and any external tooling key on
+        it)."""
+        sup = _make_supervisor(config_dir, clock)
+        fake_proc = _FakeProc(pid=51002)
+        with patch.object(sup, "_probe_service_health", return_value=HealthProbe.UNKNOWN), \
+             patch.object(sup, "_release_stale_changelog_lock"):
+            with pytest.raises(
+                StorageServiceStartError,
+                match=r"did not become healthy .* within 1s",
+            ):
+                sup._wait_for_service_ready(fake_proc, 19999, timeout=1.0)
+
+    def test_migration_stall_raises_migration_specific_message_and_cleans_up(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import nexus.daemon.storage_service_daemon as ssd_mod
+        import nexus.daemon.readiness as readiness
+
+        monkeypatch.setattr(ssd_mod, "_MIGRATION_STALL_TIMEOUT", 0.2)
+        sup = _make_supervisor(config_dir, clock)
+        fake_proc = _FakeProc(pid=51003)
+
+        log_lines = iter([["event=schema_migration_start"]])
+
+        def fake_log_reader() -> list[str]:
+            return next(log_lines, [])
+
+        cleanup_calls: list[str] = []
+        # IDLE (not UNAVAILABLE): the probe IS available but finds nothing
+        # executing, so the 600s-equivalent (monkeypatched to 0.2s) stall
+        # bound applies. UNAVAILABLE would widen to the 3600s log-only bound
+        # instead — not the branch this test targets.
+        with patch.object(sup, "_probe_service_health", return_value=HealthProbe.UNKNOWN), \
+             patch.object(sup, "_build_log_tailer", return_value=fake_log_reader), \
+             patch.object(sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE), \
+             patch.object(
+                 sup, "_release_stale_changelog_lock",
+                 side_effect=lambda reason: cleanup_calls.append(reason),
+             ):
+            with pytest.raises(StorageServiceStartError, match="migration stalled"):
+                sup._wait_for_service_ready(fake_proc, 19999, timeout=60.0)
+
+        assert "readiness_timeout" in cleanup_calls
+
+    def test_waiting_for_lock_never_triggers_cleanup_on_its_own(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """nexus-8vp0i review round 2 (substantive-critic Critical 1): a
+        live holder must NEVER be terminated. 'Waiting for changelog lock'
+        alone must NOT trigger cleanup — the lock may be legitimately held
+        by a still-running engine (macOS has no PR_SET_PDEATHSIG, so an
+        orphaned-but-alive engine from a dead supervisor is reachable
+        there). Liquibase gives up on its own after its 10-minute
+        changeLogLockWaitTime with a LockException, which exits THIS
+        process non-zero — that is the ReadinessProcessExitedError path,
+        which DOES clean up (see test_process_exit_triggers_stale_lock_
+        cleanup). TickResult.waiting_for_lock is still reported (observed
+        via the progress log), just never wired to a cleanup call."""
+        import nexus.daemon.readiness as readiness
+
+        sup = _make_supervisor(config_dir, clock)
+        fake_proc = _FakeProc(pid=51004)
+
+        # Every tick reports 'Waiting for changelog lock' — a sustained,
+        # not just one-off, observation — right up until health turns OK.
+        log_batches = iter([
+            ["Waiting for changelog lock"],
+            ["Waiting for changelog lock"],
+            ["Waiting for changelog lock"],
+        ])
+
+        def fake_log_reader() -> list[str]:
+            return next(log_batches, [])
+
+        health_answers = iter([HealthProbe.UNKNOWN, HealthProbe.UNKNOWN, HealthProbe.OK])
+
+        def fake_health(port: int | None = None) -> HealthProbe:
+            return next(health_answers, HealthProbe.OK)
+
+        with patch.object(sup, "_probe_service_health", side_effect=fake_health), \
+             patch.object(sup, "_build_log_tailer", return_value=fake_log_reader), \
+             patch.object(sup, "_migration_pg_probe", return_value=readiness.PgActivity.IDLE), \
+             patch.object(sup, "_release_stale_changelog_lock") as cleanup, \
+             patch("time.sleep"):
+            sup._wait_for_service_ready(fake_proc, 19999, timeout=60.0)
+
+        cleanup.assert_not_called()
+
+
+class TestStartLockedReleasesStaleLockBeforeSpawn:
+    def test_release_stale_lock_called_before_spawn(
+        self, config_dir: Path, clock: _FakeClock
+    ) -> None:
+        """Step 1.5 (nexus-8vp0i): the stale-changelog-lock cleanup must run
+        AFTER _ensure_pg_running and BEFORE _spawn_service."""
+        sup = _make_supervisor(config_dir, clock)
+        order: list[str] = []
+
+        sup._ensure_pg_running = lambda: order.append("ensure_pg")  # type: ignore[method-assign]
+        sup._release_stale_changelog_lock = lambda reason: order.append(  # type: ignore[method-assign]
+            f"release_lock:{reason}"
+        )
+
+        def _fake_spawn() -> tuple[Any, int]:
+            order.append("spawn_service")
+            return _FakeProc(pid=51005), 18078
+
+        sup._spawn_service = _fake_spawn  # type: ignore[method-assign]
+        stub_supervisor = MagicMock()
+        stub_supervisor.record.generation = 1
+        sup._supervisor = stub_supervisor
+
+        with patch.object(sup, "_wait_for_service_ready"), patch.object(sup, "_publish"):
+            sup._start_locked()
+
+        assert order == ["ensure_pg", "release_lock:pre_spawn", "spawn_service"]
