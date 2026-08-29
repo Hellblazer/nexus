@@ -572,10 +572,35 @@ def store_put_manifest_direct(
         )
 
 
-def _retract_manifest_rows_for_chash(reader, writer, entry, chash: str) -> None:
+def _retract_manifest_rows_for_chash(
+    reader, writer, entry, chash: str, *, expected_collection: str | None = None,
+) -> None:
     """Explicitly retract *chash*'s own manifest row(s) from *entry*'s
     document BEFORE the caller tombstones it and deletes the T3 chunk
     (nexus-mmkqe / nexus-rnqbw, RDR-191 GATE-2).
+
+    GHOST-DOC GUARD (nexus-d9fwj): *entry* can be a ghost/sourceless
+    document registered with an EMPTY ``physical_collection`` (a
+    documented live population — see ``health.py``'s null-collection
+    census). Post-GATE-2, ``write_manifest`` rejects a blank/None
+    ``collection`` client-side with ``ValueError`` — a regression vs the
+    pre-GATE-2 engine-inferred-collection behavior, where a blank
+    collection here was silently tolerated. Both of this helper's
+    callers previously let that ``ValueError`` reach their own
+    exception handling: ``store_delete_catalog_cleanup``'s broad except
+    swallowed it and skipped ``delete_document`` entirely (the whole
+    catalog cleanup abandoned), and ``reap_catalog_manifest_for_chashes``'s
+    narrow except logged and let the tombstone proceed but left the
+    manifest row in place, keeping the chunk anti-join-protected.
+
+    When *entry* has no ``physical_collection``, *expected_collection*
+    (the caller-supplied collection scope, when one is available on
+    that call) is used as a fallback so the retraction can still
+    succeed with a real, known-good collection value. When neither is
+    available, the retraction is skipped outright (not attempted, not
+    raised) and logged at WARNING naming the tumbler and the reason —
+    the manifest row is left in place, exactly as if retraction had
+    failed, but without corrupting either caller's outer control flow.
 
     TWO-TIER PROTECTION (T2 nexus/rdr-191-dangling-definition-of-record
     [22364], amended 2026-08-12): ``PgVectorRepository#delete``'s anti-join
@@ -618,8 +643,21 @@ def _retract_manifest_rows_for_chash(reader, writer, entry, chash: str) -> None:
         }
         for r in current_rows if r.chash != chash
     ]
-    if len(remaining) != len(current_rows):
-        writer.write_manifest(tumbler_str, remaining, collection=entry.physical_collection)
+    if len(remaining) == len(current_rows):
+        return  # chash was not present in this entry's manifest -- nothing to retract
+    collection = entry.physical_collection or expected_collection
+    if not collection:
+        _log.warning(
+            "manifest_retraction_skipped_blank_collection",
+            tumbler=tumbler_str, chash=chash,
+            reason=(
+                "ghost/sourceless document has no physical_collection and "
+                "no expected_collection fallback was supplied — retraction "
+                "skipped; the manifest row is left in place"
+            ),
+        )
+        return
+    writer.write_manifest(tumbler_str, remaining, collection=collection)
 
 
 def store_delete_catalog_cleanup(
@@ -743,7 +781,10 @@ def store_delete_catalog_cleanup(
         # the way it used to. See _retract_manifest_rows_for_chash.
         retract_reader = make_catalog_reader()
         if retract_reader is not None:
-            _retract_manifest_rows_for_chash(retract_reader, writer, entry, chash_doc_id)
+            _retract_manifest_rows_for_chash(
+                retract_reader, writer, entry, chash_doc_id,
+                expected_collection=expected_collection,
+            )
         writer.delete_document(Tumbler.parse(tumbler))
         _log.info(
             "store_delete_catalog_row_removed",
@@ -896,7 +937,10 @@ def reap_catalog_manifest_for_chashes(
             # anti-join loudly (not silently) blocks the caller's own T3
             # delete, which is the SAFE direction (data protected, not lost).
             try:
-                _retract_manifest_rows_for_chash(reader, writer, entry, chash)
+                _retract_manifest_rows_for_chash(
+                    reader, writer, entry, chash,
+                    expected_collection=expected_collection,
+                )
             except Exception:  # noqa: BLE001 — retraction is best-effort; see comment above
                 _log.warning(
                     "catalog_reap_retraction_failed",
