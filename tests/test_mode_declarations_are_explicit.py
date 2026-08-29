@@ -338,7 +338,15 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 59
 # client-side naming decision identically; Popen is mocked in both, no
 # real embedder or cloud call is made. Rationale in conftest.py beside
 # the entries.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 48
+# 48 -> 56 (nexus-ubnwk + nexus-8tnz2, 2026-08-28): +4 TestSearchAspectScoped
+# wire-shape tests (fake `_post`, voyage token is a conformant-name segment
+# used as opaque routing data) and +4 drop-orphan-collections tests (fake
+# writer + fake count routes; the voyage-named orphan mirrors the measured
+# live population the arm classifies). Both reason "string-literal-as-name";
+# rationale in conftest.py beside the entries. Found by the release
+# preflight's mode-census leg — the census self-skips under `-n auto`, so
+# the merged-tree full-suite pass never fired it.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 56
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:
