@@ -243,7 +243,7 @@ def seeded_catalog(cat):
     """Seed documents and links in _TENANT for collection_health assertions.
 
     Seeded state:
-        owner: dsu5z-repo (prefix "20")
+        owner: dsu5z-repo (prefix "20.1")
         doc_a: indexed_at="2026-01-01T08:00:00" -- no incoming links (orphan)
         doc_b: indexed_at="2026-06-01T12:00:00" -- no incoming links (orphan)
         doc_c: indexed_at="2026-03-15T00:00:00" -- has one incoming link (non-orphan)
@@ -255,7 +255,7 @@ def seeded_catalog(cat):
         orphan_count = 2  (doc_a and doc_b have no incoming links)
     """
     owner_t = cat.register_owner(
-        name="dsu5z-repo", owner_type="repo", tumbler_prefix="20"
+        name="dsu5z-repo", owner_type="repo", tumbler_prefix="20.1"
     )
     doc_a = cat.register(
         str(owner_t), "DSU5Z Doc A",

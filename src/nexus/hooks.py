@@ -89,10 +89,15 @@ def _t1_clear_if_owned(t1) -> None:
     try:
         decision = resolve_t1_routing_tiers(nexus_config_dir())
     except Exception as exc:  # noqa: BLE001 — ownership cannot be proven; must never default to clearing
+        # nexus-z0idx follow-on: kwarg is "detail", not "message" — stdlib
+        # logging's LogRecord reserves "message" (set internally by
+        # getMessage()); passing message= as an extra kwarg raises
+        # KeyError("Attempt to overwrite 'message' in LogRecord") the
+        # moment structlog is stdlib-routed.
         _log.error(
             "session_end_t1_ownership_check_failed",
             error=str(exc),
-            message=(
+            detail=(
                 "could not determine T1 ownership; skipping clear() to avoid "
                 "deleting a scope this process may not own"
             ),
@@ -103,7 +108,7 @@ def _t1_clear_if_owned(t1) -> None:
         _log.warning(
             "session_end_t1_clear_skipped_leased_scope",
             session_id=decision.session_id,
-            message=(
+            detail=(
                 "T1 resolved via a lease borrowed from another live process; "
                 "skipping clear() -- rows age out via the 24h TTL sweep "
                 "instead of being deleted immediately"
@@ -413,7 +418,7 @@ def session_end_flush() -> str:
             _log.warning(
                 "session_end_flush_t1_unavailable",
                 error=str(exc),
-                message="flagged scratch entries were not flushed",
+                detail="flagged scratch entries were not flushed",
             )
             t1 = None
         # T1 access is process-local; snapshot the flagged entries here so

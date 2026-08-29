@@ -349,7 +349,9 @@ def _probe_local_token_collections(
                 "local_token_collection_probe_failed",
                 local_token=local_token,
                 error=str(exc),
-                message=(
+                # nexus-z0idx follow-on: "detail", not "message" — stdlib
+                # logging reserves "message" on LogRecord.
+                detail=(
                     "grandfather probe raised for this candidate token; "
                     "treated as no-match and the next candidate (or the "
                     "strict resolver) was tried instead."
@@ -442,7 +444,7 @@ def resolve_write_embedding_model(
                     "resolve_write_embedding_model_grandfathered",
                     content_type=content_type,
                     grandfathered_token=found,
-                    message=(
+                    detail=(
                         "local.embed_model is voyage-shaped with no "
                         "voyage_api_key configured; a pre-existing local "
                         "collection was found for this content_type, so "
@@ -770,7 +772,7 @@ def t3_collection_name(
                 _log.debug(
                     "t3_collection_name_promoted_candidate_tombstoned",
                     promoted=promoted, user_arg=user_arg,
-                    message=(
+                    detail=(
                         "promoted target has physical chunk rows but every "
                         "one belongs to a trashed document; falling through "
                         "to the next candidate rather than treating it as "

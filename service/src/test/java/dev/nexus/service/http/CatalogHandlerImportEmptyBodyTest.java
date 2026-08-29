@@ -135,7 +135,7 @@ class CatalogHandlerImportEmptyBodyTest {
     void importOwner_validBody_stillReturns200() throws Exception {
         // Non-regression: the empty-body guard must not disturb the happy path.
         CapturingExchange ex = post("/v1/catalog/import/owner",
-            "{\"tumbler_prefix\":\"9\",\"name\":\"zbci5-owner\",\"owner_type\":\"curator\"}");
+            "{\"tumbler_prefix\":\"1.9\",\"name\":\"zbci5-owner\",\"owner_type\":\"curator\"}");
         handleWithTenant(ex);
         assertThat(ex.status).as("valid single-row body still imports").isEqualTo(200);
         assertThat(ex.bodyString()).contains("\"imported\":1");

@@ -430,7 +430,17 @@ class TestRequiredEngineVersion:
         # and the new test verified non-vacuous by surgical mutation.
         # NOT run at bump time, by design: --acquire on the published bytes and
         # the deploy + STEP-6 cloud gates, which follow the client tag push.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 87)
+        # ->(0,1,88) 2026-08-28: the paired 7.22.0 cut — the client halves of
+        # RDR-156 D5 aspect-scoped search (nexus-ubnwk), telemetry baseline
+        # (nexus-v0x32), drop-orphan-collections (nexus-8tnz2) and the consent
+        # wire deletion (nexus-lqqb2) ship in 7.22.0 and need this engine's
+        # 4 changesets (aspects-004, catalog-034, vectors-008 x2) plus the
+        # TumblerGrammar boundary + collection-counts-all route. Gated BEFORE
+        # this bump on 2ca52773f: JVM 2287/0/0/7, --shakeout PASSED,
+        # --candidate-migration PASSED with delta=4 matching the EXPECT pin,
+        # published-client write gate PASSED (exact manifest counts). --acquire
+        # + deploy/cloud gates follow the client tag push, as always.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 88)
 
 
 class TestParseEngineVersion:

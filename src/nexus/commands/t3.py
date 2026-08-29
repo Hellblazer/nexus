@@ -26,6 +26,7 @@ Out of scope:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -40,6 +41,12 @@ import structlog
 from nexus import config as _config
 
 _log = structlog.get_logger(__name__)
+
+#: How many chunk ids the ``t3_gc_chunks_deleted`` log event and the
+#: gc_audit row's ``details.chunk_ids_sample`` carry verbatim (nexus-fduai);
+#: the rest is a count. The row's ``chashes`` list is NOT sampled here —
+#: the engine caps it itself and keeps ``chash_count`` exact.
+_GC_AUDIT_ID_SAMPLE = 50
 
 # SIG-6 (nexus-872w): resumable backfill state file.
 # The state file is a JSON dict mapping collection name → list of doc_ids
@@ -157,6 +164,14 @@ def _make_catalog():
             "Catalog not initialized. Run 'nx catalog setup' before 'nx t3 gc'."
         )
     return cat
+
+
+def _make_catalog_writer():
+    """Open the write-only catalog proxy ``nx t3 gc`` reports its audit row
+    through (nexus-fduai). Patched in tests for isolation."""
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.factory)
+
+    return make_catalog_writer()
 
 
 def _make_t3_for_backfill():
@@ -568,11 +583,19 @@ def gc_cmd(
     # already-in-flight one); the residual snapshot-to-execution race is
     # single-operator-driven and acceptably small in practice.
     #
-    # AUDIT-TRAIL WINDOW (nexus-i711w item 20, Hal ruling 2026-07-30):
-    # the local ChunkOrphaned EventLog emission died with the local
-    # git-backed catalog. Until the engine's gc-audit surface ships
-    # (next engine tag), destructive T3 GC has no audit record — an
-    # explicitly accepted window; do not re-litigate here.
+    # AUDIT TRAIL (nexus-fduai; closes the nexus-i711w item-20 window, Hal
+    # ruling 2026-07-30): the local ChunkOrphaned EventLog died with the
+    # local catalog. The engine's gc_audit table that replaced it is fed
+    # server-side by the background reaps (sweepChunks / purge_trash /
+    # gc_quarantine_orphans, actor="engine"), but the delete THIS verb
+    # performs happens client-side, so the engine cannot see it — which is
+    # exactly why it ships a client-facing producer, POST /gc_audit/record
+    # (nexus-jqvzk, "the rows recordGcAudit writes for nx t3 gc"). This
+    # verb reports its delete there in the same breath, then mirrors it as
+    # the structured ``t3_gc_chunks_deleted`` event. A dry run records
+    # nothing (report-only runs would swamp the trail); an audit write that
+    # fails after the delete succeeded is WARNED and fails the exit code —
+    # a delete with no forensic row is the blind spot nexus-sybbh named.
     pending_chunk_ids: list[str] = [chunk_id for chunk_id, _chash in candidates]
 
     deleted_total = 0
@@ -595,6 +618,54 @@ def gc_cmd(
         click.echo(
             f"\nSummary: deleted {deleted_total} chunk(s) from {collection}."
         )
+        audit_id: int | None = None
+        audit_error: str | None = None
+        writer = None
+        try:
+            writer = _make_catalog_writer()
+            audit_id = writer.record_gc_audit(
+                operation="t3_gc",
+                collection=collection,
+                actor="nx t3 gc",
+                dry_run=False,
+                chashes=[chash for _chunk_id, chash in candidates],
+                details={
+                    "deleted": deleted_total,
+                    "requested": len(pending_chunk_ids),
+                    "chunk_ids_sample": pending_chunk_ids[:_GC_AUDIT_ID_SAMPLE],
+                    "chunk_ids_truncated": max(
+                        len(pending_chunk_ids) - _GC_AUDIT_ID_SAMPLE, 0,
+                    ),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — the delete already happened; surface the missing audit row loudly, never a traceback
+            audit_error = f"{type(exc).__name__}: {exc}"
+        # Closing the proxy is housekeeping: a close() that raises after the
+        # row was written must not report the row as unwritten.
+        close = getattr(writer, "close", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close()
+        _log.info(
+            "t3_gc_chunks_deleted",
+            collection=collection,
+            deleted=deleted_total,
+            requested=len(pending_chunk_ids),
+            chunk_ids_sample=pending_chunk_ids[:_GC_AUDIT_ID_SAMPLE],
+            chunk_ids_truncated=max(len(pending_chunk_ids) - _GC_AUDIT_ID_SAMPLE, 0),
+            gc_audit_id=audit_id,
+            gc_audit_error=audit_error,
+        )
+        if audit_error is not None:
+            click.echo(
+                f"  WARNING: the {deleted_total} chunk(s) above were deleted "
+                f"but the gc_audit row recording it could NOT be written "
+                f"({audit_error}) — the deletion has no forensic record in "
+                f"nexus.gc_audit. Keep this output; see the "
+                f"t3_gc_chunks_deleted log event for the ids.",
+                err=True,
+            )
+            raise click.exceptions.Exit(1)
 
 
 @t3.command("backfill-manifest")

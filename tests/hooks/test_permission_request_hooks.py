@@ -167,3 +167,92 @@ class TestHookAgreement:
         """Neither hook approves tools from unknown plugins."""
         assert _run_hook(NX_SCRIPT, "mcp__other_plugin__tool") == ""
         assert _run_hook(SN_SCRIPT, "mcp__other_plugin__tool") == ""
+
+
+def _run_pretooluse(script: Path, tool_name: str) -> str:
+    """Pipe a PreToolUse payload (``hook_event_name`` set) into a hook script."""
+    payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": tool_name})
+    result = subprocess.run(
+        ["bash", str(script)],
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, f"Hook failed: {result.stderr}"
+    return result.stdout.strip()
+
+
+def _pretooluse_matchers(hooks_json: Path) -> list[str]:
+    data = json.loads(hooks_json.read_text())
+    return [entry["matcher"] for entry in data["hooks"].get("PreToolUse", [])]
+
+
+class TestPreToolUseApproval:
+    """The same allowlists are registered on PreToolUse.
+
+    PermissionRequest fires only when a permission PROMPT would be shown.
+    Under ``defaultMode: auto`` the classifier decides unlisted tools first
+    and never consults PermissionRequest (cc-validation scenario 16,
+    measured), so a plugin approver on that event alone is inert on an
+    auto-mode box: a directive-mandated tool such as sequential thinking
+    was classifier-denied on 2026-08-28 with the approver installed.
+    ``permissionDecision: allow`` on PreToolUse lands before the classifier.
+    One script per plugin serves both events, so the allowlist has one home.
+    """
+
+    NX_HOOKS = NX_SCRIPT.parent.parent / "hooks.json"
+    SN_HOOKS = SN_SCRIPT.parent.parent / "hooks.json"
+
+    @pytest.mark.parametrize(
+        ("script", "tool_name"),
+        [
+            (NX_SCRIPT, "mcp__plugin_conexus_sequential-thinking__sequentialthinking"),
+            (NX_SCRIPT, "mcp__plugin_conexus_nexus__search"),
+            (SN_SCRIPT, "mcp__plugin_sn_serena__jet_brains_find_symbol"),
+            (SN_SCRIPT, "mcp__plugin_sn_context7__query-docs"),
+        ],
+    )
+    def test_pretooluse_payload_yields_permission_decision_allow(
+        self, script: Path, tool_name: str
+    ) -> None:
+        data = json.loads(_run_pretooluse(script, tool_name))
+        out = data["hookSpecificOutput"]
+        assert out["hookEventName"] == "PreToolUse"
+        assert out["permissionDecision"] == "allow"
+        assert "decision" not in out  # the PermissionRequest shape must not leak
+
+    @pytest.mark.parametrize("script", [NX_SCRIPT, SN_SCRIPT])
+    def test_pretooluse_payload_for_unlisted_tool_is_silent(self, script: Path) -> None:
+        assert _run_pretooluse(script, "mcp__other_plugin__tool") == ""
+
+    def test_permissionrequest_shape_unchanged_without_event_name(self) -> None:
+        """A payload with no hook_event_name keeps the PermissionRequest shape."""
+        for script, tool in (
+            (NX_SCRIPT, "mcp__plugin_conexus_nexus__search"),
+            (SN_SCRIPT, "mcp__plugin_sn_serena__jet_brains_find_symbol"),
+        ):
+            data = json.loads(_run_hook(script, tool))
+            assert data["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
+            assert data["hookSpecificOutput"]["decision"] == {"behavior": "allow"}
+
+    def test_hooks_json_registers_the_approver_on_pretooluse(self) -> None:
+        assert "mcp__plugin_conexus_.*" in _pretooluse_matchers(self.NX_HOOKS)
+        assert "mcp__plugin_sn_.*" in _pretooluse_matchers(self.SN_HOOKS)
+
+    def test_pretooluse_entry_runs_the_same_script_as_permissionrequest(self) -> None:
+        for hooks_json, script_name in (
+            (self.NX_HOOKS, "auto-approve-nx-mcp.sh"),
+            (self.SN_HOOKS, "auto-approve-sn-mcp.sh"),
+        ):
+            data = json.loads(hooks_json.read_text())["hooks"]
+            def commands(event: str) -> set[str]:
+                return {
+                    h["command"]
+                    for entry in data.get(event, [])
+                    if entry["matcher"].startswith("mcp__plugin_")
+                    for h in entry["hooks"]
+                }
+            pre, perm = commands("PreToolUse"), commands("PermissionRequest")
+            assert pre == perm, f"{hooks_json}: PreToolUse {pre} vs PermissionRequest {perm}"
+            assert any(script_name in c for c in pre)

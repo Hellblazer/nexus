@@ -96,6 +96,59 @@ class TestAspectsShow:
         result = runner.invoke(enrich, ["aspects-show", "1.99.99"])
         assert result.exit_code != 0
 
+    def test_unsupported_prefix_states_the_fact_not_a_dead_remedy(self, env) -> None:
+        """nexus-hj7mg: measured 2026-08-24 — a code__* document (the large
+        majority of the catalog) with no aspect record got told to `Run
+        'nx enrich aspects code__...'`, which then aborts with 'No
+        extractor config registered for collection'. The remedy must
+        state the actual fact (aspects are not extracted for this
+        prefix) instead of naming a command that fails, and must derive
+        the supported-prefix list from the same registry
+        `nx enrich aspects` consults."""
+        cat_dir, db_path, cat = env
+        owner = cat.register_owner(
+            "myrepo", "repo", repo_hash="abcd1234",
+            repo_root="/tmp/myrepo",
+        )
+        t = cat.register(
+            owner, "t3.py",
+            content_type="code",
+            physical_collection="code__myrepo",
+            file_path="src/t3.py",
+        )
+        runner = CliRunner()
+        result = runner.invoke(enrich, ["aspects-show", str(t)])
+        assert result.exit_code == 0, result.output
+        assert "Run 'nx enrich aspects" not in result.output, (
+            f"must not recommend a command that aborts: {result.output!r}"
+        )
+        assert "code__myrepo" in result.output
+        assert "not extracted" in result.output
+        assert "knowledge__*" in result.output
+        assert "rdr__*" in result.output
+
+    def test_supported_prefix_with_no_record_still_names_the_extract_command(
+        self, env,
+    ) -> None:
+        """Control: a knowledge__* document with no aspect record yet is
+        the genuinely runnable case — the original 'Run nx enrich
+        aspects ...' remedy must still fire there."""
+        cat_dir, db_path, cat = env
+        owner = cat.register_owner(
+            "myrepo", "repo", repo_hash="abcd1234",
+            repo_root="/tmp/myrepo",
+        )
+        t = cat.register(
+            owner, "Unprocessed Paper",
+            content_type="paper",
+            physical_collection="knowledge__myrepo-papers",
+            file_path="docs/papers/unprocessed.pdf",
+        )
+        runner = CliRunner()
+        result = runner.invoke(enrich, ["aspects-show", str(t)])
+        assert result.exit_code == 0, result.output
+        assert "Run 'nx enrich aspects knowledge__myrepo-papers'" in result.output
+
 
 # ── aspects-list ────────────────────────────────────────────────────────────
 

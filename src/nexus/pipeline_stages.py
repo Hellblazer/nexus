@@ -473,6 +473,7 @@ def uploader_loop(
     *,
     catalog_doc_id: str = "",
     hooks: "HookRegistry | None" = None,
+    dry_run: bool = False,
 ) -> None:
     """Poll chunk buffer for embedded chunks and upsert to T3 ChromaDB.
 
@@ -481,6 +482,16 @@ def uploader_loop(
     through to ``HookRegistry.fire_batch`` so ``manifest_write_batch_hook``
     can write the manifest without having to read it from chunk metadata
     (which Phase 3 retired).
+
+    Pass *dry_run=True* (nexus-uxg4u round 2) to skip ``hooks.fire_batch``/
+    ``fire_single`` for every uploaded batch — default hooks
+    (``install_default_hooks``, reached whenever a caller passes
+    ``hooks=None``) wire a REAL T2 aspect-extraction-queue write via
+    ``aspect_extraction_enqueue_hook``, which does not itself check
+    *catalog_doc_id* truthiness before enqueueing. The T3 upsert into
+    *t3* itself is unaffected — ``pipeline_index_pdf``'s caller already
+    controls whether *t3* is the real or an ephemeral client; this flag
+    only stops the CATALOG-adjacent hook fan-out.
     """
     total_uploaded = 0
 
@@ -527,12 +538,13 @@ def uploader_loop(
                     from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 - deferred to avoid circular import at module load
                     hooks = HookRegistry()
                     install_default_hooks(hooks)
-                hooks.fire_batch(
-                    ids, collection, documents, embeddings, metadatas,
-                    catalog_doc_id=catalog_doc_id,
-                )
-                for _did, _doc in zip(ids, documents):
-                    hooks.fire_single(_did, collection, _doc)
+                if not dry_run:
+                    hooks.fire_batch(
+                        ids, collection, documents, embeddings, metadatas,
+                        catalog_doc_id=catalog_doc_id,
+                    )
+                    for _did, _doc in zip(ids, documents):
+                        hooks.fire_single(_did, collection, _doc)
 
                 indices = [row["chunk_index"] for row in batch]
                 db.mark_uploaded(content_hash, indices)
@@ -812,6 +824,8 @@ def pipeline_index_pdf(
     hooks: "HookRegistry | None" = None,
     source_uri: str = "",
     allow_degraded_extraction: bool = False,
+    dry_run: bool = False,
+    on_doc_registered: Callable[[str, bool], None] | None = None,
 ) -> int:
     """Three-stage streaming pipeline for PDFs.
 
@@ -836,6 +850,32 @@ def pipeline_index_pdf(
             whose ``content_hash`` matches — so neither the pipeline
             state nor half-written prior chunks can silently skip the
             re-ingest or race the upsert. No-op when False.
+
+    Pass *dry_run=True* (nexus-uxg4u) to skip every catalog/T2 write this
+    function would otherwise make — the fallback pre-flight registration
+    below, the completion fence (``_fence_begin``/``_fence_complete``/
+    ``_fence_fail``), and the ``_catalog_pdf_hook`` registration/linking
+    at the tail. Not gated by inference from *embed_fn* or *t3*'s shape:
+    a caller that swaps in a no-op embedder for a preview must say so
+    explicitly, or a future change reintroducing a real query against
+    that throwaway handle would silently start touching the catalog
+    again. The pipeline buffer (``db``/``HttpPipelineDB``) itself is
+    UNCHANGED by this flag — it is transient extraction/chunking
+    staging, not the catalog Document graph, and is what makes the
+    preview's chunk counts real; it is already cleaned up via
+    ``db.delete_pipeline_data`` on a successful run.
+
+    Pass *on_doc_registered* (nexus-uxg4u round 2, code-review-expert
+    Finding B) to be notified as ``(doc_id, created)`` whenever THIS
+    call's own fallback registration (below) fires and resolves an
+    identity. *doc_id* can arrive here empty for a reason OTHER than
+    "no catalog": the caller's own pre-flight registration can return
+    "" via the worktree/tempdir ephemeral-skip path or a swallowed
+    registration exception — in which case this function's fallback
+    mint is the only registration event for the whole run, and a
+    caller tracking created-vs-matched for rollback purposes (e.g.
+    ``index_pdf``'s own closure) has no way to see it without this
+    callback.
 
     Returns total chunks indexed.
     """
@@ -864,13 +904,25 @@ def pipeline_index_pdf(
     # thread doc_id through every chunk metadata. Idempotent on re-index
     # via Catalog.register's by_file_path early-return; returns "" when
     # the catalog is absent (no-catalog ingest contract preserved).
-    if not doc_id:
+    if not doc_id and not dry_run:
         from nexus.doc_indexer import _register_or_lookup_doc_id  # noqa: PLC0415 - deferred to avoid circular import at module load
-        doc_id = _register_or_lookup_doc_id(
+        # nexus-uxg4u round 2: with_created=True + on_doc_registered so a
+        # mint made HERE (the caller's own doc_id arrived empty) is not
+        # invisible to the caller's rollback tracking — see this
+        # function's own docstring for why doc_id can be empty here for a
+        # reason other than "no catalog".
+        _reg_result = _register_or_lookup_doc_id(
             pdf_path, corpus,
             content_type="paper",
             physical_collection=collection,
+            with_created=True,
         )
+        if isinstance(_reg_result, tuple):
+            doc_id, _fallback_created = _reg_result
+        else:
+            doc_id, _fallback_created = _reg_result, False
+        if on_doc_registered is not None:
+            on_doc_registered(doc_id, _fallback_created)
 
     # nexus-9ji: --force must break the partial-ingest deadlock. Both
     # pipeline-buffer state and T3 orphan chunks can independently block
@@ -918,8 +970,10 @@ def pipeline_index_pdf(
 
     # nexus-5xn3k.4 RUNFENCE C2: commit the fence BEFORE the first chunk
     # upsert (memo §3.5 T0) — right before the executor starts the
-    # uploader stage. Gated on doc_id per the no-catalog ingest contract.
-    if doc_id:
+    # uploader stage. Gated on doc_id per the no-catalog ingest contract
+    # (nexus-uxg4u: and explicitly on dry_run, though doc_id is already
+    # "" for a dry run given the gate above).
+    if doc_id and not dry_run:
         from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 - deferred to avoid circular import at module load
         _fence_begin(doc_id, content_hash, collection)
 
@@ -950,6 +1004,7 @@ def pipeline_index_pdf(
             chunking_done,
             catalog_doc_id=doc_id,
             hooks=hooks,
+            dry_run=dry_run,
         )
 
         all_futures: set[Future] = {extract_future, chunk_future, upload_future}
@@ -1003,8 +1058,11 @@ def pipeline_index_pdf(
                 exc_info=True,
             )
         # nexus-5xn3k.4: _fence_fail never raises, so first_exc propagation
-        # below cannot be masked by a fence-write failure.
-        if doc_id:
+        # below cannot be masked by a fence-write failure. nexus-uxg4u:
+        # never touch the catalog on a dry run (doc_id is already "" in
+        # that case per the pre-flight gate above, but check explicitly
+        # for the same defense-in-depth reason as the fence-begin gate).
+        if doc_id and not dry_run:
             from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
             _fence_fail(doc_id, str(first_exc))
         raise first_exc
@@ -1073,49 +1131,58 @@ def pipeline_index_pdf(
     # keys no extractor writes (``docling_title``/``pdf_title``/``pdf_author``
     # are the real ones) — so every streamed PDF registered as its filename
     # stem with no author. One shared chain for all PDF title resolution.
-    from nexus.indexer_utils import resolve_pdf_title  # noqa: PLC0415 - circular-dep avoidance (nexus.indexer_utils)
-    _meta = getattr(extraction_result, "metadata", None) or {}
-    title = resolve_pdf_title(_meta, pdf_path, getattr(extraction_result, "text", None))
-    author = str(_meta.get("pdf_author") or _meta.get("author") or "")
-    # Extract year from pdf_creation_date or explicit year field
-    year_raw = 0
-    if _meta:
-        year_raw = _meta.get("year", 0)
-        if not year_raw:
-            creation_date = _meta.get("pdf_creation_date", "")
-            if creation_date:
-                import re as _re  # noqa: PLC0415 - branch-local; deferred to call time
-                m = _re.search(r"(\d{4})", str(creation_date))
-                if m:
-                    year_raw = int(m.group(1))
-    _catalog_pdf_hook(
-        pdf_path=pdf_path,
-        collection_name=collection,
-        title=title,
-        author=author,
-        year=int(year_raw) if year_raw else 0,
-        corpus=corpus,
-        chunk_count=total_chunks,
-        source_uri=source_uri,
-    )
+    #
+    # nexus-uxg4u: never touch the catalog on a dry run — this hook
+    # (unlike the fence calls above) writes unconditionally regardless of
+    # *doc_id*, so it needs its own explicit gate, not just an empty
+    # *doc_id* check.
+    if not dry_run:
+        from nexus.indexer_utils import resolve_pdf_title  # noqa: PLC0415 - circular-dep avoidance (nexus.indexer_utils)
+        _meta = getattr(extraction_result, "metadata", None) or {}
+        title = resolve_pdf_title(_meta, pdf_path, getattr(extraction_result, "text", None))
+        author = str(_meta.get("pdf_author") or _meta.get("author") or "")
+        # Extract year from pdf_creation_date or explicit year field
+        year_raw = 0
+        if _meta:
+            year_raw = _meta.get("year", 0)
+            if not year_raw:
+                creation_date = _meta.get("pdf_creation_date", "")
+                if creation_date:
+                    import re as _re  # noqa: PLC0415 - branch-local; deferred to call time
+                    m = _re.search(r"(\d{4})", str(creation_date))
+                    if m:
+                        year_raw = int(m.group(1))
+        _catalog_pdf_hook(
+            pdf_path=pdf_path,
+            collection_name=collection,
+            title=title,
+            author=author,
+            year=int(year_raw) if year_raw else 0,
+            corpus=corpus,
+            chunk_count=total_chunks,
+            source_uri=source_uri,
+        )
 
-    # RDR-089 document-grain chain — once per PDF boundary at the streaming
-    # pipeline tail. content="" (PDF text streamed not retained); the hook
-    # reads source_path itself per the P0.1 content-sourcing contract.
-    # nexus-tdgc: _catalog_pdf_hook ran above so the catalog entry now
-    # exists; resolve the doc_id and forward it to the document chain.
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - deferred to avoid circular import at module load
-    from nexus.doc_indexer import _lookup_existing_doc_id  # noqa: PLC0415 - deferred to avoid circular import at module load
-    _cat = make_catalog_reader()
-    hooks.fire_document(
-        str(pdf_path), collection, "",
-        doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),
-    )
+        # RDR-089 document-grain chain — once per PDF boundary at the
+        # streaming pipeline tail. content="" (PDF text streamed not
+        # retained); the hook reads source_path itself per the P0.1
+        # content-sourcing contract.
+        # nexus-tdgc: _catalog_pdf_hook ran above so the catalog entry
+        # now exists; resolve the doc_id and forward it to the document
+        # chain.
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - deferred to avoid circular import at module load
+        from nexus.doc_indexer import _lookup_existing_doc_id  # noqa: PLC0415 - deferred to avoid circular import at module load
+        _cat = make_catalog_reader()
+        hooks.fire_document(
+            str(pdf_path), collection, "",
+            doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),
+        )
 
     # nexus-5xn3k.4 RUNFENCE C2: the fence tail — after every possible
     # manifest touch (including the fire_document hook above), before
-    # returning. Gated on doc_id per the no-catalog ingest contract.
-    if doc_id:
+    # returning. Gated on doc_id per the no-catalog ingest contract
+    # (nexus-uxg4u: and explicitly on dry_run).
+    if doc_id and not dry_run:
         from nexus.doc_indexer import _fence_complete, _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
         if total_chunks == 0:
             # MUST: zero extraction is a FAILURE, never /complete(0) — a

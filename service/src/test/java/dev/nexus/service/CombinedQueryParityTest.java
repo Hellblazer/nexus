@@ -102,6 +102,8 @@ class CombinedQueryParityTest {
     private static final String FN_META_384   = "nexus.search_metadata_scoped_384";
     private static final String FN_TOPIC_1024 = "nexus.search_topic_scoped_1024";
     private static final String FN_TOPIC_384  = "nexus.search_topic_scoped_384";
+    // RDR-156 Decision 5 (bead nexus-ubnwk): the fourth combined-query shape.
+    private static final String FN_ASPECT_1024 = "nexus.search_aspect_scoped_1024";
 
     // ── Collections (conformant <type>__<owner>__<model>__<version>) ─────────
     private static final String COLL_M     = "knowledge__cqp-meta__voyage-context-3__v1";       // 1024
@@ -119,6 +121,10 @@ class CombinedQueryParityTest {
     // catalog-008 (nexus-889ff): subtree (dotted tumblers) + where (chunk metadata) fixtures.
     private static final String COLL_SUB   = "knowledge__cqp-sub__voyage-context-3__v1";       // 1024
     private static final String COLL_WHERE = "knowledge__cqp-where__voyage-context-3__v1";     // 1024
+    // RDR-156 Decision 5 (bead nexus-ubnwk): aspect-scoped fixtures.
+    private static final String COLL_ASPECT        = "knowledge__cqp-aspect__voyage-context-3__v1";        // 1024
+    private static final String COLL_ASPECT_NARROW = "knowledge__cqp-aspect-narrow__voyage-context-3__v1"; // 1024
+    private static final String COLL_ASPECT_EXPLAIN = "knowledge__cqp-aspect-explain__voyage-context-3__v1"; // 1024
 
     // ── Topic labels ─────────────────────────────────────────────────────────
     private static final String TOPIC_VEC   = "Vector Search";
@@ -288,6 +294,9 @@ class CombinedQueryParityTest {
             seedMetaDocMeta(su, COLL_WHERE, "w2", 0.8, 0.6, "{\"lang\": \"py\"}");     // 0.2
             seedMetaDocMeta(su, COLL_WHERE, "w3", 0.6, 0.8, "{\"lang\": \"java\"}");   // 0.4
 
+            // ----- aspect-scoped fixture (1024): RDR-156 Decision 5 -----
+            seedAspectFixture(su);
+
             // ----- large fixture for the EXPLAIN group (GROUP 3) -----
             seedExplainFixture(su);
 
@@ -295,7 +304,8 @@ class CombinedQueryParityTest {
             // bulk-loaded tables to rows=1 and wrongly prefer a filter-first sort over
             // the HNSW index in GROUP 3.
             for (String tbl : List.of("chunks", "catalog_documents",
-                    "catalog_document_chunks", "topic_assignments", "topics")) {
+                    "catalog_document_chunks", "topic_assignments", "topics",
+                    "document_aspects")) {
                 su.createStatement().execute("ANALYZE nexus." + tbl);
             }
         }
@@ -340,6 +350,109 @@ class CombinedQueryParityTest {
             "SELECT '" + TENANT_A + "', decode(lpad(g::text, 64, '0'), 'hex'), " + topicId + ", '"
             + COLL_EXPLAIN + "', " +
             "'2026-01-01T00:00:00+00'::timestamptz FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+    }
+
+    /**
+     * Aspect-scoped fixture COLL_ASPECT (RDR-156 Decision 5, bead nexus-ubnwk) — five
+     * docs, each seeded via {@link #seedMetaDoc} (catalog doc + chunk + manifest):
+     * <pre>
+     *   doc   proposed_method            confidence  doc_id     dir        dist
+     *   asp1  "Uses gradient descent"    0.9         stamped    (1.0,0.0)  0.0
+     *   asp2  "Uses gradient boosting"   0.2         stamped    (0.8,0.6)  0.2
+     *   asp3  (no document_aspects row)  —           —          (0.6,0.8)  0.4
+     *   asp4  "Uses gradient descent"    0.9         stamped    (0.0,1.0)  1.0
+     *   asp5  "Uses gradient descent"    0.9         NULL       (-1.0,0.0) 2.0
+     * </pre>
+     * field=proposed_method, pattern="gradient" → matches asp1,asp2,asp4 (asp3 has no
+     * aspects row — INNER JOIN excludes it; asp5's doc_id is NULL — the join's own
+     * {@code a.doc_id = d.tumbler} condition excludes it even though its content
+     * matches, proving "NULL doc_id never matches" independent of any field/pattern).
+     * pattern="descent" → matches asp1,asp4 only (asp2 says "boosting"); asp2 is
+     * nearer than asp4, so a top-K=2 vector-then-filter two-step misses asp4 entirely
+     * — the GROUP 10 recall-superset probe.
+     */
+    private void seedAspectFixture(Connection su) throws Exception {
+        insertCollection(su, TENANT_A, COLL_ASPECT);
+        seedMetaDoc(su, 1024, COLL_ASPECT, "asp1", "paper", "asp", 2024, "research", 1.0, 0.0);
+        insertAspectRow(su, TENANT_A, COLL_ASPECT, "asp1", "asp1",
+                        "Uses gradient descent", 0.9);
+        seedMetaDoc(su, 1024, COLL_ASPECT, "asp2", "paper", "asp", 2024, "research", 0.8, 0.6);
+        insertAspectRow(su, TENANT_A, COLL_ASPECT, "asp2", "asp2",
+                        "Uses gradient boosting", 0.2);
+        seedMetaDoc(su, 1024, COLL_ASPECT, "asp3", "paper", "asp", 2024, "research", 0.6, 0.8);
+        // asp3 deliberately has NO document_aspects row at all.
+        seedMetaDoc(su, 1024, COLL_ASPECT, "asp4", "paper", "asp", 2024, "research", 0.0, 1.0);
+        insertAspectRow(su, TENANT_A, COLL_ASPECT, "asp4", "asp4",
+                        "Uses gradient descent", 0.9);
+        seedMetaDoc(su, 1024, COLL_ASPECT, "asp5", "paper", "asp", 2024, "research", -1.0, 0.0);
+        insertAspectRow(su, TENANT_A, COLL_ASPECT, "asp5", null,
+                        "Uses gradient descent", 0.9);
+
+        // Narrow fixture (GROUP 9-style exact recall): 3 chunks, all matching the
+        // aspect predicate, distant query vector.
+        insertCollection(su, TENANT_A, COLL_ASPECT_NARROW);
+        seedMetaDoc(su, 1024, COLL_ASPECT_NARROW, "asn1", "paper", "asn", 2024, "research", 0.0, 1.0);
+        insertAspectRow(su, TENANT_A, COLL_ASPECT_NARROW, "asn1", "asn1", "Uses gradient descent", 0.9);
+        seedMetaDoc(su, 1024, COLL_ASPECT_NARROW, "asn2", "paper", "asn", 2024, "research", -0.2, 0.9797959);
+        insertAspectRow(su, TENANT_A, COLL_ASPECT_NARROW, "asn2", "asn2", "Uses gradient descent", 0.9);
+        seedMetaDoc(su, 1024, COLL_ASPECT_NARROW, "asn3", "paper", "asn", 2024, "research", 0.2, 0.9797959);
+        insertAspectRow(su, TENANT_A, COLL_ASPECT_NARROW, "asn3", "asn3", "Uses gradient descent", 0.9);
+
+        // Bulk, non-selective fixture for the EXPLAIN group: every doc has a matching
+        // aspects row, so the planner cannot use aspect selectivity to avoid the HNSW
+        // index — the same "HNSW survives the join" property GROUP 3 pins for the
+        // metadata/topic joins.
+        seedAspectExplainFixture(su);
+    }
+
+    private static void insertAspectRow(Connection su, String tenantId, String collection,
+                                        String sourcePath, String docId,
+                                        String proposedMethod, double confidence)
+            throws Exception {
+        su.createStatement().execute(
+            "INSERT INTO nexus.document_aspects " +
+            "  (tenant_id, collection, source_path, proposed_method, confidence, " +
+            "   extracted_at, model_version, extractor_name, doc_id) " +
+            "VALUES ('" + tenantId + "', '" + collection + "', '" + sourcePath + "', " +
+            sqlText(proposedMethod) + ", " + confidence + ", " +
+            "'2026-01-01T00:00:00+00'::timestamptz, 'cqp-test-model', 'cqp-test-extractor', " +
+            (docId == null ? "NULL" : sqlText(docId)) + ") " +
+            "ON CONFLICT (tenant_id, collection, source_path) DO UPDATE SET " +
+            "  proposed_method = EXCLUDED.proposed_method, " +
+            "  confidence = EXCLUDED.confidence, doc_id = EXCLUDED.doc_id");
+    }
+
+    /**
+     * Bulk-seed {@link #EXPLAIN_ROWS} paper documents in COLL_ASPECT_EXPLAIN, each
+     * with a matching {@code document_aspects} row (proposed_method contains
+     * "gradient", doc_id pre-stamped — this fixture models the POST-backfill steady
+     * state, not the backfill itself). Mirrors {@link #seedExplainFixture}'s volume
+     * and non-selectivity rationale.
+     */
+    private void seedAspectExplainFixture(Connection su) throws Exception {
+        insertCollection(su, TENANT_A, COLL_ASPECT_EXPLAIN);
+        su.createStatement().execute(
+            "INSERT INTO nexus.catalog_documents " +
+            "  (tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) " +
+            "SELECT '" + TENANT_A + "', 'asx'||g, 'Doc '||g, 'asxauthor', 2024, 'paper', 'research', '" +
+            COLL_ASPECT_EXPLAIN + "' FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        su.createStatement().execute(
+            "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(1024) + ") " +
+            "SELECT '" + TENANT_A + "', '" + COLL_ASPECT_EXPLAIN + "', decode(lpad((g+1000000)::text, 64, '0'), 'hex'), 'asx'||g, " +
+            "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::vector " +
+            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        su.createStatement().execute(
+            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
+            "SELECT '" + TENANT_A + "', 'asx'||g, 0, decode(lpad((g+1000000)::text, 64, '0'), 'hex'), '" + COLL_ASPECT_EXPLAIN + "' " +
+            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        su.createStatement().execute(
+            "INSERT INTO nexus.document_aspects " +
+            "  (tenant_id, collection, source_path, proposed_method, confidence, " +
+            "   extracted_at, model_version, extractor_name, doc_id) " +
+            "SELECT '" + TENANT_A + "', '" + COLL_ASPECT_EXPLAIN + "', 'asx'||g, " +
+            "'Uses gradient descent', 0.9, '2026-01-01T00:00:00+00'::timestamptz, " +
+            "'cqp-test-model', 'cqp-test-extractor', 'asx'||g " +
+            "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -813,6 +926,191 @@ class CombinedQueryParityTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // GROUP 10 — aspect-scoped (RDR-156 Decision 5, bead nexus-ubnwk): combined
+    // vector + document_aspects predicate query.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(100)
+    void aspect_queryVectorIsFirstArgument_signaturePinned() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT pg_catalog.pg_get_function_arguments(p.oid) AS args " +
+                "  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace " +
+                " WHERE n.nspname = 'nexus' AND p.proname = 'search_aspect_scoped_1024'");
+            assertThat(rs.next())
+                .as("nexus.search_aspect_scoped_1024 must exist (vectors-008)").isTrue();
+            String args = rs.getString("args");
+            assertThat(args)
+                .as("aspect-scoped query vector must be the FIRST argument, typed `vector`")
+                .startsWith("p_query vector");
+            assertThat(args)
+                .as("aspect-scoped signature: collections[], field, pattern, "
+                    + "min_confidence, where, n")
+                .contains("p_collections text[]")
+                .contains("p_field text")
+                .contains("p_pattern text")
+                .contains("p_min_confidence double precision")
+                .contains("p_where jsonb")
+                .contains("p_n integer");
+        }
+    }
+
+    @Test @Order(101)
+    void aspect_fieldPatternFilter_exactRankedByDistance_excludesNoRowAndNullDocId() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            assertThat(callAspect(su, 1024, COLL_ASPECT, "proposed_method", "gradient", null, 10))
+                .as("field=proposed_method,pattern=gradient → {asp1,asp2,asp4} ranked by "
+                    + "distance (0.0,0.2,1.0); asp3 (no document_aspects row) and asp5 "
+                    + "(doc_id NULL, content otherwise matches) are BOTH excluded — the "
+                    + "INNER JOIN to document_aspects and the join's own "
+                    + "a.doc_id = d.tumbler condition")
+                .containsExactly("asp1", "asp2", "asp4");
+        }
+    }
+
+    @Test @Order(102)
+    void aspect_minConfidenceFilter_exact() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            assertThat(callAspect(su, 1024, COLL_ASPECT, null, null, 0.5, 10))
+                .as("min_confidence=0.5 → {asp1,asp4} (confidence 0.9); asp2 (0.2) excluded; "
+                    + "asp3 (no row) and asp5 (NULL doc_id) excluded regardless")
+                .containsExactly("asp1", "asp4");
+        }
+    }
+
+    @Test @Order(103)
+    void aspect_unknownField_returnsEmpty() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            assertThat(callAspect(su, 1024, COLL_ASPECT, "no_such_field", "gradient", null, 10))
+                .as("an unrecognized p_field falls through the SQL CASE to NULL — "
+                    + "NULL ILIKE ... is NULL (never TRUE) — so it matches NOTHING, "
+                    + "never every row")
+                .isEmpty();
+        }
+    }
+
+    @Test @Order(104)
+    void aspect_nullDocId_neverMatchesEvenWithFullyMatchingContent() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            // asp5's document_aspects row matches field/pattern/confidence identically
+            // to asp1/asp4 — the ONLY difference is doc_id IS NULL. No call, with any
+            // combination of filters, can ever surface it.
+            assertThat(callAspect(su, 1024, COLL_ASPECT, "proposed_method", "descent", null, 10))
+                .as("pattern=descent → {asp1,asp4}; asp5 (identical content, NULL doc_id) "
+                    + "never appears")
+                .containsExactly("asp1", "asp4")
+                .doesNotContain("asp5");
+        }
+    }
+
+    @Test @Order(105)
+    void aspect_tombstone_dropsAndReturns() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            assertThat(callAspect(su, 1024, COLL_ASPECT, "proposed_method", "gradient", null, 10))
+                .as("baseline: {asp1,asp2,asp4}")
+                .containsExactly("asp1", "asp2", "asp4");
+
+            setDeleted(su, TENANT_A, "asp2", true);
+            assertThat(callAspect(su, 1024, COLL_ASPECT, "proposed_method", "gradient", null, 10))
+                .as("tombstoned doc asp2 must drop out of aspect-scoped results")
+                .containsExactly("asp1", "asp4");
+
+            setDeleted(su, TENANT_A, "asp2", false);
+            assertThat(callAspect(su, 1024, COLL_ASPECT, "proposed_method", "gradient", null, 10))
+                .as("restored doc asp2 must return")
+                .containsExactly("asp1", "asp2", "asp4");
+        }
+    }
+
+    @Test @Order(106)
+    void aspect_narrowCollection_exactRecall_returnsAllN() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            assertThat(rawChunkCount(su, 1024, TENANT_A, COLL_ASPECT_NARROW))
+                .as("CONTROL: COLL_ASPECT_NARROW must hold exactly 3 chunks").isEqualTo(3);
+
+            List<String> got = callAspect(su, 1024, COLL_ASPECT_NARROW,
+                                          "proposed_method", "gradient", null, 10);
+            assertThat(got)
+                .as("narrow collection (size 3 < ef_search), distant query vector, "
+                    + "non-selective aspect predicate (all 3 match): the combined query "
+                    + "must return EXACTLY 3 rows (== N) — a silent under-return at the "
+                    + "scan ceiling is the precise Finding-5b hazard, now for the "
+                    + "aspects join too")
+                .hasSize(3)
+                .containsExactlyInAnyOrder("asn1", "asn2", "asn3");
+        }
+    }
+
+    @Test @Order(107)
+    void explain_aspectScoped_usesHnswIndex_notSeqScan() throws Exception {
+        // Large, NON-selectively-filtered fixture (every doc matches "gradient"): the
+        // vector ANN is the driving access path, so a correct impl uses the HNSW
+        // index even through the added document_aspects join.
+        String plan = explainAspectPlan(1024, COLL_ASPECT_EXPLAIN, "proposed_method", "gradient");
+        assertThat(plan)
+            .as("combined aspect-scoped query must use the HNSW index "
+                + "idx_chunks_embedding_1024 for the ANN ordering. Plan was:%n%s", plan)
+            .contains("idx_chunks_embedding_1024");
+        assertThat(plan)
+            .as("the document_aspects join must NOT defeat the index into a Seq Scan "
+                + "on nexus.chunks. Plan was:%n%s", plan)
+            .doesNotContain("Seq Scan on chunks");
+        assertThat(plan)
+            .as("a Function Scan node means the function is not inlinable (plpgsql) — "
+                + "vectors-008 must use an inlinable LANGUAGE sql function. Plan was:%n%s",
+                plan)
+            .doesNotContain("Function Scan");
+    }
+
+    @Test @Order(108)
+    void parity_aspectScoped_equalsTwoStepOracle_whenNonSelective() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            // topK covers every fixture chunk in COLL_ASPECT (5) — no truncation loss,
+            // so the two-step path and the combined query must agree exactly.
+            List<String> twoStep = twoStepAspectOracle(su, 1024, COLL_ASPECT, "gradient", 10);
+            assertThat(twoStep)
+                .as("CONTROL: two-step oracle (top-10, non-truncating) for pattern="
+                    + "gradient is [asp1,asp2,asp4]")
+                .containsExactly("asp1", "asp2", "asp4");
+            assertThat(callAspect(su, 1024, COLL_ASPECT, "proposed_method", "gradient", null, 10))
+                .as("combined aspect-scoped query must return EXACTLY the two-step "
+                    + "oracle's result when the vector window is non-truncating "
+                    + "(ordering included)")
+                .containsExactlyElementsOf(twoStep);
+        }
+    }
+
+    @Test @Order(109)
+    void recall_aspectScoped_strictlySupersetsTwoStepOracle_whenSelective() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            // Two-step: vector top-2 (nearest are asp1 dist=0.0, asp2 dist=0.2) THEN
+            // filter by pattern=descent — asp2 says "boosting", fails the text test —
+            // two-step result = [asp1] only. asp4 (dist=1.0, "descent") is OUTSIDE the
+            // top-2 vector window and is never even considered.
+            List<String> twoStep = twoStepAspectOracle(su, 1024, COLL_ASPECT, "descent", 2);
+            assertThat(twoStep)
+                .as("CONTROL: two-step oracle (top-2, truncating) for pattern=descent "
+                    + "is [asp1] only — asp4 is outside the top-2 vector window")
+                .containsExactly("asp1");
+
+            List<String> combined = callAspect(su, 1024, COLL_ASPECT, "proposed_method",
+                                               "descent", null, 10);
+            assertThat(combined)
+                .as("combined aspect-scoped query applies the predicate BEFORE the "
+                    + "vector limit — it must find asp4 too, which the two-step path "
+                    + "missed entirely")
+                .containsExactly("asp1", "asp4");
+            assertThat(combined)
+                .as("combined result must be a STRICT superset of the two-step oracle "
+                    + "(recall win exactly when the predicate is selective and the "
+                    + "vector window is small)")
+                .containsAll(twoStep)
+                .hasSizeGreaterThan(twoStep.size());
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // CALL HELPERS (combined-query functions)
     // ══════════════════════════════════════════════════════════════════════════
 
@@ -863,6 +1161,32 @@ class CombinedQueryParityTest {
             "SELECT id FROM nexus.search_metadata_scoped_" + dim + "(" +
             queryVecLiteral(dim) + ", ARRAY['" + collection + "']::text[], " +
             sqlText(contentType) + ", NULL, NULL::int, NULL, NULL::text, NULL::jsonb, 10)";
+        return explain(inner);
+    }
+
+    /** Invoke search_aspect_scoped_&lt;dim&gt;; returns ids in returned order. */
+    private List<String> callAspect(Connection conn, int dim, String collection,
+                                    String field, String pattern, Double minConfidence,
+                                    int n) throws Exception {
+        String sql =
+            "SELECT id FROM nexus.search_aspect_scoped_" + dim + "(" +
+            queryVecLiteral(dim) + ", " +
+            "ARRAY['" + collection + "']::text[], " +
+            sqlText(field) + ", " +
+            sqlText(pattern) + ", " +
+            (minConfidence == null ? "NULL::float8" : minConfidence.toString()) + ", " +
+            "NULL::jsonb, " +
+            n + ")";
+        return runIds(conn, sql);
+    }
+
+    /** EXPLAIN (no ANALYZE) the aspect-scoped function with seqscan disabled. */
+    private String explainAspectPlan(int dim, String collection, String field, String pattern)
+            throws Exception {
+        String inner =
+            "SELECT id FROM nexus.search_aspect_scoped_" + dim + "(" +
+            queryVecLiteral(dim) + ", ARRAY['" + collection + "']::text[], " +
+            sqlText(field) + ", " + sqlText(pattern) + ", NULL::float8, NULL::jsonb, 10)";
         return explain(inner);
     }
 
@@ -960,6 +1284,43 @@ class CombinedQueryParityTest {
             "                      AND d.deleted_at IS NULL)) " +
             " ORDER BY c." + DimTables.embeddingColumn(dim) + " <=> " + queryVecLiteral(dim) + " ASC";
         return runIds(conn, sql);
+    }
+
+    /**
+     * Two-step oracle the aspect-scoped function retires: (1) raw vector rank, TOP
+     * {@code topK} only (models the {@code search} tool's top-N truncation), then
+     * (2) app-side filter of THOSE candidates by their document_aspects row's
+     * proposed_method (ILIKE pattern) — a candidate outside the top-{@code topK}
+     * vector window is never considered, regardless of whether it matches the
+     * pattern. This is the recall hazard: a selective aspect predicate cannot widen
+     * a vector window that already truncated it away.
+     */
+    private List<String> twoStepAspectOracle(Connection conn, int dim, String collection,
+                                             String pattern, int topK) throws Exception {
+        String topKSql =
+            "SELECT d.tumbler AS id " +
+            "  FROM nexus.catalog_documents d " +
+            "  JOIN nexus.catalog_document_chunks m " +
+            "    ON m.tenant_id = d.tenant_id AND m.doc_id = d.tumbler " +
+            "  JOIN " + DimTables.CHUNKS_TABLE_NAME + " c " +
+            "    ON c.tenant_id = m.tenant_id AND c.collection = m.collection " +
+            "   AND c.chash = m.chash " +
+            " WHERE m.collection = '" + collection + "' " +
+            "   AND d.deleted_at IS NULL " +
+            " ORDER BY c." + DimTables.embeddingColumn(dim) + " <=> " + queryVecLiteral(dim) + " ASC " +
+            " LIMIT " + topK;
+        List<String> topKIds = runIds(conn, topKSql);
+        List<String> matched = new ArrayList<>();
+        for (String id : topKIds) {
+            String sql =
+                "SELECT 1 FROM nexus.document_aspects a " +
+                " WHERE a.tenant_id = '" + TENANT_A + "' AND a.doc_id = '" + id + "' " +
+                "   AND a.proposed_method ILIKE '%" + pattern + "%'";
+            try (var st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+                if (rs.next()) matched.add(id);
+            }
+        }
+        return matched;
     }
 
     // ══════════════════════════════════════════════════════════════════════════

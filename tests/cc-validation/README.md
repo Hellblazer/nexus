@@ -21,6 +21,7 @@ silently nullified scenarios for an hour-plus at least once.
 | Symptom | Likely trap | Section |
 |---|---|---|
 | Every scenario fails at startup, pane shows `API Error: 401` | stale OAuth creds | [Auth](#auth) |
+| Every scenario reports `tool_ran=0` / "MCP connection issue" although the run printed a green `[auth]` line | the provisioned credential is a token-less keychain husk; the pane says `Login expired · Please run /login` | [Auth](#auth) |
 | MCP tool "not available", `STUB_LOG` empty | project `.mcp.json` never connects + stub python lacks `mcp` | [MCP servers](#mcp-servers-the-big-one) |
 | `can't find pane: cc-val`, suite aborts mid-run | bare `tmux` instead of `_tmux` (wrong socket) | [tmux isolation](#tmux-isolation) |
 | Hook "runs" but writes nothing | PreToolUse hooks don't inherit harness env | [Hooks](#hooks) |
@@ -45,6 +46,55 @@ at runtime and refreshes the on-disk snapshot for the Linux/CI fallback. The
 A well-written scenario is **fail-closed**: it asserts the *presence* of an
 expected marker, so a 401 lands in the `else` branch (a real fail), never a
 vacuous pass. Keep it that way.
+
+### More than one keychain item carries the service name (2026-08-28)
+
+`security find-generic-password -s 'Claude Code-credentials' -w` with **no
+`-a`** returns an ARBITRARY match. Measured on this box: two items share that
+service name — an `acct="unknown"` item created 2026-08-23 whose
+`claudeAiOauth` is an empty husk (`accessToken ""`, `refreshToken ""`,
+`expiresAt 0`), and the `acct="<login user>"` item the live CLI actually
+refreshes. The bare lookup returned the husk.
+
+`provision_credentials` used to validate only that the blob parsed as JSON —
+which a husk does — so it printed `[auth] provisioned from macOS keychain
+(live)` and every scenario ran against a **logged-out** session. Scenarios 16
+and 28 then reported `hook_fired=0 tool_ran=0` and their guards blamed the MCP
+connection, while the pane had said the real thing the whole time:
+
+```
+⏺ Login expired · Please run /login          # in the transcript
+                        Not logged in · Run /login   # in the status bar
+```
+
+Worse, the same code path then ran `cp "$dest" "$AUTH_DIR/.credentials.json"`,
+so the husk **overwrote the fallback snapshot** — the harness destroyed its own
+only alternative credential source.
+
+Both are fixed: `runner.sh::_cred_tool pick` enumerates the accounts under the
+service (attribute-only `security dump-keychain`, no secret read, no prompt),
+rejects any item with no `accessToken` and no `refreshToken` (and any expired
+one with no refresh token), takes the freshest survivor, and **fails loud**
+naming `claude /login` when nothing is usable. The snapshot is refreshed only
+from a credential that passed that check.
+
+**Lesson (same class as the 2026-05-31 trio below): a successful FETCH is not
+a valid CREDENTIAL.** `[auth] provisioned …` is a provenance line, not an auth
+verification — never read it as "auth is fine".
+
+### Watching a run: `CC_VAL_DEBUG_CAPTURE=1`
+
+```bash
+CC_VAL_DEBUG_CAPTURE=1 ./tests/cc-validation/runner.sh --scenario 16
+```
+
+Polls `capture-pane` every 2s into `$CC_VAL_DEBUG_DIR` (default
+`$TMPDIR/cc-val-debug`), alongside per-tick copies of `STUB_LOG` and
+`HOOK_LOG`. Snapshots live outside `$TEST_HOME`, so the EXIT trap's `rm -rf`
+cannot eat them, and the poller is killed at cleanup. Sampling DURING the run
+is the only option — the TUI's alternate screen is gone once claude exits, so
+a post-mortem capture shows nothing. This is the instrument that found the
+`Login expired` line above; reach for it before hypothesising.
 
 ## MCP servers (the big one)
 
@@ -300,6 +350,26 @@ rather than hypothesising — twice the first hypothesis was wrong:
 Lesson encoded in the convention above: assert on forensic side-effects, and
 when a result is surprising, add a deterministic probe before believing a
 behavioural hypothesis.
+
+## Root cause resolved 2026-08-28 (nexus-qs1g6)
+
+- **16 and 28 at CC 2.1.251 were NOT a prompt-delivery regression.** All four
+  sub-runs reported `hook_fired=0 tool_ran=0`, and the first two hypotheses
+  (a new startup dialog eating keystrokes; deferred MCP tools not loading) were
+  both wrong. A `CC_VAL_DEBUG_CAPTURE=1` run settled it in one pass: the TUI
+  reached input-ready, `claude_prompt`'s `load-buffer`/`paste-buffer` + Enter
+  delivered BOTH prompts verbatim, the stub server spawned — and the model
+  answered `Login expired · Please run /login`. The provisioned credential was
+  a token-less keychain husk (see [Auth](#auth)). With the credential picker
+  fixed, both scenarios produce non-vacuous verdicts: 16 passes with
+  `tool_ran=1` in both sub-runs, and 28 passes with `28a allow → tool_ran=1`,
+  `28b deny → tool_ran=0`, hook fired and server connected in both.
+- Two latent harness bugs found in the same pass, both in the `claude_start_auto`
+  copies in scenarios 16 and 28: the readiness pattern `auto.*on` matches the
+  ECHOED COMMAND LINE (`...=auto --mcp-config … --strict-mcp-con`) and `❯ `
+  matches an ordinary shell prompt, so the loop broke on its first poll no
+  matter what Claude was doing — only the `sleep 8` + `sleep 5` were holding it
+  together. Both now anchor on the status bar's literal `auto mode on`.
 
 ## Patterns from `~/git/recording-rig`
 

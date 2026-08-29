@@ -68,9 +68,9 @@ class TestDescendantsRoute:
         self, t2_service_env,
     ) -> None:
         client = _client()
-        expected = _seed_descendants(client, "701", _CORPUS_SIZE)
+        expected = _seed_descendants(client, "70.1", _CORPUS_SIZE)
 
-        got_tumblers = {d["tumbler"] for d in client.descendants("701")}
+        got_tumblers = {d["tumbler"] for d in client.descendants("70.1")}
 
         missing = expected - got_tumblers
         extra = got_tumblers - expected
@@ -84,14 +84,14 @@ class TestDescendantsRoute:
         self, t2_service_env,
     ) -> None:
         client = _client()
-        target = _seed_descendants(client, "702", 5)
-        sibling = _seed_descendants(client, "703", 5)  # must NOT leak in
+        target = _seed_descendants(client, "70.2", 5)
+        sibling = _seed_descendants(client, "70.3", 5)  # must NOT leak in
 
-        got_tumblers = {d["tumbler"] for d in client.descendants("702")}
+        got_tumblers = {d["tumbler"] for d in client.descendants("70.2")}
 
         assert got_tumblers == target
         assert not (got_tumblers & sibling), "sibling subtree leaked into descendants()"
-        assert "702" not in got_tumblers, "the root itself is not its own descendant"
+        assert "70.2" not in got_tumblers, "the root itself is not its own descendant"
 
 
 class TestDescendantsFallbackOn404:

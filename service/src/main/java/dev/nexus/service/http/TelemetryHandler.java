@@ -28,6 +28,7 @@ import java.util.Map;
  *   POST /v1/telemetry/relevance/log           single relevance event
  *   POST /v1/telemetry/relevance/batch         batch relevance events
  *   GET  /v1/telemetry/relevance/query         query by filters
+ *   GET  /v1/telemetry/relevance/stats         count/oldest/newest (nexus-v0x32)
  *   POST /v1/telemetry/relevance/expire        expire old entries
  *   POST /v1/telemetry/search/batch            batch search telemetry
  *   GET  /v1/telemetry/search/stats            collection health stats
@@ -39,8 +40,6 @@ import java.util.Map;
  *   GET  /v1/telemetry/tier_writes/query       aggregated counts for nx tier-status (nexus-59wjj)
  *   GET  /v1/telemetry/tier_writes/list        per-row detail incl. target_title, capped page +
  *                                              exact total (nexus-onjvy)
- *   POST /v1/telemetry/consents/record         record a consent grant/revoke (RDR-182)
- *   GET  /v1/telemetry/consents/list           list the tenant's consent trail (RDR-182)
  *   GET  /v1/telemetry/retention/markers       cumulative-deletes retention markers (nexus-24p05)
  *   POST /v1/telemetry/nx_answer_runs/record   record an nx_answer run
  *   GET  /v1/telemetry/nx_answer_runs/query     rows + exact aggregates (nexus-eho3u)
@@ -110,6 +109,7 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/relevance/log"          -> handleRelevanceLog(exchange, tenant, method);
                 case "/relevance/batch"        -> handleRelevanceBatch(exchange, tenant, method);
                 case "/relevance/query"        -> handleRelevanceQuery(exchange, tenant, method);
+                case "/relevance/stats"        -> handleRelevanceStats(exchange, tenant, method);
                 case "/relevance/expire"       -> handleRelevanceExpire(exchange, tenant, method);
                 case "/search/batch"           -> handleSearchBatch(exchange, tenant, method);
                 case "/search/stats"           -> handleSearchStats(exchange, tenant, method);
@@ -118,8 +118,6 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/tier_writes/record"     -> handleTierWriteRecord(exchange, tenant, method);
                 case "/tier_writes/query"      -> handleTierWritesQuery(exchange, tenant, method);
                 case "/tier_writes/list"       -> handleTierWritesList(exchange, tenant, method);
-                case "/consents/record"        -> handleConsentRecord(exchange, tenant, method);
-                case "/consents/list"          -> handleConsentList(exchange, tenant, method);
                 case "/retention/markers"      -> handleRetentionMarkers(exchange, tenant, method);
                 case "/nx_answer_runs/record"  -> handleNxAnswerRunRecord(exchange, tenant, method);
                 case "/nx_answer_runs/query"   -> handleNxAnswerRunsQuery(exchange, tenant, method);
@@ -183,6 +181,18 @@ public final class TelemetryHandler implements HttpHandler {
         int limit = parseIntParam(params, "limit", 100);
         var rows = repo.getRelevanceLog(tenant, query, chunkId, action, sessionId, limit);
         HttpUtil.send(ex, 200, json(rows));
+    }
+
+    /**
+     * GET /v1/telemetry/relevance/stats (nexus-v0x32, playbook §4.5 telemetry
+     * baseline): {@code {count, oldest, newest}} for the tenant's whole
+     * relevance_log — no filters, no paging, so a single call answers the
+     * baseline's "row count, oldest surviving row timestamp" figures without
+     * paging through {@code /relevance/query}'s capped 300-row window.
+     */
+    private void handleRelevanceStats(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        HttpUtil.send(ex, 200, json(repo.relevanceStats(tenant)));
     }
 
     private void handleRelevanceExpire(HttpExchange ex, String tenant, String method) throws IOException {
@@ -293,23 +303,6 @@ public final class TelemetryHandler implements HttpHandler {
         int limit = parseIntParam(params, "limit", 100);
         var result = repo.listTierWrites(tenant, sessionId, since, lastN, limit);
         HttpUtil.send(ex, 200, json(result));
-    }
-
-    // ── consents (RDR-182 nexus-ng2sy: service-mode consent-audit parity) ────────
-
-    private void handleConsentRecord(HttpExchange ex, String tenant, String method) throws IOException {
-        requireMethod(ex, method, "POST");
-        var body = readBody(ex);
-        String scope = requireString(body, "scope");
-        String tsIso = optStr(body, "ts");
-        boolean granted = requireBool(body, "granted");
-        repo.recordConsent(tenant, scope, tsIso, granted);
-        HttpUtil.send(ex, 200, json(Map.of("ok", true)));
-    }
-
-    private void handleConsentList(HttpExchange ex, String tenant, String method) throws IOException {
-        requireMethod(ex, method, "GET");
-        HttpUtil.send(ex, 200, json(repo.listConsents(tenant)));
     }
 
     /**

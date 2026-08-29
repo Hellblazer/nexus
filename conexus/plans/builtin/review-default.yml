@@ -49,5 +49,5 @@ plan_json:
       fields: decision,rationale,rdr
   - tool: compare
     args:
-      criterion: decision-drift
+      focus: decision-drift
       inputs: $step3.contents

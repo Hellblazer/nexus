@@ -400,6 +400,52 @@ class TestT3VsCatalog:
         assert len(payload["t3_orphans"]) == 1
         assert payload["t3_orphans"][0]["name"] == "code__orphan"
         assert payload["t3_orphans"][0]["chunk_count"] == 1
+        assert payload["t3_orphans"][0]["class"] == "orphan"
+
+    def test_t3_tombstoned_only_reported_separately_never_fails(
+        self, isolated_nexus, runner, chroma_client,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """nexus-8tnz2 fix-round CRITICAL 2: a T3 collection with chunks
+        whose ONLY catalog document has been soft-deleted (tombstoned,
+        still restorable until purge-trash) must be reported as
+        t3_tombstoned_only, NEVER as a t3_orphans/FAIL -- it is not
+        debris, it is data pending purge."""
+        cat = ActiveCatalog()
+        owner = cat.register_owner("nexus", "repo", repo_hash="cdcd")
+        doc = cat.register(
+            owner, "doc.md", content_type="prose",
+            file_path="doc.md", physical_collection="docs__tombstoned",
+        )
+        assert cat.delete_document(doc) is True
+
+        _seed(chroma_client, "docs__tombstoned", [
+            {"id": "c1", "content": "x"},
+        ])
+
+        class _FakeT3:
+            _client = chroma_client
+
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
+            def list_collections(self):
+                return [{"name": "docs__tombstoned"}]
+
+        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
+        result = runner.invoke(
+            doctor_cmd, ["--t3-vs-catalog", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)["t3_vs_catalog"]
+        assert payload["pass"] is True
+        assert payload["t3_orphans"] == []
+        assert len(payload["t3_tombstoned_only"]) == 1
+        row = payload["t3_tombstoned_only"][0]
+        assert row["name"] == "docs__tombstoned"
+        assert row["chunk_count"] == 1
+        assert row["class"] == "tombstoned-only"
+        assert row["tombstoned_count"] == 1
 
     def test_doc_pointing_at_missing_t3_detected(
         self, isolated_nexus, runner, chroma_client,

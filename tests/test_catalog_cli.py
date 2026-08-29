@@ -167,6 +167,7 @@ class TestRegisterAndShow:
         assert result.exit_code == 0
         data = json.loads(result.stdout)
         assert data["title"] == "Test Paper"
+        assert "kind" not in data
 
     def test_register_with_explicit_source_uri(
         self, initialized_catalog, catalog_env,
@@ -205,6 +206,44 @@ class TestRegisterAndShow:
         # renders ClickException via echo, not via stderr/exception).
         assert result.exit_code != 0
         assert "no scheme" in result.output
+
+    def test_show_depth_two_tumbler_renders_owner_card(
+        self, initialized_catalog, catalog_env,
+    ):
+        """nexus-v3w9n: catalog-034 grammar makes a depth-2 tumbler an OWNER
+        address, not a document one. Pre-fix this rendered an
+        undifferentiated "Not found" for a perfectly valid owner prefix.
+        """
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register", "--title", "Test Paper", "--owner", "1.1",
+        ])
+        result = runner.invoke(main, ["catalog", "show", "1.1"])
+        assert result.exit_code == 0, result.output
+        assert "Owner:" in result.output
+        assert "Documents:  1" in result.output
+
+    def test_show_depth_two_tumbler_json(
+        self, initialized_catalog, catalog_env,
+    ):
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register", "--title", "Test Paper", "--owner", "1.1",
+        ])
+        result = runner.invoke(main, ["catalog", "show", "1.1", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert data["kind"] == "owner"
+        assert data["tumbler_prefix"] == "1.1"
+        assert data["document_count"] == 1
+
+    def test_show_depth_two_unknown_owner_prefix_not_found(
+        self, initialized_catalog, catalog_env,
+    ):
+        runner = CliRunner()
+        result = runner.invoke(main, ["catalog", "show", "1.999"])
+        assert result.exit_code != 0
+        assert "Not found" in result.output
 
     def test_show_omits_uri_line_when_empty(
         self, initialized_catalog, catalog_env,
@@ -1216,9 +1255,12 @@ class _FakeFullCat:
     def all_documents(self, limit=0):
         return list(self._entries)
 
-    def collection_doc_counts(self):
+    def collection_doc_counts(self, *, include_deleted=False):
         if self._doc_counts_exc is not None:
             raise self._doc_counts_exc
+        # nexus-8tnz2 fix-round: no tombstone population modeled -- same
+        # dict for both live-only and include_deleted=True, so every
+        # zero-live-doc row keeps classifying as "orphan" unchanged.
         return dict(self._doc_counts)
 
     def manifest_verify_all(self):
@@ -1916,7 +1958,7 @@ class TestVerifyCommand:
             def all_documents(self, limit=0):
                 return list(self._entries)
 
-            def collection_doc_counts(self):
+            def collection_doc_counts(self, *, include_deleted=False):
                 return dict(self._doc_counts)
 
             def manifest_verify_all(self):
@@ -3102,11 +3144,21 @@ class TestWhh61IntegrityCarve:
         # _get_catalog() can return now that the local Catalog is deleted.
         cat = MagicMock(spec=HttpCatalogClient)
         cat.all_documents.return_value = []  # empty → clean early return
+        # nexus-8tnz2's orphan-collections check runs unconditionally (an
+        # empty catalog with a populated T3 IS the orphan case), so verify
+        # now calls _make_t3() even on the empty-docs path this test takes;
+        # unpatched, that builds a REAL vector client whose accessor probes
+        # the managed service (a live network call whose verdict flips with
+        # the engine floor — caught 2026-08-28 when the v0.1.88 floor bump
+        # turned it INCOMPLETE). Empty list_collections() = no orphans.
+        t3 = MagicMock()
+        t3.list_collections.return_value = []
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
                 patch(
                     "nexus.commands.catalog._get_catalog_writer",
                     return_value=MagicMock(spec=list(CATALOG_WRITE_OPS)),
-                ):
+                ), \
+                patch("nexus.commands.catalog._make_t3", return_value=t3):
             result = CliRunner().invoke(main, ["catalog", "verify"])
         assert result.exit_code == 0, result.output
         cat.all_documents.assert_called()

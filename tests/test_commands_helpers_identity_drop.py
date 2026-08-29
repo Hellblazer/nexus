@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import click
 import pytest
+from structlog.testing import capture_logs
+
+from nexus.mcp_infra import _record_complete_refusal
 
 from nexus.commands._helpers import (
     emit_identity_drop_summary,
@@ -125,6 +128,58 @@ def test_emit_identity_drop_summary_surfaces_complete_refusals(capsys):
         "WARNING: 1 of the 5 indexed above had completion refused" in err
     )
     assert "Re-index or --force to retry" in err
+
+
+def test_refused_footer_splits_refusals_bucketed_into_failed(capsys):
+    """nexus-l6tr7: two refusals recorded, one of them PROPAGATED and was
+    bucketed into ``failed`` by the caller — the footer states the split
+    instead of "2 of the 1 indexed"."""
+    _record_complete_refusal("1.2.3")
+    _record_complete_refusal("1.2.4")
+
+    result = emit_identity_drop_summary(indexed_count=1, refused_in_failed=1)
+
+    assert result is True
+    err = capsys.readouterr().err
+    assert (
+        "WARNING: 2 completion refusal(s) by the engine's fail-closed verify "
+        "(fence left at 'indexing'): 1 of the 1 indexed above and 1 listed "
+        "under failed" in err
+    )
+    assert "2 of the 1 indexed" not in err
+
+
+def test_refused_footer_reports_collector_divergence_instead_of_clamping(capsys):
+    """More refusals bucketed than the run-wide collector holds is
+    recording drift (or a duplicate record). It is reported as such —
+    never clamped into "0 of the N indexed above" — and logged under the
+    same event the write_many path uses for the identical drift."""
+    _record_complete_refusal("1.2.3")
+
+    with capture_logs() as cap:
+        result = emit_identity_drop_summary(indexed_count=0, refused_in_failed=2)
+
+    assert result is True
+    err = capsys.readouterr().err
+    assert "2 record(s) had completion refused" in err
+    assert "refusal collector reported 1" in err
+    assert "0 of the" not in err
+    events = [e for e in cap if e.get("event") == "complete_refused_count_mismatch"]
+    assert len(events) == 1
+    assert events[0]["collector_len"] == 1
+    assert events[0]["bucketed_in_failed"] == 2
+    assert events[0]["path"] == "dt_index_footer"
+
+
+def test_refused_footer_bucketed_with_empty_collector_still_reports(capsys):
+    """Guard order: a bucketed refusal with an EMPTY collector must not
+    fall through to silence (code-review-expert)."""
+    result = emit_identity_drop_summary(indexed_count=0, refused_in_failed=1)
+
+    assert result is True
+    err = capsys.readouterr().err
+    assert "1 record(s) had completion refused" in err
+    assert "refusal collector reported 0" in err
 
 
 def test_emit_identity_drop_summary_surfaces_swept_count_as_info_not_a_problem(capsys):

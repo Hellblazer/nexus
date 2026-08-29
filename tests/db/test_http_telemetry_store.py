@@ -40,7 +40,6 @@ _relevance_log: list[dict[str, Any]] = []
 _search_telemetry: list[dict[str, Any]] = []
 _tier_writes: list[dict[str, Any]] = []
 _retention_markers: dict[str, int] = {}
-_consents: list[dict[str, Any]] = []
 _nx_answer_runs: list[dict[str, Any]] = []
 _hook_failures: list[dict[str, Any]] = []
 _frecency: dict[str, dict[str, Any]] = {}  # keyed by chunk_id
@@ -64,7 +63,6 @@ def _clear_all() -> None:
         _relevance_log.clear()
         _search_telemetry.clear()
         _tier_writes.clear()
-        _consents.clear()
         _retention_markers.clear()
         _nx_answer_runs.clear()
         _hook_failures.clear()
@@ -193,15 +191,6 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                     "agent":        body.get("agent"),
                     "project":      body.get("project"),
                     "target_title": body.get("target_title"),
-                })
-            self._send(200, {"ok": True})
-
-        elif pp == "/v1/telemetry/consents/record":
-            with _STORE_LOCK:
-                _consents.append({
-                    "scope":   body.get("scope", ""),
-                    "ts":      body.get("ts", ""),
-                    "granted": bool(body.get("granted")),
                 })
             self._send(200, {"ok": True})
 
@@ -383,6 +372,17 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                 results = sorted(results, key=lambda x: x["timestamp"], reverse=True)[:limit]
             self._send(200, results)
 
+        elif pp == "/v1/telemetry/relevance/stats":
+            # nexus-v0x32: mirror TelemetryRepository.relevanceStats — whole-
+            # tenant count/oldest/newest, no filters, no paging.
+            with _STORE_LOCK:
+                timestamps = [r["timestamp"] for r in _relevance_log]
+            self._send(200, {
+                "count":  len(timestamps),
+                "oldest": min(timestamps) if timestamps else None,
+                "newest": max(timestamps) if timestamps else None,
+            })
+
         elif pp == "/v1/telemetry/tier_writes/query":
             # nexus-59wjj: mirror TelemetryRepository.queryTierWrites — filter
             # precedence last_n (sessions) > session_id > since; group by
@@ -467,11 +467,6 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                 "total": total,
             }
             self._send(200, out)
-            return
-
-        elif pp == "/v1/telemetry/consents/list":
-            with _STORE_LOCK:
-                self._send(200, list(_consents))
             return
 
         elif pp == "/v1/telemetry/retention/markers":
@@ -685,6 +680,36 @@ class TestGetRelevanceLog:
             client.log_relevance(f"q{i}", f"c{i}", "a")
         rows = client.get_relevance_log(limit=3)
         assert len(rows) <= 3
+
+
+class TestGetRelevanceStats:
+    """nexus-v0x32: playbook §4.5 telemetry baseline — whole-tenant
+    count/oldest/newest, GET /v1/telemetry/relevance/stats."""
+
+    def test_empty_reports_zero_and_none(self, client):
+        stats = client.get_relevance_stats()
+        assert stats == {"count": 0, "oldest": None, "newest": None}
+
+    def test_counts_rows_and_reports_oldest_newest(self, client):
+        # import_relevance_row writes the timestamp VERBATIM (fidelity ETL
+        # path), so oldest/newest are deterministic rather than racing the
+        # fake server's now()-stamped /relevance/log path.
+        client.import_relevance_row(
+            query="q1", chunk_id="c1", collection="", action="click",
+            session_id="s", timestamp="2020-01-01T00:00:00Z",
+        )
+        client.import_relevance_row(
+            query="q2", chunk_id="c2", collection="", action="click",
+            session_id="s", timestamp="2020-06-15T12:30:00Z",
+        )
+        client.import_relevance_row(
+            query="q3", chunk_id="c3", collection="", action="click",
+            session_id="s", timestamp="2019-03-10T08:00:00Z",
+        )
+        stats = client.get_relevance_stats()
+        assert stats["count"] == 3
+        assert stats["oldest"] == "2019-03-10T08:00:00Z"
+        assert stats["newest"] == "2020-06-15T12:30:00Z"
 
 
 class TestExpireRelevanceLog:
@@ -1300,37 +1325,6 @@ class TestQueryNxAnswerRuns:
         )
 
 
-class TestConsentAudit:
-    """RDR-182 nexus-ng2sy: the service-mode consent-audit twin routes through
-    HTTP to /v1/telemetry/consents/{record,list}."""
-
-    def test_record_and_list_grant_revoke_in_order(self, client):
-        client.record_consent(
-            scope="flag:claude_assisted_remediation",
-            ts="2026-07-13T00:00:00Z", granted=True,
-        )
-        client.record_consent(
-            scope="remediate:chash-poison",
-            ts="2026-07-13T00:01:00Z", granted=True,
-        )
-        client.record_consent(
-            scope="flag:claude_assisted_remediation",
-            ts="2026-07-13T00:02:00Z", granted=False,
-        )
-        rows = client.list_consents()
-        assert rows == [
-            {"scope": "flag:claude_assisted_remediation",
-             "ts": "2026-07-13T00:00:00Z", "granted": True},
-            {"scope": "remediate:chash-poison",
-             "ts": "2026-07-13T00:01:00Z", "granted": True},
-            {"scope": "flag:claude_assisted_remediation",
-             "ts": "2026-07-13T00:02:00Z", "granted": False},
-        ]
-
-    def test_empty_trail_returns_empty_list(self, client):
-        assert client.list_consents() == []
-
-
 class TestTrimHookFailures:
     def test_trim_days_validation(self, client):
         with pytest.raises(ValueError, match="days must be >= 1"):
@@ -1591,3 +1585,51 @@ class TestRetentionMarkers:
 
     def test_get_retention_markers_empty(self, client):
         assert client.get_retention_markers(["nexus.relevance_log"]) == {}
+
+
+class TestGetRelevanceStatsAgainstRealEngine:
+    """nexus-v0x32: proves ``GET /v1/telemetry/relevance/stats`` round-trips
+    through the REAL engine substrate (not the fake server above). Every
+    test in this suite already gets a live PG+JAR engine with a freshly
+    minted per-test tenant via the autouse ``_pin_t2_substrate`` fixture
+    (``tests/conftest.py``, itself built on ``tests/_engine_substrate.py``'s
+    ``ensure_engine``/``mint_test_tenant``) — this test uses that ambient
+    substrate directly via ``T2Database``, the same pattern
+    ``tests/db/test_eho3u_nx_answer_runs_read.py`` and
+    ``tests/db/test_telemetry_retention_marker.py`` use for their own
+    real-engine round trips."""
+
+    def test_relevance_stats_roundtrips_through_the_real_store(self, tmp_path):
+        from nexus.db.t2 import T2Database
+
+        db = T2Database(tmp_path / "memory.db")
+        try:
+            before = db.telemetry.get_relevance_stats()
+            assert before == {"count": 0, "oldest": None, "newest": None}, (
+                "a freshly minted per-test tenant must start with an empty "
+                "relevance_log"
+            )
+
+            db.telemetry.import_relevance_row(
+                query="v0x32-real-engine-q1",
+                chunk_id="3f6fc7dab5e64271e7d7878af4c51d1d3752219f18c11819cb48ec2c61131a80",
+                collection="knowledge__x",
+                action="click",
+                session_id="s",
+                timestamp="2020-01-01T00:00:00Z",
+            )
+            db.telemetry.log_relevance(
+                "v0x32-real-engine-q2",
+                "b0f2f39241ba9ea53467b2896a06c230d0af376bc0c46514f3fff71b73005dfd",
+                "click",
+            )
+
+            after = db.telemetry.get_relevance_stats()
+            assert after["count"] == 2
+            assert after["oldest"] == "2020-01-01T00:00:00Z"
+            # log_relevance stamps "now" server-side; just prove it is the
+            # NEWER of the two, not a fixed literal (avoids a flaky exact-ts
+            # assertion against real wall-clock time).
+            assert after["newest"] >= after["oldest"]
+        finally:
+            db.close()

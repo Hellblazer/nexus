@@ -20,6 +20,7 @@ modules are deleted.
 from __future__ import annotations
 
 import json
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -116,6 +117,24 @@ class HighlightRecord:
 #: and ``nx memory expire``. ``HttpTelemetryStore.expire_relevance_log``'s
 #: literal ``days: int = 90`` default mirrors this number.
 RELEVANCE_LOG_RETENTION_DAYS: int = 90
+
+
+def with_doc_id(record: "AspectRecord", doc_id: str) -> "AspectRecord":
+    """Return *record* attributed to *doc_id* when it has none of its own.
+
+    nexus-x1de2 (52): the extractor builds records without a ``doc_id``
+    (it only knows collection + source_path), while the producers that
+    complete them DO know the catalog identity — the worker from the
+    queue row (``QueueRow.doc_id``, nexus-tdgc) and ``nx enrich aspects``
+    from the catalog entry it iterates. Before this helper that identity
+    was used for the chunk lookup and then dropped, so every completed
+    row landed with ``doc_id`` NULL: an unattributed row the catalog FK
+    (fk-001) can never join. A record that already carries a ``doc_id``
+    keeps it; an empty *doc_id* changes nothing.
+    """
+    if record.doc_id or not doc_id:
+        return record
+    return dataclasses.replace(record, doc_id=doc_id)
 
 
 def _safe_json_list(s: str | None) -> list:

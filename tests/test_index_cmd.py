@@ -460,6 +460,18 @@ def test_index_pdf_force_dry_run_mutual_exclusion(runner, fake_pdf):
     assert "mutually exclusive" in result.output.lower()
 
 
+def test_index_pdf_dry_run_threads_flag_to_index_pdf(runner, fake_pdf):
+    """nexus-uxg4u: --dry-run must reach doc_indexer.index_pdf as an
+    explicit dry_run=True kwarg, not be inferred from the dry-run
+    branch's ephemeral T3 client or no-op embedder -- the phantom-
+    registration bug this flag closes is gated on the flag itself."""
+    with patch("nexus.doc_indexer.index_pdf", return_value=3) as m:
+        result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    _, kw = m.call_args
+    assert kw.get("dry_run") is True
+
+
 def test_index_pdf_allow_degraded_extraction_flag_defaults_false(runner, fake_pdf):
     """nexus-wi1uv: the override must be opt-in, not the default posture."""
     with patch("nexus.doc_indexer.index_pdf", return_value=PDF_RESULT) as m:

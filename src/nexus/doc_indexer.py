@@ -624,8 +624,21 @@ def _register_or_lookup_doc_id(
     year: int = 0,
     base_path: Path | None = None,
     source_uri: str = "",
-) -> str:
+    with_created: bool = False,
+) -> str | tuple[str, bool]:
     """RDR-102 D1 pre-flight catalog registration for the doc_indexer family.
+
+    Pass *with_created=True* (nexus-uxg4u task 2) to additionally receive
+    whether THIS call minted a brand-new Document — returns ``(doc_id,
+    created)`` instead of a bare ``doc_id`` string. ``created`` is True
+    only for the genuine ``writer.register`` mint path at the tail of
+    this function; every lookup/dedup/skip/error path returns
+    ``created=False``. Callers use this to decide whether a downstream
+    failure should roll back (delete) the fresh registration via
+    :func:`nexus.catalog.store_hook.rollback_minted_catalog_entry` — a
+    pre-existing document (``created=False``) is never a rollback
+    candidate. Default ``False`` preserves the historical bare-``str``
+    return for every existing call site.
 
     Mirrors the ``indexer.py:run`` upfront pattern: open the catalog,
     resolve (or create) the curator owner for *corpus*, look up the
@@ -770,7 +783,7 @@ def _register_or_lookup_doc_id(
                     f"deliberately, or drop --collection to target its "
                     f"current home."
                 )
-            return str(existing_by_uri.tumbler)
+            return (str(existing_by_uri.tumbler), False) if with_created else str(existing_by_uri.tumbler)
 
         existing = reader.by_file_path(owner, fp)
         if existing is None:
@@ -860,7 +873,7 @@ def _register_or_lookup_doc_id(
                     # scrolling back through WARNING-level structlog output.
                     from nexus.mcp_infra import _record_physical_collection_reconciled  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
                     _record_physical_collection_reconciled()
-            return str(existing.tumbler)
+            return (str(existing.tumbler), False) if with_created else str(existing.tumbler)
 
         # nexus-u8n4r: refuse registration when the identity about to be
         # STORED (``fp`` — absolute when no ``base_path`` was threaded, as
@@ -884,12 +897,46 @@ def _register_or_lookup_doc_id(
             )
             from nexus.mcp_infra import _record_ephemeral_registration_skip  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
             _record_ephemeral_registration_skip(fp, str(owner), reason="worktree_or_tempdir")
-            return ""
+            return ("", False) if with_created else ""
 
         try:
             source_mtime = file_path.stat().st_mtime
         except OSError:
             source_mtime = 0.0
+        # nexus-uxg4u task 2: only request the created-vs-matched signal
+        # when THIS call's caller asked for it — mirroring every existing
+        # call site's plain-tumbler contract exactly (never touching the
+        # wire shape they rely on) is safer than always asking, since a
+        # test double's ``writer.register`` fake (there are several,
+        # returning a bare tumbler/string) would otherwise need to know
+        # about a kwarg it predates.
+        if with_created:
+            _write_result = writer.register(
+                owner=owner,
+                title=title or file_path.stem,
+                content_type=content_type,
+                file_path=fp,
+                corpus=corpus,
+                physical_collection=physical_collection,
+                chunk_count=0,
+                year=year,
+                author=author,
+                source_mtime=source_mtime,
+                source_uri=source_uri,
+                with_created=True,
+            )
+            # Defensive: a test double's ``writer.register`` fake (several
+            # exist, predating with_created) ignores the kwarg and returns
+            # a bare tumbler/string rather than a 2-tuple. Treat that the
+            # same way HttpCatalogClient.register treats an older engine
+            # that omits the wire field entirely — "created=True" is the
+            # historical assumption every caller ignoring this parameter
+            # already makes, not a guess this call site invents.
+            if isinstance(_write_result, tuple):
+                tumbler, created = _write_result
+            else:
+                tumbler, created = _write_result, True
+            return str(tumbler), created
         tumbler = writer.register(
             owner=owner,
             title=title or file_path.stem,
@@ -914,7 +961,7 @@ def _register_or_lookup_doc_id(
         # reports success. Surface it at warning, not debug, so the operator can
         # see a non-clean run instead of silent data loss.
         _log.warning("preflight_register_failed", exc_info=True)
-        return ""
+        return ("", False) if with_created else ""
     finally:
         if writer is not None:
             writer.close()
@@ -1616,6 +1663,8 @@ def _index_pdf_incremental(
     force: bool = False,
     doc_id: str = "",
     source_uri: str = "",
+    dry_run: bool = False,
+    on_doc_registered: Callable[[str, bool], None] | None = None,
 ) -> int:
     """Embed and upsert chunks in batches with checkpoint support.
 
@@ -1642,6 +1691,25 @@ def _index_pdf_incremental(
     reproduction of nexus-y8qtj inside its own fix. *source_uri* is
     forwarded only when this function must register fresh (``doc_id``
     empty).
+
+    Pass *dry_run=True* (nexus-uxg4u) to skip the fallback registration,
+    the completion fence (``_fence_begin``/``_fence_complete``/
+    ``_fence_fail``), and any T2 telemetry those writes would trigger —
+    mirrors ``index_pdf``'s own dry-run gate. Not expected on the normal
+    call path (``index_pdf`` already resolves *doc_id* and stays on the
+    small-document path for a dry run's typically tiny preview), kept
+    for direct callers and defense in depth.
+
+    Pass *on_doc_registered* (nexus-uxg4u round 2, code-review-expert
+    Finding B) to be notified as ``(doc_id, created)`` whenever THIS
+    call's own fallback registration (below) fires and resolves an
+    identity — a caller with dry_run=False needs this because *doc_id*
+    can arrive here empty for a reason OTHER than "no catalog": the
+    caller's own pre-flight can return "" via the worktree/tempdir
+    ephemeral-skip path or a swallowed registration exception, in which
+    case THIS function's fallback mint is the only registration event
+    for the whole run, and the caller's own created-tracking (if any)
+    has no way to see it without this callback.
 
     Returns the total number of chunks indexed.
     """
@@ -1695,14 +1763,26 @@ def _index_pdf_incremental(
     # PDF. Mirrors pipeline_stages.pipeline_index_pdf's `if not doc_id:`
     # guard.
     _catalog_doc_id_for_batch = doc_id
-    if not _catalog_doc_id_for_batch:
+    if not _catalog_doc_id_for_batch and not dry_run:
         _ct_for_register = (metadatas_all[0].get("content_type") if metadatas_all else "") or "pdf"
-        _catalog_doc_id_for_batch = _register_or_lookup_doc_id(
+        # nexus-uxg4u round 2: with_created=True + on_doc_registered so a
+        # mint made HERE (the caller's own doc_id arrived empty) is not
+        # invisible to the caller's rollback tracking — see this
+        # function's own docstring for why doc_id can be empty here for a
+        # reason other than "no catalog".
+        _reg_result = _register_or_lookup_doc_id(
             Path(file_path), corpus,
             content_type=_ct_for_register,
             physical_collection=collection_name,
             source_uri=source_uri,
+            with_created=True,
         )
+        if isinstance(_reg_result, tuple):
+            _catalog_doc_id_for_batch, _fallback_created = _reg_result
+        else:
+            _catalog_doc_id_for_batch, _fallback_created = _reg_result, False
+        if on_doc_registered is not None:
+            on_doc_registered(_catalog_doc_id_for_batch, _fallback_created)
     # nexus-5xn3k.4 review follow-up (code-review-expert HIGH): this path was
     # unfenced. Resolution above already sits before the first upsert (the
     # batch loop below), so no hoist is needed here — just the begin call.
@@ -1758,16 +1838,26 @@ def _index_pdf_incremental(
             # Post-store hook chains (RDR-095). Both single-doc and batch
             # chains fire from every storage event; the per-doc loop covers
             # single-shape consumers on CLI ingest.
+            #
+            # nexus-uxg4u round 2 (code-review-expert Finding A /
+            # substantive-critic ship-blocker-adjacent): gated on dry_run
+            # explicitly here too -- default hooks (install_default_hooks,
+            # reached whenever a caller passes hooks=None) wire
+            # aspect_extraction_enqueue_hook, a REAL T2 write. The CLI's
+            # own empty-HookRegistry() convention is not something dry_run
+            # itself enforces; a direct caller with hooks=None must not
+            # get a real T2/manifest write on a dry run.
             if hooks is None:
                 from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
                 hooks = HookRegistry()
                 install_default_hooks(hooks)
-            hooks.fire_batch(
-                batch_ids, collection_name, batch_docs, embeddings, batch_metas,
-                catalog_doc_id=_catalog_doc_id_for_batch,
-            )
-            for _did, _doc in zip(batch_ids, batch_docs):
-                hooks.fire_single(_did, collection_name, _doc)
+            if not dry_run:
+                hooks.fire_batch(
+                    batch_ids, collection_name, batch_docs, embeddings, batch_metas,
+                    catalog_doc_id=_catalog_doc_id_for_batch,
+                )
+                for _did, _doc in zip(batch_ids, batch_docs):
+                    hooks.fire_single(_did, collection_name, _doc)
 
             # Checkpoint
             write_checkpoint(CheckpointData(
@@ -2043,6 +2133,7 @@ def index_pdf(
     source_uri: str = "",
     on_fork_detected: Callable[[list[tuple[str, int]]], None] | None = None,
     allow_degraded_extraction: bool = False,
+    dry_run: bool = False,
 ) -> int | dict:
     """Index *pdf_path* into a T3 collection.
 
@@ -2100,6 +2191,22 @@ def index_pdf(
     ``--allow-degraded-extraction`` on ``nx index pdf``. Threaded to both
     the streaming pipeline and the batch/incremental path below, since
     either can be selected depending on *streaming* and page count.
+
+    Pass *dry_run=True* (nexus-uxg4u) to preview extraction and chunking
+    ONLY — no catalog registration, no fence writes, no catalog hook
+    registration/linking. The pre-flight catalog registration below is
+    skipped entirely (``doc_id`` stays ``""``) rather than inferred from
+    *embed_fn*, so the preview never mints a phantom catalog Document
+    that a subsequent (never-taken, dry-run) completion could refuse.
+    Extraction + chunking counts are unaffected. When *dry_run=False*
+    (the default) and this call's own pre-flight registration MINTED a
+    brand-new Document (vs. finding a pre-existing one), a failure
+    anywhere downstream — most notably :class:`~nexus.errors.
+    IndexRunVerifyRefused` from the completion fence — rolls that fresh
+    registration back via :func:`nexus.catalog.store_hook.
+    rollback_minted_catalog_entry` before re-raising; a run against a
+    pre-existing document is left exactly as the fence marked it
+    (``_fence_fail``), never rolled back.
     """
     from functools import partial  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
@@ -2200,12 +2307,85 @@ def index_pdf(
     # (set inside ``_pdf_chunks`` via ``make_chunk_metadata(content_type=
     # "pdf", ...)``). The two namespaces are distinct: catalog tracks
     # source typing; chunk metadata tracks T3 routing.
-    doc_id = _register_or_lookup_doc_id(
-        pdf_path, corpus,
-        content_type="paper",
-        physical_collection=col_name,
-        source_uri=source_uri,
-    )
+    if dry_run:
+        # nexus-uxg4u: a dry run must never touch the catalog — this is
+        # the phantom-registration bug this flag exists to close. Gated
+        # on an explicit flag, never inferred from embed_fn/t3 shape.
+        doc_id = ""
+        _doc_id_freshly_minted = False
+    else:
+        # nexus-uxg4u: defensive unpacking — a test double patching this
+        # function (widespread across the suite, pre-dating this fix)
+        # returns a bare ``str`` regardless of *with_created*, since a
+        # mock/lambda ignores kwargs it doesn't know about. Treat a
+        # non-tuple result as "not freshly minted" rather than raising a
+        # ValueError on unpack: safe for every existing double (rollback
+        # simply never fires for them, which matches what they already
+        # assert) and exact for the real function, which always returns
+        # a 2-tuple when with_created=True.
+        _reg_result = _register_or_lookup_doc_id(
+            pdf_path, corpus,
+            content_type="paper",
+            physical_collection=col_name,
+            source_uri=source_uri,
+            with_created=True,
+        )
+        if isinstance(_reg_result, tuple):
+            doc_id, _doc_id_freshly_minted = _reg_result
+        else:
+            doc_id, _doc_id_freshly_minted = _reg_result, False
+
+    # nexus-uxg4u round 2 (code-review-expert Finding B / substantive-critic
+    # SIGNIFICANT): the pre-flight call above is not the ONLY place THIS
+    # call can mint a fresh Document. `_register_or_lookup_doc_id` returns
+    # ("", False) on the worktree/tempdir ephemeral-skip path and on its
+    # own best-effort exception swallow — when either happens, doc_id=""
+    # flows into pipeline_index_pdf / _index_pdf_incremental with
+    # dry_run=False, and BOTH have their own `if not doc_id:` fallback
+    # registration that can independently mint. The small-doc branch's
+    # second, nominally-idempotent lookup call (`_catalog_doc_id_for_batch`
+    # below) can too, for the identical reason. A plain local variable
+    # captured once here cannot see any of those — a MUTABLE state dict,
+    # updated via `_note_fallback_mint` from wherever a fallback mint
+    # actually happens (including across the pipeline_stages.py module
+    # boundary via the `on_doc_registered` callback), is what lets the one
+    # rollback closure below cover every mint this call can make, not just
+    # the pre-flight's own.
+    _mint_state: dict[str, object] = {
+        "doc_id": doc_id, "freshly_minted": _doc_id_freshly_minted,
+    }
+
+    def _note_fallback_mint(fallback_doc_id: str, created: bool) -> None:
+        """Record a fallback registration performed by THIS call, wherever
+        it happened. Only ever called when the site's own `if not doc_id:`
+        (or, for the small-doc branch's second call, an explicit
+        `if created:`) guard already established the pre-flight above did
+        NOT mint — so this never downgrades a genuine pre-flight mint,
+        only supplies information the pre-flight had none of.
+        """
+        _mint_state["doc_id"] = fallback_doc_id
+        _mint_state["freshly_minted"] = created
+
+    def _rollback_if_freshly_minted(exc: BaseException) -> None:
+        """nexus-uxg4u task 2 (+ round 2 fallback-mint coverage): undo a
+        registration THIS call minted — whether at the pre-flight above or
+        at a callee's fallback site — when the run fails downstream (e.g.
+        ``IndexRunVerifyRefused`` from the completion fence, or any other
+        exception). A pre-existing document (``freshly_minted=False``) is
+        left exactly as the fence marked it — never a rollback candidate,
+        since deleting it could discard someone else's prior, unrelated
+        indexing work. Never masks *exc* — this is a best-effort
+        compensation the caller re-raises past regardless of outcome.
+        """
+        _mint_doc_id = _mint_state["doc_id"]
+        if dry_run or not _mint_state["freshly_minted"] or not _mint_doc_id:
+            return
+        from nexus.catalog.store_hook import rollback_minted_catalog_entry  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.store_hook)
+        rollback_minted_catalog_entry(_mint_doc_id, original_error=str(exc))
+        _log.warning(
+            "index_pdf_fresh_registration_rolled_back",
+            doc_id=_mint_doc_id, pdf=str(pdf_path), reason=str(exc),
+        )
 
     # Incremental sync: skip if file is already indexed with the same hash AND model.
     # nexus-dcym: prefer doc_id-keyed lookup; content_hash fallback when
@@ -2252,16 +2432,22 @@ def index_pdf(
             # is NOT a 0 here — pipeline_index_pdf lets PipelineConflictRunning
             # propagate instead, so a stranded-row retry is a loud failure,
             # never a silent 0-chunk "success".
-            count = pipeline_index_pdf(
-                pdf_path, content_hash, col_name, db,
-                embed_fn=embed_fn, extractor=extractor, on_formula_oom=on_formula_oom,
-                corpus=corpus, target_model=target_model,
-                force=force,
-                doc_id=doc_id,
-                hooks=hooks,
-                source_uri=source_uri,
-                allow_degraded_extraction=allow_degraded_extraction,
-            )
+            try:
+                count = pipeline_index_pdf(
+                    pdf_path, content_hash, col_name, db,
+                    embed_fn=embed_fn, extractor=extractor, on_formula_oom=on_formula_oom,
+                    corpus=corpus, target_model=target_model,
+                    force=force,
+                    doc_id=doc_id,
+                    hooks=hooks,
+                    source_uri=source_uri,
+                    allow_degraded_extraction=allow_degraded_extraction,
+                    dry_run=dry_run,
+                    on_doc_registered=_note_fallback_mint,
+                )
+            except Exception as exc:
+                _rollback_if_freshly_minted(exc)
+                raise
             # nexus-y8qtj: end-of-run fork check. Best-effort, always runs;
             # the callback (if any) lets the CLI fold a count into its
             # summary without a second catalog round-trip.
@@ -2433,6 +2619,9 @@ def index_pdf(
 
     # Catalog registration helper for batch paths (streaming has its own hook)
     def _register_in_catalog(meta_list: list[dict], chunk_count: int) -> None:
+        if dry_run:
+            # nexus-uxg4u: never touch the catalog on a dry run.
+            return
         try:
             from nexus.pipeline_stages import _catalog_pdf_hook  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
             _catalog_pdf_hook(
@@ -2463,13 +2652,19 @@ def index_pdf(
             from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
             hooks = HookRegistry()
             install_default_hooks(hooks)
-        count = _index_pdf_incremental(
-            pdf_path, corpus, prepared, content_hash, col_name, db,
-            embed_fn=embed_fn, on_progress=on_progress, hooks=hooks,
-            force=force,
-            doc_id=doc_id,
-            source_uri=source_uri,
-        )
+        try:
+            count = _index_pdf_incremental(
+                pdf_path, corpus, prepared, content_hash, col_name, db,
+                embed_fn=embed_fn, on_progress=on_progress, hooks=hooks,
+                force=force,
+                doc_id=doc_id,
+                source_uri=source_uri,
+                dry_run=dry_run,
+                on_doc_registered=_note_fallback_mint,
+            )
+        except Exception as exc:
+            _rollback_if_freshly_minted(exc)
+            raise
         metadatas = [p[2] for p in prepared]
         _register_in_catalog(metadatas, len(metadatas))
         # RDR-089 document-grain chain — fires once per PDF boundary at the
@@ -2478,12 +2673,18 @@ def index_pdf(
         # content-sourcing contract.
         # nexus-tdgc: forward the catalog doc_id (lookup is post-register
         # so the entry exists by this point in the incremental path).
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
-        _cat = make_catalog_reader()
-        hooks.fire_document(
-            str(pdf_path), col_name, "",
-            doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),
-        )
+        #
+        # nexus-uxg4u round 2: gated on dry_run -- both the fire_document
+        # call itself (a hook, per code-review-expert Finding A) and the
+        # catalog read that resolves its doc_id argument, which is
+        # pointless work on a dry run (nothing was registered to look up).
+        if not dry_run:
+            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
+            _cat = make_catalog_reader()
+            hooks.fire_document(
+                str(pdf_path), col_name, "",
+                doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),
+            )
         # nexus-y8qtj: end-of-run fork check (see the streaming branch above).
         _forks = _check_document_fork(doc_id, col_name)
         if on_fork_detected is not None:
@@ -2522,12 +2723,32 @@ def index_pdf(
         install_default_hooks(hooks)
     # nexus-zq79 F2: register-or-lookup (fresh indexes returned "" pre-fix).
     _ct_for_register = (metadatas_list[0].get("content_type") if metadatas_list else "") or "pdf"
-    _catalog_doc_id_for_batch = _register_or_lookup_doc_id(
-        pdf_path, corpus,
-        content_type=_ct_for_register,
-        physical_collection=col_name,
-        source_uri=source_uri,
-    )
+    if dry_run:
+        # nexus-uxg4u: never touch the catalog on a dry run — this call
+        # would otherwise be idempotent onto the top-level pre-flight
+        # registration above, which is itself skipped for dry_run.
+        _catalog_doc_id_for_batch = ""
+    else:
+        # nexus-uxg4u round 2 (substantive-critic SIGNIFICANT, third
+        # named fallback site): normally idempotent onto the pre-flight
+        # above, but when THAT returned "" (worktree/tempdir skip, or a
+        # swallowed exception) this call can independently mint fresh —
+        # with_created=True + _note_fallback_mint makes that visible to
+        # the rollback closure too. Only reports a mint (never a plain
+        # lookup) so a genuine pre-flight mint above is never downgraded.
+        _reg_result = _register_or_lookup_doc_id(
+            pdf_path, corpus,
+            content_type=_ct_for_register,
+            physical_collection=col_name,
+            source_uri=source_uri,
+            with_created=True,
+        )
+        if isinstance(_reg_result, tuple):
+            _catalog_doc_id_for_batch, _batch_created = _reg_result
+        else:
+            _catalog_doc_id_for_batch, _batch_created = _reg_result, False
+        if _batch_created:
+            _note_fallback_mint(_catalog_doc_id_for_batch, True)
     if _catalog_doc_id_for_batch:
         _fence_begin(_catalog_doc_id_for_batch, content_hash, col_name)
 
@@ -2570,25 +2791,42 @@ def index_pdf(
         # manifest_complete is now always None; the explicit, PROPAGATING
         # `_fence_complete` call below (mirroring `_index_pdf_incremental`)
         # is the completion stamp for this branch.
-        hooks.fire_batch(
-            ids, col_name, documents, embeddings, metadatas_list,
-            catalog_doc_id=_catalog_doc_id_for_batch,
-        )
-        for _did, _doc in zip(ids, documents):
-            hooks.fire_single(_did, col_name, _doc)
-        # RDR-089 document-grain chain — fires once per small-doc PDF boundary.
-        # content="" (full document text not retained in this path); the hook
-        # reads source_path itself.
-        # nexus-tdgc: forward the catalog doc_id post-register.
-        hooks.fire_document(
-            str(pdf_path), col_name, "",
-            doc_id=_catalog_doc_id_for_batch,
-        )
+        #
+        # nexus-uxg4u round 2 (code-review-expert Finding A / substantive-
+        # critic): gated on dry_run -- these are real hook fires (default
+        # hooks wire a real T2 aspect-queue write), not something the
+        # empty-doc_id check below covers on its own.
+        if not dry_run:
+            hooks.fire_batch(
+                ids, col_name, documents, embeddings, metadatas_list,
+                catalog_doc_id=_catalog_doc_id_for_batch,
+            )
+            for _did, _doc in zip(ids, documents):
+                hooks.fire_single(_did, col_name, _doc)
+            # RDR-089 document-grain chain — fires once per small-doc PDF
+            # boundary. content="" (full document text not retained in
+            # this path); the hook reads source_path itself.
+            # nexus-tdgc: forward the catalog doc_id post-register.
+            hooks.fire_document(
+                str(pdf_path), col_name, "",
+                doc_id=_catalog_doc_id_for_batch,
+            )
     except Exception as exc:
         # _fence_fail never raises, so the original exception always
         # propagates unmasked.
         if _catalog_doc_id_for_batch:
             _fence_fail(_catalog_doc_id_for_batch, str(exc))
+        # nexus-uxg4u round 2 (substantive-critic ship-blocker): this
+        # except path re-raises DIRECTLY out of index_pdf -- unlike the
+        # streaming/incremental branches (each a separate function
+        # wrapped by index_pdf's own try/except around the call site),
+        # this embed/upsert/hooks block is INLINE in index_pdf with no
+        # outer wrap of its own. Without this call, a freshly-minted
+        # document whose embed/upsert/hooks stage fails here is left
+        # behind forever (_fence_fail only marks 'failed', never
+        # deletes) -- the exact reported bug, reachable via a real
+        # --streaming never run on a small PDF.
+        _rollback_if_freshly_minted(exc)
         raise
 
     # nexus-tbkk1: stale-chunk prune via _identity_where's source_path
@@ -2614,7 +2852,11 @@ def index_pdf(
     # and the caller never reaches `_register_in_catalog` for this run,
     # exactly as the incremental branch's caller never does on refusal.
     if _catalog_doc_id_for_batch:
-        _fence_complete(_catalog_doc_id_for_batch, content_hash, len(prepared))
+        try:
+            _fence_complete(_catalog_doc_id_for_batch, content_hash, len(prepared))
+        except Exception as exc:
+            _rollback_if_freshly_minted(exc)
+            raise
 
     _register_in_catalog(metadatas_list, len(metadatas_list))
 

@@ -559,14 +559,11 @@ def get_t1_plan_cache(*, populate_from=None):
     """Return the T1 ``plans__session`` cache, lazy-populated on first call.
 
     When *populate_from* (a PlanLibrary) is supplied, the cache is
-    populated from its rows on first call and **repopulated whenever
-    the underlying SQLite file mtime advances** (nexus-qgjr). The mtime
-    check mirrors the catalog's ``_last_consistency_mtime`` pattern at
-    ``catalog.py:405``: cheap when nothing changed, rebuilds when a
-    write moves the file's stat-time.
-
-    Libraries without a ``path`` attribute fall back to populate-once
-    semantics; the mtime tier costs them nothing.
+    populated from its rows on first call and repopulated no less often
+    than every ``_HTTP_PLAN_LIBRARY_STALENESS_SECONDS`` seconds
+    (nexus-ie7o8, bounded staleness). The SQLite file-mtime refresh that
+    once sat beside it (nexus-qgjr) died with the SQLite plan library
+    (nexus-x1de2 (54)).
 
     Returns ``None`` when no T1 client is reachable; the matcher falls
     back to FTS5 in that case. Subsequent calls after an init failure
@@ -1427,17 +1424,32 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     try:
         from nexus.db import make_t3  # noqa: PLC0415 — deferred: hot path
 
-        make_t3().get_collection(collection).delete(ids=orphaned)
+        result = make_t3().get_collection(collection).delete(ids=orphaned)
     except Exception as exc:  # noqa: BLE001 — the index must not fail on cleanup
         structlog.get_logger().warning(
             "superseded_sweep_failed", doc_id=doc_id, collection=collection,
             orphans=len(orphaned), error=str(exc))
         _record_superseded_sweep_skip(doc_id, collection, "delete_failed")
         return
-    structlog.get_logger().info(
-        "superseded_vectors_swept", doc_id=doc_id, collection=collection,
-        deleted=len(orphaned), kept_shared=shared, kept_notes=kept_notes)
-    _record_superseded_swept(len(orphaned))
+    # nexus-tl5qh (RDR-191 F10c follow-up, o8dil.45's sibling site): report
+    # the server's ACTUAL delete count, not the requested candidate size.
+    # The engine's anti-join can legitimately refuse part of the batch — a
+    # chash another live document's manifest still references — and that
+    # is not a failure of this sweep, just a candidate that was never a
+    # true orphan; discarding the response would silently over-report.
+    actual = result if isinstance(result, int) else len(orphaned)
+    if actual < len(orphaned):
+        structlog.get_logger().warning(
+            "superseded_sweep_partial_delete", doc_id=doc_id, collection=collection,
+            requested=len(orphaned), actual=actual,
+            note="the server's anti-join refused to delete some candidates "
+                 "-- they are still referenced by a live catalog manifest "
+                 "row and were never true orphans")
+    else:
+        structlog.get_logger().info(
+            "superseded_vectors_swept", doc_id=doc_id, collection=collection,
+            deleted=actual, kept_shared=shared, kept_notes=kept_notes)
+    _record_superseded_swept(actual)
 
 
 def _sweep_superseded_vectors_many(
@@ -1562,7 +1574,7 @@ def _sweep_superseded_vectors_many(
     try:
         from nexus.db import make_t3  # noqa: PLC0415 — deferred: hot path
 
-        make_t3().get_collection(collection).delete(ids=orphaned)
+        result = make_t3().get_collection(collection).delete(ids=orphaned)
     except Exception as exc:  # noqa: BLE001 — the index must not fail on cleanup
         structlog.get_logger().warning(
             "superseded_sweep_failed", doc_id=_batch_label, collection=collection,
@@ -1570,11 +1582,22 @@ def _sweep_superseded_vectors_many(
         for doc_id in dropped_by_doc:
             _record_superseded_sweep_skip(doc_id, collection, "delete_failed")
         return
-    structlog.get_logger().info(
-        "superseded_vectors_swept_batch", doc_count=len(dropped_by_doc),
-        collection=collection, deleted=len(orphaned), kept_shared=shared,
-        kept_notes=kept_notes)
-    _record_superseded_swept(len(orphaned))
+    # nexus-tl5qh: report the server's ACTUAL delete count — see the
+    # per-doc sibling (_sweep_superseded_vectors) for the full rationale.
+    actual = result if isinstance(result, int) else len(orphaned)
+    if actual < len(orphaned):
+        structlog.get_logger().warning(
+            "superseded_sweep_batch_partial_delete", doc_count=len(dropped_by_doc),
+            collection=collection, requested=len(orphaned), actual=actual,
+            note="the server's anti-join refused to delete some candidates "
+                 "-- they are still referenced by a live catalog manifest "
+                 "row and were never true orphans")
+    else:
+        structlog.get_logger().info(
+            "superseded_vectors_swept_batch", doc_count=len(dropped_by_doc),
+            collection=collection, deleted=actual, kept_shared=shared,
+            kept_notes=kept_notes)
+    _record_superseded_swept(actual)
 
 
 def _stamp_index_run_complete(cat, doc_id: str, content_hash: str,

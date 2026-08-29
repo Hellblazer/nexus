@@ -2302,6 +2302,31 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_catalog_rename_collection_tombstone_probe.py::test_rename_rejects_tombstoned_old_with_actionable_message",
     "tests/test_catalog_rename_collection_tombstone_probe.py::test_rename_rejects_tombstoned_new_as_not_free_to_claim",
     #
+    # nexus-ubnwk (search_aspect_scoped wire shape) — reason:
+    # "string-literal-as-name". The four TestSearchAspectScoped tests pass
+    # "knowledge__a__voyage-context-3__v1" as the collections argument and
+    # assert the POSTed request body / passthrough shape against a fake
+    # `_post` (the HTTP layer is replaced wholesale); no embedder is
+    # constructed and no credential is read. The voyage token is one segment
+    # of a conformant RDR-103 name used as opaque routing data.
+    "tests/test_http_vector_client_combined_query.py::TestSearchAspectScoped::test_posts_to_aspect_route_with_filters",
+    "tests/test_http_vector_client_combined_query.py::TestSearchAspectScoped::test_omits_none_filters_from_body",
+    "tests/test_http_vector_client_combined_query.py::TestSearchAspectScoped::test_where_forwarded_and_empty_where_omitted",
+    "tests/test_http_vector_client_combined_query.py::TestSearchAspectScoped::test_returns_empty_list_passthrough",
+    #
+    # nexus-8tnz2 (drop-orphan-collections arm) — reason:
+    # "string-literal-as-name". The fixtures name an orphan collection
+    # "code__test-repo-abc123__voyage-code-3__v1" to mirror the measured
+    # live population the arm classifies (voyage-model collections with 0
+    # catalog docs); the tests assert classification/drop/refusal against a
+    # fake writer and fake count routes — no embedder, no credential, and
+    # swapping in a bge-768 name would divorce the fixture from the case
+    # the arm exists for.
+    "tests/test_reconcile_stale_drop_orphan_collections.py::test_dry_run_default_lists_candidates_and_never_builds_the_writer",
+    "tests/test_reconcile_stale_drop_orphan_collections.py::test_confirmed_drops_exactly_the_classified_orphans",
+    "tests/test_reconcile_stale_drop_orphan_collections.py::test_orphan_still_drops_when_tombstone_count_is_available",
+    "tests/test_reconcile_stale_drop_orphan_collections.py::test_delete_failure_for_one_collection_reports_and_exits_nonzero",
+    #
     # RDR-185 ladder — reason: "string-literal-as-name". Builds a conformant
     # RDR-103 collection NAME (or a CollectionClassification carrying the
     # name's model SEGMENT) and asserts on planning/rollback/re-id behaviour

@@ -19,6 +19,9 @@ import org.jooq.impl.DSL;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_1024;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_384;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_768;
 // RDR-191 Phase 4 (nexus-o8dil.16/.18): chunks_384/768/1024 collapsed into the
 // single nexus.chunks table (three nullable embedding_<dim> columns) --
 // CHUNKS_384/CHUNKS_768/CHUNKS_1024 no longer exist as generated jOOQ Table
@@ -1910,6 +1913,100 @@ public final class PgVectorRepository {
                 queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults);
             case 1024 -> SEARCH_METADATA_SCOPED_1024.call(
                 queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn), embed.tokens());
+    }
+
+    /**
+     * Field allowlist for {@link #searchAspectScopedWithTokens} — the locked wire
+     * contract (RDR-156 Decision 5, bead nexus-ubnwk), identical in this Java set, the
+     * SQL function's CASE expression (vectors-008-aspect-scoped.xml), the Python
+     * client's {@code ASPECT_SCOPED_FIELD_ALLOWLIST}, and the MCP tool's docstring.
+     * FIVE columns, NOT the seven {@code aspects-001-baseline.xml} originally defined
+     * as TEXT: {@code extras} and {@code salient_sentences} were converted TEXT ->
+     * jsonb by {@code aspects-003-type-hygiene.xml}, so a SQL CASE branch returning
+     * either cannot unify with these five TEXT branches ("CASE types text and jsonb
+     * cannot be matched"). Excluding them also matches the pre-existing
+     * {@code AspectRepository.ALLOWED_ASPECT_COLUMNS} precedent (the RDR-089
+     * operator-query fast path), which already excludes both for the identical
+     * reason. round-1 review fix (code-review-expert + substantive-critic Critical):
+     * this set previously still listed all seven, so {@code field="extras"} passed
+     * this guard and {@link dev.nexus.service.http.VectorHandler}'s 400-check, then
+     * silently fell through the SQL CASE to NULL (matches nothing, no error) instead
+     * of being rejected — a correctness-silent-fallback the field allowlist exists
+     * to prevent.
+     */
+    public static final java.util.Set<String> ASPECT_SCOPED_FIELD_ALLOWLIST = java.util.Set.of(
+        "problem_formulation", "proposed_method", "experimental_datasets",
+        "experimental_baselines", "experimental_results");
+
+    /**
+     * Aspect-scoped combined search (RDR-156 Decision 5, bead nexus-ubnwk).
+     *
+     * <p>Calls {@code nexus.search_aspect_scoped_<dim>} (vectors-008): joins
+     * {@code chunks_<dim> ⋈ catalog_document_chunks ⋈ catalog_documents ⋈
+     * document_aspects} (the last via {@code doc_id = tumbler}, aspects-004's backfill
+     * precondition), filters by an optional aspect-field substring pattern, an optional
+     * confidence floor, and the same chunk-metadata {@code where} JSONB-containment
+     * predicate every sibling combined-query shape uses, then ranks by cosine distance.
+     * Retires the two-step {@code search} + {@code operator_filter(source="aspects")}
+     * app-side path for the case where the aspect predicate is selective: that path
+     * filters AFTER the vector top-N truncation and can silently miss a distant match
+     * the aspect predicate would otherwise have kept; this function applies the
+     * predicate inside the same statement as the rank, so selectivity gates the scan.
+     *
+     * <p>A document with no {@code document_aspects} row, or whose row's {@code doc_id}
+     * is still NULL (no matching {@code source_uri} at backfill time), never joins —
+     * excluded by design, not a bug (aspects-004-doc-id-backfill.xml's own header).
+     * {@code field} MUST be validated against {@link #ASPECT_SCOPED_FIELD_ALLOWLIST}
+     * by the caller (the HTTP handler 400s on an unrecognized field before this method
+     * is ever reached) — the SQL function's own CASE also falls through to NULL for an
+     * unrecognized field name (matches nothing, never every row), a second, independent
+     * line of defense.
+     *
+     * <p>Returns the document tumbler as {@code id} (document-level, like
+     * {@link #searchMetadataScoped}); a document with multiple matching chunks can
+     * appear more than once — consumer-side de-duplication (keep best distance per id)
+     * is the Python tool's responsibility, matching every sibling combined-query shape.
+     *
+     * @param field         one of {@link #ASPECT_SCOPED_FIELD_ALLOWLIST}; null = no
+     *                      field-text filter (confidence/where only)
+     * @param pattern       substring to match (ILIKE) within {@code field}; ignored
+     *                      when {@code field} is null
+     * @param minConfidence aspects confidence floor (inclusive); null = no floor
+     * @param where         chunk-metadata equality predicates (JSONB containment);
+     *                      null/empty = no filter
+     */
+    public Tokened<List<Map<String, Object>>> searchAspectScopedWithTokens(
+            String tenant, String queryText, List<String> collectionNames,
+            String field, String pattern, Double minConfidence,
+            Map<String, Object> where, int nResults) {
+        if (collectionNames == null || collectionNames.isEmpty()) {
+            return new Tokened<>(List.of(), 0L);
+        }
+        if (nResults < 1) {
+            throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
+        }
+        if (field != null && !ASPECT_SCOPED_FIELD_ALLOWLIST.contains(field)) {
+            throw new IllegalArgumentException(
+                "unknown aspect field '" + field + "' - must be one of "
+                + ASPECT_SCOPED_FIELD_ALLOWLIST);
+        }
+        int dim = requireHomogeneousDim(collectionNames);
+        requireHomogeneousModel(collectionNames);
+        EmbedResult embed = embedQuery(collectionNames.get(0), queryText, dim);
+        Vector queryVec = Vector.of(embed.embeddings().get(0));
+        JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
+        String[] colls = collectionNames.toArray(String[]::new);
+
+        org.jooq.Table<?> fn = switch (dim) {
+            case 384  -> SEARCH_ASPECT_SCOPED_384.call(
+                queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults);
+            case 768  -> SEARCH_ASPECT_SCOPED_768.call(
+                queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults);
+            case 1024 -> SEARCH_ASPECT_SCOPED_1024.call(
+                queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
         return new Tokened<>(runCombinedQueryWithChash(tenant, fn), embed.tokens());

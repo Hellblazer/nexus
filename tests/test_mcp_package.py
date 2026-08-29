@@ -23,7 +23,8 @@ def test_catalog_module_importable():
 def test_core_registered_tools():
     """Core tools registered with @mcp.tool() (RDR-088 added filter, check,
     verify; RDR-126 added daemon_uninstall; RDR-156 P4 added the two
-    combined-query primitives)."""
+    combined-query primitives; RDR-156 Decision 5 added the fourth,
+    search_aspect_scoped)."""
     from nexus.mcp.core import mcp
 
     tool_names = {t.name for t in mcp._tool_manager.list_tools()}
@@ -41,6 +42,8 @@ def test_core_registered_tools():
         "daemon_uninstall",
         # RDR-156 P4 combined-query primitives (nexus-joesk, nexus-houg9)
         "search_metadata_scoped", "search_topic_scoped", "search_graph_hop",
+        # RDR-156 Decision 5 (bead nexus-ubnwk): the fourth combined-query shape.
+        "search_aspect_scoped",
         # RDR-182 P3 consent-gated remediation surface (forensics/remediate)
         # DELETED at nexus-lgdel: the chash-rekey upgrade rung it steered
         # operators toward no longer exists.

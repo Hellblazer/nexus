@@ -17,7 +17,9 @@ from nexus.doc_indexer import (
     _lookup_existing_doc_id, _markdown_chunks,
     batch_index_markdowns, batch_index_pdfs, index_markdown, index_pdf,
 )
-from tests._catalog_fixture_ops import ActiveCatalog, documents_by_file_path, seed_manifest_chunks
+from tests._catalog_fixture_ops import (
+    ActiveCatalog, count_documents, documents_by_file_path, seed_manifest_chunks,
+)
 
 
 def _wrap_write_batch_with_fk_seed(t3):
@@ -398,6 +400,306 @@ class TestIndexPdfUnchunkableGuard:
         # under test must not block registration for a real PDF.
         mock_register.assert_called()
         assert result == 1
+
+
+# ── nexus-uxg4u: --dry-run must never touch the catalog ─────────────────────
+
+
+class TestIndexPdfDryRunNeverTouchesCatalog:
+    def test_dry_run_never_calls_register_or_lookup_doc_id(
+        self, sample_pdf, mock_t3,
+    ):
+        """A recorded catalog fake proves ZERO catalog calls on dry_run —
+        not just an empty end state — while the preview still reports a
+        real chunk count. Mirrors this file's own
+        ``test_zero_byte_pdf_raises_before_registration`` idiom."""
+        from nexus.doc_indexer import index_pdf
+        from nexus.hook_registry import HookRegistry
+
+        with patch("nexus.doc_indexer._register_or_lookup_doc_id") as mock_register:
+            with pdf_extract_patches_ctx():
+                result = index_pdf(
+                    sample_pdf, corpus="uxg4u-dry-run", t3=mock_t3,
+                    embed_fn=_fake_embed, hooks=HookRegistry(), dry_run=True,
+                )
+        mock_register.assert_not_called()
+        assert result == 1  # the real chunk from pdf_extract_patches_ctx()
+
+    def test_dry_run_never_calls_catalog_pdf_hook(self, sample_pdf, mock_t3):
+        """The batch-path catalog hook (``_catalog_pdf_hook``) writes
+        unconditionally regardless of doc_id -- it needs its own gate,
+        not just an empty doc_id, and this proves that gate holds."""
+        from nexus.doc_indexer import index_pdf
+        from nexus.hook_registry import HookRegistry
+
+        with patch("nexus.pipeline_stages._catalog_pdf_hook") as mock_hook:
+            with pdf_extract_patches_ctx():
+                index_pdf(
+                    sample_pdf, corpus="uxg4u-dry-run-hook", t3=mock_t3,
+                    embed_fn=_fake_embed, hooks=HookRegistry(), dry_run=True,
+                )
+        mock_hook.assert_not_called()
+
+    def test_dry_run_real_engine_leaves_doc_count_unchanged(
+        self, sample_pdf, mock_t3,
+    ):
+        """End-to-end against the REAL local test engine (autouse T2
+        substrate, see ``_no_propagating_fence_complete``'s docstring) --
+        proves no Document row lands, not merely that a mock wasn't
+        invoked."""
+        from nexus.doc_indexer import index_pdf
+        from nexus.hook_registry import HookRegistry
+
+        before = count_documents()
+        with pdf_extract_patches_ctx():
+            result = index_pdf(
+                sample_pdf, corpus="uxg4u-dry-run-engine", t3=mock_t3,
+                embed_fn=_fake_embed, hooks=HookRegistry(), dry_run=True,
+            )
+        assert result == 1
+        assert count_documents() == before
+        assert documents_by_file_path(str(sample_pdf.resolve())) == []
+
+    def test_dry_run_with_default_hooks_fires_zero_hooks(
+        self, sample_pdf, mock_t3,
+    ):
+        """nexus-uxg4u round 2 (Critical, both reviewers): today's
+        safety is the CLI's own convention of passing an empty
+        ``HookRegistry()`` for --dry-run -- not something ``dry_run``
+        itself enforces. A direct caller with ``hooks=None`` (->
+        ``install_default_hooks`` wires a REAL T2 aspect-extraction-
+        queue write via ``aspect_extraction_enqueue_hook``, which does
+        not check doc_id truthiness before enqueueing) must get ZERO
+        hook fires on a dry run regardless -- proven with a NON-empty,
+        real default registry, not the CLI's own empty one."""
+        from nexus.doc_indexer import index_pdf
+
+        with patch("nexus.mcp_infra.manifest_write_batch_hook") as mock_manifest, \
+                patch("nexus.mcp_infra.taxonomy_assign_batch_hook") as mock_taxonomy, \
+                patch("nexus.aspect_worker.aspect_extraction_enqueue_hook") as mock_aspect:
+            with pdf_extract_patches_ctx():
+                result = index_pdf(
+                    sample_pdf, corpus="uxg4u-dry-run-default-hooks", t3=mock_t3,
+                    embed_fn=_fake_embed, dry_run=True,  # hooks=None (default)
+                )
+        assert result == 1
+        mock_manifest.assert_not_called()
+        mock_taxonomy.assert_not_called()
+        mock_aspect.assert_not_called()
+
+
+# ── nexus-uxg4u task 2: fresh-mint rollback on post-registration failure ────
+
+
+class TestIndexPdfFreshMintRollback:
+    def test_index_run_verify_refused_rolls_back_freshly_minted_doc(
+        self, sample_pdf, mock_t3, monkeypatch,
+    ):
+        """A run that MINTED its own catalog Document (created=True) and
+        then fails the completion fence must roll that registration back
+        exactly once, with the minted doc_id, then re-raise -- never
+        silently swallowing the refusal."""
+        from nexus.doc_indexer import index_pdf
+        from nexus.errors import IndexRunVerifyRefused
+        from nexus.hook_registry import HookRegistry
+
+        minted_doc_id = "1.1.uxg4u-fresh"
+        rollback_calls: list[tuple[str, str]] = []
+
+        def _fake_rollback(tumbler, *, original_error=""):
+            rollback_calls.append((tumbler, original_error))
+            return True
+
+        def _refuse(*a, **kw):
+            raise IndexRunVerifyRefused(
+                doc_id=minted_doc_id, referenced=0, present=0,
+                missing=0, chunk_count=1,
+            )
+
+        def _register_side_effect(*args, with_created=False, **kwargs):
+            # Mirrors the REAL function's contract exactly: index_pdf's
+            # pre-flight call (with_created=True) gets a 2-tuple; the
+            # small-document branch's own second, redundant lookup call
+            # (with_created defaults False) gets a bare doc_id -- a fixed
+            # return_value would hand that second call the tuple too.
+            return (minted_doc_id, True) if with_created else minted_doc_id
+
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.rollback_minted_catalog_entry",
+            _fake_rollback,
+        )
+        with patch(
+            "nexus.doc_indexer._register_or_lookup_doc_id",
+            side_effect=_register_side_effect,
+        ), patch("nexus.doc_indexer._fence_begin"), patch(
+            "nexus.doc_indexer._fence_complete", side_effect=_refuse,
+        ):
+            with pdf_extract_patches_ctx():
+                with pytest.raises(IndexRunVerifyRefused):
+                    index_pdf(
+                        sample_pdf, corpus="uxg4u-rollback", t3=mock_t3,
+                        embed_fn=_fake_embed, hooks=HookRegistry(),
+                    )
+        assert len(rollback_calls) == 1
+        assert rollback_calls[0][0] == minted_doc_id
+
+    def test_index_run_verify_refused_on_preexisting_doc_never_rolls_back(
+        self, sample_pdf, mock_t3, monkeypatch,
+    ):
+        """The SAME failure against a PRE-EXISTING document (created=False)
+        must be left exactly as the fence marked it -- no rollback, since
+        deleting it could discard someone else's prior indexing work."""
+        from nexus.doc_indexer import index_pdf
+        from nexus.errors import IndexRunVerifyRefused
+        from nexus.hook_registry import HookRegistry
+
+        existing_doc_id = "1.1.uxg4u-preexisting"
+        rollback_calls: list[str] = []
+
+        def _fake_rollback(tumbler, *, original_error=""):
+            rollback_calls.append(tumbler)
+            return True
+
+        def _refuse(*a, **kw):
+            raise IndexRunVerifyRefused(
+                doc_id=existing_doc_id, referenced=0, present=0,
+                missing=0, chunk_count=1,
+            )
+
+        def _register_side_effect(*args, with_created=False, **kwargs):
+            return (existing_doc_id, False) if with_created else existing_doc_id
+
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.rollback_minted_catalog_entry",
+            _fake_rollback,
+        )
+        with patch(
+            "nexus.doc_indexer._register_or_lookup_doc_id",
+            side_effect=_register_side_effect,
+        ), patch("nexus.doc_indexer._fence_begin"), patch(
+            "nexus.doc_indexer._fence_complete", side_effect=_refuse,
+        ) as mock_complete, patch("nexus.doc_indexer._fence_fail") as mock_fail:
+            with pdf_extract_patches_ctx():
+                with pytest.raises(IndexRunVerifyRefused):
+                    index_pdf(
+                        sample_pdf, corpus="uxg4u-no-rollback", t3=mock_t3,
+                        embed_fn=_fake_embed, hooks=HookRegistry(),
+                    )
+        assert rollback_calls == []
+        mock_complete.assert_called_once()
+        # _fence_complete raising propagates directly (nexus-5xn3k.4
+        # contract) -- it is not routed back through _fence_fail, which
+        # is reserved for the embed/upsert try block's own exceptions.
+        mock_fail.assert_not_called()
+
+    def test_embed_failure_after_fresh_mint_rolls_back(
+        self, sample_pdf, mock_t3, monkeypatch,
+    ):
+        """nexus-uxg4u round 2 (substantive-critic ship-blocker): the
+        small-doc branch's embed/upsert/hooks try/except re-raises
+        DIRECTLY out of index_pdf -- unlike the streaming/incremental
+        branches (each wrapped by index_pdf's own try/except around the
+        call site), this inline block had no wrap of its own, so a
+        freshly-minted document whose embed stage fails here was left
+        behind forever (``_fence_fail`` only marks 'failed', never
+        deletes). Reachable via a real ``--streaming never`` run on a
+        small PDF."""
+        from nexus.doc_indexer import index_pdf
+        from nexus.hook_registry import HookRegistry
+
+        minted_doc_id = "1.1.uxg4u-embed-fail"
+        rollback_calls: list[str] = []
+
+        def _fake_rollback(tumbler, *, original_error=""):
+            rollback_calls.append(tumbler)
+            return True
+
+        def _register_side_effect(*args, with_created=False, **kwargs):
+            return (minted_doc_id, True) if with_created else minted_doc_id
+
+        def _boom_embed(texts, model):
+            raise RuntimeError("embed service unavailable")
+
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.rollback_minted_catalog_entry",
+            _fake_rollback,
+        )
+        with patch(
+            "nexus.doc_indexer._register_or_lookup_doc_id",
+            side_effect=_register_side_effect,
+        ), patch("nexus.doc_indexer._fence_begin"), patch(
+            "nexus.doc_indexer._fence_fail",
+        ) as mock_fail:
+            with pdf_extract_patches_ctx():
+                with pytest.raises(RuntimeError, match="embed service unavailable"):
+                    index_pdf(
+                        sample_pdf, corpus="uxg4u-embed-rollback", t3=mock_t3,
+                        embed_fn=_boom_embed, hooks=HookRegistry(),
+                        streaming="never",
+                    )
+        mock_fail.assert_called_once()
+        assert len(rollback_calls) == 1
+        assert rollback_calls[0] == minted_doc_id
+
+    def test_worktree_skip_then_fallback_mint_rolls_back_on_fence_refusal(
+        self, sample_pdf, mock_t3, monkeypatch,
+    ):
+        """nexus-uxg4u round 2 (code-review-expert Finding B): doc_id can
+        arrive at the small-doc branch's second registration call empty
+        for a reason OTHER than "no catalog" -- the worktree/tempdir
+        ephemeral-skip path or a swallowed pre-flight exception both
+        return ("", False). When that second call independently mints
+        (created=True), that mint must be just as rollback-eligible on a
+        later fence refusal as a pre-flight mint would have been -- not
+        invisible to the closure that only knew about the pre-flight's
+        own (empty) outcome."""
+        from nexus.doc_indexer import index_pdf
+        from nexus.errors import IndexRunVerifyRefused
+        from nexus.hook_registry import HookRegistry
+
+        fallback_doc_id = "1.1.uxg4u-fallback-mint"
+        rollback_calls: list[str] = []
+
+        def _fake_rollback(tumbler, *, original_error=""):
+            rollback_calls.append(tumbler)
+            return True
+
+        def _refuse(*a, **kw):
+            raise IndexRunVerifyRefused(
+                doc_id=fallback_doc_id, referenced=0, present=0,
+                missing=0, chunk_count=1,
+            )
+
+        calls = {"n": 0}
+
+        def _register_side_effect(*args, with_created=False, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # The top-level pre-flight resolves NOTHING (simulates
+                # the worktree/tempdir ephemeral-skip path).
+                return ("", False) if with_created else ""
+            # The small-doc branch's own second call independently mints.
+            return (fallback_doc_id, True) if with_created else fallback_doc_id
+
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.rollback_minted_catalog_entry",
+            _fake_rollback,
+        )
+        with patch(
+            "nexus.doc_indexer._register_or_lookup_doc_id",
+            side_effect=_register_side_effect,
+        ), patch("nexus.doc_indexer._fence_begin"), patch(
+            "nexus.doc_indexer._fence_complete", side_effect=_refuse,
+        ):
+            with pdf_extract_patches_ctx():
+                with pytest.raises(IndexRunVerifyRefused):
+                    index_pdf(
+                        sample_pdf, corpus="uxg4u-fallback-rollback", t3=mock_t3,
+                        embed_fn=_fake_embed, hooks=HookRegistry(),
+                    )
+        assert calls["n"] >= 2, "the fallback (small-doc second) call never fired"
+        assert len(rollback_calls) == 1
+        assert rollback_calls[0] == fallback_doc_id
 
 
 class TestBatchIndexMarkdownsUnchunkableFiles:

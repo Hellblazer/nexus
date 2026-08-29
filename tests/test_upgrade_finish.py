@@ -1101,6 +1101,81 @@ class TestConvergeEngine:
         assert any("converged engine" in a for a in actions)
         assert any("NEEDS HUMAN" in a for a in actions)
 
+    # ── nexus-mqm5w: an rc!=0 restart-stale no longer short-circuits ──
+
+    def test_restart_rc_incomplete_but_converged_is_not_needs_human(self, tmp_path):
+        """A non-zero stop/start rc must not short-circuit the convergence
+        check before `_running_engine` ever runs. The predecessor claimed
+        NEEDS HUMAN the instant `stop` or `start` exited non-zero, even
+        when the engine went on to converge — the exact false alarm hit
+        during the v7.5.0 release battery (stop rc=1 from a stubborn-but-
+        harmless survivor; start rc=0; engine landed on the required
+        version; convergence fully succeeded). Positive case: this must
+        go GREEN only once the rc-based early return is removed."""
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch(
+                    "nexus.daemon.binary_install.install_binary",
+                    return_value=(tmp_path / "service" / "nexus-service", {"version": _REQUIRED_STR}),
+                ), \
+                patch(
+                    "nexus.upgrade_finish.service_stack_pids", return_value=[],
+                ), \
+                patch(
+                    "nexus.upgrade_finish.subprocess.run",
+                    side_effect=[
+                        MagicMock(returncode=1, stdout="", stderr="stop: no live lease"),
+                        MagicMock(returncode=0, stdout="", stderr=""),
+                    ],
+                ), \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    return_value=_RunningEngine(up=True, version=REQUIRED_ENGINE_VERSION),
+                ):
+            actions = converge_engine(tmp_path)
+
+        assert not any("NEEDS HUMAN" in a for a in actions), actions
+        assert any("verified running v" + _REQUIRED_STR in a for a in actions)
+
+    def test_restart_rc_incomplete_and_still_old_version_is_needs_human(self, tmp_path):
+        """Non-vacuity companion to the positive case above: rc!=0 must not
+        become treated as harmless either. When the engine is STILL on the
+        old version after an incomplete stop/start, NEEDS HUMAN must still
+        fire — this goes red if the version comparison (not just the rc
+        check) is deleted."""
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch(
+                    "nexus.daemon.binary_install.install_binary",
+                    return_value=(tmp_path / "service" / "nexus-service", {"version": _REQUIRED_STR}),
+                ), \
+                patch(
+                    "nexus.upgrade_finish.service_stack_pids", return_value=[],
+                ), \
+                patch(
+                    "nexus.upgrade_finish.subprocess.run",
+                    side_effect=[
+                        MagicMock(returncode=1, stdout="", stderr="stop: no live lease"),
+                        MagicMock(returncode=0, stdout="", stderr=""),
+                    ],
+                ), \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    return_value=_RunningEngine(
+                        up=True,
+                        version=tuple(int(p) for p in _older_version_str().split(".")),
+                    ),
+                ):
+            actions = converge_engine(tmp_path)
+
+        assert any("NEEDS HUMAN" in a for a in actions), actions
+
     # ── nexus-pgdcv: the gate DEFERS when it cannot verify, never blind ──
 
     def test_unknown_probe_defers_and_never_installs(self, tmp_path):

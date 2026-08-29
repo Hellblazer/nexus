@@ -49,6 +49,7 @@ def test_all_command_modules_registered():
         "storage_cmd": "storage",
         "stranded_cmd": "stranded",
         "taxonomy_cmd": "taxonomy",
+        "telemetry_cmd": "telemetry",
         "tenant_cmd": "tenant",
         "tier_status": "tier-status",
         "answer_runs": "answer-runs",

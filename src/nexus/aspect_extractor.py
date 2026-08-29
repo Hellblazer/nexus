@@ -744,6 +744,20 @@ def select_config(collection: str) -> ExtractorConfig | None:
     return None
 
 
+def registered_prefixes() -> list[str]:
+    """The collection prefixes with a registered extractor config, e.g.
+    ``["knowledge__", "rdr__"]`` (nexus-hj7mg).
+
+    The single source of truth for "which prefixes get aspects" is
+    ``_REGISTRY`` — callers that need to tell a user what IS supported
+    (as opposed to routing a specific collection via :func:`select_config`)
+    derive the list from here rather than hardcoding it a second time,
+    which is exactly how a caller's copy goes stale the next time a
+    prefix is added or removed.
+    """
+    return list(_REGISTRY.keys())
+
+
 # ── Per-document shape routing (nexus-kmbys) ─────────────────────────────────
 
 #: Paper-structure signals. A document scoring >= _PAPER_SHAPE_THRESHOLD

@@ -48,7 +48,10 @@ class _Cat:
     def all_documents(self, limit=0):
         return list(self._entries)
 
-    def collection_doc_counts(self):
+    def stats(self):
+        return {"doc_count": len(self._entries)}
+
+    def collection_doc_counts(self, *, include_deleted=False):
         counts: dict[str, int] = {}
         for e in self._entries:
             counts[e.physical_collection] = counts.get(e.physical_collection, 0) + 1

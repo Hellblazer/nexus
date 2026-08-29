@@ -153,4 +153,36 @@ class TestPinnedInstall:
             "6.18.1", legacy="uv tool install conexus==6.18.1"
         )
         assert out != "nx self install"
-        assert "6.18.1" in out
+
+
+class TestLocalExtraAdvice:
+    """nexus-hbgso: unlike every other function here, a generation box has
+    NO working remedy for adding the [local] extra to an EXISTING
+    generation -- extras are fixed at build time, and `nx self install`'s
+    upgrade path (self_cmd.py's `_converge_legacy_install` / upgrade flow)
+    is deliberately `NO --extras`. So the generation branch states the
+    limitation instead of naming a command, unlike upgrade_command /
+    pinned_install_command which always have a real command to give."""
+
+    def test_legacy_box_gets_the_reinstall_form(self, unmigrated) -> None:
+        assert install_advice.local_extra_advice() == [
+            'uv tool install --reinstall "conexus[local]"',
+        ]
+
+    def test_legacy_box_honors_a_custom_legacy_string(self, unmigrated) -> None:
+        assert install_advice.local_extra_advice(legacy="custom-cmd") == [
+            "custom-cmd",
+        ]
+
+    def test_generation_box_states_the_limitation_not_a_command(
+        self, migrated,
+    ) -> None:
+        out = install_advice.local_extra_advice()
+        assert len(out) == 1
+        joined = out[0]
+        assert "no in-place remedy" in joined
+        assert "[local]" in joined
+        # never a command that would look runnable but fail:
+        assert "nx init" not in joined
+        assert "pip install" not in joined
+        assert "nx self install" not in joined

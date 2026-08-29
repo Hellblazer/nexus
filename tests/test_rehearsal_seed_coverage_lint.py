@@ -367,6 +367,26 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # and the DROP DEFAULT/DROP NOT NULL shape (with no CHECK, staging
         # stays typeless) lands at HEAD.
         ("telemetry-006-2", "nexus-tk070.p6b"),
+        # nexus-ubnwk (RDR-156 Decision 5): aspects-004-1's doc_id backfill —
+        # its own NO FORCE/FORCE toggle wraps an UPDATE joining
+        # nexus.document_aspects to nexus.catalog_documents on exact
+        # source_uri equality (both tables toggled, the catalog-014-0
+        # both-tables lesson). Seeded as a legacy NULL-doc_id
+        # document_aspects row whose source_uri exactly matches a fresh
+        # catalog document (tumbler 1.1.204); effect-asserted (doc_id is
+        # stamped to 1.1.204 post-hop, FORCE restored on both tables).
+        ("aspects-004-1", "nexus-ubnwk"),
+        # nexus-v3w9n (Sam decision, tumbler-grammar data remediation):
+        # catalog-034-0's own NO FORCE/FORCE toggle wraps an UPDATE
+        # tombstoning every live catalog_documents row with fewer than 3
+        # non-empty dot-separated tumbler segments (the 2026-08-28 census's
+        # two phantom registrations, "1.1"/"1.2"). Seeded as a fresh
+        # 2-segment ghost tumbler ("1.5", the DELETE/tombstone arm) plus a
+        # conforming 3-segment control row ("1.1.205", the KEEP arm);
+        # effect-asserted (the ghost row is tombstoned, the control row
+        # survives untouched, FORCE restored on catalog_documents via the
+        # existing generic check aspects-004-1 already exercises).
+        ("catalog-034-0", "nexus-v3w9n"),
     }
 )
 

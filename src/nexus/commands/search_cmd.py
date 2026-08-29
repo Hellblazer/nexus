@@ -399,7 +399,10 @@ def search_cmd(
         _maybe_emit_silent_zero_note(
             diagnostics_out, quiet=quiet, config=config,
         )
-        click.echo("No results.")
+        if json_out:
+            click.echo(format_json([]))
+        else:
+            click.echo("No results.")
         return
 
     # Python-side path scoping (ChromaDB has no $startswith operator).
@@ -413,7 +416,10 @@ def search_cmd(
             or r.metadata.get("source_path", "").startswith(resolved)
         ]
         if not results:
-            click.echo("No results.")
+            if json_out:
+                click.echo(format_json([]))
+            else:
+                click.echo("No results.")
             return
 
     # nexus-oo4f post-query filter: --max-file-chunks against the
@@ -463,7 +469,10 @@ def search_cmd(
             if (cnt := _doc_chunk_count(r)) is None or cnt <= max_file_chunks
         ]
         if not results:
-            click.echo("No results.")
+            if json_out:
+                click.echo(format_json([]))
+            else:
+                click.echo("No results.")
             return
 
     # Pre-reranker: capture rg file paths and matched line numbers while all

@@ -757,10 +757,13 @@ def local_embedder_advisory(
                 "installed — search is silently running at 384-dim "
                 "(all-MiniLM-L6-v2), materially worse than your choice"
             ),
-            fix_suggestions=[
-                "Install the local extra and provision bge-768: nx init",
-                "Or directly: pip install 'conexus[local]'",
-            ],
+            # nexus-hbgso: `nx init` cannot install an extra (the picker it
+            # once hosted was removed at RDR-174 P1.3) and bare `pip install`
+            # has no meaningful target under the generation layout — both
+            # named dead ends on the one check whose job is getting the user
+            # off a 384-dim embedder. Route through install_advice so the
+            # generation-vs-legacy-uv distinction lives in one place.
+            fix_suggestions=_install_advice().local_extra_advice(),
         )
 
     if choice is None and active_model == _TIER0_MODEL:

@@ -681,13 +681,17 @@ class TestDtContentExceptionHandling:
         assert "1 failed" in result.output, result.output
         assert "U-BAD" in result.output, result.output
         assert "completion REFUSED" in result.output, result.output
-        # Same rationale as the ChunkLandingUnverifiedError test above: a
-        # bare raise from this stub does not, by itself, populate
+        # A bare raise from this stub does not, by itself, populate
         # get_complete_refusals() (only the real doc_indexer._fence_
         # complete -> _record_complete_refusal call site does that, as a
         # side effect of the SAME exception in production) — see the
-        # dedicated integration test below for that wiring.
-        assert result.exit_code == 0, result.output
+        # dedicated integration test below for that wiring. The run-level
+        # gate still decides the exit code, and since nexus-l6tr7 it also
+        # counts the refusals dt.py bucketed into `failed`, so a refusal
+        # fails the run here too (nexus-tp8yk D2b) and the footer names
+        # the collector divergence instead of staying silent.
+        assert result.exit_code != 0, result.output
+        assert "listed under failed" in result.output, result.output
 
     def test_dt_content_refusal_still_honours_run_level_gate(
         self, runner, fake_selectors, monkeypatch,

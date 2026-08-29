@@ -306,6 +306,7 @@ from nexus.commands.catalog_cmds import doctor as _doctor_cmds  # noqa: E402 —
 from nexus.commands.catalog_cmds import orphan_backfill as _orphan_backfill_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import reconcile_stale as _reconcile_stale_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import purge_trash as _purge_trash_cmds  # noqa: E402 — must follow the `catalog` group definition above
+from nexus.commands.catalog_cmds import gc_audit as _gc_audit_cmds  # noqa: E402 — must follow the `catalog` group definition above
 
 _owners_cmds.register(catalog)
 _backfill_cmds.register(catalog)
@@ -320,6 +321,7 @@ _doctor_cmds.register(catalog)
 _orphan_backfill_cmds.register(catalog)
 _reconcile_stale_cmds.register(catalog)
 _purge_trash_cmds.register(catalog)
+_gc_audit_cmds.register(catalog)
 
 
 @catalog.command("init")
@@ -413,6 +415,33 @@ def list_cmd(owner: str, content_type: str, limit: int, offset: int, as_json: bo
             click.echo(f"\n  Next page: --offset {offset + limit}")
 
 
+def _show_owner_card(cat: "CatalogReader", owner_tumbler: Tumbler, raw_value: str, as_json: bool) -> None:
+    """Render a depth-2 tumbler as an owner card (nexus-v3w9n).
+
+    ``raw_value`` is the argument the caller typed, used verbatim in the
+    "Not found" message so it matches the existing document-not-found wording.
+    """
+    owner = cat.get_owner_by_prefix(str(owner_tumbler))
+    if owner is None:
+        raise click.ClickException(f"Not found: {raw_value}")
+    document_count = len(cat.by_owner(owner_tumbler))
+    if as_json:
+        # nexus-v3w9n fix round 1 (substantive-critic Significant finding):
+        # explicit discriminator rather than relying on callers to infer
+        # "owner vs document" from key-shape (tumbler_prefix/document_count
+        # vs tumbler/links_from/links_to). Document JSON is unchanged.
+        d = {"kind": "owner", **owner}
+        d["document_count"] = document_count
+        click.echo(json.dumps(d, indent=2, default=str))
+    else:
+        click.echo(f"Owner:      {owner.get('tumbler_prefix', owner_tumbler)}")
+        click.echo(f"Name:       {owner.get('name', '')}")
+        click.echo(f"Type:       {owner.get('owner_type', '')}")
+        click.echo(f"Repo hash:  {owner.get('repo_hash', '')}")
+        click.echo(f"Next seq:   {owner.get('next_seq', 0)}")
+        click.echo(f"Documents:  {document_count}")
+
+
 @catalog.command("show")
 @click.argument("tumbler_or_title")
 @click.option("--json", "as_json", is_flag=True)
@@ -422,6 +451,21 @@ def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
     Accepts a tumbler (1.9.14) or a title/filename. Use --json for machine-readable output.
     """
     cat = _get_catalog()
+    # nexus-v3w9n: catalog-034 grammar makes tumbler depth unambiguous — an
+    # owner prefix is EXACTLY 2 segments, a document tumbler is >= 3. A
+    # depth-2 argument is therefore an OWNER address, not a document one;
+    # cat.resolve()/_resolve_tumbler() below never consult owners and would
+    # otherwise render an undifferentiated "Not found" for a perfectly valid
+    # owner prefix. Only a value that PARSES as a tumbler is affected —
+    # title-fallback resolution (_resolve_tumbler) is unchanged for anything
+    # else, including a non-numeric argument.
+    try:
+        parsed = Tumbler.parse(tumbler_or_title)
+    except ValueError:
+        parsed = None
+    if parsed is not None and parsed.depth == 2:
+        _show_owner_card(cat, parsed, tumbler_or_title, as_json)
+        return
     t = _resolve_tumbler(cat, tumbler_or_title)
     entry = cat.resolve(t)
     if entry is None:

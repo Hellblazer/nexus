@@ -967,6 +967,66 @@ class TestPipelineIndexPdf:
 
 
 
+class TestPipelineIndexPdfDryRun:
+    """nexus-uxg4u: dry_run must gate every catalog/T2 write this
+    function makes on its own account (the fallback pre-flight
+    registration for a direct caller, the completion fence, and the
+    catalog hook) -- this is the streaming route the observed bug's
+    fence refusal (IndexRunVerifyRefused, claimed_chunk_count=84) came
+    through when called via doc_indexer.index_pdf."""
+
+    def test_dry_run_never_registers_or_touches_catalog(self, db, mock_t3) -> None:
+        fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
+        fr = _er(1)
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
+                patch("nexus.doc_indexer._register_or_lookup_doc_id") as mock_register, \
+                patch("nexus.doc_indexer._fence_begin") as mock_begin, \
+                patch("nexus.doc_indexer._fence_complete") as mock_complete, \
+                patch("nexus.doc_indexer._fence_fail") as mock_fail, \
+                patch("nexus.pipeline_stages._catalog_pdf_hook") as mock_hook:
+            ME.return_value.extract.side_effect = _fx(1, fr)
+            MC.return_value.chunk.return_value = fc
+            total = pipeline_index_pdf(
+                Path("/dry-run.pdf"), "dryrun123", "docs__test",
+                mock_t3, db=db, embed_fn=_embed, corpus="test", dry_run=True,
+            )
+        assert total == 1
+        mock_register.assert_not_called()
+        mock_begin.assert_not_called()
+        mock_complete.assert_not_called()
+        mock_fail.assert_not_called()
+        mock_hook.assert_not_called()
+
+    def test_dry_run_with_default_hooks_uploader_loop_fires_zero_hooks(
+        self, db, mock_t3,
+    ) -> None:
+        """nexus-uxg4u round 2 (Critical, both reviewers): uploader_loop
+        (Stage 3, spawned via pool.submit) fires hooks.fire_batch/
+        fire_single unconditionally on every uploaded batch -- dry_run
+        was not even in its signature. install_default_hooks wires a
+        REAL T2 aspect-extraction-queue write (aspect_extraction_
+        enqueue_hook is a document hook, not reached from uploader_loop
+        directly, but manifest_write_batch_hook / taxonomy_assign_
+        batch_hook ARE batch hooks fired straight from here) -- proven
+        with hooks=None (a real default registry), not the caller's own
+        empty one."""
+        fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
+        fr = _er(1)
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
+                patch("nexus.mcp_infra.manifest_write_batch_hook") as mock_manifest, \
+                patch("nexus.mcp_infra.taxonomy_assign_batch_hook") as mock_taxonomy:
+            ME.return_value.extract.side_effect = _fx(1, fr)
+            MC.return_value.chunk.return_value = fc
+            total = pipeline_index_pdf(
+                Path("/dry-run-hooks.pdf"), "dryrunhooks123", "docs__test",
+                mock_t3, db=db, embed_fn=_embed, corpus="test", dry_run=True,
+                hooks=None,
+            )
+        assert total == 1
+        mock_manifest.assert_not_called()
+        mock_taxonomy.assert_not_called()
+
+
 class TestBufferEdgeCases:
     def test_count_pipelines(self, db) -> None:
         assert db.count_pipelines() == 0

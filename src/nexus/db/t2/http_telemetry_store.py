@@ -30,6 +30,7 @@ tests/db/test_http_t2_store_parity.py):
 Route mapping (matches TelemetryHandler Java):
     POST /v1/telemetry/relevance/log    — log_relevance
     GET  /v1/telemetry/relevance/query  — get_relevance_log
+    GET  /v1/telemetry/relevance/stats  — get_relevance_stats (nexus-v0x32)
     POST /v1/telemetry/relevance/expire — expire_relevance_log
     POST /v1/telemetry/search/batch     — log_search_batch
     GET  /v1/telemetry/search/stats     — query_collection_stats
@@ -300,34 +301,6 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         inherits another target's watermark."""
         return self._base_url or ""
 
-    def record_consent(self, *, scope: str, ts: str, granted: bool) -> None:
-        """Record a consent grant/revoke. Calls ``POST /v1/telemetry/consents/record``.
-
-        Append-only; ``granted`` distinguishes a grant from a revoke.
-
-        Introduced for RDR-182's ``remediate`` consent audit (nexus-ng2sy).
-        That surface is deleted, so this method has NO production caller.
-        It survives because ``tests/db/t2_store_contract.py`` requires it of
-        every telemetry store — the HTTP/engine parity contract owns it now,
-        not RDR-182. Removing it is a parity-suite change, not a cleanup.
-        """
-        self._post("/v1/telemetry/consents/record", {
-            "scope":   scope,
-            "ts":      ts,
-            "granted": granted,
-        })
-
-    def list_consents(self) -> list[dict[str, Any]]:
-        """Read the tenant's consent-audit trail (grants and revokes, in
-        insertion order). Calls ``GET /v1/telemetry/consents/list``.
-
-        No production caller: the ``nx remediate --history`` surface this
-        read was built for is deleted. Kept by the same parity contract as
-        ``record_consent`` above.
-        """
-        data = self._get("/v1/telemetry/consents/list")
-        return data if isinstance(data, list) else []
-
     def get_retention_markers(self, relations: list[str]) -> dict[str, int]:
         """Cumulative-deletes retention markers for *relations* (nexus-24p05)
         — the verify-fill watermark's rollback detector. Calls
@@ -343,6 +316,28 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         if not isinstance(markers, dict):
             return {}
         return {k: int(v) for k, v in markers.items() if isinstance(v, (int, float))}
+
+    def get_relevance_stats(self) -> dict[str, Any]:
+        """Whole-tenant relevance_log aggregate (nexus-v0x32, playbook §4.5
+        telemetry baseline): ``{"count": int, "oldest": str | None,
+        "newest": str | None}``. Calls ``GET /v1/telemetry/relevance/stats``
+        — no filters, no paging, unlike :meth:`get_relevance_log`'s capped
+        300-row window (which cannot answer "row count" or "oldest
+        surviving row" honestly at all, RDR proven 2026-08-27).
+
+        Raises on transport/HTTP failure (including 404 on an engine that
+        predates this route) — callers render the honest failure message
+        via :func:`relevance_stats_read_failure_message`, same three-way
+        split as :func:`nx_answer_runs_read_failure_message`.
+        """
+        data = self._get("/v1/telemetry/relevance/stats")
+        if not isinstance(data, dict):  # defensive: a stripped proxy response
+            return {"count": 0, "oldest": None, "newest": None}
+        return {
+            "count": int(data.get("count") or 0),
+            "oldest": data.get("oldest"),
+            "newest": data.get("newest"),
+        }
 
     #: RDR-196 .p1d (nexus-nyry9.10) capability-probe cache. Class-level
     #: default; the first probe on THIS instance shadows it with an
@@ -1117,6 +1112,39 @@ def tier_writes_read_failure_message(exc: Exception) -> str:
             f"the tier_writes/query route returned HTTP {status} — the route "
             "exists but failed; investigate the engine before assuming "
             "version skew."
+        )
+    return prefix + (
+        f"the service read failed ({type(exc).__name__}) — "
+        "service unreachable."
+    )
+
+
+def relevance_stats_read_failure_message(exc: Exception) -> str:
+    """One shared, honest diagnosis for a failed relevance/stats read.
+
+    Same three-way split as :func:`tier_writes_read_failure_message` and
+    :func:`nx_answer_runs_read_failure_message` (nexus-v0x32): a 404 means
+    this engine predates the ``relevance/stats`` route (version skew, never
+    reported as a fabricated 0), any other HTTP status means the route
+    exists and failed on a live engine, and no status at all means the
+    service is unreachable. Used by ``nx telemetry baseline`` so a caller
+    cannot mistake "no route" for "no rows".
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    prefix = (
+        "relevance_log is recorded in the service-backed telemetry store "
+        "(Postgres); "
+    )
+    if status == 404:
+        return prefix + (
+            "this engine predates the relevance/stats route — "
+            "deploy an engine carrying nexus-v0x32 to see counts."
+        )
+    if status is not None:
+        return prefix + (
+            f"the relevance/stats route returned HTTP {status} — the "
+            "route exists but failed; investigate the engine before "
+            "assuming version skew."
         )
     return prefix + (
         f"the service read failed ({type(exc).__name__}) — "

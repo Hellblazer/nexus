@@ -116,6 +116,6 @@ plan_json:
           - $question
     - tool: generate
       args:
-        outline: factual-answer
-        with_citations: true
+        template: factual-answer
+        cited: true
         inputs: $step5.ranked

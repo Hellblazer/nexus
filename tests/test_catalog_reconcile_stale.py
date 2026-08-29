@@ -51,7 +51,16 @@ class _FakeCat:
     def all_documents(self, limit=0):
         return list(self._entries)
 
-    def collection_doc_counts(self):
+    def stats(self):
+        # The engine's catalog_stats.doc_count: every live row, aliases and
+        # collection-less rows included (nexus-cwhci anchor).
+        return {"doc_count": len(self._entries)}
+
+    def collection_doc_counts(self, *, include_deleted=False):
+        # nexus-8tnz2 fix-round: no tombstone population is modeled by this
+        # fake (every fixture in this file is live-only) -- include_deleted
+        # returns the SAME dict, which keeps every zero-live-doc row
+        # classifying as "orphan" (never "tombstoned-only") unchanged.
         return dict(self._doc_counts)
 
     def owners_with_roots(self):
@@ -108,7 +117,7 @@ def _writer_factory_raises():
 def _blank_report(**overrides) -> dict:
     """Full-shape ``_classify`` return value, for tests that bypass classification."""
     base = {
-        "total_docs": 0,
+        "total_docs": 0, "substrate_anchor": {"status": "ok", "substrate_doc_count": 0, "walked_docs": 0, "delta": 0, "reason": None},
         "vanished_empty_manifest": [],
         "vanished_has_manifest": [],
         "zero_count_recount": [],
@@ -1105,3 +1114,205 @@ def test_reconcile_stale_registered_under_catalog_group():
     catalog_group = main.commands["catalog"]
     assert "reconcile-stale" in catalog_group.commands
     assert catalog_group.commands["reconcile-stale"].callback is reconcile_stale_mod.reconcile_stale_cmd.callback
+
+
+# ── nexus-cwhci: the substrate anchor (playbook §S4 non-vacuity) ──────────
+
+
+class _AnchorCat(_FakeCat):
+    """``doc_count`` may be an int (same count before and after the walk)
+    or a list consumed one value per stats() call (before, after, ...)."""
+
+    def __init__(self, entries, *, doc_count=None, raise_exc=None, **kw):
+        super().__init__(entries, **kw)
+        self._doc_count = doc_count
+        self._raise = raise_exc
+        self.stats_calls = 0
+
+    def stats(self):
+        self.stats_calls += 1
+        if self._raise is not None:
+            raise self._raise
+        if isinstance(self._doc_count, list):
+            return {"doc_count": self._doc_count[min(self.stats_calls - 1, len(self._doc_count) - 1)]}
+        return {"doc_count": self._doc_count if self._doc_count is not None else len(self._entries)}
+
+
+class _NoStatsCat(_FakeCat):
+    stats = None  # a reader that cannot report a substrate count at all
+
+
+class TestSubstrateAnchor:
+    def _entries(self):
+        return [
+            _FakeEntry("1.60.1", "live", physical_collection="knowledge__live", chunk_count=3),
+            _FakeEntry("1.60.2", "alias", physical_collection="knowledge__live", alias_of="1.60.1"),
+            _FakeEntry("1.60.3", "ghost", physical_collection=""),
+        ]
+
+    def test_ok_when_the_engine_count_matches_the_walk(self, monkeypatch):
+        runner = CliRunner()
+        cat = _AnchorCat(self._entries(), doc_counts={"knowledge__live": 2}, manifests={"1.60.1": ["a" * 64]})
+        _patch(monkeypatch, cat, _FakeT3({"knowledge__live"}))
+        result = runner.invoke(main, ["catalog", "reconcile-stale"])
+        assert result.exit_code == 0, result.output
+        assert "Substrate anchor: OK — the engine counts 3 live catalog document(s) and this walk saw 3" in result.output
+        assert "1 alias, 1 without a collection excluded" in result.output
+        assert "1 non-alias catalog document(s) examined" in result.output
+
+    def test_json_carries_the_anchor(self, monkeypatch):
+        runner = CliRunner()
+        cat = _AnchorCat(self._entries(), doc_counts={"knowledge__live": 2}, manifests={"1.60.1": ["a" * 64]})
+        _patch(monkeypatch, cat, _FakeT3({"knowledge__live"}))
+        result = runner.invoke(main, ["catalog", "reconcile-stale", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["substrate_anchor"] == {
+            "status": "ok", "substrate_doc_count": 3, "substrate_doc_count_before": 3,
+            "substrate_doc_count_after": 3, "walked_docs": 3, "delta": 0, "reason": None,
+            "moved_during_walk": False,
+        }
+        assert payload["walked_docs"] == 3 and payload["alias_docs"] == 1 and payload["no_collection_docs"] == 1
+
+    def test_mismatch_is_incomplete_not_a_pass(self, monkeypatch):
+        runner = CliRunner()
+        # The engine holds 5 live rows; the walk only saw 3 — a probe failure.
+        cat = _AnchorCat(self._entries(), doc_count=5, doc_counts={"knowledge__live": 2}, manifests={"1.60.1": ["a" * 64]})
+        _patch(monkeypatch, cat, _FakeT3({"knowledge__live"}))
+        result = runner.invoke(main, ["catalog", "reconcile-stale"])
+        assert result.exit_code != 0
+        assert "Substrate anchor: MISMATCH — the engine counted 5 live catalog document(s) before the walk and 5 after it; this walk saw 3, outside that bracket (delta -2" in result.output
+        assert "INCOMPLETE: substrate anchor MISMATCH" in result.output
+        # The census is still printed above the refusal — the operator sees both.
+        assert "non-alias catalog document(s) examined" in result.output
+
+    def test_unavailable_anchor_is_incomplete(self, monkeypatch):
+        runner = CliRunner()
+        cat = _NoStatsCat(self._entries(), doc_counts={"knowledge__live": 2}, manifests={"1.60.1": ["a" * 64]})
+        _patch(monkeypatch, cat, _FakeT3({"knowledge__live"}))
+        result = runner.invoke(main, ["catalog", "reconcile-stale"])
+        assert result.exit_code != 0
+        assert "Substrate anchor: UNAVAILABLE (catalog reader exposes no stats())" in result.output
+        assert "INCOMPLETE: substrate anchor unavailable" in result.output
+
+    def test_stats_error_is_unavailable_with_the_cause(self, monkeypatch):
+        runner = CliRunner()
+        cat = _AnchorCat(self._entries(), raise_exc=RuntimeError("engine 503"), doc_counts={"knowledge__live": 2}, manifests={"1.60.1": ["a" * 64]})
+        _patch(monkeypatch, cat, _FakeT3({"knowledge__live"}))
+        result = runner.invoke(main, ["catalog", "reconcile-stale", "--json"])
+        assert result.exit_code != 0
+        assert "RuntimeError: engine 503" in result.output
+
+
+    def test_writes_landing_during_the_walk_are_corroborated_not_mismatched(self, monkeypatch):
+        """A busy box indexes while the census walks: the engine counted 3
+        before the walk and 4 after it, the walk saw 3 — inside the bracket,
+        so the walk is corroborated (code-review-expert, 2026-08-28)."""
+        runner = CliRunner()
+        cat = _AnchorCat(self._entries(), doc_count=[3, 4], doc_counts={"knowledge__live": 2}, manifests={"1.60.1": ["a" * 64]})
+        _patch(monkeypatch, cat, _FakeT3({"knowledge__live"}))
+        result = runner.invoke(main, ["catalog", "reconcile-stale", "--json"])
+        assert result.exit_code == 0, result.output
+        anchor = json.loads(result.stdout)["substrate_anchor"]
+        assert anchor["status"] == "ok" and anchor["moved_during_walk"] is True
+        assert (anchor["substrate_doc_count_before"], anchor["substrate_doc_count_after"]) == (3, 4)
+        assert cat.stats_calls == 2
+
+    def test_walk_outside_both_brackets_is_a_mismatch(self, monkeypatch):
+        runner = CliRunner()
+        cat = _AnchorCat(self._entries(), doc_count=[6, 7], doc_counts={"knowledge__live": 2}, manifests={"1.60.1": ["a" * 64]})
+        _patch(monkeypatch, cat, _FakeT3({"knowledge__live"}))
+        result = runner.invoke(main, ["catalog", "reconcile-stale"])
+        assert result.exit_code != 0
+        assert "counted 6 live catalog document(s) before the walk and 7 after it; this walk saw 3, outside that bracket" in result.output
+
+    def test_mismatch_blocks_every_mutation_arm(self, monkeypatch):
+        """The anchor guard runs before any --execute arm acts: a census the
+        substrate does not corroborate must not be the basis of a delete."""
+        runner = CliRunner()
+        writer = _FakeWriter()
+        cat = _AnchorCat(self._entries(), doc_count=9, doc_counts={"knowledge__live": 2}, manifests={"1.60.1": ["a" * 64]})
+        _patch(monkeypatch, cat, _FakeT3({"knowledge__live"}), writer)
+        result = runner.invoke(main, [
+            "catalog", "reconcile-stale", "--execute", "tombstone-ghost-notes", "--no-dry-run", "--confirm",
+        ])
+        assert result.exit_code != 0
+        assert "INCOMPLETE: substrate anchor MISMATCH" in result.output
+        assert "the mutation arms refuse on it too" in result.output
+        assert writer.deleted == [] and writer.resynced == [], "no catalog write may follow an uncorroborated census"
+
+
+# ── nexus-41zr9: the §5.4 write-time guard census ─────────────────────────
+
+
+class TestWriteTimeGuardCensus:
+    def _cat(self):
+        return _AnchorCat(
+            [_FakeEntry("1.60.1", "live", physical_collection="knowledge__live", chunk_count=3)],
+            doc_counts={"knowledge__live": 1}, manifests={"1.60.1": ["a" * 64]},
+        )
+
+    def test_every_mutation_arm_has_a_row(self):
+        mod = reconcile_stale_mod
+        assert set(mod._WRITE_TIME_GUARDS) == {
+            "recount", "tombstone-vanished", "tombstone-orphaned",
+            "tombstone-zero-content", "tombstone-ghost-notes",
+            "drop-orphan-collections",
+        }
+        for verb, g in mod._WRITE_TIME_GUARDS.items():
+            assert g["status"] in {"shipped", "shipped-with-residuals", "UNGUARDED", "n/a"}, verb
+            assert g["guard"], verb
+
+    @pytest.mark.parametrize("verb,expect", [
+        ("recount", "UNGUARDED — the chunk_count desync writer (the wu8s1/94fxl class) is still unfound"),
+        ("tombstone-vanished", "shipped-with-residuals — SCOPED, not root-cause: this repo's OWN tracked host-run harnesses"),
+        ("tombstone-orphaned", "shipped-with-residuals — worktree/temp indexing refused at registration"),
+        ("tombstone-zero-content", "shipped — unchunkable sources"),
+        ("tombstone-ghost-notes", "shipped — store_put notes get a title-derived identity"),
+        ("drop-orphan-collections", "shipped-with-residuals — SCOPED, not root-cause (same honesty note as tombstone-vanished above)"),
+    ])
+    def test_each_arm_prints_its_guard_before_acting(self, monkeypatch, verb, expect):
+        runner = CliRunner()
+        _patch(monkeypatch, self._cat(), _FakeT3({"knowledge__live"}), _FakeWriter())
+        result = runner.invoke(main, ["catalog", "reconcile-stale", "--execute", verb])  # dry-run default
+        assert result.exit_code == 0, result.output
+        assert "Write-time guard (playbook §5.4, as of 2026-08-28): " + expect in result.output
+        if verb == "tombstone-orphaned":
+            assert "residuals: nexus-rng8r" in result.output
+            assert "yx75p" not in result.output  # the enqueue-side gap is not this arm's population
+        if verb == "recount":
+            assert "residuals: nexus-wu8s1" in result.output
+        if verb in ("tombstone-vanished", "drop-orphan-collections"):
+            assert "residuals: nexus-8tnz2" in result.output
+        # the guard line precedes the arm's candidate report
+        assert result.output.index("Write-time guard") < result.output.index(f"\n{verb}:")
+
+    def test_tombstone_vanished_no_longer_carries_an_unowned_residual(self, monkeypatch):
+        """nexus-8tnz2: the write-time guard (the scratch-scope lint) now
+        exists, so this row's ``unowned_residual`` key -- "benchmark/gate
+        debris collections need namespace isolation, not artifact gating,
+        no bead names it" -- is REMOVED (the design of record's Task C).
+        Flips the pre-nexus-8tnz2
+        test_unowned_residual_is_named_on_every_run."""
+        runner = CliRunner()
+        _patch(monkeypatch, self._cat(), _FakeT3({"knowledge__live"}), _FakeWriter())
+        result = runner.invoke(main, ["catalog", "reconcile-stale", "--execute", "tombstone-vanished"])
+        assert result.exit_code == 0, result.output
+        assert "UNOWNED residual" not in result.output
+        assert "nexus-8tnz2" in result.output
+
+    def test_json_census_carries_the_table(self, monkeypatch):
+        runner = CliRunner()
+        _patch(monkeypatch, self._cat(), _FakeT3({"knowledge__live"}))
+        result = runner.invoke(main, ["catalog", "reconcile-stale", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["write_time_guards_as_of"] == "2026-08-28"
+        table = payload["write_time_guards"]
+        assert table["tombstone-vanished"]["status"] == "shipped-with-residuals"
+        assert table["tombstone-vanished"]["residual_beads"] == ["nexus-8tnz2"]
+        assert "unowned_residual" not in table["tombstone-vanished"]
+        assert table["drop-orphan-collections"]["status"] == "shipped-with-residuals"
+        assert table["drop-orphan-collections"]["residual_beads"] == ["nexus-8tnz2"]
+        assert table["tombstone-orphaned"]["residual_beads"] == ["nexus-rng8r"]
+        assert table["recount"]["status"] == "UNGUARDED" and table["recount"]["residual_beads"] == ["nexus-wu8s1"]

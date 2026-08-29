@@ -211,7 +211,25 @@ def catalog_show(
 
         entry = None
         if tumbler:
-            entry = cat.resolve(Tumbler.parse(tumbler))
+            t = Tumbler.parse(tumbler)
+            # nexus-v3w9n: catalog-034 grammar makes tumbler depth
+            # unambiguous — an owner prefix is EXACTLY 2 segments, a
+            # document tumbler is >= 3. cat.resolve() never consults
+            # owners, so a depth-2 argument would otherwise render an
+            # undifferentiated "Not found" for a perfectly valid owner
+            # prefix.
+            if t.depth == 2:
+                owner = cat.get_owner_by_prefix(str(t))
+                if owner is None:
+                    return {"error": f"Not found: {tumbler}"}
+                # nexus-v3w9n fix round 1 (substantive-critic Significant
+                # finding): explicit discriminator rather than relying on
+                # callers to infer "owner vs document" from key-shape.
+                # Document JSON is unchanged.
+                d = {"kind": "owner", **owner}
+                d["document_count"] = len(cat.by_owner(t))
+                return d
+            entry = cat.resolve(t)
         elif title:
             results = cat.find(title)
             entry = results[0] if results else None

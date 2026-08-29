@@ -46,18 +46,21 @@ pytestmark = pytest.mark.integration
 #:
 #: Provenance, re-derivable:
 #:   memory      _COLUMNS,       src/nexus/db/t2/memory_store.py     @ dbf67ed1^
-#:   consents    list_consents,  src/nexus/db/t2/telemetry.py        @ 514253aa^
 #:   relevance   get_relevance_log SELECT, same file/commit
 #:   topics      _TOPIC_COLUMNS, src/nexus/db/t2/catalog_taxonomy.py @ f24bdb85^
 #:
 #: A key added to the service without being added here FAILS, which is the
 #: behaviour the pair had before P4. Changing a tuple is a deliberate
 #: contract change and belongs in the commit that changes the shape.
+#:
+#: The consents oracle row (nexus-lqqb2, 2026-08-28) is gone along with
+#: ``record_consent``/``list_consents`` themselves — the consent-audit
+#: telemetry was dead wire (no producer since ``nx remediate`` was deleted at
+#: v7.15.0), so there is nothing left to hold a shape parity for.
 _ORACLE_MEMORY_ROW: frozenset[str] = frozenset({
     "id", "project", "title", "session", "agent", "content",
     "tags", "timestamp", "ttl", "access_count", "last_accessed",
 })
-_ORACLE_CONSENT_ROW: frozenset[str] = frozenset({"scope", "ts", "granted"})
 _ORACLE_RELEVANCE_ROW: frozenset[str] = frozenset({
     "id", "query", "chunk_id", "collection", "action", "session_id", "timestamp",
 })
@@ -155,23 +158,12 @@ def test_scratch_search_shape_parity_live(service, _token_env):
 _TELEMETRY_ALLOW: frozenset[str] = frozenset()
 
 
-def test_telemetry_consents_and_relevance_shape_parity_live(service, _token_env):
+def test_telemetry_relevance_shape_parity_live(service, _token_env):
     from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
 
     base_url, _token, _ = service
     http = HttpTelemetryStore(base_url=base_url, tenant="default")
     try:
-        http.record_consent(
-            scope="remediate:chash-poison",
-            ts="2026-07-13T00:00:00Z", granted=True,
-        )
-        r_rows = http.list_consents()
-        assert r_rows
-        _assert_shape(
-            r_rows[0], _ORACLE_CONSENT_ROW, _TELEMETRY_ALLOW,
-            "telemetry.list_consents",
-        )
-
         from tests._t2_fixture_ops import canonical_chunk_id
 
         http.log_relevance(

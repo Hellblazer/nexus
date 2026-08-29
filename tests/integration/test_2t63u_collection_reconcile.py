@@ -192,6 +192,7 @@ def _collection(suffix: str) -> str:
 def _pre_2t63u_register_or_lookup_doc_id(
     file_path, corpus, *, content_type, physical_collection,
     title="", author="", year=0, base_path=None, source_uri="",
+    with_created=False,
 ):
     """KILL CONTROL fixture (mandatory —
     feedback_falsify_by_deleting_the_code / T2 nexus/nexus-2t63u-debug-
@@ -217,6 +218,12 @@ def _pre_2t63u_register_or_lookup_doc_id(
         assert existing is not None, (
             "kill control fixture only covers the by_file_path-hit branch"
         )
+        # nexus-uxg4u gave the real function a `with_created` kwarg
+        # ((doc_id, created) when True). This replica only covers the
+        # by_file_path-HIT branch, where nothing is minted — created is
+        # False by that contract, not an approximation.
+        if with_created:
+            return str(existing.tumbler), False
         return str(existing.tumbler)
     finally:
         writer.close()

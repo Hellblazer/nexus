@@ -2705,6 +2705,161 @@ def search_graph_hop(
         return _mcp_tool_error("search_graph_hop", e)
 
 
+@mcp.tool(
+    title="Aspect-Scoped Combined Search",
+    annotations={"readOnlyHint": True},
+    structured_output=False,
+)
+def search_aspect_scoped(
+    query: str,
+    corpus: str = "knowledge,code,docs",
+    limit: int = 10,
+    field: str = "",
+    pattern: str = "",
+    min_confidence: float = 0.0,
+    where: str = "",
+    structured: bool = False,
+) -> "str | dict":
+    """Aspect-scoped combined search (RDR-156 Decision 5, bead nexus-ubnwk).
+
+    The single-statement unification of the ``search`` + ``operator_filter(source=
+    "aspects")`` two-step app-side path, for the case where the aspect predicate is
+    selective: that path filters AFTER the vector top-N truncation and can silently
+    miss a distant match the aspect predicate would otherwise have kept (RECALL loss
+    exactly when the predicate is selective). ``nexus.search_aspect_scoped_<dim>``
+    joins the chunk table to the catalog manifest + documents + ``document_aspects``
+    (on ``doc_id = tumbler``) and applies *field*/*pattern*/*min_confidence*/*where*
+    inside the SAME statement as the vector rank, so selectivity gates the scan.
+    Document-level results (``id`` is the tumbler), deduped to one row per tumbler at
+    the best (nearest) distance. Each row also carries the matched chunk's ``chash``
+    (RDR-086 ``chunk_text_hash`` source).
+
+    DOC_ID PRECONDITION: a document with no ``document_aspects`` row, or whose row's
+    ``doc_id`` is still NULL, never joins and is excluded — by design, not a bug.
+    This tool does NOT retire ``operator_filter(source="aspects")`` (keyed on
+    ``source_uri``, not ``doc_id`` — it can see rows this tool cannot, and vice versa
+    for the recall case above); both remain available, each covering a case the
+    other does not.
+
+    REAL COVERAGE OF THE doc_id BACKFILL (not edge-case drift — structural, by
+    corpus): ``aspects-004-doc-id-backfill.xml`` attributes a row only when
+    ``document_aspects.source_uri`` is byte-for-byte equal to the catalog document's
+    own ``source_uri``. Holds for file-keyed corpora (``code__``/``docs__``/``rdr__``,
+    both sides key off the same ``file://`` path). Does NOT hold for ``knowledge__``
+    collections (the dominant aspects corpus): the catalog's ``source_uri`` there is
+    derived from the document TITLE (``src/nexus/catalog/store_hook.py:286``), while
+    the aspect extractor's ``source_uri`` is built from ``source_path``
+    (``src/nexus/aspect_readers.py:172``, often itself a content-hash string) — two
+    different identity fields for the same document family, not one field spelled
+    two ways. The large majority of ``knowledge__`` ``document_aspects`` rows
+    therefore stay ``doc_id`` NULL after the backfill and only become visible to
+    this tool as they are RE-EXTRACTED under ``nexus-x1de2``'s go-forward stamping
+    (which keys off the extraction queue's own ``doc_id``, not ``source_uri``, so it
+    does not retroactively fix legacy rows). Gap-fill for the ``knowledge__`` family
+    is tracked as ``nexus-bocft``.
+
+    FIELD ALLOWLIST (locked wire contract, identical to
+    ``HttpVectorClient.ASPECT_SCOPED_FIELD_ALLOWLIST``, the Java 400-guard, and the
+    SQL function's CASE): ``problem_formulation``, ``proposed_method``,
+    ``experimental_datasets``, ``experimental_baselines``, ``experimental_results``.
+    NOT ``extras`` or ``salient_sentences`` — both are ``jsonb`` (aspects-003-type-
+    hygiene.xml), not plain text, and the pre-existing two-step path
+    (``AspectRepository.ALLOWED_ASPECT_COLUMNS``) already excludes them from
+    substring filtering for the same reason. An unrecognized *field* is rejected
+    here BEFORE the network call (the engine also 400s, a second, independent line
+    of defense).
+
+    Service-mode only — the combined-query functions live in the pgvector Postgres;
+    in local/Chroma mode this returns an error.
+
+    PLAN-RUNNER CAVEAT (nexus-zekpl, same as ``search_metadata_scoped`` /
+    ``search_graph_hop``): the structured ``ids``/``tumblers`` are document
+    tumblers, NOT chunk chashes — the runner's chash-keyed auto-hydration
+    (``store_get_many``) needs a tumbler-aware hydration path to consume them.
+
+    MULTI-MODEL CORPUS (nexus-3l6gz): when *corpus* resolves to collections
+    spanning more than one embedding model, this tool issues one combined-query
+    call PER model group and merges the results — see :func:`_grouped_combined_query`.
+    The merge is ALL-OR-NOTHING (same accepted caveat as every sibling combined-query
+    tool's merge, including the cross-model raw-cosine-distance caveat).
+
+    Args:
+        query: Search query string.
+        corpus: Corpus prefixes or collection names, comma-separated; "all" for all.
+        limit: Max rows.
+        field: One of the field allowlist above ("" = no field-text filter, i.e.
+            confidence/where only).
+        pattern: Substring to match (case-insensitive) within *field*; ignored when
+            *field* is "".
+        min_confidence: Aspects confidence floor, inclusive (0.0 = no floor).
+        where: Chunk-metadata equality filter, ``KEY=VALUE`` comma-separated
+            ("" = no filter). Equality only; applied as JSONB containment on chunk
+            metadata — orthogonal to the aspects predicate, not a substitute for it.
+        structured: Return ``{ids, tumblers, distances, collections, contents, chashes}``.
+    """
+    try:
+        from nexus.db.http_vector_client import HttpVectorClient, is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+        t3 = _get_t3()
+        if not is_service_backed(t3):
+            return ("Error: search_aspect_scoped requires service mode "
+                    "(pgvector); not available in local/Chroma mode")
+        if field and field not in HttpVectorClient.ASPECT_SCOPED_FIELD_ALLOWLIST:
+            return (f"Error: search_aspect_scoped field {field!r} is not a known "
+                    f"aspect field; allowed: "
+                    f"{sorted(HttpVectorClient.ASPECT_SCOPED_FIELD_ALLOWLIST)}")
+        target = _resolve_corpus_target(corpus, t3)
+        if not target:
+            return f"No collections match corpus {corpus!r}"
+        where_map: dict | None = None
+        if where.strip():
+            from nexus.filters import parse_where_str  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+            parsed = parse_where_str(where)
+            if parsed and (
+                "$and" in parsed or "$or" in parsed
+                or any(isinstance(v, dict) for v in parsed.values())
+            ):
+                return ("Error: search_aspect_scoped `where` is equality-only "
+                        "(KEY=VALUE, comma-separated); comparison operators "
+                        "(>=, <=, >, <, !=) are not supported in service mode")
+            where_map = parsed or None
+        # nexus-3l6gz / nexus-hg745: one combined-query call per embedding-model
+        # group, ALL-OR-NOTHING. See _grouped_combined_query for the full contract.
+        rows = _grouped_combined_query(target, lambda group: t3.search_aspect_scoped(
+            query, group,
+            field=(field or None),
+            pattern=(pattern or None),
+            min_confidence=(min_confidence or None),
+            where=(where_map or None),
+            n_results=limit,
+        ))
+        # Document-level: the function returns one row per matching CHUNK, so a
+        # multi-chunk document repeats its tumbler. Collapse to one row per id,
+        # keeping the best (nearest) distance, and truncate to `limit` AFTER the
+        # merge (see _dedup_by_id_keep_best).
+        rows = _dedup_by_id_keep_best(rows, limit)
+        if structured:
+            ids = [r.get("id", "") for r in rows]
+            return {
+                "ids": ids,
+                "tumblers": ids,
+                "distances": _reported_distances(rows),
+                "collections": [r.get("collection", "") for r in rows],
+                "contents": [r.get("content", "") for r in rows],
+                "chashes": [r.get("chash", "") for r in rows],
+            }
+        if not rows:
+            return "No documents found."
+        return _cap_text_result("\n\n".join(
+            f"[{r.get('collection', '')}] {r.get('id', '')} (dist={r.get('distance', 0.0):.4f})"
+            f"\n{r.get('content', '')}"
+            for r in rows
+        ), "search_aspect_scoped")
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("search_aspect_scoped", e)
+
+
 # nexus-descendants-seed-cap: defensive ceiling on the graph-hop seed list
 # query() materializes client-side from an explicit `subtree` scope
 # (ab7907fb follow-on — descendants() itself no longer truncates a large

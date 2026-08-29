@@ -584,7 +584,7 @@ class AspectExtractionWorker:
                         row.collection, row.source_path,
                     )
                     continue
-                db.complete_aspect(dataclasses.asdict(record))
+                db.complete_aspect(dataclasses.asdict(_attributed(record, row)))
         try:
             t2_index_write(_persist_all)
         except Exception:  # noqa: BLE001 — batch persist best-effort; failure logged via log.warning
@@ -809,7 +809,9 @@ class AspectExtractionWorker:
             # never writes memory.db directly. asdict() because the wire
             # protocol decodes a dataclass arg to its field dict.
             t2_index_write(
-                lambda db: db.complete_aspect(dataclasses.asdict(record))
+                lambda db: db.complete_aspect(
+                    dataclasses.asdict(_attributed(record, row))
+                )
             )
         except Exception as exc:  # noqa: BLE001 — persist is best-effort; failure logged via log.warning
             _log.warning(
@@ -1146,6 +1148,18 @@ def drain_worker(
 #: ``doc_id``); it is NOT a filesystem path, so Gap-2 canonicalization
 #: skips it.
 _CHASH_RE = re.compile(r"^([0-9a-f]{32}|[0-9a-f]{64})$")
+
+
+def _attributed(record: "AspectRecord", row: object) -> "AspectRecord":
+    """Stamp the queue row's catalog identity onto *record* before it is
+    completed (nexus-x1de2 (52)). The extractor never sets ``doc_id``; the
+    row carries the one captured at enqueue (nexus-tdgc). Both completion
+    paths (batch ``_persist_all`` and the single-row ``_process_row``) go
+    through here so a row with a known identity is never persisted
+    unattributed."""
+    from nexus.db.t2.records import with_doc_id  # noqa: PLC0415 — deferred to avoid circular import (db.t2 <-> aspect_worker)
+
+    return with_doc_id(record, getattr(row, "doc_id", "") or "")
 
 
 def _resolve_catalog_reader():

@@ -133,6 +133,43 @@ class TestDtIndexSummaryTruthful:
         assert "NOT fully indexed" in result.output
         assert "nx catalog show" in result.output
 
+    def test_mixed_refusal_batch_footer_is_arithmetically_honest(self, runner, monkeypatch):
+        """nexus-l6tr7: a batch mixing (a) a record refused on the
+        non-propagating flush-grain path (chunks returned normally, counted
+        in ``indexed``) with (b) a record refused on the PROPAGATING path
+        (``IndexRunVerifyRefused`` raised, bucketed into ``failed`` — never
+        in ``indexed``) used to print "2 of the 1 indexed above had
+        completion refused": the collector counts both, ``indexed`` only
+        (a). The footer must state the split instead of an impossible
+        subset.
+        """
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_complete_refusals",
+            lambda: ["1.2.3", "1.2.4"],
+        )
+        monkeypatch.setattr("nexus.mcp_infra.reset_complete_refusals", lambda: None)
+
+        def index_record(uuid, path, **kw):
+            if uuid == "U2":
+                raise IndexRunVerifyRefused(
+                    doc_id="1.2.4", referenced=3, present=1, missing=2, chunk_count=3,
+                )
+            return (True, 5)
+
+        result = self._run(
+            runner, monkeypatch, index_record=index_record,
+            records=[("U1", "/a.pdf"), ("U2", "/b.pdf")],
+        )
+        assert result.exit_code != 0, result.output
+        assert "2 of the 1 indexed" not in result.output
+        assert (
+            "2 completion refusal(s) by the engine's fail-closed verify "
+            "(fence left at 'indexing'): 1 of the 1 indexed above and "
+            "1 listed under failed"
+        ) in result.output
+        assert "NOT fully indexed" in result.output
+        assert "1 failed" in result.output
+
     def test_refused_subset_wording_is_not_hardcoded_to_one_of_one(self, runner, monkeypatch):
         """Pins the N/M relationship for a non-trivial ratio — a test that
         only ever exercises 1-of-1 could pass even if the wording were
@@ -252,7 +289,13 @@ class TestDtIndexRefusalPropagation:
             records=[("U1", "/a.pdf"), ("U2", "/b.pdf")],
             index_pdf_fn=_dispatch,
         )
-        assert result.exit_code == 0, result.output
+        # nexus-l6tr7: a refusal fails the exit code (nexus-tp8yk D2b) even
+        # here, where mocking index_pdf BELOW _fence_complete leaves the
+        # run-wide collector empty — the footer reports that divergence
+        # loudly instead of the old silent rc=0. "Not raised" below means
+        # no traceback, not a clean exit.
+        assert result.exit_code != 0, result.output
+        assert "listed under failed" in result.output
         assert not seq, "U2 was never dispatched — the batch aborted after U1's refusal"
         assert "completion REFUSED" in result.output
         assert "NOT fully indexed" in result.output
@@ -269,7 +312,11 @@ class TestDtIndexRefusalPropagation:
             records=[("U1", "/a.pdf")],
             index_pdf_fn=_raise,
         )
-        assert result.exit_code == 0, result.output
+        # See the sibling test: rc is non-zero for a refusal; the contract
+        # pinned here is that it surfaces as a reported failure, never as
+        # an escaping traceback.
+        assert result.exit_code != 0, result.output
+        assert "completion REFUSED" in result.output
         assert result.exception is None or isinstance(result.exception, SystemExit), (
             f"the refusal escaped as a raw traceback: {result.exception!r}"
         )

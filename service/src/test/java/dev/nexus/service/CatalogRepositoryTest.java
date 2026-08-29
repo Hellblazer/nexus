@@ -2949,6 +2949,78 @@ class CatalogRepositoryTest {
         assertThat(countsQ).containsEntry(shared, 1L);
     }
 
+    // ── nexus-8tnz2 fix-round CRITICAL 2: collectionDocCountsIncludingDeleted ──
+
+    @Test @Order(124)
+    void collectionDocCountsIncludingDeleted_matchesLiveOnlyWhenNothingTombstoned() {
+        String tenant = "an-idl-tenant";
+        String coll   = "an-idl__knowledge__voyage__v1";
+
+        repo.upsertDocument(tenant, mapOf(
+            "tumbler", "anidl.1", "title", "Live 1",
+            "content_type", "knowledge", "physical_collection", coll
+        ));
+        repo.upsertDocument(tenant, mapOf(
+            "tumbler", "anidl.2", "title", "Live 2",
+            "content_type", "knowledge", "physical_collection", coll
+        ));
+
+        var liveOnly = repo.collectionDocCounts(tenant);
+        var allRows  = repo.collectionDocCountsIncludingDeleted(tenant);
+
+        assertThat(liveOnly).containsEntry(coll, 2L);
+        assertThat(allRows).containsEntry(coll, 2L);
+    }
+
+    @Test @Order(125)
+    void collectionDocCountsIncludingDeleted_countsTombstonedDocsLiveOnlyDoesNot() {
+        // nexus-8tnz2 fix-round CRITICAL 2: a collection whose ONLY catalog
+        // document has been soft-tombstoned must read live=0, all=1 — the
+        // exact signal classify_t3_orphan_collections uses to distinguish
+        // "tombstoned-only" (restorable) from "orphan" (never registered).
+        String tenant = "an-idl2-tenant";
+        String coll   = "an-idl2__knowledge__voyage__v1";
+
+        repo.upsertDocument(tenant, mapOf(
+            "tumbler", "anidl2.1", "title", "Soon Tombstoned",
+            "content_type", "knowledge", "physical_collection", coll
+        ));
+
+        int deleted = repo.deleteDocument(tenant, "anidl2.1");
+        assertThat(deleted).isEqualTo(1);
+
+        var liveOnly = repo.collectionDocCounts(tenant);
+        var allRows  = repo.collectionDocCountsIncludingDeleted(tenant);
+
+        assertThat(liveOnly).doesNotContainKey(coll);
+        assertThat(allRows).containsEntry(coll, 1L);
+    }
+
+    @Test @Order(126)
+    void collectionDocCountsIncludingDeleted_crossTenantIsolation() {
+        String tenantP = "anidlp-tenant";
+        String tenantQ = "anidlq-tenant";
+        String shared  = "shared-idl__analytics__v1";
+
+        repo.upsertDocument(tenantP, mapOf(
+            "tumbler", "anidlp.1", "title", "P1",
+            "content_type", "knowledge", "physical_collection", shared
+        ));
+        repo.deleteDocument(tenantP, "anidlp.1");
+        repo.upsertDocument(tenantQ, mapOf(
+            "tumbler", "anidlq.1", "title", "Q1",
+            "content_type", "knowledge", "physical_collection", shared
+        ));
+
+        var allRowsP = repo.collectionDocCountsIncludingDeleted(tenantP);
+        var allRowsQ = repo.collectionDocCountsIncludingDeleted(tenantQ);
+
+        // tenantP's tombstoned doc is counted in P's include_deleted view
+        // (RLS scopes by tenant, not by liveness); it must never leak into Q.
+        assertThat(allRowsP).containsEntry(shared, 1L);
+        assertThat(allRowsQ).containsEntry(shared, 1L);
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // COVERAGE BY CONTENT TYPE (nexus-3cwnx)
     // ══════════════════════════════════════════════════════════════════════════

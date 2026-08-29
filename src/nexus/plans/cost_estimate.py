@@ -210,6 +210,8 @@ _KNOWN_RETRIEVAL_TOOLS: Final[frozenset[str]] = frozenset({
     "search", "query", "traverse",
     "store_get", "store_get_many", "store_list",
     "search_metadata_scoped", "search_graph_hop", "search_topic_scoped",
+    # RDR-156 Decision 5 (nexus-ubnwk): the fourth combined-query shape.
+    "search_aspect_scoped",
     "plan_search",
 })
 

@@ -15,7 +15,12 @@ interpreter, so no import cost), forks, ``setsid``s, forks again, and
 redirects stdio to ``/dev/null`` -- all before touching a single nexus
 module. Then in the fully detached grandchild it imports
 ``nexus.hooks`` and runs ``session_end_flush()``. Wall-clock cost
-to return control to Claude Code: ~17ms.
+to return control to Claude Code: ~17ms for the fork itself; measured
+2026-08-28 (nexus-33fhv) the parent path totals ~150ms with a reachable
+engine (~120ms with none), the balance being the POST-fork tier-summary
+read and capability census below, which never delay the cleanup
+dispatch. The detached grandchild's own work is ~1ms against a local
+engine (one T2 expire round-trip; the T1 routing resolve is file reads).
 
 RDR-094 Phase C swap: the launcher dispatches to
 ``hooks.session_end_flush`` (storage-only path, fork-safe). nx-mcp

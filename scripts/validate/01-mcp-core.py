@@ -464,7 +464,40 @@ def _exercise_nx_plan_audit() -> None:
 
 # ── entrypoint ───────────────────────────────────────────────────────────────
 
+def _refuse_unless_sandboxed() -> str | None:
+    """nexus-8tnz2 fix-round CRITICAL 1 (substantive-critic): this suite
+    calls MCP tools (``store_put``, ``collection_list``, ``memory_put``,
+    ...) DIRECTLY, in-process, via ``nexus.mcp.core`` -- there is no
+    subprocess boundary to interpose a guard on. It is safe when run via
+    ``scripts/validate/run-all.sh`` (its sourced ``lib.sh`` sets
+    ``NX_LOCAL=1`` and swaps ``HOME`` to the scratch sandbox BEFORE this
+    file is invoked), but this file is also independently
+    ``__main__``-runnable (``uv run python scripts/validate/01-mcp-core.py``)
+    -- with no invoker, those calls would silently land in whatever
+    service the ambient environment resolves, potentially the operator's
+    live production tenant. This is an IN-FILE guard, not a reliance on
+    the invoker's discipline: refuse loudly, in-process, before importing
+    a single MCP tool, when ``NX_LOCAL`` is not "1". Returns an error
+    message to print, or None when it is safe to proceed.
+    """
+    if os.environ.get("NX_LOCAL") != "1":
+        return (
+            "REFUSED: this suite calls MCP tools (store_put, collection_list, "
+            "memory_put, ...) directly in-process -- NX_LOCAL=1 must be set "
+            "(normally via `bash scripts/validate/run-all.sh`, whose sourced "
+            "lib.sh exports it and swaps $HOME to a scratch sandbox before this "
+            "file runs) so those calls land in the scratch sandbox, never a "
+            "live cloud tenant. Run via scripts/validate/run-all.sh, or export "
+            "NX_LOCAL=1 yourself if you really mean to run this file standalone."
+        )
+    return None
+
+
 def main() -> int:
+    refusal = _refuse_unless_sandboxed()
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 2
     print(f"[{ts()}] MCP core tools live exercise — sandbox={os.environ.get('HOME')}")
     try:
         run_suite()

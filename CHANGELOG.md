@@ -6,6 +6,237 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.22.0] - 2026-08-28
+
+Paired release with `engine-service-v0.1.88` (tagged on `2ca52773f`;
+`REQUIRED_ENGINE_VERSION` bumped in this release, deploy fires at the
+client-tag push). The engine tag carries the 4 changesets these features
+need — aspects-004 (doc_id backfill), catalog-034 (tumbler grammar
+tombstones), vectors-008 x2 (`search_aspect_scoped`) — pre-tag battery,
+`--acquire` on the published bytes, and a production PITR fork-walk
+rehearsal all green (walk: 4/4 changesets, backfill 487/487 with residual
+0, 2/2 phantom tombstones).
+
+### Added
+
+- **`nx telemetry baseline [--json] [--since <iso>]` (nexus-v0x32).** The
+  shakedown playbook's §4.5 telemetry baseline as one command with a fixed
+  shape, in a fixed row order: `nx_answer` runs (total, since-window count,
+  the published latency buckets, plan-match hits vs inline fallback, newest
+  and oldest run), tier writes by tier / tool / agent, `relevance_log`
+  count / oldest / newest (server-side SQL via the new engine route
+  `GET /v1/telemetry/relevance/stats`) plus its retention marker,
+  `search_telemetry` global (rendered as the LOWER BOUND it is, with
+  per-collection `zero_hit_rate`), the drop meter, the literal
+  `consent: RETIRED` row, and the engine's catalog document count as
+  context. Every figure carries its own window (`--since` scopes only the
+  first two); a figure the client cannot obtain renders
+  `UNAVAILABLE: <reason>` and stays present in `--json`, never omitted and
+  never a fabricated zero. Engine: `TelemetryRepository.relevanceStats`
+  ships in `engine-service-v0.1.88` (paired with this release); until that
+  tag is deployed the `relevance_log` row reads UNAVAILABLE naming the
+  reason.
+
+- **`nx catalog reconcile-stale --execute drop-orphan-collections`, and the
+  host-harness scratch-scope lint (nexus-8tnz2).** T3 collections that hold
+  chunks but have no catalog documents (benchmark and gate debris) are now
+  classified by ONE function shared with `nx catalog doctor --t3-vs-catalog`
+  and `nx catalog verify`'s new `orphan_collections` field, split into
+  `orphan` (never had documents) and `tombstoned-only` (documents soft-deleted,
+  restorable until purge-trash). The arm lists both in dry-run and drops only
+  `orphan`, through the cascaded API delete path, with the write-time guard
+  line every mutation arm prints. The tombstone count comes from a NEW engine
+  route, `GET /v1/catalog/docs/collection-counts-all`; on an engine that
+  predates it the read 404s, the arm reports INCOMPLETE, and `--execute`
+  refuses rather than reading live-only counts as "no tombstones". A new
+  repo-wide lint (`tests/test_host_harness_scratch_scope_lint.py`) holds an
+  exact allowlist over every tracked shell and Python harness that writes into
+  a service (34 files / 150 sites, each with the isolation pattern that makes
+  it safe); `scripts/validate/01-mcp-core.py` now refuses to run outside
+  `NX_LOCAL=1`, and `scripts/spikes/spike_rdr089_delos.py`, a spike that wrote
+  into the live store with no sandbox, is deleted. `delete_collection` joins the
+  service writer whitelist with its per-entry test.
+
+- **`search_aspect_scoped`, the fourth combined-query shape (RDR-156 D5,
+  nexus-ubnwk).** `nexus.search_aspect_scoped_<dim>` joins the chunk table to
+  the catalog manifest, documents, and `document_aspects` (on
+  `doc_id = tumbler`) and applies an aspect-field substring filter, a
+  confidence floor, and the chunk-metadata `where` predicate inside the same
+  statement as the vector rank, so a selective aspect predicate gates the scan
+  instead of filtering after the top-N truncation (the recall loss of the
+  two-step `search` + `operator_filter(source="aspects")` path, which stays
+  available: the two have different coverage). Exposed as
+  `POST /v1/vectors/search-aspect-scoped`, `HttpVectorClient.search_aspect_scoped`,
+  the `search_aspect_scoped` MCP tool, and a plan-runner retrieval step. The
+  field allowlist is the five text aspect columns, identical in the SQL CASE,
+  the engine's 400 guard, and the client (a test parses the changeset to keep
+  them from drifting). Engine: `aspects-004` backfills `document_aspects.doc_id`
+  from exact `source_uri` equality under the FORCE/NO-FORCE toggle; this
+  attributes file-keyed corpora only. `knowledge__` aspect rows are keyed on a
+  hashed `source_path` while their catalog URI derives from the title, so they
+  stay unattributed until re-extracted under nexus-x1de2's go-forward stamping
+  (gap-fill: nexus-bocft). Frecency-boosted rank, the fifth D5 shape, is retired
+  as not a combined query (RDR-156 §Decision 5 disposition).
+
+- **Tumbler grammar enforced at the engine's API boundary; `nx catalog show`
+  renders an owner card for a two-segment tumbler (nexus-v3w9n).** An owner
+  prefix is exactly two non-blank, dot-free segments and a document tumbler
+  three or more, so the two namespaces cannot overlap. `TumblerGrammar`
+  validates every route that accepts an explicit address, before any write
+  and all-or-nothing on batch routes (`/register`, `/owners/upsert`,
+  `/import/owner`, `/import/document`, `/doc/register`, `/doc/register_many`),
+  answering HTTP 400 `{"error", "rule": "tumbler-grammar", "field", "value"}`;
+  ten lookup-only routes are tabled in its javadoc. `catalog-034` tombstones
+  the two 2026-05-22 phantom registrations (`1.1`, `1.2`) that sat under a
+  nonexistent owner `1`. The table CHECK constraints are deferred: the engine
+  test corpus builds one-segment owners with two-segment documents throughout
+  (331 tests across 46 classes broke under the CHECKs), so they land behind
+  nexus-ia69x once the fixtures conform; the changeset header carries the exact
+  predicates. On the read side, `nx catalog show 1.2` and MCP `catalog_show`
+  now render the owner (`"kind": "owner"`, name, type, document count) for a
+  numeric depth-2 tumbler instead of a phantom document; depth 3+ is unchanged.
+
+### Fixed
+
+- **S-batch: seven groomed live defects, one review pass (nexus-50l6y,
+  von7f, z0idx, mqm5w, tl5qh, hbgso, hj7mg).** Builtin plans now pass the
+  arg names their operators accept — hybrid-factual-lookup's generate step
+  could not dispatch at all — held by a census lint that resolves every
+  builtin step's operator through the runtime's own dispatch tables and
+  checks its args against the real signature. `nx search --json` emits
+  valid JSON on zero hits at all three exit points. Thirteen structlog
+  calls across six files passed the reserved `message=` kwarg (a KeyError
+  the moment the event fires under stdlib routing); renamed to each
+  file's own convention and held at zero by a repo-wide AST lint.
+  `upgrade_finish` probes the running engine before declaring NEEDS
+  HUMAN. The superseded-vector sweep stops over-reporting deletes. The
+  degraded-embedder advisory and `nx enrich aspects-show` recommend only
+  remedies that actually work on this install — or say plainly that none
+  exists — instead of plausible dead commands.
+
+
+- **`nx index pdf --dry-run` writes nothing, enforced rather than assumed
+  (nexus-uxg4u).** The dry-run path used to register a catalog document
+  before any work; when the completion fence then correctly refused the
+  no-chunks run, the registration survived as a phantom entry claiming
+  chunks that do not exist (relayed from a live box, reproducible on any
+  machine without API keys — the exact case the flag advertises). An
+  explicit `dry_run` flag now threads from the CLI through the whole PDF
+  pipeline, gating every catalog registration, fence call, and post-store
+  hook (the hook gate is proven against the real default hook registry,
+  not the CLI's empty-registry convention). On a real run, any document
+  freshly minted during the call — pre-flight or any of the three
+  fallback registration sites — is rolled back automatically if the run
+  fails afterward, and the failure still propagates; a pre-existing
+  document is left exactly as the fence marked it. The fence itself is
+  untouched.
+
+
+- **Engine: `databasechangelog.dateexecuted` reads as UTC (nexus-rph82).**
+  Liquibase stamped it in the JVM's default zone; on the GMT-hosted managed
+  database a post-deploy audit windowing on it against `now()` reported
+  "nothing applied" for a walk that had completed sixty seconds earlier
+  (PITR fork, 2026-08-27). The migrator — and `Main`, before any datasource
+  is built — pin the JVM default zone to UTC and set the migration session
+  to UTC (Liquibase stamps the column from the server's `now()` in the
+  session zone). Service log timestamps are UTC as well, now explicitly in
+  the logback pattern rather than by whatever zone the box happened to run.
+- **Engine: a centroid re-upsert under a different dim replaces the
+  embedding (nexus-2qryr).** `upsertCentroids` set only the incoming dim's
+  column on conflict, so a re-embed under a new model tripped the unified
+  table's exactly-one-embedding CHECK (and, pre-unification, silently
+  orphaned the old row). The other dim columns are now cleared in the same
+  update; the contract is documented and pinned.
+- **Engine: the import-links FK backstop and the dangling-endpoint 400 are
+  tested (nexus-ndwzk).** The raw-23503 catch behind `importLinksBatch`'s
+  precheck now has a real-PG test that provokes the constraint with the
+  precheck bypassed, and both `POST /v1/catalog/link` and
+  `/v1/catalog/import/link` have HTTP-level tests of the machine-readable
+  `{error, code: "dangling_endpoint", missing}` body.
+- **`nx catalog reconcile-stale` names the write-time guard before every
+  mutation arm (nexus-41zr9).** The shakedown playbook's §5.4 requires a
+  run that cleans a population to name the guard that stops it recurring
+  and to surface one that does not exist. Each `--execute` arm now prints
+  `Write-time guard (playbook §5.4): shipped | shipped-with-residuals |
+  UNGUARDED — …` with the guard's location, residual beads and an as-of
+  date. Two arms print UNGUARDED today: `recount` (the chunk_count desync
+  writer, nexus-wu8s1, is unfound) and `tombstone-vanished` (benchmark/gate
+  debris collections, the dominant vanished population, have no namespace
+  isolation and no owner bead — printed as an unowned residual on every
+  run). The census `--json` carries the table as `write_time_guards`; the
+  table in code is the record the playbook points at.
+- **`nx catalog reconcile-stale` anchors its census to the substrate
+  (nexus-cwhci).** The shakedown playbook's §S4 required comparing the
+  census's examined count against a substrate-direct document count and
+  recorded that no such count is reachable on a managed box, so S4 sat as
+  an unowned "standing gap" for five cycles. It is reachable: the engine's
+  `catalog_stats.doc_count` is a server-side SQL count served by
+  `GET /v1/catalog/stats`. Every census now opens with
+  `Substrate anchor: OK|MISMATCH|UNAVAILABLE`, comparing that count (taken
+  before and after the walk, so writes landing mid-walk are corroborated
+  rather than mis-read) with the rows the walk saw; MISMATCH and UNAVAILABLE
+  exit non-zero as INCOMPLETE and every `--execute` arm refuses on them.
+  The anchor proves the walk saw every row the engine serves this caller;
+  it shares the caller's tenant scope, so rows hidden by scope stay a
+  server-operator check (playbook S4b). `--json` carries
+  `substrate_anchor`. Playbook amendment: T2 [23598] §S4.
+- **New aspect rows are attributed to their catalog document (nexus-x1de2).**
+  The extractor builds an `AspectRecord` without a `doc_id`; the worker had
+  the identity on its queue row and `nx enrich aspects` had it on the
+  catalog entry, and both dropped it at completion, so every row landed
+  with `doc_id` NULL — a row the catalog foreign key can never join. Both
+  producers now stamp it (`with_doc_id`), an upsert that still lacks one
+  logs `document_aspects_upsert_unattributed` instead of writing silently,
+  and the engine's upsert keeps an existing `doc_id` when a later write
+  omits it. **Go-forward only:** rows written before this release keep
+  `doc_id` NULL until re-extracted (`nx enrich aspects --all`); this is a
+  different axis from nexus-bocft's "aspect rows no current entry claims",
+  which is keyed on `source_path`/title and is unchanged here. Also pinned:
+  `nx plan …` reports "plans service unavailable" cleanly, malformed engine
+  aspect bodies (NULL columns, garbage JSON) parse to empty fields; and the
+  plan cache's SQLite file-mtime refresh branch — unreachable since the
+  SQLite plan library was deleted — is gone.
+- **`nx index repo` names the three catalog-linking sub-phases (nexus-jg3x5).**
+  `Catalog: linking N new entries…` was followed by tens of seconds of silence
+  while rdr, prose, and pdf link generation ran — each already timed into
+  `catalog_hook_stage_timing`, none emitted. Each generator that can do work
+  for the batch now prints `[post] Catalog linking: <kind>…` on entry and
+  `[post] Catalog linking: <kind> done (Ns)` on exit with the measured
+  duration; a generator with no qualifying new document emits no pair.
+- **`nx dt index`'s refusal footer is arithmetically honest in a mixed batch
+  (nexus-l6tr7).** A batch mixing a flush-grain refusal (counted in
+  `indexed`) with a propagating one (bucketed into `failed`) printed
+  "2 of the 1 indexed above had completion refused". The footer now states
+  the split: "N completion refusal(s) …: K of the M indexed above and J
+  listed under failed"; a bucket count the run-wide collector cannot
+  account for is reported as recording drift, never clamped.
+- **`nx t3 gc` writes its `gc_audit` row (nexus-fduai).** The verb's
+  comment deferred the audit to "the engine's gc-audit surface (next
+  engine tag)"; that surface shipped in v0.1.62 with a client-facing
+  producer (`POST /v1/catalog/gc_audit/record`) built for exactly this
+  verb, and nothing ever called it — the engine only sees the deletes it
+  performs itself, so an operator-driven gc left `nexus.gc_audit` at zero
+  rows. A successful `--no-dry-run --yes` run now records one row
+  (`operation=t3_gc`, `actor="nx t3 gc"`, the full chash list, counts and
+  an id sample in `details`) and mirrors it as a structured
+  `t3_gc_chunks_deleted` event carrying the row id. An audit write that
+  fails after the delete is warned and fails the exit code; dry runs
+  record nothing. New `nx catalog gc-audit list [--collection] [--operation]
+  [--limit] [--offset] [--json]` reads the trail — until now `nx doctor`'s
+  pass/fail non-empty check was its only reader.
+
+### Removed
+
+- **The dead consent-audit telemetry wire (nexus-lqqb2).**
+  `HttpTelemetryStore.record_consent` / `list_consents`, the engine's
+  `/v1/telemetry/consents/{record,list}` routes and handlers, and
+  `TelemetryRepository.recordConsent` / `listConsents` are gone, with the
+  tests that exercised them. Their only producer, `nx remediate`, was
+  removed at v7.15.0 and no caller remained; the writer family the
+  shakedown playbook counts is three, not four. The `consent_audit` table
+  and its Liquibase changeset are untouched (a drop is its own changeset,
+  if ever).
+
 ## [7.21.0] - 2026-08-28
 
 ### Changed

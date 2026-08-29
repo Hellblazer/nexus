@@ -37,16 +37,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Need a credential source: the live macOS keychain OR a captured snapshot.
-# provision_credentials (below) prefers the keychain and falls back to the
-# snapshot; only error here when neither is available.
-if ! { command -v security >/dev/null 2>&1 \
-       && security find-generic-password -s 'Claude Code-credentials' -w >/dev/null 2>&1; } \
-   && [[ ! -f "$AUTH_DIR/.credentials.json" ]]; then
-    echo "Error: no credentials — keychain miss and $AUTH_DIR/.credentials.json missing." >&2
-    echo "       run tests/e2e/auth-login.sh first." >&2
-    exit 1
-fi
+# NOTE: there is deliberately NO early "do we have credentials?" check here.
+# The one that used to live at this spot asked only whether a keychain lookup
+# SUCCEEDED, which a token-less husk item satisfies (see provision_credentials
+# below, 2026-08-28). provision_credentials is the single fail-loud gate, and
+# it runs before tmux starts, so nothing expensive happens ahead of it.
 
 source "$REPO_ROOT/tests/e2e/lib.sh"
 TMUX_SESSION="cc-val"  # override the e2e default after sourcing
@@ -136,9 +131,50 @@ claude_start() {
     _lib_claude_start "$@"
 }
 
+# ─── Live pane capture (CC_VAL_DEBUG_CAPTURE=1) ──────────────────────────────
+# The README's standing lesson is that every cc-val mystery is settled by
+# MEASURING the pane, and that a capture taken after the TUI exits is useless
+# (the alternate screen is gone by then) — the pane has to be sampled DURING
+# the run. This poller is that instrument, kept in-tree instead of being
+# re-improvised each time it is needed. It is what showed "Login expired ·
+# Please run /login" behind four scenarios that were all reporting
+# "MCP connection issue" (2026-08-28, nexus-qs1g6).
+#
+#   CC_VAL_DEBUG_CAPTURE=1 ./tests/cc-validation/runner.sh --scenario 16
+#
+# Snapshots land OUTSIDE $TEST_HOME so the EXIT trap's rm -rf cannot eat them.
+CC_VAL_DEBUG_DIR="${CC_VAL_DEBUG_DIR:-${TMPDIR%/}/cc-val-debug}"
+_DEBUG_CAPTURE_PID=""
+
+start_debug_capture() {
+    [[ "${CC_VAL_DEBUG_CAPTURE:-0}" == "1" ]] || return 0
+    rm -rf "$CC_VAL_DEBUG_DIR"
+    mkdir -p "$CC_VAL_DEBUG_DIR/panes"
+    (
+        i=0
+        while :; do
+            i=$(( i + 1 ))
+            n=$(printf '%04d' "$i")
+            {
+                echo "### tick=$n epoch=$(date +%s)"
+                _tmux capture-pane -t "$TMUX_SESSION" -p -S -200 2>&1
+            } > "$CC_VAL_DEBUG_DIR/panes/pane-$n.txt"
+            if [[ -f "$STUB_LOG" ]]; then cp "$STUB_LOG" "$CC_VAL_DEBUG_DIR/stub-$n.log" 2>/dev/null || true; fi
+            if [[ -f "$HOOK_LOG" ]]; then cp "$HOOK_LOG" "$CC_VAL_DEBUG_DIR/hook-$n.log" 2>/dev/null || true; fi
+            sleep 2
+        done
+    ) &
+    _DEBUG_CAPTURE_PID=$!
+    echo "  [debug] pane capture every 2s -> $CC_VAL_DEBUG_DIR"
+}
+
 cleanup() {
     echo ""
     echo "Cleaning up..."
+    if [[ -n "${_DEBUG_CAPTURE_PID:-}" ]]; then
+        kill "$_DEBUG_CAPTURE_PID" 2>/dev/null || true
+        echo "  [debug] pane capture kept at $CC_VAL_DEBUG_DIR"
+    fi
     # Tear down the whole private socket — safe precisely because it is ours
     # alone (NX_TMUX_SOCKET). Falls back to a scoped kill-session if the
     # server is already gone.
@@ -163,22 +199,152 @@ mkdir -p "$TEST_HOME/.claude/plugins" "$TEST_HOME/.claude/agents" "$TEST_HOME/.c
 # authentication credentials") and every scenario fails before the model
 # runs anything. Prefer the live macOS keychain at runtime; refresh the
 # on-disk snapshot from it so the Linux/CI fallback path stays usable.
+#
+# TWO DEFECTS FIXED 2026-08-28 (nexus-qs1g6), both of the same class —
+# treating a successful FETCH as a valid CREDENTIAL:
+#
+#   1. MORE THAN ONE keychain item can carry the service name
+#      'Claude Code-credentials'. Measured on this box: an acct="unknown"
+#      item created 2026-08-23 whose claudeAiOauth is an empty husk
+#      (accessToken "", refreshToken "", expiresAt 0) sitting alongside the
+#      live acct="<login user>" item the CLI actually refreshes. `security
+#      find-generic-password -s <svc> -w` with no `-a` returns an ARBITRARY
+#      match, and it returned the husk. The old code's only validity test
+#      was json.load() parseability — which a husk passes — so it printed
+#      "provisioned from macOS keychain (live)" and every scenario then ran
+#      against a logged-out session. The pane showed the real answer the
+#      whole time ("Login expired · Please run /login"), while the verdicts
+#      blamed the MCP connection. Choose the credential by CONTENT now:
+#      enumerate the accounts under the service and take the freshest item
+#      that actually carries a token.
+#   2. The snapshot refresh (`cp "$dest" "$AUTH_DIR/..."`) ran on that path
+#      too, so the husk OVERWROTE the fallback snapshot — the harness
+#      destroyed its own only alternative credential source. The snapshot is
+#      only ever refreshed from a credential that passed the check now.
+#
+# _cred_tool pick  → freshest usable keychain credential on stdout, rc 1 if none
+# _cred_tool check <file> → rc 0 iff that file holds a usable credential
+_cred_tool() {
+    python3 - "$@" <<'PY'
+import json
+import re
+import subprocess
+import sys
+import time
+
+SERVICE = "Claude Code-credentials"
+
+
+def verdict(data):
+    """(ok, reason). Usable == carries a token we can authenticate or refresh with."""
+    oauth = (data or {}).get("claudeAiOauth") or {}
+    access = oauth.get("accessToken") or ""
+    refresh = oauth.get("refreshToken") or ""
+    if not access and not refresh:
+        return False, "empty husk — accessToken and refreshToken are both blank"
+    expires = oauth.get("expiresAt") or 0
+    if expires and expires <= int(time.time() * 1000) and not refresh:
+        return False, "accessToken expired and no refreshToken to renew it"
+    return True, ""
+
+
+def expiry(data):
+    return ((data or {}).get("claudeAiOauth") or {}).get("expiresAt") or 0
+
+
+mode = sys.argv[1]
+
+if mode == "check":
+    try:
+        with open(sys.argv[2]) as fh:
+            payload = json.load(fh)
+    except Exception as exc:
+        print(f"unreadable: {exc}", file=sys.stderr)
+        sys.exit(1)
+    ok, why = verdict(payload)
+    if not ok:
+        print(why, file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
+
+# mode == "pick"
+
+
+def fetch(acct):
+    cmd = ["security", "find-generic-password", "-s", SERVICE]
+    if acct is not None:
+        cmd += ["-a", acct]
+    proc = subprocess.run(cmd + ["-w"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        return None
+    try:
+        return json.loads(proc.stdout)
+    except Exception:
+        return None
+
+
+# `security` has no list-by-service, so enumerate accounts from an
+# ATTRIBUTE-ONLY dump (no `-d`, so no secrets are read and no unlock prompt).
+accounts, block = [], []
+dump = subprocess.run(["security", "dump-keychain"], capture_output=True, text=True).stdout
+for line in dump.splitlines() + ["keychain: <eof>"]:
+    if line.startswith("keychain: "):
+        text = "\n".join(block)
+        svce = re.search(r'"svce"<blob>="([^"]*)"', text)
+        acct = re.search(r'"acct"<blob>="([^"]*)"', text)
+        if svce and acct and svce.group(1) == SERVICE:
+            accounts.append(acct.group(1))
+        block = [line]
+    else:
+        block.append(line)
+
+usable, seen = [], set()
+for acct in accounts + [None]:  # None == the old first-match form, tried last
+    if acct in seen:
+        continue
+    seen.add(acct)
+    payload = fetch(acct)
+    if payload is None:
+        continue
+    label = acct if acct is not None else "<first-match>"
+    ok, why = verdict(payload)
+    if ok:
+        usable.append((expiry(payload), label, payload))
+    else:
+        print(f"  [auth] skipping keychain item acct={label!r}: {why}", file=sys.stderr)
+
+if not usable:
+    sys.exit(1)
+usable.sort(key=lambda row: row[0], reverse=True)
+expires, label, payload = usable[0]
+print(f"  [auth] keychain item acct={label!r} selected (expiresAt={expires})", file=sys.stderr)
+sys.stdout.write(json.dumps(payload))
+PY
+}
+
 provision_credentials() {
     local dest="$TEST_HOME/.claude/.credentials.json"
-    local kc_json
-    if command -v security >/dev/null 2>&1 \
-       && kc_json="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null)" \
-       && [[ -n "$kc_json" ]] \
-       && printf '%s' "$kc_json" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+    local kc_json=""
+    if command -v security >/dev/null 2>&1; then
+        kc_json="$(_cred_tool pick || true)"
+    fi
+    if [[ -n "$kc_json" ]]; then
         printf '%s' "$kc_json" > "$dest"
+        # Only now — with a credential that passed the check — is it safe to
+        # refresh the Linux/CI fallback snapshot.
         cp "$dest" "$AUTH_DIR/.credentials.json" 2>/dev/null || true
-        echo "  [auth] provisioned from macOS keychain (live)"
-    elif [[ -f "$AUTH_DIR/.credentials.json" ]]; then
+        echo "  [auth] provisioned from macOS keychain (token present, refreshable)"
+    elif [[ -f "$AUTH_DIR/.credentials.json" ]] && _cred_tool check "$AUTH_DIR/.credentials.json"; then
         cp "$AUTH_DIR/.credentials.json" "$dest"
-        echo "  [auth] provisioned from snapshot file (keychain unavailable)"
+        echo "  [auth] provisioned from snapshot file (no usable keychain item)"
     else
-        echo "Error: no credentials available — keychain miss and no snapshot at $AUTH_DIR/.credentials.json" >&2
-        echo "       run tests/e2e/auth-login.sh to capture credentials." >&2
+        # FAIL LOUD. The alternative — proceeding on an unusable credential —
+        # burns ~5 minutes per scenario and then reports "MCP connection issue"
+        # for what is really a logged-out session.
+        echo "Error: no USABLE credentials — every candidate is token-less or expired." >&2
+        echo "       Keychain items under 'Claude Code-credentials' were checked (reasons above)" >&2
+        echo "       and the snapshot at $AUTH_DIR/.credentials.json is missing or unusable." >&2
+        echo "       Remedy: run 'claude /login' in a normal session, then re-run this harness." >&2
         exit 1
     fi
     chmod 600 "$dest"
@@ -280,6 +446,8 @@ _tmux new-session -d -s "$TMUX_SESSION" -x 220 -y 50
 _tmux send-keys -t "$TMUX_SESSION" "source $TEST_HOME/.env.test" Enter
 sleep 1
 touch "$TEST_HOME/.zshrc"
+
+start_debug_capture
 
 # ─── Run scenarios ────────────────────────────────────────────────────────────
 

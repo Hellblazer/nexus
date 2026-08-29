@@ -78,9 +78,22 @@ public final class TaxonomyCentroidRepository {
     }
 
     /**
-     * Upsert centroids, routing each to {@code taxonomy_centroids_<dim>} by the vector's
-     * length. Re-upserting an existing {@code (tenant, collection, topic_id)} updates the
-     * embedding, label, and doc_count in place (ON CONFLICT update — chroma upsert parity).
+     * Upsert centroids, routing each to the {@code embedding_<dim>} column of the unified
+     * {@code nexus.taxonomy_centroids} table by the vector's length. Re-upserting an
+     * existing {@code (tenant, collection, topic_id)} updates the embedding, label, and
+     * doc_count in place (ON CONFLICT update — chroma upsert parity).
+     *
+     * <p><b>Dim transition (nexus-2qryr).</b> A re-upsert of the same key with a vector of
+     * a DIFFERENT length — a re-embed under a new model — REPLACES the embedding: the
+     * incoming dim's column is set and the other two are cleared in the same UPDATE, so
+     * the row always satisfies {@code taxonomy_centroids_exactly_one_embedding}. Before
+     * the tables were unified this silently landed the new vector in another shard and
+     * orphaned the old row; after unification, without the clearing, it raised the CHECK
+     * violation. "Fail loud" was considered and rejected: a re-embed is exactly the
+     * legitimate upsert this method's contract promises, and a deployment is single-dim
+     * (RDR-075/077), so a stranded old-dim vector would be unreachable dead data, not
+     * information worth protecting. Pinned by
+     * {@code TaxonomyCentroidRepositoryTest.upsert_dimTransition_replacesEmbedding}.
      *
      * @throws IllegalArgumentException if any embedding length is not 384/768/1024
      */
@@ -99,7 +112,7 @@ public final class TaxonomyCentroidRepository {
         tenantScope.withTenant(tenant, ctx -> {
             for (CentroidRecord r : records) {
                 DimTables.CentroidTable ct = DimTables.CENTROIDS.get(r.embedding().length);
-                ctx.insertInto(ct.table())
+                var upsert = ctx.insertInto(ct.table())
                    .columns(ct.tenantId(), ct.collection(), ct.topicId(),
                             ct.embedding(), ct.label(), ct.docCount())
                    .values(tenant, r.collection(), r.topicId(),
@@ -108,8 +121,15 @@ public final class TaxonomyCentroidRepository {
                    .doUpdate()
                    .set(ct.embedding(), DSL.excluded(ct.embedding()))
                    .set(ct.label(),     DSL.excluded(ct.label()))
-                   .set(ct.docCount(),  DSL.excluded(ct.docCount()))
-                   .execute();
+                   .set(ct.docCount(),  DSL.excluded(ct.docCount()));
+                // nexus-2qryr: clear the OTHER dim columns so a dim transition
+                // replaces the embedding instead of tripping the exactly-one CHECK.
+                for (DimTables.CentroidTable other : DimTables.CENTROIDS.values()) {
+                    if (!other.embedding().getName().equals(ct.embedding().getName())) {
+                        upsert = upsert.set(other.embedding(), (Vector) null);
+                    }
+                }
+                upsert.execute();
             }
             return null;
         });

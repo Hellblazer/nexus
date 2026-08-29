@@ -6,7 +6,7 @@ Two FastMCP servers and the post-store hook framework that backs them. The singl
 
 | File | Server | Tools |
 |---|---|---|
-| `core.py` | `nexus` | 36 registered tools + 3 demoted (plain functions, no `@mcp.tool()`): `search`, `query`, `store_put/get/list`, `memory_*`, `scratch*`, `collection_list`, `plan_save/search`, and more — see the module docstring for the current roster. |
+| `core.py` | `nexus` | 37 registered tools + 3 demoted (plain functions, no `@mcp.tool()`): `search`, `query`, `store_put/get/list`, `memory_*`, `scratch*`, `collection_list`, `plan_save/search`, and more — see the module docstring for the current roster. |
 | `catalog.py` | `nexus-catalog` | 10 registered tools + 3 demoted: `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats` (the `catalog_` prefix is dropped — server namespace already provides context) |
 
 `mcp_infra.py` holds singletons (T2/T3 clients), test injection, default post-store hook consumers, and `check_version_compatibility`. The three-chain hook registry itself lives in `nexus.hook_registry.HookRegistry` and is constructor-injected from each entry point (MCP server, CLI command, indexer). `mcp_server.py` is a backward-compat shim re-exporting the tool functions from `core.py` and `catalog.py` (no `__all__` to pin a count against).

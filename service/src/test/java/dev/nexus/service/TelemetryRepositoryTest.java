@@ -482,37 +482,6 @@ class TelemetryRepositoryTest {
         assertThat(totalOf(uncapped)).isEqualTo(7);
     }
 
-    // ── consents (RDR-182 nexus-ng2sy: service-mode consent-audit parity) ────────
-
-    @Test @Order(32)
-    void recordConsent_grantAndRevoke_areAppendOnlyAndListedInOrder() {
-        // Append-only: a grant AND a revoke are each their own row; listConsents
-        // returns them in insertion order for the tenant.
-        repo.recordConsent(TENANT_A, "flag:claude_assisted_remediation", PAST_TS, true);
-        repo.recordConsent(TENANT_A, "remediate:chash-poison", PAST_TS, true);
-        repo.recordConsent(TENANT_A, "flag:claude_assisted_remediation", PAST_TS, false);
-
-        var rows = repo.listConsents(TENANT_A);
-        assertThat(rows).hasSize(3);
-        assertThat(rows.get(0).get("scope")).isEqualTo("flag:claude_assisted_remediation");
-        assertThat(rows.get(0).get("granted")).isEqualTo(true);
-        assertThat(rows.get(1).get("scope")).isEqualTo("remediate:chash-poison");
-        assertThat(rows.get(2).get("granted")).isEqualTo(false);  // the revoke retained
-    }
-
-    @Test @Order(33)
-    void listConsents_isTenantIsolated() {
-        // Rows written under TENANT_A must not be visible to TENANT_B (FORCE RLS).
-        repo.recordConsent(TENANT_B, "remediate:chash-poison", PAST_TS, true);
-        var aRows = repo.listConsents(TENANT_A);
-        var bRows = repo.listConsents(TENANT_B);
-        // A has the 3 from the prior test; B has exactly its own 1.
-        assertThat(bRows).hasSize(1);
-        assertThat(bRows.get(0).get("scope")).isEqualTo("remediate:chash-poison");
-        assertThat(aRows).noneMatch(r -> "tel-tenant-b".equals(r.get("scope")));
-        assertThat(aRows.size()).isGreaterThanOrEqualTo(3);
-    }
-
     @Test @Order(31)
     void recordNxAnswerRun_livePath_persistsAndIsRetrievableUnderTenant() {
         repo.recordNxAnswerRun(TENANT_A,
@@ -1307,6 +1276,49 @@ class TelemetryRepositoryTest {
             repo.getRetentionMarkers(b, List.of("nexus.relevance_log")))
             .as("tenant B must not see tenant A's marker (RLS)")
             .isEmpty();
+    }
+
+    // ── nexus-v0x32: relevance/stats (playbook §4.5 telemetry baseline) ─────
+
+    @Test
+    void relevanceStats_emptyTenant_reportsZeroCountAndNullTimestamps() {
+        String tenant = "rel-stats-empty-" + System.nanoTime();
+        var stats = repo.relevanceStats(tenant);
+        org.assertj.core.api.Assertions.assertThat(stats)
+            .containsEntry("count", 0)
+            .containsEntry("oldest", null)
+            .containsEntry("newest", null);
+    }
+
+    @Test
+    void relevanceStats_countsRowsAndReportsOldestNewest() {
+        String tenant = "rel-stats-" + System.nanoTime();
+        repo.importRelevanceRow(tenant, "q1", "c7ac372b7b8ab091b8f723a45e236c05ac2c6721d4fb869bcfda1b66cbbd30a2", "knowledge__x", "click", "s",
+            "2020-01-01T00:00:00Z");
+        repo.importRelevanceRow(tenant, "q2", "e46466f2a3040ceb0fbdd3889209a8a1d3488b4b2af8e51cd7da3dc37d5d8f5f", "knowledge__x", "click", "s",
+            "2020-06-15T12:30:00Z");
+        repo.importRelevanceRow(tenant, "q3", "9d710182e0f8dd92dd35d20e3144f947bc91ee19d1bd7a3aecab1caf7ebcf91e", "knowledge__x", "click", "s",
+            "2019-03-10T08:00:00Z");
+
+        var stats = repo.relevanceStats(tenant);
+        org.assertj.core.api.Assertions.assertThat(stats)
+            .containsEntry("count", 3)
+            .containsEntry("oldest", "2019-03-10T08:00:00Z")
+            .containsEntry("newest", "2020-06-15T12:30:00Z");
+    }
+
+    @Test
+    void relevanceStats_isTenantScoped() {
+        String a = "rel-stats-iso-a-" + System.nanoTime();
+        String b = "rel-stats-iso-b-" + System.nanoTime();
+        repo.importRelevanceRow(a, "q", "8c82b0fa4cf980baf9548635007bed74e9eaceeb57e7b5ccff842b5f05de452e", "knowledge__x", "click", "s",
+            "2021-01-01T00:00:00Z");
+        var statsB = repo.relevanceStats(b);
+        org.assertj.core.api.Assertions.assertThat(statsB)
+            .as("tenant B must not see tenant A's relevance_log rows (RLS)")
+            .containsEntry("count", 0)
+            .containsEntry("oldest", null)
+            .containsEntry("newest", null);
     }
 
     // ── nexus-eho3u: nx_answer_runs read surface ─────────────────────────────

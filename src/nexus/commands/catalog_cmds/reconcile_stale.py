@@ -188,6 +188,11 @@ from nexus.commands.catalog_cmds.integrity import (
 # unchanged.
 from nexus.repo_identity import is_worktree_or_tempdir_path
 
+# nexus-8tnz2: shared T3-orphan-collection classification -- the SAME
+# function `nx catalog doctor --t3-vs-catalog` (t3_orphans) and `nx catalog
+# verify` (orphan_collections) consume, so all three agree by construction.
+from nexus.commands.catalog_cmds.t3_orphans import classify_t3_orphan_collections
+
 _log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
@@ -195,7 +200,7 @@ if TYPE_CHECKING:
 
 _ACTIONS = (
     "recount", "tombstone-vanished", "tombstone-orphaned", "tombstone-zero-content",
-    "tombstone-ghost-notes",
+    "tombstone-ghost-notes", "drop-orphan-collections",
 )
 
 # reconcile_cmd's convention (catalog.py): actionable findings cap at 20,
@@ -416,6 +421,222 @@ def _format_reason_counts(counts: dict[str, int]) -> str:
     return ", ".join(f"{reason}={n}" for reason, n in sorted(counts.items()))
 
 
+def _substrate_anchor(cat: "CatalogReader", *, walked: int, before: dict | None) -> dict:
+    """The S4 non-vacuity anchor (nexus-cwhci): the engine's own server-side
+    count of live catalog documents compared with the rows THIS walk paged
+    through.
+
+    ``catalog_stats.doc_count`` is a SECURITY INVOKER view over
+    ``catalog_documents WHERE deleted_at IS NULL`` (catalog-019), evaluated
+    by SQL on the substrate and served by ``GET /v1/catalog/stats`` — an
+    aggregate the engine computes in one statement, reachable on a
+    cloud-managed box through the public API with the store's own
+    credentials. No psql, no relay. ``all_documents`` reads the same
+    tombstone-aware views, so a walk that saw every live row matches it
+    exactly; aliases and rows without a collection are counted here too,
+    then excluded from ``total_docs`` by the classification.
+
+    WHAT IT CORROBORATES, AND WHAT IT CANNOT (substantive-critic,
+    2026-08-28): the aggregate and the walk are independent MECHANISMS
+    (one SQL ``count(*)`` versus an OFFSET-paged read materialised
+    client-side), so agreement proves the walk saw every row the engine
+    serves this caller — the paging, truncation and swallowed-read class
+    the playbook's §S4 calls a probe failure. They share the caller's
+    tenant scope and RLS, so agreement says nothing about rows the caller
+    cannot see: a document registered under another tenant, or hidden by
+    a scope defect, is invisible to both, and only a server-operator count
+    (psql on the substrate) can surface that class. The playbook records
+    that split as S4 (this anchor, every box) and S4b (scope divergence, a
+    conexus relay when suspected).
+
+    The walk is BRACKETED by two point-in-time counts (*before* it starts,
+    *after* it ends — code-review-expert, 2026-08-28): a live box indexes
+    while a census walks, so a single write landing mid-walk must not read
+    as a probe failure. ``ok`` when the walk equals both counts; ``ok`` with
+    ``moved_during_walk`` when the two counts differ and the walk landed
+    between them (the delta is explained by writes the walk straddled);
+    ``MISMATCH`` when the walk falls outside both (a probe failure, never a
+    clean census); ``unavailable`` when the reader cannot report a count at
+    all — unverifiable is never a pass, so ``MISMATCH`` and ``unavailable``
+    both make the run INCOMPLETE (see :func:`_raise_if_anchor_failed`).
+    """
+    base = {
+        "substrate_doc_count": None, "substrate_doc_count_before": None,
+        "substrate_doc_count_after": None, "walked_docs": walked, "delta": None,
+        "moved_during_walk": False,
+    }
+    if before is None or before.get("status") == "unavailable":
+        reason = (before or {}).get("reason", "no count taken before the walk")
+        return {**base, "status": "unavailable", "reason": reason}
+    after = _substrate_count(cat)
+    if after.get("status") == "unavailable":
+        return {**base, "substrate_doc_count_before": before["doc_count"],
+                "status": "unavailable", "reason": after["reason"]}
+    b, a = before["doc_count"], after["doc_count"]
+    lo, hi = min(b, a), max(b, a)
+    result = {
+        **base, "substrate_doc_count": a, "substrate_doc_count_before": b,
+        "substrate_doc_count_after": a, "delta": walked - a, "reason": None,
+    }
+    if lo <= walked <= hi:
+        return {**result, "status": "ok", "moved_during_walk": b != a}
+    return {**result, "status": "MISMATCH"}
+
+
+#: nexus-41zr9 — the write-time guard census the shakedown playbook's §5.4
+#: makes a precondition of every mutation arm ("each shakedown that runs a
+#: mutation arm must name the WRITE-TIME GUARD that would have prevented
+#: the population, and file it if it does not exist"). Keyed by arm. An arm
+#: prints its row before acting, and the census ``--json`` carries the whole
+#: table, so the shakedown record gets it without hand-assembly. An
+#: ``UNGUARDED`` row with no owner is the signal the doctrine asks for —
+#: printed on every run, never silent. Statuses: ``shipped`` (the guard is
+#: in the wheel), ``shipped-with-residuals`` (in the wheel, named holes
+#: still open), ``UNGUARDED`` (nothing prevents the population from
+#: recurring), ``n/a`` (reserved for an arm that repairs a cache whose
+#: writer is guarded; no arm qualifies today — recount's writer is not).
+#:
+#: THIS TABLE IS THE RECORD. The playbook amendment (T2 [23598] §5.4) points
+#: here rather than restating the rows, so there is one copy to rot. Rot
+#: is caught by hand, not by a test: the tests pin the residual bead ids and
+#: statuses as written, so closing a residual bead (or shipping a guard) is
+#: the moment to edit the row, and the playbook's §3.2 instrument-freshness
+#: census asks for exactly that check every shakedown. ``as_of`` is printed
+#: so a reader knows how old the claim is.
+_WRITE_TIME_GUARDS_AS_OF = "2026-08-28"
+_WRITE_TIME_GUARDS: dict[str, dict] = {
+    "recount": {
+        "status": "UNGUARDED",
+        "guard": "the chunk_count desync writer (the wu8s1/94fxl class) is still unfound, so "
+                 "stale counts keep being written; recount repairs the symptom",
+        "where": "no write-time guard exists yet",
+        "residual_beads": ["nexus-wu8s1"],
+    },
+    "tombstone-vanished": {
+        "status": "shipped-with-residuals",
+        "guard": "SCOPED, not root-cause: this repo's OWN tracked host-run harnesses are "
+                 "guarded from reintroducing this class, via an exact-allowlist lint over every "
+                 "nx index/nx store/nx collection/store_put site under tests/e2e/** and "
+                 "scripts/** (tests/test_host_harness_scratch_scope_lint.py, nexus-8tnz2 census: "
+                 "all 34 existing files/150 sites are already read-only, container-isolated, or NX_LOCAL "
+                 "under a sandboxed HOME/config dir — a NEW site must be reviewed rather than "
+                 "silently joining the census). This does NOT address the OBSERVED live "
+                 "population's root cause: the design-of-record itself found no producer of the "
+                 "actual debris names (code__test-repo-<hex>, docs__hotfix_smoke, "
+                 "docs__local_smoketest_336, knowledge__val530, docs__1-2188) anywhere in this "
+                 "repo — that producer is external and remains completely UNGUARDED by this "
+                 "lint or anything else here. A future in-repo site that genuinely needs the "
+                 "operator's live service has two conforming routes named in the lint's own "
+                 "directive text: self-provision an engine and mint its own tenant "
+                 "(POST /v1/tenants/create under the boot bearer, the tests/_engine_substrate.py "
+                 "mint_test_tenant precedent), or the throughput bench's marker-scoped-owner + "
+                 "before/after collection-list snapshot + EXIT-time teardown shape. The API "
+                 "delete/rename path IS cascaded (delete-path incompleteness, fixed); the sweep "
+                 "arm that cleans the SYMPTOM — both the already-landed population and whatever "
+                 "the still-unidentified external producer adds next — is "
+                 "`nx catalog reconcile-stale --execute drop-orphan-collections`",
+        "where": "write-time (this repo's own harnesses only): "
+                 "tests/test_host_harness_scratch_scope_lint.py; cascade: engine "
+                 "CatalogDeleteCollectionCascadeTest / CatalogRenameCollectionTest; sweep "
+                 "(symptom, any producer): reconcile_stale.py's drop-orphan-collections arm via "
+                 "classify_t3_orphan_collections()",
+        "residual_beads": ["nexus-8tnz2"],
+    },
+    "tombstone-orphaned": {
+        "status": "shipped-with-residuals",
+        "guard": "worktree/temp indexing refused at registration (nexus-u8n4r) — covers the "
+                 "owner_root_gone population; file_missing after a legitimate index is lifecycle, "
+                 "swept by housekeeping (miss_count), not a write-time gap",
+        "where": "nexus.repo_identity.should_skip_ephemeral_registration, wired at doc_indexer, indexer, pipeline_stages",
+        "residual_beads": ["nexus-rng8r"],
+    },
+    "tombstone-zero-content": {
+        "status": "shipped",
+        "guard": "unchunkable sources (zero-byte, binary) never registered (nexus-rqsh1)",
+        "where": "nexus.classifier.looks_like_binary_content at the indexer's registration guard; "
+                 "catalog_cmds.integrity._is_zero_content_by_design mirrors it",
+        "residual_beads": [],
+    },
+    "tombstone-ghost-notes": {
+        "status": "shipped",
+        "guard": "store_put notes get a title-derived identity at write time (NULL-identity class, fixed)",
+        "where": "nexus.catalog.store_hook (uri_for(collection, title)); nx catalog doctor --store-put-integrity",
+        "residual_beads": [],
+    },
+    "drop-orphan-collections": {
+        "status": "shipped-with-residuals",
+        "guard": "SCOPED, not root-cause (same honesty note as tombstone-vanished above): the "
+                 "same lint (tests/test_host_harness_scratch_scope_lint.py, nexus-8tnz2) prevents "
+                 "THIS repo's own tracked harnesses from creating new T3-orphan collections "
+                 "(chunks present in T3, zero catalog documents — live or tombstoned — "
+                 "referencing them). It does nothing about the observed live population's actual, "
+                 "external, still-unidentified producer. This arm is the sweep for the SYMPTOM "
+                 "regardless of source — already-accumulated debris, or whatever an unguarded "
+                 "external producer adds next — via the SAME classify_t3_orphan_collections() "
+                 "function `nx catalog doctor --t3-vs-catalog` and `nx catalog verify` also "
+                 "consume. Never drops a tombstoned-only collection (nexus-8tnz2 fix-round "
+                 "CRITICAL 2) — only a confirmed 'orphan' (zero live AND zero tombstoned docs).",
+        "where": "write-time (this repo's own harnesses only): "
+                 "tests/test_host_harness_scratch_scope_lint.py; classification: "
+                 "src/nexus/commands/catalog_cmds/t3_orphans.py::classify_t3_orphan_collections",
+        "residual_beads": ["nexus-8tnz2"],
+    },
+}
+
+
+def _echo_write_time_guard(verb: str) -> None:
+    """Print the §5.4 precondition for *verb* — before the arm's own report."""
+    g = _WRITE_TIME_GUARDS[verb]
+    line = f"Write-time guard (playbook §5.4, as of {_WRITE_TIME_GUARDS_AS_OF}): {g['status']} — {g['guard']}"
+    if g.get("where"):
+        line += f" [{g['where']}]"
+    if g.get("residual_beads"):
+        line += f"; residuals: {', '.join(g['residual_beads'])}"
+    if g.get("unowned_residual"):
+        line += f"; UNOWNED residual: {g['unowned_residual']} — no bead names it"
+    click.echo(line)
+
+
+def _substrate_count(cat: "CatalogReader") -> dict:
+    """One point-in-time engine count (``catalog_stats.doc_count``), or an
+    ``unavailable`` record naming why."""
+    stats_fn = getattr(cat, "stats", None)
+    if not callable(stats_fn):
+        return {"status": "unavailable", "reason": "catalog reader exposes no stats()"}
+    try:
+        stats = stats_fn() or {}
+    except Exception as exc:  # noqa: BLE001 — boundary catch; the anchor reports the failure, the census still prints
+        return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
+    doc_count = stats.get("doc_count")
+    if doc_count is None:
+        return {"status": "unavailable", "reason": "engine stats carry no doc_count"}
+    return {"status": "ok", "doc_count": int(doc_count)}
+
+
+def _raise_if_anchor_failed(report: dict) -> None:
+    """nexus-cwhci: a walk the substrate count does not corroborate is not a
+    census — refuse the same way the unreadable guard does."""
+    anchor = report.get("substrate_anchor") or {}
+    status = anchor.get("status")
+    if status == "ok":
+        return
+    if status == "MISMATCH":
+        raise click.ClickException(
+            f"reconcile-stale INCOMPLETE: substrate anchor MISMATCH — the engine counted "
+            f"{anchor['substrate_doc_count_before']} live catalog document(s) before the walk "
+            f"and {anchor['substrate_doc_count_after']} after it; this walk saw "
+            f"{anchor['walked_docs']}, outside that bracket (delta {anchor['delta']:+d}). "
+            f"A census the substrate does not corroborate is a probe failure, not a clean "
+            f"result (playbook §S4); the mutation arms refuse on it too."
+        )
+    raise click.ClickException(
+        f"reconcile-stale INCOMPLETE: substrate anchor unavailable "
+        f"({anchor.get('reason', 'unknown')}) — the walk saw {anchor.get('walked_docs')} "
+        f"row(s) but nothing independent corroborates that count. Unverifiable is never "
+        f"a pass (playbook §S4)."
+    )
+
+
 def _classify(cat: "CatalogReader", t3: object) -> tuple[dict, list[str]]:
     """Build the full classification report. Returns ``(report, unreadable)``.
 
@@ -424,14 +645,19 @@ def _classify(cat: "CatalogReader", t3: object) -> tuple[dict, list[str]]:
     trusted — the caller must refuse to act on ANY of the findings below,
     same as ``catalog verify``'s INCOMPLETE contract.
     """
-    entries = [
-        e for e in cat.all_documents(limit=0)
-        if not e.alias_of and e.physical_collection
-    ]
+    before = _substrate_count(cat)  # nexus-cwhci: first bracket, taken BEFORE the walk
+    walked = list(cat.all_documents(limit=0))
+    entries = [e for e in walked if not e.alias_of and e.physical_collection]
     total_docs = len(entries)
+    alias_docs = sum(1 for e in walked if e.alias_of)
+    no_collection_docs = sum(1 for e in walked if not e.alias_of and not e.physical_collection)
 
     report = {
         "total_docs": total_docs,
+        "walked_docs": len(walked),
+        "alias_docs": alias_docs,
+        "no_collection_docs": no_collection_docs,
+        "substrate_anchor": _substrate_anchor(cat, walked=len(walked), before=before),
         "vanished_empty_manifest": [],
         "vanished_has_manifest": [],
         "zero_count_recount": [],
@@ -579,7 +805,41 @@ def _label_dishonest(row: dict) -> str:
     )
 
 
+def _echo_anchor(report: dict) -> None:
+    a = report.get("substrate_anchor") or {}
+    excluded = (
+        f"{report.get('alias_docs', 0)} alias, "
+        f"{report.get('no_collection_docs', 0)} without a collection excluded from examination"
+    )
+    if a.get("status") == "ok" and a.get("moved_during_walk"):
+        click.echo(
+            f"Substrate anchor: OK — the engine counted {a['substrate_doc_count_before']} live "
+            f"catalog document(s) before the walk and {a['substrate_doc_count_after']} after it; "
+            f"this walk saw {a['walked_docs']}, inside that bracket (writes landed during the "
+            f"walk; {excluded})."
+        )
+    elif a.get("status") == "ok":
+        click.echo(
+            f"Substrate anchor: OK — the engine counts {a['substrate_doc_count']} live catalog "
+            f"document(s) and this walk saw {a['walked_docs']} ({excluded})."
+        )
+    elif a.get("status") == "MISMATCH":
+        click.echo(
+            f"Substrate anchor: MISMATCH — the engine counted {a['substrate_doc_count_before']} "
+            f"live catalog document(s) before the walk and {a['substrate_doc_count_after']} after "
+            f"it; this walk saw {a['walked_docs']}, outside that bracket (delta {a['delta']:+d}; "
+            f"{excluded}). The census below is NOT a pass."
+        )
+    else:
+        click.echo(
+            f"Substrate anchor: UNAVAILABLE ({a.get('reason', 'unknown')}) — the walk saw "
+            f"{a.get('walked_docs')} row(s) with nothing independent to corroborate it. "
+            f"The census below is NOT a pass."
+        )
+
+
 def _echo_human_report(report: dict, unreadable: list[str]) -> None:
+    _echo_anchor(report)
     click.echo(f"Catalog reconcile-stale: {report['total_docs']} non-alias catalog document(s) examined.")
 
     vanished_empty = report["vanished_empty_manifest"]
@@ -734,6 +994,14 @@ def _json_payload(report: dict, unreadable: list[str]) -> dict:
         "dishonest": report["dishonest"],
         "dishonest_by_origin": _count_by_key(report["dishonest"], "origin"),
         "incomplete": unreadable,
+        # nexus-cwhci: the S4 anchor — engine server-side count vs this walk.
+        "substrate_anchor": report.get("substrate_anchor"),
+        # nexus-41zr9: the §5.4 write-time guard census, keyed by mutation arm.
+        "write_time_guards": _WRITE_TIME_GUARDS,
+        "write_time_guards_as_of": _WRITE_TIME_GUARDS_AS_OF,
+        "walked_docs": report.get("walked_docs"),
+        "alias_docs": report.get("alias_docs"),
+        "no_collection_docs": report.get("no_collection_docs"),
     }
 
 
@@ -758,6 +1026,7 @@ def _report_only_notice(dry_run: bool, confirm: bool) -> bool:
 
 
 def _run_recount(report: dict, *, will_act: bool, dry_run: bool) -> None:
+    _echo_write_time_guard("recount")
     targets = report["zero_count_recount"]
     click.echo(f"\nrecount: {len(targets)} candidate(s) (manifest non-empty despite chunk_count == 0).")
     _echo_sample(targets, _CAP_ACTION, _label_zero_count)
@@ -799,6 +1068,7 @@ def _run_recount(report: dict, *, will_act: bool, dry_run: bool) -> None:
 
 
 def _run_tombstone(report: dict, class_key: str, *, will_act: bool, dry_run: bool, verb: str) -> None:
+    _echo_write_time_guard(verb)
     targets, invariant_skipped = _assert_empty_manifest(report[class_key])
     click.echo(f"\n{verb}: {len(targets)} candidate(s) (empty manifest).")
     _echo_sample(targets, _CAP_ACTION, _label_vanished if class_key.startswith("vanished") else _label_zero_count)
@@ -853,6 +1123,7 @@ def _run_tombstone_ghost_notes(
     raises is unverifiable and is never tombstoned. Tombstones are
     reversible until ``purge-trash``.
     """
+    _echo_write_time_guard("tombstone-ghost-notes")
     note_shaped = [
         row
         for key, rows in report.items()
@@ -916,6 +1187,126 @@ def _run_tombstone_ghost_notes(
         "`nx catalog purge-trash --execute`; the title list is in T2 "
         "nexus/ghost-notes-knowledge__knowledge-2026-08-28-titles."
     )
+
+
+def _run_drop_orphan_collections(
+    cat: "CatalogReader", t3: object, *, will_act: bool, dry_run: bool,
+) -> None:
+    """drop-orphan-collections (nexus-8tnz2): T3 collections with chunks
+    but ZERO catalog documents -- the reverse-direction sibling of
+    tombstone-vanished's population (there, catalog docs point at a T3
+    collection that no longer exists; here, a T3 collection exists and the
+    catalog never registered a document for it at all -- benchmark/gate
+    debris, T2 nexus/catalog-cleanup-2026-08-03-executed-and-prevention
+    [21385] item 3).
+
+    Consumes the SAME classification ``nx catalog doctor --t3-vs-catalog``
+    reports as ``t3_orphans`` and ``nx catalog verify`` reports as
+    ``orphan_collections`` -- ``classify_t3_orphan_collections`` is the ONE
+    definition all three call, so they agree by construction (nexus-8tnz2
+    locked invariant).
+
+    A row whose chunk count could not be read (an ``error`` key -- the
+    nexus-pyv0e class of T3 read failure) is NEVER a delete target: an
+    unresolvable count is not confirmed orphan-hood, the same discipline
+    every other arm in this module applies to its own candidates. A
+    failure classifying the population AT ALL (T3's collection listing, or
+    EITHER catalog doc-count read -- live-only or ``include_deleted=True``)
+    refuses outright -- the same INCOMPLETE contract as the base census
+    (``_raise_if_unreadable``); an unavailable tombstone count is exactly
+    such a failure (nexus-8tnz2 fix-round CRITICAL 2) -- this arm refuses
+    ``--execute`` rather than guess whether a zero-live-doc collection is a
+    genuine orphan or merely tombstoned-only.
+
+    Only ``class == "orphan"`` rows are ever a delete target.
+    ``class == "tombstoned-only"`` rows (every referencing catalog document
+    is soft-deleted, still restorable until ``purge_trash``, RDR-156 D6)
+    are listed distinctly, with their ``tombstoned_count``, and NEVER
+    dropped -- hard-deleting a T3 collection whose catalog documents are
+    merely tombstoned would destroy still-recoverable content and bypass
+    ``purge_trash``'s own grace window.
+
+    Drops go through the cascaded API delete path only
+    (``HttpCatalogClient.delete_collection`` -- the tombstone-vanished
+    guard row calls this cascade "fixed"), never a raw vector-store
+    delete, never psql.
+    """
+    _echo_write_time_guard("drop-orphan-collections")
+    try:
+        classified = classify_t3_orphan_collections(cat, t3)
+    except Exception as exc:  # noqa: BLE001 — boundary catch; refused below, never silently treated as zero orphans
+        raise click.ClickException(
+            "reconcile-stale INCOMPLETE: could not classify T3 orphan collections "
+            f"({type(exc).__name__}: {exc}) — a read this arm depends on could not "
+            "be trusted (this includes the tombstoned-vs-orphan disambiguation read); "
+            "refusing to act (same INCOMPLETE contract as the census)."
+        ) from exc
+
+    targets = [o for o in classified if o.get("class") == "orphan"]
+    tombstoned_only = [o for o in classified if o.get("class") == "tombstoned-only"]
+    unresolvable = [o for o in classified if "error" in o]
+
+    click.echo(
+        f"\ndrop-orphan-collections: {len(targets)} candidate(s) "
+        "(T3 collection has chunks; zero catalog documents -- live or tombstoned -- "
+        "reference it)."
+    )
+    for row in targets[:_CAP_ACTION]:
+        click.echo(f"    {row['name']:<50} chunks={row['chunk_count']}")
+    if len(targets) > _CAP_ACTION:
+        click.echo(f"    ... and {len(targets) - _CAP_ACTION} more")
+    if tombstoned_only:
+        click.echo(
+            f"  {len(tombstoned_only)} collection(s) are tombstoned-only -- every "
+            "referencing catalog document is soft-deleted (restorable until "
+            "`nx catalog purge-trash --execute`), NOT gone. NEVER a delete target "
+            "for this arm:"
+        )
+        _echo_sample(
+            tombstoned_only, _CAP_INFO,
+            lambda r: f"{r['name']:<50} chunks={r['chunk_count']} tombstoned_docs={r['tombstoned_count']}",
+        )
+    if unresolvable:
+        click.echo(
+            f"  skipped {len(unresolvable)} whose chunk count could not be read from T3 "
+            "(unresolvable — never a delete target): "
+            + ", ".join(f"{o['name']} ({o['error']})" for o in unresolvable[:5])
+            + (" ..." if len(unresolvable) > 5 else "")
+        )
+    if not will_act:
+        if dry_run:
+            click.echo("\n(dry-run — no catalog writes performed.)")
+        return
+    if not targets:
+        click.echo("\nNothing to drop.")
+        return
+
+    from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
+    writer = _cat_cmd._get_catalog_writer()
+    n_dropped = 0
+    failures: list[dict] = []
+    try:
+        for row in targets:
+            try:
+                response = writer.delete_collection(row["name"])
+                n_dropped += 1
+                click.echo(
+                    f"  dropped {row['name']} (chunk_count={row['chunk_count']} before; "
+                    f"response={response})"
+                )
+            except Exception as exc:  # noqa: BLE001 — isolated per-collection: continue, report at end
+                failures.append({"name": row["name"], "error": str(exc)})
+                _log.warning(
+                    "reconcile_stale_drop_orphan_failed", name=row["name"], error=str(exc),
+                )
+    finally:
+        writer.close()
+
+    click.echo(f"\nDone: dropped {n_dropped} orphan collection(s).")
+    if failures:
+        click.echo(f"\n{len(failures)} failure(s):")
+        _echo_sample(failures, _CAP_INFO, lambda r: f"{r['name']}: {r['error']}")
+        raise click.exceptions.Exit(1)
 
 
 @click.command("reconcile-stale")
@@ -985,6 +1376,17 @@ def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_o
                              are manifest-only gaps and are never
                              tombstoned; rows whose T3 probe fails are
                              skipped. Reversible until ``purge-trash``.
+      drop-orphan-collections  delete whole T3 collections that have
+                             chunks but ZERO catalog documents referencing
+                             them (nexus-8tnz2: benchmark/gate debris --
+                             the reverse direction of tombstone-vanished).
+                             Consumes the same classification as
+                             ``nx catalog doctor --t3-vs-catalog``
+                             (``t3_orphans``); a collection whose chunk
+                             count could not be read is never a delete
+                             target. Goes through the cascaded API delete
+                             (``HttpCatalogClient.delete_collection``),
+                             never a raw vector-store delete.
 
     \\b
     Examples:
@@ -1013,6 +1415,7 @@ def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_o
         _echo_human_report(report, unreadable)
 
     _raise_if_unreadable(unreadable)
+    _raise_if_anchor_failed(report)
 
     if action is None:
         return
@@ -1038,6 +1441,8 @@ def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_o
         )
     elif action == "tombstone-ghost-notes":
         _run_tombstone_ghost_notes(report, t3, will_act=will_act, dry_run=dry_run)
+    elif action == "drop-orphan-collections":
+        _run_drop_orphan_collections(cat, t3, will_act=will_act, dry_run=dry_run)
 
 
 def register(group: click.Group) -> None:

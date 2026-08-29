@@ -136,6 +136,8 @@ SEARCH_QUERY_TOOLS = frozenset({
     "search_graph_hop",
     "search_metadata_scoped",
     "search_topic_scoped",
+    # RDR-156 Decision 5 (nexus-ubnwk): the fourth combined-query shape.
+    "search_aspect_scoped",
 })
 
 #: Retrieval tools on the nexus-catalog MCP server. ``search`` is

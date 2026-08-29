@@ -279,20 +279,71 @@ def _emit_identity_drops_warning() -> bool:
     return True
 
 
-def _emit_refused_warning(*, indexed_count: int) -> bool:
+def _emit_refused_warning(*, indexed_count: int, refused_in_failed: int = 0) -> bool:
     """nexus-5xn3k.6 (RUNFENCE C4): the manifest write SUCCEEDED but the
     engine's fail-closed completion verify REFUSED the stamp —
     index_state stays 'indexing', the document is NOT fully indexed.
     Distinct from both collectors above (a refusal, not a write failure
     or an identity drop). Returns ``True`` iff the collector held an
-    entry."""
+    entry.
+
+    *refused_in_failed* (nexus-l6tr7): how many of the collector's
+    refusals the caller ALREADY bucketed into its ``failed`` list because
+    the refusal propagated as ``IndexRunVerifyRefused`` (the streaming /
+    incremental path) instead of returning normally with chunks (the
+    flush-grain path, which IS counted in *indexed_count*).
+    ``_fence_complete`` records BOTH kinds in the same process-global
+    collector by design, so without this split a mixed batch printed
+    "2 of the 1 indexed above" — an impossible subset. Zero (the default,
+    and every caller that never propagates) keeps the original wording.
+    """
     import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time
 
     from nexus.mcp_infra import get_complete_refusals  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached when checked
 
     refused = get_complete_refusals()
-    if not refused:
+    collected = len(refused)
+    if collected == 0 and refused_in_failed <= 0:
         return False
+    if refused_in_failed > collected:
+        # The caller bucketed MORE refusals than the run-wide collector
+        # holds. ``_fence_complete`` records every refusal before raising,
+        # and the collector deduplicates by doc_id, so this is either a
+        # duplicate record in one batch or recording drift — say so
+        # rather than clamp into a sentence that contradicts itself
+        # (substantive-critic; same event mcp_infra raises on the
+        # write_many path).
+        import structlog  # noqa: PLC0415 — deliberate function-local import: rare branch
+
+        structlog.get_logger(__name__).warning(
+            "complete_refused_count_mismatch",
+            collector_len=collected,
+            bucketed_in_failed=refused_in_failed,
+            path="dt_index_footer",
+            note="more refusals bucketed into failed than the run-wide "
+                 "collector recorded — duplicate record or recording drift",
+        )
+        click.echo(
+            f"  WARNING: {refused_in_failed} record(s) had completion "
+            f"refused by the engine's fail-closed verify (fence left at "
+            f"'indexing') and are listed under failed; the run-wide "
+            f"refusal collector reported {collected} — see the "
+            f"complete_refused_count_mismatch log event — NOT fully "
+            f"indexed. Re-index or --force to retry.",
+            err=True,
+        )
+        return True
+    if refused_in_failed > 0:
+        in_indexed = collected - refused_in_failed
+        click.echo(
+            f"  WARNING: {len(refused)} completion refusal(s) by the "
+            f"engine's fail-closed verify (fence left at 'indexing'): "
+            f"{in_indexed} of the {indexed_count} indexed above and "
+            f"{refused_in_failed} listed under failed — NOT fully "
+            f"indexed. Re-index or --force to retry.",
+            err=True,
+        )
+        return True
     click.echo(
         f"  WARNING: {len(refused)} of the {indexed_count} "
         f"indexed above had completion refused by the engine's "
@@ -350,11 +401,14 @@ def _emit_superseded_sweep_skipped_warning() -> bool:
 
 
 _IDENTITY_DROP_CHECKS = {
-    "write_failed": lambda indexed_count: _emit_write_failed_warning(),
-    "identity_drops": lambda indexed_count: _emit_identity_drops_warning(),
-    "refused": lambda indexed_count: _emit_refused_warning(indexed_count=indexed_count),
-    "superseded_swept": lambda indexed_count: _emit_superseded_swept_info(),
-    "superseded_sweep_skipped": lambda indexed_count: _emit_superseded_sweep_skipped_warning(),
+    "write_failed": lambda indexed_count, **kw: _emit_write_failed_warning(),
+    "identity_drops": lambda indexed_count, **kw: _emit_identity_drops_warning(),
+    "refused": lambda indexed_count, **kw: _emit_refused_warning(
+        indexed_count=indexed_count,
+        refused_in_failed=kw.get("refused_in_failed", 0),
+    ),
+    "superseded_swept": lambda indexed_count, **kw: _emit_superseded_swept_info(),
+    "superseded_sweep_skipped": lambda indexed_count, **kw: _emit_superseded_sweep_skipped_warning(),
 }
 # Default sequence matches index_repo_cmd's pre-extraction order (also
 # used, fresh, by index_pdf_cmd / index_md_cmd — nexus-7f5qj). The two
@@ -369,6 +423,7 @@ _DEFAULT_ORDER = (
 
 def emit_identity_drop_summary(
     *, indexed_count: int, order: tuple[str, ...] = _DEFAULT_ORDER,
+    refused_in_failed: int = 0,
 ) -> bool:
     """Echo a WARNING line (stderr) for each populated collector since the
     last :func:`reset_identity_drop_collectors` call. Returns ``True`` if
@@ -388,10 +443,14 @@ def emit_identity_drop_summary(
     ("N of the *indexed_count* indexed above..."); pass the count of
     files/records this run actually wrote (excluding skips), matching
     each caller's own bookkeeping.
+
+    *refused_in_failed* (nexus-l6tr7): refusals the caller already
+    bucketed into ``failed`` because they PROPAGATED as
+    ``IndexRunVerifyRefused`` — see :func:`_emit_refused_warning`.
     """
     problems_detected = False
     for key in order:
-        if _IDENTITY_DROP_CHECKS[key](indexed_count):
+        if _IDENTITY_DROP_CHECKS[key](indexed_count, refused_in_failed=refused_in_failed):
             problems_detected = True
     return problems_detected
 

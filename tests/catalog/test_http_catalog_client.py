@@ -477,6 +477,13 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"collections": ["code__test__voyage-code-3__v1"]})
         elif op == "/docs/collection-counts":
             self._send_json({"counts": {"code__test__voyage-code-3__v1": 2}})
+        elif op == "/docs/collection-counts-all":
+            # nexus-8tnz2: all-rows counts, INCLUDING soft-tombstoned docs
+            # still restorable until purge_trash — one more than the
+            # live-only "/docs/collection-counts" count above so a test
+            # exercising both through the live fake server can tell them
+            # apart.
+            self._send_json({"counts": {"code__test__voyage-code-3__v1": 3}})
         elif op == "/docs/orphaned":
             # nexus-8y1tm: CatalogRepository.orphanedDocs() narrow 4-key shape
             # (tumbler/title/content_type/file_path, all str) — NOT the full
@@ -1782,6 +1789,63 @@ class TestHttpCatalogClientRoundTrip:
 
         # Must not raise
         client.resync_chunk_count_cache("1.1.1")
+
+    def test_collection_doc_counts_routes_include_deleted_to_new_path(
+        self, client: HttpCatalogClient
+    ) -> None:
+        """nexus-8tnz2 fix-round-2 EXTENSION: ``include_deleted=True`` must
+        hit the brand-new ``/docs/collection-counts-all`` path, never the
+        old ``/docs/collection-counts`` route with a query param -- the
+        substantive-critic round-2 finding was that a query param on the
+        EXISTING route is indistinguishable from "old engine silently
+        ignored it" (HTTP 200, live-only data, no error). A separate path
+        lets a pre-upgrade engine 404 cleanly instead.
+        """
+        calls: list[tuple[str, dict]] = []
+
+        def _fake_get(path: str, **params: object) -> dict:
+            calls.append((path, dict(params)))
+            return {"counts": {"some__coll": 1}}
+
+        client._get = _fake_get  # type: ignore[method-assign]
+
+        client.collection_doc_counts()
+        client.collection_doc_counts(include_deleted=False)
+        client.collection_doc_counts(include_deleted=True)
+
+        assert calls == [
+            ("/docs/collection-counts", {}),
+            ("/docs/collection-counts", {}),
+            ("/docs/collection-counts-all", {}),
+        ]
+
+    def test_collection_doc_counts_all_rows_error_propagates_uncaught(
+        self, client: HttpCatalogClient
+    ) -> None:
+        """A 404 (or any other failure) reading the all-rows count must
+        propagate as the store's normal error -- NEVER degrade to an empty
+        dict or to live-only counts (unlike
+        :meth:`HttpCatalogClient.manifest_null_collection_report`'s
+        best-effort degrade, which is safe only because that route has no
+        hard-delete consumer downstream). ``classify_t3_orphan_collections``
+        depends on this propagating uncaught so an unreadable all-rows
+        count becomes the caller's INCOMPLETE refusal, never a silent
+        tombstoned_count=0 that misclassifies a restorable collection as a
+        genuine orphan."""
+        import httpx
+
+        def _raising_get(path: str, **params: object):
+            raise httpx.HTTPStatusError(
+                "404 Not Found",
+                request=httpx.Request("GET", "http://example/v1/catalog" + path),
+                response=httpx.Response(404, request=httpx.Request("GET", "http://x")),
+            )
+
+        client._get = _raising_get  # type: ignore[method-assign]
+
+        with pytest.raises(httpx.HTTPStatusError):
+            client.collection_doc_counts(include_deleted=True)
+
 # ── Guarded methods ───────────────────────────────────────────────────────────
 
 class TestGuardedMethods:

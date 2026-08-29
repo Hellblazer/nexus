@@ -248,6 +248,54 @@ follow the corrected reap-then-delete order; see
 [cli-reference.md § nx store](cli-reference.md#nx-store) for the resulting
 user-facing exit-code and reported-count contract.
 
+**Tumbler grammar (nexus-v3w9n, catalog-034, 2026-08-28; amended twice same
+day — segment COUNT not numeric content, then boundary not schema).** An
+owner prefix (`catalog_owners.tumbler_prefix`) is exactly 2 dot-separated,
+non-empty, non-blank, dot-free segments (e.g. `1.7`, `bt.1`); a document
+tumbler (`catalog_documents.tumbler`) is 3 or more. Segment CONTENT need
+not be numeric on the ENGINE side — numeric-ness is the Python client's
+`Tumbler.parse` concern (int-segmented), enforced there, unchanged, and
+narrower: `nx catalog show` / `catalog_show`'s depth-2-is-owner branch
+only fires for a numeric tumbler, so a mnemonic owner prefix (`bt.1`) is
+invisible to it. This is disclosure, not a live gap: mnemonic owner
+prefixes exist only in the engine's own Java test fixtures — the
+2026-08-28 production census found 72 owners, every one shaped `1.N`. See
+[`src/nexus/catalog/AGENTS.md`](../src/nexus/catalog/AGENTS.md)'s grammar
+bullet for the full disclosure. Never widen the engine grammar.
+
+Enforced at the engine's HTTP API boundary (`CatalogHandler`'s
+`TumblerGrammar` validator, HTTP 400 `{"rule": "tumbler-grammar", "field",
+"value"}`), NOT by a schema `CHECK` — Amendment 2 (owner decision) deferred
+the two `CHECK` constraints (`catalog_owners_prefix_grammar_ck` /
+`catalog_documents_tumbler_grammar_ck`) to **nexus-ia69x** after the full
+engine-suite measurement showed the test corpus itself is shaped
+1-segment-owner / 2-segment-document throughout — raw-SQL fixtures and
+shared scaffolding included, well beyond what a syntactic census could
+find (1959 tests, 331 broken across 46+ classes). Every external producer
+enters through `CatalogHandler`'s HTTP routes (legacy `/register`,
+`/owners/upsert`, `/import/owner`, `/import/document`, `/doc/register`,
+`/doc/register_many` — see `TumblerGrammar`'s own javadoc for the full
+route-by-route VALIDATED/LOOKUP-ONLY table; `/import/document` was a
+ship-blocker gap closed in fix round 1); internal minting (`ownerPrefix +
+"." + seq`) already conforms by construction, so the boundary is where an
+illegal shape can actually be introduced today. The two batch routes
+(`/import/owner`, `/import/document`, `/doc/register_many`) validate every
+row before the single repository call — one bad row anywhere refuses the
+whole batch with zero partial writes. Fix round 1 also closed a
+whitespace-only-segment gap (`"1. "` validated as conforming under a bare
+`isEmpty()` check) — `TumblerGrammar` now rejects blank segments too, and
+the deferred `CHECK` predicates named in catalog-034's header carry the
+same `\s`-excluding fix so nexus-ia69x inherits the closed gap.
+`catalog-034-tumbler-grammar.xml` still carries the data changeset that
+tombstones the two live 2026-05-22 phantom registrations (`1.1`/`1.2`,
+registered under a nonexistent 1-segment owner) — that step is
+independent of the deferred `CHECK`s and ships regardless. `nx catalog
+show` / `catalog_show` resolve a depth-2 tumbler as an owner card rather
+than a document lookup (see [cli-reference.md § nx catalog show](cli-reference.md#nx-catalog-show));
+the JSON form carries an explicit `"kind": "owner"` discriminator (fix
+round 1) so a consumer never has to infer owner-vs-document from key
+shape.
+
 **Tumbler allocation and next_seq.** A tumbler's trailing segment is a
 sequential number allocated per owner via `SELECT ... FOR UPDATE` on
 `catalog_owners.next_seq` (`CatalogHandler.java`); the column tracks the
@@ -371,6 +419,23 @@ that window. **Retired (nexus-lgdel.l1, 2026-08-16):** the beneficiary
 population reached zero, so `chash_alias` and the whole legacy-reference
 resolution route are DROPPED — a legacy 32-hex reference is no longer
 resolvable at all; re-index the source to mint a canonical 64-hex chash.
+
+### Combined-query shapes ([RDR-156](rdr/rdr-156-vector-store-capability-leverage.md) Decision 5)
+
+Four MCP tools unify an app-side stitch (vector search, then a second round trip against the catalog or aspects store) into ONE planner-optimizable SQL statement, each backed by a per-embedding-dim `LANGUAGE sql STABLE SECURITY INVOKER` Postgres function (`nexus.search_<shape>_384/768/1024`) that takes the query vector as a plan-time argument so the HNSW index survives the join:
+
+| Tool | Function | Joins in | Retires |
+|---|---|---|---|
+| `search_metadata_scoped` | `search_metadata_scoped_<dim>` | `catalog_document_chunks` + `catalog_documents` | `query`'s catalog-routing dance (`content_type`/`author`/`year`/`corpus`/`subtree`/chunk `where`) |
+| `search_topic_scoped` | `search_topic_scoped_<dim>` | `topic_assignments` + `topics` | app-side topic-label filter-then-rank |
+| `search_graph_hop` | `search_graph_hop_<dim>` | a `WITH RECURSIVE` BFS over `catalog_links`, then the two tables above | `query`'s `follow_links` app-side graph BFS + per-collection search + re-join |
+| `search_aspect_scoped` | `search_aspect_scoped_<dim>` | the two tables above + `document_aspects` (on `doc_id = tumbler`) | `search` + `operator_filter(source="aspects")`, for the case where the aspect predicate is selective — that two-step path filters AFTER the vector top-N truncation and can silently miss a distant match the predicate would otherwise keep |
+
+`search_aspect_scoped`'s join runs on `document_aspects.doc_id`, not `source_uri` — a precondition the other three shapes don't share. A document whose aspects row has no `doc_id` never joins and is silently excluded from this shape — by design, not a bug; those rows remain reachable through the older `operator_filter(source="aspects")` path, which is keyed on `source_uri` and unaffected. Its field allowlist (`problem_formulation`, `proposed_method`, `experimental_datasets`, `experimental_baselines`, `experimental_results`) deliberately excludes `extras` and `salient_sentences`: both were converted `TEXT` -> `jsonb` by `aspects-003-type-hygiene.xml` ([RDR-194](rdr/rdr-194-fk-census-structural-schema-warts.md)), so a five-field allowlist, not the seven `aspects-001-baseline.xml` originally defined as `TEXT`, is correct here — matching the pre-existing `AspectRepository.ALLOWED_ASPECT_COLUMNS` precedent.
+
+**`doc_id` coverage is real, not edge-case drift.** `doc_id` is populated by the one-time `aspects-004-doc-id-backfill.xml` changeset, which attributes a row only when `document_aspects.source_uri` is byte-for-byte equal to the catalog document's own `source_uri`. That holds for file-keyed corpora (`code__`/`docs__`/`rdr__`, both sides key off the same `file://` path). For `knowledge__` collections — the dominant aspects corpus — it structurally does NOT hold: the catalog registers those documents' `source_uri` from the document **title** (`src/nexus/catalog/store_hook.py:286`), while the aspect extractor's `source_uri` is built from **`source_path`** (`src/nexus/aspect_readers.py:172`), often itself a content-hash string. Title and `source_path` are two different identity fields for the same document family, not the same field spelled two ways, so an exact match essentially never occurs there — the large majority of `knowledge__` `document_aspects` rows stay `doc_id` NULL after the backfill and are invisible to `search_aspect_scoped` until re-extracted under `nexus-x1de2`'s go-forward stamping (which keys off the extraction queue's own `doc_id`, not `source_uri`, so it does not retroactively fix these rows either). Gap-fill for the `knowledge__` family is tracked as `nexus-bocft`.
+
+A frecency-boosted fifth shape named in the RDR was retired before implementation (2026-08-28 disposition) — frecency boosting is a ranking adjustment, not a combined *query* in this family's sense.
 
 ### Metadata field semantics (chunk vs document level)
 
