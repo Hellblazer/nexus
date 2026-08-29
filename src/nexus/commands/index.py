@@ -1066,15 +1066,14 @@ def index_repo_cmd(
         # affected chunks silently lost their topic assignments. Same
         # channel-and-shape precedent as chunk_flush_failed_files directly
         # above (stdout click.echo() Warning, never print()/structlog for
-        # the user-facing line), but a DIFFERENT exit-code policy
-        # (decided deliberately, not defaulted, per the bead's explicit
-        # ask): a PARTIAL taxonomy-assignment loss stays rc=0 — this
-        # summary line is the signal a human or script reads — because
-        # topic assignment is a secondary index, not the primary write
-        # path chunk_flush_failed_files guards. Exit only turns non-zero
-        # on TOTAL loss: every taxonomy-assign batch attempted this run
-        # failed (the GH #1432 class — nothing useful happened on this
-        # axis at all).
+        # the user-facing line). EXIT-CODE POLICY (decided 2026-08-29 under
+        # the no-silent-fallback directive, revising the first cut's
+        # partial-loss-exits-0): ANY lost topic assignment is a
+        # data-correctness event — topic-scoped search over those chunks is
+        # silently incomplete — and an exit-code-only consumer must not read
+        # it as success. The warning line prints first (the summary a human
+        # reads), then the run exits non-zero; total loss (every batch
+        # failed, the GH #1432 class) is named as such.
         taxonomy_assign_batches_attempted = (stats or {}).get(
             "taxonomy_assign_batches_attempted", 0,
         )
@@ -1101,6 +1100,15 @@ def index_repo_cmd(
                     f"received a topic assignment. See the WARNING line "
                     f"above."
                 )
+            raise click.ClickException(
+                f"{taxonomy_assign_batches_failed}/"
+                f"{taxonomy_assign_batches_attempted} taxonomy-assign "
+                f"batch(es) failed this run (nexus-7lw6a) — "
+                f"{taxonomy_assign_chunks_failed} chunk(s) lost their topic "
+                f"assignment; the index itself completed. Re-run once the "
+                f"assign endpoint is healthy to repair. See the WARNING line "
+                f"above."
+            )
 
 
 def _taxonomy_incomplete(collections: list[str]) -> bool:

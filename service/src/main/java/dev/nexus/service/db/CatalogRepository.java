@@ -2603,8 +2603,13 @@ public final class CatalogRepository {
      * Optionally filter by content_type. Returns up to limit results.
      *
      * <p><strong>Order contract (nexus-fgxmk):</strong> results are ordered by
-     * {@code tumbler} — registration order within an owner, stable across
-     * heap churn — NOT by relevance. Before this the statement had no
+     * {@code tumbler} — the TEXT column's string order, stable across heap
+     * churn — NOT by relevance and NOT numeric: it coincides with
+     * registration order only while every segment stays single-digit
+     * ({@code "1.9.10"} sorts before {@code "1.9.2"}). The contract is
+     * determinism, which is what {@code [0]} callers were missing; a caller
+     * that needs the newest or oldest match must order by the parsed tumbler
+     * itself. Before this the statement had no
      * {@code ORDER BY} at all, so a seq scan emitted physical ctid order:
      * insertion order on a fresh table, and arbitrary once free-space reuse
      * set in (measured: the same query returned two matching rows reversed

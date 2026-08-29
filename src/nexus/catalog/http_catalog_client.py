@@ -1609,9 +1609,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         """Full-text search over title/author/corpus/file_path.
 
         Order contract (nexus-fgxmk): the engine returns matches ordered by
-        tumbler — registration order within an owner — not by relevance.
-        Before 7.23.0 the statement had no ``ORDER BY`` and ``find(x)[0]``
-        was heap placement (measured reversing on a churned database).
+        tumbler as TEXT — string order, stable across heap churn — not by
+        relevance and not numeric (``"1.9.10"`` sorts before ``"1.9.2"``; it
+        coincides with registration order only while segments stay
+        single-digit). The contract is determinism. Before 7.23.0 the
+        statement had no ``ORDER BY`` and ``find(x)[0]`` was heap placement
+        (measured reversing on a churned database).
 
         Matching is BROADER than a title lookup: the English tsquery drops
         stopwords, so ``find("Paper A")`` matches "Paper B" too. Never take

@@ -125,15 +125,16 @@ def test_index_repo_pdf_quality_gate_key_absent_exit_zero(runner, repo_dir, mock
 
 # ── nexus-7lw6a: taxonomy_assign_batch_failed counted + surfaced ───────────
 
-def test_index_repo_taxonomy_assign_partial_failure_exit_zero_with_summary(
+def test_index_repo_taxonomy_assign_partial_failure_exits_nonzero_with_summary(
     runner, repo_dir, mock_reg,
 ):
     """A PARTIAL taxonomy-assignment loss (some, not all, batches failed --
     e.g. an HTTP 500 from the assign endpoint on 2 of 5 batches) must name
-    the failed-batch count AND the affected-chunk count in the summary, but
-    stay exit_code == 0 -- the exit-code policy decided for this bead: the
-    summary line is the signal for a partial loss, non-zero exit is
-    reserved for TOTAL loss (see the sibling total-failure test below)."""
+    the failed-batch count AND the affected-chunk count in the summary AND
+    exit non-zero. Policy revised 2026-08-29 under the no-silent-fallback
+    directive (the first cut exited 0 on a partial loss): 1,254 chunks
+    silently missing their topic assignments is a data-correctness event,
+    and an exit-code-only consumer must not read it as success."""
     result, mock_idx = _invoke_repo(
         runner, [str(repo_dir)], mock_reg,
         index_return={
@@ -143,10 +144,11 @@ def test_index_repo_taxonomy_assign_partial_failure_exit_zero_with_summary(
             "taxonomy_assign_chunks_failed": 1254,
         },
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code != 0, result.output
     assert "2/5 taxonomy-assign batch(es) failed" in result.output
     assert "1254 chunk(s) affected" in result.output
-    assert "Done." in result.output
+    assert "1254 chunk(s) lost their topic assignment" in result.output
+    assert "the index itself completed" in result.output
 
 
 def test_index_repo_taxonomy_assign_total_failure_exits_nonzero(
@@ -154,8 +156,8 @@ def test_index_repo_taxonomy_assign_total_failure_exits_nonzero(
 ):
     """A TOTAL taxonomy-assignment loss -- every batch attempted this run
     failed -- is the GH #1432 class and must exit non-zero, naming the
-    count. nexus-7lw6a exit-code policy: total loss only, never a partial
-    one."""
+    count as TOTAL (a partial loss is also non-zero since 2026-08-29; the
+    two messages differ so the operator knows which happened)."""
     result, mock_idx = _invoke_repo(
         runner, [str(repo_dir)], mock_reg,
         index_return={
