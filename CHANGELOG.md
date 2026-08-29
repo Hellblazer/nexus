@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.23.0] - 2026-08-29
+
+Paired release with `engine-service-v0.1.89` (tagged on `55be868db`;
+`REQUIRED_ENGINE_VERSION` bumped in this release, deploy fires at the
+client-tag push). The engine tag carries no Liquibase changeset: the
+engine half of this release is `GET /v1/catalog/search` ordering by tumbler
+(nexus-fgxmk), the read-only `GET /v1/aspects/list_without_catalog_document`
+census route (nexus-mlu3k), the manifest-drop sweep counting tombstoned
+referrers (nexus-0cwre), and the U+0000 literal fix (nexus-eeuyg).
+
+Plugin surface that becomes live with this pin (from `conexus/PENDING_RELEASE.md`):
+the RDR-184 ledger audits re-keyed for the CC 2.1.251 SubagentStart payload
+(`conexus/hooks/scripts/expectations.sh`, nexus-houpu) and the matching
+runbook text in the orchestration skill and the continuation command.
+
 ### Fixed
 
 - **`nx doctor` and the uv-takeover repair no longer treat uv's

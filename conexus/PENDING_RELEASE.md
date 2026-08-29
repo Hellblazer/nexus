@@ -29,39 +29,7 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release or plugin cut (pinned: v7.22.0)
+## Awaiting the next release or plugin cut (pinned: v7.23.0)
 
-- `conexus/hooks/scripts/expectations.sh` — bead nexus-houpu: RDR-184 ledger
-  audit surfaces re-keyed for the CC 2.1.251 SubagentStart payload. A named
-  background teammate now arrives with an opaque `a<hex>` `agent_id` and
-  `agent_type` == its `subagent_type`; the `a<name>-<hash>` encoding is gone
-  from the wire. `expectations_undeclared` and `expectations_census` pair
-  every START by (agent_type, N-of-type EXPECT credit) — the key
-  `expectations_owes_report` has used since nexus-hbr4x — and share one
-  blind-spot rule: rc=1 only when EXPECT rows exist and zero STARTs were
-  walked. A START whose type has no EXPECT row (including a dispatch the
-  PreToolUse Agent|Task hook never saw, unless hand-declared) is now NAMED
-  UNDECLARED instead of silently skipped.
-
-  **What is inert until this ships:** through the INSTALLED plugin path
-  (`~/.claude/plugins/marketplaces/*/conexus/hooks/scripts/`) the two audits
-  still give an unpaired START the old free pass (skipped, not named) and
-  still read rc=1 as `recognized==0`; hooked dispatches were already paired
-  by type there, so a fully mechanized session audits the same either way.
-  The in-repo path (`source tests/e2e/lib/expectations.sh`) is live
-  immediately. The stop guard is unaffected: `expectations_owes_report`
-  needed no change and `conexus/hooks/scripts/subagent-stop.sh` consumes
-  only it.
-
-- `conexus/skills/orchestration/SKILL.md` — bead nexus-houpu: the retro item
-  (step 3) states the re-keyed `expectations_undeclared` exit-code contract
-  (rc=1 = EXPECT rows present, zero STARTs walked; a START the PreToolUse
-  hook never saw is UNDECLARED unless hand-declared; the census never exits
-  2) instead of the retired `recognized==0` gloss. Guidance text only; an
-  installed session reads the old wording until the next plugin cut.
-
-- `conexus/commands/continuation.md` — bead nexus-houpu: the Gap-1
-  declaration-completeness step and the scenario-27 tripwire describe the
-  CC 2.1.251 payload (opaque `a<hex>` agent_id, `agent_type` ==
-  `subagent_type`, no name morphology) and the same rc contract as above.
-  Guidance text only; inert until the next plugin cut.
+Nothing pending. v7.23.0 advanced the pin, so everything previously
+listed here is live in installed sessions.
