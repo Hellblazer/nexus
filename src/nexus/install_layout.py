@@ -72,10 +72,13 @@ import dataclasses
 import json
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import structlog
 
 from nexus.errors import NexusError
 
@@ -112,6 +115,123 @@ NEVER_SHIM = frozenset({
     "uv", "uvx",
 })
 
+#: Console scripts of DEPENDENCIES that nexus shims although the ``conexus``
+#: distribution's own metadata does not declare them (uv does not link them
+#: either). The Python twin of ``NX_DEPENDENCY_SCRIPTS`` in
+#: ``_install/shims.sh``, pinned by ``tests/test_install_layout_twins_agree.py``.
+DEPENDENCY_SCRIPTS = frozenset({"mineru", "mineru-api"})
+
+#: The query the shell installer's ``_nx_declared_scripts`` runs, verbatim:
+#: ask the generation's OWN interpreter which console scripts the installed
+#: distribution declares. Exit 3 on a lookup failure so "declares nothing" and
+#: "could not ask" never collapse into the same empty answer (RG-A).
+_DECLARED_SCRIPTS_QUERY = """\
+import sys
+try:
+    import importlib.metadata as md
+    eps = md.distribution(sys.argv[1]).entry_points
+except Exception as exc:
+    print("NX_LOOKUP_FAILED", exc, file=sys.stderr)
+    sys.exit(3)
+for ep in eps:
+    if getattr(ep, "group", None) == "console_scripts":
+        print(ep.name)
+"""
+
+def declared_console_scripts(generation: Path, dist: str = "conexus") -> frozenset[str]:
+    """The console scripts *generation*'s installed *dist* declares.
+
+    This is THE set of names nexus owns in the shared bin dir: exactly what
+    ``nx_write_shims`` writes, derived the same way (the generation's own
+    ``bin/python`` answering ``importlib.metadata``). It is deliberately NOT
+    "everything in ``<generation>/bin``": a venv's ``bin/`` also holds the
+    interpreter it was built from (``python3.12``), and ``~/.local/bin`` is a
+    shared directory where uv leaves interpreter links of the same name
+    (``uv python install``). Deriving the owned set from the bin listing
+    reported those links as reclaimed shims -- a FATAL doctor row on a healthy
+    box -- and the takeover repair announced it was "rewriting" them (it never
+    did: the shell writer derives its own set, so the message was wrong, not
+    the write) (GH #1487, nexus-50hm9). ``NEVER_SHIM`` alone cannot close
+    that: it names ``python3``, not every versioned interpreter link a machine
+    can carry.
+
+    Raises :class:`InstallLayoutError` when the generation cannot answer --
+    no interpreter, a failing query, a distribution that declares nothing --
+    so a caller says "could not check" rather than guessing an owned set from
+    a listing. Uncertain means say so.
+    """
+    python = generation / "bin" / "python"
+    if not python.is_file():
+        raise InstallLayoutError(
+            f"{generation} has no bin/python to ask which console scripts it declares"
+        )
+    try:
+        proc = subprocess.run(  # noqa: S603 -- the generation's own interpreter, fixed argv
+            [str(python), "-c", _DECLARED_SCRIPTS_QUERY, dist],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise InstallLayoutError(
+            f"could not run {python} to list {dist}'s console scripts: {exc}"
+        ) from exc
+    if proc.returncode != 0:
+        raise InstallLayoutError(
+            f"{python} could not list {dist}'s console scripts "
+            f"(exit {proc.returncode}): {proc.stderr.strip() or 'no diagnostic'}"
+        )
+    names: set[str] = set()
+    for line in proc.stdout.splitlines():
+        name = line.strip()
+        if not name:
+            continue
+        if not _COMPONENT_RE.match(name):
+            # Said out loud, not dropped on the floor: a declared script the
+            # shim template would refuse is a fact about the install.
+            _log.warning(
+                "declared_console_script_refused",
+                generation=str(generation), dist=dist, name=name,
+            )
+            continue
+        names.add(name)
+    if not names:
+        raise InstallLayoutError(
+            f"{dist} in {generation.name} declares no console scripts -- a "
+            "distribution-name mismatch, not an empty product; refusing to derive "
+            "the owned shim set from a directory listing instead"
+        )
+    return frozenset(names) - NEVER_SHIM
+
+
+def owned_shim_names(generation: Path, dist: str = "conexus") -> frozenset[str]:
+    """The shim names ``nx_write_shims`` WRITES for *generation* -- the exact
+    set nexus owns in the shared bin dir, derived the way the writer derives
+    it: the distribution's declared console scripts plus
+    :data:`DEPENDENCY_SCRIPTS`, minus :data:`NEVER_SHIM`, restricted to names
+    that actually exist in the generation's ``bin/`` (a declared-but-not-built
+    entry point -- an optional extra -- gets no shim, so a foreign symlink at
+    that name in the bin dir is not ours either). Propagates
+    :class:`InstallLayoutError` from :func:`declared_console_scripts`.
+    """
+    candidates = (declared_console_scripts(generation, dist) | DEPENDENCY_SCRIPTS) - NEVER_SHIM
+    return frozenset(name for name in candidates if (generation / "bin" / name).exists())
+
+
+def reclaimed_shims(generation: Path, bin_dir: Path) -> list[str]:
+    """The owned shim names at *bin_dir* that are symlinks -- uv's, not ours.
+
+    nexus writes every shim as a regular file, so a symlink at an OWNED name
+    is a reclaim by construction (a stray ``uv tool install --force conexus``).
+    A symlink at any other name -- a uv-managed ``python3.12``, pyenv's
+    ``python``, a separately installed ``mineru`` on a generation that never
+    shipped one -- is not ours to judge and is never listed. Propagates
+    :class:`InstallLayoutError` from :func:`owned_shim_names`.
+    """
+    return [
+        name for name in sorted(owned_shim_names(generation))
+        if (bin_dir / name).is_symlink()
+    ]
+
+
 #: The pointer every shim resolves. Always an ABSOLUTE symlink, so that plain
 #: ``readlink`` suffices -- ``readlink -f`` is macOS >= 12.3 only.
 CURRENT_LINK_NAME = "current"
@@ -144,6 +264,9 @@ _DEFAULT_BIN_SUBPATH = (".local", "bin")
 #: from sysexits.h -- a specific status, so an operator seeing it in a log can
 #: tell "no current generation" from a command that merely failed.
 SHIM_NO_CURRENT_EXIT = 70
+
+
+_log = structlog.get_logger(__name__)
 
 
 class InstallLayoutError(NexusError):

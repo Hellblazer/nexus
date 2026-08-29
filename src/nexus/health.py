@@ -263,9 +263,12 @@ def _check_generation_layout() -> list[HealthResult]:
       it. Reporting wreckage as breakage trains the operator to ignore this row,
       which is how a real fault gets missed.
 
-    The shim names are DERIVED from ``<current>/bin`` rather than hardcoded. A
-    hardcoded inventory is the failure class this whole arc removes, and doctor
-    is the last place to reintroduce one.
+    The shim names are what the installed distribution DECLARES (plus the
+    dependency scripts the writer also shims), asked of the generation's own
+    interpreter -- the installer's rule, not a hardcoded inventory and not a
+    listing of ``<current>/bin`` (GH #1487). A hardcoded inventory is the
+    failure class this whole arc removes, and doctor is the last place to
+    reintroduce one.
     """
     label = "Generation layout"
     try:
@@ -325,20 +328,26 @@ def _check_generation_layout() -> list[HealthResult]:
             fix_suggestions=["scripts/reinstall-tool.sh"],
         )]
 
-    # SUBTRACT THE NAMES NEXUS NEVER OWNS. A venv's bin/ holds python, pip and
-    # activate; nx_write_shims explicitly never shims them. ~/.local/bin is a
-    # SHARED directory — pyenv, asdf and homebrew all leave a `python` symlink
-    # there — so deriving the owned set from <current>/bin without this
-    # subtraction hard-fails a healthy install on a common machine
-    # configuration (RG-C). A row that cries wolf is this check's own docstring
-    # warning inverted: it trains the operator to ignore the row, which is how
-    # the real reclaim gets missed.
-    reclaimed = [
-        entry.name
-        for entry in sorted((current / "bin").iterdir())
-        if entry.name not in install_layout.NEVER_SHIM
-        and (bin_dir / entry.name).is_symlink()
-    ] if (current / "bin").is_dir() else []
+    # THE OWNED SET IS WHAT THE DISTRIBUTION DECLARES, not a listing of
+    # <current>/bin. ~/.local/bin is a SHARED directory: pyenv, asdf and
+    # homebrew leave a `python` symlink there (RG-C), and uv leaves versioned
+    # interpreter links (`python3.12`, from `uv python install`) whose name the
+    # generation venv's own bin/ also carries. Reading the listing reported
+    # those as uv reclaiming a shim and offered `nx self install` as the fix,
+    # which would have rewritten the user's default python3.12 into a nexus
+    # shim (GH #1487, nexus-50hm9). A row that cries wolf is this check's own
+    # docstring warning inverted; a fix that hijacks python3 is worse.
+    try:
+        owned = install_layout.owned_shim_names(current)
+    except install_layout.InstallLayoutError as exc:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"could not ask {current.name} which console scripts it declares "
+                f"— {exc}; the shim-ownership check cannot run"
+            ),
+        )]
+    reclaimed = [name for name in sorted(owned) if (bin_dir / name).is_symlink()]
     if reclaimed:
         return [HealthResult(
             label=label, ok=False, fatal=True,
@@ -361,14 +370,14 @@ def _check_generation_layout() -> list[HealthResult]:
             f"generation(s), shims owned by nexus"
         ),
     )]
-    results.extend(_check_shims_match_template(current, bin_dir, tools))
+    results.extend(_check_shims_match_template(current, bin_dir, tools, owned))
     results.extend(_check_base_interpreters(current, generations))
     results.extend(_check_orphan_uv_install())
     results.extend(_check_generation_holders(current, generations, tools=tools))
     return results
 
 
-def _check_shims_match_template(current, bin_dir, tools) -> list[HealthResult]:
+def _check_shims_match_template(current, bin_dir, tools, owned) -> list[HealthResult]:
     """A shim must match the template, not merely be a regular file.
 
     The not-a-symlink check catches uv reclaiming a name. It does NOT catch a
@@ -379,24 +388,19 @@ def _check_shims_match_template(current, bin_dir, tools) -> list[HealthResult]:
     this compares against the source of truth rather than a restatement of it.
     """
     from nexus import install_layout  # noqa: PLC0415 — deferred import
-
-    if not (current / "bin").is_dir():
-        return []
     mismatched = []
     checked = 0
-    for entry in sorted((current / "bin").iterdir()):
-        if entry.name in install_layout.NEVER_SHIM:
-            continue
-        shim = bin_dir / entry.name
+    for name in sorted(owned):  # the caller asked the generation once; no second spawn
+        shim = bin_dir / name
         if not shim.is_file() or shim.is_symlink():
             continue  # absent or reclaimed — the row above owns those
         try:
-            expected = install_layout.render_shim(entry.name, tools=tools)
+            expected = install_layout.render_shim(name, tools=tools)
         except Exception:  # noqa: BLE001 — a name the template refuses is not ours to judge here
             continue
         checked += 1
         if shim.read_text() != expected:
-            mismatched.append(entry.name)
+            mismatched.append(name)
     if not mismatched:
         # Emit the PASS too. Every other row in this group does, and a check
         # that is silent when healthy cannot be distinguished from one that did

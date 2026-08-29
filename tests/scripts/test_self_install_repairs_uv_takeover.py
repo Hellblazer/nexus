@@ -134,6 +134,28 @@ def test_a_healthy_box_is_left_alone(bed) -> None:
     assert _shims_are_nexus_owned(bin_dir, tools)
 
 
+def test_a_uv_managed_interpreter_link_is_left_alone(bed) -> None:
+    """GH #1487 (nexus-50hm9): `nx upgrade` printed "shims python3.12 in
+    ~/.local/bin were uv symlinks: rewriting them" for a uv-managed
+    interpreter link (`uv python install`) that merely shares a name with the
+    generation venv's own python3.12. The owned set is what the distribution
+    declares, so the link is never a candidate and is never touched."""
+    tools, bin_dir, uv_tools, current, versions = bed
+    (current / "bin" / "python3.12").write_text("#!/bin/sh\n")
+    uv_python = tools.parent / "uv-python" / "cpython-3.12" / "bin" / "python3.12"
+    uv_python.parent.mkdir(parents=True)
+    uv_python.write_text("#!/bin/sh\n")
+    (bin_dir / "python3.12").symlink_to(uv_python)
+
+    lines = repair_uv_takeover()
+
+    assert lines == [], lines
+    assert (bin_dir / "python3.12").is_symlink()
+    assert os.readlink(bin_dir / "python3.12") == str(uv_python)
+    for ep in ENTRY_POINTS:
+        assert not (bin_dir / ep).is_symlink()
+
+
 def test_a_pure_uv_box_is_not_a_takeover(bed) -> None:
     """No generation layout at all: that is nx self install's convergence, not a repair."""
     tools, bin_dir, uv_tools, current, versions = bed

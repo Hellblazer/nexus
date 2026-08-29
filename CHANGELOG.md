@@ -8,6 +8,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`nx doctor` and the uv-takeover repair no longer treat uv's
+  `~/.local/bin/python3.12` interpreter link as a reclaimed nexus shim**
+  (GH #1487, nexus-50hm9). The owned shim set is now what the installed
+  `conexus` distribution DECLARES — the generation's own interpreter is
+  asked, the same query the installer runs — never a listing of
+  `<current>/bin`, whose versioned interpreter shares its name with the
+  link `uv python install` leaves in the shared bin dir. Doctor's
+  "Generation layout" row stays green on such a box; `nx upgrade`'s
+  `[uv-takeover]` precondition and `nx self install` never name it and never
+  offer to rewrite it. A generation that cannot answer the query makes doctor
+  WARN ("could not ask … which console scripts it declares") and leaves the
+  repair's shims untouched with a printed line — never a green over an owned
+  set derived by guessing.
 - **Ghost documents are cleaned up by the production delete paths**
   (nexus-sz89e, verified then fixed). `store_delete` / `nx store delete` /
   `HttpVectorClient.expire` all pass a real collection, and the nexus-c53hy
