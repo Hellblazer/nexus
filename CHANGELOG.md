@@ -15,12 +15,18 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the latest report by `run_timestamp` that gated the live
   `release_version`, requires it green, and writes the tracker with the
   report basename as the `gate` provenance; exit 3 and nothing written on
-  no report / red / schema drift. `nx service record-deploy` gains
-  `--gate-report-dir` / `--gate-report` (the same path; the typed `--gate`
-  becomes the manual fallback and is mutually exclusive with them). Closes
-  both the omission vector (v0.1.17 stale across three deploys) and the
-  premature-write vector (`gate PASSED` typed 17 s before a red report,
-  2026-08-28). conexus stays side-effect-free.
+  no report / red / schema drift. A bare verify with no report directory
+  also exits 3 — the only way to run it without recording is the explicit
+  `--no-record-deploy` opt-out — and the `commit` provenance is resolved
+  from the live version's tag after the probe, never the floor tag.
+  `nx service record-deploy` gains `--gate-report-dir` / `--gate-report`
+  (the same path; the typed `--gate` becomes the manual fallback and is
+  mutually exclusive with them). Closes the premature-write vector by
+  construction (`gate PASSED` typed 17 s before a red report, 2026-08-28)
+  and the omission vector for every verify that runs: it cannot pass
+  while silently skipping the record (v0.1.17 stale across three deploys
+  was a skipped step; a skipped verify is still a skipped verify). conexus
+  stays side-effect-free.
 
 ### Changed
 

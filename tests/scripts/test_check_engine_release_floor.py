@@ -1049,10 +1049,12 @@ def test_v7_6_1_source_ancestry_regression_is_red() -> None:
 
 
 def test_main_runs_ancestry_check_after_a_clean_floor_default_mode() -> None:
+    # --no-record-deploy: this test targets the ancestry arm, not the
+    # nexus-nx3l5 tracker leg, which REFUSES a bare verify with no report dir.
     with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())), \
          patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
          patch.object(gate, "check_source_ancestry", return_value=0) as mock_ancestry:
-        rc = gate.main(["--url", _TEST_URL])
+        rc = gate.main(["--url", _TEST_URL, "--no-record-deploy"])
     assert rc == 0
     mock_ancestry.assert_called_once_with(gate._pinned_engine_tag())
 
@@ -1766,17 +1768,70 @@ def test_post_tag_verify_exits_3_when_the_report_directory_is_missing(
     assert "gitignored" in capsys.readouterr().err
 
 
-def test_bare_verify_without_a_directory_passes_but_says_the_tracker_was_not_recorded(
+def test_bare_verify_without_a_directory_refuses_with_exit_3(
+    _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A verify that passes while silently skipping the record is the omission
+    vector in a new place (substantive-critic on 0f2657c03). Fail loud."""
+    with _clean_post_tag_verify():
+        rc = gate.main(["--url", _TEST_URL])
+
+    assert rc == 3
+    assert _tracker_t2.puts == []
+    err = capsys.readouterr().err
+    assert "TRACKER NOT RECORDED (exit 3)" in err
+    assert "--record-deploy-from-gate-report" in err
+    assert "--no-record-deploy" in err
+
+
+def test_no_record_deploy_is_the_explicit_visible_opt_out(
     _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
 ) -> None:
     with _clean_post_tag_verify():
-        rc = gate.main(["--url", _TEST_URL])
+        rc = gate.main(["--url", _TEST_URL, "--no-record-deploy"])
 
     assert rc == 0
     assert _tracker_t2.puts == []
     err = capsys.readouterr().err
-    assert "tracker NOT recorded" in err
-    assert "--record-deploy-from-gate-report" in err
+    assert "NOTE (--no-record-deploy)" in err
+    assert "NOT recorded" in err
+
+
+def test_no_record_deploy_conflicts_with_the_report_flag(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        gate.main(["--url", _TEST_URL, "--no-record-deploy", "--record-deploy-from-gate-report", str(tmp_path)])
+    assert excinfo.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "mode_args",
+    [["--paired-deploy", "engine-service-v9.9.9"], ["--paired-deploy-auto"], ["--ledger-only"]],
+)
+def test_no_record_deploy_is_refused_in_pre_deploy_modes(mode_args: list[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        gate.main([*mode_args, "--no-record-deploy"])
+    assert excinfo.value.code == 2
+
+
+def test_commit_provenance_names_the_live_versions_tag_not_the_floor(
+    tmp_path: Path, _tracker_t2: type[_TrackerMemory]
+) -> None:
+    """check_floor proves live >= floor, not equality: an above-floor live
+    engine must be attributed to ITS tag's commit, never the floor tag's."""
+    live = ".".join(str(p) for p in _bump(REQUIRED_ENGINE_VERSION))
+    _step6_report(tmp_path, version=live, stamp=_T0)
+    seen: list[str] = []
+
+    def _resolve(tag: str, repo_root=None) -> str:
+        seen.append(tag)
+        return "live-sha" if tag == f"engine-service-v{live}" else "WRONG-sha"
+
+    with _clean_post_tag_verify(live), patch.object(gate, "_tag_commit", side_effect=_resolve):
+        rc = gate.main(["--url", _TEST_URL, "--record-deploy-from-gate-report", str(tmp_path)])
+
+    assert rc == 0
+    assert seen == [f"engine-service-v{live}"]
+    assert _tracker_t2.puts[0]["content"].startswith(f"engine-service-v{live} @ live-sha; recorded ")
 
 
 def test_env_directory_drives_the_bare_verify(

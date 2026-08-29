@@ -323,6 +323,25 @@ def test_operator_named_tag_must_match_the_live_read(
     assert _fake_t2.puts == []
 
 
+def test_commit_resolver_is_called_with_the_live_version_after_the_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _fake_t2: type[_FakeMemory]
+) -> None:
+    _patch_live(monkeypatch, "0.1.88")
+    _write(tmp_path, _doc())
+    seen: list[str] = []
+
+    def _resolve(live: str) -> str:
+        seen.append(live)
+        return "sha-for-" + live
+
+    result = dt.record_deploy_from_gate_report(
+        report_dir=tmp_path, url="https://api.conexus-nexus.com", commit="ignored", commit_resolver=_resolve,
+    )
+
+    assert seen == ["0.1.88"]
+    assert result.content.startswith("engine-service-v0.1.88 @ sha-for-0.1.88; recorded ")
+
+
 def test_exactly_one_report_source_is_required(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         dt.record_deploy_from_gate_report(url="https://api.conexus-nexus.com")

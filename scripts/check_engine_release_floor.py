@@ -156,11 +156,20 @@ premature write of 2026-08-28 (``gate PASSED`` recorded 17 s before a RED
 report) and the standing omission vector (v0.1.17 stale across three deploys)
 both needed: the write cannot precede the verdict and cannot be skipped by a
 verify that ran. ``$NX_GATE_REPORT_DIR`` supplies ``DIR`` when the flag is
-absent (set it once on the operator's box); a bare verify with neither prints
-a loud "tracker NOT recorded" note so the omission is visible, not silent. The
+absent (set it once on the operator's box). A bare verify with NEITHER
+REFUSES -- exit ``3``, tracker not recorded, the flag named -- because a
+verify that passes while silently skipping the record is the omission vector
+in a new place (substantive-critic on 0f2657c03). The only way to run the bare
+verify without recording is the explicit ``--no-record-deploy`` opt-out, for a
+box that does not hold the reports; it prints the same note and exits ``0``,
+and it is visible in the transcript the way a skipped step never was. The
 pre-deploy modes (``--paired-deploy``, ``--paired-deploy-auto``,
-``--ledger-only``) never record: there is no post-deploy report to read yet,
-and ``release.yml``'s auto invocation runs where the reports do not exist.
+``--ledger-only``) never record and refuse both flags: there is no post-deploy
+report to read yet, and ``release.yml``'s auto invocation runs where the
+reports do not exist. The tracker's ``commit`` provenance is resolved AFTER the
+live probe from the LIVE version's tag (``git rev-list -n1
+engine-service-v<live>``), never from the floor tag -- the floor is only a lower
+bound on what is running.
 
 Usage::
 
@@ -169,11 +178,13 @@ Usage::
     uv run python scripts/check_engine_release_floor.py --paired-deploy engine-service-v0.1.63
     uv run python scripts/check_engine_release_floor.py --paired-deploy-auto
     uv run python scripts/check_engine_release_floor.py --record-deploy-from-gate-report ../conexus/deploy
+    uv run python scripts/check_engine_release_floor.py --no-record-deploy   # explicit opt-out, box without the reports
 
 Exit codes: ``0`` current, ``1`` stale / incompatible, ``2`` unreachable
 (network/DNS/TLS/timeout -- "could not verify" is never treated as "must be
-fine"), ``3`` deploy verified but the tracker was NOT recorded (no green
-STEP-6 report for the live version, or the report schema moved).
+fine"), ``3`` deploy verified but the tracker was NOT recorded (no report
+directory given and no ``--no-record-deploy`` opt-out; no green STEP-6 report
+for the live version; or the report schema moved).
 """
 from __future__ import annotations
 
@@ -1094,11 +1105,20 @@ def check_floor(
 
 
 _TRACKER_NOT_RECORDED_NOTE = (
-    "NOTE: deployed-engine-version tracker NOT recorded by this verify. Pass "
+    "deployed-engine-version tracker NOT recorded by this verify. Pass "
     "--record-deploy-from-gate-report <conexus checkout>/deploy (or set "
     f"{deploy_tracker.GATE_REPORT_DIR_ENV}) so the post-tag VERIFY writes the tracker "
-    "from conexus's STEP-6 report (nexus-nx3l5). The hand-typed "
-    "`nx service record-deploy --gate PASSED` is the fallback, not the path."
+    "from conexus's STEP-6 report (nexus-nx3l5)."
+)
+_TRACKER_REFUSAL = (
+    f"TRACKER NOT RECORDED (exit 3): {_TRACKER_NOT_RECORDED_NOTE} A verify that "
+    "passes while silently skipping the record is the omission vector in a new "
+    "place; the explicit opt-out for a box that does not hold the reports is "
+    "--no-record-deploy."
+)
+_TRACKER_OPT_OUT_NOTE = (
+    f"NOTE (--no-record-deploy): {_TRACKER_NOT_RECORDED_NOTE} Record it from a box "
+    "that holds the reports, or with `nx service record-deploy --gate-report-dir`."
 )
 
 
@@ -1124,18 +1144,21 @@ def _tag_commit(tag: str, repo_root: pathlib.Path | None = None) -> str:
 
 
 def record_deploy_from_gate_report_leg(
-    report_dir: pathlib.Path, *, url: str | None, tag: str, repo_root: pathlib.Path | None = None
+    report_dir: pathlib.Path, *, url: str | None, repo_root: pathlib.Path | None = None
 ) -> int:
     """The post-tag tracker write (nexus-nx3l5). Returns ``0`` or ``3``.
 
     Runs ONLY after the floor and ancestry checks passed. Re-reads the live
     ``/version`` through the same path ``nx service record-deploy`` uses, so
-    the tracker keeps exactly one writer and one live-assert.
+    the tracker keeps exactly one writer and one live-assert. The commit
+    provenance is resolved from the LIVE version's tag after that probe --
+    ``check_floor`` only proves ``live >= floor``, so the floor tag may not be
+    what is running.
     """
-    commit = _tag_commit(tag, repo_root)
     try:
         result = deploy_tracker.record_deploy_from_gate_report(
-            report_dir=report_dir, url=url, commit=commit,
+            report_dir=report_dir, url=url,
+            commit_resolver=lambda live: _tag_commit(f"engine-service-v{live}", repo_root),
         )
     except deploy_tracker.DeployTrackerError as exc:
         print(f"TRACKER NOT RECORDED (exit 3): {exc}", file=sys.stderr)
@@ -1245,6 +1268,17 @@ def main(argv: list[str] | None = None) -> int:
         "set. Mutually exclusive with --paired-deploy, --paired-deploy-auto, and "
         "--ledger-only (pre-deploy modes have no report to read).",
     )
+    parser.add_argument(
+        "--no-record-deploy",
+        action="store_true",
+        help="Explicit opt-out (nexus-nx3l5): run the bare post-tag VERIFY on a box "
+        "that does not hold conexus's STEP-6 reports, without recording the "
+        "tracker. Prints a note and exits 0. Without this, a bare verify that "
+        "has no report directory (flag or $NX_GATE_REPORT_DIR) exits 3 -- a "
+        "passing verify that silently skipped the record is the omission vector "
+        "this leg exists to close. Mutually exclusive with "
+        "--record-deploy-from-gate-report and with the pre-deploy modes.",
+    )
     args = parser.parse_args(argv)
     if args.paired_deploy is not None and args.paired_deploy_auto:
         parser.error("--paired-deploy and --paired-deploy-auto are mutually exclusive")
@@ -1253,6 +1287,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             "--record-deploy-from-gate-report is the post-tag VERIFY's flag; it is "
             "mutually exclusive with --paired-deploy, --paired-deploy-auto, and --ledger-only"
+        )
+    if args.no_record_deploy and args.record_deploy_from_gate_report is not None:
+        parser.error("--no-record-deploy and --record-deploy-from-gate-report are mutually exclusive")
+    if args.no_record_deploy and non_bare:
+        parser.error(
+            "--no-record-deploy applies to the bare post-tag VERIFY only; the pre-deploy "
+            "modes never record"
         )
     # The env default applies to the bare verify only -- a globally-set
     # NX_GATE_REPORT_DIR must not turn a pre-deploy mode into a recorder.
@@ -1289,11 +1330,12 @@ def main(argv: list[str] | None = None) -> int:
         # report to record from yet. Byte-for-byte the pre-nx3l5 outcome.
         return 0
     if report_dir is None:
-        print(_TRACKER_NOT_RECORDED_NOTE, file=sys.stderr)
-        return 0
-    return record_deploy_from_gate_report_leg(
-        pathlib.Path(report_dir), url=args.url, tag=ancestry_tag,
-    )
+        if args.no_record_deploy:
+            print(_TRACKER_OPT_OUT_NOTE, file=sys.stderr)
+            return 0
+        print(_TRACKER_REFUSAL, file=sys.stderr)
+        return 3
+    return record_deploy_from_gate_report_leg(pathlib.Path(report_dir), url=args.url)
 
 
 if __name__ == "__main__":

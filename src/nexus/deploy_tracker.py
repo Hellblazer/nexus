@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -341,6 +342,7 @@ def record_deploy_from_gate_report(
     url: str | None = None,
     commit: str = "",
     expected_version: str | None = None,
+    commit_resolver: Callable[[str], str] | None = None,
 ) -> TrackerWrite:
     """Probe the live engine, find its authoritative STEP-6 report, write the tracker.
 
@@ -348,6 +350,10 @@ def record_deploy_from_gate_report(
     report, which must have gated the live version) is given. *expected_version*
     (``X.Y.Z``), when set, is asserted against the live read first — the
     operator-named-tag guard ``nx service record-deploy`` has always had.
+    *commit_resolver*, when given, is called with the LIVE version after the
+    probe and its result replaces *commit*: provenance must name the commit of
+    what is actually running, which the caller cannot know before the probe
+    (the floor tag is only a lower bound on the live version).
 
     Raises a :class:`DeployTrackerError` subclass (named reason, nothing
     written) or lets the probe's ``ManagedServiceError`` propagate.
@@ -362,6 +368,8 @@ def record_deploy_from_gate_report(
     base = url or resolve_managed_endpoint(require_token=False)[0]
     caps = probe_managed_service(base_url=base)
     live = caps.release_version
+    if commit_resolver is not None:
+        commit = commit_resolver(live)
     if expected_version is not None and live != expected_version:
         raise LiveVersionMismatch(
             f"Refusing to record {expected_version!r}: the service at {caps.base_url} is running "

@@ -460,7 +460,10 @@ you to re-run WITHOUT `--paired-deploy` once the deploy lands) is where the
 2026-08-28). After the cloud engine verifies current and source ancestry passes,
 it reads conexus's STEP-6 gate reports from that directory (the conexus
 checkout's `deploy/`; gitignored there, so operator-local — set
-`NX_GATE_REPORT_DIR` once on the box and the flag becomes optional), selects the
+`NX_GATE_REPORT_DIR` once on the box and the flag becomes optional; a bare verify
+with NEITHER refuses, exit 3, and the only way to run it without recording is the
+explicit, transcript-visible `--no-record-deploy` opt-out for a box that does not
+hold the reports), selects the
 LATEST report (by `run_timestamp`) that gated the live `release_version`, requires
 it green, and writes the tracker with the report's basename as the `gate`
 provenance. Nothing is written — exit `3`, named reason — when no report gated the
@@ -472,8 +475,11 @@ Why this shape: `--gate PASSED` used to be typed. On 2026-08-28 it was typed at
 later (T2 `release-7.22.0-ship-2026-08-28`). Before that the step was simply
 skipped (v0.1.17 stale across three deploys; nexus-6igii). The report IS the
 verdict, so the write cannot precede it, and it rides the verify you already run,
-so it cannot be skipped by a verify that ran. Step 7's ordering still holds: the
-verify finds no green report until conexus's STEP-6 has actually reported.
+so it cannot be skipped by a verify that ran, and cannot be skipped SILENTLY at
+all: the opt-out is a flag you type. Step 7's ordering still holds: the verify
+finds no green report until conexus's STEP-6 has actually reported. The `commit`
+provenance is resolved from the LIVE version's tag after the probe, never from
+the floor tag (the floor is only a lower bound on what is running).
 
 Manual fallback only (a verify you cannot run from the box that holds the reports):
 
