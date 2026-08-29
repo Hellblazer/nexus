@@ -17,7 +17,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   report basename as the `gate` provenance; exit 3 and nothing written on
   no report / red / schema drift. A bare verify with no report directory
   also exits 3 — the only way to run it without recording is the explicit
-  `--no-record-deploy` opt-out — and the `commit` provenance is resolved
+  `--no-record-deploy REASON` opt-out, reason printed — and the `commit`
+  provenance is resolved
   from the live version's tag after the probe, never the floor tag.
   `nx service record-deploy` gains `--gate-report-dir` / `--gate-report`
   (the same path; the typed `--gate` becomes the manual fallback and is

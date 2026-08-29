@@ -462,8 +462,8 @@ it reads conexus's STEP-6 gate reports from that directory (the conexus
 checkout's `deploy/`; gitignored there, so operator-local — set
 `NX_GATE_REPORT_DIR` once on the box and the flag becomes optional; a bare verify
 with NEITHER refuses, exit 3, and the only way to run it without recording is the
-explicit, transcript-visible `--no-record-deploy` opt-out for a box that does not
-hold the reports), selects the
+explicit, transcript-visible `--no-record-deploy "<reason>"` opt-out for a box that
+does not hold the reports — the reason is required and printed), selects the
 LATEST report (by `run_timestamp`) that gated the live `release_version`, requires
 it green, and writes the tracker with the report's basename as the `gate`
 provenance. Nothing is written — exit `3`, named reason — when no report gated the

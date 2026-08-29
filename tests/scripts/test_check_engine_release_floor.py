@@ -1054,7 +1054,7 @@ def test_main_runs_ancestry_check_after_a_clean_floor_default_mode() -> None:
     with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())), \
          patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION), \
          patch.object(gate, "check_source_ancestry", return_value=0) as mock_ancestry:
-        rc = gate.main(["--url", _TEST_URL, "--no-record-deploy"])
+        rc = gate.main(["--url", _TEST_URL, "--no-record-deploy", "ancestry-arm test"])
     assert rc == 0
     mock_ancestry.assert_called_once_with(gate._pinned_engine_tag())
 
@@ -1788,18 +1788,25 @@ def test_no_record_deploy_is_the_explicit_visible_opt_out(
     _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
 ) -> None:
     with _clean_post_tag_verify():
-        rc = gate.main(["--url", _TEST_URL, "--no-record-deploy"])
+        rc = gate.main(["--url", _TEST_URL, "--no-record-deploy", "laptop, no conexus checkout"])
 
     assert rc == 0
     assert _tracker_t2.puts == []
     err = capsys.readouterr().err
     assert "NOTE (--no-record-deploy)" in err
     assert "NOT recorded" in err
+    assert "Reason given: laptop, no conexus checkout" in err
+
+
+def test_no_record_deploy_requires_a_reason() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        gate.main(["--url", _TEST_URL, "--no-record-deploy", "   "])
+    assert excinfo.value.code == 2
 
 
 def test_no_record_deploy_conflicts_with_the_report_flag(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as excinfo:
-        gate.main(["--url", _TEST_URL, "--no-record-deploy", "--record-deploy-from-gate-report", str(tmp_path)])
+        gate.main(["--url", _TEST_URL, "--no-record-deploy", "why", "--record-deploy-from-gate-report", str(tmp_path)])
     assert excinfo.value.code == 2
 
 
@@ -1809,7 +1816,7 @@ def test_no_record_deploy_conflicts_with_the_report_flag(tmp_path: Path) -> None
 )
 def test_no_record_deploy_is_refused_in_pre_deploy_modes(mode_args: list[str]) -> None:
     with pytest.raises(SystemExit) as excinfo:
-        gate.main([*mode_args, "--no-record-deploy"])
+        gate.main([*mode_args, "--no-record-deploy", "why"])
     assert excinfo.value.code == 2
 
 

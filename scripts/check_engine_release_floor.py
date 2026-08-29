@@ -160,9 +160,10 @@ absent (set it once on the operator's box). A bare verify with NEITHER
 REFUSES -- exit ``3``, tracker not recorded, the flag named -- because a
 verify that passes while silently skipping the record is the omission vector
 in a new place (substantive-critic on 0f2657c03). The only way to run the bare
-verify without recording is the explicit ``--no-record-deploy`` opt-out, for a
-box that does not hold the reports; it prints the same note and exits ``0``,
-and it is visible in the transcript the way a skipped step never was. The
+verify without recording is the explicit ``--no-record-deploy REASON`` opt-out,
+for a box that does not hold the reports; it prints the note with the reason
+and exits ``0``, and it is visible in the transcript the way a skipped step
+never was (a bare boolean would invite habit; the reason is required). The
 pre-deploy modes (``--paired-deploy``, ``--paired-deploy-auto``,
 ``--ledger-only``) never record and refuse both flags: there is no post-deploy
 report to read yet, and ``release.yml``'s auto invocation runs where the
@@ -178,7 +179,7 @@ Usage::
     uv run python scripts/check_engine_release_floor.py --paired-deploy engine-service-v0.1.63
     uv run python scripts/check_engine_release_floor.py --paired-deploy-auto
     uv run python scripts/check_engine_release_floor.py --record-deploy-from-gate-report ../conexus/deploy
-    uv run python scripts/check_engine_release_floor.py --no-record-deploy   # explicit opt-out, box without the reports
+    uv run python scripts/check_engine_release_floor.py --no-record-deploy "laptop, no conexus checkout"   # explicit opt-out
 
 Exit codes: ``0`` current, ``1`` stale / incompatible, ``2`` unreachable
 (network/DNS/TLS/timeout -- "could not verify" is never treated as "must be
@@ -1270,14 +1271,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--no-record-deploy",
-        action="store_true",
+        default=None,
+        metavar="REASON",
         help="Explicit opt-out (nexus-nx3l5): run the bare post-tag VERIFY on a box "
         "that does not hold conexus's STEP-6 reports, without recording the "
-        "tracker. Prints a note and exits 0. Without this, a bare verify that "
-        "has no report directory (flag or $NX_GATE_REPORT_DIR) exits 3 -- a "
-        "passing verify that silently skipped the record is the omission vector "
-        "this leg exists to close. Mutually exclusive with "
-        "--record-deploy-from-gate-report and with the pre-deploy modes.",
+        "tracker. REASON is required and is printed with the note, so the "
+        "transcript says why (the way --ack-client-lag names a bead). Exits 0. "
+        "Without this, a bare verify that has no report directory (flag or "
+        "$NX_GATE_REPORT_DIR) exits 3 -- a passing verify that silently skipped "
+        "the record is the omission vector this leg exists to close. Mutually "
+        "exclusive with --record-deploy-from-gate-report and with the pre-deploy "
+        "modes.",
     )
     args = parser.parse_args(argv)
     if args.paired_deploy is not None and args.paired_deploy_auto:
@@ -1288,9 +1292,11 @@ def main(argv: list[str] | None = None) -> int:
             "--record-deploy-from-gate-report is the post-tag VERIFY's flag; it is "
             "mutually exclusive with --paired-deploy, --paired-deploy-auto, and --ledger-only"
         )
-    if args.no_record_deploy and args.record_deploy_from_gate_report is not None:
+    if args.no_record_deploy is not None and not args.no_record_deploy.strip():
+        parser.error("--no-record-deploy needs a REASON (why this box is not recording the tracker)")
+    if args.no_record_deploy is not None and args.record_deploy_from_gate_report is not None:
         parser.error("--no-record-deploy and --record-deploy-from-gate-report are mutually exclusive")
-    if args.no_record_deploy and non_bare:
+    if args.no_record_deploy is not None and non_bare:
         parser.error(
             "--no-record-deploy applies to the bare post-tag VERIFY only; the pre-deploy "
             "modes never record"
@@ -1330,8 +1336,8 @@ def main(argv: list[str] | None = None) -> int:
         # report to record from yet. Byte-for-byte the pre-nx3l5 outcome.
         return 0
     if report_dir is None:
-        if args.no_record_deploy:
-            print(_TRACKER_OPT_OUT_NOTE, file=sys.stderr)
+        if args.no_record_deploy is not None:
+            print(f"{_TRACKER_OPT_OUT_NOTE} Reason given: {args.no_record_deploy.strip()}", file=sys.stderr)
             return 0
         print(_TRACKER_REFUSAL, file=sys.stderr)
         return 3
