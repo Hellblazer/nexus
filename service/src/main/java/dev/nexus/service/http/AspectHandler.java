@@ -106,6 +106,7 @@ public final class AspectHandler implements HttpHandler {
                 case "/get_by_doc_id"                   -> handleGetByDocId(exchange, tenant, method);
                 case "/list_by_collection"              -> handleListByCollection(exchange, tenant, method);
                 case "/list_by_extractor_version"       -> handleListByExtractorVersion(exchange, tenant, method);
+                case "/list_without_catalog_document"   -> handleListWithoutCatalogDocument(exchange, tenant, method);
                 case "/delete"                          -> handleDeleteAspect(exchange, tenant, method);
                 case "/rename_collection"               -> handleRenameCollection(exchange, tenant, method);
                 case "/salient_sentences/set"           -> handleSetSalient(exchange, tenant, method);
@@ -266,6 +267,23 @@ public final class AspectHandler implements HttpHandler {
         int limit  = parseIntOrDefault(q.get("limit"),  0);
         int offset = parseIntOrDefault(q.get("offset"), 0);
         List<Map<String, Object>> rows = repo.listByCollection(tenant, collection, limit, offset);
+        HttpUtil.send(ex, 200, MAPPER.writeValueAsString(rows));
+    }
+
+    /**
+     * GET /v1/aspects/list_without_catalog_document?limit=&amp;offset= (nexus-mlu3k,
+     * read-only): aspect rows no live catalog document claims, each with
+     * {@code tombstoned_match}. {@code limit} is clamped to
+     * {@link AspectRepository#MAX_PAGE_ROWS} (absent or 0 = one full page, never
+     * everything); page with {@code offset}. See
+     * {@link AspectRepository#listWithoutCatalogDocument}.
+     */
+    private void handleListWithoutCatalogDocument(HttpExchange ex, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"GET required\"}"); return; }
+        Map<String, String> q = parseQuery(ex.getRequestURI());
+        int limit  = parseIntOrDefault(q.get("limit"),  0);
+        int offset = parseIntOrDefault(q.get("offset"), 0);
+        List<Map<String, Object>> rows = repo.listWithoutCatalogDocument(tenant, limit, offset);
         HttpUtil.send(ex, 200, MAPPER.writeValueAsString(rows));
     }
 

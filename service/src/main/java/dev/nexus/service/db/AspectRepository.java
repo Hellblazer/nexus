@@ -348,6 +348,84 @@ public final class AspectRepository {
     }
 
     /**
+     * Page ceiling for {@link #listWithoutCatalogDocument}: one call returns at
+     * most this many rows, whatever {@code limit} says (0 or negative means "a
+     * full page", never "everything"). The live population this route was
+     * built to explain was 846 rows on 2026-08-28 — already ~3x this ceiling —
+     * so an unclamped default would have issued one unbounded query on its very
+     * first real run. Same convention as {@code TelemetryHandler}'s
+     * {@code MAX_QUERY_RUNS_LIMIT}: clamp, never 400; a caller that wants more
+     * pages by {@code offset}.
+     */
+    public static final int MAX_PAGE_ROWS = 300;
+
+    /**
+     * Aspect rows that NO live catalog document claims (nexus-mlu3k, read-only).
+     *
+     * <p>Uses aspects-004's attribution predicate verbatim, negated: a row is
+     * listed when {@code doc_id IS NULL} and no same-tenant, non-alias,
+     * non-tombstoned {@code catalog_documents} row has a byte-equal
+     * {@code source_uri}. Each row carries {@code tombstoned_match}: whether a
+     * document that would otherwise have matched (same tenant, same
+     * {@code source_uri}, not an alias) exists but is TOMBSTONED — so a caller
+     * can tell "never registered" from "registered, then deleted" without a
+     * second query. A tombstoned ALIAS is deliberately not a match: the flag
+     * negates exactly one clause of the live predicate ({@code deleted_at}),
+     * nothing else. Ordered by {@code source_uri} then {@code collection} for
+     * stable paging; each call returns at most {@link #MAX_PAGE_ROWS} rows.
+     * This is the census the live cluster needed a nexus_diag session for; the
+     * client verb ({@code nx enrich aspects-without-catalog}) pages through and
+     * buckets what comes back.
+     */
+    public List<Map<String, Object>> listWithoutCatalogDocument(String tenant, int limit, int offset) {
+        int page = limit <= 0 ? MAX_PAGE_ROWS : Math.min(limit, MAX_PAGE_ROWS);
+        int skip = Math.max(offset, 0);
+        return tenantScope.withTenant(tenant, ctx -> {
+            var live = ctx.selectOne().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(DOCUMENT_ASPECTS.TENANT_ID))
+                .and(CATALOG_DOCUMENTS.SOURCE_URI.eq(DOCUMENT_ASPECTS.SOURCE_URI))
+                .and(CATALOG_DOCUMENTS.SOURCE_URI.ne(""))
+                .and(CATALOG_DOCUMENTS.ALIAS_OF.eq(""))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull());
+            var tombstoned = exists(ctx.selectOne().from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(DOCUMENT_ASPECTS.TENANT_ID))
+                .and(CATALOG_DOCUMENTS.SOURCE_URI.eq(DOCUMENT_ASPECTS.SOURCE_URI))
+                .and(CATALOG_DOCUMENTS.SOURCE_URI.ne(""))
+                .and(CATALOG_DOCUMENTS.ALIAS_OF.eq(""))
+                .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()));
+            var q = ctx.select(
+                    DOCUMENT_ASPECTS.COLLECTION,
+                    DOCUMENT_ASPECTS.SOURCE_PATH,
+                    DOCUMENT_ASPECTS.SOURCE_URI,
+                    DOCUMENT_ASPECTS.EXTRACTED_AT,
+                    DOCUMENT_ASPECTS.MODEL_VERSION,
+                    DOCUMENT_ASPECTS.EXTRACTOR_NAME,
+                    DOCUMENT_ASPECTS.CONFIDENCE,
+                    tombstoned.as("tombstoned_match"))
+                .from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.DOC_ID.isNull())
+                .and(notExists(live))
+                .orderBy(DOCUMENT_ASPECTS.SOURCE_URI.asc(), DOCUMENT_ASPECTS.COLLECTION.asc());
+            var rows = q.limit(page).offset(skip).fetch();
+            List<Map<String, Object>> out = new ArrayList<>();
+            for (var r : rows) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("collection",       r.get(DOCUMENT_ASPECTS.COLLECTION));
+                m.put("source_path",      r.get(DOCUMENT_ASPECTS.SOURCE_PATH));
+                m.put("source_uri",       r.get(DOCUMENT_ASPECTS.SOURCE_URI));
+                var at = r.get(DOCUMENT_ASPECTS.EXTRACTED_AT);
+                m.put("extracted_at",     at == null ? null : at.toString());
+                m.put("model_version",    r.get(DOCUMENT_ASPECTS.MODEL_VERSION));
+                m.put("extractor_name",   r.get(DOCUMENT_ASPECTS.EXTRACTOR_NAME));
+                m.put("confidence",       r.get(DOCUMENT_ASPECTS.CONFIDENCE));
+                m.put("tombstoned_match", Boolean.TRUE.equals(r.get("tombstoned_match", Boolean.class)));
+                out.add(m);
+            }
+            return out;
+        });
+    }
+
+    /**
      * List records by extractor/version for re-extraction triage.
      */
     public List<Map<String, Object>> listByExtractorVersion(String tenant, String extractorName, String maxVersion) {

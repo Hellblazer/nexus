@@ -2152,6 +2152,167 @@ def aspects_show_cmd(tumbler_or_title: str, as_json: bool, field: str) -> None:
     _print_aspect_record(record, field=field)
 
 
+@enrich.command(name="aspects-without-catalog")
+@click.option(
+    "--limit", default=0, show_default=True,
+    help="Maximum rows to fetch from the engine (0 = all; fetched in pages of at most 300).",
+)
+@click.option(
+    "--match-basenames", is_flag=True,
+    help=(
+        "For file:// rows, also report whether a LIVE catalog document exists "
+        "under the same basename at a different URI (one full catalog scan)."
+    ),
+)
+@click.option(
+    "--json", "as_json", is_flag=True,
+    help="Emit the rows and buckets as JSON instead of the human report.",
+)
+def aspects_without_catalog_cmd(limit: int, match_basenames: bool, as_json: bool) -> None:
+    """Census of aspect rows that no live catalog document claims (nexus-mlu3k).
+
+    The engine applies aspects-004's attribution predicate, negated, and
+    returns every ``document_aspects`` row with ``doc_id IS NULL`` whose
+    ``source_uri`` matches no live, non-alias catalog document on this
+    tenant. This verb buckets what comes back so the number is explained
+    rather than eyeballed as backfill failure: by URI scheme (``file``,
+    ``chroma``, no scheme, other), by whether a TOMBSTONED document matches
+    (registered then deleted, vs never registered), by extraction month and
+    extractor/model (era), and — for ``file://`` rows — by whether the path
+    still exists on this box. ``--match-basenames`` adds one full catalog
+    scan to say whether the same basename IS registered under another URI
+    (the URI-normalisation-drift signature).
+
+    Read-only. The engine serves at most 300 rows per call; the verb pages
+    through. Exit 2 when the engine has no such route (older engine) — an
+    unverifiable census is never reported as empty.
+    """
+    import os  # noqa: PLC0415 — command-local
+    from collections import Counter  # noqa: PLC0415 — command-local
+    from urllib.parse import urlparse  # noqa: PLC0415 — command-local
+
+    import httpx  # noqa: PLC0415 — command-local
+
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
+
+    try:
+        with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access (RDR-128 P3)
+            rows = list(db.document_aspects.iter_without_catalog_document(
+                max_rows=limit or None,
+            ))
+    except httpx.HTTPStatusError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            click.echo(
+                "✗ census cannot run: the deployed engine has no "
+                "/v1/aspects/list_without_catalog_document route (nexus-mlu3k) — "
+                "deploy an engine carrying it. Unverifiable is not empty.",
+                err=True,
+            )
+            raise click.exceptions.Exit(2)
+        raise click.ClickException(f"aspects census failed: {exc}") from exc
+    except httpx.TransportError as exc:
+        raise click.ClickException(
+            f"aspects census failed: engine unreachable ({exc}). "
+            "Start it (nx daemon service start) or check NX_SERVICE_URL; "
+            "unverifiable is not empty."
+        ) from exc
+
+    def _scheme(uri: str) -> str:
+        if "://" not in (uri or ""):
+            return "none"
+        sch = urlparse(uri).scheme.lower()
+        return sch if sch in ("file", "chroma") else "other"
+
+    def _month(stamp: object) -> str:
+        text = str(stamp or "")
+        return text[:7] if len(text) >= 7 else "unknown"
+
+    basenames: dict[str, list[str]] = {}
+    if match_basenames:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            raise click.ClickException("Catalog not initialized. Run 'nx catalog setup' first.")
+        for doc in cat.all_documents():
+            uri = getattr(doc, "source_uri", "") or ""
+            if uri:
+                basenames.setdefault(os.path.basename(uri.rstrip("/")), []).append(uri)
+
+    enriched: list[dict[str, Any]] = []
+    for r in rows:
+        uri = str(r.get("source_uri") or "")
+        sch = _scheme(uri)
+        e = dict(r)
+        e["scheme"] = sch
+        e["era"] = _month(r.get("extracted_at"))
+        if sch == "file":
+            path = urlparse(uri).path
+            e["exists_on_disk"] = bool(path) and os.path.exists(path)
+            if match_basenames:
+                e["basename_registered_at"] = [
+                    u for u in basenames.get(os.path.basename(path), []) if u != uri
+                ]
+        enriched.append(e)
+
+    by_scheme = Counter(e["scheme"] for e in enriched)
+    tombstoned = sum(1 for e in enriched if e.get("tombstoned_match"))
+    by_era = Counter(e["era"] for e in enriched)
+    by_extractor = Counter(
+        f"{e.get('extractor_name') or '?'}@{e.get('model_version') or '?'}" for e in enriched
+    )
+    file_rows = [e for e in enriched if e["scheme"] == "file"]
+    file_missing = sum(1 for e in file_rows if not e.get("exists_on_disk"))
+    file_renamed = sum(1 for e in file_rows if e.get("basename_registered_at")) if match_basenames else None
+
+    report = {
+        "total": len(enriched),
+        "by_scheme": dict(by_scheme),
+        "tombstoned_match": tombstoned,
+        "by_era": dict(sorted(by_era.items())),
+        "by_extractor": dict(by_extractor.most_common()),
+        "file_rows": len(file_rows),
+        "file_rows_missing_on_disk": file_missing,
+        "file_rows_basename_registered_elsewhere": file_renamed,
+        "rows": enriched,
+    }
+    if as_json:
+        click.echo(json.dumps(report, indent=2, default=str))
+        return
+
+    click.echo(
+        f"Aspect rows with no live catalog document: {report['total']} "
+        f"(tombstoned match: {tombstoned})"
+    )
+    click.echo("  by scheme: " + ", ".join(f"{k}={v}" for k, v in sorted(by_scheme.items())))
+    click.echo("  by era:    " + ", ".join(f"{k}={v}" for k, v in sorted(by_era.items())))
+    click.echo("  by extractor: " + ", ".join(f"{k}={v}" for k, v in by_extractor.most_common()))
+    if file_rows:
+        line = f"  file:// rows: {len(file_rows)}, missing on this box: {file_missing}"
+        if match_basenames:
+            line += f", basename registered under another URI: {file_renamed}"
+        click.echo(line)
+    if not enriched:
+        click.echo("  (none — every aspect row is claimed by a live catalog document)")
+        return
+    click.echo("  sample:")
+    for e in enriched[:10]:
+        flags = []
+        if e.get("tombstoned_match"):
+            flags.append("tombstoned-match")
+        if e["scheme"] == "file" and not e.get("exists_on_disk"):
+            flags.append("missing-on-disk")
+        if e.get("basename_registered_at"):
+            flags.append("basename-elsewhere")
+        click.echo(
+            f"    {e['scheme']:6} {e['era']}  {e.get('collection')}  {e.get('source_uri')}"
+            + (f"  [{', '.join(flags)}]" if flags else "")
+        )
+    if len(enriched) > 10:
+        click.echo(f"    … {len(enriched) - 10} more (--json for all)")
+
+
 @enrich.command(name="aspects-list")
 @click.option(
     "--collection", required=True,

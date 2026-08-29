@@ -120,6 +120,12 @@ class AspectRepositoryTest {
             // GRANT ... ON ALL TABLES IN SCHEMA nexus; the test role is scoped explicitly).
             su.createStatement().execute(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_collections TO " + SVC_ROLE);
+            // nexus-mlu3k: listWithoutCatalogDocument anti-joins document_aspects to
+            // catalog_documents (aspects-004's predicate, negated). Production's nexus_svc
+            // holds SELECT there via grants-nexus-svc's schema-wide loop; this explicitly
+            // scoped test role must be granted it by hand, same as catalog_collections above.
+            su.createStatement().execute(
+                "GRANT SELECT ON nexus.catalog_documents TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
 
@@ -1586,6 +1592,76 @@ class AspectRepositoryTest {
         assertThat(repo.listPending(t, 100))
             .as("in_progress must not be downgraded by a stale batch import")
             .isEmpty();
+    }
+
+    /**
+     * nexus-mlu3k: the read-only census of aspect rows no live catalog document
+     * claims. Seeds five legacy (doc_id NULL) rows and three catalog documents:
+     * a live one matching row A (excluded), a tombstoned one matching row B
+     * (included, flagged), and a tombstoned ALIAS matching row E (included, NOT
+     * flagged: the flag negates only deleted_at, aliases never match). Rows C
+     * (no scheme) and D (chroma://) have no catalog document at all. Also pins
+     * the page ceiling: limit 0 is one full page, never everything.
+     */
+    @Test @Order(77)
+    void listWithoutCatalogDocument_negatesTheAspects004Predicate_andFlagsTombstonedMatches() throws Exception {
+        String col = "knowledge__mlu3k";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri) VALUES ('"
+                + TENANT_A + "', 'mlu3k.1', 'live match', 'file:///repo/a.md') ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri, deleted_at) VALUES ('"
+                + TENANT_A + "', 'mlu3k.2', 'tombstoned match', 'file:///repo/b.md', now()) ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri, alias_of, deleted_at) VALUES ('"
+                + TENANT_A + "', 'mlu3k.3', 'tombstoned alias', 'file:///repo/e.md', 'mlu3k.1', now()) ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+        }
+        for (String[] row : new String[][] {
+                {"a.md", "file:///repo/a.md"}, {"b.md", "file:///repo/b.md"},
+                {"c.md", "repo/c.md"}, {"d.md", "chroma://knowledge__mlu3k/d.md"},
+                {"e.md", "file:///repo/e.md"}}) {
+            var body = makeAspect(col, row[0]);
+            body.remove("doc_id");             // legacy shape: doc_id NULL
+            body.put("source_uri", row[1]);
+            assertThat(repo.upsertAspect(TENANT_A, body)).isPositive();
+        }
+
+        var byUri = new java.util.LinkedHashMap<String, Map<String, Object>>();
+        for (var r : listAllWithoutCatalogDocument(TENANT_A)) {
+            if (col.equals(r.get("collection"))) byUri.put((String) r.get("source_uri"), r);
+        }
+
+        assertThat(byUri.keySet())
+            .as("the live-matched row is excluded; tombstoned, tombstoned-alias, no-scheme and chroma rows are listed")
+            .containsExactlyInAnyOrder("file:///repo/b.md", "file:///repo/e.md", "repo/c.md", "chroma://knowledge__mlu3k/d.md");
+        assertThat(byUri.get("file:///repo/b.md").get("tombstoned_match")).isEqualTo(true);
+        assertThat(byUri.get("file:///repo/e.md").get("tombstoned_match"))
+            .as("a tombstoned ALIAS is not a would-have-matched document").isEqualTo(false);
+        assertThat(byUri.get("repo/c.md").get("tombstoned_match")).isEqualTo(false);
+        assertThat(byUri.get("chroma://knowledge__mlu3k/d.md").get("extractor_name")).isEqualTo("scholarly-paper");
+
+        assertThat(repo.listWithoutCatalogDocument(TENANT_A, 1, 0)).as("limit is honoured").hasSize(1);
+        assertThat(repo.listWithoutCatalogDocument(TENANT_A, 0, 0).size())
+            .as("limit 0 is one full page, never unbounded")
+            .isLessThanOrEqualTo(AspectRepository.MAX_PAGE_ROWS);
+        assertThat(repo.listWithoutCatalogDocument(TENANT_A, 10_000, 0).size())
+            .as("an over-large limit is clamped, not rejected")
+            .isLessThanOrEqualTo(AspectRepository.MAX_PAGE_ROWS);
+
+        assertThat(listAllWithoutCatalogDocument(TENANT_B))
+            .as("RLS: tenant B sees none of tenant A's rows").noneMatch(r -> col.equals(r.get("collection")));
+    }
+
+    /** Page through {@code listWithoutCatalogDocument} the way the client verb does. */
+    private List<Map<String, Object>> listAllWithoutCatalogDocument(String tenant) {
+        List<Map<String, Object>> all = new ArrayList<>();
+        for (int offset = 0; ; offset += AspectRepository.MAX_PAGE_ROWS) {
+            var page = repo.listWithoutCatalogDocument(tenant, AspectRepository.MAX_PAGE_ROWS, offset);
+            all.addAll(page);
+            if (page.size() < AspectRepository.MAX_PAGE_ROWS) return all;
+        }
     }
 
     @Test @Order(69)

@@ -130,6 +130,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`nx enrich aspects-without-catalog`** (nexus-mlu3k): read-only census
+  of aspect rows no live catalog document claims, served by a new engine
+  route (`GET /v1/aspects/list_without_catalog_document`, aspects-004's
+  attribution predicate negated, with `tombstoned_match` per row, at most
+  300 rows per call — the verb pages through) and bucketed client-side by URI scheme, tombstoned matches, extraction era,
+  extractor/model, and on-disk presence (`--match-basenames` adds the
+  registered-under-another-URI signal). Exit 2 on an engine without the
+  route; an unverifiable census is never reported as empty.
 - **`deployed-engine-version` tracker written from conexus's STEP-6 gate
   report** (nexus-nx3l5, shape c). New `nexus.deploy_tracker` module: the
   post-tag verify `scripts/check_engine_release_floor.py
