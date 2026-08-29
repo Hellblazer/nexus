@@ -262,14 +262,14 @@ def seeded(cat):
     repo_a = cat.register_owner(
         name="xnz0o-repo-a",
         owner_type="repo",
-        tumbler_prefix="201",
+        tumbler_prefix="201.1",
         repo_root="/projects/xnz0o-a",
         head_hash="aaaa1111",
     )
     repo_b = cat.register_owner(
         name="xnz0o-repo-b",
         owner_type="repo",
-        tumbler_prefix="202",
+        tumbler_prefix="202.1",
         repo_root="/projects/xnz0o-b",
         head_hash="bbbb2222",
     )
@@ -277,7 +277,7 @@ def seeded(cat):
     curator = cat.register_owner(
         name="xnz0o-curator",
         owner_type="curator",
-        tumbler_prefix="203",
+        tumbler_prefix="203.1",
     )
 
     # ── Collections ───────────────────────────────────────────────────────────
