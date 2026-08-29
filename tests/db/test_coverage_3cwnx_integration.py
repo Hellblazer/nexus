@@ -265,25 +265,28 @@ def cat(java_service):
 
 _DOCS = [
     # (tumbler, title, content_type)
-    # tumbler "30" exercises the ``OR tumbler = prefix`` arm of owner_prefix filter
-    ("30",   "3cwnx Owner 30 (exact match)",  "paper"),
-    ("30.1", "3cwnx Paper A",                 "paper"),
-    ("30.2", "3cwnx Paper B",                 "paper"),
-    ("30.3", "3cwnx Paper C (unlinked)",      "paper"),
-    ("30.4", "3cwnx RDR A",                   "rdr"),
-    ("30.5", "3cwnx RDR B (unlinked)",        "rdr"),
-    ("30.6", "3cwnx Code A (unlinked)",       "code"),
-    ("31.1", "3cwnx Sub-Paper A",             "paper"),
+    # Grammar (nexus-v3w9n / catalog-034): a document tumbler is >= 3
+    # segments; a doc AT the owner prefix itself (the old "30" seed that
+    # exercised the ``OR tumbler = prefix`` filter arm) is REFUSED at the
+    # boundary — that arm's input class is eradicated by design, pinned by
+    # the refusal control in test B below.
+    ("30.1.1", "3cwnx Paper A",                 "paper"),
+    ("30.1.2", "3cwnx Paper B",                 "paper"),
+    ("30.1.3", "3cwnx Paper C (unlinked)",      "paper"),
+    ("30.1.4", "3cwnx RDR A",                   "rdr"),
+    ("30.1.5", "3cwnx RDR B (unlinked)",        "rdr"),
+    ("30.1.6", "3cwnx Code A (unlinked)",       "code"),
+    ("31.1.1", "3cwnx Sub-Paper A",             "paper"),
 ]
 
 _LINKS = [
     # (from_tumbler, to_tumbler, link_type)
-    # 30.1 -> 30.2 (cites)       => 30.1 from, 30.2 from+to
-    # 30.2 -> 30.4 (implements)  => 30.4 to
-    # 31.1 -> 30.1 (relates)     => 31.1 from, 30.1 also to
-    ("30.1", "30.2", "cites"),
-    ("30.2", "30.4", "implements"),
-    ("31.1", "30.1", "relates"),
+    # 30.1.1 -> 30.1.2 (cites)      => 30.1.1 from, 30.1.2 from+to
+    # 30.1.2 -> 30.1.4 (implements) => 30.1.4 to
+    # 31.1.1 -> 30.1.1 (relates)    => 31.1.1 from, 30.1.1 also to
+    ("30.1.1", "30.1.2", "cites"),
+    ("30.1.2", "30.1.4", "implements"),
+    ("31.1.1", "30.1.1", "relates"),
 ]
 
 
@@ -317,53 +320,68 @@ def test_coverage_no_prefix_exact_values(seeded, cat) -> None:
     rows = cat.coverage_by_content_type()
     by_type = {r["content_type"]: r for r in rows}
 
-    # paper: "30" + 30.1 + 30.2 + 30.3 (under 30) + 31.1 (under 31) = 5 total
-    # linked: 30.1 (from+to), 30.2 (from+to), 31.1 (from) = 3 linked papers
-    # "30" is unlinked (no links); 30.3 is unlinked
-    assert by_type["paper"]["total"] == 5
+    # paper: 30.1.1 + 30.1.2 + 30.1.3 (under 30.1) + 31.1.1 (under 31.1) = 4 total
+    # linked: 30.1.1 (from+to), 30.1.2 (from+to), 31.1.1 (from) = 3 linked papers
+    # 30.1.3 is unlinked
+    assert by_type["paper"]["total"] == 4
     assert by_type["paper"]["linked"] == 3
 
-    # rdr: 30.4 + 30.5 = 2 total; 30.4 (as to_tumbler) = 1 linked
+    # rdr: 30.1.4 + 30.1.5 = 2 total; 30.1.4 (as to_tumbler) = 1 linked
     assert by_type["rdr"]["total"] == 2
     assert by_type["rdr"]["linked"] == 1
 
-    # code: 30.6 only = 1 total; 0 linked
+    # code: 30.1.6 only = 1 total; 0 linked
     assert by_type["code"]["total"] == 1
     assert by_type["code"]["linked"] == 0
 
 
 def test_coverage_owner_prefix_scoping(seeded, cat) -> None:
-    """B) Service: owner_prefix scopes to the 30.X subtree AND tumbler == "30".
+    """B) Service: owner_prefix scopes to the 30.1.X subtree.
 
-    The filter is ``tumbler LIKE '30.%' OR tumbler = '30'`` — the second arm
-    (exact equality) ensures the owner document itself is included when it exists.
-    This test exercises that arm explicitly via tumbler "30" in the seed data.
+    The filter is ``tumbler LIKE '30.1.%' OR tumbler = '30.1'``. The second
+    arm (exact equality — "the owner document itself, when it exists") used
+    to be exercised by seeding a document AT the owner prefix; the tumbler
+    grammar (nexus-v3w9n: a document is >= 3 segments) makes that input
+    class unregistrable, and catalog-034 tombstoned the two live rows of
+    that shape (the phantom 1.1/1.2 pair). The arm's eradication is pinned
+    below by an explicit registration-refusal control, kill-control style —
+    not by silently dropping the exercise.
     """
-    rows = cat.coverage_by_content_type(owner_prefix="30")
+    rows = cat.coverage_by_content_type(owner_prefix="30.1")
     by_type = {r["content_type"]: r for r in rows}
 
-    # Under prefix "30" (LIKE '30.%' OR = '30'):
-    #   "30", 30.1, 30.2, 30.3 = 4 papers total
+    # Under prefix "30.1" (LIKE '30.1.%'):
+    #   30.1.1, 30.1.2, 30.1.3 = 3 papers total
     # Linked papers in scope:
-    #   30.1 is linked (from_tumbler in cites→30.2, AND to_tumbler from 31.1→30.1)
-    #   30.2 is linked (from_tumbler in 30.2→30.4, AND to_tumbler from 30.1→30.2)
-    #   "30" is unlinked; 30.3 is unlinked
+    #   30.1.1 is linked (from in cites→30.1.2, AND to from 31.1.1→30.1.1)
+    #   30.1.2 is linked (from in 30.1.2→30.1.4, AND to from 30.1.1→30.1.2)
+    #   30.1.3 is unlinked
     # => 2 linked papers
-    assert by_type["paper"]["total"] == 4
+    assert by_type["paper"]["total"] == 3
     assert by_type["paper"]["linked"] == 2
 
-    # rdr: 30.4 + 30.5 = 2 total; 30.4 linked (to_tumbler of 30.2->30.4)
+    # rdr: 30.1.4 + 30.1.5 = 2 total; 30.1.4 linked (to of 30.1.2->30.1.4)
     assert by_type["rdr"]["total"] == 2
     assert by_type["rdr"]["linked"] == 1
 
-    # code: 30.6 = 1 total; 0 linked
+    # code: 30.1.6 = 1 total; 0 linked
     assert by_type["code"]["total"] == 1
     assert by_type["code"]["linked"] == 0
 
-    # 31.1 paper must NOT be counted (not under prefix "30")
-    # Total paper count of 4 (not 5) confirms 31.1 is excluded
-    # AND that the "30" exact-match arm fired (contributing 1 doc)
-    assert by_type["paper"]["total"] == 4
+    # 31.1.1 paper must NOT be counted (not under prefix "30.1"):
+    # total of 3 (not 4) confirms the exclusion.
+    assert by_type["paper"]["total"] == 3
+
+    # NON-VACUITY CONTROL (the eradicated exact-match arm): a document AT
+    # the owner prefix — the only input that could ever fire
+    # ``tumbler = prefix`` — is refused at the boundary with the grammar
+    # 400, so the arm cannot be fed by any registrable document.
+    import httpx
+    with pytest.raises(httpx.HTTPStatusError, match="tumbler grammar violation"):
+        cat._post("/register", {
+            "tumbler": "30.1", "title": "3cwnx doc-at-prefix (refused)",
+            "content_type": "paper",
+        })
 
 
 # TOMBSTONE (nexus-i711w terminal deletion): the DIE test
