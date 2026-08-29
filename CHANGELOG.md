@@ -33,6 +33,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   structured warning, so `store_delete`'s `delete_document` always runs
   and the reap tombstone proceeds instead of dying on the GATE-2 blank-
   collection `ValueError`.
+- **`nx index` counts taxonomy-assign batch failures and says so**
+  (nexus-7lw6a). `taxonomy_assign_batch_failed` (an HTTP 500 from the
+  assign endpoint) was logged and then forgotten; a run that lost 1,254
+  chunks' topic assignments reported `Done.` and exit 0. The run summary
+  now carries `Warning: N/M taxonomy-assign batch(es) failed (K chunk(s)
+  affected)` in the same shape as the flush-failure line, with no phantom
+  line on a clean run. Exit-code policy: partial loss stays exit 0 (the
+  summary is the signal); exit is non-zero only when every attempted
+  batch failed.
+- **`nx index` catalog-hook progress is TTY-gated** (nexus-c14zi). The
+  `\r` repaint writes are routed through the phase channel when stderr
+  is not a TTY, so a redirected log gets discrete lines instead of
+  `Catalog: linking ...  Catalog: housekeeping...` mashed together with a
+  structlog event on the end.
 
 ### Removed
 

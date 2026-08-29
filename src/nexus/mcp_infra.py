@@ -187,6 +187,58 @@ def reset_service_t2_op_stats() -> None:
     with _service_t2_stats_lock:
         _service_t2_op_stats.clear()
 
+
+# nexus-7lw6a: process-lifetime-global counters for taxonomy-assign batch
+# outcomes, mirroring ``_service_t2_op_stats`` above (same
+# reset-at-run-start / read-at-run-end contract, same "must not accumulate
+# across runs" rationale — nexus.indexer.index_repository resets this at
+# the same point it resets the two op-stats dicts, and reads it once at the
+# end of the run). ``attempted`` counts every real
+# ``assign_from_chashes`` call (success or failure); ``failed_batches`` /
+# ``failed_chunks`` count only the EXCEPTION path in
+# ``taxonomy_assign_batch_hook`` — a whole batch's assignments lost to a
+# transport/server failure (the GH #1432-class total-loss case this bead's
+# exit-code policy keys on). The separate ``unmatched_chashes`` tripwire
+# (a partial gap inside an otherwise-successful batch) is deliberately NOT
+# folded in here: that batch DID succeed, so counting it would corrupt the
+# "every batch failed" total-loss determination.
+_taxonomy_assign_run_stats: dict[str, int] = {
+    "attempted": 0, "failed_batches": 0, "failed_chunks": 0,
+}
+_taxonomy_assign_stats_lock = threading.Lock()
+
+
+def _record_taxonomy_assign_attempt() -> None:
+    """Count one ``assign_from_chashes`` call, whether it goes on to
+    succeed or fail. Denominator for the "every batch failed" exit-code
+    check in ``nexus.commands.index``."""
+    with _taxonomy_assign_stats_lock:
+        _taxonomy_assign_run_stats["attempted"] += 1
+
+
+def _record_taxonomy_assign_batch_failure(chunk_count: int) -> None:
+    """Count one whole-batch taxonomy-assign failure (the exception path)
+    and the chunks it affected."""
+    with _taxonomy_assign_stats_lock:
+        _taxonomy_assign_run_stats["failed_batches"] += 1
+        _taxonomy_assign_run_stats["failed_chunks"] += chunk_count
+
+
+def taxonomy_assign_run_stats() -> dict[str, int]:
+    """Snapshot of ``{attempted, failed_batches, failed_chunks}`` for the
+    current run. Mirrors ``service_t2_op_stats()``'s snapshot contract."""
+    with _taxonomy_assign_stats_lock:
+        return dict(_taxonomy_assign_run_stats)
+
+
+def reset_taxonomy_assign_run_stats() -> None:
+    """Zero the counters (test / per-run reset, mirrors
+    ``reset_service_t2_op_stats()``)."""
+    with _taxonomy_assign_stats_lock:
+        _taxonomy_assign_run_stats["attempted"] = 0
+        _taxonomy_assign_run_stats["failed_batches"] = 0
+        _taxonomy_assign_run_stats["failed_chunks"] = 0
+
 # ── Search trace cache (RDR-061 E2) ──────────────────────────────────────────
 # Session-keyed cache of recent search results. Populated by the search tool,
 # consumed by store_put and catalog_link to correlate agent actions with the
@@ -832,6 +884,10 @@ def taxonomy_assign_batch_hook(
         # that (or any other transport failure) is caught below and reported
         # via the SAME tripwire every other service-path failure uses — the
         # hook fails loud and reports, it never recomputes client-side.
+        # nexus-7lw6a: counted regardless of outcome — the denominator the
+        # run-summary exit-code check uses to tell "some batches failed"
+        # from "every batch failed" (total loss).
+        _record_taxonomy_assign_attempt()
         try:
             result = t2_index_write(
                 lambda db: db.taxonomy.assign_from_chashes(
@@ -843,6 +899,10 @@ def taxonomy_assign_batch_hook(
             _record_taxonomy_tripwire(
                 collection, doc_ids, f"service path: {type(exc).__name__}: {exc}",
             )
+            # nexus-7lw6a: this IS the whole-batch-loss case the bead is
+            # about (e.g. an HTTP 500 from the assign endpoint) — every
+            # doc_id in this batch lost its taxonomy assignment.
+            _record_taxonomy_assign_batch_failure(len(doc_ids))
             return
         unmatched = result.get("unmatched_chashes") if isinstance(result, dict) else None
         if unmatched:

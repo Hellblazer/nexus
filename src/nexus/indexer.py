@@ -937,6 +937,48 @@ def _delete_docs_for_paths(repo: Path, deleted_relpaths: list[str]) -> None:
         _log.debug("since_head_delete_docs_unavailable", exc_info=True)
 
 
+def _catalog_progress(
+    msg: str,
+    *,
+    is_tty: bool,
+    on_phase: Callable[[str], None] | None,
+    write: Callable[[str], None],
+) -> None:
+    """TTY-gated progress reporter for ``_catalog_hook``'s ``"  Catalog:
+    ..."`` lines (registering / linking / housekeeping / done).
+
+    nexus-c14zi: this used to be a raw ``sys.stderr.write`` bound directly,
+    un-gated on TTY. Its ``\\r`` in-place-repaint writes are harmless on an
+    interactive terminal but a literal control character in a redirected
+    (non-TTY) log — two of these writes used to land on the SAME physical
+    line with no separator (observed: "Catalog: linking 251 new
+    entries...  Catalog: housekeeping..." mashed together, since neither
+    write is ever followed by a real newline until the very next call).
+
+    On a TTY, *write* is called with *msg* completely unchanged — same
+    behavior as before this fix, repaint included (``_maybe_run_
+    housekeeping`` is also passed this function as its ``progress``
+    callback, so its own ``\\r`` writes get identical treatment for free).
+
+    On a non-TTY stderr, route through the phase channel instead: strip
+    the trailing ``\\r``/``\\n`` (``on_phase``'s own ``click.echo`` always
+    terminates the line) and emit exactly one clean, discrete line —
+    never a bare ``\\r``. Falls back to a plain ``write``-terminated line
+    when no ``on_phase`` was supplied (some callers invoke
+    ``_catalog_hook`` without one, e.g. tests).
+    """
+    if is_tty:
+        write(msg)
+        return
+    stripped = msg.rstrip("\r\n")
+    if not stripped:
+        return
+    if on_phase is not None:
+        on_phase(stripped)
+    else:
+        write(stripped + "\n")
+
+
 def _catalog_hook(
     repo: Path,
     repo_name: str,
@@ -1054,8 +1096,16 @@ def _catalog_hook(
             )
             _log.info("catalog_owner_created", owner=str(owner), repo=repo_name)
 
+        import functools  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         import sys  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-        _progress = sys.stderr.write
+
+        # nexus-c14zi: TTY-gate the raw ``\r`` writes below (and the ones
+        # ``_maybe_run_housekeeping`` makes through the same ``progress``
+        # callback) — see ``_catalog_progress``'s own docstring for why.
+        _progress = functools.partial(
+            _catalog_progress,
+            is_tty=sys.stderr.isatty(), on_phase=on_phase, write=sys.stderr.write,
+        )
         _progress(f"  Catalog: registering {len(indexed_files)} files…\r")
 
         # nexus-dst5h: ONE owner-scoped fetch + local join instead of a
@@ -3749,6 +3799,12 @@ def _run_index(
     from nexus.mcp_infra import reset_service_t2_op_stats  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
 
     reset_service_t2_op_stats()
+    # nexus-7lw6a: same process-lifetime-global rationale as the two resets
+    # immediately above — zero the taxonomy-assign batch outcome counters
+    # so the end-of-run summary covers exactly THIS run.
+    from nexus.mcp_infra import reset_taxonomy_assign_run_stats  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
+
+    reset_taxonomy_assign_run_stats()
 
     # RDR-103 Phase 3a: registry value preserves the legacy name when
     # the repo was added before the migration; fallback queries the
@@ -5179,6 +5235,31 @@ def _run_index(
                     + ("…" if len(_batch_failures) > 5 else "")
                 )
 
+        # nexus-7lw6a: taxonomy_assign_batch_failed (e.g. an HTTP 500 from
+        # the assign endpoint) used to be logged at WARNING and counted
+        # nowhere — the run reported clean while the affected chunks lost
+        # their topic assignments. Same "SAME shape as the existing
+        # flush-failure reporting" the bead asks for: an on_phase WARNING
+        # line, conditional (no phantom line on a clean run), read from the
+        # nexus-7lw6a run-scoped counters reset above.
+        from nexus.mcp_infra import taxonomy_assign_run_stats  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
+        _taxonomy_stats = taxonomy_assign_run_stats()
+        _taxonomy_batches_failed = _taxonomy_stats["failed_batches"]
+        if _taxonomy_batches_failed:
+            _log.error(
+                "index_taxonomy_assign_batch_failures",
+                batches_failed=_taxonomy_batches_failed,
+                chunks_failed=_taxonomy_stats["failed_chunks"],
+                batches_attempted=_taxonomy_stats["attempted"],
+            )
+            if on_phase is not None:
+                on_phase(
+                    f"WARNING: {_taxonomy_batches_failed} taxonomy-assign "
+                    f"batch(es) FAILED ({_taxonomy_stats['failed_chunks']} "
+                    f"chunk(s) affected) — see the taxonomy_assign_batch_"
+                    f"failed log events for details."
+                )
+
     # Post-processing phase markers (nexus-vatx Gap 2): the per-file
     # progress bar ends at "[N/N]" but the pipeline keeps running for
     # pruning, stamping, and catalog registration. Without markers the
@@ -5400,6 +5481,13 @@ def _run_index(
         len(_skipped_files), _files_attempted_total,
     )
 
+    # nexus-7lw6a: final snapshot for the return dict below — read fresh
+    # here (rather than reusing the `if _batcher is not None:` block's
+    # local above) so this holds even in the degenerate case of no batcher
+    # at all (nothing attempted, all zeros — never a phantom failure).
+    from nexus.mcp_infra import taxonomy_assign_run_stats  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
+    _final_taxonomy_stats = taxonomy_assign_run_stats()
+
     # nexus-qgc4b: files_changed drives the caller's post-index gate. RDR
     # (re)indexing is a content change too, so an RDR-only run still triggers
     # taxonomy discovery. nexus-3lswy: RDR files are now folded into
@@ -5450,6 +5538,16 @@ def _run_index(
             "docs": _prose_written + _pdf_written,
             "rdr": _rdr_written,
         },
+        # nexus-7lw6a: taxonomy-assign batch outcomes for this run (reset at
+        # the top of this function, accumulated by every
+        # taxonomy_assign_batch_hook flush-grain fire). index_repo_cmd uses
+        # "attempted" as the denominator for the exit-code policy: a
+        # PARTIAL loss (some batches failed) stays rc=0 — the summary line
+        # is the signal — while a TOTAL loss (every attempted batch failed,
+        # the GH #1432 class) drives a non-zero exit.
+        "taxonomy_assign_batches_attempted": _final_taxonomy_stats["attempted"],
+        "taxonomy_assign_batches_failed": _final_taxonomy_stats["failed_batches"],
+        "taxonomy_assign_chunks_failed": _final_taxonomy_stats["failed_chunks"],
     }
 
 
