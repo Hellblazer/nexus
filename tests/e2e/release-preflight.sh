@@ -83,7 +83,18 @@ git fetch --tags --force --quiet origin 2>/dev/null || echo "  [warn] could not 
 echo "== release preflight =="
 
 # 1. Engine identity: pin vs newest published tag vs live cloud vs source drift.
-check "engine-release-floor"      uv run python scripts/check_engine_release_floor.py
+#    A PAIRED release (release skill Step 0) has the cloud BEHIND the floor by
+#    construction until the deploy fires at client-tag push, so the bare form
+#    is red on every paired cut (measured: 7.23.0, 2026-08-29). With
+#    NX_PAIRED_DEPLOY=engine-service-vX.Y.Z set, this runs the SAME mechanized
+#    paired acceptance the human Step 0 invocation uses (--paired-deploy: the
+#    named tag must verify published, pinned, newest) -- stricter, never looser,
+#    and the flag names the pairing out loud in the transcript.
+if [ -n "${NX_PAIRED_DEPLOY:-}" ]; then
+    check "engine-release-floor"  uv run python scripts/check_engine_release_floor.py --paired-deploy "$NX_PAIRED_DEPLOY"
+else
+    check "engine-release-floor"  uv run python scripts/check_engine_release_floor.py
+fi
 # 2. Merge-blocking on EVERY PR to main -- an unacknowledged ## Unshipped entry
 #    blocks the release PR itself, not just the tag.
 check "wire-contract-ledger"      uv run python scripts/check_engine_release_floor.py --ledger-only

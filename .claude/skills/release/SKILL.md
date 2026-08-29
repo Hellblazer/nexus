@@ -59,6 +59,9 @@ This gate exists because the engine silently drifted 22 `service/` commits / 4 d
 
 ```bash
 ./tests/e2e/release-preflight.sh
+# paired release: name the engine tag so its floor step runs the paired
+# acceptance instead of the bare form (red by construction pre-deploy)
+NX_PAIRED_DEPLOY=engine-service-vX.Y.Z ./tests/e2e/release-preflight.sh
 ```
 
 Run this BEFORE step 1 and before any expensive leg. It evaluates every
@@ -204,7 +207,7 @@ CI enforces parity. Missing any one of these fails the marketplace-version-match
 
 Optional but recommended: also bump `plugins[].source.sha` to the 40-char SHA of the release commit, for protection against tag force-push. Add post-commit (Step 8a, see below).
 
-**Engine-service pin (conditional 8th target — nexus-3rq00).** The Python/Java boundary rides one more hand-edited constant that sits OUTSIDE the seven-manifest parity gate: `PINNED_SERVICE_TAG` in `src/nexus/daemon/binary_install.py`, the `engine-service-vX.Y.Z` release this build auto-installs. It is DERIVED from `REQUIRED_ENGINE_VERSION`, so it is never hand-edited: moving the engine identity moves the pin by construction. Two invariants the `TestEnginePinParity` test enforces: (1) `PINNED_SERVICE_TAG`'s numeric version must be `>= REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) — never ship a client that auto-installs an engine it then refuses as too old; (2) at the 6.0 release boundary the pin must be non-None (it is intentionally `None` pre-6.0). A release that bumps pyproject to 6.x without setting a real pin trips CI.
+**Engine-service pin (conditional 8th target — nexus-3rq00).** The Python/Java boundary rides one more hand-edited constant that sits OUTSIDE the seven-manifest parity gate: `PINNED_SERVICE_TAG` in `src/nexus/daemon/binary_install.py`, the `engine-service-vX.Y.Z` release this build auto-installs. It is DERIVED from `REQUIRED_ENGINE_VERSION`, so it is never hand-edited: moving the engine identity moves the pin by construction. Two invariants the `TestEnginePinParity` test enforces: (1) `PINNED_SERVICE_TAG`'s numeric version must be `>= REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) — never ship a client that auto-installs an engine it then refuses as too old; (2) at the 6.0 release boundary the pin must be non-None (it is intentionally `None` pre-6.0). A release that bumps pyproject to 6.x without setting a real pin trips CI. **The pin's VALUE is asserted in exactly one test** — `tests/test_engine_version.py::TestRequiredEngineVersion::test_pinned_floor_is_current` hardcodes the tuple with a per-bump comment trail — so every `REQUIRED_ENGINE_VERSION` bump edits that assertion in the same commit (add the bump's reason to its comment). Missed on 7.23.0: the unit leg of the battery red'd on it after the paired engine gate was already green.
 
 Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 
