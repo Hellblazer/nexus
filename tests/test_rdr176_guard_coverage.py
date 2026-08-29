@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus.commands import doctor, upgrade
+from nexus.commands import upgrade
 
 from tests._t2_fixture_ops import bootstrap_migration_source
 from nexus.db.t2 import T2Database
@@ -77,27 +77,3 @@ def test_service_mode_run_upgrade_does_not_mutate_db(
 
 
 # ── Guard #5: doctor diagnostics open read-only (no WAL header write) ─────────
-
-
-def test_t2_diagnostic_connect_service_mode_is_read_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-
-    db_path = _seed_legacy_db(tmp_path)  # journal_mode=DELETE on disk
-    digest_before = _content_digest(db_path)
-
-    monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
-    conn = doctor._t2_diagnostic_connect(db_path, sqlite3)
-    try:
-        # Read-only: a write must be rejected, and the WAL pragma must NOT have
-        # been forced (which would rewrite the DB header = a mutation).
-        with pytest.raises(sqlite3.OperationalError):
-            conn.execute("CREATE TABLE _probe (x INTEGER)")
-        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
-        assert mode != "wal"
-    finally:
-        conn.close()
-
-    assert _content_digest(db_path) == digest_before
-
-

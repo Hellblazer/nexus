@@ -17,26 +17,6 @@ _CHECK = "✓"
 _WARN = "✗"
 
 
-def _t2_diagnostic_connect(db_path: Path, sqlite3: Any) -> Any:
-    """Open the T2 SQLite DB for a read-only doctor diagnostic.
-
-    RDR-176 Phase 1 (Gap 2, non-mutation): in service mode the local ``.db`` is
-    a frozen migration source — a downgrade must find it byte-for-content
-    unchanged. ``PRAGMA journal_mode=WAL`` writes the DB header, so in service
-    mode open ``?mode=ro`` and skip the WAL pragma (these diagnostics only
-    SELECT). In sqlite mode keep the historical behaviour (WAL + busy_timeout)
-    so a concurrent MCP writer does not trip lock errors during the check.
-
-    ``sqlite3`` is passed in by the caller (each check imports it lazily to keep
-    CLI startup fast). The WAL-opening sqlite-mode arm died with the =sqlite
-    opt-out (RDR-158 P3, nexus-7bomn) — read-only is the only correct posture
-    against a frozen migration source.
-    """
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)  # frozen-source-read: nx doctor diagnostic — read-only (mode=ro) inspection of the frozen migration source; named in SQLITE_CONNECT_ALLOWLIST
-    conn.execute("PRAGMA busy_timeout=5000")
-    return conn
-
-
 def _check_line(label: str, ok: bool, detail: str = "") -> str:
     status = _CHECK if ok else _WARN
     msg = f"  {status} {label}"
@@ -74,7 +54,7 @@ def _reinstall_command() -> str:
     return install_advice.upgrade_command("uv tool install --reinstall conexus")
 
 
-def _run_check_schema() -> None:
+def _run_check_schema(*, strict: bool = False) -> None:
     """Validate the T2 schema is actually applied (RDR-076; PORTED at
     nexus-vl8lk from an N/A stub).
 
@@ -103,6 +83,21 @@ def _run_check_schema() -> None:
     schema_error or zero applied changesets; 0 (with an explicit N/A note)
     when the endpoint withholds the fingerprint by design (managed/cloud);
     0 with a changeset count otherwise.
+
+    :param strict: nexus-b1v9z part B. The honest N/A above is a
+        DELIBERATE, previously-litigated design (nexus-vl8lk) for
+        interactive use — an operator asking "is my schema okay?" should
+        not get a false failure just because their endpoint withholds the
+        fingerprint by design. But a release-gate CALLER (release-
+        sandbox.sh) cannot distinguish that N/A from a real pass by exit
+        code alone, and the whole point of running this check there is to
+        prove the substrate is present and correct — an N/A is exactly as
+        uninformative as never having run the check. ``strict=True`` (the
+        CLI's ``--fail-on-violation``, an existing doctor.py flag
+        previously scoped to ``--check-storage-boundary``) makes ONLY the
+        N/A outcome fatal; a genuine schema_error or zero-changeset FAIL
+        was already non-zero regardless of this flag, and a healthy
+        engine still exits 0.
     """
     from nexus.health import probe_t2_schema_fingerprint  # noqa: PLC0415 — deferred to keep CLI startup fast
 
@@ -121,6 +116,14 @@ def _run_check_schema() -> None:
             "endpoint (managed/cloud service withholds it by design, or "
             "the engine predates the /version schema fields) — N/A."
         )
+        if strict:
+            click.echo(
+                "T2 schema check: FAIL (strict/gate mode) — an honest N/A "
+                "is not proof the schema is applied; a release gate must "
+                "see an actual OK.",
+                err=True,
+            )
+            raise click.exceptions.Exit(1)
         return
 
     if fp.schema_error:
@@ -795,7 +798,8 @@ def _run_check_plan_library() -> None:
             f"  NOTE: template parity not checked ({parity.unavailable}).",
             err=True,
         )
-    else:
+    warnings = 0
+    if parity.unavailable is None:
         if parity.missing_unchecked:
             click.echo(
                 "  NOTE: drift was checked, but MISSING templates were not — "
@@ -823,6 +827,7 @@ def _run_check_plan_library() -> None:
                 "place — remove with `nx plan delete <id>` if intended.",
                 err=True,
             )
+            warnings += 1
         failed = failed or parity.failed
     if non_dimensional:
         click.echo(
@@ -830,6 +835,7 @@ def _run_check_plan_library() -> None:
             "(legacy / pre-RDR-078 seeds).",
             err=True,
         )
+        warnings += 1
     if truncated:
         click.echo(
             f"  NOTE: plan count hit the {MAX_QUERY_RESULTS}-row page cap — "
@@ -837,10 +843,17 @@ def _run_check_plan_library() -> None:
             err=True,
         )
 
-    if not failed:
-        click.echo("All checks passed.")
-    else:
+    if failed:
         raise click.exceptions.Exit(1)
+    # A WARN alone does not change the exit code (nexus-eg5tw) — only the
+    # FAIL:-class conditions above do that, via `failed`. But the verdict
+    # line must say so: printing an unqualified "All checks passed." next
+    # to a WARN emitted two lines above is a self-contradiction within the
+    # same block, not two independent facts.
+    if warnings:
+        click.echo(f"All checks passed, with {warnings} warning(s).")
+    else:
+        click.echo("All checks passed.")
 
 
 def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
@@ -962,7 +975,12 @@ def _report_aspect_queue_service() -> None:
 
     Fails LOUD on a transport error rather than degrading to the sqlite path:
     silently falling back would reproduce the exact defect being fixed — a
-    frozen-file reading presented as the live queue.
+    frozen-file reading presented as the live queue. A transport failure is
+    reported as UNKNOWN (exit 0 -- not reporting pass or fail); a nonzero
+    FAILED-row count from a reachable queue is a genuine content failure and
+    raises ``click.exceptions.Exit(1)`` with a ✗ FAIL: marker (nexus-fylxo),
+    matching the 4 sibling supplementary checks (resources / plan-library /
+    taxonomy / t1) that already signal failure this way.
     """
     import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
 
@@ -1011,6 +1029,18 @@ def _report_aspect_queue_service() -> None:
             "see the worker logs for the failure text)"
         )
         click.echo("\nRe-enqueue them with: nx aspects requeue-failed")
+        # nexus-fylxo: a nonzero failed-row backlog is a real content
+        # problem, not merely descriptive detail -- its 4 siblings
+        # (resources / plan-library / taxonomy / t1) all emit a ✗/FAIL:
+        # marker and raise Exit on their own failure condition; this check
+        # printed the numbers and silently returned 0 regardless of how
+        # large the backlog grew. Match the sibling contract.
+        click.echo(
+            f"\n✗ FAIL: {len(failed)} failed aspect-extraction row(s) in "
+            "the queue.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
 
 
 def _run_check_aspect_queue() -> None:
@@ -1553,7 +1583,9 @@ def _run_supplementary_checks() -> None:
     help="Validate the T2 schema is applied (Postgres, Liquibase-managed, "
          "via the engine's GET /version changelog fingerprint). Exits 2 "
          "when the engine is unreachable, 1 on schema_error or zero "
-         "applied changesets. nexus-vl8lk.",
+         "applied changesets; an honest N/A (endpoint withholds the "
+         "fingerprint by design) exits 0 unless combined with "
+         "--fail-on-violation. nexus-vl8lk, nexus-b1v9z.",
 )
 @click.option(
     "--check-search",
@@ -1647,7 +1679,11 @@ def _run_supplementary_checks() -> None:
     is_flag=True,
     default=False,
     help="With --check-storage-boundary, exit 1 if any violation is "
-         "found. Without this flag the lint is informational.",
+         "found (informational without this flag). With --check-schema, "
+         "treat an honest N/A (fingerprint withheld by design) as a "
+         "failure too -- for release-gate callers that need an actual "
+         "OK, not an unprovable N/A that reads identically to a pass "
+         "(nexus-b1v9z).",
 )
 @click.option(
     "--phase",
@@ -1808,7 +1844,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if check_schema:
-        _run_check_schema()
+        _run_check_schema(strict=fail_on_violation)
         return
 
     if check_search:
@@ -2532,42 +2568,15 @@ def _run_check_taxonomy() -> None:
     ``assign_topic`` directly — or a test fixture that seeds rows — will
     silently re-break the invariant. This check detects the drift.
     """
-    import sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
-
-    # THE VERDICT IS SERVICE-SCOPED; the census below is not (nexus-ypori).
-    #
-    # This check has always read the local SQLite file. That was the operating
-    # substrate once; since RDR-158 P4 it is a FROZEN MIGRATION SOURCE, so
-    # auditing it and exiting non-zero reports a stale relic as a live fault —
-    # which is how the release-sandbox smoke came to block on 29-day-old rows
-    # that do not exist in the engine at all.
-    #
-    # Its two siblings in the same doctor loop (_run_check_schema,
-    # _run_check_plan_library) went through the SAME N/A-stub intermediate
-    # state this comment describes, then were themselves ported off the
-    # stub at nexus-vl8lk (they now ask the engine directly rather than
-    # reporting N/A) — the plan-library docstring names the original
-    # failure this comment is about, "without that a fresh install exits
-    # non-zero from the release-sandbox smoke".
-    #
-    # The census is KEPT rather than deleted, because it is the only taxonomy
-    # inspection of the frozen source and RDR-176 Gap 2 wants those probes
-    # working with no engine running (it is why storage_boundary_lint
-    # allowlists this module's one sqlite3.connect). It is demoted from
-    # verdict to note: it reports what it found and names the store, and it
-    # never decides the exit code.
-    #
-    # The engine cannot answer this question yet — there is no route that
-    # computes the drift, and reconstructing it client-side costs one round
-    # trip per topic plus a bulk assignment read. Tracked separately.
-    # SERVICE FIRST. The engine computes this against the store the running
-    # system actually writes, with the predicate held next to the materializer
-    # it audits (TaxonomyRepository.linkDrift). Only when no service answers do
-    # we fall back to the legacy census below, and we say which store we read.
+    # ENGINE ONLY. nexus-ypori made the engine the verdict; nexus-b1v9z part A
+    # made an engine-side failure loud; 2026-08-29 (Hal: "there is no path
+    # back to chromadb sqlite") deleted the frozen-source census that used to
+    # run when no engine answered, together with the RDR-176 Gap-2 rationale
+    # that kept it. No engine to ask is exit 2: unverifiable is never a pass.
+    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
     from contextlib import suppress as _suppress  # noqa: PLC0415 — branch-local
 
     report: dict[str, Any] | None = None
-    _unreachable = "unknown"
     try:
         from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — deferred: CLI startup cost
 
@@ -2577,172 +2586,61 @@ def _run_check_taxonomy() -> None:
         finally:
             with _suppress(Exception):
                 store.close()
-    except Exception as exc:  # noqa: BLE001 — unreachable or too-old engine: fall through, saying which
-        text = str(exc)
-        if "404" in text:
+    except httpx.HTTPStatusError as exc:
+        if "404" in str(exc):
             # The route is newer than the deployed engine. Distinguish this
-            # from "no service" — the operator's action differs entirely
-            # (deploy an engine carrying /links/drift vs. start one).
-            _unreachable = (
-                "the deployed engine has no /links/drift route (added for "
-                "nexus-ypori) — it reports this check only once an engine "
-                "carrying it is deployed"
-            )
-        else:
-            _unreachable = text
-
-    if report is not None:
-        total = int(report.get("projection_total") or 0)
-        count = int(report.get("drift_count") or 0)
-        if not count:
+            # from "no service": the operator's action differs (deploy an
+            # engine carrying /links/drift vs. start one).
             click.echo(
-                f"✓ topic_links invariant holds ({total} topic(s) with "
-                "projection assignments)."
+                "✗ taxonomy check cannot run: the deployed engine has no "
+                "/links/drift route (added for nexus-ypori) — deploy an engine "
+                "carrying it and re-run. Unverifiable is not a pass.",
+                err=True,
             )
-            return
+            raise click.exceptions.Exit(2)
+        click.echo(f"✗ FAIL: taxonomy engine check failed: {exc}", err=True)
+        raise click.exceptions.Exit(1)
+    except (httpx.HTTPError, RuntimeError) as exc:
+        # Transport failure (connect/timeout) or an unresolvable endpoint
+        # (ServiceEndpointUnresolvableError, a RuntimeError subclass): no
+        # engine to ask, and there is no other store to read.
         click.echo(
-            f"✗ topic_links drift: {count}/{total} topic(s) have projection "
-            "assignments but no topic_links row."
+            f"✗ taxonomy check cannot run: no engine answered ({exc}). Start "
+            "the service (`nx daemon service start`) and re-run. Unverifiable "
+            "is not a pass.",
+            err=True,
         )
-        for row in (report.get("rows") or [])[:10]:
-            tid = row.get("topic_id")
-            pretty = row.get("label") or f"(unlabelled id={tid})"
-            coll = row.get("collection")
-            scope = f" [{coll}]" if coll else ""
-            click.echo(f"  - topic {tid}: {pretty}{scope}")
-        if count > 10:
-            click.echo(f"  … {count - 10} more")
-        click.echo(
-            "Fix: re-run `nx taxonomy project --backfill --persist` to rebuild "
-            "the materialized view."
-        )
+        raise click.exceptions.Exit(2)
+    except Exception as exc:  # noqa: BLE001 — any other failure is the verdict, never a traceback (critic on 7742b9c05)
+        click.echo(f"✗ FAIL: taxonomy engine check failed: {exc}", err=True)
         raise click.exceptions.Exit(1)
 
-    click.echo(
-        f"Engine check unavailable ({_unreachable}). Reading the frozen SQLite "
-        "migration source instead — downgrade/migration troubleshooting only, "
-        "and NOT a statement about the running system."
-    )
-
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        click.echo("T2 database not found — nothing to check.")
-        return
-
-    # Context manager guards against a raise/early-return leaking the
-    # connection, matching _run_check_plan_library (RDR-176 review M-3).
-    from contextlib import closing, suppress  # noqa: PLC0415 — branch-local; avoids import cost on the non-doctor path
-
-    with closing(_t2_diagnostic_connect(db_path, sqlite3)) as conn:
-        _run_check_taxonomy_body(conn)
-
-
-def _run_check_taxonomy_body(conn: Any) -> None:
-    tables = {
-        r[0]
-        for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
-    }
-    required = {"topic_assignments", "topic_links", "topics"}
-    missing = required - tables
-    if missing:
+    assert report is not None
+    total = int(report.get("projection_total") or 0)
+    count = int(report.get("drift_count") or 0)
+    if not count:
         click.echo(
-            "Taxonomy tables missing: "
-            f"{', '.join(sorted(missing))} — run `nx catalog setup` to initialise."
+            f"✓ topic_links invariant holds ({total} topic(s) with "
+            "projection assignments)."
         )
         return
-
-    # Topics that have projection assignments but no row in topic_links
-    # (neither as source nor target) are drift — but only when a
-    # topic_links pair is structurally possible. A doc_id with exactly
-    # one projection assignment cannot produce a link (a link requires
-    # from + to), so flagging it as drift is a false positive. Same
-    # The co-occurring partner must be NON-projection, which is the exact
-    # opposite of what this comment asserted until nexus-ypori.
-    #
-    # The materializer pairs a projection TARGET with a non-projection
-    # SOURCE — TaxonomyRepository.refreshProjectionLinks:1609-1610 is
-    # ``.and(src.ASSIGNED_BY.ne("projection"))`` under
-    # ``.where(tgt.ASSIGNED_BY.eq("projection"))``, and the SQLite-era
-    # implementation it replaced said the same (catalog_taxonomy.py:1312
-    # @ f24bdb85^). So a centroid partner is precisely what DOES produce a
-    # link, and two projection assignments on one doc produce NONE.
-    #
-    # nexus-346q asserted the inverse in its commit message, in this
-    # comment, and in a test that seeded projection+centroid and asserted
-    # no drift — pinning the bug rather than the behaviour. The guard
-    # therefore demanded the one condition under which the materializer
-    # never emits a link, then reported the absent link as drift: measured
-    # 0 of 50 flagged rows were linkable at all, while the 2 genuinely
-    # drifted topics were suppressed by the same guard.
-    #
-    # The original observation stands and is why a guard exists at all:
-    # a doc_id with exactly one projection assignment cannot produce a
-    # link (a link needs from + to), and 15 of 20 residual rows in the
-    # nexus-346q shakeout were such isolated topics. Only the partner's
-    # required assigned_by was wrong.
-    # The NOT EXISTS form (``tl.from_topic_id = ta.topic_id OR
-    # tl.to_topic_id = ta.topic_id``) defeats SQLite's index planner —
-    # the OR forces a covering scan of topic_links per outer row, which
-    # multiplies with the topic_assignments scan into billions of row
-    # touches on real-size catalogs (~526k × 13k = ~7B comparisons in
-    # one production database, hanging the check past 30s). Pre-build
-    # the linked-topic set with a UNION (uses the topic_links primary
-    # key for both halves) and reduce to a single fast NOT IN.
-    drift_rows = conn.execute(
-        """
-        SELECT DISTINCT ta.topic_id, t.label, t.collection
-          FROM topic_assignments ta
-          LEFT JOIN topics t ON t.id = ta.topic_id
-         WHERE ta.assigned_by = 'projection'
-           AND ta.topic_id NOT IN (
-               SELECT from_topic_id FROM topic_links
-               UNION
-               SELECT to_topic_id   FROM topic_links
-           )
-           AND EXISTS (
-               SELECT 1 FROM topic_assignments ta2
-                WHERE ta2.doc_id      = ta.doc_id
-                  AND ta2.topic_id    != ta.topic_id
-                  AND ta2.assigned_by != 'projection'
-           )
-        """
-    ).fetchall()
-
-    projection_total = conn.execute(
-        "SELECT COUNT(DISTINCT topic_id) FROM topic_assignments "
-        "WHERE assigned_by = 'projection'"
-    ).fetchone()[0]
-
-    if not drift_rows:
-        click.echo(
-            f"  legacy source: topic_links invariant holds ({projection_total} "
-            "topic(s) with projection assignments)."
-        )
-        return
-
-    # A NOTE, not a verdict — no Exit(1). These rows are in the frozen
-    # migration source, so failing on them would block a release on data the
-    # running system does not use.
     click.echo(
-        f"  legacy source: topic_links drift, {len(drift_rows)}/"
-        f"{projection_total} topic(s) with projection assignments but no "
-        "topic_links row."
+        f"✗ topic_links drift: {count}/{total} topic(s) have projection "
+        "assignments but no topic_links row."
     )
-    for topic_id, label, coll in drift_rows[:10]:
-        pretty = label or f"(unlabelled id={topic_id})"
+    for row in (report.get("rows") or [])[:10]:
+        tid = row.get("topic_id")
+        pretty = row.get("label") or f"(unlabelled id={tid})"
+        coll = row.get("collection")
         scope = f" [{coll}]" if coll else ""
-        click.echo(f"    - topic {topic_id}: {pretty}{scope}")
-    if len(drift_rows) > 10:
-        click.echo(f"    … {len(drift_rows) - 10} more")
+        click.echo(f"  - topic {tid}: {pretty}{scope}")
+    if count > 10:
+        click.echo(f"  … {count - 10} more")
     click.echo(
-        "  This is the frozen SQLite migration source, NOT the engine. It is "
-        "reported for downgrade/migration troubleshooting and does not affect "
-        "this check's result."
+        "Fix: re-run `nx taxonomy project --backfill --persist` to rebuild "
+        "the materialized view."
     )
+    raise click.exceptions.Exit(1)
 
 
 def _run_check_quotas(*, json_out: bool = False) -> None:

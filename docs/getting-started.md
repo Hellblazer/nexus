@@ -279,12 +279,13 @@ front:
 nx self install --version 6.18.1  # 1. hop to the last migration-capable release
 nx upgrade                        # 2. migrate there: ChromaDB → Postgres+pgvector
                                   #    (copy-not-move; Chroma left byte-untouched
-                                  #    as the rollback source)
+                                  #    — a relic afterwards, nothing reads it)
 nx self install                   # 3. hop forward to current and converge the rest
 nx upgrade
 ```
 
-Hop 1 is a deliberate downgrade, and under the generation layout that is safe by
+Hop 1 is a deliberate version pin — an older client, on purpose, to run the
+migration it still carries — and under the generation layout that is safe by
 construction: it builds 6.18.1 as a new generation and flips to it, leaving the
 newer tree on disk for hop 3 rather than overwriting anything. Keep the
 `--version` pin — a bare `nx self install` installs the newest release, which is

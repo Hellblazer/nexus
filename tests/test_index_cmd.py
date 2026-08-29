@@ -123,6 +123,89 @@ def test_index_repo_pdf_quality_gate_key_absent_exit_zero(runner, repo_dir, mock
     assert result.exit_code == 0, result.output
 
 
+# ── nexus-7lw6a: taxonomy_assign_batch_failed counted + surfaced ───────────
+
+def test_index_repo_taxonomy_assign_partial_failure_exits_nonzero_with_summary(
+    runner, repo_dir, mock_reg,
+):
+    """A PARTIAL taxonomy-assignment loss (some, not all, batches failed --
+    e.g. an HTTP 500 from the assign endpoint on 2 of 5 batches) must name
+    the failed-batch count AND the affected-chunk count in the summary AND
+    exit non-zero. Policy revised 2026-08-29 under the no-silent-fallback
+    directive (the first cut exited 0 on a partial loss): 1,254 chunks
+    silently missing their topic assignments is a data-correctness event,
+    and an exit-code-only consumer must not read it as success."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={
+            "files_changed": 3,
+            "taxonomy_assign_batches_attempted": 5,
+            "taxonomy_assign_batches_failed": 2,
+            "taxonomy_assign_chunks_failed": 1254,
+        },
+    )
+    assert result.exit_code != 0, result.output
+    assert "2/5 taxonomy-assign batch(es) failed" in result.output
+    assert "1254 chunk(s) affected" in result.output
+    assert "1254 chunk(s) lost their topic assignment" in result.output
+    assert "the index itself completed" in result.output
+
+
+def test_index_repo_taxonomy_assign_total_failure_exits_nonzero(
+    runner, repo_dir, mock_reg,
+):
+    """A TOTAL taxonomy-assignment loss -- every batch attempted this run
+    failed -- is the GH #1432 class and must exit non-zero, naming the
+    count as TOTAL (a partial loss is also non-zero since 2026-08-29; the
+    two messages differ so the operator knows which happened)."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={
+            "files_changed": 3,
+            "taxonomy_assign_batches_attempted": 2,
+            "taxonomy_assign_batches_failed": 2,
+            "taxonomy_assign_chunks_failed": 600,
+        },
+    )
+    assert result.exit_code != 0, result.output
+    assert "all 2 taxonomy-assign batch(es) failed this run" in result.output
+    # The WARNING line (the summary the human/script actually reads) still
+    # printed before the ClickException fired.
+    assert "2/2 taxonomy-assign batch(es) failed" in result.output
+
+
+def test_index_repo_no_taxonomy_assign_failures_no_phantom_summary_line(
+    runner, repo_dir, mock_reg,
+):
+    """A clean run (batches attempted, none failed) must NOT gain a
+    phantom '0 failed' summary line -- non-vacuity: this is the assertion
+    that would catch an unconditional summary line the failure-count
+    assertions above cannot."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={
+            "files_changed": 3,
+            "taxonomy_assign_batches_attempted": 5,
+            "taxonomy_assign_batches_failed": 0,
+            "taxonomy_assign_chunks_failed": 0,
+        },
+    )
+    assert result.exit_code == 0, result.output
+    assert "taxonomy-assign batch(es) failed" not in result.output
+
+
+def test_index_repo_taxonomy_assign_keys_absent_exit_zero(runner, repo_dir, mock_reg):
+    """Backward compat: an older/mocked index_repository return dict with
+    no taxonomy_assign_* keys at all must not be treated as a failure
+    (.get default of 0), matching the pdf_quality_gate_failed precedent."""
+    result, mock_idx = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={"files_changed": 3},
+    )
+    assert result.exit_code == 0, result.output
+    assert "taxonomy-assign batch(es) failed" not in result.output
+
+
 def test_index_repo_skipped_unextractable_files_reported_on_stderr(runner, repo_dir, mock_reg):
     """nexus-deyd5 round 2 (code-review finding): the skip-count note must
     land on STDERR, alongside the WARNING/ERROR log line(s) it points at

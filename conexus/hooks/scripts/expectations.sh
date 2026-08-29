@@ -14,33 +14,39 @@
 # call (never after: a fast-stopping teammate can fire SubagentStop before
 # a post-dispatch write lands).
 #
-# NAME MORPHOLOGY (scenario 27, verified on live sessions): a NAMED agent
-# reaches the hooks with agent_type == <name> and agent_id ==
-# "a<name>-<hash>"; an UNNAMED agent has agent_type == <subagent_type> and
-# agent_id == "a<hash>" (no "a<name>-" prefix). Consequences baked in
-# below:
-#   - The consult rule requires BOTH agent_type == EXPECTed name AND the
-#     "a<name>-" agent_id prefix, so a sync Task whose subagent_type
-#     happens to equal an expected name can never be blocked.
-#   - Only NAMED background dispatches are enforceable. The dispatch
-#     convention therefore requires a name on every background teammate;
-#     an unnamed background dispatch simply falls outside the guard
-#     (fail-open), it does not break anything.
+# PAYLOAD SHAPE (scenario 27, re-measured 2026-08-29 against CC 2.1.251,
+# bead nexus-houpu). EVERY dispatch — named background teammate included —
+# reaches SubagentStart as:
+#   agent_id   == an OPAQUE "a<hex>" handle (e.g. "aeb1c1b56623244ae")
+#   agent_type == the dispatch's subagent_type, VERBATIM
+# The dispatch NAME appears nowhere in the payload, in any field. The
+# earlier "a<name>-<hash>" agent_id encoding is GONE; nothing in this
+# file may key on it, and nothing below does.
 #
-# TYPE KEYING (nexus-qc4p1 / nexus-nu7fo, measured 2026-07-31 against the
-# live Claude Code hook payloads). The morphology above is unreachable in
-# the harness this repo actually runs in: its Agent tool takes NO `name`
-# parameter (tool_input is exactly description / prompt / subagent_type /
-# run_in_background), so every dispatch arrives UNNAMED — agent_id
-# "a<hash>", agent_type == subagent_type — and `recognized` was
-# structurally pinned at 0 across 25 consecutive dispatches. The one
-# value BOTH sides of the ledger can know is the agent TYPE:
+# TYPE KEYING — THE ONLY KEYING (nexus-qc4p1 / nexus-nu7fo, measured
+# 2026-07-31; nexus-houpu, re-measured 2026-08-29). The one value BOTH
+# sides of the ledger can know is the agent TYPE:
 #   PreToolUse(Agent).tool_input.subagent_type == SubagentStart.agent_type
 # (verified identical, same session_id, for general-purpose x2 + Explore
-# in one turn). So EXPECT rows written by the PreToolUse hook
-# (agent-dispatch-expect.sh) are keyed on subagent_type, and the audit
-# surfaces below recognise a START row by EITHER key: the legacy
-# "a<name>-" morphology OR its agent_type matching an EXPECT name.
+# in one turn, and again for a NAMED background dispatch at 2.1.251).
+# So EXPECT rows written by the PreToolUse hook (agent-dispatch-expect.sh)
+# are keyed on subagent_type, and EVERY reader below — the consult rule,
+# the declaration audit, the census — pairs a START row to an EXPECT row
+# by (agent_type, N-of-type credit), with EXPECT rows deduped by their
+# dispatch_id. There is no second key and no morphology fallback.
+#
+# WHY THE MORPHOLOGY BRANCH IS GONE (nexus-houpu). It was already
+# unreachable when nexus-qc4p1 widened these readers: the Agent tool takes
+# NO `name` parameter (tool_input is exactly description / prompt /
+# subagent_type / run_in_background), so `recognized` was structurally
+# pinned at 0 across 25 consecutive dispatches and the type key was added
+# ALONGSIDE it rather than replacing it. CC 2.1.251 removed the encoding
+# outright, so the branch could no longer fire even in principle. Keeping
+# a dead disjunct is not free: it kept three doc blocks and two audit
+# surfaces describing a key that decides nothing, and it made "recognised
+# by morphology" look like a live fallback that could excuse a missing
+# EXPECT row. Deleted, and `recognized` demoted from a GATE to a
+# diagnostic tally on the SUMMARY line.
 #
 # WHY N-OF-TYPE AND NOT AN ORDINAL. Two dispatches of the same
 # subagent_type in one turn are indistinguishable at pairing time, and an
@@ -72,9 +78,10 @@
 # would silently under-count the N-of-type deficit.
 # No JSON: writers are bash one-liners and LLM-authored echos; a malformed
 # LINE costs one entry, a malformed json file would cost the session.
-# Reads are awk exact-field comparisons plus one quoted-literal glob
-# prefix check (the morphology gate — quoting keeps caller metacharacters
-# inert, and the charset gate above it enforces that). No locks:
+# Reads are awk EXACT-FIELD comparisons only — no globs, no regexes over
+# caller-supplied values (the morphology prefix check that was the sole
+# exception is deleted, nexus-houpu), which is what keeps caller
+# metacharacters inert regardless of the charset gate. No locks:
 # single-host, append-only, line-grain, and creation itself is one
 # O_APPEND|O_CREAT open (no check-then-truncate window).
 #
@@ -297,7 +304,11 @@ _expectations_claim_credit() {
 # guard had literally never fired (nexus-hbr4x finding 0); dropping the
 # morphology requirement and keying on agent_type alone is what makes it
 # fire at all. See nexus-rkigh above for how the resulting false-block
-# class (introduced by dropping morphology) is now closed.
+# class (introduced by dropping morphology) is now closed. As of CC
+# 2.1.251 (nexus-houpu) the "a<name>-" encoding does not exist in the
+# payload at all, so this function's keying is not merely the better
+# choice — it is the only one the wire still supports. This function
+# needed no edit for that change; the audit surfaces below did.
 #
 # LOCKING (nexus-bk974, P2 SIGNIFICANT, same critique round): the
 # read-decide-append below is wrapped in the SAME bounded mkdir lockdir
@@ -833,52 +844,67 @@ expectations_already_blocked() {
 # retro audit (RDR-184 .16; query hardened out of markdown after the
 # Phase-2 critique proved the unfiltered version false-flagged every
 # sync dispatch). Prints one "UNDECLARED\t<agent_id>\t<agent_type>" line
-# per NAMED-morphology START row (agent_id == "a<agent_type>-<hash>")
-# that has NO EXPECT row for that name. An EXPECT row of EITHER mode
-# suppresses — a deliberately-declared named-sync dispatch stays
-# audit-clean. Unnamed (sync-shaped) dispatches are never flagged: their
-# START rows lack the morphology, and finding 4 already proves sync
-# dispatches cannot idle-without-report. Missing/unreadable file => no
-# output, exit 0 (fail-open, like every consult surface here).
+# per START row whose agent_type has no unspent EXPECT credit left. An
+# EXPECT row of EITHER mode supplies credit — a deliberately-declared
+# sync dispatch stays audit-clean. Missing/unreadable file => rc 3 (see
+# NO-LEDGER EXIT CODE below).
 #
-# BLIND-SPOT DISCLOSURE (bead nexus-mk3tw): a "prompt-named" dispatch —
-# a unique name embedded in the Agent-tool PROMPT text rather than in an
-# actual name= field the framework threads into the hook payload — never
-# acquires the "a<name>-<hash>" morphology this audit keys on. Its START
-# row arrives with agent_type == the bare subagent_type and agent_id ==
-# "a<hash>" — structurally IDENTICAL to an ordinary anonymous sync
-# dispatch. There is no field in the payload that tells these two apart
-# (scenario 27); the guard cannot recover the orchestrator's intent from
-# data that was never sent. Silently reporting "no UNDECLARED lines" in
-# that case (the pre-mk3tw behavior) reads as "all clear" when it is
-# really "recognised nothing" — confirmed reproduced 2026-07-25,
-# 4-then-6 named background dispatches / 0 EXPECT rows / undeclared=0.
+# EVERY START IS EVALUATED (nexus-houpu, 2026-08-29). There is no longer
+# an unrecognised class that gets a free pass. The previous rule skipped
+# any START that matched neither the "a<name>-" morphology nor an EXPECT
+# name, on the reasoning that flagging it would false-accuse ordinary
+# anonymous SYNC dispatches — true while EXPECT rows were hand-written
+# for named background teammates only. It stopped being true at
+# nexus-qc4p1: agent-dispatch-expect.sh is a PreToolUse(Agent) hook that
+# writes an EXPECT row for EVERY dispatch it sees, sync ones included
+# (mode="sync"), gated only by NX_ORCH_STOP_GUARD — the same gate that
+# controls the START stamp, so the two cannot be asymmetrically off. A
+# START with no EXPECT of its type therefore means exactly one thing: the
+# declaration machinery did not see that dispatch. That is the deficit
+# this audit exists to report, so it is now reported per dispatch instead
+# of being silently dropped.
 #
-# The fix does not (cannot) recover per-dispatch detection. It makes the
-# aggregate honest: every call now ALSO prints one
+# WHAT REPLACED THE MORPHOLOGY BLIND SPOT (bead nexus-mk3tw, superseded
+# here). mk3tw's finding was that a background teammate named only in the
+# PROMPT text never acquired the "a<name>-<hash>" agent_id encoding this
+# audit keyed on, so N such dispatches with 0 EXPECT rows reported
+# "undeclared=0" — a false all-clear (reproduced 2026-07-25, 4-then-6
+# dispatches). Its fix could not recover per-dispatch detection and so
+# settled for an honest aggregate: a SUMMARY line plus a BLINDSPOT hard
+# failure whenever recognized==0. Type keying recovers the per-dispatch
+# detection mk3tw could not, and CC 2.1.251 removed the encoding
+# entirely, so that fixture now produces four UNDECLARED lines and rc 2 —
+# a NAMED deficit, which is strictly more than the aggregate disclosure
+# it replaces. The SUMMARY line is kept verbatim in shape:
 #   SUMMARY\tchecked=<N> recognized=<M> unrecognized=<N-M> undeclared=<K>
-# line, where checked = every unique START'd agent_id regardless of
-# morphology, recognized = the subset with named morphology (the only
-# ones this audit can classify at all), unrecognized = the rest (could
-# be ordinary sync dispatches OR blind-spotted prompt-named background
-# ones — indistinguishable from here, by construction).
+# `checked` is every unique START'd agent_id; `recognized` is now a
+# DIAGNOSTIC TALLY of the STARTs whose type appears among EXPECT names,
+# not a gate on whether a START is evaluated. With the dispatch hook live
+# they coincide; when it is inert, recognized=0 while undeclared=checked,
+# and BOTH readings say the same thing.
 #
-# HARD FAILURE (never a silent pass): when checked > 0 and recognized ==
-# 0 — the guard saw dispatches but its filters matched NONE of them —
-# that is the exact false-clean shape from the bead. The function still
-# prints every line (UNDECLARED rows if any, plus SUMMARY) but returns
-# exit 1 instead of 0, and prints a BLINDSPOT line calling it out by
-# name. A caller that only greps for "UNDECLARED" and ignores the exit
-# code repeats the original mistake; the exit code is the part that
-# cannot be misread as silence.
+# DISPATCHES THE HOOK CANNOT SEE ARE NAMED, NOT EXCUSED. The EXPECT row is
+# written by the PreToolUse hook on the Agent|Task tools only
+# (agent-dispatch-expect.sh), while SubagentStart fires for every
+# subagent. A START that reached SubagentStart by another door — a
+# Workflow-tool agent, an agent a hook itself spawned — has no EXPECT row
+# of its type and IS reported UNDECLARED (rc=2). That is the intent: an
+# audit that silently skipped what it could not pair is the free pass
+# this function used to give, and it hid a half-working dispatch hook.
+# The remedy is at dispatch time — `expectations_expect` by hand, keyed on
+# the subagent type, for exactly the dispatch the hook cannot see (see
+# conexus/skills/orchestration/SKILL.md) — never a skip in the audit.
 #
 # UNDECLARED-DEFICIT EXIT CODE (nexus-suuja): a genuine undeclared>0
 # result was previously rc-invisible — the same exit 0 as a fully clean
 # run — so a caller keying on rc alone (not parsing SUMMARY/UNDECLARED
 # lines) could not tell "nothing to report" from "N recognized
-# dispatches never got a report". This function now exits 2 when
-# undeclared>0, checked strictly AFTER the recognized==0 BLINDSPOT check
-# above, which still takes priority and still exits 1.
+# dispatches never got a report". This function exits 2 when
+# undeclared>0, checked strictly AFTER the BLINDSPOT check below, which
+# still takes priority and still exits 1. (Under the current rule the two
+# are mutually exclusive — undeclared>0 requires at least one START,
+# BLINDSPOT requires none — but the precedence is kept explicit so the rc
+# contract does not depend on that happening to stay true.)
 #
 # NO-LEDGER EXIT CODE (nexus-ahl9v): shakedown falsification F3 proved a
 # MISTYPED session id audits as rc=0 "clean" — indistinguishable from a
@@ -896,23 +922,25 @@ expectations_already_blocked() {
 # actual stop-guard hook's calls, see subagent-stop.sh) are untouched and
 # stay fail-open on a missing file. RC CONTRACT:
 #   0 = clean (no undeclared, not a blindspot, ledger was readable)
-#   1 = recognized==0 blindspot — false-clean, not a pass
+#   1 = BLINDSPOT — the ledger declared dispatches (EXPECT rows exist)
+#       but recorded ZERO STARTs, so the audit walked nothing. An audit
+#       that saw no dispatch at all is not a clean audit (nexus-mk3tw's
+#       "not evidence of compliance" rule, re-aimed at the one shape that
+#       can still produce it now that every START is evaluated: an inert
+#       or unregistered SubagentStart stamp).
 #   2 = undeclared>0 — a real declaration-completeness deficit
 #   3 = no ledger file for this session — nothing was checkable, NOT
 #       evidence of cleanliness (nexus-ahl9v)
-# See AGENTS.md's ledger usage snippet for the caller-facing summary.
+# See AGENTS.md's ledger usage snippet for the caller-facing summary (it
+# states this same contract).
 #
-# WIDENED RECOGNISER (nexus-qc4p1): recognized now means "pairable by
-# EITHER key" — legacy name-morphology, OR the START row's agent_type
-# appearing among EXPECT names. The second key is what the PreToolUse
-# dispatch hook writes, and it is the only one reachable in a harness
-# whose Agent tool has no name parameter (see TYPE KEYING in the header).
-# Matching is N-OF-TYPE and credit-consuming in first-appearance order:
-# three STARTs of a type with two EXPECT rows yield exactly one
-# UNDECLARED line, so a PARTIAL mechanization failure is visible instead
-# of being absorbed by set membership. The BLINDSPOT hard failure is
-# unchanged and still fires when nothing at all was checkable — which is
-# precisely what an uninstalled/inert dispatch hook looks like.
+# N-OF-TYPE MATCHING (nexus-qc4p1, unchanged): credit is consumed in
+# first-appearance order, so three STARTs of a type with two EXPECT rows
+# yield exactly one UNDECLARED line — a PARTIAL mechanization failure
+# stays visible instead of being absorbed by set membership. EXPECT rows
+# are deduped by dispatch_id first (see the awk comment below), because a
+# double registration inflates the credit pool and would MASK exactly the
+# undeclared START this audit is looking for.
 expectations_undeclared() {
     local sid="$1"
     local file=""
@@ -924,14 +952,13 @@ expectations_undeclared() {
         return 3
     fi
     awk -F'\t' '
-        # Recognition is decided in END, not on the START line: an EXPECT
+        # Pairing is decided in END, not on the START line: an EXPECT
         # row for the type may be anywhere in the file, so a single pass
         # cannot classify a START row as it arrives.
         $2 == "START" {
             if (!($3 in allstart)) {
                 allstart[$3] = 1; checked++
                 order[++n] = $3; stype[$3] = $4
-                named[$3] = (index($3, "a" $4 "-") == 1 && length($3) > length($4) + 2)
             }
         }
         # Dedupe by dispatch_id: the writing hook takes a bounded lock, so a
@@ -940,18 +967,19 @@ expectations_undeclared() {
         # a duplicate START row is — it inflates the credit pool and MASKS an
         # undeclared start. The reader can settle it unambiguously, so it does.
         $2 == "EXPECT" && $5 != "" && ($5 in dseen) { next }
-        $2 == "EXPECT" { if ($5 != "") dseen[$5] = 1; e[$3] = 1; credit[$3]++ }
+        $2 == "EXPECT" { if ($5 != "") dseen[$5] = 1; e[$3] = 1; credit[$3]++
+                         expect_total++ }
         END {
             undeclared = 0
             for (i = 1; i <= n; i++) {
                 id = order[i]; t = stype[id]
-                # Recognised by EITHER key: legacy name-morphology, or the
-                # agent TYPE appearing among EXPECT names (the key the
-                # PreToolUse hook writes). Unrecognised ids are neither
-                # counted nor flagged — the pre-existing contract, so an
-                # ordinary undeclared sync dispatch is never false-flagged.
-                if (!named[id] && !(t in e)) continue
-                recognized++
+                # recognized is a TALLY, not a gate (nexus-houpu): it
+                # records how many STARTs had an EXPECT row of their type
+                # anywhere in the ledger, which is what distinguishes an
+                # inert dispatch hook from a partially-missed one. Every
+                # START is evaluated either way — there is no longer an
+                # unrecognised class that skips the credit check.
+                if (t in e) recognized++
                 if (credit[t] > 0) { credit[t]--; continue }   # N-of-type
                 print "UNDECLARED\t" id "\t" t
                 undeclared++
@@ -959,8 +987,12 @@ expectations_undeclared() {
             unrecognized = checked - recognized
             printf "SUMMARY\tchecked=%d recognized=%d unrecognized=%d undeclared=%d\n", \
                 checked, recognized, unrecognized, undeclared
-            if (checked > 0 && recognized == 0) {
-                print "BLINDSPOT\tguard recognised 0 of " checked " dispatched agent(s) by name-morphology or agent-type - undeclared=" undeclared " here is NOT evidence of compliance, it means nothing was checkable"
+            # The one false-clean shape left: the ledger declares dispatches
+            # and records no START at all, so the walk above examined
+            # nothing. Zero UNDECLARED lines there means "nothing was
+            # checkable", never "compliant" (nexus-mk3tw, re-aimed).
+            if (checked == 0 && expect_total > 0) {
+                print "BLINDSPOT\tledger holds " expect_total " EXPECT row(s) and ZERO START rows - the audit walked nothing, so undeclared=" undeclared " is NOT evidence of compliance (check the SubagentStart stamp is registered and NX_ORCH_STOP_GUARD is not off)"
                 exit 1
             }
             if (undeclared > 0) exit 2
@@ -989,32 +1021,33 @@ expectations_undeclared() {
 # REPORTED per round) are kept in ROWS counts. Missing/unreadable file =>
 # no output, exit 0 (fail-open, like every consult surface here).
 #
-# BLIND-SPOT DISCLOSURE + HARD FAILURE (bead nexus-mk3tw — same defect
-# class as expectations_undeclared above, see its header for the full
-# mechanism writeup: a "prompt-named" background dispatch never acquires
-# the "a<name>-<hash>" morphology this census's per-agent view keys on,
-# so it is structurally indistinguishable from an anonymous sync
-# dispatch. Reproduced 2026-07-25: expect=0 start=6, and
-# "undeclared=0"/"no_terminal=0" read as clean while the census had in
-# fact classified NONE of the 6 by name — a guard reporting undeclared=0
-# when it recognised 0 of N dispatches is worse than reporting nothing.
+# EVERY STARTED AGENT IS LISTED (nexus-houpu, 2026-08-29), matching
+# expectations_undeclared's rule above — see its header for why the
+# unrecognised free pass had to go. Two consequences here specifically:
+#   - The per-agent view no longer suppresses a STARTed id that pairs
+#     with no EXPECT row. It prints with its REAL agent_type and a
+#     declared/undeclared verdict, decided by N-OF-TYPE credit in
+#     first-appearance order.
+#   - The companion special case is gone with it: an unrecognised id that
+#     happened to carry a terminal verb used to be re-labelled as if it
+#     had no START row at all (name "-", declaration "no-start"), which
+#     misreported a dispatch the ledger had plainly seen start. "no-start"
+#     now means only what it says — a BLOCKED/REPORTED/WOULDBLOCK row for
+#     an id with no START row (review 21032 Critical 2 / nexus-0s0o1).
+# EXPECTED_NO_START compares COUNTS (a type with 2 EXPECT rows and 1
+# START is still short one), unchanged.
 #
-# checked = every unique agent_id that ever got a START row, regardless
-# of morphology. recognized = the subset the AGENT/CLASSIFIED lines can
-# say anything about at all. When checked > 0 and recognized == 0 this
-# function still prints every line it would normally print, but ALSO
-# exits 1 instead of 0 — the exit code is the part a caller cannot
-# mistake for a clean run even if it only skims stdout.
-#
-# WIDENED RECOGNISER (nexus-qc4p1), matching expectations_undeclared:
-# recognized = named morphology OR agent_type present among EXPECT names,
-# and declared/undeclared is decided by N-OF-TYPE credit in
-# first-appearance order rather than set membership. EXPECTED_NO_START
-# likewise compares COUNTS (a type with 2 EXPECT rows and 1 START is
-# still short one). Agents pairable by neither key stay unlisted — the
-# pre-existing contract that keeps ordinary sync dispatches from
-# false-flagging — but they are still counted in checked, so the
-# BLINDSPOT line and its exit 1 still see them.
+# BLIND-SPOT DISCLOSURE + EXIT CODE (bead nexus-mk3tw, superseded in
+# mechanism, kept in intent — the SAME rule as expectations_undeclared).
+# mk3tw reproduced expect=0 start=6 reading as clean because the per-agent
+# view keyed on an agent_id encoding that no dispatch carried. That
+# fixture now lists all 6 as undeclared (undeclared=6 in CLASSIFIED), and
+# expectations_undeclared exits 2 on it: a deficit, disclosed per dispatch.
+# The BLINDSPOT line stays as the aggregate tally. This function is the
+# REPORT, not the verdict: it exits 1 only for the one shape neither
+# surface can see into — EXPECT rows present and ZERO STARTs walked — and
+# 0 otherwise. It never exits 2; the rc=2 deficit contract belongs to
+# expectations_undeclared alone, so a caller reading both gets one answer.
 expectations_census() {
     local sid="$1"
     [[ -n "$sid" ]] || return 0
@@ -1052,16 +1085,11 @@ expectations_census() {
             if (!($3 in allstart)) {
                 allstart[$3] = 1; checked++
                 stype[$3] = $4; startcount[$4]++
-                named[$3] = (index($3, "a" $4 "-") == 1 && length($3) > length($4) + 2)
                 if (!($3 in listed)) { order[++n] = $3; listed[$3] = 1 }
             }
         }
         $2 == "REPORTED" || $2 == "BLOCKED" || $2 == "WOULDBLOCK" {
             if (!($3 in listed)) { order[++n] = $3; listed[$3] = 1 }
-            # Explicit set, NOT "id in term": term[] is READ in the END
-            # loop, and an awk read auto-vivifies the key, so membership
-            # in term[] is worthless there (the caveat two comments up).
-            hasterm[$3] = 1
         }
         $2 == "REPORTED" {
             # Resolution strength (critique 2026-07-22): a REPORTED row that
@@ -1087,19 +1115,22 @@ expectations_census() {
                 id = order[i]
                 t = (term[id] == "") ? "NO_TERMINAL" : term[id]
                 ty = stype[id]
-                if ((id in allstart) && !named[id] && !(ty in expect)) {
-                    # Started, but pairable by neither key. Listing it would
-                    # false-flag every ordinary sync dispatch as undeclared,
-                    # which is the pre-mk3tw over-firing this audit already
-                    # rejected once. It still counts in BLINDSPOT/checked.
-                    if (!(id in hasterm)) continue
-                    ty = ""
-                }
                 if (ty == "") {
+                    # No START row for this id at all — it reached the
+                    # ledger only through a terminal verb (review 21032
+                    # Critical 2 / nexus-0s0o1). This is the ONLY route to
+                    # "no-start"; an id that did start is never relabelled
+                    # into it (nexus-houpu).
                     print "AGENT\t" id "\t-\t" t "\tno-start"
                     nostart++
                 } else {
-                    recognized++
+                    # recognized is a TALLY of STARTs whose type was
+                    # declared somewhere in the ledger, not a gate on
+                    # listing (nexus-houpu). Every STARTed id is listed and
+                    # gets a verdict; recognized==0 with checked>0 means
+                    # not one dispatch was declared, which is what the
+                    # BLINDSPOT line below reports.
+                    if (ty in expect) recognized++
                     if (credit[ty] > 0) { credit[ty]--; d = "declared" }
                     else               { d = "undeclared"; undeclared++ }
                     print "AGENT\t" id "\t" ty "\t" t "\t" d
@@ -1119,7 +1150,12 @@ expectations_census() {
                 cls["WOULDBLOCK"], cls["NO_TERMINAL"], undeclared, nostart, ens
             unrecognized = checked - recognized
             printf "BLINDSPOT\tchecked=%d recognized=%d unrecognized=%d\n", checked, recognized, unrecognized
-            if (checked > 0 && recognized == 0) exit 1
+            # ONE blind-spot rule, shared with expectations_undeclared: the
+            # ledger declared dispatches and the walk examined no START. An
+            # all-undeclared session is a DEFICIT (undeclared=N above; rc=2
+            # from expectations_undeclared), never a blind spot -- the two
+            # surfaces must not answer differently on the same ledger.
+            if (checked == 0 && rows["EXPECT"] > 0) exit 1
         }
     ' "$file" 2>/dev/null
     return $?

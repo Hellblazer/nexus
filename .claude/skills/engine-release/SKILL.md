@@ -448,24 +448,49 @@ Client version to run it from: the working tree (`HEAD`), the same dev-client ×
 - **`REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) MUST move to this tag** — unconditionally, not "only if the release needs the features". There is ONE engine identity per release: the engine it was built and gated with, on EVERY install path (Hal directive 2026-07-15, after the 14h GH #1402 incident). It is NOT a compatibility minimum. For local-mode installs this constant is the ONLY delivery vehicle — an engine tag that is cut, gated, and never pinned reaches nobody. `PINNED_SERVICE_TAG` is DERIVED from it, so the one edit moves both.
   Sequencing — PAIRED release (Hal directive 2026-08-02, supersedes "bump lands with the NEXT release AFTER deploy"): the bump rides the client release PAIRED with this engine's deploy — same release, not the next one (floor-lag ships a client whose pinned engine lacks the engine halves of its own features: the 7.1.0/v0.1.62 inversion). The deploy relay fires at client-tag push, parallel with the PyPI publish (Step 6), so the engine is live before any user can install the floor-bumped client. GH #1402's lesson stands as: never publish a floor-bumped client with NO deploy armed — the deploy fires at tag push, not "eventually". `scripts/check_engine_release_floor.py` fails the release if a gated tag was never pinned. The client-side `release` skill's Step 0 runs this gate with `--paired-deploy engine-service-vX.Y.Z` (nexus-k1c08) to distinguish the expected pre-deploy cloud-behind state from real drift — this skill only needs to ensure the tag it just cut is what that flag names.
 
-### 8. Record state (T2) — guarded by a live /version read (DO NOT SKIP)
+### 8. Record state (T2) — written by the post-tag VERIFY from conexus's STEP-6 report
+
+```bash
+uv run python scripts/check_engine_release_floor.py --record-deploy-from-gate-report <conexus checkout>/deploy
+```
+
+The bare post-tag VERIFY (the same command the `release` skill's Step 0 tells
+you to re-run WITHOUT `--paired-deploy` once the deploy lands) is where the
+`deployed-engine-version` tracker gets written (nexus-nx3l5, shape c, adopted
+2026-08-28). After the cloud engine verifies current and source ancestry passes,
+it reads conexus's STEP-6 gate reports from that directory (the conexus
+checkout's `deploy/`; gitignored there, so operator-local — set
+`NX_GATE_REPORT_DIR` once on the box and the flag becomes optional; a bare verify
+with NEITHER refuses, exit 3, and the only way to run it without recording is the
+explicit, transcript-visible `--no-record-deploy "<reason>"` opt-out for a box that
+does not hold the reports — the reason is required and printed), selects the
+LATEST report (by `run_timestamp`) that gated the live `release_version`, requires
+it green, and writes the tracker with the report's basename as the `gate`
+provenance. Nothing is written — exit `3`, named reason — when no report gated the
+live version, the latest is red, or the report schema moved. A green report's
+advisories are printed, never inferred empty.
+
+Why this shape: `--gate PASSED` used to be typed. On 2026-08-28 it was typed at
+02:41:10Z with ~10 min of Step 6's gate still running; run 1 came back RED 17 s
+later (T2 `release-7.22.0-ship-2026-08-28`). Before that the step was simply
+skipped (v0.1.17 stale across three deploys; nexus-6igii). The report IS the
+verdict, so the write cannot precede it, and it rides the verify you already run,
+so it cannot be skipped by a verify that ran, and cannot be skipped SILENTLY at
+all: the opt-out is a flag you type. Step 7's ordering still holds: the verify
+finds no green report until conexus's STEP-6 has actually reported. The `commit`
+provenance is resolved from the LIVE version's tag after the probe, never from
+the floor tag (the floor is only a lower bound on what is running).
+
+Manual fallback only (a verify you cannot run from the box that holds the reports):
 
 ```
-nx service record-deploy engine-service-vX.Y.Z --commit <sha> --gate PASSED
+nx service record-deploy engine-service-vX.Y.Z --commit <sha> --gate-report-dir <conexus checkout>/deploy
 ```
 
-This GETs the deployed service's `/version`, ASSERTS `release_version == X.Y.Z`,
-and only then writes the `deployed-engine-version` tracker. The recorded version
-is machine-sourced from the live read — never hand-typed — so it cannot disagree
-with what the cloud is actually running, and running it before the deploy lands
-fails loud instead of recording a wrong fact (nexus-dz6b1 / RDR-179).
-
-**Scope honesty:** this guards the *value* (no wrong version can be recorded); it
-does NOT force the step to run. The original v0.1.17-stale-across-three-deploys
-incident was an OMISSION, not a fat-finger — so this step is still skippable and
-you must not skip it. Closing the omission vector for good (cloud-gate writes the
-tracker on pass) is a tracked follow-up. `--commit`/`--gate` are verbatim
-provenance, not verified against the deploy.
+Same selection, same refusals, same single writer. The verbatim
+`--gate PASSED` form still exists and is exactly what it says: a hand-typed
+claim recorded verbatim — use it only when there is genuinely no report, and
+say so in the ship record.
 
 To read what the cloud is running WITHOUT trusting the tracker, use the live
 handshake directly: `nx service probe` (prints `release_version`). The tracker is

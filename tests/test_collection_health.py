@@ -56,15 +56,6 @@ def _fake_hub_score(col: str) -> float | None:
     return {"code__alpha": 0.05, "docs__beta": 0.20}.get(col)
 
 
-def _fake_chash_coverage(col: str) -> float | None:
-    # code__alpha fully backfilled; docs__beta partial; docs__stale absent.
-    return {
-        "code__alpha": 1.0,
-        "docs__beta": 0.75,
-        "docs__stale": 0.0,
-    }.get(col)
-
-
 def _fake_chunk_count(col: str) -> int:
     """T3-sourced chunk counts (nexus-39zi). The real implementation
     reads ``coll.count()`` on the live ChromaDB collection; tests
@@ -86,7 +77,6 @@ class TestComputeCollectionHealth:
             telemetry_stats_fn=_fake_telemetry_stats,
             projection_rank_fn=_fake_projection_ranks,
             hub_score_fn=_fake_hub_score,
-            chash_coverage_fn=_fake_chash_coverage,
         )
         by_name = {r.name: r for r in rows}
         assert by_name["code__alpha"].chunk_count == 120
@@ -108,7 +98,6 @@ class TestComputeCollectionHealth:
             telemetry_stats_fn=_fake_telemetry_stats,
             projection_rank_fn=_fake_projection_ranks,
             hub_score_fn=_fake_hub_score,
-            chash_coverage_fn=_fake_chash_coverage,
         )
         assert rows[0].zero_hit_rate_30d is None
         assert rows[0].median_query_distance_30d is None
@@ -122,7 +111,6 @@ class TestComputeCollectionHealth:
             telemetry_stats_fn=_fake_telemetry_stats,
             projection_rank_fn=_fake_projection_ranks,
             hub_score_fn=_fake_hub_score,
-            chash_coverage_fn=_fake_chash_coverage,
         )
         assert rows[0].cross_projection_rank is None
 
@@ -135,7 +123,6 @@ class TestComputeCollectionHealth:
             telemetry_stats_fn=_fake_telemetry_stats,
             projection_rank_fn=_fake_projection_ranks,
             hub_score_fn=_fake_hub_score,
-            chash_coverage_fn=_fake_chash_coverage,
         )
         assert rows[0].hub_domination_score is None
 
@@ -168,7 +155,6 @@ class TestChunkCountFromT3:
             projection_rank_fn=_fake_projection_ranks,
             hub_score_fn=_fake_hub_score,
             chunk_count_fn=_t3_chunk_count,
-            chash_coverage_fn=_fake_chash_coverage,
         )
         assert rows[0].chunk_count == 500, (
             f"chunk_count_fn must override catalog-sourced count; "
@@ -195,7 +181,6 @@ class TestChunkCountFromT3:
             projection_rank_fn=_fake_projection_ranks,
             hub_score_fn=_fake_hub_score,
             chunk_count_fn=_t3_has_chunks,
-            chash_coverage_fn=_fake_chash_coverage,
         )
         assert rows[0].chunk_count == 63077
 
@@ -212,7 +197,6 @@ class TestChunkCountFromT3:
             projection_rank_fn=_fake_projection_ranks,
             hub_score_fn=_fake_hub_score,
             # no chunk_count_fn — fall through to catalog
-            chash_coverage_fn=_fake_chash_coverage,
         )
         # _fake_catalog_stats returns chunk_count=120 for code__alpha
         assert rows[0].chunk_count == 120
@@ -231,65 +215,46 @@ class TestChunkCountFromT3:
         )
 
 
-# ── Chash coverage (RDR-087 Phase 4.6) ─────────────────────────────────────
+# ── chash_indexed_ratio deletion (nexus-70vpz / RDR-187) ───────────────────
 
 
-class TestChashCoverage:
-    """Ratio of chash_index rows to T3 chunks, surfaced post-RDR-086."""
+class TestChashIndexedRatioRemoved:
+    """``chash_indexed_ratio`` was deleted outright, not repointed.
 
-    def test_ratio_surfaces_on_rows(self) -> None:
+    RDR-187 dropped ``nexus.chash_index``; the surviving read path
+    (``HttpChashIndex.count_for_collection``) serves from the same
+    chunks tables the T3 chunk count itself reads, so the ratio's
+    numerator and denominator were always identical — a health signal
+    that could never signal (reads 1.000 on every collection,
+    including zombies). Pinned here so the field cannot silently
+    return without a replacement invariant behind it.
+    """
+
+    def test_row_has_no_chash_indexed_ratio_field(self) -> None:
+        import dataclasses
+
+        from nexus.collection_health import CollectionHealthRow
+
+        field_names = {f.name for f in dataclasses.fields(CollectionHealthRow)}
+        assert "chash_indexed_ratio" not in field_names
+
+    def test_compute_collection_health_rejects_chash_coverage_fn(self) -> None:
         from nexus.collection_health import compute_collection_health
 
-        rows = compute_collection_health(
-            ["code__alpha", "docs__beta", "docs__stale"],
-            catalog_stats_fn=_fake_catalog_stats,
-            telemetry_stats_fn=_fake_telemetry_stats,
-            projection_rank_fn=_fake_projection_ranks,
-            hub_score_fn=_fake_hub_score,
-            chash_coverage_fn=_fake_chash_coverage,
-        )
-        by_name = {r.name: r for r in rows}
-        assert by_name["code__alpha"].chash_indexed_ratio == pytest.approx(1.0)
-        assert by_name["docs__beta"].chash_indexed_ratio == pytest.approx(0.75)
-        assert by_name["docs__stale"].chash_indexed_ratio == pytest.approx(0.0)
+        with pytest.raises(TypeError):
+            compute_collection_health(
+                ["code__alpha"],
+                catalog_stats_fn=_fake_catalog_stats,
+                telemetry_stats_fn=_fake_telemetry_stats,
+                projection_rank_fn=_fake_projection_ranks,
+                hub_score_fn=_fake_hub_score,
+                chash_coverage_fn=lambda _col: 1.0,
+            )
 
-    def test_missing_coverage_is_none(self) -> None:
-        from nexus.collection_health import compute_collection_health
-
-        rows = compute_collection_health(
-            ["code__unknown"],
-            catalog_stats_fn=_fake_catalog_stats,
-            telemetry_stats_fn=_fake_telemetry_stats,
-            projection_rank_fn=_fake_projection_ranks,
-            hub_score_fn=_fake_hub_score,
-            chash_coverage_fn=_fake_chash_coverage,
-        )
-        assert rows[0].chash_indexed_ratio is None
-
-    def test_human_output_hints_when_coverage_below_one(self) -> None:
+    def test_json_output_omits_chash_indexed_ratio(self) -> None:
         from nexus.collection_health import (
-            compute_collection_health, format_health_table,
+            compute_collection_health, format_health_json,
         )
-
-        rows = compute_collection_health(
-            ["code__alpha", "docs__beta", "docs__stale"],
-            catalog_stats_fn=_fake_catalog_stats,
-            telemetry_stats_fn=_fake_telemetry_stats,
-            projection_rank_fn=_fake_projection_ranks,
-            hub_score_fn=_fake_hub_score,
-            chash_coverage_fn=_fake_chash_coverage,
-        )
-        out = format_health_table(rows, sort_by="name")
-        # At least one row has ratio < 1.0 → hint line must appear.
-        assert "backfill-hash" in out
-
-    def test_human_output_no_hint_when_all_fully_covered(self) -> None:
-        from nexus.collection_health import (
-            compute_collection_health, format_health_table,
-        )
-
-        def _all_covered(_col: str) -> float:
-            return 1.0
 
         rows = compute_collection_health(
             ["code__alpha"],
@@ -297,9 +262,24 @@ class TestChashCoverage:
             telemetry_stats_fn=_fake_telemetry_stats,
             projection_rank_fn=_fake_projection_ranks,
             hub_score_fn=_fake_hub_score,
-            chash_coverage_fn=_all_covered,
+        )
+        payload = json.loads(format_health_json(rows))
+        assert "chash_indexed_ratio" not in payload["collections"][0]
+
+    def test_table_output_omits_chash_indexed_ratio_and_backfill_hint(self) -> None:
+        from nexus.collection_health import (
+            compute_collection_health, format_health_table,
+        )
+
+        rows = compute_collection_health(
+            ["code__alpha", "docs__beta", "docs__stale"],
+            catalog_stats_fn=_fake_catalog_stats,
+            telemetry_stats_fn=_fake_telemetry_stats,
+            projection_rank_fn=_fake_projection_ranks,
+            hub_score_fn=_fake_hub_score,
         )
         out = format_health_table(rows, sort_by="name")
+        assert "chash_indexed_ratio" not in out
         assert "backfill-hash" not in out
 
 
@@ -317,7 +297,6 @@ class TestFormatters:
             telemetry_stats_fn=_fake_telemetry_stats,
             projection_rank_fn=_fake_projection_ranks,
             hub_score_fn=_fake_hub_score,
-            chash_coverage_fn=_fake_chash_coverage,
         )
 
     def test_human_format_contains_all_columns(self, rows) -> None:

@@ -458,6 +458,40 @@ class CatalogRepositoryTest {
         assertThat(repo.getDocument(TENANT_A, "2.9").get("title")).isEqualTo("Still Guarded");
     }
 
+    /**
+     * nexus-fgxmk: {@code searchDocuments} carries an ORDER CONTRACT (tumbler) and its
+     * matching is broader than a title lookup. Three docs are inserted in the physical
+     * order C, A, B so that a statement with no {@code ORDER BY} — which emits ctid order
+     * on a fresh table — would return 9.3 first and go RED here. All three match
+     * "Paper A" because {@code plainto_tsquery('english', ...)} drops the stopword "A"
+     * and matches on {@code 'paper'} alone: the stopword trap this pins by name, and the
+     * reason an exact title is resolved client-side ({@code find_by_title_exact}).
+     */
+    @Test @Order(134)
+    void document_searchDocuments_orderedByTumbler_andStopwordTitlesMatchSiblings() {
+        repo.upsertOwner(TENANT_A, Map.of(
+            "tumbler_prefix", "9", "name", "fgxmk-papers", "owner_type", "curator"));
+        for (String[] doc : new String[][] {{"9.3", "Paper C"}, {"9.1", "Paper A"}, {"9.2", "Paper B"}}) {
+            repo.upsertDocument(TENANT_A, mapOf(
+                "tumbler", doc[0], "title", doc[1], "content_type", "paper", "corpus", "papers",
+                "physical_collection", "knowledge__fgxmk__voyage-context-3__v1", "chunk_count", 1));
+        }
+
+        var hits = repo.searchDocuments(TENANT_A, "Paper A", null, 50);
+        var tumblers = hits.stream().map(d -> (String) d.get("tumbler")).toList();
+
+        // The tenant is shared across this class, so other "Paper ..." docs match too
+        // (they are part of the point). The owner-9 subsequence pins insertion order
+        // being overridden; the whole list pins the contract (tumbler is a text
+        // column, so the engine's ORDER BY is string order).
+        assertThat(tumblers.stream().filter(t -> t.startsWith("9.")).toList())
+            .as("stopword 'A' drops, so every 'Paper ...' matches; order is by tumbler, not insertion")
+            .containsExactly("9.1", "9.2", "9.3");
+        assertThat(tumblers).as("searchDocuments order contract: ORDER BY tumbler").isSorted();
+        // Exact resolution is the client's job; the engine's contract is order + breadth.
+        assertThat(hits.stream().filter(d -> "Paper A".equals(d.get("title"))).count()).isEqualTo(1);
+    }
+
     @Test @Order(135)
     void document_updateDocumentsMany_batchesHeterogeneousUpdatesInOneRoundTrip() {
         // nexus-xedhp: replaces N serial writer.update() calls with one

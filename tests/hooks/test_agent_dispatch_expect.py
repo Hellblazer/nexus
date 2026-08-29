@@ -322,14 +322,25 @@ class TestPairsWithSubagentStart:
 
     def test_undispatched_start_is_still_flagged(self, tmp_path: Path) -> None:
         """Non-vacuity: with the dispatch hook NOT run, the same start row
-        reads exactly as the five broken sessions did."""
+        is NAMED as undeclared — per dispatch, by type (nexus-houpu) — not
+        skipped as unrecognisable the way the five broken sessions were.
+        The census is the report (rc=0, undeclared=1 in CLASSIFIED); the
+        rc=2 verdict on the same ledger comes from expectations_undeclared."""
         _run(
             _subagent_start("a29d3cfdd53ae3e98", "conexus:code-review-expert"),
             tmp_path, script=STAMP,
         )
         census = _lib_call("expectations_census", tmp_path, SESSION)
-        assert census.returncode == 1, "a 0-of-N session must hard-fail"
+        assert census.returncode == 0, census.stdout
+        assert (
+            "AGENT\ta29d3cfdd53ae3e98\tconexus:code-review-expert\tNO_TERMINAL\tundeclared"
+            in census.stdout
+        ), census.stdout
+        assert "undeclared=1" in census.stdout
         assert "BLINDSPOT\tchecked=1 recognized=0 unrecognized=1" in census.stdout
+        undeclared = _lib_call("expectations_undeclared", tmp_path, SESSION)
+        assert undeclared.returncode == 2, "a 0-of-N session is a deficit, rc=2"
+        assert "UNDECLARED\ta29d3cfdd53ae3e98\tconexus:code-review-expert" in undeclared.stdout
 
 
 class TestSameTypeDispatchedTwice:

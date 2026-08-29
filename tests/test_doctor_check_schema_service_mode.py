@@ -27,7 +27,7 @@ def _fp(**kwargs) -> T2SchemaFingerprint:
     return T2SchemaFingerprint(**defaults)
 
 
-def _run() -> tuple[str, str]:
+def _run(*, strict: bool = False) -> tuple[str, str]:
     """Run ``_run_check_schema`` under a CliRunner isolation context so
     ``click.echo(..., err=True)`` is captured reliably — mirrors the
     established pattern for ``_run_check_*`` functions that can raise
@@ -36,7 +36,7 @@ def _run() -> tuple[str, str]:
     with runner.isolation() as (out, err, _):
         exit_code: int | None = None
         try:
-            _run_check_schema()
+            _run_check_schema(strict=strict)
         except click.exceptions.Exit as exc:
             exit_code = exc.exit_code
         printed = out.getvalue().decode() + err.getvalue().decode()
@@ -100,3 +100,47 @@ def test_managed_endpoint_omits_fields_is_honest_na_exits_0():
     assert exit_code is None
     assert "N/A" in printed
     assert "not exposed" in printed
+
+
+def test_healthy_engine_still_passes_in_strict_mode():
+    """Strict mode changes only the N/A outcome — a genuinely healthy engine
+    must still exit 0 with --fail-on-violation set."""
+    with patch(
+        "nexus.health.probe_t2_schema_fingerprint",
+        return_value=_fp(latest_id="vectors-014", changeset_count=209),
+    ):
+        printed, exit_code = _run(strict=True)
+    assert exit_code is None
+    assert "OK" in printed
+
+
+def test_managed_endpoint_na_is_fatal_in_strict_mode():
+    """nexus-b1v9z part B: interactive ``nx doctor --check-schema`` must
+    keep vl8lk's honest, non-fatal N/A (the test above pins that). But a
+    RELEASE-GATE caller (release-sandbox.sh) cannot tell an honest N/A
+    apart from a real pass by reading rc alone -- the whole point of
+    running the check there is to prove the substrate is present and
+    correct. --fail-on-violation (the existing doctor.py strict-mode
+    convention, previously scoped to --check-storage-boundary) makes N/A
+    a hard failure for that caller, without touching the default
+    interactive behavior pinned above."""
+    with patch(
+        "nexus.health.probe_t2_schema_fingerprint",
+        return_value=T2SchemaFingerprint(reachable=True, reported=False),
+    ):
+        printed, exit_code = _run(strict=True)
+    assert exit_code == 1
+    assert "N/A" in printed
+    assert "strict" in printed.lower() or "gate" in printed.lower()
+
+
+def test_schema_error_still_exits_1_in_strict_mode():
+    """A real schema_error is already a failure independent of strict
+    mode -- strict must not change or duplicate that outcome."""
+    with patch(
+        "nexus.health.probe_t2_schema_fingerprint",
+        return_value=_fp(schema_error="databasechangelog unreadable"),
+    ):
+        printed, exit_code = _run(strict=True)
+    assert exit_code == 1
+    assert "databasechangelog unreadable" in printed

@@ -18,6 +18,7 @@ Interface parity (bead nexus-gmiaf.15, RDR-152 P2.5):
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from typing import Any
 import httpx
 import structlog
 
+from nexus.db.limits import MAX_QUERY_RESULTS
 from nexus.db.t2.records import AspectRecord, _safe_json_dict, _safe_json_list
 
 _log = structlog.get_logger(__name__)
@@ -225,6 +227,53 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             params["limit"] = limit
         rows: list[dict] = self._get("/list_by_collection", params)
         return [_body_to_record(r) for r in rows]
+
+    def list_without_catalog_document(
+        self, limit: int | None = None, offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Aspect rows no live catalog document claims (nexus-mlu3k, read-only).
+
+        ``GET /v1/aspects/list_without_catalog_document``: aspects-004's
+        attribution predicate, negated engine-side — ``doc_id IS NULL`` and no
+        same-tenant, non-alias, non-tombstoned catalog document with a
+        byte-equal ``source_uri``. Each row is a plain dict (``collection``,
+        ``source_path``, ``source_uri``, ``extracted_at``, ``model_version``,
+        ``extractor_name``, ``confidence``, ``tombstoned_match``) rather than
+        an :class:`AspectRecord`, because the census cares about identity and
+        era, not the extracted fields. Ordered by ``source_uri`` then
+        ``collection``. ONE PAGE: the engine clamps *limit* to
+        ``AspectRepository.MAX_PAGE_ROWS`` (300; ``None``/0 = one full page,
+        never everything), so walk with *offset* or use
+        :meth:`iter_without_catalog_document`. An engine without the route
+        404s — the caller reports that, never an empty census.
+        """
+        params: dict[str, Any] = {"offset": offset}
+        if limit is not None:
+            params["limit"] = limit
+        rows: list[dict[str, Any]] = self._get("/list_without_catalog_document", params)
+        return list(rows or [])
+
+    def iter_without_catalog_document(
+        self, max_rows: int | None = None, page_size: int = MAX_QUERY_RESULTS,
+    ) -> Iterator[dict[str, Any]]:
+        """Page through :meth:`list_without_catalog_document` until a short page.
+
+        *max_rows* caps the total (``None`` = all); *page_size* is the per-call
+        ``limit`` (defaults to the ``MAX_QUERY_RESULTS`` ceiling the engine
+        clamps to, so a full page is never silently a truncated one).
+        """
+        if page_size <= 0:
+            raise ValueError(f"page_size must be positive, got {page_size}")
+        offset = 0
+        yielded = 0
+        while max_rows is None or yielded < max_rows:
+            want = page_size if max_rows is None else min(page_size, max_rows - yielded)
+            page = self.list_without_catalog_document(limit=want, offset=offset)
+            yield from page
+            yielded += len(page)
+            offset += len(page)
+            if len(page) < want:
+                return
 
     def delete(self, collection: str, source_path: str) -> int:
         """Drop the row at (collection, source_path). Returns deleted count."""

@@ -20,24 +20,17 @@ on real installs and must not be mistaken for either.
 """
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
-import pytest
 
 
-def _make_catalog_db(path: Path, *, documents: int = 0, links: int = 0) -> None:
-    """A minimally realistic legacy catalog file."""
+def _touch_relic(path: Path, size: int = 4096) -> Path:
+    """A leftover pre-PG ``.catalog.db``. Nothing parses it any more (2026-08-29:
+    there is no path back to that era), so its content is arbitrary bytes."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
-    conn.execute("CREATE TABLE documents (tumbler TEXT PRIMARY KEY, title TEXT)")
-    conn.execute("CREATE TABLE links (id INTEGER PRIMARY KEY, from_t TEXT, to_t TEXT)")
-    for i in range(documents):
-        conn.execute("INSERT INTO documents VALUES (?, ?)", (f"1.1.{i}", f"doc{i}"))
-    for i in range(links):
-        conn.execute("INSERT INTO links VALUES (?, ?, ?)", (i, "1.1.0", "1.1.1"))
-    conn.commit()
-    conn.close()
+    path.write_bytes(b"x" * size)
+    return path
+
 
 
 class TestCatalogLegacyFileCheck:
@@ -47,37 +40,42 @@ class TestCatalogLegacyFileCheck:
 
         assert _check_catalog_legacy_file(config_dir=tmp_path) == []
 
-    def test_populated_file_is_flagged_frozen_with_its_counts(
+    def test_populated_file_is_named_as_a_relic_without_counts(
         self, tmp_path: Path,
     ) -> None:
-        """Steve's shape. The row must carry the counts, because the whole
-        failure was a human unable to tell which store was authoritative."""
+        """Steve's shape, revised 2026-08-29: the row used to carry row counts
+        read from the file so a human could tell which store was
+        authoritative. Nothing reads the file any more (there is no path back
+        to the Chroma/SQLite era), so the row names it as a relic with its
+        size and mtime, says Postgres is authoritative, and says to delete it."""
         from nexus.health import _check_catalog_legacy_file
 
-        _make_catalog_db(tmp_path / "catalog" / ".catalog.db", documents=532, links=13)
+        _touch_relic(tmp_path / "catalog" / ".catalog.db", size=155648)
         results = _check_catalog_legacy_file(config_dir=tmp_path)
 
         assert len(results) == 1
         r = results[0]
         assert not r.ok            # visible, not buried in the green
-        assert not r.fatal         # an orphaned source is expected, not broken
-        assert "frozen" in r.detail.lower()
-        assert "532" in r.detail
-        assert "13" in r.detail
-        # The load-bearing instruction: do not restore from it.
+        assert not r.fatal         # a relic is expected, not broken
+        detail = r.detail.lower()
+        assert "relic" in detail
+        assert "no path back" in detail
+        assert "postgres" in detail
+        assert "155648" in r.detail
+        assert "document rows" not in detail   # no probe, no counts
+        assert any("delete" in s.lower() for s in r.fix_suggestions)
         assert any("restore" in s.lower() for s in r.fix_suggestions)
 
     def test_empty_but_present_file_is_still_flagged(self, tmp_path: Path) -> None:
-        """The dev-box shape. An empty legacy file must NOT read as "nothing
-        to see" — a restore from it succeeds and silently yields no catalog."""
+        """The dev-box shape. An empty legacy file is still named — it is
+        still a relic on disk, and the operator should know it is dead."""
         from nexus.health import _check_catalog_legacy_file
 
-        _make_catalog_db(tmp_path / "catalog" / ".catalog.db", documents=0, links=0)
+        _touch_relic(tmp_path / "catalog" / ".catalog.db", size=1)
         results = _check_catalog_legacy_file(config_dir=tmp_path)
 
         assert len(results) == 1
-        assert "frozen" in results[0].detail.lower()
-        assert "0 document" in results[0].detail
+        assert "relic" in results[0].detail.lower()
 
     def test_zero_byte_stray_is_named_separately_not_as_a_catalog(
         self, tmp_path: Path,
@@ -107,12 +105,12 @@ class TestCatalogLegacyFileCheck:
 
         results = _check_catalog_legacy_file(config_dir=tmp_path)
         assert len(results) == 1
-        assert "frozen" in results[0].detail.lower()
+        assert "relic" in results[0].detail.lower()
 
     def test_both_files_present_yields_one_row_each(self, tmp_path: Path) -> None:
         from nexus.health import _check_catalog_legacy_file
 
-        _make_catalog_db(tmp_path / "catalog" / ".catalog.db", documents=5)
+        _touch_relic(tmp_path / "catalog" / ".catalog.db")
         (tmp_path / "catalog.db").write_bytes(b"")
         results = _check_catalog_legacy_file(config_dir=tmp_path)
         assert len(results) == 2
@@ -130,25 +128,18 @@ class TestCatalogLegacyFileCheck:
         )
 
 
-@pytest.mark.parametrize("docs,links", [(532, 13), (0, 0), (17829, 1779)])
-def test_states_the_disclaimer_at_every_population(
-    tmp_path: Path, docs: int, links: int,
-) -> None:
-    """Across every population — including one large enough to look like a
-    real catalog — the row must positively state that this file is frozen and
-    that Postgres is authoritative.
+def test_states_the_disclaimer(tmp_path: Path) -> None:
+    """The row must positively state that the file is a relic nothing reads,
+    that there is no path back to it, and that Postgres is authoritative.
 
-    Originally written as a FORBIDDEN-substring check ("live mirror",
-    "authoritative" must not appear). That was wrong: those words appear
-    legitimately when CONTRASTING the two stores ("not a live mirror", "the
-    authoritative catalog is in Postgres"), so the check failed correct
-    copy. Asserting the disclaimer positively pins the property that actually
-    matters and cannot be satisfied by silence.
+    Formerly parametrised over populations read from the file; the probe is
+    gone (2026-08-29), so there is one shape to pin.
     """
     from nexus.health import _check_catalog_legacy_file
 
-    _make_catalog_db(tmp_path / "catalog" / ".catalog.db", documents=docs, links=links)
+    _touch_relic(tmp_path / "catalog" / ".catalog.db")
     detail = _check_catalog_legacy_file(config_dir=tmp_path)[0].detail.lower()
-    assert "frozen" in detail
-    assert "not a live mirror" in detail
+    assert "relic" in detail
+    assert "nothing reads it" in detail
+    assert "no path back" in detail
     assert "postgres" in detail

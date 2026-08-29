@@ -52,8 +52,9 @@ def catalog(tmp_path, monkeypatch):
                  content_type="paper", physical_collection="knowledge__transformers", chunk_count=30, author="Vaswani")
     cat.register(repo_owner, "RDR-052: Catalog-First Query Routing",
                  content_type="rdr", physical_collection="rdr__nexus", chunk_count=8, author="hal")
-    fagin_t = cat.find("Schema Mappings")[0].tumbler
-    vaswani_t = cat.find("Attention")[0].tumbler
+    # nexus-fgxmk: exact titles, never find()[0] — "Mappings" matches two seeds.
+    fagin_t = cat.find_by_title_exact("Schema Mappings and Data Exchange")[0].tumbler
+    vaswani_t = cat.find_by_title_exact("Attention Is All You Need")[0].tumbler
     cat.link(fagin_t, vaswani_t, "cites", created_by="test")
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
     return cat

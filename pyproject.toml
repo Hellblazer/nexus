@@ -12,7 +12,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "7.22.0"
+version = "7.23.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -233,6 +233,7 @@ markers = [
     "needs_stamped_jar: integration test that constructs a vector client, so its service jar must carry a release_version (build with scripts/build-gate-jar.sh) — nexus-ao29z",
     "lived_in: integration test that dispatches real claude -p or requires seeded lived-in corpora (deselect with '-m \"integration and not lived_in\"')",
     "cloud_mode: integration test that needs the SERVICE embedding voyage-* collections, i.e. cloud mode. Incompatible with a local-service install, which RDR-160 pins to bge-768 and which serves one embedding mode at a time (deselect with '-m \"integration and not cloud_mode\"')",
+    "real_managed_default: opt OUT of the unit suite's black-holed default managed endpoint (nexus-d5aye) — for tests that assert DEFAULT_MANAGED_SERVICE_URL's own value; they must still not reach the network",
     "lint: repo-structure/meta lint tests (AST-scan the whole src tree, walk conexus/ agent-skill-command markdown, RDR frontmatter, marker-selection coverage) rather than exercising src behavior. Excluded from default addopts; runs in the dedicated CI lint leg — see .github/workflows/ci.yml's 'pytest (lint markers)' job (test-suite-compression P0, nexus-test-cleanup 2026-08-05).",
     "scenario: cross-verb CLI journey against the real per-process engine substrate (tests/conftest.py::t2_service_env) — observes a write through a DIFFERENT verb/store handle than the one that made it. Runs in the DEFAULT loop (deliberately NOT added to addopts' deselection) — see tests/test_scenario_journeys.py and the pytest_sessionfinish non-vacuity guard in tests/conftest.py (test-suite-compression P2-reduced, nexus-test-cleanup 2026-08-05).",
     "mandatory_regression_pin: a release/CI-gate test (nexus-moht0 vacuous-gate class) that MUST exercise a real external dependency (live git tags, an authenticated network call) rather than a mock, per its bead's own 'measure the detector against a deliberately broken fix' acceptance criterion. Always ALSO carries `integration` (excluded from default addopts, since it needs an environment the unit `test` job deliberately does not provide — full git history / GITHUB_TOKEN). A skip here must never read as a pass — see the pytest_sessionfinish non-vacuity guard in tests/conftest.py, NX_MANDATORY_PIN_SKIP_BUDGET.",

@@ -101,8 +101,8 @@ BOTH local and managed-cloud modes. `make_t3()` returns an
 (`storage_service_addr.<uid>`). Start it via `nx daemon service start`. The
 older ChromaDB serving path (`nx daemon t3`) is GONE — deleted at
 [RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md) P4b (`nx daemon` has no
-t3 subcommand; frozen Chroma directories on disk remain rollback artifacts
-only). T2 domain stores serve through the same service
+t3 subcommand; frozen Chroma directories left on disk are relics — nothing
+reads them and there is no path back to that era; delete them when convenient). T2 domain stores serve through the same service
 backend ([RDR-152](rdr/rdr-152-postgres-java-storage-service.md)); the SQLite + FTS5 substrate ([RDR-120](rdr/rdr-120-storage-substrate-split.md)) is
 deleted (RDR-158 P4) and its `NX_STORAGE_BACKEND=sqlite` opt-out hard-errors (P3).
 
@@ -965,8 +965,10 @@ is locked` daemon incidents):
   --check-storage-boundary`) hard-fails any raw `sqlite3.connect` or
   direct `T2Database(...)` construction outside its explicit named
   allowlists. The per-line `epsilon-allow` escape token was RETIRED at
-  RDR-186 P4 (census-to-zero): surviving sites — the three read-only
-  frozen-migration-source diagnostics (`SQLITE_CONNECT_ALLOWLIST`) and
+  RDR-186 P4 (census-to-zero): surviving sites — NO `sqlite3.connect`
+  at all (`SQLITE_CONNECT_ALLOWLIST` is empty since 2026-08-29: the two
+  frozen-source diagnostics went with their downgrade rationale, because
+  there is no path back to the Chroma/SQLite era) and
   the documented-irreducible direct constructions
   (`T2DATABASE_CONSTRUCTION_ALLOWLIST`) — are enumerated per file with
   exact counts in `storage_boundary_lint.py`; a new site is a hard
@@ -1031,9 +1033,10 @@ is locked` daemon incidents):
 the client-side T2 migration chain (`src/nexus/db/migrations.py`: the
 `MIGRATIONS` / `T3_UPGRADES` registries, `apply_pending`,
 `T2Database.bootstrap_schema`, the migration flock) is deleted. Schema is
-engine-owned via Liquibase in every mode; the local `.db` files are a FROZEN
-migration source ([RDR-176](rdr/rdr-176-survivable-managed-migration-readiness.md) Gap 2)
-that nothing migrates or re-stamps. `T2Database.__init__()` constructs the
+engine-owned via Liquibase in every mode; any local `.db` file left over
+from the pre-PG era is a relic that nothing reads, migrates, re-stamps, or
+probes ([RDR-176](rdr/rdr-176-survivable-managed-migration-readiness.md) Gap 2's
+downgrade rationale was retired 2026-08-29 — there is no path back). `T2Database.__init__()` constructs the
 domain stores (all HTTP clients) and runs no schema work; its
 `run_migrations` parameter is retained-and-ignored for signature stability.
 Installs still carrying pre-PG local data use the pinned last

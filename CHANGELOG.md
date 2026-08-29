@@ -6,6 +6,198 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.23.0] - 2026-08-29
+
+Paired release with `engine-service-v0.1.89` (tagged on `55be868db`;
+`REQUIRED_ENGINE_VERSION` bumped in this release, deploy fires at the
+client-tag push). The engine tag carries no Liquibase changeset: the
+engine half of this release is `GET /v1/catalog/search` ordering by tumbler
+(nexus-fgxmk), the read-only `GET /v1/aspects/list_without_catalog_document`
+census route (nexus-mlu3k), the manifest-drop sweep counting tombstoned
+referrers (nexus-0cwre), and the U+0000 literal fix (nexus-eeuyg).
+
+Plugin surface that becomes live with this pin (from `conexus/PENDING_RELEASE.md`):
+the RDR-184 ledger audits re-keyed for the CC 2.1.251 SubagentStart payload
+(`conexus/hooks/scripts/expectations.sh`, nexus-houpu) and the matching
+runbook text in the orchestration skill and the continuation command.
+
+### Fixed
+
+- **`nx doctor` and the uv-takeover repair no longer treat uv's
+  `~/.local/bin/python3.12` interpreter link as a reclaimed nexus shim**
+  (GH #1487, nexus-50hm9). The owned shim set is now what the installed
+  `conexus` distribution DECLARES — the generation's own interpreter is
+  asked, the same query the installer runs — never a listing of
+  `<current>/bin`, whose versioned interpreter shares its name with the
+  link `uv python install` leaves in the shared bin dir. Doctor's
+  "Generation layout" row stays green on such a box; `nx upgrade`'s
+  `[uv-takeover]` precondition and `nx self install` never name it and never
+  offer to rewrite it. A generation that cannot answer the query makes doctor
+  WARN ("could not ask … which console scripts it declares") and leaves the
+  repair's shims untouched with a printed line — never a green over an owned
+  set derived by guessing.
+- **Ghost documents are cleaned up by the production delete paths**
+  (nexus-sz89e, verified then fixed). `store_delete` / `nx store delete` /
+  `HttpVectorClient.expire` all pass a real collection, and the nexus-c53hy
+  mismatch guard compared it to a ghost's blank `physical_collection` and
+  skipped the cleanup every time — the nexus-d9fwj retraction fix beneath
+  it was unreachable from production. A blank collection now has nothing to
+  mismatch; a document that names a different collection is still refused.
+- **The unit suite cannot dial the live managed service** (nexus-d5aye).
+  An autouse fixture points `DEFAULT_MANAGED_SERVICE_URL` at a loopback
+  port nothing listens on, so a CliRunner-invoked command that reaches an
+  unpatched `probe_managed_service()` with no pinned endpoint (the pin-off
+  `NX_TEST_T2_SUBSTRATE=none` runs, or a test that clears `NX_SERVICE_URL`)
+  fails fast naming `127.0.0.1:9` instead of probing production;
+  `@pytest.mark.real_managed_default` opts out for tests that assert the
+  constant's own value.
+- **Gates restore `release.properties` bytes, never `git checkout` it to
+  HEAD** (nexus-iws18). `tests/e2e/local-service-gate.sh` (both restore
+  sites), `tests/e2e/migration-rehearsal/run.sh` (`_guided_restore`) and
+  `tests/e2e/published-client-write-gate.sh` (cleanup) now snapshot the
+  file at start and put those bytes back on exit, so a gate run no longer
+  destroys an uncommitted edit to that file. Pinned by
+  `tests/test_gate_release_props_restore_lint.py`.
+- **`run.sh --shakeout` refuses `--no-build`** like every other native
+  leg (nexus-mbeke): the pre-tag candidate gate can no longer be satisfied
+  by a stale binary. Pinned by
+  `tests/test_rehearsal_native_legs_refuse_no_build.py` across the live
+  native legs.
+- **Engine sources are text again** (nexus-eeuyg): `AspectRepository.java`
+  and `PlanRepository.java` each embedded a raw NUL byte inside a
+  string-literal map key, so `file(1)` called them `data` and `grep -I`
+  zero-hit every audit over them. Both now use the Java unicode escape for
+  U+0000 (identical runtime bytes); `tests/test_java_sources_are_text.py`
+  scans every Java source for raw NULs.
+- **Engine: the manifest-drop chunk sweep honours tombstoned referrers
+  (Tier 1)** (nexus-0cwre). `sweepChunksQuery`'s shared-chash union guard
+  carried `DELETED_AT IS NULL`, so a soft-deleted document's manifest row
+  did not count as a reference. Measured: the sweep then tried to delete
+  the chunk and failed on `fk_catalog_chunks_chunk`, ending every such
+  write with `errored=true, reason=sweep_failed` and the data saved only
+  by the constraint. The guard now matches `PgVectorRepository#delete`'s
+  anti-join and `gc_expire_quarantine`: a tombstoned owner still protects
+  until `purge_trash` reaps both together. The notes guard keeps its live
+  filter on purpose (a manifest-less tombstoned note has no row for
+  `purge_trash` to reap with; that is the Tier-2 side, unchanged).
+- **`nx doctor` verdict lines stop contradicting their own block**
+  (nexus-eg5tw): the plan-library check now says "All checks passed, with
+  N warning(s)." when it emitted a WARN, instead of an unqualified pass on
+  the next line; rc is unchanged (a WARN alone never flips it).
+- **`nx doctor`'s aspect-queue check signals failure like its siblings**
+  (nexus-fylxo): a failed-row backlog now emits `✗ FAIL: N failed
+  aspect-extraction row(s)...` and exits 1 on the standalone
+  `--check-aspect-queue` (which already propagated its rc) instead of a
+  purely descriptive count.
+- **`nx doctor --check-taxonomy` fails loud on an engine error; `--check-
+  schema --fail-on-violation` makes the honest N/A fatal** (nexus-b1v9z).
+  A genuine engine-side failure (an HTTP 500) is now exit 1 rather than a
+  silent fall-through to the RDR-176 SQLite census (kept, on purpose, for
+  the no-engine troubleshooting case it was built for). `--check-schema`
+  keeps its intentional N/A-exit-0 (nexus-vl8lk) interactively; both
+  `release-sandbox.sh` call sites pass `--fail-on-violation`, where an
+  N/A must not read as a pass.
+- **Catalog `find()` has an order contract and an exact-title sibling**
+  (nexus-fgxmk). The engine's `/search` had no `ORDER BY`, so
+  `find(title)[0]` was heap placement (measured reversing on a churned
+  database); it now orders by tumbler as text (string order — stable, not
+  numeric, not relevance). Because the English tsquery drops
+  stopwords, `find("Paper A")` legitimately matches "Paper B" too, so
+  `HttpCatalogClient.find_by_title_exact(title)` is the promoted
+  resolution entry point (the idiom two test files had grown locally);
+  the three latent `find()[0]` sites now use it, and the stopword case is
+  pinned on both sides of the wire.
+- **Ghost-document manifest retraction no longer aborts catalog cleanup**
+  (nexus-d9fwj). `store_hook._retract_manifest_rows_for_chash` guards a
+  blank `physical_collection` (a ghost/sourceless document): it falls back
+  to the caller's expected collection, else skips the retraction with a
+  structured warning, so `delete_document` and the reap tombstone run
+  instead of dying on the GATE-2 blank-collection `ValueError`. Scope
+  caveat: the three production callers all pass a real
+  `expected_collection`, and the pre-existing nexus-c53hy mismatch guard
+  short-circuits a ghost (blank collection) BEFORE this retraction is
+  reached, so today the fix is exercised only by the
+  `expected_collection=None` calling shape; whether that guard should
+  admit ghosts is nexus-sz89e.
+- **`nx index` counts taxonomy-assign batch failures and says so**
+  (nexus-7lw6a). `taxonomy_assign_batch_failed` (an HTTP 500 from the
+  assign endpoint) was logged and then forgotten; a run that lost 1,254
+  chunks' topic assignments reported `Done.` and exit 0. The run summary
+  now carries `Warning: N/M taxonomy-assign batch(es) failed (K chunk(s)
+  affected)` in the same shape as the flush-failure line, with no phantom
+  line on a clean run, and the run exits non-zero on ANY lost assignment
+  (a data-correctness event an exit-code-only consumer must not read as
+  success; total loss is named as such).
+- **`nx index` catalog-hook progress is TTY-gated** (nexus-c14zi). The
+  `\r` repaint writes are routed through the phase channel when stderr
+  is not a TTY, so a redirected log gets discrete lines instead of
+  `Catalog: linking ...  Catalog: housekeeping...` mashed together with a
+  structlog event on the end.
+
+### Removed
+
+- **Every read of the frozen pre-PG SQLite files** (Hal, 2026-08-29:
+  "there is no path back to chromadb sqlite"). `nx doctor
+  --check-taxonomy`'s SQLite census fallback and the legacy `.catalog.db`
+  row-count probe were the last two `sqlite3.connect` sites in `src/`,
+  kept under RDR-176 Gap 2's downgrade rationale; that rationale is
+  retired with them and `SQLITE_CONNECT_ALLOWLIST` is empty. The doctor
+  rows for a leftover `memory.db` / `.catalog.db` now name them as relics
+  to delete. `--check-taxonomy` is engine-only: exit 2 when no engine
+  answers or the route is missing, exit 1 on an engine error or drift.
+  The vestigial `sqlite3` imports in `retry.py` (the Chroma "database is
+  locked" retry leg), `hooks.py`, `collection_audit.py` and
+  `db/t2/__init__.py` are gone; `src/nexus` imports `sqlite3` nowhere.
+- **`chash_indexed_ratio` (`nx collection health`) and the identical
+  `chash_index` coverage section (`nx collection audit`)** (nexus-70vpz):
+  both compared a count served from the chunks tables to the chunks
+  tables and read 1.000 on every collection, zombies included, since
+  RDR-187 dropped `chash_index`. A health signal that cannot signal is
+  deleted, not repointed. `HttpChashIndex.count_for_collection` now has no
+  application caller (kept; contract tests still exercise it).
+
+### Added
+
+- **`nx enrich aspects-without-catalog`** (nexus-mlu3k): read-only census
+  of aspect rows no live catalog document claims, served by a new engine
+  route (`GET /v1/aspects/list_without_catalog_document`, aspects-004's
+  attribution predicate negated, with `tombstoned_match` per row, at most
+  300 rows per call — the verb pages through) and bucketed client-side by URI scheme, tombstoned matches, extraction era,
+  extractor/model, and on-disk presence (`--match-basenames` adds the
+  registered-under-another-URI signal). Exit 2 on an engine without the
+  route; an unverifiable census is never reported as empty.
+- **`deployed-engine-version` tracker written from conexus's STEP-6 gate
+  report** (nexus-nx3l5, shape c). New `nexus.deploy_tracker` module: the
+  post-tag verify `scripts/check_engine_release_floor.py
+  --record-deploy-from-gate-report DIR` (or `NX_GATE_REPORT_DIR`) selects
+  the latest report by `run_timestamp` that gated the live
+  `release_version`, requires it green, and writes the tracker with the
+  report basename as the `gate` provenance; exit 3 and nothing written on
+  no report / red / schema drift. A bare verify with no report directory
+  also exits 3 — the only way to run it without recording is the explicit
+  `--no-record-deploy REASON` opt-out, reason printed — and the `commit`
+  provenance is resolved
+  from the live version's tag after the probe, never the floor tag.
+  `nx service record-deploy` gains `--gate-report-dir` / `--gate-report`
+  (the same path; the typed `--gate` becomes the manual fallback and is
+  mutually exclusive with them). Closes the premature-write vector by
+  construction (`gate PASSED` typed 17 s before a red report, 2026-08-28)
+  and the omission vector for every verify that runs: it cannot pass
+  while silently skipping the record (v0.1.17 stale across three deploys
+  was a skipped step; a skipped verify is still a skipped verify). conexus
+  stays side-effect-free.
+
+### Changed
+
+- **Aspect worker idle poll: 2 s -> 30 s** (`DEFAULT_POLL_INTERVAL_S`,
+  nexus-59611 stage 1). The `claim_batch` poll was ~45k requests/day,
+  ~80% of all edge traffic, 99% of them empty, against ~16 arrivals/hour
+  (conexus edge measurement, conexus-ppwe). 30 s cuts ~93% of that and
+  still samples ~8x faster than items arrive; extraction is async
+  (~26 s median) so the added claim latency is invisible to consumers.
+  No knob: stage 2 is event-driven wake-up. Explicit `poll_interval`
+  arguments are unchanged.
+
 ## [7.22.0] - 2026-08-28
 
 Paired release with `engine-service-v0.1.88` (tagged on `2ca52773f`;

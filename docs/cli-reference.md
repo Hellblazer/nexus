@@ -611,6 +611,14 @@ Resolves the tumbler (or document title) via the catalog, looks up the aspect ro
 | `--json` | Emit JSON instead of human-readable form |
 | `--field NAME` | Project a single aspect field (`problem_formulation`, `proposed_method`, `experimental_datasets`, `experimental_baselines`, `experimental_results`, `extras`, `confidence`). Output is the raw value |
 
+### nx enrich aspects-without-catalog
+
+```
+nx enrich aspects-without-catalog [--limit N] [--match-basenames] [--json]
+```
+
+Read-only census of `document_aspects` rows that NO live catalog document claims (nexus-mlu3k). The engine applies aspects-004's attribution predicate, negated (`GET /v1/aspects/list_without_catalog_document`): `doc_id IS NULL` and no same-tenant, non-alias, non-tombstoned catalog document has a byte-equal `source_uri`. Each row carries `tombstoned_match` (a deleted document does match — registered then removed — vs never registered). The verb buckets the result so the number is explained rather than eyeballed as backfill failure: by URI scheme (`file` / `chroma` / none / other), tombstoned matches, extraction month and `extractor@model` (era), and for `file://` rows whether the path still exists on this box; `--match-basenames` adds one full catalog scan reporting whether the same basename IS registered under another URI (the URI-normalisation-drift signature). The engine serves at most 300 rows per call (clamped, never rejected); the verb pages through, and `--limit N` caps the total (0 = all). Live census 2026-08-28 for reference: 846 such rows = 555 `chroma://` (structural, by design until re-extraction) + 231 `file://` with no document + 60 with no scheme; that total is CORRECT after the aspects-004 walk, not a shortfall. Exit 2 when the deployed engine has no such route — an unverifiable census is never reported as empty.
+
 ### nx enrich aspects-list
 
 List aspect records for a collection, or the gaps with `--missing`.
@@ -1850,8 +1858,8 @@ nx collection list
 | `rename OLD NEW` | In-place metadata-only rename in the T3 vector store + T2 + catalog cascade (4.8.0, nexus-1ccq). Never re-embeds; same-prefix renames whose embedding-model segment differs are rejected (6.3.1, nexus-tcvpn) |
 | `re-embed NAME --to MODEL` | In-place re-embed for non-CCE Voyage models (nexus-bw65). Service mode: same-model only — the computed vectors ride the verbatim passthrough; a cross-model `--to` fails loud (server-side embedding routes by the collection NAME's model segment; cross-model moves are the migration pipeline's job). `--no-dry-run --yes` to apply (6.3.1, nexus-c9xr2/u37lw) |
 | `rewrite-metadata [NAME]` | Rewrite/repair chunk metadata in place; `--all` for every collection, `--source-path` to scope to one source, `--dry-run` to report counts only |
-| `audit NAME` | Deep-dive per-collection report: distance histogram, top-5 cross-projections, orphan chunks, hub topics, chash coverage (RDR-087 Phase 4) |
-| `health` | Composite per-collection health table — chunk counts (T3-sourced), staleness, hub score, chash coverage (RDR-087 Phase 3.4) |
+| `audit NAME` | Deep-dive per-collection report: distance histogram, top-5 cross-projections, orphan chunks, hub topics (RDR-087 Phase 4) |
+| `health` | Composite per-collection health table — chunk counts (T3-sourced), staleness, hub score (RDR-087 Phase 3.4) |
 | `merge-candidates` | Pair-wise cross-collection overlap ranking — surfaces collection pairs with high shared-topic similarity as merge/bridge candidates (RDR-087 Phase 4.3) |
 | `delete NAME` | Delete collection (irreversible) |
 | `prune` | List collections whose name-declared embedding dim mismatches the ACTIVE serving embedder — orphans from a prior embedder generation that every search silently skips (GH #1113, nexus-9tsdf). Fail-safe: no flags lists only; `--yes` deletes via the same cascade as `delete`; `--dry-run` always wins over `--yes`. An unresolved active-embedder probe lists nothing (never guesses). `nx doctor` names these orphans and points here |
@@ -1871,13 +1879,15 @@ nx collection list
 The `reindex` command performs a pre-delete safety check before wiping the collection: it confirms the original source documents are still accessible. If the check fails, the command aborts unless `--force` is given. After re-indexing, a `verify --deep` probe runs automatically to confirm retrieval health. The command dispatches per collection type (`code__`, `docs__`, `rdr__`, `knowledge__`) to the appropriate indexer.
 
 
-**RDR-086 Phase 1.3 — T2 `chash_index` reconciliation.** The same per-chunk
-pass also populates the T2 `chash_index` table so `nx doc cite` and
-`Catalog.resolve_chash` can answer "which collection + doc_id holds this
-chunk hash?" in ~50 µs instead of scanning ChromaDB. Reconciles gaps left
-by Phase 1.2 dual-write failures and pre-Phase-1 collections indexed before
-the dual-write existed. A tqdm progress bar renders in an interactive
-terminal (auto-disabled on non-TTY CI logs).
+**Chash resolution (RDR-086 Phase 1.3, table retired at RDR-187).** The
+per-chunk pass once populated a separate T2 `chash_index` table so `nx doc
+cite` and `Catalog.resolve_chash` could answer "which collection + doc_id
+holds this chunk hash?" without scanning the vector store. RDR-187 dropped
+that table: the chunks tables ARE the chash-keyed store and the catalog
+manifest (`document_chunks`) carries the doc-to-chash structure, so there
+is no separate index to reconcile and nothing for this pass to backfill. A
+tqdm progress bar renders in an interactive terminal (auto-disabled on
+non-TTY CI logs).
 
 Scale reference: a full `--all` on a 278k-chunk / 136-collection corpus
 takes ~25–70 minutes on ChromaDB Cloud. Maintenance-window operation.
@@ -1916,7 +1926,7 @@ takes ~25–70 minutes on ChromaDB Cloud. Maintenance-window operation.
 |------|-------------|
 | `--force-prefix-change` | Allow a cross-prefix rename (e.g. `code__foo` → `docs__foo`) OR a same-prefix rename whose embedding-model segment differs (6.3.1, nexus-tcvpn). Rename never re-embeds, so either change leaves the vectors in the OLD model space under a name claiming the new one — use only when you know the vectors already match the target name (cross-model moves belong to the ladder's substrate rung, the RDR-162 vector ETL — `nx upgrade`) |
 
-Renames the collection in the T3 vector store via `t3.rename_collection` (a metadata-only update on the pgvector service path — no embedding re-upload, no Voyage cost, no vector egress), and cascades the new name through T2 taxonomy, `chash_index`, and catalog (service-backed Postgres). Ordering (SIG-8 / nexus-nhyh): the T2 cascade runs FIRST, then the T3 rename, so a partial failure is recoverable: if the T3 rename fails the T2/catalog rows can be re-pointed or the rename re-run; if T2 fails no T3 rename was attempted.
+Renames the collection in the T3 vector store via `t3.rename_collection` (a metadata-only update on the pgvector service path — no embedding re-upload, no Voyage cost, no vector egress), and cascades the new name through every collection-scoped engine table — chunks, taxonomy (assignments, topics, meta, centroids), aspects, highlights, telemetry, and the catalog documents/collection registration (service-backed Postgres; `chash_index` is retired, RDR-187). Ordering (SIG-8 / nexus-nhyh): the T2 cascade runs FIRST, then the T3 rename, so a partial failure is recoverable: if the T3 rename fails the T2/catalog rows can be re-pointed or the rename re-run; if T2 fails no T3 rename was attempted.
 
 **`audit` flags:**
 
@@ -1926,7 +1936,7 @@ Renames the collection in the T3 vector store via `t3.rename_collection` (a meta
 | `--live` | When the 30-day `search_telemetry` histogram is empty, sample live chunks from ChromaDB and derive the distance histogram from self-queries (4.8.0, nexus-fx2d). Budget ~10 s at default `--live-n` |
 | `--live-n N` | Number of live-probe samples when `--live` fires (default: 25) |
 
-Renders five sections: distance histogram, top-5 cross-projections, orphan chunks (>30d with no incoming links), top-10 cross-collection hub topics this collection contributes to, and `chash_index` coverage ratio + sample unindexed chunk IDs.
+Renders four sections: distance histogram, top-5 cross-projections, orphan chunks (>30d with no incoming links), and top-10 cross-collection hub topics this collection contributes to. (A fifth `chash_index` coverage section was removed at nexus-70vpz / RDR-187 — once RDR-187 dropped `chash_index`, the ratio it reported compared a chunk count to itself and could never read anything but 1.0.)
 
 **`health` flags:**
 
@@ -1943,7 +1953,7 @@ Chunk counts come from T3's live `coll.count()` (same source as `nx collection l
 |------|-------------|
 | `-y` / `--yes` / `--confirm` | Skip interactive confirmation prompt |
 
-Delete cascade covers the T3 collection, T2 `chash_index` rows, T2 taxonomy assignments + topics, pipeline-buffer rows (4.8.0, nexus-8a8e), and catalog documents + links.
+Delete cascade (engine-side, RDR-164 P2) covers the collection's chunks, taxonomy assignments + topics + centroids, aspects, highlights, aspect-queue rows, and catalog documents + manifest + collection registration; the streaming pipeline buffer is swept by its own engine endpoint (RDR-186). `chash_index` is retired (RDR-187).
 
 ---
 
@@ -2336,12 +2346,12 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 |------|-------------|
 | `--check-search` | Run probe 3a — the name-resolution canary from `tests/fixtures/name_canaries.py`. Exits 2 when any surface raises an unexpected exception (RDR-087 Phase 3.2) |
 | `--check-resources` | Probe POSIX semaphore headroom and report orphan multiprocessing-tracker pressure. Exits 2 with `Errno 28` when the namespace is exhausted (MinerU workers / orphan chroma children / trackers re-parented to init after ungraceful MCP shutdowns) |
-| `--check-taxonomy` | Verify the `topic_links` ≡ projection-assignment invariant (GH #252). Exits 1 on drift |
+| `--check-taxonomy` | Verify the `topic_links` ≡ projection-assignment invariant (GH #252) against the ENGINE. Exits 1 on drift or an engine-side error, 2 when no engine answers or the deployed engine lacks the `/links/drift` route (unverifiable is not a pass; the frozen-SQLite fallback was deleted 2026-08-29 — there is no path back to that era) |
 | `--check-tier-discipline` | Audit tier-write activity for the current session: prints the tier-write summary and warns when a substantive session has no write-back (Phase 1B nexus-a52i) |
 | `--check-mcp-logs` | Summarize ERROR/CRITICAL events in nexus's OWN structured MCP log (`<NEXUS_CONFIG_DIR>/logs/mcp.log` plus rotations), counted by event name with the most-recent example per event. Until 7.11.0 this scanned ONLY Claude Code's per-server cache, so nexus's own error signatures had no automated consumer at all; that cache scan survives as a clearly-labeled secondary section, since it carries a distinct signal the nexus-side log cannot (client-side stdio transport death: `STDIO connection dropped`, `stdio transport error`, macOS only, skips cleanly elsewhere — RDR-094 Phase H, nexus-50u5) |
 | `--mcp-log-hours N` | Lookback window in hours for `--check-mcp-logs` (default: 24) |
 | `--check-storage-boundary` | RDR-120 P0.A AST-scan for direct `sqlite3.connect` / `voyageai.Client` calls and `T2Database`/`T3Database` constructions outside the named allowlists in `storage_boundary_lint.py`. The per-line `# epsilon-allow:` escape token is retired (RDR-186 P4): surviving sites are enumerated per file with exact counts; a new site is a hard violation |
-| `--fail-on-violation` | With `--check-storage-boundary`, exit 1 if any violation is found (otherwise the lint is informational) |
+| `--fail-on-violation` | With `--check-storage-boundary`, exit 1 if any violation is found (otherwise the lint is informational). With `--check-schema`, treat an honest N/A (fingerprint withheld by design) as a failure too — for release-gate callers that need an actual OK rather than an unprovable N/A that reads identically to a pass (nexus-b1v9z) |
 | `--phase ID` | With `--check-storage-boundary`, the RDR-120 phase identifier used to record the `120-phase-<phase>-catalog-allowlist-count` T2 metric |
 | `--check-t1` | Diagnose T1 session lease presence + freshness. Checks `~/.config/nexus/t1_session_lease.<session_id>`. Exits 1 only when a session-id resolves AND a lease file exists AND it is expired/corrupt; a resolved session with no lease file at all is informational (a bare CLI legitimately has none — the MCP lifespan mints its own) |
 | `--check-mineru` | Verify MinerU is importable — surfaces a corrupt install at doctor-time instead of waiting for the first math-heavy PDF index to fail |
@@ -2365,6 +2375,15 @@ an honest verdict — OK with the changeset count, FAIL on `schema_error` or
 zero applied changesets, exit 2 (state UNKNOWN) when the engine is
 unreachable, or an explicit N/A when the endpoint withholds the fingerprint
 by design (managed/cloud service).
+
+The honest N/A is exit 0 by default (nexus-vl8lk: an operator asking "is my
+schema okay?" interactively should not get a false failure). Combined with
+`--fail-on-violation` (nexus-b1v9z), that same N/A exits 1 instead — for a
+release-gate caller (e.g. `tests/e2e/release-sandbox.sh`) that cannot tell
+an honest N/A apart from a real pass by exit code alone, and for which the
+whole point of running the check is proving the substrate is actually
+present and correct. A genuine `schema_error` or zero-changeset FAIL is
+already non-zero regardless of this flag.
 
 ```
 nx doctor --check-plan-library    # Report plan-library dimensional health
@@ -2399,6 +2418,13 @@ shipped on disk) is reported as a WARN, not a failure — remove it with
 absence is unprovable — the check reports drift (still trustworthy for the
 rows it did see) but notes that missing templates were not checked, rather
 than silently under-reporting.
+
+A WARN (orphaned rows, or non-dimensional legacy rows) never flips the exit
+code on its own — only the FAIL-class conditions above do that. But the
+verdict line now names any WARN emitted in the same run (`All checks
+passed, with N warning(s).`) instead of printing an unqualified `All checks
+passed.` next to a WARN two lines above, which read as the block
+contradicting itself (nexus-eg5tw).
 
 `--check-t3-legacy-metadata` / `--strict-legacy-metadata` (nexus-1714) were
 DELETED at nexus-lgdel.l2: the check surveyed local Chroma T3 collections
@@ -2442,7 +2468,7 @@ The `--check-post-store-hooks` flag (introduced 4.18.0, `nexus-b0ka`) prints eve
 nx doctor --check-aspect-queue       # Surface RDR-089 aspect-extraction worker depth
 ```
 
-The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reports the `aspect_extraction_queue` row count plus per-status breakdown (`pending`, `processing`, `failed`, `completed`), the oldest non-completed `enqueued_at` as a lag indicator, and the top failed rows with their `last_error`. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring. Pre-RDR-089 databases (no queue table) report cleanly as "table not present" rather than erroring.
+The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reports the `aspect_extraction_queue` row count plus per-status breakdown (`pending`, `processing`, `failed`, `completed`), the oldest non-completed `enqueued_at` as a lag indicator, and the top failed rows with their `last_error`. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring. Pre-RDR-089 databases (no queue table) report cleanly as "table not present" rather than erroring. A transport failure (service unreachable) reports UNKNOWN and exits 0 — not reporting pass or fail; a reachable queue with one or more `failed` rows is a real backlog signal and exits 1 with a `✗ FAIL:` marker, matching the other promoted supplementary checks (nexus-fylxo).
 
 ---
 
@@ -3234,10 +3260,12 @@ Probe a managed nexus service for reachability and version compatibility. `--url
 ### nx service record-deploy
 
 ```
-nx service record-deploy TAG [--commit SHA] [--gate RESULT] [--url URL]
+nx service record-deploy TAG [--commit SHA] [--gate-report-dir DIR | --gate-report FILE | --gate RESULT] [--url URL]
 ```
 
-Record `TAG` (`engine-service-vX.Y.Z`, `vX.Y.Z`, or `X.Y.Z`) as the cloud-deployed engine in the `deployed-engine-version` T2 tracker — **guarded by a live `/version` read**. GETs the service handshake, asserts `release_version` equals `TAG`'s version, and only then writes the tracker; the recorded version is machine-sourced from the live read, never hand-typed. Fails loud (and writes nothing) if the deploy has not landed or the version disagrees, so a *wrong* version can never be recorded (nexus-dz6b1 / RDR-179). This replaces the old hand-typed `nx memory put` in the engine-release skill's record step. Note the scope boundary: it guards the recorded value, not that the step is run — forcing the write (cloud-gate writes the tracker on pass) is a tracked follow-up; `--commit`/`--gate` are recorded verbatim, not verified.
+Record `TAG` (`engine-service-vX.Y.Z`, `vX.Y.Z`, or `X.Y.Z`) as the cloud-deployed engine in the `deployed-engine-version` T2 tracker — **guarded by a live `/version` read**. GETs the service handshake, asserts `release_version` equals `TAG`'s version, and only then writes the tracker; the recorded version is machine-sourced from the live read, never hand-typed. Fails loud (and writes nothing) if the deploy has not landed or the version disagrees, so a *wrong* version can never be recorded (nexus-dz6b1 / RDR-179). This replaces the old hand-typed `nx memory put` in the engine-release skill's record step.
+
+**The `gate` field is derived from conexus's STEP-6 report, not typed** (7.23.0, nexus-nx3l5 shape c). `--gate-report-dir DIR` reads the gate reports in `DIR` (the conexus checkout's `deploy/`; gitignored there, so operator-local — a clone or CI cannot see them), selects the LATEST report by `run_timestamp` that gated the live `release_version` (`sections.preconditions.version_visibility.observed.release_version`, read from the live edge during the run — never `identity.jar_version`, the control-plane jar), requires `schema_version == 3` and `overall.pass`, prints its advisories (always read on green, never inferred empty), and records `gate PASSED <report basename> (advisories: N)`. Nothing is written — a named error — when the directory is missing, no report gated the live version, the latest one is red, or the schema moved; any-green and first-wins are both wrong on real files (`024127Z` red and `030235Z` green coexist for 0.1.88). `--gate-report FILE` names one report, which must have gated the live version. The tracker has one writer (`nexus.deploy_tracker.write_deployed_engine_tracker`), shared with the post-tag verify's `scripts/check_engine_release_floor.py --record-deploy-from-gate-report`, which is the normal path; this command is the manual fallback. `--gate RESULT` records a hand-typed value verbatim and is mutually exclusive with the report options — it is exactly what it says, and on 2026-08-28 it was typed 17 s before the gate it named came back red. `--commit` is recorded verbatim, not verified.
 
 ### nx service token issue
 

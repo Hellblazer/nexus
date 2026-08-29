@@ -250,37 +250,23 @@ BANLIST: tuple[tuple[str, str], ...] = (
 # so a deleted survivor forces the entry DOWN (exact-ledger discipline:
 # a stale entry is a lie about the debt).
 
-#: The only ``sqlite3.connect`` sites allowed anywhere in ``src/``:
-#: diagnostics against the frozen SQLite migration source (RDR-176 Gap 2 —
-#: a downgrade must find the local ``.db`` files intact, and these probes
-#: must work with no engine running). Both survivors are READ-ONLY
-#: (``mode=ro`` URIs). SQLite as a storage SUBSTRATE is deleted (RDR-158 P4
-#: / RDR-186); a new connect is a hard violation, not a number to bump.
-#:
-#: health.py's entry (the PRAGMA integrity_check + FTS5 write-shaped probe)
-#: was REMOVED at nexus-ay18d: the check it backed (``_check_t2_integrity``)
-#: validated a fossil on a migrated box and passed vacuously on a fresh
-#: PG-only box (the file never exists in that install shape). It was ported
-#: to :func:`nexus.health.probe_t2_schema_fingerprint`, which asks the
-#: engine's existing ``GET /version`` for the applied Liquibase changelog
-#: fingerprint instead of opening the frozen file — no ``sqlite3.connect``
-#: left in health.py. The ratchet moves 3 -> 2 (down, per the exact-ledger
-#: discipline below); it must never move back up without a fresh Hal
-#: decision recorded on a bead.
+#: ``sqlite3.connect`` sites allowed anywhere in ``src/``: NONE. RETIRED EMPTY
+#: 2026-08-29 (Hal: "there is no path back to chromadb sqlite. none. it is not
+#: an option"). The two read-only frozen-source probes this dict used to name
+#: — ``nx doctor --check-taxonomy``'s SQLite census and the legacy
+#: ``.catalog.db`` row-count probe — were kept under RDR-176 Gap 2 ("a
+#: downgrade must find the local ``.db`` files intact, and these probes must
+#: work with no engine running"); that rationale is retired with them. The
+#: frozen files are relics to delete, not artifacts to read. SQLite as a
+#: storage SUBSTRATE was deleted at RDR-158 P4 / RDR-186; a new connect is a
+#: hard violation, not a number to bump, and a new entry here requires a fresh
+#: Hal decision recorded on a bead. (History of the ratchet: 3 -> 2 at
+#: nexus-ay18d, 2 -> 0 here; it must never move up without that decision.)
 #:
 #: GRANULARITY (zero-review Sig-2, stated plainly): these allowlists budget
-#: per-FILE counts, not per-site identities — swapping a file's legitimate
-#: site for a different connect at another line, holding the count, is not
-#: detected mechanically; the reviewed module edit this dict requires is
-#: the control. Same strength as the census it replaced, minus the
-#: self-service per-line escape.
-SQLITE_CONNECT_ALLOWLIST: dict[str, int] = {
-    # mode=ro URI probe of a legacy source db (schema presence sniff).
-    "src/nexus/db/__init__.py": 1,
-    # nx doctor read-only (mode=ro URI) inspection of the frozen
-    # migration source.
-    "src/nexus/commands/doctor.py": 1,
-}
+#: per-FILE counts, not per-site identities — the reviewed module edit this
+#: dict requires is the control.
+SQLITE_CONNECT_ALLOWLIST: dict[str, int] = {}
 
 #: ``voyageai.Client`` sites outside ``db/``: the RDR-152 Seam B Phase-4
 #: deletion targets. RETIRED EMPTY at nexus-sghyo (2026-08-06, Hal
@@ -305,7 +291,7 @@ T2DATABASE_CONSTRUCTION_ALLOWLIST: dict[str, int] = {
     "src/nexus/commands/catalog.py": 1,    # one-shot catalog-setup plan-seed loader
     "src/nexus/commands/catalog_cmds/report.py": 1,  # read-only T2 access
     "src/nexus/commands/doc.py": 3,        # read-only T2 access
-    "src/nexus/commands/enrich.py": 8,     # read-only T2 access (+ routed writes)
+    "src/nexus/commands/enrich.py": 9,     # read-only T2 access (+ routed writes); 9th = aspects-without-catalog census (nexus-mlu3k)
     "src/nexus/commands/index.py": 2,      # read-only probes; writes via t2_index_write
     "src/nexus/commands/rdr.py": 1,        # short-lived read-only preamble CLI
     "src/nexus/commands/search_cmd.py": 1, # read-only T2 access

@@ -58,7 +58,6 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import sqlite3
 
 import structlog
 
@@ -302,7 +301,7 @@ class T2Database:
         *,
         old: str,
         new: str,
-        _conn: "sqlite3.Connection | None" = None,
+        _conn: Any | None = None,
     ) -> dict[str, int]:
         """Rename a collection atomically across all T2 collection tables.
 
@@ -343,7 +342,7 @@ class T2Database:
         *,
         old: str,
         new: str,
-        _conn: "sqlite3.Connection | None" = None,
+        _conn: Any | None = None,
     ) -> dict[str, int]:
         """Inner implementation — called only while RENAME_LOCK is held.
 

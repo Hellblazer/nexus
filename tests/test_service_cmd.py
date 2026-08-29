@@ -318,3 +318,101 @@ def test_record_deploy_fails_loud_when_service_unreachable(monkeypatch, _fake_t2
     result = _run(["record-deploy", "engine-service-v0.1.24"])
     assert result.exit_code != 0
     assert _fake_t2.puts == []  # NO write when we cannot verify live truth
+
+
+# ── nx service record-deploy --gate-report-dir / --gate-report (nexus-nx3l5, shape c) ──
+
+
+def _step6_report(directory, *, version: str, minutes: int = 0, passed: bool = True):
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    stamp = datetime(2026, 8, 29, 2, 44, 44, tzinfo=UTC) + timedelta(minutes=minutes)
+    doc = {
+        "schema_version": 3,
+        "run_timestamp": stamp.isoformat(),
+        "identity": {"jar_version": "1.0-SNAPSHOT"},
+        "sections": {"preconditions": {"version_visibility": {"observed": {"release_version": version}}}},
+        "overall": {
+            "pass": passed,
+            "failures": [] if passed else ["latency over bound"],
+            "exit_code": 0 if passed else 1,
+            "advisories": [],
+        },
+    }
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"gate-report-{stamp.strftime('%Y%m%dT%H%M%SZ')}-v011.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return path
+
+
+def test_record_deploy_from_gate_report_dir_derives_the_gate_field(monkeypatch, _fake_t2, tmp_path) -> None:
+    _patch_caps(monkeypatch, "0.1.88")
+    _step6_report(tmp_path, version="0.1.88", passed=False)
+    green = _step6_report(tmp_path, version="0.1.88", minutes=20)
+
+    result = _run([
+        "record-deploy", "engine-service-v0.1.88",
+        "--gate-report-dir", str(tmp_path), "--commit", "2ca52773f",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert len(_fake_t2.puts) == 1
+    content = _fake_t2.puts[0]["content"]
+    assert content.startswith("engine-service-v0.1.88 @ 2ca52773f; recorded ")
+    assert f"gate PASSED {green.name} (advisories: 0)" in content
+    assert _fake_t2.puts[0]["ttl"] is None
+    assert "✓ recorded deployed engine" in result.output
+
+
+def test_record_deploy_from_gate_report_dir_refuses_a_red_latest_report(monkeypatch, _fake_t2, tmp_path) -> None:
+    _patch_caps(monkeypatch, "0.1.88")
+    _step6_report(tmp_path, version="0.1.88", passed=True)
+    red = _step6_report(tmp_path, version="0.1.88", minutes=20, passed=False)
+
+    result = _run(["record-deploy", "engine-service-v0.1.88", "--gate-report-dir", str(tmp_path)])
+
+    assert result.exit_code != 0
+    assert red.name in result.output
+    assert "RED" in result.output
+    assert _fake_t2.puts == []
+
+
+def test_record_deploy_gate_and_report_are_mutually_exclusive(monkeypatch, _fake_t2, tmp_path) -> None:
+    _patch_caps(monkeypatch, "0.1.88")
+
+    result = _run([
+        "record-deploy", "engine-service-v0.1.88",
+        "--gate-report-dir", str(tmp_path), "--gate", "PASSED",
+    ])
+
+    assert result.exit_code != 0
+    assert "derived" in result.output
+    assert _fake_t2.puts == []
+
+
+def test_record_deploy_explicit_report_must_match_the_live_version(monkeypatch, _fake_t2, tmp_path) -> None:
+    _patch_caps(monkeypatch, "0.1.88")
+    green_88 = _step6_report(tmp_path, version="0.1.88")
+    other = _step6_report(tmp_path / "other", version="0.1.87")
+
+    ok = _run(["record-deploy", "engine-service-v0.1.88", "--gate-report", str(green_88)])
+    assert ok.exit_code == 0, ok.output
+    assert green_88.name in _fake_t2.puts[0]["content"]
+
+    _fake_t2.puts.clear()
+    bad = _run(["record-deploy", "engine-service-v0.1.88", "--gate-report", str(other)])
+    assert bad.exit_code != 0
+    assert "0.1.87" in bad.output
+    assert _fake_t2.puts == []
+
+
+def test_record_deploy_from_report_still_asserts_the_named_tag_against_live(monkeypatch, _fake_t2, tmp_path) -> None:
+    _patch_caps(monkeypatch, "0.1.88")
+    _step6_report(tmp_path, version="0.1.88")
+
+    result = _run(["record-deploy", "engine-service-v0.1.89", "--gate-report-dir", str(tmp_path)])
+
+    assert result.exit_code != 0
+    assert "0.1.89" in result.output and "0.1.88" in result.output
+    assert _fake_t2.puts == []

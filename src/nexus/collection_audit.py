@@ -25,7 +25,6 @@ Four sections:
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -74,28 +73,12 @@ class HubAssignment:
 
 
 @dataclass(frozen=True)
-class ChashCoverage:
-    """RDR-087 Phase 4.6: chash_index coverage for *collection*.
-
-    ``None`` fields distinguish "backfill needed" from "schema absent".
-    The ``missing_sample`` is a best-effort list of up to 5 T3 chunk IDs
-    whose ``chunk_text_hash`` metadata is not present in ``chash_index``
-    — populated when 0 < ratio < 1.0. Empty when ratio is 1.0 or None.
-    """
-    total_chunks: int | None
-    indexed_rows: int
-    ratio: float | None
-    missing_sample: list[str]
-
-
-@dataclass(frozen=True)
 class AuditReport:
     collection: str
     distance_histogram: DistanceHistogram
     cross_projections: list[ProjectionPair]
     orphans: list[OrphanChunk]
     hub_assignments: list[HubAssignment]
-    chash_coverage: ChashCoverage | None = None
     #: nexus-kmo9h (critic item 2): False when the orphan leg never ran —
     #: service mode (the local .catalog.db is a frozen migration source) or
     #: no local catalog. Distinguishes "checked, clean" from "couldn't
@@ -220,7 +203,7 @@ def compute_live_distance_histogram(
 
 
 def compute_orphan_chunks(
-    catalog_conn: sqlite3.Connection,
+    catalog_conn: Any,
     collection: str,
     *,
     age_days: int = 30,
@@ -249,7 +232,7 @@ def compute_orphan_chunks(
 # ── Section 4: hub-topic assignments ────────────────────────────────────────
 
 
-def _open_catalog_conn() -> sqlite3.Connection | None:
+def _open_catalog_conn() -> Any | None:
     """Return ``None`` — the local catalog cache DB no longer exists.
 
     nexus-e9ru2 / nexus-i711w: the catalog is service-owned; the audit's
@@ -260,120 +243,6 @@ def _open_catalog_conn() -> sqlite3.Connection | None:
     the function survives the local catalog's deletion.
     """
     return None
-
-
-# ── Section 5: chash_index coverage (RDR-087 Phase 4.6 / nexus-c2op) ────────
-
-
-def compute_chash_coverage(collection: str) -> ChashCoverage | None:
-    """Report chash coverage for *collection*.
-
-    ⚠ SERVICE MODE: this ratio is a TAUTOLOGY BY DESIGN post-RDR-187
-    (nexus-piwya.3/.4). ``count_for_collection`` is now served from the
-    same ``chunks_<dim>`` tables that ``col.count()`` reads, so both
-    sides of the ratio count the identical rows: the ratio is pinned at
-    1.0 and ``missing_sample`` stays empty. That is the RDR's correct
-    end-state — with the router retired there is no derived copy left to
-    drift, so there is nothing for this probe to catch. Do NOT "fix"
-    this as a bug, and do not treat a service-mode 1.0 as evidence
-    during a real ingest gap (it cannot see one). The ratio remains a
-    genuine drift signal only on pre-migration SQLite installs
-    (RDR-158), where the router and T3 are still distinct stores.
-
-    Composes (1) the chash-store count for *collection*, (2)
-    ``col.count()`` on the T3 collection for total chunks, (3) a
-    best-effort sampled T3 ``get(where={'chunk_text_hash': ...})`` walk
-    producing up to 5 IDs whose hash is not registered — "run backfill"
-    evidence on the SQLite path.
-
-    Returns ``None`` when either side of the ratio is unreachable
-    (T2 file missing, T3 unavailable); calling code treats this
-    the same as ratio=None (schema absent vs backfill needed).
-    """
-    from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-    # RDR-152 nexus-gmiaf.16 seam, COLLAPSED (nexus-i711w Stage 2 sub-stage
-    # A): HttpChashIndex is the only chash index — the SQLite arm died with
-    # the store.
-    from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    idx = HttpChashIndex()
-
-    # Review remediation (Reviewer B/I-1, B/S-3, C/I-4): open ChashIndex
-    # once for the whole coverage computation instead of opening + closing
-    # + reopening around the missing-sample probe. Also narrows the TOCTOU
-    # window: ``indexed_rows`` and ``missing_sample`` are drawn from the
-    # same snapshot. ``ratio`` remains advisory — the T3 ``col.count()``
-    # happens between the two chash_index reads and a concurrent indexer
-    # run can shift either side. Callers treat the number as a point-in-
-    # time estimate.
-    try:
-        indexed_rows = idx.count_for_collection(collection)
-
-        try:
-            t3 = make_t3()
-            # nexus-8lbe (RDR-108 Phase 4 review CR-M3): use
-            # get_collection (not get_or_create_collection) so a
-            # missing T3 collection is reported as "unknown total"
-            # rather than minted as an empty zombie. The ks40 fix
-            # closed three indexer paths but missed this audit
-            # entry point — without this guard the audit ITSELF
-            # creates the zombies it then reports.
-            col = t3.get_collection(collection)
-            total_chunks = col.count()
-        except Exception:  # noqa: BLE001 — boundary catch of undocumented errors; degrades to safe fallback return
-            return ChashCoverage(
-                total_chunks=None,
-                indexed_rows=indexed_rows,
-                ratio=None,
-                missing_sample=[],
-            )
-
-        if total_chunks == 0:
-            return ChashCoverage(
-                total_chunks=0, indexed_rows=indexed_rows,
-                ratio=None, missing_sample=[],
-            )
-
-        ratio = min(1.0, indexed_rows / total_chunks)
-
-        # Sample missing chunks only when there's actually a gap. Bounded
-        # at 5 to keep the audit cheap; the operator uses nx collection
-        # backfill-hash for the real fix. RDR-108 Phase 4 (nexus-z1mu):
-        # one set-difference between T3 chunk IDs and indexed chash[:32]
-        # values replaces the per-page IN-list probe.
-        missing: list[str] = []
-        if ratio < 1.0:
-            try:
-                page = col.get(limit=300, include=[])
-                ids = page.get("ids") or []
-                if ids:
-                    indexed_chashes = idx.registered_chashes_for_collection(collection)
-                    for cid in ids:
-                        if cid not in indexed_chashes:
-                            missing.append(cid)
-                        if len(missing) >= 5:
-                            break
-            except Exception as _exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
-                from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred import; rare/branch-local path
-
-                # nexus-ou4tb walk: degraded-service reads WARN; other
-                # sampling failures keep DEBUG. Ratio stays meaningful
-                # either way (the hard-degrade case bailed at count()).
-                _emit = _log.warning if isinstance(_exc, VectorServiceError) else _log.debug
-                _emit(
-                    "chash_coverage_missing_sample_failed",
-                    collection=collection, exc_info=True,
-                )
-                missing = []  # best-effort: ratio still meaningful
-    finally:
-        idx.close()
-
-    return ChashCoverage(
-        total_chunks=total_chunks,
-        indexed_rows=indexed_rows,
-        ratio=ratio,
-        missing_sample=missing,
-    )
 
 
 # ── Orchestrator ────────────────────────────────────────────────────────────
@@ -420,8 +289,8 @@ def run_collection_audit(
             cat_conn.close()
 
     # Live-probe fallback — only when telemetry came back empty AND
-    # caller opted in. Same error boundary as chash coverage: a T3
-    # hiccup shouldn't blank the telemetry/projection/hub results.
+    # caller opted in. Own error boundary: a T3 hiccup shouldn't blank
+    # the telemetry/projection/hub results.
     if live and hist.source == "empty":
         try:
             if t3 is None:
@@ -436,21 +305,12 @@ def run_collection_audit(
                 "live_histogram_failed",
                 collection=collection, live_n=live_n, exc_info=True,
             )
-    # RDR-087 Phase 4.6 (nexus-c2op): chash coverage section. Own error
-    # boundary — the rest of the audit is purely T2, chash coverage hits
-    # T3, so failures (missing collection, network) shouldn't lose the
-    # other sections.
-    try:
-        chash = compute_chash_coverage(collection)
-    except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
-        chash = None
     return AuditReport(
         collection=collection,
         distance_histogram=hist,
         cross_projections=projections,
         orphans=orphans,
         hub_assignments=hubs,
-        chash_coverage=chash,
         orphans_checked=orphans_checked,
     )
 
@@ -515,34 +375,6 @@ def format_audit_human(report: AuditReport) -> str:
                 f"srcs={h_.source_collection_count:>3}  "
                 f"this_col_chunks={h_.chunks_in_hub:>4}"
             )
-    lines.append("")
-    # Section 5: chash_index coverage (RDR-087 Phase 4.6 / nexus-c2op)
-    lines.append("=== chash_index coverage ===")
-    cov = report.chash_coverage
-    if cov is None:
-        lines.append(
-            "  (chash_index unavailable — T2 missing or T3 unreachable)"
-        )
-    elif cov.total_chunks == 0 or cov.total_chunks is None:
-        lines.append(
-            f"  indexed_rows={cov.indexed_rows}  (collection has no T3 chunks)"
-        )
-    else:
-        ratio_pct = 100.0 * (cov.ratio or 0.0)
-        lines.append(
-            f"  total_chunks={cov.total_chunks}  "
-            f"indexed_rows={cov.indexed_rows}  "
-            f"ratio={cov.ratio:.3f} ({ratio_pct:.1f}%)"
-        )
-        if cov.ratio is not None and cov.ratio < 1.0:
-            lines.append(
-                "  Run `nx collection backfill-hash "
-                f"{report.collection}` to close the gap."
-            )
-            if cov.missing_sample:
-                lines.append("  Sample unindexed chunk IDs:")
-                for cid in cov.missing_sample:
-                    lines.append(f"    - {cid}")
     return "\n".join(lines)
 
 

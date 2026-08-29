@@ -2601,6 +2601,27 @@ public final class CatalogRepository {
     /**
      * FTS search over title/author/corpus/file_path using OR'd tsquery.
      * Optionally filter by content_type. Returns up to limit results.
+     *
+     * <p><strong>Order contract (nexus-fgxmk):</strong> results are ordered by
+     * {@code tumbler} — the TEXT column's string order, stable across heap
+     * churn — NOT by relevance and NOT numeric: it coincides with
+     * registration order only while every segment stays single-digit
+     * ({@code "1.9.10"} sorts before {@code "1.9.2"}). The contract is
+     * determinism, which is what {@code [0]} callers were missing; a caller
+     * that needs the newest or oldest match must order by the parsed tumbler
+     * itself. Before this the statement had no
+     * {@code ORDER BY} at all, so a seq scan emitted physical ctid order:
+     * insertion order on a fresh table, and arbitrary once free-space reuse
+     * set in (measured: the same query returned two matching rows reversed
+     * fourteen tests apart on one xdist worker). Callers that indexed
+     * {@code [0]} were relying on heap placement.
+     *
+     * <p>Matching is broader than a title lookup: {@code plainto_tsquery
+     * ('english', ...)} drops stopwords, so "Paper A" reduces to {@code
+     * 'paper'} and matches "Paper B" too (the {@code 'simple'} leg keeps the
+     * stopword lexeme, so the exact title still matches — it is just not the
+     * only match). A caller that needs the document whose title IS the query
+     * filters client-side: {@code HttpCatalogClient.find_by_title_exact}.
      */
     // TOMBSTONE-FILTER-WIDEN (nexus-mqd6t): the WHERE Condition is assembled
     // into a local variable in an earlier statement (folding the FTS match
@@ -2646,6 +2667,8 @@ public final class CatalogRepository {
             return ctx.select(documentFields())
                       .from(CATALOG_DOCUMENTS)
                       .where(where)
+                      // nexus-fgxmk: a stated, stable order. See the javadoc.
+                      .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                       .limit(limit <= 0 ? 200 : limit)
                       .fetch()
                       .map(r -> docRowFromRecord(r.intoMap()));
@@ -4893,16 +4916,31 @@ public final class CatalogRepository {
             .where(CHUNKS.TENANT_ID.eq(tenant))
             .and(CHUNKS.COLLECTION.eq(collection))
             .and(CHUNKS_CHASH_HEX.in(dropped))
+            // SHARED-CHASH UNION GUARD. "Referenced" INCLUDES tombstoned owners
+            // (nexus-0cwre, Tier 1 of the RDR-191 GATE-2 definition of record,
+            // T2 [22364]): this sweep is an INDEPENDENT-DELETER surface, the same
+            // class as PgVectorRepository#delete's anti-join (nexus-mmkqe) and
+            // gc_expire_quarantine (nexus-wnpet), both made unconditional. A
+            // soft-deleted document deliberately keeps its manifest rows so a
+            // restore stays possible; those rows must go on protecting their
+            // chunk until purge_trash reaps BOTH together. The DELETED_AT.isNull()
+            // term this join used to carry let a tombstoned OTHER document's
+            // reference count for nothing — exactly where the guard matters,
+            // since on the primary path the caller's own rows are already gone.
             .and(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
                 .join(CATALOG_DOCUMENTS)
                   .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
                       .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
                 .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CHUNKS.TENANT_ID))
-                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS.CHASH))
-                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())))
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(CHUNKS.CHASH))))
             // nl3fn NOTES GUARD: is this chash a live note's OWN identity
             // chash (is_note_shaped mirror)? Collection-scoped, matching
-            // catalog_documents_for_collection's scope client-side.
+            // catalog_documents_for_collection's scope client-side. This guard
+            // KEEPS its DELETED_AT.isNull() on purpose (nexus-0cwre scope): a
+            // manifest-less note has no manifest row for purge_trash to reap
+            // with, so once tombstoned its chunk would strand forever if this
+            // sweep also refused it — that is the grace-window (Tier 2) side
+            // the bead says not to reconcile.
             .and(DSL.notExists(ctx.selectOne().from(CATALOG_DOCUMENTS)
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
                 .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection))

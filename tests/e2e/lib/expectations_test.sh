@@ -340,40 +340,50 @@ fi
 
 # ── Test 12b: undeclared-dispatch audit (the .16 retro query) ────────────
 # The Phase-2 critique (Critical-1) proved the original markdown-embedded
-# awk false-flagged every ordinary SYNC dispatch (no morphology filter,
-# untested). The audit is now a tested function: flag ONLY named-
-# morphology START rows (agent_id == "a<agent_type>-<hash>") that have
-# no EXPECT row for that name; an EXPECT row of EITHER mode suppresses
-# (a deliberately-declared named-sync dispatch stays audit-clean).
-echo "Test 12b: undeclared audit flags only undeclared NAMED dispatches"
+# awk false-flagged every ordinary SYNC dispatch (no filter, untested).
+# The audit is now a tested function keyed on (agent_type, N-of-type
+# EXPECT credit) — the ONLY key the CC 2.1.251 payload still carries
+# (nexus-houpu; agent_id is an opaque "a<hex>" handle in every case).
+# An EXPECT row of EITHER mode supplies credit, so a deliberately-declared
+# SYNC dispatch stays audit-clean — but it must actually be declared: the
+# PreToolUse dispatch hook writes an EXPECT row for sync dispatches too,
+# so an undeclared one is a real gap in the declaration machinery, not
+# the "ordinary anonymous sync" free pass this used to grant.
+echo "Test 12b: undeclared audit keys on agent_type credit, not agent_id shape"
 AUD_SID="audit-session"
 audf="$(expectations_file "$AUD_SID")"
 rm -f "$audf"
-# sync unnamed dispatch: START row with subagent_type + hash id -> never flagged
+# sync dispatch, DECLARED sync -> credit suppresses it
+expectations_expect "$AUD_SID" "general-purpose" "sync"
 expectations_start "$AUD_SID" "a16b397f79df79c42" "general-purpose"
-# named background teammate, DECLARED -> not flagged
+# background teammate, DECLARED -> not flagged
 expectations_expect "$AUD_SID" "declared-bg" "background"
-expectations_start "$AUD_SID" "adeclared-bg-1234567890abcdef" "declared-bg"
-# named dispatch declared SYNC -> suppressed
+expectations_start "$AUD_SID" "a1234567890abcdef" "declared-bg"
+# a second declared-sync type
 expectations_expect "$AUD_SID" "declared-sync" "sync"
-expectations_start "$AUD_SID" "adeclared-sync-1234567890abcd" "declared-sync"
-# named teammate, UNDECLARED -> the one true positive
-expectations_start "$AUD_SID" "arogue-bg-1234567890abcdef" "rogue-bg"
+expectations_start "$AUD_SID" "abcdef1234567890a" "declared-sync"
+# UNDECLARED: opaque 2.1.251-shaped id, no EXPECT row of its type
+expectations_start "$AUD_SID" "aeb1c1b56623244ae" "rogue-bg"
 out="$(expectations_undeclared "$AUD_SID")"
 if [[ "$(printf '%s\n' "$out" | grep -c "UNDECLARED")" == "1" ]]; then
     ok "exactly one UNDECLARED line for four mixed dispatches"
 else
     bad "expected exactly 1 UNDECLARED, got: $out"
 fi
-if [[ "$out" == *$'UNDECLARED\tarogue-bg-1234567890abcdef\trogue-bg'* ]]; then
-    ok "the undeclared named teammate is the one flagged"
+if [[ "$out" == *$'UNDECLARED\taeb1c1b56623244ae\trogue-bg'* ]]; then
+    ok "the undeclared teammate is flagged by TYPE, from an opaque a<hex> id"
 else
     bad "wrong/missing UNDECLARED line: $out"
 fi
 if [[ "$out" == *"general-purpose"* || "$out" == *"declared-bg"* || "$out" == *"declared-sync"* ]]; then
-    bad "audit flagged a sync or declared dispatch (cry-wolf class): $out"
+    bad "audit flagged a declared dispatch (cry-wolf class): $out"
 else
-    ok "sync-unnamed and both declared dispatches not flagged"
+    ok "all three declared dispatches (2 sync, 1 background) not flagged"
+fi
+if [[ "$out" == *$'SUMMARY\tchecked=4 recognized=3 unrecognized=1 undeclared=1'* ]]; then
+    ok "SUMMARY tallies recognized=3 as a diagnostic, undeclared=1 as the verdict"
+else
+    bad "SUMMARY wrong: $(printf '%s\n' "$out" | grep SUMMARY)"
 fi
 # nexus-ahl9v: a session with no ledger file is NOT evidence of
 # cleanliness -- it must be distinguishable (rc=3 + stderr NOTE) from a
@@ -511,23 +521,28 @@ else
     bad "sweep deleted a fresh file"
 fi
 
-# ── Test 15: Gap-1 blind spot to prompt-named dispatches (nexus-mk3tw) ───
-# Reproduces the false-clean reported live 2026-07-24/25 (bead nexus-mk3tw):
-# background teammates named only inside the Agent-tool PROMPT text (there
-# is no name= field in the dispatch schema for the framework to thread into
-# the hook payload — see the header comment above expectations_undeclared)
-# arrive at SubagentStart with agent_type == the bare subagent_type and
-# agent_id == "a<hash>" — structurally IDENTICAL to an anonymous sync
-# dispatch. Both the declaration-completeness audit and the census key
-# EXCLUSIVELY on the "a<agent_type>-<hash>" named morphology, so every one
-# of these dispatches was invisible to both, and a session with N such
-# dispatches and 0 EXPECT rows reported "undeclared=0" — a false all-clear.
-echo "Test 15: Gap-1 guard blind spot to prompt-named (unnamed-morphology) dispatches"
+# ── Test 15: the mk3tw fixture, now resolved per-dispatch (nexus-houpu) ──
+# The fixture is the one reported live 2026-07-24/25 (bead nexus-mk3tw):
+# background teammates whose name lived only in the Agent-tool PROMPT text,
+# arriving at SubagentStart with agent_type == the bare subagent_type and an
+# opaque agent_id — and ZERO EXPECT rows, because the declaration step was
+# never performed. Under the morphology key both audit surfaces classified
+# NONE of them and reported "undeclared=0": a false all-clear that mk3tw
+# could only paper over with an aggregate BLINDSPOT disclosure.
+#
+# Type keying resolves it per dispatch instead: every START is measured
+# against its type's EXPECT credit, so all four are NAMED as undeclared and
+# the audit exits 2 (a real deficit) rather than 1 (nothing was checkable).
+# The agent_ids below are the CC 2.1.251 shape — opaque "a<hex>", no
+# "a<name>-" prefix anywhere, which is now the only shape the payload emits.
+echo "Test 15: undeclared dispatches are named individually, not disclosed in aggregate"
 
 # ── frozen copy of the PRE-mk3tw logic (verbatim from the code these two
 # functions replaced) — the permanent "old guard" baseline. Kept as an
 # inline snapshot rather than a git-history lookup so this regression proof
-# does not silently stop proving anything once this fix is committed.
+# does not silently stop proving anything once this fix is committed. It is
+# also the standing demonstration of WHY the morphology key was deleted at
+# nexus-houpu: it matches nothing the harness can produce.
 _pre_mk3tw_undeclared() {
     local file="$1"
     awk -F'\t' '
@@ -561,10 +576,8 @@ _pre_mk3tw_census_undeclared_count() {
 BSID="mk3tw-blindspot"
 bsf="$(expectations_file "$BSID")"
 rm -f "$bsf"
-# 4 prompt-named background dispatches (the bead's first-sighting shape),
-# zero EXPECT rows (the mechanism was never invoked / never existed) —
-# every START row has UNNAMED morphology: agent_id "a<hash>" with no
-# "a<agent_type>-" prefix.
+# 4 undeclared background dispatches, zero EXPECT rows (the declaration
+# mechanism never invoked). Every agent_id is the 2.1.251 opaque form.
 {
     printf '2026-07-25T10:00:00Z\tSTART\ta1a2b3c4d5e6f708\tcode-review-expert\n'
     printf '2026-07-25T10:00:05Z\tSTART\ta9f8e7d6c5b4a302\tsubstantive-critic\n'
@@ -572,104 +585,170 @@ rm -f "$bsf"
     printf '2026-07-25T10:00:15Z\tSTART\taffeeddccbbaa9988\ttest-validator\n'
 } >"$bsf"
 
-# ── baseline: the OLD guard passes when it should fail ───────────────────
+# ── baseline: the OLD morphology guard sees nothing at all ───────────────
 old_undeclared_out="$(_pre_mk3tw_undeclared "$bsf")"
 old_census_line="$(_pre_mk3tw_census_undeclared_count "$bsf")"
 if [[ -z "$old_undeclared_out" ]]; then
-    ok "BASELINE (old guard): 4 undeclared named-background dispatches produce ZERO UNDECLARED output (the bug, reproduced)"
+    ok "BASELINE (retired morphology key): 4 undeclared dispatches produce ZERO UNDECLARED output (the bug, reproduced)"
 else
     bad "BASELINE assumption broken — old guard unexpectedly flagged something: $old_undeclared_out"
 fi
 if [[ "$old_census_line" == "undeclared=0 start=4" ]]; then
-    ok "BASELINE (old guard): census-style count reads undeclared=0 despite start=4 (the false-clean, reproduced)"
+    ok "BASELINE (retired morphology key): census-style count reads undeclared=0 despite start=4 (the false-clean, reproduced)"
 else
     bad "BASELINE assumption broken — old census-style count: $old_census_line"
 fi
 
-# ── fixed guard: same fixture, must NOT read as clean ─────────────────────
+# ── type-keyed guard: same fixture, all four named ───────────────────────
 new_undeclared_out="$(expectations_undeclared "$BSID")"
 new_undeclared_rc=$?
-if [[ "$new_undeclared_rc" -ne 0 ]]; then
-    ok "FIXED expectations_undeclared: hard-fails (exit $new_undeclared_rc) instead of silently returning 0"
+if [[ "$new_undeclared_rc" -eq 2 ]]; then
+    ok "expectations_undeclared: rc=2 (real deficit), not rc=0 and not an aggregate-only rc=1"
 else
-    bad "FIXED expectations_undeclared: still exits 0 on a 0-of-4-recognised session"
+    bad "expectations_undeclared: expected rc=2 on a 4-undeclared session, got rc=$new_undeclared_rc"
 fi
-if grep -q $'SUMMARY\tchecked=4 recognized=0 unrecognized=4 undeclared=0' <<<"$new_undeclared_out"; then
-    ok "FIXED expectations_undeclared: SUMMARY distinguishes checked=4 from recognized=0"
+if [[ "$(grep -c '^UNDECLARED' <<<"$new_undeclared_out")" == "4" ]]; then
+    ok "expectations_undeclared: all four dispatches named individually"
 else
-    bad "FIXED expectations_undeclared: SUMMARY line missing/wrong: $new_undeclared_out"
+    bad "expectations_undeclared: expected 4 UNDECLARED lines, got: $new_undeclared_out"
+fi
+if grep -q $'UNDECLARED\ta1122334455667788\tcode-review-expert' <<<"$new_undeclared_out"; then
+    ok "expectations_undeclared: the SECOND dispatch of a repeated type is named too (N-of-type, not set membership)"
+else
+    bad "expectations_undeclared: repeated-type dispatch missing: $new_undeclared_out"
+fi
+if grep -q $'SUMMARY\tchecked=4 recognized=0 unrecognized=4 undeclared=4' <<<"$new_undeclared_out"; then
+    ok "expectations_undeclared: SUMMARY reports recognized=0 as a tally alongside undeclared=4"
+else
+    bad "expectations_undeclared: SUMMARY line missing/wrong: $new_undeclared_out"
 fi
 if grep -q "^BLINDSPOT" <<<"$new_undeclared_out"; then
-    ok "FIXED expectations_undeclared: emits an explicit BLINDSPOT line"
+    bad "expectations_undeclared: BLINDSPOT fired on a session whose STARTs were all walked: $new_undeclared_out"
 else
-    bad "FIXED expectations_undeclared: no BLINDSPOT line: $new_undeclared_out"
+    ok "expectations_undeclared: no BLINDSPOT line — the audit walked every START, so nothing is undisclosed"
 fi
 
 new_census_out="$(expectations_census "$BSID")"
 new_census_rc=$?
-if [[ "$new_census_rc" -ne 0 ]]; then
-    ok "FIXED expectations_census: hard-fails (exit $new_census_rc) instead of silently returning 0"
+if [[ "$new_census_rc" -eq 0 ]]; then
+    ok "expectations_census: rc=0 — the census is the REPORT; an all-undeclared session is a deficit it discloses (undeclared=4), not a blind spot, and expectations_undeclared (rc=2 above) carries the verdict on the same ledger"
 else
-    bad "FIXED expectations_census: still exits 0 on a 0-of-4-recognised session"
+    bad "expectations_census: expected rc=0 on a 0-of-4-declared session (deficit, not blind spot), got rc=$new_census_rc"
+fi
+if grep -q $'AGENT\ta1a2b3c4d5e6f708\tcode-review-expert\tNO_TERMINAL\tundeclared' <<<"$new_census_out"; then
+    ok "expectations_census: per-agent view lists the opaque-id dispatch with its REAL type and an undeclared verdict"
+else
+    bad "expectations_census: per-agent line missing/wrong: $(grep a1a2b3c4d5e6f708 <<<"$new_census_out")"
 fi
 if grep -q $'BLINDSPOT\tchecked=4 recognized=0 unrecognized=4' <<<"$new_census_out"; then
-    ok "FIXED expectations_census: BLINDSPOT line reports checked=4 recognized=0 unrecognized=4"
+    ok "expectations_census: BLINDSPOT line reports checked=4 recognized=0 unrecognized=4"
 else
-    bad "FIXED expectations_census: BLINDSPOT line missing/wrong: $(grep BLINDSPOT <<<"$new_census_out")"
+    bad "expectations_census: BLINDSPOT line missing/wrong: $(grep BLINDSPOT <<<"$new_census_out")"
 fi
-if grep -q 'CLASSIFIED	reported=0 blocked_resolved=0 (immediate=0 later=0) blocked_unresolved=0 wouldblock=0 no_terminal=0 undeclared=0 no_start=0 expected_no_start=0' <<<"$new_census_out"; then
-    ok "FIXED expectations_census: CLASSIFIED line unchanged in shape (undeclared=0 alone, without BLINDSPOT, would still read as clean)"
+if grep -q 'CLASSIFIED	reported=0 blocked_resolved=0 (immediate=0 later=0) blocked_unresolved=0 wouldblock=0 no_terminal=4 undeclared=4 no_start=0 expected_no_start=0' <<<"$new_census_out"; then
+    ok "expectations_census: CLASSIFIED counts the four as no_terminal=4 undeclared=4 (previously 0 and 0)"
 else
-    bad "FIXED expectations_census: CLASSIFIED line format regressed: $(grep CLASSIFIED <<<"$new_census_out")"
+    bad "expectations_census: CLASSIFIED line wrong: $(grep CLASSIFIED <<<"$new_census_out")"
 fi
 rm -f "$bsf"
 
-# ── control: mixed session (some recognized) must NOT blindspot-fail ────
-# Guards against the fix over-firing: one named+declared dispatch, one
-# named+undeclared dispatch (still caught by the pre-existing UNDECLARED
-# logic), and two unrecognized (blind-spotted) dispatches. recognized=2 >
-# 0, so this must NOT read as BLINDSPOT (rc=1, "recognised NOTHING") even
-# though unrecognized > 0.
-#
-# STALE-ASSERTION FIX (nexus-a4nun / nexus-3zu8g, 2026-08-09): this test
-# originally asserted rc==0 ("does not hard-fail"), written before the
-# UNDECLARED-DEFICIT exit code (nexus-suuja, see expectations_undeclared's
-# header) widened the rc contract to 0=clean / 1=BLINDSPOT / 2=undeclared
-# deficit / 3=no-ledger. This fixture deliberately includes a genuine
-# undeclared dispatch (rogue-bg — asserted below), so under the CURRENT
-# contract the correct, intended result is rc=2 (a real deficit, not a
-# blindspot false-clean) — rc==0 would mean "nothing to report", which is
-# false here. The guard this CONTROL exists to prove — recognized>0 must
-# not fall into the rc=1 BLINDSPOT branch — is captured by asserting
-# rc==2 specifically (rc=1 would also make this check fail).
-MSID="mk3tw-mixed"
-msf="$(expectations_file "$MSID")"
-rm -f "$msf"
+# ── Test 16: the one remaining false-clean shape — nothing to walk ───────
+# With every START evaluated, the audit can no longer be silent about a
+# dispatch it saw. The shape it can still be silent about is a ledger that
+# DECLARED dispatches and recorded no START at all: the SubagentStart stamp
+# unregistered or inert. Zero UNDECLARED lines there means "nothing was
+# checkable", and must not read as compliance (nexus-mk3tw's rule, re-aimed
+# at the shape that can still produce it — nexus-houpu).
+echo "Test 16: EXPECT rows with zero START rows is a BLINDSPOT (rc=1), not a clean audit"
+NSID="houpu-no-starts"
+nsf="$(expectations_file "$NSID")"
+rm -f "$nsf"
 {
-    printf '2026-07-25T10:00:00Z\tEXPECT\tdeclared-bg\tbackground\n'
-    printf '2026-07-25T10:00:05Z\tSTART\tadeclared-bg-1234567890abcdef\tdeclared-bg\n'
-    printf '2026-07-25T10:00:10Z\tSTART\tarogue-bg-abcdef1234567890\trogue-bg\n'
-    printf '2026-07-25T10:00:15Z\tSTART\ta1a2b3c4d5e6f708\tcode-review-expert\n'
-    printf '2026-07-25T10:00:20Z\tSTART\ta9f8e7d6c5b4a302\tsubstantive-critic\n'
-} >"$msf"
-mixed_undeclared_out="$(expectations_undeclared "$MSID")"
-mixed_undeclared_rc=$?
-if [[ "$mixed_undeclared_rc" -eq 2 ]]; then
-    ok "CONTROL: mixed session (recognized=2 > 0) reports the genuine undeclared-deficit (rc=2, nexus-suuja), not BLINDSPOT (rc=1)"
+    printf '2026-08-29T10:00:00Z\tEXPECT\tgeneral-purpose\tbackground\tt1\n'
+    printf '2026-08-29T10:00:01Z\tEXPECT\tExplore\tbackground\tt2\n'
+} >"$nsf"
+nostart_out="$(expectations_undeclared "$NSID")"
+nostart_rc=$?
+if [[ "$nostart_rc" -eq 1 ]]; then
+    ok "declared-but-no-STARTs audits as rc=1 BLINDSPOT, not rc=0 clean"
 else
-    bad "CONTROL: mixed session with 2 recognized dispatches returned rc=$mixed_undeclared_rc, expected rc=2 (undeclared-deficit)"
+    bad "declared-but-no-STARTs returned rc=$nostart_rc, expected rc=1"
 fi
-if grep -q $'UNDECLARED\tarogue-bg-abcdef1234567890\trogue-bg' <<<"$mixed_undeclared_out"; then
-    ok "CONTROL: the genuinely undeclared named dispatch is still caught"
+if grep -q "^BLINDSPOT" <<<"$nostart_out"; then
+    ok "BLINDSPOT line names the shape (EXPECT rows present, zero STARTs walked)"
 else
-    bad "CONTROL: undeclared named dispatch not flagged: $mixed_undeclared_out"
+    bad "no BLINDSPOT line on a zero-START ledger: $nostart_out"
 fi
-if grep -q $'SUMMARY\tchecked=4 recognized=2 unrecognized=2 undeclared=1' <<<"$mixed_undeclared_out"; then
-    ok "CONTROL: SUMMARY counts exact (checked=4 recognized=2 unrecognized=2 undeclared=1)"
+if grep -q $'SUMMARY\tchecked=0 recognized=0 unrecognized=0 undeclared=0' <<<"$nostart_out"; then
+    ok "SUMMARY shows checked=0 — the number that makes undeclared=0 meaningless"
 else
-    bad "CONTROL: SUMMARY counts wrong: $mixed_undeclared_out"
+    bad "SUMMARY wrong on a zero-START ledger: $nostart_out"
 fi
-rm -f "$msf"
+nostart_census_out="$(expectations_census "$NSID")"
+nostart_census_rc=$?
+if [[ "$nostart_census_rc" -eq 1 ]]; then
+    ok "expectations_census agrees: rc=1 on the same zero-START ledger — one blind-spot rule on both surfaces"
+else
+    bad "expectations_census returned rc=$nostart_census_rc on a zero-START ledger, expected rc=1"
+fi
+if grep -q $'BLINDSPOT\tchecked=0 recognized=0 unrecognized=0' <<<"$nostart_census_out"; then
+    ok "expectations_census tally shows checked=0 on the zero-START ledger"
+else
+    bad "expectations_census tally wrong: $(grep BLINDSPOT <<<"$nostart_census_out")"
+fi
+rm -f "$nsf"
+
+# ── Test 17: census figures for a partially-declared repeated type ───────
+# One EXPECT row, two STARTs of that same type: the first consumes the
+# credit and is declared, the second is undeclared. This is the partial-
+# mechanization shape (one dispatch's PreToolUse write lost) that set
+# membership would absorb entirely, and it is the reason the match is
+# N-of-type rather than "has this type ever been declared".
+echo "Test 17: census figures — one EXPECT, two same-type STARTs => 1 declared + 1 undeclared"
+PSID="houpu-partial"
+psf="$(expectations_file "$PSID")"
+rm -f "$psf"
+{
+    printf '2026-08-29T11:00:00Z\tEXPECT\tgeneral-purpose\tbackground\ttu1\n'
+    printf '2026-08-29T11:00:05Z\tSTART\taeb1c1b56623244ae\tgeneral-purpose\n'
+    printf '2026-08-29T11:00:06Z\tSTART\ta77c0ffee1234567b\tgeneral-purpose\n'
+} >"$psf"
+part_out="$(expectations_census "$PSID")"
+part_rc=$?
+if [[ "$part_rc" -eq 0 ]]; then
+    ok "census rc=0: recognized>0, so this is a per-agent finding, not a blindspot"
+else
+    bad "census returned rc=$part_rc on a partially-declared session, expected rc=0"
+fi
+if grep -q $'AGENT\taeb1c1b56623244ae\tgeneral-purpose\tNO_TERMINAL\tdeclared' <<<"$part_out"; then
+    ok "first same-type START consumes the credit and reads declared"
+else
+    bad "first START not declared: $(grep aeb1c1b56623244ae <<<"$part_out")"
+fi
+if grep -q $'AGENT\ta77c0ffee1234567b\tgeneral-purpose\tNO_TERMINAL\tundeclared' <<<"$part_out"; then
+    ok "second same-type START exhausts the credit and reads undeclared"
+else
+    bad "second START not undeclared: $(grep a77c0ffee1234567b <<<"$part_out")"
+fi
+if grep -q $'BLINDSPOT\tchecked=2 recognized=2 unrecognized=0' <<<"$part_out"; then
+    ok "BLINDSPOT tally: both STARTs recognized by type even though one is undeclared"
+else
+    bad "BLINDSPOT tally wrong: $(grep BLINDSPOT <<<"$part_out")"
+fi
+part_und_out="$(expectations_undeclared "$PSID")"
+part_und_rc=$?
+if [[ "$part_und_rc" -eq 2 ]]; then
+    ok "expectations_undeclared agrees: rc=2 deficit on the same ledger"
+else
+    bad "expectations_undeclared rc=$part_und_rc on the partial ledger, expected rc=2"
+fi
+if grep -q $'SUMMARY\tchecked=2 recognized=2 unrecognized=0 undeclared=1' <<<"$part_und_out"; then
+    ok "recognized=2 and undeclared=1 coexist — recognition is a tally, not a verdict"
+else
+    bad "SUMMARY wrong on the partial ledger: $part_und_out"
+fi
+rm -f "$psf"
+
 
 echo ""
 echo "expectations_test.sh: $PASS passed, $FAIL failed"

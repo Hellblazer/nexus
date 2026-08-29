@@ -1060,6 +1060,56 @@ def index_repo_cmd(
                 f"above."
             )
 
+        # nexus-7lw6a: taxonomy_assign_batch_failed (an HTTP 500 or other
+        # transport failure from the assign endpoint) used to be logged at
+        # WARNING and counted nowhere — the run reported clean while the
+        # affected chunks silently lost their topic assignments. Same
+        # channel-and-shape precedent as chunk_flush_failed_files directly
+        # above (stdout click.echo() Warning, never print()/structlog for
+        # the user-facing line). EXIT-CODE POLICY (decided 2026-08-29 under
+        # the no-silent-fallback directive, revising the first cut's
+        # partial-loss-exits-0): ANY lost topic assignment is a
+        # data-correctness event — topic-scoped search over those chunks is
+        # silently incomplete — and an exit-code-only consumer must not read
+        # it as success. The warning line prints first (the summary a human
+        # reads), then the run exits non-zero; total loss (every batch
+        # failed, the GH #1432 class) is named as such.
+        taxonomy_assign_batches_attempted = (stats or {}).get(
+            "taxonomy_assign_batches_attempted", 0,
+        )
+        taxonomy_assign_batches_failed = (stats or {}).get(
+            "taxonomy_assign_batches_failed", 0,
+        )
+        taxonomy_assign_chunks_failed = (stats or {}).get(
+            "taxonomy_assign_chunks_failed", 0,
+        )
+        if taxonomy_assign_batches_failed:
+            click.echo(
+                f"Warning: {taxonomy_assign_batches_failed}/"
+                f"{taxonomy_assign_batches_attempted} taxonomy-assign "
+                f"batch(es) failed ({taxonomy_assign_chunks_failed} "
+                f"chunk(s) affected) — see the taxonomy_assign_batch_failed "
+                f"log events for details. Topic-scoped search over the "
+                f"affected chunk(s) will be incomplete until the next "
+                f"successful re-index."
+            )
+            if taxonomy_assign_batches_failed == taxonomy_assign_batches_attempted:
+                raise click.ClickException(
+                    f"all {taxonomy_assign_batches_failed} taxonomy-assign "
+                    f"batch(es) failed this run (nexus-7lw6a) — no chunks "
+                    f"received a topic assignment. See the WARNING line "
+                    f"above."
+                )
+            raise click.ClickException(
+                f"{taxonomy_assign_batches_failed}/"
+                f"{taxonomy_assign_batches_attempted} taxonomy-assign "
+                f"batch(es) failed this run (nexus-7lw6a) — "
+                f"{taxonomy_assign_chunks_failed} chunk(s) lost their topic "
+                f"assignment; the index itself completed. Re-run once the "
+                f"assign endpoint is healthy to repair. See the WARNING line "
+                f"above."
+            )
+
 
 def _taxonomy_incomplete(collections: list[str]) -> bool:
     """Return True if ANY collection has no discovered topics yet.

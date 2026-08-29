@@ -16,7 +16,6 @@ import urllib.error
 from collections.abc import Callable
 from typing import Any
 
-import sqlite3
 
 import httpx
 import structlog
@@ -235,9 +234,8 @@ def _is_retryable_vector_error(exc: BaseException) -> bool:
     fragments) and serves the PG-backed HttpVectorClient path.
 
     Check order:
-    1. sqlite3.OperationalError with 'locked' — the Chroma
-       PersistentClient contention leg; dead code once the migration
-       read legs delete at P2 (remove WITH them, not before).
+    1. (retired 2026-08-29) the Chroma/SQLite 'database is locked' leg —
+       gone with the substrate.
     2. Transport-level errors (ConnectError, ReadTimeout, RemoteProtocolError) — always retry.
     3. Chained httpx.HTTPStatusError OR urllib.error.HTTPError (direct,
        chained, or wrapped in VectorServiceError) — authoritative integer
@@ -270,9 +268,8 @@ def _is_retryable_vector_error(exc: BaseException) -> bool:
         equivalent logic below.
     4. String fallback — plain Exception message body (gateway HTML or service JSON).
     """
-    # 1. Chroma PersistentClient concurrent write contention (dies at P2).
-    if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower():
-        return True
+    # 1. (retired 2026-08-29) the Chroma/SQLite 'database is locked' leg is
+    #    gone with the substrate; there is no path back to it.
     # 2. Transport-level errors — no HTTP response, but clearly transient.
     if isinstance(exc, httpx.TransportError):
         return True

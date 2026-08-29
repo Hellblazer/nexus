@@ -6,9 +6,12 @@ orphan chunks, hub-topic assignments. Section 1 (distance histogram)
 ships telemetry-only in this bead; the live-probe fallback is deferred
 to follow-up bead ``nexus-fx2d``.
 
-CATALOG SUBSTRATE (nexus-i711w terminal deletion). Seven of the eleven tests
-— the live-distance-probe section and the chash-coverage section — never
-touch a catalog at all and are unaffected.
+CATALOG SUBSTRATE (nexus-i711w terminal deletion). Five of the nine tests
+— the live-distance-probe section — never touch a catalog at all and are
+unaffected. (The chash-coverage section and its tests were deleted at
+nexus-70vpz / RDR-187: once RDR-187 dropped ``chash_index``, the ratio it
+reported compared a chunk count to itself and could never read anything
+but 1.0.)
 
 The remaining FOUR are PORT-BLOCKED on nexus-e9ru2 and are annotated at
 their own sites: ``TestOrphanChunks`` (both) plus the two
@@ -282,118 +285,6 @@ class TestLiveDistanceProbe:
             )
         assert report.distance_histogram.source == "live"
         assert report.distance_histogram.sample_size == 6
-
-
-# ── Section 5: chash_index coverage (RDR-087 Phase 4.6 / nexus-c2op) ────────
-
-
-class _FakeChashIndex:
-    """Stand-in for ``HttpChashIndex`` — the only chash index since
-    nexus-i711w Stage 2 sub-stage A deleted the SQLite ``ChashIndex``.
-    ``compute_chash_coverage`` constructs it via the function-local
-    ``nexus.db.t2.http_chash_index.HttpChashIndex`` seam, so tests
-    monkeypatch that attribute with a factory returning this fake."""
-
-    def __init__(self, count: int = 0, chashes: set[str] | None = None) -> None:
-        self._count = count
-        self._chashes = chashes or set()
-        self.closed = False
-
-    def count_for_collection(self, collection: str) -> int:
-        return self._count
-
-    def registered_chashes_for_collection(self, collection: str) -> set[str]:
-        return set(self._chashes)
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class TestChashCoverageSection:
-    """Audit section 5 ratio + missing_sample shape.
-
-    The production ``compute_chash_coverage`` hits T3 for the total
-    chunk count and the HTTP chash index for the indexed-row count. Both
-    are stubbed (``_FakeChashIndex`` + a fake T3) so the test is
-    deterministic without network. (Ported off the deleted SQLite
-    ``ChashIndex`` seed in nexus-i711w Stage 2 sub-stage A2.)
-    """
-
-    def test_empty_t3_collection_returns_none_ratio(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
-        from nexus.collection_audit import compute_chash_coverage
-
-        idx = _FakeChashIndex(count=0)
-        monkeypatch.setattr(
-            "nexus.db.t2.http_chash_index.HttpChashIndex", lambda: idx,
-        )
-
-        class _FakeCol:
-            def count(self): return 0
-        class _FakeT3:
-            def get_or_create_collection(self, _n): return _FakeCol()
-            # nexus-8lbe: compute_chash_coverage now uses get_collection
-            def get_collection(self, _n): return _FakeCol()
-
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
-
-        cov = compute_chash_coverage("code__empty")
-        assert cov is not None
-        assert cov.total_chunks == 0
-        assert cov.indexed_rows == 0
-        assert cov.ratio is None
-        assert idx.closed, "coverage probe must close the chash index"
-
-
-    def test_missing_t3_collection_does_not_create_zombie(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
-        """nexus-8lbe (RDR-108 Phase 4 review CR-M3): the audit must
-        NOT speculatively create a T3 collection while computing
-        chash coverage. Pre-fix it called
-        ``get_or_create_collection`` and minted an empty zombie any
-        time the audit ran on a collection name that didn't yet
-        exist in T3 — the same leak ks40 fixed in three indexer
-        paths but missed in collection_audit.
-
-        Post-fix: ``get_collection`` raises NotFoundError; the
-        audit catches and returns total_chunks=None.
-        ``get_or_create_collection`` MUST NOT be called.
-        """
-        from nexus.errors import CollectionNotFoundError as _ChromaNotFoundError
-
-        from nexus.collection_audit import compute_chash_coverage
-
-        monkeypatch.setattr(
-            "nexus.db.t2.http_chash_index.HttpChashIndex",
-            lambda: _FakeChashIndex(count=0),
-        )
-
-        get_or_create_calls: list[str] = []
-
-        class _FakeT3:
-            def get_or_create_collection(self, name):
-                get_or_create_calls.append(name)
-                class _C:
-                    def count(self_inner): return 0
-                return _C()
-
-            def get_collection(self, name):
-                raise _ChromaNotFoundError(f"Collection {name} not found")
-
-        monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
-
-        cov = compute_chash_coverage("code__never_created")
-
-        assert get_or_create_calls == [], (
-            "audit must NOT speculatively create T3 collection; "
-            f"get_or_create_collection was called with {get_or_create_calls!r}"
-        )
-        assert cov is not None
-        assert cov.total_chunks is None
-        assert cov.ratio is None
-        assert cov.missing_sample == []
 
 
 # ── CLI integration ─────────────────────────────────────────────────────────

@@ -95,6 +95,9 @@ class CatalogReader(Protocol):
     def find(self, query, *, content_type=...) -> object:  # canonical
         ...
 
+    def find_by_title_exact(self, title, *, content_type=...) -> object:  # canonical (nexus-fgxmk)
+        ...
+
     def find_by_file_path(self, file_path) -> object:  # canonical
         ...
 

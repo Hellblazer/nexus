@@ -99,6 +99,10 @@ def documents_by_title(title: str) -> list[Any]:
     also matched "Non-Enriched Paper" and the engine arm reversed the two
     after an update. Exact comparison over ``all_documents()`` has neither
     failure mode.
+
+    nexus-fgxmk later promoted the FTS-then-exact-filter idiom into
+    ``HttpCatalogClient.find_by_title_exact``; this scan stays for callers
+    that must not depend on the ``/search`` result cap.
     """
     return [d for d in active_reader().all_documents() if d.title == title]
 

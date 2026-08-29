@@ -735,7 +735,18 @@ case "$MODE" in
         # the gate reported success.
         for check in --check-schema --check-plan-library --check-taxonomy; do
             echo "  nx doctor $check:"
-            if nx doctor "$check" 2>&1 | sed 's/^/    /'; then
+            # nexus-b1v9z: --check-schema's honest N/A (endpoint withholds
+            # the schema fingerprint by design) is an intentional exit-0
+            # outcome for interactive use (nexus-vl8lk) but is indistinguishable
+            # from a real pass to THIS caller -- a release gate whose entire
+            # point is proving the substrate is present and correct.
+            # --fail-on-violation makes that N/A a hard failure here without
+            # touching interactive `nx doctor --check-schema`'s behavior.
+            check_args=("$check")
+            if [[ "$check" == "--check-schema" ]]; then
+                check_args+=(--fail-on-violation)
+            fi
+            if nx doctor "${check_args[@]}" 2>&1 | sed 's/^/    /'; then
                 echo "    [pass]"
             else
                 echo "    [FAIL] -- exit non-zero" >&2
@@ -1204,7 +1215,14 @@ case "$MODE" in
         fi
         for check in --check-schema --check-plan-library --check-taxonomy; do
             echo "  $check:"
-            if ! nx doctor "$check" 2>&1 | tail -5 | sed 's/^/    /'; then
+            # nexus-b1v9z: see the smoke-mode loop's comment above -- an
+            # honest --check-schema N/A must not read as a pass to a
+            # release gate.
+            check_args=("$check")
+            if [[ "$check" == "--check-schema" ]]; then
+                check_args+=(--fail-on-violation)
+            fi
+            if ! nx doctor "${check_args[@]}" 2>&1 | tail -5 | sed 's/^/    /'; then
                 echo "  [FAIL] nx doctor $check exited non-zero" >&2
                 SHAKEDOWN_FAILED+=("10/11 nx doctor $check")
             fi

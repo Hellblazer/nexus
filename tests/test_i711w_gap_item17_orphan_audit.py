@@ -46,13 +46,14 @@ class TestOrphanAuditServiceModeDegradation:
         # (collection_audit.py:376-382) without touching any live install
         # state: per-store env wins over the global backend default.
         monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
-        # Keep the audit hermetic: no T3/network coverage probe (the section
-        # has its own tests; this one is about the orphan section's
-        # degradation reporting). The raw-T2 telemetry/projection/hub
-        # sections need no patch since RDR-158 P3 (nexus-7bomn): `_open_t2`
-        # died with the =sqlite opt-out and those sections are unconditionally
-        # their neutral empty values.
-        monkeypatch.setattr(ca, "compute_chash_coverage", lambda collection: None)
+        # Keep the audit hermetic: no T3/network probe needed for the
+        # orphan section's degradation reporting under test here. The
+        # raw-T2 telemetry/projection/hub sections need no patch since
+        # RDR-158 P3 (nexus-7bomn): `_open_t2` died with the =sqlite
+        # opt-out and those sections are unconditionally their neutral
+        # empty values. The former chash-coverage section (also T3/
+        # network-backed) is gone entirely — deleted at nexus-70vpz /
+        # RDR-187 — so there is nothing left to monkeypatch for it.
 
         # Collection name deliberately avoids the voyage-* embedder tokens: the
         # audit path under test is embedder-agnostic, and a voyage literal

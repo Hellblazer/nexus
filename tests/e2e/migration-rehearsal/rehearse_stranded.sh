@@ -223,7 +223,7 @@ printf '%s\n' "$DISARM_OUT" | sed 's/^/       /'
 [ "$DISARM_RC" -eq 0 ] && ok "disarm-in-process control passed: armed trips, disarmed (same files) is silent" \
   || bad "disarm-in-process control FAILED (rc=$DISARM_RC) — see output above"
 
-# ── Stage 8 — HOP 2: downgrade BACK to the exact pin the message named ────────
+# ── Stage 8 — HOP 2: pin BACK to the exact older version the message named ──────
 say "Stage 8 — HOP 2: downgrade back to conexus==$PIN_RELEASE (literally the message's own instruction)"
 if uv pip install --python "$HOME/nxenv" --reinstall "conexus==$PIN_RELEASE" 2>&1 | tail -5 | sed 's/^/       /'; then
   ok "downgraded to conexus==$PIN_RELEASE"

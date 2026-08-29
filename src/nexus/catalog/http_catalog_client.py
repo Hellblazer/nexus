@@ -1606,10 +1606,44 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def find(
         self, query: str, *, content_type: str | None = None
     ) -> list[CatalogEntry]:
+        """Full-text search over title/author/corpus/file_path.
+
+        Order contract (nexus-fgxmk): the engine returns matches ordered by
+        tumbler as TEXT — string order, stable across heap churn — not by
+        relevance and not numeric (``"1.9.10"`` sorts before ``"1.9.2"``; it
+        coincides with registration order only while segments stay
+        single-digit). The contract is determinism. Before 7.23.0 the
+        statement had no ``ORDER BY`` and ``find(x)[0]`` was heap placement
+        (measured reversing on a churned database).
+
+        Matching is BROADER than a title lookup: the English tsquery drops
+        stopwords, so ``find("Paper A")`` matches "Paper B" too. Never take
+        ``[0]`` as "the document titled *query*" — use
+        :meth:`find_by_title_exact` for that.
+        """
         params: dict = {"q": query}
         if content_type:
             params["content_type"] = content_type
         return self._docs_from(self._get("/search", **params))
+
+    def find_by_title_exact(
+        self, title: str, *, content_type: str | None = None
+    ) -> list[CatalogEntry]:
+        """Every live document whose ``title`` equals *title* exactly.
+
+        The exact-resolution entry point nexus-fgxmk promotes out of the test
+        files (``tests/test_enrich_command.py::_exact``,
+        ``tests/_catalog_fixture_ops.py::documents_by_title``): a full-text
+        :meth:`find` on the title, then an exact client-side title filter.
+        The ``'simple'`` tsquery leg keeps stopword lexemes, so a title made
+        of nothing but stopwords still matches itself. Returns a list because
+        titles are not unique across owners/collections; a caller that needs
+        exactly one asserts ``len(...) == 1`` with the candidates in the
+        message. Bounded by the engine's ``/search`` result cap — for a title
+        whose tokens match more documents than that, resolve by identity
+        (:meth:`by_source_uri` / :meth:`by_file_path`) instead.
+        """
+        return [e for e in self.find(title, content_type=content_type) if e.title == title]
 
     def by_file_path(
         self, owner: Tumbler | str, file_path: str

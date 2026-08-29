@@ -299,16 +299,21 @@ def repair_uv_takeover(*, dry_run: bool = False) -> list[str]:
     legacy = install_layout.uv_conexus_venv()
     legacy_present = (legacy / "bin").is_dir()
 
-    taken = [
-        entry.name
-        for entry in sorted((current / "bin").iterdir())
-        if entry.name not in install_layout.NEVER_SHIM
-        and (bin_dir / entry.name).is_symlink()
-    ] if (current / "bin").is_dir() else []
-    if not taken and not legacy_present:
-        return []
-
     lines: list[str] = []
+    try:
+        # Owned = what the distribution DECLARES (the installer's own query),
+        # never a listing of <current>/bin: a uv-managed python3.12 link in the
+        # shared bin dir shares its name with the venv's interpreter and must
+        # never be rewritten into a nexus shim (GH #1487, nexus-50hm9).
+        taken = install_layout.reclaimed_shims(current, bin_dir)
+    except install_layout.InstallLayoutError as exc:
+        taken = []
+        lines.append(
+            f"could not ask {current.name} which console scripts it declares "
+            f"({exc}): shims left untouched; run `nx doctor`"
+        )
+    if not taken and not legacy_present:
+        return lines
     target = current
     if legacy_present:
         uv_version = _installed_version(legacy)

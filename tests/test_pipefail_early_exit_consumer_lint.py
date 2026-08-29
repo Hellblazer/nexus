@@ -936,11 +936,11 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/run.sh:187",
         "tests/e2e/migration-rehearsal/run.sh:200",
         "tests/e2e/migration-rehearsal/run.sh:211",
-        "tests/e2e/migration-rehearsal/run.sh:623",
-        "tests/e2e/migration-rehearsal/run.sh:654",
-        "tests/e2e/migration-rehearsal/run.sh:709",
-        "tests/e2e/migration-rehearsal/run.sh:726",
-        "tests/e2e/migration-rehearsal/run.sh:774",
+        "tests/e2e/migration-rehearsal/run.sh:638",
+        "tests/e2e/migration-rehearsal/run.sh:669",
+        "tests/e2e/migration-rehearsal/run.sh:724",
+        "tests/e2e/migration-rehearsal/run.sh:741",
+        "tests/e2e/migration-rehearsal/run.sh:789",
         # --- tests/e2e/mac-signed-binary-gate.sh (7 entries): needs an
         # actually-signed macOS binary + `spctl`/`codesign` on real macOS
         # to safely verify a rewrite of the signature-inspection logic.
@@ -1196,9 +1196,14 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         #   why the sandbox activates $HOME first, +6 lines): :1110 -> :1116,
         #   :1114 -> :1120, :1162 -> :1168. Same 3 sites, same rationale --
         #   only the prose above them changed.
-        "tests/e2e/release-sandbox.sh:1130",
-        "tests/e2e/release-sandbox.sh:1134",
-        "tests/e2e/release-sandbox.sh:1182",
+        #   Retargeted AGAIN (nexus-b1v9z: --check-schema's smoke/shakedown
+        #   loops now build a per-check args array so --fail-on-violation
+        #   can be appended only for --check-schema, +11 lines before this
+        #   region): :1130 -> :1141, :1134 -> :1145, :1182 -> :1193. Same 3
+        #   sites, same rationale -- only an earlier, unrelated loop grew.
+        "tests/e2e/release-sandbox.sh:1141",
+        "tests/e2e/release-sandbox.sh:1145",
+        "tests/e2e/release-sandbox.sh:1193",
     }
 )
 _PIPEFAIL_OR_TRUE_SITES_CEILING = 9

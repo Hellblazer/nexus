@@ -1486,10 +1486,10 @@ def health_cmd(sort_by: str, fmt: str) -> None:
 def audit_cmd(name: str, fmt: str, live: bool, live_n: int) -> None:
     """Deep-dive audit for a single collection (RDR-087 Phase 4.2).
 
-    Five sections: distance histogram (30d telemetry, ``--live`` to
+    Four sections: distance histogram (30d telemetry, ``--live`` to
     probe T3 when telemetry is cold), top-5 cross-projections,
     orphan chunks (>30d, no incoming links), top-10 cross-collection
-    hub topic assignments, chash_index coverage.
+    hub topic assignments.
     """
     from nexus.collection_audit import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         format_audit_human,

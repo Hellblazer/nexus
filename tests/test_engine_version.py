@@ -440,7 +440,10 @@ class TestRequiredEngineVersion:
         # --candidate-migration PASSED with delta=4 matching the EXPECT pin,
         # published-client write gate PASSED (exact manifest counts). --acquire
         # + deploy/cloud gates follow the client tag push, as always.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 88)
+        # ->(0,1,89) for 7.23.0 (paired): GET /v1/catalog/search ORDER BY tumbler
+        # (nexus-fgxmk) and the read-only aspects census route (nexus-mlu3k);
+        # no changeset.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 89)
 
 
 class TestParseEngineVersion:

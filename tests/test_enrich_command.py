@@ -424,7 +424,9 @@ def _exact(cat, title: str):
     production caller indexes into find() (grep-checked) — so the fix is to
     stop depending on one.
     """
-    hits = [e for e in cat.find(title) if e.title == title]
+    # nexus-fgxmk promoted this idiom into the API; kept here as the
+    # one-entry assertion these tests want on top of it.
+    hits = cat.find_by_title_exact(title)
     assert len(hits) == 1, (
         f"expected exactly one entry titled {title!r}, got "
         f"{[(str(e.tumbler), e.title) for e in hits]}"

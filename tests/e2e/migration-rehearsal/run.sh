@@ -120,7 +120,7 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # suite when it drifts. Following the old wording blocked the 7.6.0 release
 # battery (2026-08-10). A prose comment that contradicts a mechanical test
 # loses to the test.
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.88}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.89}"
 # nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
 # published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
 # resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
@@ -320,10 +320,19 @@ _guided_restore() {
   # floor tag it is hand-swapped in under (the harness's Stage 4/5 hand-
   # swap bookkeeping depends on this — see rehearse_candidate_migration.sh's
   # own header for what that bookkeeping does and does not claim).
-  { [ "$GUIDED" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ] || [ "$CANDIDATE_MIGRATION" = 1 ]; } || return 0
-  rm -f "$RELEASE_PROPS.tmp" 2>/dev/null || true
-  git checkout -- "$RELEASE_PROPS" 2>/dev/null || true
+  if { [ "$GUIDED" = 1 ] || [ "$SHAKEOUT_E2E" = 1 ] || [ "$CANDIDATE_MIGRATION" = 1 ]; }; then
+    rm -f "$RELEASE_PROPS.tmp" 2>/dev/null || true
+    # Pre-invocation BYTES, never `git checkout` (nexus-iws18: HEAD is not
+    # what was in the tree when this run started; a checkout destroys any
+    # uncommitted edit to release.properties on every run).
+    cp "$RELEASE_PROPS_SNAPSHOT" "$RELEASE_PROPS" 2>/dev/null || true
+  fi
+  rm -f "$RELEASE_PROPS_SNAPSHOT" 2>/dev/null || true
 }
+# nexus-iws18: snapshot release.properties' actual bytes before any leg can
+# stamp it; _guided_restore puts exactly these back on exit.
+RELEASE_PROPS_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/release.properties.snapshot.XXXXXX")"
+cp "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT"
 trap '_guided_restore' EXIT
 
 [ "$COLD" = 1 ] && [ "$GUIDED" = 1 ] && { echo "--cold and --guided are different flows; pick one" >&2; exit 2; }
@@ -377,6 +386,12 @@ fi
 # service/ tree natively (like --guided) and drives its own entrypoint
 # (rehearse_shakeout.sh, nexus-h8rf6) — never combined with another flow flag.
 [ "$SHAKEOUT" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; } && { echo "--shakeout is a standalone candidate shakeout (its own entrypoint); do not combine with other legs" >&2; exit 2; }
+# --shakeout is the PRE-TAG candidate gate: its whole purpose is "prove THIS
+# candidate binary", so a stale binary satisfying it inverts the gate
+# (nexus-mbeke, reopening nexus-ndve9 on the pre-tag leg). Refuse --no-build
+# exactly like every other native-build leg; the candidate IDENTITY assertion
+# that would make --no-build safe is nexus-dk5wb.
+[ "$SHAKEOUT" = 1 ] && [ "$DO_BUILD" = 0 ] && { echo "--shakeout is the pre-tag candidate gate and always rebuilds the native candidate + working-tree wheel (a stale binary would satisfy it silently, nexus-mbeke); --no-build is irrelevant" >&2; exit 2; }
 # --package-upgrade is a standalone journey (nexus-cfgo9): NO native build (the
 # NEW engine is acquired for real by the product's own convergence code, never
 # locally built or supplied by this harness) — never combined with another

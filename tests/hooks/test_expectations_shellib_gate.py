@@ -21,8 +21,12 @@ the two pre-existing assertion failures this file's companion fix
 (nexus-3zu8g, 2026-08-09) retired — both were stale assertions pinning
 REMOVED behavior (the named-agent-morphology gate dropped at nexus-hbr4x,
 and the pre-nexus-suuja rc contract), not live defects in ``expectations.sh``
-itself; see ``tests/e2e/lib/expectations_test.sh``'s Test 7 and the Test 15
-CONTROL block for the corrected assertions and their rationale.
+itself; see ``tests/e2e/lib/expectations_test.sh``'s Test 7 for the
+corrected assertion and its rationale. The Test 15 CONTROL block that was
+also cited here is gone (nexus-houpu, 2026-08-29): it existed to prove the
+mk3tw BLINDSPOT did not over-fire on a session with SOME recognised
+dispatches, and recognition stopped being the thing that decides whether a
+START is audited at all. Tests 15-17 replace it.
 
 THE LOAD-BEARING REQUIREMENT. An abort produces NEITHER a "[FAIL]" line nor
 a complete "N passed, M failed" summary line — a wrapper that greps stdout
@@ -56,7 +60,7 @@ SUITE = REPO_ROOT / "tests" / "e2e" / "lib" / "expectations_test.sh"
 # commit; a mismatch here without that intent is exactly the drift class
 # this gate exists to catch — never widen this to a floor/inequality to
 # make a failing edit pass quietly.
-EXPECTED_PASSED = 63
+EXPECTED_PASSED = 75
 EXPECTED_FAILED = 0
 
 _SUMMARY_RE = re.compile(r"expectations_test\.sh: (\d+) passed, (\d+) failed")

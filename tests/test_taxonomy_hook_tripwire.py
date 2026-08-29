@@ -86,3 +86,67 @@ def test_tripwire_persist_failure_never_propagates(monkeypatch):
     mcp_infra.taxonomy_assign_batch_hook(
         ["doc1"], "knowledge__tw__voyage-context-3__v1", ["c1"], [[0.1]], None,
     )
+
+
+# nexus-7lw6a: taxonomy_assign_batch_failed (e.g. the HTTP 500 this file's
+# _fire_service_path_failure simulates) was logged at WARNING and counted
+# nowhere -- nx index repo's run summary reported clean while the affected
+# chunks lost their topic assignments. These tests drive the SAME failure
+# injection as test_service_path_failure_records_hook_failures_row above
+# and assert the run-scoped counters mcp_infra.taxonomy_assign_run_stats()
+# exposes for that summary, rather than only the pre-existing warning log +
+# hook_failures row.
+
+def test_service_path_failure_counts_batch_and_chunks(monkeypatch):
+    """Non-vacuity: the pre-existing warning-log assertion (test above)
+    already passes today without any counter -- reverting the
+    _record_taxonomy_assign_attempt/_record_taxonomy_assign_batch_failure
+    calls in taxonomy_assign_batch_hook makes THIS test go red while that
+    one stays green, proving the two are independently pinned."""
+    mcp_infra.reset_taxonomy_assign_run_stats()
+    captured: list = []
+    _fire_service_path_failure(monkeypatch, captured)  # must not raise
+
+    stats = mcp_infra.taxonomy_assign_run_stats()
+    assert stats["attempted"] == 1
+    assert stats["failed_batches"] == 1
+    assert stats["failed_chunks"] == 2  # len(["doc1", "doc2"])
+
+
+def test_successful_assign_counts_attempt_but_not_failure(monkeypatch):
+    """A batch that succeeds must count toward the denominator
+    (`attempted`) without being mistaken for a failure -- otherwise a
+    single failed batch among many successes would misreport as total
+    loss."""
+    mcp_infra.reset_taxonomy_assign_run_stats()
+    _force_service_path(monkeypatch)
+
+    def _capture_write(fn, **_kwargs):
+        t2 = MagicMock()
+        t2.taxonomy.assign_from_chashes.return_value = {}
+        return fn(t2)
+
+    monkeypatch.setattr(mcp_infra, "t2_index_write", _capture_write)
+    mcp_infra.taxonomy_assign_batch_hook(
+        ["doc1"], "knowledge__tw__minilm-l6-v2-384__v1", ["c1"], [[0.1]], None,
+    )
+
+    stats = mcp_infra.taxonomy_assign_run_stats()
+    assert stats["attempted"] == 1
+    assert stats["failed_batches"] == 0
+    assert stats["failed_chunks"] == 0
+
+
+def test_reset_taxonomy_assign_run_stats_zeroes_all_counters(monkeypatch):
+    """Per-run reset (called by indexer.index_repository at run start, same
+    point as the two sibling op-stats resets) must not leave a prior run's
+    counts to bleed into the next one's summary."""
+    mcp_infra.reset_taxonomy_assign_run_stats()
+    captured: list = []
+    _fire_service_path_failure(monkeypatch, captured)
+    assert mcp_infra.taxonomy_assign_run_stats()["failed_batches"] == 1
+
+    mcp_infra.reset_taxonomy_assign_run_stats()
+    assert mcp_infra.taxonomy_assign_run_stats() == {
+        "attempted": 0, "failed_batches": 0, "failed_chunks": 0,
+    }

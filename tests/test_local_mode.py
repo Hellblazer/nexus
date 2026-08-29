@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -529,36 +528,6 @@ class TestMakeT3Local:
         monkeypatch.setenv("NX_LOCAL", "0")
         from nexus.db import make_t3
         assert make_t3(_client=MagicMock(), _ef_override=MagicMock())._local_mode is False
-
-
-# ── retry.py: sqlite3 OperationalError ────────────────────────────────────────
-
-
-class TestRetryableSqliteError:
-    @pytest.mark.parametrize(
-        ("msg", "expected"),
-        [("database is locked", True), ("no such table: foo", False)],
-        ids=["locked", "other"],
-    )
-    def test_retryable_classification(self, msg: str, expected: bool) -> None:
-        from nexus.retry import _is_retryable_vector_error
-        assert _is_retryable_vector_error(sqlite3.OperationalError(msg)) is expected
-
-    def test_vector_with_retry_retries_locked(self) -> None:
-        from nexus.retry import _vector_with_retry
-        call_count = 0
-
-        def flaky_fn():
-            nonlocal call_count
-            call_count += 1
-            if call_count < 3:
-                raise sqlite3.OperationalError("database is locked")
-            return "success"
-
-        with patch("nexus.retry.time.sleep"):
-            result = _vector_with_retry(flaky_fn)
-        assert result == "success"
-        assert call_count == 3
 
 
 # ── Staleness round-trip ──────────────────────────────────────────────────────
