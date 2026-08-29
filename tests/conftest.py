@@ -1466,6 +1466,44 @@ def t2_service_env(request: pytest.FixtureRequest,
 
 
 @pytest.fixture(autouse=True)
+def _blackhole_default_managed_endpoint(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-d5aye: the unit suite must never reach the live managed service.
+
+    ``_isolate_service_endpoint_env`` clears ``NX_SERVICE_URL`` and
+    ``_isolate_config_dir`` hides the operator's ``config.yml``, which is
+    exactly what makes ``resolve_managed_endpoint`` fall back to
+    ``DEFAULT_MANAGED_SERVICE_URL`` — the real cloud. On 2026-08-28 a
+    CliRunner-invoked ``nx catalog verify`` reached an unpatched
+    ``probe_managed_service()`` through the vector-client singleton and made
+    a real network probe from inside the suite; its failure text carried
+    the cloud's true release_version. The test had been green for as long
+    as cloud == floor and went red at the v0.1.88 floor bump.
+
+    Under the pinned suite ``t2_service_env`` sets ``NX_SERVICE_URL`` to the
+    local test engine AFTER the isolation, so the default is normally never
+    reached (the incident's probe hit the engine that was reachable). The
+    default IS reached when the pin is off (``NX_TEST_T2_SUBSTRATE=none`` —
+    the worktree agents' narrow runs) or a test clears the env; that is the
+    path this closes. So the DEFAULT is a black hole under pytest: a loopback
+    port nothing listens on. A test that reaches the probe unpatched there
+    fails FAST and LOUD with ``127.0.0.1:9`` in the message (connection
+    refused — never a hang, never estate state), instead of quietly talking
+    to production.
+    Tests that need the constant's real value (they assert it, they do not
+    dial it) opt out with ``@pytest.mark.real_managed_default``. No fixture
+    restores real network access; the integration marker's tests set
+    ``NX_SERVICE_URL`` explicitly and are unaffected.
+    """
+    if request.node.get_closest_marker("real_managed_default") is not None:
+        return
+    from nexus.db import managed_endpoint as _me
+
+    monkeypatch.setattr(_me, "DEFAULT_MANAGED_SERVICE_URL", "http://127.0.0.1:9")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Strip ambient service-endpoint env from every unit test (nexus-dvom6).
 

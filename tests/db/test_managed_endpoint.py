@@ -85,6 +85,7 @@ def _trimmed_version_body(release_version: str = _FLOOR_STR) -> dict:
 # ── endpoint resolution ──────────────────────────────────────────────────────
 
 
+@pytest.mark.real_managed_default
 def test_resolve_defaults_to_managed_url(monkeypatch):
     monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
     base, token = resolve_managed_endpoint()
@@ -125,6 +126,7 @@ def test_resolve_missing_token_fails_loud(monkeypatch):
     assert "NX_SERVICE_TOKEN" in str(exc.value)
 
 
+@pytest.mark.real_managed_default
 def test_resolve_token_optional_when_not_required(monkeypatch):
     base, token = resolve_managed_endpoint(require_token=False)
     assert base == DEFAULT_MANAGED_SERVICE_URL
@@ -331,6 +333,7 @@ def test_probe_trimmed_payload_passes_and_defaults_optional_fields():
     assert caps.schema_changeset_count is None
 
 
+@pytest.mark.real_managed_default
 def test_probe_defaults_base_url_to_managed(monkeypatch):
     monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
     seen = {}

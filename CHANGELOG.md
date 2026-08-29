@@ -15,6 +15,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   skipped the cleanup every time — the nexus-d9fwj retraction fix beneath
   it was unreachable from production. A blank collection now has nothing to
   mismatch; a document that names a different collection is still refused.
+- **The unit suite cannot dial the live managed service** (nexus-d5aye).
+  An autouse fixture points `DEFAULT_MANAGED_SERVICE_URL` at a loopback
+  port nothing listens on, so a CliRunner-invoked command that reaches an
+  unpatched `probe_managed_service()` with no pinned endpoint (the pin-off
+  `NX_TEST_T2_SUBSTRATE=none` runs, or a test that clears `NX_SERVICE_URL`)
+  fails fast naming `127.0.0.1:9` instead of probing production;
+  `@pytest.mark.real_managed_default` opts out for tests that assert the
+  constant's own value.
 - **Gates restore `release.properties` bytes, never `git checkout` it to
   HEAD** (nexus-iws18). `tests/e2e/local-service-gate.sh` (both restore
   sites), `tests/e2e/migration-rehearsal/run.sh` (`_guided_restore`) and
