@@ -52,3 +52,16 @@ mechanize, it matters enough to ship.
   immediately. The stop guard is unaffected: `expectations_owes_report`
   needed no change and `conexus/hooks/scripts/subagent-stop.sh` consumes
   only it.
+
+- `conexus/skills/orchestration/SKILL.md` — bead nexus-houpu: the retro item
+  (step 3) states the re-keyed `expectations_undeclared` exit-code contract
+  (rc=1 = EXPECT rows present, zero STARTs walked; a START the PreToolUse
+  hook never saw is UNDECLARED unless hand-declared; the census never exits
+  2) instead of the retired `recognized==0` gloss. Guidance text only; an
+  installed session reads the old wording until the next plugin cut.
+
+- `conexus/commands/continuation.md` — bead nexus-houpu: the Gap-1
+  declaration-completeness step and the scenario-27 tripwire describe the
+  CC 2.1.251 payload (opaque `a<hex>` agent_id, `agent_type` ==
+  `subagent_type`, no name morphology) and the same rc contract as above.
+  Guidance text only; inert until the next plugin cut.
