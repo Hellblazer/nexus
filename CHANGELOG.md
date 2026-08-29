@@ -8,6 +8,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Ghost documents are cleaned up by the production delete paths**
+  (nexus-sz89e, verified then fixed). `store_delete` / `nx store delete` /
+  `HttpVectorClient.expire` all pass a real collection, and the nexus-c53hy
+  mismatch guard compared it to a ghost's blank `physical_collection` and
+  skipped the cleanup every time — the nexus-d9fwj retraction fix beneath
+  it was unreachable from production. A blank collection now has nothing to
+  mismatch; a document that names a different collection is still refused.
 - **Gates restore `release.properties` bytes, never `git checkout` it to
   HEAD** (nexus-iws18). `tests/e2e/local-service-gate.sh` (both restore
   sites), `tests/e2e/migration-rehearsal/run.sh` (`_guided_restore`) and

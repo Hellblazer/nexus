@@ -758,7 +758,18 @@ def store_delete_catalog_cleanup(
     if entry is None:
         return "", ""
 
-    if expected_collection is not None and entry.physical_collection != expected_collection:
+    # nexus-c53hy cross-collection protection, with the nexus-sz89e rule: a
+    # GHOST (blank physical_collection — the documented live population) has
+    # no collection to mismatch. Every production caller passes a real
+    # expected_collection, so without this rule a ghost was never cleaned up
+    # by store_delete at all (the guard fired before the nexus-d9fwj
+    # retraction guard below was ever reached). A NON-blank collection that
+    # differs is still refused, unchanged.
+    if (
+        expected_collection is not None
+        and entry.physical_collection
+        and entry.physical_collection != expected_collection
+    ):
         _log.debug(
             "store_delete_catalog_cleanup_collection_mismatch",
             doc_id=chash_doc_id, expected_collection=expected_collection,
@@ -907,7 +918,14 @@ def reap_catalog_manifest_for_chashes(
             )
             if entry is None:
                 continue
-            if expected_collection is not None and entry.physical_collection != expected_collection:
+            # nexus-sz89e: a ghost's blank physical_collection cannot mismatch
+            # (see store_delete_catalog_cleanup); a non-blank other collection
+            # is still skipped (nexus-c53hy).
+            if (
+                expected_collection is not None
+                and entry.physical_collection
+                and entry.physical_collection != expected_collection
+            ):
                 _log.debug(
                     "catalog_reap_collection_mismatch",
                     chash=chash, expected_collection=expected_collection,
