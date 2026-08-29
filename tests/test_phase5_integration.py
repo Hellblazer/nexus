@@ -375,6 +375,38 @@ class TestDoctorCheckTaxonomy:
         # and it must still fall back rather than reporting nothing
         assert "frozen SQLite migration source" in result.output
 
+    def test_engine_side_error_fails_loud_never_reads_as_clean(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """nexus-b1v9z part A: a REACHABLE engine that answers with a real
+        error (HTTP 500, not the 404 "route doesn't exist yet" case) is a
+        genuine engine-side failure, not "no engine to ask". The old broad
+        ``except Exception`` treated it identically to "unreachable" and
+        fell through to the frozen SQLite census -- which, on a fresh HOME
+        with no local db file, reported "nothing to check" at exit 0. That
+        is the exact false-green nexus-ypori's engine-first fix was meant
+        to end: an engine-side fault must be the verdict, not silently
+        swallowed by a fallback meant for the no-engine-at-all case."""
+        import httpx
+
+        db_path = tmp_path / "nonexistent" / "memory.db"  # fresh HOME: no local db at all
+        store = MagicMock()
+        store.get_link_drift.side_effect = httpx.HTTPStatusError(
+            "HttpTaxonomyStore./v1/taxonomy/links/drift failed: HTTP 500: internal error",
+            request=MagicMock(), response=MagicMock(),
+        )
+        with patch(
+            "nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore",
+            return_value=store,
+        ), patch("nexus.config.default_db_path", return_value=db_path):
+            result = runner.invoke(main, ["doctor", "--check-taxonomy"])
+
+        assert result.exit_code != 0, result.output
+        assert "500" in result.output
+        # the false-green this test exists to close:
+        assert "nothing to check" not in result.output, result.output
+        assert "frozen SQLite migration source" not in result.output, result.output
+
     def test_no_db_file(self, runner: CliRunner, tmp_path: Path) -> None:
         db_path = tmp_path / "nonexistent" / "memory.db"
         with self._no_service(), patch(

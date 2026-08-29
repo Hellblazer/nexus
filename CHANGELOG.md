@@ -37,6 +37,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   until `purge_trash` reaps both together. The notes guard keeps its live
   filter on purpose (a manifest-less tombstoned note has no row for
   `purge_trash` to reap with; that is the Tier-2 side, unchanged).
+- **`nx doctor` verdict lines stop contradicting their own block**
+  (nexus-eg5tw): the plan-library check now says "All checks passed, with
+  N warning(s)." when it emitted a WARN, instead of an unqualified pass on
+  the next line; rc is unchanged (a WARN alone never flips it).
+- **`nx doctor`'s aspect-queue check signals failure like its siblings**
+  (nexus-fylxo): a failed-row backlog now emits `✗ FAIL: N failed
+  aspect-extraction row(s)...` and exits 1 on the standalone
+  `--check-aspect-queue` (which already propagated its rc) instead of a
+  purely descriptive count.
+- **`nx doctor --check-taxonomy` fails loud on an engine error; `--check-
+  schema --fail-on-violation` makes the honest N/A fatal** (nexus-b1v9z).
+  A genuine engine-side failure (an HTTP 500) is now exit 1 rather than a
+  silent fall-through to the RDR-176 SQLite census (kept, on purpose, for
+  the no-engine troubleshooting case it was built for). `--check-schema`
+  keeps its intentional N/A-exit-0 (nexus-vl8lk) interactively; both
+  `release-sandbox.sh` call sites pass `--fail-on-violation`, where an
+  N/A must not read as a pass.
 - **Ghost-document manifest retraction no longer aborts catalog cleanup**
   (nexus-d9fwj). `store_hook._retract_manifest_rows_for_chash` guards a
   blank `physical_collection` (a ghost/sourceless document): it falls back

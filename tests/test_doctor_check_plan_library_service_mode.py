@@ -85,6 +85,27 @@ def test_healthy_library_reports_counts_and_passes():
     assert re.search(r"non-dimensional:\s+1\b", printed)
 
 
+def test_warning_is_reflected_in_the_verdict_line_not_masked():
+    """nexus-eg5tw: this fixture emits a WARN (1 non-dimensional row) with
+    no FAIL — the old code printed that WARN and then an UNQUALIFIED
+    'All checks passed.' in the same block, contradicting itself. The
+    verdict must name the warning; rc stays 0 (a WARN alone is not a
+    failure — only FAIL:-class conditions raise Exit)."""
+    n_builtins = _MIN_GLOBAL_BUILTIN_COUNT
+    rows = _builtin_rows(n_builtins) + [_row(dimensions=None, tags="", project="personal")]
+    with patch("nexus.db.t2.http_plan_library.HttpPlanLibrary") as lib:
+        lib.return_value.list_plans.return_value = rows
+        printed, exit_code = _run()
+
+    assert exit_code is None
+    assert "WARN: 1 non-dimensional row(s)" in printed
+    # The bare, unqualified verdict line must not appear alongside a WARN —
+    # that exact coexistence is the bug. A qualified verdict (e.g. "passed
+    # ... with 1 warning") is fine; the literal bare line is not.
+    assert "All checks passed.\n" not in printed
+    assert re.search(r"warning", printed, re.IGNORECASE)
+
+
 def test_below_floor_exits_1_names_reseed_fix():
     """Below the builtin floor is a genuine FAIL — the reseed verb named
     in the fix hint is the LIVE command (`nx plan reseed`), not the

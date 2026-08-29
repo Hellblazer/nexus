@@ -324,6 +324,8 @@ class TestAspectQueueCheckRoutes:
         .listFailed does not select LAST_ERROR). Omitting it silently would make
         a failing queue look error-free — the same class again — so the absence
         is stated."""
+        import click
+
         from nexus.commands import doctor as doctor_mod
         # nexus-i711w Stage 2 sub-stage A2: QueueRow rehomed to records when
         # the SQLite aspect_extraction_queue module was deleted.
@@ -337,13 +339,47 @@ class TestAspectQueueCheckRoutes:
             q.return_value.pending_count.return_value = 0
             q.return_value.list_failed.return_value = [row]
             runner = CliRunner()
-            with runner.isolation() as (out, _err, _):
-                doctor_mod._run_check_aspect_queue()
-                printed = out.getvalue().decode()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_aspect_queue()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
 
         assert "knowledge__x" in printed
         assert "retries 3" in printed
         assert "last_error is not carried" in printed, printed
+        # nexus-fylxo: a failed-row backlog must signal failure like its
+        # siblings (resources/plan-library/taxonomy/t1), not read as healthy.
+        assert exit_code == 1
+        assert "✗" in printed or "FAIL:" in printed, printed
+
+    def test_zero_failed_rows_does_not_signal_failure(
+        self, service_mode: None,
+    ) -> None:
+        """A healthy queue (pending rows only, no failures) must stay a
+        clean, non-raising report -- the fix must not turn every backlog
+        into a failure, only a genuine failed-row count."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
+            q.return_value.pending_count.return_value = 7
+            q.return_value.list_failed.return_value = []
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_aspect_queue()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert exit_code is None
+        assert "7 pending" in printed
+        assert "FAIL" not in printed
 
 
 # ── console twin (nexus-k0luu, second surface) ──────────────────────────────

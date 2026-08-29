@@ -74,7 +74,7 @@ def _reinstall_command() -> str:
     return install_advice.upgrade_command("uv tool install --reinstall conexus")
 
 
-def _run_check_schema() -> None:
+def _run_check_schema(*, strict: bool = False) -> None:
     """Validate the T2 schema is actually applied (RDR-076; PORTED at
     nexus-vl8lk from an N/A stub).
 
@@ -103,6 +103,21 @@ def _run_check_schema() -> None:
     schema_error or zero applied changesets; 0 (with an explicit N/A note)
     when the endpoint withholds the fingerprint by design (managed/cloud);
     0 with a changeset count otherwise.
+
+    :param strict: nexus-b1v9z part B. The honest N/A above is a
+        DELIBERATE, previously-litigated design (nexus-vl8lk) for
+        interactive use — an operator asking "is my schema okay?" should
+        not get a false failure just because their endpoint withholds the
+        fingerprint by design. But a release-gate CALLER (release-
+        sandbox.sh) cannot distinguish that N/A from a real pass by exit
+        code alone, and the whole point of running this check there is to
+        prove the substrate is present and correct — an N/A is exactly as
+        uninformative as never having run the check. ``strict=True`` (the
+        CLI's ``--fail-on-violation``, an existing doctor.py flag
+        previously scoped to ``--check-storage-boundary``) makes ONLY the
+        N/A outcome fatal; a genuine schema_error or zero-changeset FAIL
+        was already non-zero regardless of this flag, and a healthy
+        engine still exits 0.
     """
     from nexus.health import probe_t2_schema_fingerprint  # noqa: PLC0415 — deferred to keep CLI startup fast
 
@@ -121,6 +136,14 @@ def _run_check_schema() -> None:
             "endpoint (managed/cloud service withholds it by design, or "
             "the engine predates the /version schema fields) — N/A."
         )
+        if strict:
+            click.echo(
+                "T2 schema check: FAIL (strict/gate mode) — an honest N/A "
+                "is not proof the schema is applied; a release gate must "
+                "see an actual OK.",
+                err=True,
+            )
+            raise click.exceptions.Exit(1)
         return
 
     if fp.schema_error:
@@ -795,7 +818,8 @@ def _run_check_plan_library() -> None:
             f"  NOTE: template parity not checked ({parity.unavailable}).",
             err=True,
         )
-    else:
+    warnings = 0
+    if parity.unavailable is None:
         if parity.missing_unchecked:
             click.echo(
                 "  NOTE: drift was checked, but MISSING templates were not — "
@@ -823,6 +847,7 @@ def _run_check_plan_library() -> None:
                 "place — remove with `nx plan delete <id>` if intended.",
                 err=True,
             )
+            warnings += 1
         failed = failed or parity.failed
     if non_dimensional:
         click.echo(
@@ -830,6 +855,7 @@ def _run_check_plan_library() -> None:
             "(legacy / pre-RDR-078 seeds).",
             err=True,
         )
+        warnings += 1
     if truncated:
         click.echo(
             f"  NOTE: plan count hit the {MAX_QUERY_RESULTS}-row page cap — "
@@ -837,10 +863,17 @@ def _run_check_plan_library() -> None:
             err=True,
         )
 
-    if not failed:
-        click.echo("All checks passed.")
-    else:
+    if failed:
         raise click.exceptions.Exit(1)
+    # A WARN alone does not change the exit code (nexus-eg5tw) — only the
+    # FAIL:-class conditions above do that, via `failed`. But the verdict
+    # line must say so: printing an unqualified "All checks passed." next
+    # to a WARN emitted two lines above is a self-contradiction within the
+    # same block, not two independent facts.
+    if warnings:
+        click.echo(f"All checks passed, with {warnings} warning(s).")
+    else:
+        click.echo("All checks passed.")
 
 
 def _run_trim_telemetry(days: int, dry_run: bool = False) -> None:
@@ -962,7 +995,12 @@ def _report_aspect_queue_service() -> None:
 
     Fails LOUD on a transport error rather than degrading to the sqlite path:
     silently falling back would reproduce the exact defect being fixed — a
-    frozen-file reading presented as the live queue.
+    frozen-file reading presented as the live queue. A transport failure is
+    reported as UNKNOWN (exit 0 -- not reporting pass or fail); a nonzero
+    FAILED-row count from a reachable queue is a genuine content failure and
+    raises ``click.exceptions.Exit(1)`` with a ✗ FAIL: marker (nexus-fylxo),
+    matching the 4 sibling supplementary checks (resources / plan-library /
+    taxonomy / t1) that already signal failure this way.
     """
     import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
 
@@ -1011,6 +1049,18 @@ def _report_aspect_queue_service() -> None:
             "see the worker logs for the failure text)"
         )
         click.echo("\nRe-enqueue them with: nx aspects requeue-failed")
+        # nexus-fylxo: a nonzero failed-row backlog is a real content
+        # problem, not merely descriptive detail -- its 4 siblings
+        # (resources / plan-library / taxonomy / t1) all emit a ✗/FAIL:
+        # marker and raise Exit on their own failure condition; this check
+        # printed the numbers and silently returned 0 regardless of how
+        # large the backlog grew. Match the sibling contract.
+        click.echo(
+            f"\n✗ FAIL: {len(failed)} failed aspect-extraction row(s) in "
+            "the queue.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
 
 
 def _run_check_aspect_queue() -> None:
@@ -1553,7 +1603,9 @@ def _run_supplementary_checks() -> None:
     help="Validate the T2 schema is applied (Postgres, Liquibase-managed, "
          "via the engine's GET /version changelog fingerprint). Exits 2 "
          "when the engine is unreachable, 1 on schema_error or zero "
-         "applied changesets. nexus-vl8lk.",
+         "applied changesets; an honest N/A (endpoint withholds the "
+         "fingerprint by design) exits 0 unless combined with "
+         "--fail-on-violation. nexus-vl8lk, nexus-b1v9z.",
 )
 @click.option(
     "--check-search",
@@ -1647,7 +1699,11 @@ def _run_supplementary_checks() -> None:
     is_flag=True,
     default=False,
     help="With --check-storage-boundary, exit 1 if any violation is "
-         "found. Without this flag the lint is informational.",
+         "found (informational without this flag). With --check-schema, "
+         "treat an honest N/A (fingerprint withheld by design) as a "
+         "failure too -- for release-gate callers that need an actual "
+         "OK, not an unprovable N/A that reads identically to a pass "
+         "(nexus-b1v9z).",
 )
 @click.option(
     "--phase",
@@ -1808,7 +1864,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if check_schema:
-        _run_check_schema()
+        _run_check_schema(strict=fail_on_violation)
         return
 
     if check_search:
@@ -2564,10 +2620,12 @@ def _run_check_taxonomy() -> None:
     # system actually writes, with the predicate held next to the materializer
     # it audits (TaxonomyRepository.linkDrift). Only when no service answers do
     # we fall back to the legacy census below, and we say which store we read.
+    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
     from contextlib import suppress as _suppress  # noqa: PLC0415 — branch-local
 
     report: dict[str, Any] | None = None
     _unreachable = "unknown"
+    _engine_failed: str | None = None
     try:
         from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — deferred: CLI startup cost
 
@@ -2577,7 +2635,17 @@ def _run_check_taxonomy() -> None:
         finally:
             with _suppress(Exception):
                 store.close()
-    except Exception as exc:  # noqa: BLE001 — unreachable or too-old engine: fall through, saying which
+    except httpx.HTTPStatusError as exc:
+        # nexus-b1v9z part A: narrowed from a blanket `except Exception`.
+        # A REACHABLE engine answering with a non-404 error status (e.g.
+        # 500) is a genuine engine-side failure -- not "no engine to ask".
+        # The old broad catch treated the two identically and fell through
+        # to the frozen SQLite census below, which on a fresh HOME (no
+        # local db file at all) silently reported "nothing to check" at
+        # exit 0 -- exactly the false-green nexus-ypori's engine-first fix
+        # was meant to end. Only the specific, already-tested "route
+        # doesn't exist on this (older) engine" 404 case still degrades to
+        # the legacy fallback; any other status is the verdict itself.
         text = str(exc)
         if "404" in text:
             # The route is newer than the deployed engine. Distinguish this
@@ -2589,7 +2657,19 @@ def _run_check_taxonomy() -> None:
                 "carrying it is deployed"
             )
         else:
-            _unreachable = text
+            _engine_failed = text
+    except (httpx.HTTPError, RuntimeError) as exc:
+        # Transport failure (connect/timeout) or an unresolvable endpoint
+        # (ServiceEndpointUnresolvableError, a RuntimeError subclass) --
+        # both mean "no engine to ask", the legitimate fallback case.
+        _unreachable = str(exc)
+
+    if _engine_failed is not None:
+        click.echo(
+            f"✗ FAIL: taxonomy engine check failed: {_engine_failed}",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
 
     if report is not None:
         total = int(report.get("projection_total") or 0)

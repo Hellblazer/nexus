@@ -2343,7 +2343,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--check-mcp-logs` | Summarize ERROR/CRITICAL events in nexus's OWN structured MCP log (`<NEXUS_CONFIG_DIR>/logs/mcp.log` plus rotations), counted by event name with the most-recent example per event. Until 7.11.0 this scanned ONLY Claude Code's per-server cache, so nexus's own error signatures had no automated consumer at all; that cache scan survives as a clearly-labeled secondary section, since it carries a distinct signal the nexus-side log cannot (client-side stdio transport death: `STDIO connection dropped`, `stdio transport error`, macOS only, skips cleanly elsewhere — RDR-094 Phase H, nexus-50u5) |
 | `--mcp-log-hours N` | Lookback window in hours for `--check-mcp-logs` (default: 24) |
 | `--check-storage-boundary` | RDR-120 P0.A AST-scan for direct `sqlite3.connect` / `voyageai.Client` calls and `T2Database`/`T3Database` constructions outside the named allowlists in `storage_boundary_lint.py`. The per-line `# epsilon-allow:` escape token is retired (RDR-186 P4): surviving sites are enumerated per file with exact counts; a new site is a hard violation |
-| `--fail-on-violation` | With `--check-storage-boundary`, exit 1 if any violation is found (otherwise the lint is informational) |
+| `--fail-on-violation` | With `--check-storage-boundary`, exit 1 if any violation is found (otherwise the lint is informational). With `--check-schema`, treat an honest N/A (fingerprint withheld by design) as a failure too — for release-gate callers that need an actual OK rather than an unprovable N/A that reads identically to a pass (nexus-b1v9z) |
 | `--phase ID` | With `--check-storage-boundary`, the RDR-120 phase identifier used to record the `120-phase-<phase>-catalog-allowlist-count` T2 metric |
 | `--check-t1` | Diagnose T1 session lease presence + freshness. Checks `~/.config/nexus/t1_session_lease.<session_id>`. Exits 1 only when a session-id resolves AND a lease file exists AND it is expired/corrupt; a resolved session with no lease file at all is informational (a bare CLI legitimately has none — the MCP lifespan mints its own) |
 | `--check-mineru` | Verify MinerU is importable — surfaces a corrupt install at doctor-time instead of waiting for the first math-heavy PDF index to fail |
@@ -2367,6 +2367,15 @@ an honest verdict — OK with the changeset count, FAIL on `schema_error` or
 zero applied changesets, exit 2 (state UNKNOWN) when the engine is
 unreachable, or an explicit N/A when the endpoint withholds the fingerprint
 by design (managed/cloud service).
+
+The honest N/A is exit 0 by default (nexus-vl8lk: an operator asking "is my
+schema okay?" interactively should not get a false failure). Combined with
+`--fail-on-violation` (nexus-b1v9z), that same N/A exits 1 instead — for a
+release-gate caller (e.g. `tests/e2e/release-sandbox.sh`) that cannot tell
+an honest N/A apart from a real pass by exit code alone, and for which the
+whole point of running the check is proving the substrate is actually
+present and correct. A genuine `schema_error` or zero-changeset FAIL is
+already non-zero regardless of this flag.
 
 ```
 nx doctor --check-plan-library    # Report plan-library dimensional health
@@ -2401,6 +2410,13 @@ shipped on disk) is reported as a WARN, not a failure — remove it with
 absence is unprovable — the check reports drift (still trustworthy for the
 rows it did see) but notes that missing templates were not checked, rather
 than silently under-reporting.
+
+A WARN (orphaned rows, or non-dimensional legacy rows) never flips the exit
+code on its own — only the FAIL-class conditions above do that. But the
+verdict line now names any WARN emitted in the same run (`All checks
+passed, with N warning(s).`) instead of printing an unqualified `All checks
+passed.` next to a WARN two lines above, which read as the block
+contradicting itself (nexus-eg5tw).
 
 `--check-t3-legacy-metadata` / `--strict-legacy-metadata` (nexus-1714) were
 DELETED at nexus-lgdel.l2: the check surveyed local Chroma T3 collections
@@ -2444,7 +2460,7 @@ The `--check-post-store-hooks` flag (introduced 4.18.0, `nexus-b0ka`) prints eve
 nx doctor --check-aspect-queue       # Surface RDR-089 aspect-extraction worker depth
 ```
 
-The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reports the `aspect_extraction_queue` row count plus per-status breakdown (`pending`, `processing`, `failed`, `completed`), the oldest non-completed `enqueued_at` as a lag indicator, and the top failed rows with their `last_error`. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring. Pre-RDR-089 databases (no queue table) report cleanly as "table not present" rather than erroring.
+The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reports the `aspect_extraction_queue` row count plus per-status breakdown (`pending`, `processing`, `failed`, `completed`), the oldest non-completed `enqueued_at` as a lag indicator, and the top failed rows with their `last_error`. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring. Pre-RDR-089 databases (no queue table) report cleanly as "table not present" rather than erroring. A transport failure (service unreachable) reports UNKNOWN and exits 0 — not reporting pass or fail; a reachable queue with one or more `failed` rows is a real backlog signal and exits 1 with a `✗ FAIL:` marker, matching the other promoted supplementary checks (nexus-fylxo).
 
 ---
 
