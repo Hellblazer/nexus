@@ -65,11 +65,15 @@ def _generation(
 ) -> Path:
     gen = tools / f"gen-{stamp}"
     (gen / "bin").mkdir(parents=True)
-    # Real entry points: the shim check derives the names it owns from
-    # <current>/bin rather than carrying a hardcoded list, so a generation
-    # without them would make that check vacuous.
+    # Real entry points, and a python that ANSWERS for them: the shim check
+    # derives the names it owns by asking the generation's interpreter which
+    # console scripts the distribution declares (the installer's own query,
+    # GH #1487 / nexus-50hm9), never from a listing of <current>/bin -- so a
+    # generation that cannot answer makes that check say so, not pass.
     for ep in ("nx", "nx-mcp"):
         (gen / "bin" / ep).write_text("#!/bin/sh\n")
+    (gen / "bin" / "python").write_text("#!/bin/sh\nprintf 'nx\\nnx-mcp\\n'\n")
+    (gen / "bin" / "python").chmod(0o755)
     if receipt:
         (gen / "nexus-install.json").write_text(
             _receipt(base_interpreter=base_interpreter)
@@ -265,7 +269,11 @@ def test_an_unrelated_tools_symlink_is_not_a_reclaimed_shim(layout, intruder) ->
     which is how the real reclaim gets missed."""
     tools, bin_dir = layout
     gen = _generation(tools, "20260826T010000Z")
-    (gen / "bin" / intruder).write_text("#!/bin/sh\n")
+    # The intruder name also lives in the generation's bin/ (a venv ships its
+    # python, pip and activate). `python` is the answering stub the fixture
+    # already wrote and must keep answering; the others are plain files.
+    if not (gen / "bin" / intruder).exists():
+        (gen / "bin" / intruder).write_text("#!/bin/sh\n")
     (tools / "current").symlink_to(gen)
     (bin_dir / "nx").write_text("#!/bin/sh\n")
     (bin_dir / intruder).symlink_to("/usr/bin/true")
@@ -276,6 +284,81 @@ def test_an_unrelated_tools_symlink_is_not_a_reclaimed_shim(layout, intruder) ->
         f"an unrelated {intruder!r} symlink was reported as uv reclaiming the "
         f"shims: {row.detail!r}"
     )
+
+
+def test_a_uv_managed_interpreter_link_is_not_a_reclaimed_shim(layout) -> None:
+    """GH #1487 (nexus-50hm9), reproduced before fixing. A generation's bin/
+    holds the interpreter it was built from (python3.12); uv leaves a link of
+    the SAME name in ~/.local/bin (`uv python install`). Deriving the owned
+    set from the bin listing reported that link as uv reclaiming a shim and
+    offered `nx self install` as the fix -- which rewrites every "taken" name
+    into a nexus shim, i.e. would hijack the user's default python3.12. The
+    owned set is what the distribution DECLARES; python3.12 is never in it."""
+    tools, bin_dir = layout
+    gen = _generation(tools, "20260826T010000Z")
+    (gen / "bin" / "python3.12").write_text("#!/bin/sh\n")
+    (tools / "current").symlink_to(gen)
+    (bin_dir / "nx").write_text(install_layout.render_shim("nx", tools=tools))
+    (bin_dir / "nx-mcp").write_text(install_layout.render_shim("nx-mcp", tools=tools))
+    uv_python = tools.parent / "uv-python" / "cpython-3.12" / "bin" / "python3.12"
+    uv_python.parent.mkdir(parents=True)
+    uv_python.write_text("#!/bin/sh\n")
+    (bin_dir / "python3.12").symlink_to(uv_python)
+    (bin_dir / "python3").symlink_to(uv_python)
+
+    row = _result(health._check_generation_layout(), "Generation layout")
+
+    assert row.ok is True, (
+        f"a uv-managed interpreter link was reported as a reclaimed shim: {row.detail!r}"
+    )
+    assert "python3.12" not in row.detail
+
+
+def test_a_generation_that_cannot_answer_warns_rather_than_passing(layout) -> None:
+    """Uncertain means say so: with no interpreter to ask, the owned set is
+    unknown, and the check must not fall back to a directory listing (the
+    GH #1487 shape) or return green over a set it never derived."""
+    tools, bin_dir = layout
+    gen = _generation(tools, "20260826T010000Z")
+    (gen / "bin" / "python").unlink()
+    (tools / "current").symlink_to(gen)
+    (bin_dir / "nx").write_text("#!/bin/sh\n")
+
+    row = _result(health._check_generation_layout(), "Generation layout")
+
+    assert row.ok is False and row.warn is True, row
+    assert "console scripts" in row.detail, row.detail
+
+
+def test_a_reclaimed_dependency_shim_is_caught_when_the_generation_ships_it(layout) -> None:
+    """nx_write_shims also shims the dependency scripts (mineru, mineru-api)
+    the distribution does not declare, when the generation built them. A
+    symlink at that name is a reclaim exactly like `nx`."""
+    tools, bin_dir = layout
+    gen = _generation(tools, "20260826T010000Z")
+    (gen / "bin" / "mineru").write_text("#!/bin/sh\n")
+    (tools / "current").symlink_to(gen)
+    (bin_dir / "nx").write_text("#!/bin/sh\n")
+    (bin_dir / "mineru").symlink_to("/usr/bin/true")
+
+    row = _result(health._check_generation_layout(), "Generation layout")
+
+    assert row.ok is False and "mineru" in row.detail, row.detail
+
+
+def test_a_foreign_dependency_script_link_is_not_ours_when_the_generation_lacks_it(layout) -> None:
+    """The same name on a generation WITHOUT mineru built (no extra): nexus
+    wrote no shim there, so a separately installed mineru link is not a
+    reclaim -- the writer's own present-in-bin rule, mirrored."""
+    tools, bin_dir = layout
+    gen = _generation(tools, "20260826T010000Z")
+    (tools / "current").symlink_to(gen)
+    (bin_dir / "nx").write_text("#!/bin/sh\n")
+    (bin_dir / "mineru").symlink_to("/usr/bin/true")
+
+    row = _result(health._check_generation_layout(), "Generation layout")
+
+    assert row.ok is True, row.detail
 
 
 def test_a_real_reclaimed_shim_is_still_caught(layout) -> None:

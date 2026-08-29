@@ -23,11 +23,13 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from nexus import install_layout
 from nexus.install_layout import (
     BIN_DIR_ENV,
     SOURCE_KINDS,
@@ -421,3 +423,35 @@ def test_both_halves_name_the_same_never_shim_set() -> None:
         f"  shell-only:  {sorted(shell_set - NEVER_SHIM)}\n"
         f"  python-only: {sorted(NEVER_SHIM - shell_set)}"
     )
+
+
+def _shell_word_list(var: str) -> frozenset[str]:
+    """The space-separated value of ``var="..."`` in the shell shim writer."""
+    text = (_SHELL_LAYOUT.parent / "shims.sh").read_text()
+    match = re.search(rf'^{var}="([^"]*)"', text, flags=re.M)
+    assert match, f"{var} not found in shims.sh"
+    return frozenset(match.group(1).split())
+
+
+def test_both_halves_agree_on_the_dependency_scripts() -> None:
+    """DEPENDENCY_SCRIPTS is the Python twin of NX_DEPENDENCY_SCRIPTS: the
+    owned-shim set doctor and the takeover repair derive (GH #1487,
+    nexus-50hm9) must be the set nx_write_shims writes, or a reclaimed
+    dependency shim goes unreported on one side."""
+    assert install_layout.DEPENDENCY_SCRIPTS == _shell_word_list("NX_DEPENDENCY_SCRIPTS")
+
+
+def _code_lines(text: str) -> list[str]:
+    return [ln.rstrip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+def test_both_halves_run_the_same_declared_scripts_query() -> None:
+    """The Python half asks a generation which console scripts it declares
+    with the SAME interpreter snippet the shell writer's _nx_declared_scripts
+    runs (GH #1487, nexus-50hm9): doctor and the takeover repair must derive
+    the owned set exactly as nx_write_shims does, or the two halves disagree
+    about which shims exist. Compared line-for-line ignoring comments."""
+    shell = (_SHELL_LAYOUT.parent / "shims.sh").read_text()
+    match = re.search(r"_nx_declared_scripts\(\) \{.*?-c '\n(.*?)\n' \"\$2\"", shell, flags=re.S)
+    assert match, "_nx_declared_scripts's inline python not found in shims.sh"
+    assert _code_lines(match.group(1)) == _code_lines(install_layout._DECLARED_SCRIPTS_QUERY)
