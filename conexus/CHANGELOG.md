@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.23.0] - 2026-08-29
+
+### Fixed
+
+- **RDR-184 ledger audits re-keyed for the CC 2.1.251 SubagentStart payload
+  (nexus-houpu).** A named background teammate now arrives with an opaque
+  `a<hex>` `agent_id` and `agent_type` == its `subagent_type`; the
+  `a<name>-<hash>` morphology `expectations_undeclared` and
+  `expectations_census` keyed on is gone from the wire. Both audits now pair
+  every START by (agent_type, N-of-type EXPECT credit, dispatch_id) and name
+  a START with no EXPECT row of its type as UNDECLARED instead of skipping
+  it; one blind-spot rule on both surfaces (rc=1 only when EXPECT rows exist
+  and zero STARTs were walked; the census is the report and never exits 2).
+  `conexus/hooks/scripts/expectations.sh`; the orchestration skill's retro
+  step and `/conexus:continuation`'s Gap-1 item state the new contract.
+
 ## [7.22.0] - 2026-08-28
 
 ### Fixed
