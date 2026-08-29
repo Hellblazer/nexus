@@ -1871,13 +1871,15 @@ nx collection list
 The `reindex` command performs a pre-delete safety check before wiping the collection: it confirms the original source documents are still accessible. If the check fails, the command aborts unless `--force` is given. After re-indexing, a `verify --deep` probe runs automatically to confirm retrieval health. The command dispatches per collection type (`code__`, `docs__`, `rdr__`, `knowledge__`) to the appropriate indexer.
 
 
-**RDR-086 Phase 1.3 — T2 `chash_index` reconciliation.** The same per-chunk
-pass also populates the T2 `chash_index` table so `nx doc cite` and
-`Catalog.resolve_chash` can answer "which collection + doc_id holds this
-chunk hash?" in ~50 µs instead of scanning ChromaDB. Reconciles gaps left
-by Phase 1.2 dual-write failures and pre-Phase-1 collections indexed before
-the dual-write existed. A tqdm progress bar renders in an interactive
-terminal (auto-disabled on non-TTY CI logs).
+**Chash resolution (RDR-086 Phase 1.3, table retired at RDR-187).** The
+per-chunk pass once populated a separate T2 `chash_index` table so `nx doc
+cite` and `Catalog.resolve_chash` could answer "which collection + doc_id
+holds this chunk hash?" without scanning the vector store. RDR-187 dropped
+that table: the chunks tables ARE the chash-keyed store and the catalog
+manifest (`document_chunks`) carries the doc-to-chash structure, so there
+is no separate index to reconcile and nothing for this pass to backfill. A
+tqdm progress bar renders in an interactive terminal (auto-disabled on
+non-TTY CI logs).
 
 Scale reference: a full `--all` on a 278k-chunk / 136-collection corpus
 takes ~25–70 minutes on ChromaDB Cloud. Maintenance-window operation.
@@ -1916,7 +1918,7 @@ takes ~25–70 minutes on ChromaDB Cloud. Maintenance-window operation.
 |------|-------------|
 | `--force-prefix-change` | Allow a cross-prefix rename (e.g. `code__foo` → `docs__foo`) OR a same-prefix rename whose embedding-model segment differs (6.3.1, nexus-tcvpn). Rename never re-embeds, so either change leaves the vectors in the OLD model space under a name claiming the new one — use only when you know the vectors already match the target name (cross-model moves belong to the ladder's substrate rung, the RDR-162 vector ETL — `nx upgrade`) |
 
-Renames the collection in the T3 vector store via `t3.rename_collection` (a metadata-only update on the pgvector service path — no embedding re-upload, no Voyage cost, no vector egress), and cascades the new name through T2 taxonomy, `chash_index`, and catalog (service-backed Postgres). Ordering (SIG-8 / nexus-nhyh): the T2 cascade runs FIRST, then the T3 rename, so a partial failure is recoverable: if the T3 rename fails the T2/catalog rows can be re-pointed or the rename re-run; if T2 fails no T3 rename was attempted.
+Renames the collection in the T3 vector store via `t3.rename_collection` (a metadata-only update on the pgvector service path — no embedding re-upload, no Voyage cost, no vector egress), and cascades the new name through every collection-scoped engine table — chunks, taxonomy (assignments, topics, meta, centroids), aspects, highlights, telemetry, and the catalog documents/collection registration (service-backed Postgres; `chash_index` is retired, RDR-187). Ordering (SIG-8 / nexus-nhyh): the T2 cascade runs FIRST, then the T3 rename, so a partial failure is recoverable: if the T3 rename fails the T2/catalog rows can be re-pointed or the rename re-run; if T2 fails no T3 rename was attempted.
 
 **`audit` flags:**
 
@@ -1943,7 +1945,7 @@ Chunk counts come from T3's live `coll.count()` (same source as `nx collection l
 |------|-------------|
 | `-y` / `--yes` / `--confirm` | Skip interactive confirmation prompt |
 
-Delete cascade covers the T3 collection, T2 `chash_index` rows, T2 taxonomy assignments + topics, pipeline-buffer rows (4.8.0, nexus-8a8e), and catalog documents + links.
+Delete cascade (engine-side, RDR-164 P2) covers the collection's chunks, taxonomy assignments + topics + centroids, aspects, highlights, aspect-queue rows, and catalog documents + manifest + collection registration; the streaming pipeline buffer is swept by its own engine endpoint (RDR-186). `chash_index` is retired (RDR-187).
 
 ---
 
