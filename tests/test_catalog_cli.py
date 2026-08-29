@@ -3144,11 +3144,21 @@ class TestWhh61IntegrityCarve:
         # _get_catalog() can return now that the local Catalog is deleted.
         cat = MagicMock(spec=HttpCatalogClient)
         cat.all_documents.return_value = []  # empty → clean early return
+        # nexus-8tnz2's orphan-collections check runs unconditionally (an
+        # empty catalog with a populated T3 IS the orphan case), so verify
+        # now calls _make_t3() even on the empty-docs path this test takes;
+        # unpatched, that builds a REAL vector client whose accessor probes
+        # the managed service (a live network call whose verdict flips with
+        # the engine floor — caught 2026-08-28 when the v0.1.88 floor bump
+        # turned it INCOMPLETE). Empty list_collections() = no orphans.
+        t3 = MagicMock()
+        t3.list_collections.return_value = []
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
                 patch(
                     "nexus.commands.catalog._get_catalog_writer",
                     return_value=MagicMock(spec=list(CATALOG_WRITE_OPS)),
-                ):
+                ), \
+                patch("nexus.commands.catalog._make_t3", return_value=t3):
             result = CliRunner().invoke(main, ["catalog", "verify"])
         assert result.exit_code == 0, result.output
         cat.all_documents.assert_called()
