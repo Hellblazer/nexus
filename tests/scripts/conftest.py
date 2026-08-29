@@ -49,3 +49,12 @@ def _isolate_wire_contract_ledger(
     ledger = tmp_path / "wire-contract-pending.md"
     ledger.write_text(_EMPTY_LEDGER, encoding="utf-8")
     monkeypatch.setattr(_wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
+
+
+@pytest.fixture(autouse=True)
+def _scrub_gate_report_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-nx3l5: ``NX_GATE_REPORT_DIR`` is meant to be set once, globally, on
+    the operator's box so the bare post-tag verify records the tracker. Inside
+    the test suite that global must never turn a ``main(["--url", ...])`` call
+    into a tracker write; every test that wants the env sets it itself."""
+    monkeypatch.delenv("NX_GATE_REPORT_DIR", raising=False)

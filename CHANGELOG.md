@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`deployed-engine-version` tracker written from conexus's STEP-6 gate
+  report** (nexus-nx3l5, shape c). New `nexus.deploy_tracker` module: the
+  post-tag verify `scripts/check_engine_release_floor.py
+  --record-deploy-from-gate-report DIR` (or `NX_GATE_REPORT_DIR`) selects
+  the latest report by `run_timestamp` that gated the live
+  `release_version`, requires it green, and writes the tracker with the
+  report basename as the `gate` provenance; exit 3 and nothing written on
+  no report / red / schema drift. `nx service record-deploy` gains
+  `--gate-report-dir` / `--gate-report` (the same path; the typed `--gate`
+  becomes the manual fallback and is mutually exclusive with them). Closes
+  both the omission vector (v0.1.17 stale across three deploys) and the
+  premature-write vector (`gate PASSED` typed 17 s before a red report,
+  2026-08-28). conexus stays side-effect-free.
+
 ### Changed
 
 - **Aspect worker idle poll: 2 s -> 30 s** (`DEFAULT_POLL_INTERVAL_S`,

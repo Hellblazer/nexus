@@ -9,6 +9,8 @@ thin client surface. Minted tokens are shown ONCE; only their hash is stored.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import click
 import structlog
 
@@ -80,7 +82,26 @@ def _normalize_engine_version(tag: str) -> str:
     "--gate",
     "gate",
     default="",
-    help="Cloud-gate result to record (e.g. PASSED).",
+    help="Cloud-gate result recorded VERBATIM (e.g. PASSED). Manual fallback "
+    "only — prefer --gate-report-dir, which derives it from the STEP-6 report.",
+)
+@click.option(
+    "--gate-report-dir",
+    "gate_report_dir",
+    default=None,
+    type=click.Path(path_type=Path),
+    help="Directory holding conexus's STEP-6 gate reports (the conexus checkout's "
+    "deploy/ — gitignored there, so operator-local). The gate field is DERIVED "
+    "from the LATEST report that gated the live engine version, which must be "
+    "green; nothing is written otherwise (nexus-nx3l5).",
+)
+@click.option(
+    "--gate-report",
+    "gate_report",
+    default=None,
+    type=click.Path(path_type=Path),
+    help="One explicit STEP-6 report file. Must have gated the live engine version "
+    "and be green. Mutually exclusive with --gate-report-dir.",
 )
 @click.option(
     "--url",
@@ -89,7 +110,14 @@ def _normalize_engine_version(tag: str) -> str:
     help="Managed service base URL. Defaults to NX_SERVICE_URL or "
     "https://api.conexus-nexus.com.",
 )
-def record_deploy(tag: str, commit: str, gate: str, url: str | None) -> None:
+def record_deploy(
+    tag: str,
+    commit: str,
+    gate: str,
+    gate_report_dir: Path | None,
+    gate_report: Path | None,
+    url: str | None,
+) -> None:
     """Record TAG as the cloud-deployed engine — GUARDED by a live ``/version`` read.
 
     Guards the ``deployed-engine-version`` T2 tracker against recording a version
@@ -101,17 +129,18 @@ def record_deploy(tag: str, commit: str, gate: str, url: str | None) -> None:
     running, and a deploy that has not landed yet fails loud instead of writing a
     wrong fact.
 
-    SCOPE — what this does NOT do: it does not guarantee the record is *made*.
-    The original rot (v0.1.17 stale across three deploys) was an omission — the
-    write step was skipped — and this command still has to be RUN (engine-release
-    skill Step 8). Closing the omission vector (cloud-gate writes the tracker as a
-    side effect of passing) is tracked separately (nexus-dz6b1 follow-up). The
-    ``--commit`` / ``--gate`` values are operator-supplied provenance and are
-    recorded verbatim — only ``release_version`` is verified against the live
-    deploy.
-    """
-    from datetime import UTC, datetime  # noqa: PLC0415 — function-local: keep import cost off the CLI hot path
+    With ``--gate-report-dir`` (or ``--gate-report``) the ``gate`` field is
+    DERIVED too (nexus-nx3l5, shape c): the latest STEP-6 report that gated the
+    live version is selected, must be green, and its basename becomes the
+    provenance. That closes the premature-write vector — ``--gate PASSED`` was
+    written 17 s before a red report on 2026-08-28 — and the omission vector
+    when the post-tag verify (``scripts/check_engine_release_floor.py
+    --record-deploy-from-gate-report``) runs the identical path. The verbatim
+    ``--gate`` form remains as the manual fallback only.
 
+    The tracker has ONE writer, :func:`nexus.deploy_tracker.write_deployed_engine_tracker`.
+    """
+    from nexus import deploy_tracker as dt  # noqa: PLC0415 — function-local: keep import cost off the CLI hot path
     from nexus.db.managed_endpoint import (  # noqa: PLC0415 — circular-dep avoidance; managed_endpoint imports config
         ManagedServiceError,
         probe_managed_service,
@@ -119,6 +148,34 @@ def record_deploy(tag: str, commit: str, gate: str, url: str | None) -> None:
     )
 
     expected = _normalize_engine_version(tag)
+
+    if gate_report_dir is not None or gate_report is not None:
+        if gate:
+            raise click.UsageError(
+                "--gate is derived from the STEP-6 report; do not combine it with "
+                "--gate-report-dir / --gate-report."
+            )
+        if gate_report_dir is not None and gate_report is not None:
+            raise click.UsageError("--gate-report-dir and --gate-report are mutually exclusive.")
+        try:
+            result = dt.record_deploy_from_gate_report(
+                report_dir=gate_report_dir,
+                report_path=gate_report,
+                url=url,
+                commit=commit,
+                expected_version=expected,
+            )
+        except (dt.DeployTrackerError, ManagedServiceError) as exc:
+            raise click.ClickException(str(exc)) from exc
+        for advisory in result.report.advisories:
+            click.echo(f"  STEP-6 advisory ({result.report.basename}): {dt.format_advisory(advisory)}")
+        _log.info(
+            "service.record_deploy", tag=tag, live=result.live_version,
+            base_url=result.base_url, report=result.report.basename,
+        )
+        click.echo(f"✓ recorded deployed engine: {result.content}")
+        return
+
     base = url or resolve_managed_endpoint(require_token=False)[0]
     try:
         caps = probe_managed_service(base_url=base)
@@ -133,43 +190,11 @@ def record_deploy(tag: str, commit: str, gate: str, url: str | None) -> None:
             "then re-run record-deploy (the tracker only records verified deploys)."
         )
 
-    timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    parts = [f"engine-service-v{live} @ {commit or '<commit unrecorded>'}"]
-    parts.append(f"recorded {timestamp}")
-    parts.append(f"gate {gate or '<gate result unrecorded>'}")
-    parts.append(f"verified live at {caps.base_url}/version")
-    content = "; ".join(parts)
-
-    from nexus.commands._helpers import t2_handle  # noqa: PLC0415 — circular-dep avoidance; _helpers imports command surfaces
-
-    with t2_handle() as handle:
-        handle.memory.put(
-            project="nexus",
-            title="deployed-engine-version",
-            content=content,
-            tags="engine,deploy,tracker,rdr-179",
-            # PERMANENT IS None, NOT 0 (nexus-6igii recurrence, 2026-07-26).
-            # This calls handle.memory.put DIRECTLY — store level, below the
-            # MCP tool layer. At the time of the nexus-6igii incident the MCP
-            # layer silently coerced ``ttl if ttl > 0 else None`` while this
-            # call site (and every other direct caller) did not, so a 0 here
-            # was written verbatim; MemoryRepository.expire() then read it as
-            # effective_ttl = 0 * (1 + log(access_count + 1)) = 0, and deleted
-            # the row on the next sweep. That coercion is RETIRED as of
-            # nexus-tk070.p6a (RDR-194 D5) — the engine itself now REJECTS
-            # ttl=0 with a loud 400 for every caller, so this comment's
-            # original footgun can no longer reach the store silently through
-            # ANY path — but the explicit ``ttl=None`` below still matters:
-            # it is the only value that means "never expires"
-            # (MemoryRepository.expire() filters ``WHERE ttl_days IS NOT
-            # NULL``), and it is required here regardless of caller-layer
-            # coercion history.
-            ttl=None,
-        )
-
+    content = dt.write_deployed_engine_tracker(
+        live_version=live, base_url=caps.base_url, commit=commit, gate=gate,
+    )
     _log.info("service.record_deploy", tag=tag, live=live, base_url=caps.base_url)
     click.echo(f"✓ recorded deployed engine: {content}")
-
 
 @service.group("token")
 def token_group() -> None:

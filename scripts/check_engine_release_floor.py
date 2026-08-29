@@ -140,27 +140,53 @@ populates the exception's structured ``deployed_version`` field. An endpoint
 that is simply broken or misconfigured is NOT "deploy pending" and must
 never be folded into paired acceptance -- see :func:`_classify_probe_failure`.
 
+**Post-tag tracker write** (``--record-deploy-from-gate-report DIR``,
+nexus-nx3l5 shape c, 2026-08-28): the bare post-tag VERIFY is where the
+``deployed-engine-version`` T2 tracker gets written, from conexus's own STEP-6
+gate report rather than from a typed ``--gate PASSED``. After the cloud engine
+verifies current AND source ancestry passes, the leg reads the reports in
+``DIR`` (the conexus checkout's ``deploy/``; gitignored there, so operator-local
+-- a clone or CI cannot see them), selects the LATEST report (by
+``run_timestamp``) that gated the live ``release_version``, requires it green,
+and writes the tracker through :func:`nexus.deploy_tracker.write_deployed_engine_tracker`
+with the report's basename as the ``gate`` provenance. Nothing is written --
+and the verify exits ``3`` with a named reason -- when no report gated the live
+version, the latest one is red, or the report schema moved. This is what the
+premature write of 2026-08-28 (``gate PASSED`` recorded 17 s before a RED
+report) and the standing omission vector (v0.1.17 stale across three deploys)
+both needed: the write cannot precede the verdict and cannot be skipped by a
+verify that ran. ``$NX_GATE_REPORT_DIR`` supplies ``DIR`` when the flag is
+absent (set it once on the operator's box); a bare verify with neither prints
+a loud "tracker NOT recorded" note so the omission is visible, not silent. The
+pre-deploy modes (``--paired-deploy``, ``--paired-deploy-auto``,
+``--ledger-only``) never record: there is no post-deploy report to read yet,
+and ``release.yml``'s auto invocation runs where the reports do not exist.
+
 Usage::
 
     uv run python scripts/check_engine_release_floor.py
     uv run python scripts/check_engine_release_floor.py --url https://staging.example.com
     uv run python scripts/check_engine_release_floor.py --paired-deploy engine-service-v0.1.63
     uv run python scripts/check_engine_release_floor.py --paired-deploy-auto
+    uv run python scripts/check_engine_release_floor.py --record-deploy-from-gate-report ../conexus/deploy
 
 Exit codes: ``0`` current, ``1`` stale / incompatible, ``2`` unreachable
 (network/DNS/TLS/timeout -- "could not verify" is never treated as "must be
-fine").
+fine"), ``3`` deploy verified but the tracker was NOT recorded (no green
+STEP-6 report for the live version, or the report schema moved).
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import subprocess
 import sys
 from datetime import datetime, timezone
 
 import check_wire_contract_pairing as _wire_ledger
+from nexus import deploy_tracker
 from nexus.db.managed_endpoint import (
     ManagedServiceError,
     ManagedServiceUnreachable,
@@ -1067,6 +1093,65 @@ def check_floor(
     return 0
 
 
+_TRACKER_NOT_RECORDED_NOTE = (
+    "NOTE: deployed-engine-version tracker NOT recorded by this verify. Pass "
+    "--record-deploy-from-gate-report <conexus checkout>/deploy (or set "
+    f"{deploy_tracker.GATE_REPORT_DIR_ENV}) so the post-tag VERIFY writes the tracker "
+    "from conexus's STEP-6 report (nexus-nx3l5). The hand-typed "
+    "`nx service record-deploy --gate PASSED` is the fallback, not the path."
+)
+
+
+def _tag_commit(tag: str, repo_root: pathlib.Path | None = None) -> str:
+    """The commit *tag* points at, for the tracker's provenance field.
+
+    Provenance only -- the guarded value is the live-probed version -- so a
+    git failure degrades to ``<commit unrecorded>`` with a stderr note rather
+    than blocking the write.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "rev-list", "-n1", tag],
+            cwd=repo_root, capture_output=True, text=True, check=True, timeout=30,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(
+            f"note: commit for {tag} not resolvable from git ({exc}); recording <commit unrecorded>",
+            file=sys.stderr,
+        )
+        return ""
+    return out.stdout.strip()
+
+
+def record_deploy_from_gate_report_leg(
+    report_dir: pathlib.Path, *, url: str | None, tag: str, repo_root: pathlib.Path | None = None
+) -> int:
+    """The post-tag tracker write (nexus-nx3l5). Returns ``0`` or ``3``.
+
+    Runs ONLY after the floor and ancestry checks passed. Re-reads the live
+    ``/version`` through the same path ``nx service record-deploy`` uses, so
+    the tracker keeps exactly one writer and one live-assert.
+    """
+    commit = _tag_commit(tag, repo_root)
+    try:
+        result = deploy_tracker.record_deploy_from_gate_report(
+            report_dir=report_dir, url=url, commit=commit,
+        )
+    except deploy_tracker.DeployTrackerError as exc:
+        print(f"TRACKER NOT RECORDED (exit 3): {exc}", file=sys.stderr)
+        return 3
+    except ManagedServiceError as exc:
+        print(
+            f"TRACKER NOT RECORDED (exit 3): the live /version re-read failed ({exc})",
+            file=sys.stderr,
+        )
+        return 3
+    for advisory in result.report.advisories:
+        print(f"  STEP-6 advisory ({result.report.basename}): {deploy_tracker.format_advisory(advisory)}")
+    print(f"deployed-engine-version recorded from {result.report.basename}: {result.content}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1145,9 +1230,35 @@ def main(argv: list[str] | None = None) -> int:
         "--paired-deploy-auto; combine with --ack-client-lag exactly like "
         "those modes.",
     )
+    parser.add_argument(
+        "--record-deploy-from-gate-report",
+        default=None,
+        metavar="DIR",
+        help="Post-tag VERIFY only (nexus-nx3l5). After the cloud engine verifies "
+        "current and source ancestry passes, read conexus's STEP-6 gate reports "
+        "from DIR (the conexus checkout's deploy/; gitignored there, so "
+        "operator-local), select the LATEST report that gated the live "
+        "release_version, require it green, and write the deployed-engine-version "
+        "tracker with that report as the gate provenance. Exit 3 and write "
+        "nothing when no report gated the live version, the latest is red, or "
+        f"the schema moved. Defaults to ${deploy_tracker.GATE_REPORT_DIR_ENV} when "
+        "set. Mutually exclusive with --paired-deploy, --paired-deploy-auto, and "
+        "--ledger-only (pre-deploy modes have no report to read).",
+    )
     args = parser.parse_args(argv)
     if args.paired_deploy is not None and args.paired_deploy_auto:
         parser.error("--paired-deploy and --paired-deploy-auto are mutually exclusive")
+    non_bare = args.paired_deploy is not None or args.paired_deploy_auto or args.ledger_only
+    if args.record_deploy_from_gate_report is not None and non_bare:
+        parser.error(
+            "--record-deploy-from-gate-report is the post-tag VERIFY's flag; it is "
+            "mutually exclusive with --paired-deploy, --paired-deploy-auto, and --ledger-only"
+        )
+    # The env default applies to the bare verify only -- a globally-set
+    # NX_GATE_REPORT_DIR must not turn a pre-deploy mode into a recorder.
+    report_dir: str | None = args.record_deploy_from_gate_report
+    if report_dir is None and not non_bare:
+        report_dir = os.environ.get(deploy_tracker.GATE_REPORT_DIR_ENV, "").strip() or None
     if args.ledger_only:
         if args.paired_deploy is not None or args.paired_deploy_auto or args.url is not None:
             parser.error(
@@ -1170,7 +1281,19 @@ def main(argv: list[str] | None = None) -> int:
     # service source destined for the parallel cut), the pinned floor's tag
     # otherwise.
     ancestry_tag = args.paired_deploy or _pinned_engine_tag()
-    return check_source_ancestry(ancestry_tag)
+    ancestry_rc = check_source_ancestry(ancestry_tag)
+    if ancestry_rc != 0:
+        return ancestry_rc
+    if non_bare:
+        # Pre-deploy modes verify preconditions; there is no post-deploy
+        # report to record from yet. Byte-for-byte the pre-nx3l5 outcome.
+        return 0
+    if report_dir is None:
+        print(_TRACKER_NOT_RECORDED_NOTE, file=sys.stderr)
+        return 0
+    return record_deploy_from_gate_report_leg(
+        pathlib.Path(report_dir), url=args.url, tag=ancestry_tag,
+    )
 
 
 if __name__ == "__main__":

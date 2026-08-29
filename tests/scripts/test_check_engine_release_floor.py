@@ -1600,3 +1600,258 @@ def test_ledger_only_rejects_paired_deploy_auto_together() -> None:
     with pytest.raises(SystemExit) as exc_info:
         gate.main(["--ledger-only", "--paired-deploy-auto"])
     assert exc_info.value.code == 2
+
+
+# ── nexus-nx3l5 (shape c): the post-tag VERIFY writes the tracker from the
+# STEP-6 report. The write cannot precede the verdict (the report IS the
+# verdict) and cannot be skipped by a verify that ran with the directory.
+
+
+from contextlib import ExitStack, contextmanager
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+_T0 = datetime(2026, 8, 29, 2, 44, 44, tzinfo=UTC)
+
+
+def _step6_report(
+    directory: Path, *, version: str, stamp: datetime, passed: bool = True,
+    advisories: tuple[Any, ...] = (), schema: Any = 3,
+) -> Path:
+    doc = {
+        "schema_version": schema,
+        "run_timestamp": stamp.isoformat(),
+        "base_url": _TEST_URL,
+        "tenant": "gate-xr789",
+        "identity": {"jar_version": "1.0-SNAPSHOT", "jar_sha256": "f" * 64},
+        "sections": {
+            "preconditions": {
+                "version_visibility": {
+                    "observed": {"app_version": "1.0-SNAPSHOT", "release_version": version},
+                    "pass": True, "violations": [],
+                }
+            },
+            "parity": {}, "latency": {}, "recall_ac3": {},
+        },
+        "overall": {
+            "pass": passed,
+            "failures": [] if passed else ["latency /v1/vectors/search: median_p95 over bound"],
+            "exit_code": 0 if passed else 1,
+            "advisories": list(advisories),
+        },
+    }
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"gate-report-{stamp.strftime('%Y%m%dT%H%M%SZ')}-v011.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return path
+
+
+class _TrackerMemory:
+    puts: list[dict[str, Any]] = []
+
+    def put(self, **kwargs: Any) -> int:
+        _TrackerMemory.puts.append(kwargs)
+        return 1
+
+
+class _TrackerHandle:
+    memory = _TrackerMemory()
+
+    def __enter__(self) -> "_TrackerHandle":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        pass
+
+
+@pytest.fixture
+def _tracker_t2(monkeypatch: pytest.MonkeyPatch) -> type[_TrackerMemory]:
+    from nexus.commands import _helpers
+
+    _TrackerMemory.puts = []
+    monkeypatch.setattr(_helpers, "t2_handle", lambda: _TrackerHandle())
+    return _TrackerMemory
+
+
+@contextmanager
+def _clean_post_tag_verify(release_version: str | None = None):
+    """Floor current, ancestry clean, git commit resolvable -- the state in
+    which the tracker leg is reached. Patches BOTH probe entry points: the
+    script's own (check_floor) and the library's re-read (deploy_tracker)."""
+    from nexus.db import managed_endpoint as me
+
+    caps = _caps(release_version or _floor_str())
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(gate, "probe_managed_service", return_value=caps))
+        stack.enter_context(patch.object(me, "probe_managed_service", return_value=caps))
+        stack.enter_context(patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION))
+        stack.enter_context(patch.object(gate, "check_source_ancestry", return_value=0))
+        stack.enter_context(patch.object(gate, "_tag_commit", return_value="2ca52773f"))
+        yield
+
+
+def test_post_tag_verify_records_the_tracker_from_the_latest_green_report(
+    tmp_path: Path, _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real 2026-08-29 shape: a red report, then a green one, same version."""
+    _step6_report(tmp_path, version=_floor_str(), stamp=_T0, passed=False)
+    green = _step6_report(tmp_path, version=_floor_str(), stamp=_T0 + timedelta(minutes=20))
+
+    with _clean_post_tag_verify():
+        rc = gate.main(["--url", _TEST_URL, "--record-deploy-from-gate-report", str(tmp_path)])
+
+    assert rc == 0
+    assert len(_tracker_t2.puts) == 1
+    put = _tracker_t2.puts[0]
+    assert put["title"] == "deployed-engine-version" and put["ttl"] is None
+    assert put["content"].startswith(f"engine-service-v{_floor_str()} @ 2ca52773f; recorded ")
+    assert f"gate PASSED {green.name} (advisories: 0)" in put["content"]
+    out = capsys.readouterr()
+    assert f"recorded from {green.name}" in out.out
+    assert "NOT recorded" not in out.err
+
+
+def test_post_tag_verify_exits_3_and_writes_nothing_when_the_latest_report_is_red(
+    tmp_path: Path, _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
+) -> None:
+    _step6_report(tmp_path, version=_floor_str(), stamp=_T0, passed=True)
+    red = _step6_report(tmp_path, version=_floor_str(), stamp=_T0 + timedelta(minutes=20), passed=False)
+
+    with _clean_post_tag_verify():
+        rc = gate.main(["--url", _TEST_URL, "--record-deploy-from-gate-report", str(tmp_path)])
+
+    assert rc == 3
+    assert _tracker_t2.puts == []
+    err = capsys.readouterr().err
+    assert "TRACKER NOT RECORDED (exit 3)" in err
+    assert red.name in err
+
+
+def test_post_tag_verify_exits_3_when_no_report_gated_the_live_version(
+    tmp_path: Path, _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
+) -> None:
+    _step6_report(tmp_path, version="0.0.1", stamp=_T0)
+
+    with _clean_post_tag_verify():
+        rc = gate.main(["--url", _TEST_URL, "--record-deploy-from-gate-report", str(tmp_path)])
+
+    assert rc == 3
+    assert _tracker_t2.puts == []
+    assert "no STEP-6 report gated release_version" in capsys.readouterr().err
+
+
+def test_post_tag_verify_exits_3_on_report_schema_drift(
+    tmp_path: Path, _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
+) -> None:
+    _step6_report(tmp_path, version=_floor_str(), stamp=_T0)
+    _step6_report(tmp_path, version=_floor_str(), stamp=_T0 + timedelta(minutes=5), schema=4)
+
+    with _clean_post_tag_verify():
+        rc = gate.main(["--url", _TEST_URL, "--record-deploy-from-gate-report", str(tmp_path)])
+
+    assert rc == 3
+    assert _tracker_t2.puts == []
+    assert "schema_version 4" in capsys.readouterr().err
+
+
+def test_post_tag_verify_exits_3_when_the_report_directory_is_missing(
+    tmp_path: Path, _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with _clean_post_tag_verify():
+        rc = gate.main(["--url", _TEST_URL, "--record-deploy-from-gate-report", str(tmp_path / "absent")])
+
+    assert rc == 3
+    assert _tracker_t2.puts == []
+    assert "gitignored" in capsys.readouterr().err
+
+
+def test_bare_verify_without_a_directory_passes_but_says_the_tracker_was_not_recorded(
+    _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with _clean_post_tag_verify():
+        rc = gate.main(["--url", _TEST_URL])
+
+    assert rc == 0
+    assert _tracker_t2.puts == []
+    err = capsys.readouterr().err
+    assert "tracker NOT recorded" in err
+    assert "--record-deploy-from-gate-report" in err
+
+
+def test_env_directory_drives_the_bare_verify(
+    tmp_path: Path, _tracker_t2: type[_TrackerMemory], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    green = _step6_report(tmp_path, version=_floor_str(), stamp=_T0)
+    monkeypatch.setenv("NX_GATE_REPORT_DIR", str(tmp_path))
+
+    with _clean_post_tag_verify():
+        rc = gate.main(["--url", _TEST_URL])
+
+    assert rc == 0
+    assert len(_tracker_t2.puts) == 1
+    assert green.name in _tracker_t2.puts[0]["content"]
+
+
+@pytest.mark.parametrize(
+    "mode_args",
+    [["--paired-deploy", "engine-service-v9.9.9"], ["--paired-deploy-auto"], ["--ledger-only"]],
+)
+def test_report_flag_is_refused_in_every_pre_deploy_mode(tmp_path: Path, mode_args: list[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        gate.main([*mode_args, "--record-deploy-from-gate-report", str(tmp_path)])
+    assert excinfo.value.code == 2
+
+
+def test_env_directory_is_ignored_in_pre_deploy_modes(
+    tmp_path: Path, _tracker_t2: type[_TrackerMemory], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A globally-set NX_GATE_REPORT_DIR must not turn --ledger-only (release-
+    branch PR CI) into a recorder."""
+    _step6_report(tmp_path, version=_floor_str(), stamp=_T0)
+    monkeypatch.setenv("NX_GATE_REPORT_DIR", str(tmp_path))
+
+    rc = gate.main(["--ledger-only"])
+
+    assert rc == 0
+    assert _tracker_t2.puts == []
+
+
+def test_tracker_leg_runs_only_after_ancestry_passes(
+    tmp_path: Path, _tracker_t2: type[_TrackerMemory]
+) -> None:
+    _step6_report(tmp_path, version=_floor_str(), stamp=_T0)
+
+    with _clean_post_tag_verify(), patch.object(gate, "check_source_ancestry", return_value=1):
+        rc = gate.main(["--url", _TEST_URL, "--record-deploy-from-gate-report", str(tmp_path)])
+
+    assert rc == 1
+    assert _tracker_t2.puts == []
+
+
+def test_advisories_on_a_green_report_are_printed_never_inferred_empty(
+    tmp_path: Path, _tracker_t2: type[_TrackerMemory], capsys: pytest.CaptureFixture[str]
+) -> None:
+    green = _step6_report(
+        tmp_path, version=_floor_str(), stamp=_T0,
+        advisories=("latency /v1/vectors/search drifting toward bound",),
+    )
+
+    with _clean_post_tag_verify():
+        rc = gate.main(["--url", _TEST_URL, "--record-deploy-from-gate-report", str(tmp_path)])
+
+    assert rc == 0
+    assert f"gate PASSED {green.name} (advisories: 1)" in _tracker_t2.puts[0]["content"]
+    assert "STEP-6 advisory" in capsys.readouterr().out
+
+
+def test_tag_commit_resolves_via_git_and_degrades_to_unrecorded(
+    capsys: pytest.CaptureFixture[str]
+) -> None:
+    ok = subprocess.CompletedProcess(args=[], returncode=0, stdout="2ca52773f\n", stderr="")
+    with patch.object(gate.subprocess, "run", return_value=ok):
+        assert gate._tag_commit("engine-service-v0.1.88") == "2ca52773f"
+
+    with patch.object(gate.subprocess, "run", side_effect=subprocess.CalledProcessError(128, "git")):
+        assert gate._tag_commit("engine-service-v0.1.88") == ""
+    assert "<commit unrecorded>" in capsys.readouterr().err
