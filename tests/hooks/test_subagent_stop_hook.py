@@ -1188,48 +1188,60 @@ def _run_undeclared(tmp_path: Path, session_id: str = SESSION) -> subprocess.Com
 
 
 class TestUndeclaredExitCodes:
-    """nexus-suuja/nexus-ahl9v: expectations_undeclared's rc contract is
-    four-way: 0 = clean, 1 = recognized==0 blindspot (pre-existing,
-    false-clean not a pass), 2 = undeclared>0 — a real declaration-
-    completeness deficit that was previously rc-invisible (same exit 0 as
-    clean), 3 = no ledger file for this session — also previously
-    rc-invisible as the same exit 0 as clean (nexus-ahl9v: a mistyped
-    session id audited as rc=0)."""
+    """nexus-suuja/nexus-ahl9v/nexus-houpu: expectations_undeclared's rc
+    contract is four-way: 0 = clean, 1 = BLINDSPOT (EXPECT rows present but
+    ZERO STARTs walked — an audit that examined nothing is not a pass),
+    2 = undeclared>0, a real declaration-completeness deficit that was once
+    rc-invisible (same exit 0 as clean), 3 = no ledger file for this session
+    — also once rc-invisible (nexus-ahl9v: a mistyped session id audited as
+    rc=0).
+
+    Every agent_id below is the CC 2.1.251 shape: an opaque ``a<hex>``
+    handle carrying no dispatch name. The retired ``a<type>-<hash>``
+    encoding is not exercised anywhere, because the payload no longer
+    produces it (nexus-houpu)."""
 
     def test_rc_zero_when_clean(self, tmp_path: Path) -> None:
         agent_type = "worker-clean"
-        agent_id = f"a{agent_type}-abc123"
         _expect_row(tmp_path, name=agent_type, mode="background")
         f = _expectations_file(tmp_path)
         with f.open("a") as fh:
-            fh.write(f"2026-08-03T00:00:00Z\tSTART\t{agent_id}\t{agent_type}\n")
+            fh.write(f"2026-08-03T00:00:00Z\tSTART\taeb1c1b56623244ae\t{agent_type}\n")
         proc = _run_undeclared(tmp_path)
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "undeclared=0" in proc.stdout
 
-    def test_rc_one_blindspot_when_nothing_recognized(self, tmp_path: Path) -> None:
+    def test_rc_one_blindspot_when_no_starts_walked(self, tmp_path: Path) -> None:
+        """The one false-clean shape left once every START is evaluated: a
+        ledger that DECLARED dispatches and recorded no START at all (an
+        unregistered or inert SubagentStart stamp). Reporting undeclared=0
+        there means 'nothing was checkable', never 'compliant'.
+
+        This replaces test_rc_one_blindspot_when_nothing_recognized, whose
+        fixture — one START with no EXPECT row of its type — is now the
+        rc=2 deficit case below, not a blind spot: the audit sees that
+        dispatch and names it."""
         f = _expectations_file(tmp_path)
         f.parent.mkdir(parents=True, exist_ok=True)
-        # Unnamed START, no EXPECT row for its type -- unrecognizable by
-        # either key (name-morphology or agent-type-in-EXPECT).
         with f.open("a") as fh:
-            fh.write("2026-08-03T00:00:00Z\tSTART\ta9f8e7d6c5b4a3\tworker-unseen\n")
+            fh.write("2026-08-03T00:00:00Z\tEXPECT\tworker-declared\tbackground\tt1\n")
         proc = _run_undeclared(tmp_path)
         assert proc.returncode == 1, proc.stdout + proc.stderr
         assert "BLINDSPOT" in proc.stdout
+        assert "checked=0" in proc.stdout
 
     def test_rc_two_when_undeclared_deficit(self, tmp_path: Path) -> None:
         agent_type = "worker-undeclared"
-        agent_id = f"a{agent_type}-def456"
+        agent_id = "a9f8e7d6c5b4a3021"
         f = _expectations_file(tmp_path)
         f.parent.mkdir(parents=True, exist_ok=True)
-        # Named START row (recognized by morphology) with NO EXPECT row at
-        # all for this name -> a genuine undeclared deficit.
+        # A START row with NO EXPECT row of its type -> a genuine undeclared
+        # deficit, named per dispatch rather than disclosed in aggregate.
         with f.open("a") as fh:
             fh.write(f"2026-08-03T00:00:00Z\tSTART\t{agent_id}\t{agent_type}\n")
         proc = _run_undeclared(tmp_path)
         assert proc.returncode == 2, proc.stdout + proc.stderr
-        assert "UNDECLARED" in proc.stdout
+        assert f"UNDECLARED\t{agent_id}\t{agent_type}" in proc.stdout
         assert "undeclared=1" in proc.stdout
 
     def test_rc_three_when_no_ledger_file(self, tmp_path: Path) -> None:
@@ -1242,6 +1254,177 @@ class TestUndeclaredExitCodes:
         assert proc.returncode == 3, proc.stdout + proc.stderr
         assert "NOTE" in proc.stderr
         assert "no-such-session-ever" in proc.stderr
+
+
+def _run_census(tmp_path: Path, session_id: str = SESSION) -> subprocess.CompletedProcess[str]:
+    """Source the reference lib directly and invoke expectations_census,
+    propagating its own exit code as the subprocess's returncode."""
+    env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "state")}
+    script = (
+        f'source "{REFERENCE_EXPECTATIONS}"; '
+        f'expectations_census "{session_id}"; rc=$?; echo "RC=$rc"; exit $rc'
+    )
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, timeout=30, env=env
+    )
+
+
+class TestNamedBackgroundDispatchAt2_1_251:
+    """nexus-houpu: a NAMED background teammate at CC 2.1.251 reaches
+    SubagentStart with an OPAQUE ``a<hex>`` agent_id and ``agent_type`` ==
+    the dispatch's ``subagent_type``, verbatim. The dispatch name is in no
+    field of the payload, and the old ``a<name>-<hash>`` agent_id encoding
+    is gone.
+
+    The consequence these tests pin: the audit surfaces pair such a START
+    to its EXPECT row BY TYPE, exactly as ``expectations_owes_report``
+    already did, and the audit's verdict does not depend on the agent_id's
+    shape in any way. A dispatch whose type was never declared is named as
+    a deficit rather than skipped as 'unrecognisable'.
+    """
+
+    # The measured shape: opaque, no dispatch name recoverable from it.
+    OPAQUE_ID = "aeb1c1b56623244ae"
+    SUBAGENT_TYPE = "general-purpose"
+
+    def test_named_background_dispatch_is_recognised_by_type(self, tmp_path: Path) -> None:
+        """The EXPECT row the PreToolUse hook writes carries the
+        subagent_type; the START row carries the same string as agent_type.
+        That pairing must clear the audit even though the agent_id shares
+        no substring with the type."""
+        _expect_row(tmp_path, name=self.SUBAGENT_TYPE, mode="background")
+        f = _expectations_file(tmp_path)
+        with f.open("a") as fh:
+            fh.write(
+                f"2026-08-29T00:00:00Z\tSTART\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\n"
+            )
+        # Falsifier for "the id shape still matters somewhere": the id
+        # cannot be derived from the type, and the type cannot be derived
+        # from the id.
+        assert self.SUBAGENT_TYPE not in self.OPAQUE_ID
+        proc = _run_undeclared(tmp_path)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "checked=1 recognized=1 unrecognized=0 undeclared=0" in proc.stdout
+        assert "UNDECLARED" not in proc.stdout
+
+    def test_named_background_dispatch_undeclared_without_expect_row(
+        self, tmp_path: Path
+    ) -> None:
+        """No EXPECT row of that type => the declaration hook did not see
+        this dispatch. Named as a deficit, per dispatch — the free pass the
+        unrecognised class used to get is gone (nexus-houpu)."""
+        f = _expectations_file(tmp_path)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a") as fh:
+            fh.write(
+                f"2026-08-29T00:00:00Z\tSTART\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\n"
+            )
+        proc = _run_undeclared(tmp_path)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert f"UNDECLARED\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}" in proc.stdout
+        assert "BLINDSPOT" not in proc.stdout, (
+            "a START the audit walked and named is not a blind spot"
+        )
+
+    def test_blindspot_only_when_no_starts_at_all(self, tmp_path: Path) -> None:
+        """rc=1 is reserved for the audit having walked nothing. One START
+        of an undeclared type is rc=2 (above); the SAME ledger with the
+        START removed is rc=1."""
+        f = _expectations_file(tmp_path)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a") as fh:
+            fh.write(
+                f"2026-08-29T00:00:00Z\tEXPECT\t{self.SUBAGENT_TYPE}\tbackground\ttu1\n"
+            )
+        proc = _run_undeclared(tmp_path)
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "BLINDSPOT" in proc.stdout
+        assert "checked=0" in proc.stdout
+
+    def test_census_lists_opaque_id_with_real_type(self, tmp_path: Path) -> None:
+        """The census per-agent view prints the opaque id against its real
+        agent_type and a declared/undeclared verdict. Two same-type STARTs
+        against one EXPECT row: first declared, second undeclared
+        (N-of-type credit, not set membership)."""
+        second_id = "a77c0ffee1234567b"
+        f = _expectations_file(tmp_path)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a") as fh:
+            fh.write(
+                f"2026-08-29T00:00:00Z\tEXPECT\t{self.SUBAGENT_TYPE}\tbackground\ttu1\n"
+                f"2026-08-29T00:00:05Z\tSTART\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\n"
+                f"2026-08-29T00:00:06Z\tSTART\t{second_id}\t{self.SUBAGENT_TYPE}\n"
+            )
+        proc = _run_census(tmp_path)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert (
+            f"AGENT\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\tNO_TERMINAL\tdeclared"
+            in proc.stdout
+        )
+        assert (
+            f"AGENT\t{second_id}\t{self.SUBAGENT_TYPE}\tNO_TERMINAL\tundeclared"
+            in proc.stdout
+        )
+        assert "BLINDSPOT\tchecked=2 recognized=2 unrecognized=0" in proc.stdout
+
+    def test_census_names_a_start_whose_type_was_never_declared(self, tmp_path: Path) -> None:
+        """A START with no EXPECT row of its type is listed as undeclared
+        in the per-agent view and counted in CLASSIFIED — and the census
+        exits 0: it is the REPORT, the rc=2 deficit verdict belongs to
+        expectations_undeclared. The mutation gate (mutations_qc4p1.sh M5)
+        keys on this test for the census half of the free pass."""
+        f = _expectations_file(tmp_path)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a") as fh:
+            fh.write(
+                f"2026-08-29T00:00:00Z\tSTART\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\n"
+            )
+        proc = _run_census(tmp_path)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert (
+            f"AGENT\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\tNO_TERMINAL\tundeclared"
+            in proc.stdout
+        ), proc.stdout
+        assert "undeclared=1" in proc.stdout
+        assert "BLINDSPOT\tchecked=1 recognized=0 unrecognized=1" in proc.stdout
+
+    def test_census_blindspot_only_when_no_starts_at_all(self, tmp_path: Path) -> None:
+        """The census and expectations_undeclared share ONE blind-spot rule:
+        EXPECT rows present, zero STARTs walked => rc=1 on both. The same
+        ledger with a START added is rc=0 here (above) and rc=2 there."""
+        f = _expectations_file(tmp_path)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a") as fh:
+            fh.write(
+                f"2026-08-29T00:00:00Z\tEXPECT\t{self.SUBAGENT_TYPE}\tbackground\ttu1\n"
+            )
+        proc = _run_census(tmp_path)
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "BLINDSPOT\tchecked=0 recognized=0 unrecognized=0" in proc.stdout
+        assert _run_undeclared(tmp_path).returncode == 1
+
+    def test_census_no_start_label_reserved_for_ids_without_a_start_row(
+        self, tmp_path: Path
+    ) -> None:
+        """Before nexus-houpu, an unrecognised START that carried a terminal
+        verb was relabelled name='-' declaration='no-start' — misreporting a
+        dispatch the ledger had plainly seen start. 'no-start' now means only
+        what it says."""
+        f = _expectations_file(tmp_path)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a") as fh:
+            fh.write(
+                f"2026-08-29T00:00:00Z\tSTART\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\n"
+                f"2026-08-29T00:00:10Z\tBLOCKED\t{self.OPAQUE_ID}\n"
+                "2026-08-29T00:00:20Z\tBLOCKED\ta0000ghostid00000\n"
+            )
+        proc = _run_census(tmp_path)
+        assert (
+            f"AGENT\t{self.OPAQUE_ID}\t{self.SUBAGENT_TYPE}\tBLOCKED_UNRESOLVED\tundeclared"
+            in proc.stdout
+        ), proc.stdout
+        assert "AGENT\ta0000ghostid00000\t-\tBLOCKED_UNRESOLVED\tno-start" in proc.stdout
+        assert "no_start=1" in proc.stdout
 
 
 class TestPluginWiring:

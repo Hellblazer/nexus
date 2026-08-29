@@ -121,19 +121,40 @@ run "M4 no sync/bg discrimination" expect-red "$T::TestSyncVsBackground"
 restore "$HOOK"
 
 echo
-echo "== M5: lib recogniser back to morphology-only (the nu7fo defect) =="
+echo "== M5: restore the unrecognised free pass (the pre-houpu defect) =="
+# Was "recogniser back to morphology-only". That mutation edited two awk
+# lines containing `named[id]`, which nexus-houpu DELETED — the replaces
+# silently matched nothing and the mutation stopped mutating. A mutation
+# that applies no diff proves the suite is green about nothing, so this one
+# ASSERTS it landed (see the vacuous-gate doctrine in AGENTS.md).
+#
+# The equivalent defect under type keying is the free pass itself: skip any
+# START whose type has no EXPECT row instead of naming it. That is exactly
+# what hid a half-working dispatch hook before houpu.
 python3 - <<'PY'
-import pathlib
+import pathlib, sys
+PAIRS = [
+    # expectations_undeclared: skip a START whose type was never declared
+    ("                if (t in e) recognized++",
+     "                if (t in e) recognized++; else continue"),
+    # expectations_census: same free pass in the per-agent view
+    ("                    if (ty in expect) recognized++",
+     "                    if (ty in expect) recognized++; else continue"),
+]
 for f in ("tests/e2e/lib/expectations.sh", "conexus/hooks/scripts/expectations.sh"):
     p = pathlib.Path(f)
     s = p.read_text()
-    # undeclared + census: drop the agent_type key, keep morphology only
-    s = s.replace("if (!named[id] && !(t in e)) continue", "if (!named[id]) continue")
-    s = s.replace('if ((id in allstart) && !named[id] && !(ty in expect)) {',
-                  'if ((id in allstart) && !named[id]) {')
+    for needle, repl in PAIRS:
+        if needle not in s:
+            sys.exit(f"M5 mutation did not apply: needle absent from {f}:\n"
+                     f"  {needle!r}\n"
+                     "the mutation would have been vacuous; fix the needle.")
+        s = s.replace(needle, repl, 1)
     p.write_text(s)
 PY
-run "M5 morphology-only" expect-red "$T::TestPairsWithSubagentStart::test_row_pairs_with_subagent_start_stamp" "$T::TestSameTypeDispatchedTwice"
+run "M5 unrecognised free pass" expect-red \
+    "tests/hooks/test_subagent_stop_hook.py::TestNamedBackgroundDispatchAt2_1_251::test_named_background_dispatch_undeclared_without_expect_row" \
+    "tests/hooks/test_subagent_stop_hook.py::TestNamedBackgroundDispatchAt2_1_251::test_census_names_a_start_whose_type_was_never_declared"
 restore "$LIB" "$PLUGIN_LIB"
 
 echo
@@ -173,6 +194,15 @@ restore "$PLUGIN_LIB"
 
 echo
 echo "== M9: ledger entry removed =="
+# The target test returns early once the marketplace pin is >= 7.0.0 (the
+# hook shipped there; re-drift is the generic drift-ledger tests' job), so
+# past that pin this mutation has NO subject: removing an entry that is not
+# there and expecting red is a vacuous pin, not a gate. Skip it out loud
+# rather than let it print "stayed GREEN" every run after a release.
+M9_PIN="$(python3 -c 'import json;print(json.load(open(".claude-plugin/marketplace.json"))["plugins"][0]["source"]["ref"])')"
+if python3 -c 'import sys;v=tuple(int(x) for x in sys.argv[1].lstrip("v").split("."));sys.exit(0 if v >= (7,0,0) else 1)' "$M9_PIN"; then
+    echo "M9 SKIPPED: pin $M9_PIN >= v7.0.0 — the hook is in the pinned tag and test_declared_in_pending_release_ledger returns early by design; nothing to mutate"
+else
 python3 - <<'PY'
 import pathlib, re
 p = pathlib.Path("conexus/PENDING_RELEASE.md")
@@ -182,6 +212,7 @@ p.write_text(s)
 PY
 run "M9 undeclared drift" expect-red "$T::TestPluginWiring::test_declared_in_pending_release_ledger"
 restore conexus/PENDING_RELEASE.md
+fi
 
 echo
 echo "== M10: reader-side dispatch_id dedup removed (review finding 1) =="

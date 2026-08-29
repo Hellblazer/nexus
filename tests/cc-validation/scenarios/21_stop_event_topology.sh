@@ -290,9 +290,12 @@ scenario_end
 # ── 21e: PRODUCTION hook, sync dispatch that used SendMessage mid-run ────────
 # ── is NOT blocked — adversarial: an EXPECT background row is planted ────────
 # ── for a name equal to the sync dispatch's subagent_type ────────────────────
-# The named-morphology consult rule must refuse the collision: a sync
-# unnamed dispatch has agent_id "a<hash>" (no "a<name>-" prefix), so even a
-# matching-name EXPECT row can never block it (gate-critique Significant-3).
+# The consult rule must refuse the collision: the sync dispatch's own EXPECT
+# row (mode=sync, written by the PreToolUse hook) makes its type MIXED, and the
+# unmixed-ness gate (nexus-rkigh, checked first) answers "does not owe" for a
+# mixed type — so a planted background EXPECT of the same type can never block
+# it (gate-critique Significant-3). Since CC 2.1.251 (nexus-houpu) there is no
+# name morphology in the payload at all; type keying is the whole mechanism.
 scenario "21e production hook: sync dispatch with mid-run SendMessage is never blocked"
 
 ORCH_LOG_E="$TEST_HOME/orch21e.log"
@@ -425,7 +428,7 @@ PY_EOF
     if grep -q "^STOP_DECISION " "$ORCH_LOG_E" 2>/dev/null; then
         fail "21e FALSE BLOCK: production hook emitted a decision for a sync dispatch — $(grep '^STOP_DECISION ' "$ORCH_LOG_E" | head -c 300)"
     else
-        pass "21e: no block decision for the sync dispatch (morphology refused the adversarial name collision)"
+        pass "21e: no block decision for the sync dispatch (the unmixed-ness gate refused the adversarial same-type collision)"
     fi
     if [[ ! -f "$EXPFILE_E" ]] || ! grep -q "BLOCKED" "$EXPFILE_E"; then
         pass "21e: no BLOCKED row recorded"
