@@ -672,8 +672,9 @@ class TestEnrichHook:
             backend="openalex",
         )
 
-        s2_entry = cat.resolve(cat.find("S2 Meta Paper")[0].tumbler)
-        oa_entry = cat.resolve(cat.find("OA Meta Paper")[0].tumbler)
+        # nexus-fgxmk: exact titles, never find()[0] — both seeds share "Meta Paper".
+        s2_entry = cat.resolve(cat.find_by_title_exact("S2 Meta Paper")[0].tumbler)
+        oa_entry = cat.resolve(cat.find_by_title_exact("OA Meta Paper")[0].tumbler)
         for entry in (s2_entry, oa_entry):
             assert "venue" not in entry.meta
             assert "citation_count" not in entry.meta

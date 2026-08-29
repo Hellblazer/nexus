@@ -1514,8 +1514,9 @@ def catalog_with_docs():
                  physical_collection="knowledge__papers__voyage-context-3__v1", chunk_count=20, author="Vaswani")
     cat.register(o2, "BERT Paper", content_type="paper",
                  physical_collection="knowledge__papers__voyage-context-3__v1", chunk_count=15, author="Devlin")
-    cat.link(cat.find("Attention Paper")[0].tumbler,
-             cat.find("BERT Paper")[0].tumbler, "cites", created_by="test")
+    # nexus-fgxmk: exact titles, never find()[0] — both seeds share the token "paper".
+    cat.link(cat.find_by_title_exact("Attention Paper")[0].tumbler,
+             cat.find_by_title_exact("BERT Paper")[0].tumbler, "cites", created_by="test")
     return cat
 
 

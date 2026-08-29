@@ -2601,6 +2601,22 @@ public final class CatalogRepository {
     /**
      * FTS search over title/author/corpus/file_path using OR'd tsquery.
      * Optionally filter by content_type. Returns up to limit results.
+     *
+     * <p><strong>Order contract (nexus-fgxmk):</strong> results are ordered by
+     * {@code tumbler} — registration order within an owner, stable across
+     * heap churn — NOT by relevance. Before this the statement had no
+     * {@code ORDER BY} at all, so a seq scan emitted physical ctid order:
+     * insertion order on a fresh table, and arbitrary once free-space reuse
+     * set in (measured: the same query returned two matching rows reversed
+     * fourteen tests apart on one xdist worker). Callers that indexed
+     * {@code [0]} were relying on heap placement.
+     *
+     * <p>Matching is broader than a title lookup: {@code plainto_tsquery
+     * ('english', ...)} drops stopwords, so "Paper A" reduces to {@code
+     * 'paper'} and matches "Paper B" too (the {@code 'simple'} leg keeps the
+     * stopword lexeme, so the exact title still matches — it is just not the
+     * only match). A caller that needs the document whose title IS the query
+     * filters client-side: {@code HttpCatalogClient.find_by_title_exact}.
      */
     // TOMBSTONE-FILTER-WIDEN (nexus-mqd6t): the WHERE Condition is assembled
     // into a local variable in an earlier statement (folding the FTS match
@@ -2646,6 +2662,8 @@ public final class CatalogRepository {
             return ctx.select(documentFields())
                       .from(CATALOG_DOCUMENTS)
                       .where(where)
+                      // nexus-fgxmk: a stated, stable order. See the javadoc.
+                      .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                       .limit(limit <= 0 ? 200 : limit)
                       .fetch()
                       .map(r -> docRowFromRecord(r.intoMap()));

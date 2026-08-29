@@ -54,6 +54,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keeps its intentional N/A-exit-0 (nexus-vl8lk) interactively; both
   `release-sandbox.sh` call sites pass `--fail-on-violation`, where an
   N/A must not read as a pass.
+- **Catalog `find()` has an order contract and an exact-title sibling**
+  (nexus-fgxmk). The engine's `/search` had no `ORDER BY`, so
+  `find(title)[0]` was heap placement (measured reversing on a churned
+  database); it now orders by tumbler. Because the English tsquery drops
+  stopwords, `find("Paper A")` legitimately matches "Paper B" too, so
+  `HttpCatalogClient.find_by_title_exact(title)` is the promoted
+  resolution entry point (the idiom two test files had grown locally);
+  the three latent `find()[0]` sites now use it, and the stopword case is
+  pinned on both sides of the wire.
 - **Ghost-document manifest retraction no longer aborts catalog cleanup**
   (nexus-d9fwj). `store_hook._retract_manifest_rows_for_chash` guards a
   blank `physical_collection` (a ghost/sourceless document): it falls back
