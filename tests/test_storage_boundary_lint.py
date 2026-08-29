@@ -609,7 +609,8 @@ def test_dual_population_baseline_locked():
         f"{[(v.file, v.line, v.symbol) for v in result.violations]}"
     )
     # The documented-irreducible construction survivor set, derived from
-    # the named allowlist (24 sites across 13 files at the RDR-186 P4 flip).
+    # the named allowlist (24 sites across 13 files at the RDR-186 P4 flip;
+    # 25 since nexus-mlu3k's aspects-without-catalog census in enrich.py).
     assert result.t2database_constructions == sum(
         T2DATABASE_CONSTRUCTION_ALLOWLIST.values()
     ), (
@@ -617,7 +618,7 @@ def test_dual_population_baseline_locked():
         f"{result.t2database_constructions} != allowlist sum "
         f"{sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values())}"
     )
-    assert sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values()) == 24
+    assert sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values()) == 25
 
 
 def test_named_allowlists_point_at_live_files():

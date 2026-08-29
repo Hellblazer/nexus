@@ -26,19 +26,19 @@ from nexus.db.t2 import http_document_aspects_store as aspects_mod
 from tests._catalog_fixture_ops import ActiveCatalog
 
 _ROWS = [
-    {"collection": "code__1-1__voyage-code-3__v1", "source_path": "src/a.py",
+    {"collection": "code__mtest__bge-base-en-v15-768__v1", "source_path": "src/a.py",
      "source_uri": "file:///nowhere/src/a.py", "extracted_at": "2026-06-03T10:00:00Z",
      "model_version": "v2", "extractor_name": "scholarly-paper", "confidence": 0.9,
      "tombstoned_match": False},
-    {"collection": "code__1-1__voyage-code-3__v1", "source_path": "src/b.py",
+    {"collection": "code__mtest__bge-base-en-v15-768__v1", "source_path": "src/b.py",
      "source_uri": "file:///nowhere/src/b.py", "extracted_at": "2026-07-14T10:00:00Z",
      "model_version": "v2", "extractor_name": "scholarly-paper", "confidence": 0.9,
      "tombstoned_match": True},
-    {"collection": "knowledge__k__voyage-context-3__v1", "source_path": "note",
+    {"collection": "knowledge__k__bge-base-en-v15-768__v1", "source_path": "note",
      "source_uri": "chroma://knowledge__k/note", "extracted_at": "2026-07-14T11:00:00Z",
      "model_version": "v1", "extractor_name": "scholarly-paper", "confidence": 0.8,
      "tombstoned_match": False},
-    {"collection": "knowledge__k__voyage-context-3__v1", "source_path": "bare",
+    {"collection": "knowledge__k__bge-base-en-v15-768__v1", "source_path": "bare",
      "source_uri": "some/relative/path.md", "extracted_at": None,
      "model_version": "v1", "extractor_name": "frontmatter", "confidence": 0.7,
      "tombstoned_match": False},
@@ -62,7 +62,7 @@ def _canned_rows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 def test_buckets_by_scheme_tombstone_era_and_extractor(_canned_rows) -> None:
     result = CliRunner().invoke(enrich, ["aspects-without-catalog", "--json"])
     assert result.exit_code == 0, result.output
-    report = json.loads(result.output)
+    report = json.loads(result.stdout)
     assert report["total"] == 4
     assert report["by_scheme"] == {"file": 2, "chroma": 1, "none": 1}
     assert report["tombstoned_match"] == 1
@@ -105,13 +105,13 @@ def test_pages_through_the_engine_ceiling_until_a_short_page(
     monkeypatch.setattr("nexus.config.default_db_path", lambda: tmp_path / "t2.db")
     result = CliRunner().invoke(enrich, ["aspects-without-catalog", "--json"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["total"] == 304
+    assert json.loads(result.stdout)["total"] == 304
     assert calls == [{"limit": 300, "offset": 0}, {"limit": 300, "offset": 300}]
 
     calls.clear()
     result = CliRunner().invoke(enrich, ["aspects-without-catalog", "--json", "--limit", "302"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["total"] == 302
+    assert json.loads(result.stdout)["total"] == 302
     assert calls == [{"limit": 300, "offset": 0}, {"limit": 2, "offset": 300}]
 
 
@@ -174,13 +174,13 @@ class TestWire:
         claimed_uri = "file:///tmp/mlu3k/claimed.md"
         cat.register(
             owner, "Claimed", content_type="docs",
-            physical_collection="docs__mlu3k__voyage-context-3__v1",
+            physical_collection="docs__mlu3k__bge-base-en-v15-768__v1",
             file_path="claimed.md", source_uri=claimed_uri,
         )
         with T2Database(tmp_path / "t2.db") as db:
             for name, uri in (("claimed.md", claimed_uri), ("orphan.md", "file:///tmp/mlu3k/orphan.md")):
                 assert db.document_aspects.upsert(AspectRecord(
-                    collection="docs__mlu3k__voyage-context-3__v1", source_path=name,
+                    collection="docs__mlu3k__bge-base-en-v15-768__v1", source_path=name,
                     problem_formulation="p", proposed_method="m",
                     experimental_datasets=[], experimental_baselines=[],
                     experimental_results="r", confidence=0.9,

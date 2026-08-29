@@ -291,7 +291,7 @@ T2DATABASE_CONSTRUCTION_ALLOWLIST: dict[str, int] = {
     "src/nexus/commands/catalog.py": 1,    # one-shot catalog-setup plan-seed loader
     "src/nexus/commands/catalog_cmds/report.py": 1,  # read-only T2 access
     "src/nexus/commands/doc.py": 3,        # read-only T2 access
-    "src/nexus/commands/enrich.py": 8,     # read-only T2 access (+ routed writes)
+    "src/nexus/commands/enrich.py": 9,     # read-only T2 access (+ routed writes); 9th = aspects-without-catalog census (nexus-mlu3k)
     "src/nexus/commands/index.py": 2,      # read-only probes; writes via t2_index_write
     "src/nexus/commands/rdr.py": 1,        # short-lived read-only preamble CLI
     "src/nexus/commands/search_cmd.py": 1, # read-only T2 access

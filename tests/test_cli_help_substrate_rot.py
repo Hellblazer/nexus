@@ -38,6 +38,9 @@ _ALLOWLIST: dict[tuple[str, str], str] = {
     # RDR-096 P3.2), not a claim about the storage substrate — the flag
     # genuinely filters rows whose persistent URI carries that scheme.
     ("enrich.py", "enrich_aspects_list"): "chroma:// is a live source_uri scheme",
+    # Same scheme value: the census buckets rows by their URI scheme, and
+    # chroma:// is one of the buckets (555 such rows live, nexus-mlu3k).
+    ("enrich.py", "aspects_without_catalog_cmd"): "chroma:// is a live source_uri scheme (census bucket)",
 }
 
 
