@@ -25,6 +25,7 @@ from plugin_channel import (
     ALLOWED_EXACT,
     ALLOWED_PREFIXES,
     DENIED_PREFIXES,
+    NEVER_DELIVERED_PREFIXES,
     PLUGIN_BY_ALLOWLIST_PREFIX,
     GitCommandError,
     TagVisibilityError,
@@ -264,6 +265,50 @@ def test_scripts_is_off_the_wheel_and_sdist_surface() -> None:
     for entry in _wheel_and_sdist_entries():
         assert not path_has_prefix(entry, "scripts"), entry
         assert not path_has_prefix("scripts", entry), entry
+
+
+def test_never_delivered_prefixes_are_off_the_wheel_and_sdist_surface() -> None:
+    """The proof's carve-out may only ever name paths that cannot reach an
+    installed user: none of NEVER_DELIVERED_PREFIXES may appear in, or
+    contain, a wheel force-include or sdist include entry. Add one that
+    does and this fails — the carve-out can never hide wheel content."""
+    assert NEVER_DELIVERED_PREFIXES, "the carve-out must not be empty"
+    for never in NEVER_DELIVERED_PREFIXES:
+        for entry in _wheel_and_sdist_entries():
+            assert not path_has_prefix(entry, never), (entry, never)
+            assert not path_has_prefix(never, entry), (entry, never)
+
+
+def test_never_delivered_paths_are_not_offenders(tmp_path: Path) -> None:
+    """A range whose only off-channel changes are never-delivered
+    (tests/, docs/, scripts/, .github/) proves clean; src/ still offends."""
+    from plugin_channel import wheel_surface_offenders
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+
+    def run(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+    run("init", "-q", "-b", "main")
+    run("config", "user.email", "t@t.invalid")
+    run("config", "user.name", "t")
+    (repo / "seed").write_text("seed\n", encoding="utf-8")
+    run("add", "seed")
+    run("commit", "-q", "-m", "seed")
+    run("tag", "v0.0.1")
+    for rel in ("tests/test_a.py", "docs/a.md", "scripts/a.py", ".github/workflows/a.yml", "conexus/skills/a.md"):
+        target = repo / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x\n", encoding="utf-8")
+        run("add", rel)
+    run("commit", "-q", "-m", "machinery + plugin")
+    assert wheel_surface_offenders("v0.0.1", "HEAD", cwd=repo) == []
+    (repo / "src").mkdir()
+    (repo / "src" / "w.py").write_text("wheel\n", encoding="utf-8")
+    run("add", "src/w.py")
+    run("commit", "-q", "-m", "wheel")
+    assert wheel_surface_offenders("v0.0.1", "HEAD", cwd=repo) == ["src/w.py"]
 
 
 def test_the_allowlist_carves_out_every_wheel_path() -> None:

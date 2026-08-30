@@ -58,6 +58,18 @@ Never HEAD of a branch that tracks ongoing development either: on
 post-cut develop, HEAD carries every unreleased wheel change, so such a
 target reports offenders for a cut that shipped none.
 
+OFFENDERS, stated exactly (RECORDED DEVIATION, 2026-08-30, the a2wmi.12
+spike): an offender is a changed path outside the channel that CAN reach
+an installed user. :data:`NEVER_DELIVERED_PREFIXES` (tests/, docs/,
+scripts/, .github/) are not offenders — they are in neither the wheel
+nor the sdist nor the plugin loader's surface, so a commit under them on
+main between the client tag and the cut (a test or cut-script fix, which
+is exactly what the first real cut needed) cannot ship anything. The
+RDR's literal "only channel-allowlisted paths" would have made the
+channel's own repair its own offender; the guarantee the proof carries,
+"no wheel content ships", is unchanged. Same carve-out the straddle
+predicate recorded at R2 (``cut_plugin_release._SHIPPED_SURFACE_PREFIXES``).
+
 This module lives under ``scripts/`` deliberately: pyproject's pytest
 ``pythonpath = ["scripts"]`` makes it importable from tests with no
 packaging, and ``scripts/`` is in neither the wheel force-include nor
@@ -76,6 +88,7 @@ __all__ = [
     "ALLOWED_EXACT",
     "ALLOWED_PREFIXES",
     "DENIED_PREFIXES",
+    "NEVER_DELIVERED_PREFIXES",
     "PLUGIN_BY_ALLOWLIST_PREFIX",
     "GitCommandError",
     "TagVisibilityError",
@@ -113,6 +126,12 @@ ALLOWED_EXACT: tuple[str, ...] = (".claude-plugin/marketplace.json",)
 #: ships them as package data), carved OUT of the channel: a plugin cut
 #: may never alter wheel behaviour.
 DENIED_PREFIXES: tuple[str, ...] = ("conexus/plans/", "conexus/daemon/")
+
+#: Repo-operational prefixes that never reach an installed user — off the
+#: wheel, off the sdist, invisible to the plugin loader (pinned by
+#: tests/test_plugin_channel.py against the parsed hatch config). The
+#: wheel-surface proof ignores them; see OFFENDERS in the module docstring.
+NEVER_DELIVERED_PREFIXES: tuple[str, ...] = ("tests/", "docs/", "scripts/", ".github/")
 
 #: Ref movement keys on THIS mapping, not on SURFACE_BY_PLUGIN: a cut
 #: carrying only conexus/evals/ or conexus/registry.yaml ships real
@@ -293,4 +312,9 @@ def wheel_surface_offenders(
             f"(rc {diff.returncode}): {diff.stderr.strip()}"
         )
     changed = [line.strip() for line in diff.stdout.splitlines() if line.strip()]
-    return sorted(path for path in changed if not is_channel_path(path))
+    return sorted(
+        path
+        for path in changed
+        if not is_channel_path(path)
+        and not any(path_has_prefix(path, never) for never in NEVER_DELIVERED_PREFIXES)
+    )
