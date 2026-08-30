@@ -751,6 +751,15 @@ def test_plugin_tag_leaves_wheel_surface_untouched() -> None:
     """
     from plugin_channel import parse_plugin_tag, wheel_surface_offenders
 
+    # Same taglessness contract as every sibling: ci.yml's pytest shards check
+    # out shallow with NO tags (nexus-dhs30), so on a cut PR an anchored pin
+    # would send _proof_target through invariant W's blind-checkout sentinel
+    # and raise TagVisibilityError there. The dedicated drift-ledger job (tags
+    # fetched, require flag set) is where this proof is binding; the shards
+    # skip it, as they skip the rest of this module. Found on the first real
+    # cut PR (#1495), which the rehearsal's tag-fetching PR-CI leg could not
+    # see; the rehearsal now runs this module in the shard shape too.
+    _require_or_skip()
     anchored = {
         name: parsed
         for name, ref in _pinned_refs().items()
