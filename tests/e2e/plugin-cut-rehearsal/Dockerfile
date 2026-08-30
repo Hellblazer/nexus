@@ -31,8 +31,13 @@ USER nexus
 ENV HOME=/home/nexus
 # The bind-mounted source is owned by the host user; git refuses to read it
 # otherwise. Identity is what the cut script's own `git commit` needs.
+# Same global exclude the host carries, so `ls-files --others` inside the
+# container matches the host's view (a `.claude/settings.local.json` the
+# host ignores globally rode into every clone otherwise).
 RUN git config --global --add safe.directory '*' \
     && git config --global user.name plugin-cut-rehearsal \
-    && git config --global user.email rehearsal@invalid
+    && git config --global user.email rehearsal@invalid \
+    && printf '%s\n' '**/.claude/settings.local.json' '.DS_Store' > /home/nexus/.gitignore_global \
+    && git config --global core.excludesFile /home/nexus/.gitignore_global
 
 WORKDIR /home/nexus
