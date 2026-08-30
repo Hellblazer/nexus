@@ -117,12 +117,18 @@ if [ "$MODE" = container ]; then
     fi
     echo "== building $IMAGE"
     docker build -q -t "$IMAGE" -f "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR" >/dev/null
-    echo "== running the rehearsal in $IMAGE (source bind-mounted read-only at /src)"
+    # Sandboxes land on the HOST (the container's TMPDIR is a bind mount),
+    # so a failed run's cut.log and clone survive the container's --rm.
+    HOST_ARTIFACTS="${TMPDIR:-/tmp}/plugin-cut-rehearsal-container"
+    mkdir -p "$HOST_ARTIFACTS"
+    echo "== running the rehearsal in $IMAGE (source bind-mounted read-only at /src; sandboxes under $HOST_ARTIFACTS)"
     keep_flag=(); [ "$KEEP" = 1 ] && keep_flag+=(--keep); [ "$PROMOTE" = 1 ] && keep_flag+=(--promote-machinery)
     docker run --rm \
         -v "$SOURCE_REPO:/src:ro" \
-        -v nexus-plugin-cut-rehearsal-uv:/root/.cache/uv \
-        -v nexus-plugin-cut-rehearsal-nx:/root/.cache/nexus \
+        -v "$HOST_ARTIFACTS:/home/nexus/tmp" \
+        -v nexus-plugin-cut-rehearsal-uv-cache:/home/nexus/.cache/uv \
+        -v nexus-plugin-cut-rehearsal-nx-cache:/home/nexus/.cache/nexus \
+        -e TMPDIR=/home/nexus/tmp \
         -e NX_REHEARSAL_IN_CONTAINER=1 \
         "$IMAGE" bash /src/tests/e2e/plugin-cut-rehearsal/run.sh \
             --host --repo /src --base-tag "$BASE_TAG" "${keep_flag[@]}"
