@@ -288,7 +288,7 @@ entries = mem.list_entries(project="native-smoke-py")
 assert any(e.get("title") == "a" for e in entries), f"memory.list_entries did not find title=a: {entries}"
 
 plans = HttpPlanLibrary()
-plan_id = plans.save_plan(query="native smoke plan query", plan_json="{\"steps\": []}", project="native-smoke-py")
+plan_id = plans.save_plan(query="native smoke plan query", plan_json="{\"steps\": []}", project="native-smoke-py", verb="research")  # verb required since hygiene-001 (b9ab65606): the client raises before the wire without it; burned engine-service-v0.1.90
 plan_results = plans.search_plans("native smoke plan", project="native-smoke-py")
 assert plan_results, f"plans.search_plans found nothing: {plan_results}"
 
