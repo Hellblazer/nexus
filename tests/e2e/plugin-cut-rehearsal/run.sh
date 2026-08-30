@@ -117,18 +117,21 @@ if [ "$MODE" = container ]; then
     fi
     echo "== building $IMAGE"
     docker build -q -t "$IMAGE" -f "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR" >/dev/null
-    # Sandboxes land on the HOST (the container's TMPDIR is a bind mount),
-    # so a failed run's cut.log and clone survive the container's --rm.
+    # The sandbox stays on the container's OWN filesystem (a bind-mounted
+    # working tree is virtiofs: racily-clean index entries made every
+    # `git apply --index` refuse, and no runner or developer ships on that).
+    # On failure the logs and git state are copied to this host directory,
+    # so they survive the container's --rm.
     HOST_ARTIFACTS="${TMPDIR:-/tmp}/plugin-cut-rehearsal-container"
     mkdir -p "$HOST_ARTIFACTS"
-    echo "== running the rehearsal in $IMAGE (source bind-mounted read-only at /src; sandboxes under $HOST_ARTIFACTS)"
+    echo "== running the rehearsal in $IMAGE (source bind-mounted read-only at /src; failure artifacts under $HOST_ARTIFACTS)"
     keep_flag=(); [ "$KEEP" = 1 ] && keep_flag+=(--keep); [ "$PROMOTE" = 1 ] && keep_flag+=(--promote-machinery)
-    docker run --rm \
+    docker run --rm --init \
         -v "$SOURCE_REPO:/src:ro" \
-        -v "$HOST_ARTIFACTS:/home/nexus/tmp" \
+        -v "$HOST_ARTIFACTS:/home/nexus/artifacts" \
         -v nexus-plugin-cut-rehearsal-uv-cache:/home/nexus/.cache/uv \
         -v nexus-plugin-cut-rehearsal-nx-cache:/home/nexus/.cache/nexus \
-        -e TMPDIR=/home/nexus/tmp \
+        -e NX_REHEARSAL_ARTIFACTS=/home/nexus/artifacts \
         -e NX_REHEARSAL_IN_CONTAINER=1 \
         "$IMAGE" bash /src/tests/e2e/plugin-cut-rehearsal/run.sh \
             --host --repo /src --base-tag "$BASE_TAG" "${keep_flag[@]}"
@@ -160,7 +163,19 @@ PASSED=0
 _step() { STEP=$((STEP + 1)); echo; echo "== step $STEP: $*"; }
 _die()  { echo "PLUGIN-CUT REHEARSAL FAILED at step $STEP: $*" >&2; echo "sandbox kept: $SANDBOX" >&2; exit 1; }
 cleanup() {
-    if [ "$PASSED" = 1 ] && [ "$KEEP" = 0 ]; then rm -rf "$SANDBOX"; else echo "sandbox: $SANDBOX"; fi
+    if [ "$PASSED" = 1 ] && [ "$KEEP" = 0 ]; then rm -rf "$SANDBOX"; return; fi
+    echo "sandbox: $SANDBOX"
+    # Inside the container the sandbox dies with it: copy what a diagnosis
+    # needs (the logs, the clone's branch/commit/status) to the host mount.
+    if [ "$PASSED" = 0 ] && [ -n "${NX_REHEARSAL_ARTIFACTS:-}" ] && [ -d "$NX_REHEARSAL_ARTIFACTS" ]; then
+        dest="$NX_REHEARSAL_ARTIFACTS/$(basename "$SANDBOX")"
+        mkdir -p "$dest"
+        cp "$SANDBOX"/*.log "$SANDBOX"/*.txt "$SANDBOX"/*.json "$dest"/ 2>/dev/null || true
+        if [ -d "$CLONE/.git" ]; then
+            { git -C "$CLONE" rev-parse --abbrev-ref HEAD; git -C "$CLONE" log --oneline -8; git -C "$CLONE" status --short; } > "$dest/git-state.txt" 2>&1 || true
+        fi
+        echo "failure artifacts copied to $dest"
+    fi
 }
 trap cleanup EXIT
 
@@ -191,8 +206,16 @@ g checkout -q -B develop "$DEV_SHA"
 UNTRACKED="$(git -C "$SOURCE_REPO" ls-files --others --exclude-standard)"
 if ! git -C "$SOURCE_REPO" diff --quiet HEAD -- . || [ -n "$UNTRACKED" ]; then
     if ! git -C "$SOURCE_REPO" diff --quiet HEAD -- .; then
-        git -C "$SOURCE_REPO" diff --binary HEAD -- . | g apply --index \
+        # Worktree apply + explicit add, never `apply --index`: on a bind-
+        # mounted sandbox (container mode) a fresh checkout's stat data does
+        # not match the index and `--index` refuses with "does not match
+        # index" (container run 2). `update-index --refresh` is the belt.
+        g update-index -q --refresh || true
+        git -C "$SOURCE_REPO" diff --binary HEAD -- . | g apply \
             || _die "could not apply the source's working-tree diff onto the clone"
+        while IFS= read -r rel; do
+            [ -n "$rel" ] && g add -A -- "$rel"
+        done <<< "$(git -C "$SOURCE_REPO" diff --name-only HEAD -- .)"
     fi
     if [ -n "$UNTRACKED" ]; then
         while IFS= read -r rel; do
@@ -215,8 +238,12 @@ if [ -n "$MACHINERY_DRIFT" ]; then
     drift_count="$(printf '%s\n' "$MACHINERY_DRIFT" | wc -l | tr -d ' ')"
     if [ "$PROMOTE" = 1 ]; then
         g checkout -q main
-        g diff --binary main develop -- "${NEVER_DELIVERED[@]}" | g apply --index \
+        g update-index -q --refresh || true
+        g diff --binary main develop -- "${NEVER_DELIVERED[@]}" | g apply \
             || _die "could not promote develop's machinery onto the fake main"
+        while IFS= read -r rel; do
+            [ -n "$rel" ] && g add -A -- "$rel"
+        done <<< "$MACHINERY_DRIFT"
         g commit -q -m "rehearsal: machinery promoted from develop to main ($drift_count never-delivered paths)"
         g checkout -q develop
         echo "   promoted $drift_count machinery path(s) from develop to the fake main as $(g rev-parse --short main) (what a PR to main lands)"

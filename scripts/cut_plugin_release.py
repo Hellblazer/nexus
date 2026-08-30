@@ -468,6 +468,11 @@ def perform_cut(
 
     branch = f"plugin-release/{version}-{n}"
     _git(repo, "switch", "-q", "-c", branch, "origin/main")
+    # A fresh checkout's stat data can be racily clean on filesystems with
+    # coarse mtimes or virtual mounts, and `apply --index` then refuses with
+    # "does not match index" (seen on a bind-mounted rehearsal clone). The
+    # refresh is cheap and makes the index-aware apply honest everywhere.
+    _git(repo, "update-index", "-q", "--refresh", check=False)
 
     diff = _git(
         repo, "diff", "--binary", "origin/main..origin/develop", "--", *pathspec
