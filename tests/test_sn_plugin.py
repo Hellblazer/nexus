@@ -112,7 +112,12 @@ class TestSnMarketplace:
         # ref is pinned in lock-step with the version field; the
         # source-ref-matches-pyproject parity check enforces the exact
         # value (see tests/test_plugin_structure.py::TestMarketplaceVersion).
-        assert source.get("ref", "").startswith("v")
+        from plugin_channel import client_version_of
+
+        assert client_version_of(source.get("ref", "")) is not None, (
+            f"sn source.ref {source.get('ref')!r} is neither v<X.Y.Z> nor "
+            f"plugin-v<X.Y.Z>-<n> (RDR-197 invariant R)"
+        )
 
     def test_sn_has_version(self, marketplace: dict) -> None:
         sn_entry = next(p for p in marketplace["plugins"] if p["name"] == "sn")

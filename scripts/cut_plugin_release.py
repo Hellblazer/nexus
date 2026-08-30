@@ -28,7 +28,10 @@ produces exactly the state they admit:
   and must move the ref.
 - No version field moves, and no counter file is created.
 - The script pushes nothing and tags nothing: it prints the PR, merge,
-  tag and back-merge commands, and the human cuts the release.
+  tag and back-merge commands, and the human cuts the release. The
+  back-merge is ``scripts/plugin_cut_back_merge.sh``, not a bare merge:
+  the cut's ledger rewrite makes ``conexus/PENDING_RELEASE.md`` conflict
+  with develop every time (rehearsal finding, 2026-08-30).
 
 MAIN-READINESS: every piece of channel machinery is outside the
 allowlist, so a cut cannot install it. Until a client release carries
@@ -465,6 +468,11 @@ def perform_cut(
 
     branch = f"plugin-release/{version}-{n}"
     _git(repo, "switch", "-q", "-c", branch, "origin/main")
+    # A fresh checkout's stat data can be racily clean on filesystems with
+    # coarse mtimes or virtual mounts, and `apply --index` then refuses with
+    # "does not match index" (seen on a bind-mounted rehearsal clone). The
+    # refresh is cheap and makes the index-aware apply honest everywhere.
+    _git(repo, "update-index", "-q", "--refresh", check=False)
 
     diff = _git(
         repo, "diff", "--binary", "origin/main..origin/develop", "--", *pathspec
@@ -541,7 +549,11 @@ def perform_cut(
     print(f"  gh pr create --base main --head {branch} --title 'plugin release: {tag}'")
     print("  gh pr merge <N> --merge")
     print(f"  git tag -a {tag} -m '{tag}' <merge-commit> && git push origin {tag}")
-    print("  git checkout develop && git merge origin/main --no-edit && git push origin develop")
+    # Not a bare merge: the cut commit empties the ledger entries it ships
+    # while develop still carries them, so the back-merge conflicts on
+    # conexus/PENDING_RELEASE.md by construction; the script resolves that
+    # one conflict (main wins) and runs develop's drift contract as the net.
+    print("  scripts/plugin_cut_back_merge.sh . && git push origin develop")
     return {"n": n, "tag": tag, "branch": branch, "moved_plugins": moved}
 
 

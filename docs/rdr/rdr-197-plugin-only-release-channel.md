@@ -249,8 +249,12 @@ below.
   list; move `source.ref`
   for the changed plugin(s) only, with no version field moving anywhere; empty
   covered ledger entries; run the minimal battery; PR to main; merge; tag;
-  push; back-merge main into develop (expected conflict-free: main gains
-  nothing develop lacks).
+  push; back-merge main into develop with `scripts/plugin_cut_back_merge.sh`
+  (NOT conflict-free, contrary to the first draft: the cut commit empties
+  the ledger entries it ships while develop still carries them, so
+  `conexus/PENDING_RELEASE.md` conflicts every time; the script resolves
+  exactly that, main wins, and runs develop's drift contract as the net —
+  2026-08-30 rehearsal finding, see Revision History).
 - **Minimal battery** (~10-15 min): the `-m lint` bucket,
   `tests/test_plugin_release_drift_ledger.py`, `tests/hooks/`, and
   `./tests/e2e/release-sandbox.sh smoke`, the only gate proving a real
@@ -421,7 +425,36 @@ Not yet run. Gate after Sam's review of this draft.
   test) because the fixes in (1)-(2) must reach main before the cut and
   would otherwise be their own offenders. The guarantee "no wheel content
   ships" is unchanged; this is the same carve-out the straddle predicate
-  recorded at R2.
+  recorded at R2. A third round found the same gap-2 class outside the
+  channel files (a hooks test and a mutation harness parsing the pin as
+  `v<semver>`, `test_sn_plugin.py` and `upgrade-shakeout.sh` requiring the
+  client form, a second proof-target resolver in `test_plugin_structure.py`
+  with the merge-ref defect): `plugin_channel.client_version_of` and
+  `plugin_channel.cut_head_sha` are now the canonical readers, and every
+  consumer delegates to them. The structural lesson, Sam's direction: the
+  channel had unit fixtures of each piece and no end-to-end exercise until
+  the real cut. `tests/e2e/plugin-cut-rehearsal/run.sh` now walks the
+  whole flow against a fake origin (cut + battery, PR CI on a synthetic
+  merge ref, merge + tag, the tag workflow's steps, back-merge) and is a
+  precondition for every real cut (AGENTS.md § usage discipline, rule 4).
+  Its first full pass found two more: the tag workflow's own
+  `tests/test_plugin_structure.py` step collected nothing (the module is
+  `lint`-marked and addopts deselects `lint`; now `-m lint`), and the
+  back-merge is NOT conflict-free as § Approach states: the cut commit
+  empties the ledger entries it ships while develop still carries them,
+  so `conexus/PENDING_RELEASE.md` conflicts every time.
+  `scripts/plugin_cut_back_merge.sh` resolves exactly that (main wins)
+  and runs develop's drift contract as the net; the cut script prints it.
+  Once the rehearsal ran its CI legs on depth-1 checkouts (the runners'
+  real shape) it found two more: the tag workflow's `-m lint` step fails
+  on `tests/test_rehearsal_native_legs_refuse_no_build.py` (it walks
+  published `v*` tags for an older engine pin, which a two-tag checkout
+  cannot resolve; now excluded there like the wire-contract module, and
+  still run by ci.yml with full history), and, unrelated to the channel,
+  the suite's real-config-dir mutation guard flakes on an armed box when
+  a live process refreshes `data_token_lease.<digest>` mid-run (RDR-005
+  pass-through; the two lease files are now allowlisted with the measured
+  evidence).
 - 2026-08-22 (design simplification, Sam's direction): the channel is
   COUNTER-LESS. `conexus/PLUGIN_CHANNEL_VERSION` is deleted from the
   design entirely; the parity test validates the tag SHAPE per plugin,

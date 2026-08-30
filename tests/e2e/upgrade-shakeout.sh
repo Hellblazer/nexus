@@ -570,7 +570,7 @@ grep -q '"name": "conexus"' "$MJ" \
     || _die "REPO_ROOT marketplace.json still contains 'name: nx' (rename incomplete)"
 # Source uses git-subdir object form with path + ref pinning
 python3 -c "
-import json, pathlib, sys
+import json, pathlib, re, sys
 mj = json.loads(pathlib.Path('$MJ').read_text())
 for p in mj['plugins']:
     src = p.get('source')
@@ -578,13 +578,20 @@ for p in mj['plugins']:
         sys.exit(f'plugin {p[\"name\"]!r} source must be object form, got {src!r}')
     if src.get('source') != 'git-subdir':
         sys.exit(f'plugin {p[\"name\"]!r} source.source must be git-subdir, got {src.get(\"source\")!r}')
-    if not src.get('ref', '').startswith('v'):
-        sys.exit(f'plugin {p[\"name\"]!r} source.ref must be tag form (vX.Y.Z), got {src.get(\"ref\")!r}')
-    if src.get('ref') != f\"v{p['version']}\":
-        sys.exit(f'plugin {p[\"name\"]!r} source.ref {src.get(\"ref\")!r} != version v{p[\"version\"]}')
-print('  all plugins: git-subdir source + ref pinned to v{version}')
+    # Either invariant-R shape (RDR-197): the client tag v<X.Y.Z>, or an
+    # anchored plugin cut plugin-v<X.Y.Z>-<n>; the version must match.
+    # Exactly the two shapes, never a hybrid: plugin-vX.Y.Z without -n and
+    # vX.Y.Z-n are both malformed (R4 review of nexus-a2wmi.12). No backticks
+    # in this comment: it sits inside a double-quoted bash string.
+    m = re.fullmatch(r'v(\d+\.\d+\.\d+)|plugin-v(\d+\.\d+\.\d+)-[1-9]\d*', src.get('ref', ''))
+    if m is None:
+        sys.exit(f'plugin {p[\"name\"]!r} source.ref must be v<X.Y.Z> or plugin-v<X.Y.Z>-<n>, got {src.get(\"ref\")!r}')
+    anchored = m.group(1) or m.group(2)
+    if anchored != p['version']:
+        sys.exit(f'plugin {p[\"name\"]!r} source.ref {src.get(\"ref\")!r} anchors {anchored!r} != version {p[\"version\"]!r}')
+print('  all plugins: git-subdir source + ref pinned to v{version} or plugin-v{version}-<n>')
 " || _die "marketplace.json pinning check failed"
-_pass "marketplace.json: rename (conexus) + tag pinning (git-subdir + ref=v\$version)"
+_pass "marketplace.json: rename (conexus) + tag pinning (git-subdir + ref anchored to \$version)"
 
 # ── 10. Plugin-name drift detection (nexus-mkj6u) ────────────────────────────
 _step "10/12 plugin-name drift detected when OLD nx plugin still installed"
