@@ -178,6 +178,16 @@ docstring.
 2. An open release PR always wins. Never cut while one is in flight.
 3. Batch related plugin work into one cut, exactly as the release
    cadence rules above batch client releases.
+4. **Rehearse before the real cut, every time:**
+   `tests/e2e/plugin-cut-rehearsal/run.sh` (container by default, `--host`
+   for a fast loop) walks the whole flow against a FAKE origin — the real
+   cut script with its battery, the cut PR's CI on a synthetic merge ref
+   with a `pull_request` payload, merge + anchored tag, the tag workflow's
+   steps, back-merge — and commits the source's uncommitted changes onto
+   its clone's develop, so machinery fixes are rehearsed before they land.
+   Must end `PLUGIN-CUT REHEARSAL PASSED`. The first real cut (2026-08-30,
+   nexus-a2wmi.12) refused three times on machinery that only runs at cut
+   time, each round costing a PR to main; every one was reachable here.
 
 **Sunset trigger:** if two years pass with zero cuts, delete the
 workflow, the parity test's anchored-form branch, and the cut script.

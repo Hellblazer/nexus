@@ -456,7 +456,7 @@ async def _t1_session_refresh_loop(session_id: str, interval: float) -> None:
         await asyncio.sleep(interval)
         try:
             from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-            with HttpTokenStore() as _ts:
+            with HttpTokenStore(prefer_data_token=True) as _ts:  # nexus-maf9l: armed boxes mint sessions with the data token
                 _minted = _ts.start_session(session_id)
             _os.environ["NX_T1_SESSION"] = _minted["session_token"]
             try:
@@ -1311,7 +1311,7 @@ def _t1_session_shutdown() -> None:
         _log.warning("t1_session_lease_clear_failed", session_id=session_id, error=str(_exc))
     try:
         from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-        with HttpTokenStore() as _ts:
+        with HttpTokenStore(prefer_data_token=True) as _ts:  # nexus-maf9l
             _ts.close_session(session_id)
         _log.info("t1_session_token_closed", session_id=session_id)
     except Exception as _exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller

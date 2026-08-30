@@ -225,9 +225,12 @@ def test_both_halves_refuse_a_username_tilde(env_var: str, tmp_path: Path) -> No
     env = {"HOME": str(tmp_path / "home"), env_var: "~root/tools"}
     assert _sh(fn, env).returncode != 0
 
-    with pytest.raises(Exception):  # InstallLayoutError
-        _python_says(tools_dir if env_var == TOOLS_DIR_ENV else bin_dir, env,
-                     pytest.MonkeyPatch())
+    # A hand-built MonkeyPatch() has no teardown: without the context manager
+    # this leaked NX_BIN_DIR='~root/tools' AND the tmp HOME into the worker's
+    # process env for every later test — measured as an ordering flake in
+    # test_trigger_wrapper_echoes_actions_and_pending (7.24.1 battery).
+    with pytest.raises(Exception), pytest.MonkeyPatch.context() as mp:  # InstallLayoutError
+        _python_says(tools_dir if env_var == TOOLS_DIR_ENV else bin_dir, env, mp)
 
 
 _INJECTION = [

@@ -29,5 +29,8 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release or plugin cut (pinned: v7.24.0)
+## Awaiting the next release or plugin cut (pinned: v7.24.1)
 
+Nothing pending. v7.24.1 advanced the pin (including plugin-v7.24.0-1's
+cut content, now inside the client tag), so everything previously
+listed here is live in installed sessions.

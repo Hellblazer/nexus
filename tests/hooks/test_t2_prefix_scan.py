@@ -536,6 +536,191 @@ def test_final_fallback_warning_names_both_local_and_cloud_remedies(tmp_path: Pa
 # ── Multi-namespace fan-out: isolation, cap, budget (nexus-eg6qe/nexus-9xado) ─
 
 
+# ── Data-token lease (nexus-znvjd) ─────────────────────────────────────────
+
+
+def _write_data_token_lease(
+    config_dir: Path,
+    *,
+    base_url: str,
+    token: str,
+    tenant: str = "default",
+    expires_in_s: float = 3600.0,
+) -> Path:
+    """Write the lease exactly as ``DataTokenManager._write_lease`` does,
+    keyed by the REAL ``_lease_key`` (sha256 of ``host[:port]\\x00tenant``)
+    so the hook's stdlib re-derivation is pinned against the client's
+    writer rather than a hand-authored digest."""
+    import time as _time
+
+    from nexus.db.data_token import _lease_key
+
+    digest = _lease_key(base_url, tenant)
+    record = {
+        "format_version": 1,
+        "token": token,
+        "tenant": tenant,
+        "base_url_digest": digest,
+        "expires_at": _time.time() + expires_in_s,
+        "ttl_seconds": 3600.0,
+        "minted_by_pid": os.getpid(),
+    }
+    config_dir.mkdir(parents=True, exist_ok=True)
+    path = config_dir / f"data_token_lease.{digest}"
+    path.write_text(json.dumps(record))
+    return path
+
+
+def test_data_token_lease_wins_over_mint_locked_service_token(
+    tmp_path: Path, mock_engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nexus-znvjd: on an armed pass-through box (RDR-005 step (d)) the
+    persisted ``service_token`` is the scope=mint-locked credential — it
+    can mint data tokens but cannot read data paths, so presenting it to
+    ``/v1/memory/projects`` is a 401 every session. The client mints and
+    caches a data token in ``data_token_lease.<digest>``; the hook must
+    prefer that lease for the resolved host over the static token."""
+    import nexus.config as nexus_config
+
+    now = _now()
+    engine = mock_engine(
+        projects=[{"project": "nexus", "last_updated": _iso(now)}],
+        entries_by_project={"nexus": [_entry("armed-box-entry", "Via data token.", now)]},
+        expected_token="minted-data-token",
+    )
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    nexus_config.set_credential("service_url", engine.base_url)
+    nexus_config.set_credential("service_token", "mint-locked-static-credential")
+    _write_data_token_lease(tmp_path, base_url=engine.base_url, token="minted-data-token")
+
+    out = _run("nexus", config_dir=tmp_path, env={})
+    assert "armed-box-entry" in out
+    assert "WARNING" not in out
+
+
+def test_data_token_lease_wins_over_env_service_token(tmp_path: Path, mock_engine) -> None:
+    """Mirrors the real client, where ``DataTokenManager.bearer_for`` beats
+    the static token however that token was supplied: a fresh lease for
+    the SAME host is direct evidence the box is armed for it."""
+    now = _now()
+    engine = mock_engine(
+        projects=[{"project": "nexus", "last_updated": _iso(now)}],
+        entries_by_project={"nexus": [_entry("env-armed-entry", "Via data token.", now)]},
+        expected_token="minted-data-token",
+    )
+    _write_data_token_lease(tmp_path, base_url=engine.base_url, token="minted-data-token")
+
+    out = _run(
+        "nexus",
+        config_dir=tmp_path,
+        env={"NX_SERVICE_URL": engine.base_url, "NX_SERVICE_TOKEN": "mint-locked-static"},
+    )
+    assert "env-armed-entry" in out
+    assert "WARNING" not in out
+
+
+def test_expired_data_token_lease_falls_back_and_401_names_the_lease(
+    tmp_path: Path, mock_engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An expired lease is not usable (the hook never mints — a mint has
+    no fallback by design), so resolution falls back to the static token
+    exactly as before nexus-znvjd. When THAT is rejected with 401 the
+    warning must name the lease path so the armed-box case is diagnosable
+    instead of reading as a generic bad-token line."""
+    import nexus.config as nexus_config
+
+    now = _now()
+    engine = mock_engine(
+        projects=[{"project": "nexus", "last_updated": _iso(now)}],
+        entries_by_project={"nexus": [_entry("never-shown", "x", now)]},
+        expected_token="minted-data-token",
+    )
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    nexus_config.set_credential("service_url", engine.base_url)
+    nexus_config.set_credential("service_token", "mint-locked-static-credential")
+    _write_data_token_lease(
+        tmp_path, base_url=engine.base_url, token="minted-data-token", expires_in_s=-1.0
+    )
+
+    out = _run("nexus", config_dir=tmp_path, env={})
+    assert "WARNING: T2 memory unreachable" in out
+    assert "HTTP 401" in out
+    assert "data_token_lease" in out, out
+    assert "never-shown" not in out
+
+
+def test_data_token_lease_for_another_host_is_ignored(
+    tmp_path: Path, mock_engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lease is keyed by ``(host[:port], tenant)`` digest; a lease minted
+    for a different endpoint must never be presented to this one — the
+    static token stays in use and the scan succeeds on it."""
+    import nexus.config as nexus_config
+
+    now = _now()
+    engine = mock_engine(
+        projects=[{"project": "nexus", "last_updated": _iso(now)}],
+        entries_by_project={"nexus": [_entry("static-token-entry", "Via static.", now)]},
+        expected_token="static-token",
+    )
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    nexus_config.set_credential("service_url", engine.base_url)
+    nexus_config.set_credential("service_token", "static-token")
+    _write_data_token_lease(
+        tmp_path, base_url="https://other.example.invalid:8443", token="foreign-data-token"
+    )
+
+    out = _run("nexus", config_dir=tmp_path, env={})
+    assert "static-token-entry" in out
+    assert "WARNING" not in out
+
+
+def test_data_token_lease_wins_on_the_env_port_leg(tmp_path: Path, mock_engine) -> None:
+    """Leg 2 (``NX_SERVICE_HOST``/``NX_SERVICE_PORT``): the lease for the
+    derived ``http://host:port`` beats the env token, same rule as leg 1."""
+    now = _now()
+    engine = mock_engine(
+        projects=[{"project": "nexus", "last_updated": _iso(now)}],
+        entries_by_project={"nexus": [_entry("port-leg-entry", "Via data token.", now)]},
+        expected_token="minted-data-token",
+    )
+    host, port = engine.host_port
+    _write_data_token_lease(tmp_path, base_url=f"http://{host}:{port}", token="minted-data-token")
+
+    out = _run(
+        "nexus",
+        config_dir=tmp_path,
+        env={
+            "NX_SERVICE_HOST": host,
+            "NX_SERVICE_PORT": str(port),
+            "NX_SERVICE_TOKEN": "mint-locked-static",
+        },
+    )
+    assert "port-leg-entry" in out
+    assert "WARNING" not in out
+
+
+def test_data_token_lease_wins_on_the_supervisor_lease_leg(
+    tmp_path: Path, mock_engine
+) -> None:
+    """Leg 3 (bare local-supervisor lease, no env, no config.yml): a fresh
+    data-token lease for the supervisor's host:port beats the supervisor
+    lease's own root token."""
+    now = _now()
+    engine = mock_engine(
+        projects=[{"project": "nexus", "last_updated": _iso(now)}],
+        entries_by_project={"nexus": [_entry("supervisor-leg-entry", "Via data token.", now)]},
+        expected_token="minted-data-token",
+    )
+    host, port = engine.host_port
+    _write_lease(tmp_path, host=host, port=port, token="supervisor-root-token")
+    _write_data_token_lease(tmp_path, base_url=f"http://{host}:{port}", token="minted-data-token")
+
+    out = _run("nexus", config_dir=tmp_path, env={})
+    assert "supervisor-leg-entry" in out
+    assert "WARNING" not in out
+
+
 def test_one_bad_namespace_does_not_discard_others(tmp_path: Path, mock_engine) -> None:
     """A failure fetching namespace N's entries must not discard the
     already-rendered output from namespaces before it — the pre-fix outer

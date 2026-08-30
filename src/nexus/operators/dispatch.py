@@ -879,7 +879,7 @@ def _close_dispatch_session(session_id: str | None, session_token: str | None) -
     try:
         from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred to avoid circular import at module load
 
-        with HttpTokenStore() as token_store:
+        with HttpTokenStore(prefer_data_token=True) as token_store:  # nexus-maf9l
             token_store.close_session(session_id)
     except Exception as exc:  # noqa: BLE001 — best-effort cleanup; NO sweep backstops this row (nexus-t23zk tracks an engine-side one, not implemented here), but a dispatch that already completed must not additionally fail on cleanup
         _log.warning(
