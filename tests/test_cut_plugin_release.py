@@ -392,6 +392,42 @@ class TestLedger:
         assert "conexus/skills/newskill/SKILL.md" not in ledger
         assert "nexus-ccccc" in ledger  # the split-delivery entry survives
 
+    def test_prose_spans_with_slashes_do_not_hold_an_entry_back(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """a2wmi.12 spike, first real cut (nexus-znvjd, 2026-08-30): the
+        entry's prose carried backticked spans containing ``/`` — a
+        config-dir placeholder and an HTTP route — and the rewrite read
+        them as un-shippable paths, left the covered entry in place, and
+        the window tests refused the branch. Prose is not a path; a
+        tests/ ride-along is not a wheel half; only a shipped-surface
+        path (src/, the denied plugin-tree prefixes, mcpb/, dt/) holds an
+        entry back."""
+        from cut_plugin_release import _rewrite_ledger
+
+        covered = (
+            "- `conexus/hooks/scripts/t2_prefix_scan.py` — bead nexus-znvjd: prefers\n"
+            "  the lease at `<config_dir>/data_token_lease.<digest>` (written by\n"
+            "  `nexus.db.data_token`); a `WARNING: ... HTTP 401 for /v1/memory/projects`\n"
+            "  line names it. Test ride-along: `tests/hooks/test_t2_prefix_scan.py`.\n"
+        )
+        split = (
+            "- `conexus/agents/dev.md`: guidance half; wheel half\n"
+            "  `src/nexus/plans/x.py` ships at the next client release (nexus-fffff)\n"
+        )
+        no_path = "- `git stash -u` is covered by the routing guard (nexus-ggggg)\n"
+        # R2 of the spike fix: a bare prefix root in prose is not a path —
+        # is_channel_path("conexus/") is True, and this entry ships nothing.
+        bare_root = "- everything under `conexus/` is the allowlist root; nothing here ships yet (nexus-hhhhh)\n"
+        text = "# Pending\n" + covered + split + no_path + bare_root
+        repo = tmp_path / "ledgeronly"
+        (repo / "conexus").mkdir(parents=True)
+        (repo / "conexus" / "PENDING_RELEASE.md").write_text(text, encoding="utf-8")
+        _rewrite_ledger(repo)
+        after = (repo / "conexus" / "PENDING_RELEASE.md").read_text(encoding="utf-8")
+        assert "nexus-znvjd" not in after  # covered: emptied
+        assert after == "# Pending\n" + split + no_path + bare_root  # the rest survives verbatim
+
 
 class TestBatteryAndWindow:
     def test_the_battery_runs_against_the_branch(

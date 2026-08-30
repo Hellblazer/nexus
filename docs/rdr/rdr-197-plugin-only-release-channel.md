@@ -406,6 +406,22 @@ Not yet run. Gate after Sam's review of this draft.
 
 ## Revision History
 
+- 2026-08-30 (a2wmi.12 spike: the first real cut, `plugin-v7.24.0-1` for
+  nexus-znvjd): three machinery defects found by the cut's own battery and
+  fixed in one PR to main. (1) The cut script's ledger rewrite judged any
+  backticked span containing `/` as a path, so prose spans left a covered
+  entry in place and the window tests refused the branch; it now keys on
+  channel paths versus the straddle predicate's shipped-surface prefixes.
+  (2) The wheel-surface proof diffed against the anchored tag
+  unconditionally; inside the release window it now targets the cut's
+  head commit, as the anchoring rule and `plugin-drift-ledger.yml` already
+  stated. (3) RECORDED DEVIATION from "only channel-allowlisted paths":
+  the proof ignores `tests/`, `docs/`, `scripts/`, `.github/`
+  (`NEVER_DELIVERED_PREFIXES`, pinned off the wheel and sdist surface by
+  test) because the fixes in (1)-(2) must reach main before the cut and
+  would otherwise be their own offenders. The guarantee "no wheel content
+  ships" is unchanged; this is the same carve-out the straddle predicate
+  recorded at R2.
 - 2026-08-22 (design simplification, Sam's direction): the channel is
   COUNTER-LESS. `conexus/PLUGIN_CHANNEL_VERSION` is deleted from the
   design entirely; the parity test validates the tag SHAPE per plugin,

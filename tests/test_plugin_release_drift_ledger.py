@@ -716,13 +716,55 @@ class TestTheCIWiringItself:
 # ---------------------------------------------------------------------------
 
 
+def _cut_head_sha() -> str:
+    """The cut PR's HEAD COMMIT, the ANCHORING rule's pre-tag target.
+
+    On a ``pull_request`` event ``actions/checkout`` leaves HEAD on the
+    synthetic merge ref (``refs/pull/<n>/merge``), whose tree moves with
+    main between runs — a timing-dependent target (R2 of the a2wmi.12
+    spike fix). The PR's own head sha is in the event payload, and
+    plugin-drift-ledger.yml fetches exactly that sha so it resolves here.
+    Anywhere else (the cut branch itself, a developer checkout) HEAD IS
+    the head commit.
+    """
+    event_path = os.environ.get("GITHUB_EVENT_PATH", "").strip()
+    if os.environ.get("GITHUB_EVENT_NAME", "").strip() == "pull_request" and event_path:
+        payload = json.loads(pathlib.Path(event_path).read_text(encoding="utf-8"))
+        sha = str(payload.get("pull_request", {}).get("head", {}).get("sha", "")).strip()
+        assert sha, "pull_request event payload carries no pull_request.head.sha"
+        return sha
+    sha = _git("rev-parse", "HEAD").stdout.strip()
+    assert sha, "HEAD does not resolve; the proof has no target"
+    return sha
+
+
+def _proof_target(name: str, ref: str) -> str:
+    """ANCHORING rule, per plugin: the anchored tag when it resolves; else,
+    INSIDE the plugin's release window, the cut PR's head commit; else the
+    unresolvable ref itself, so ``wheel_surface_offenders`` raises rather
+    than passing silently (a missing tag outside the window is a blind
+    checkout, never a free pass)."""
+    if _git("rev-parse", "--verify", f"{ref}^{{commit}}").returncode == 0:
+        return ref
+    if plugin_in_release_window(name, ref):
+        return _cut_head_sha()
+    return ref
+
+
 def test_plugin_tag_leaves_wheel_surface_untouched() -> None:
     """For every plugin pinned at an anchored ref, the range from the base
-    client tag to the anchored tag touches only channel-allowlisted paths.
+    client tag to the proof target carries no deliverable path outside the
+    channel (NEVER_DELIVERED_PREFIXES excluded — plugin_channel's OFFENDERS
+    paragraph).
+
+    Target: :func:`_proof_target` (the anchored tag; inside the window, the
+    cut PR's head commit via :func:`_cut_head_sha`). The a2wmi.12 spike's
+    first cut branch failed here with "unknown revision" because this test
+    diffed against the tag unconditionally.
 
     Passes trivially while no plugin is pinned anchored (today's steady
-    state); the fixture arm below is the non-vacuity proof of the
-    mechanism, so that pass is honest, not a masked gate.
+    state); the fixture arm below and TestProofTarget are the non-vacuity
+    proofs of the mechanism, so that pass is honest, not a masked gate.
     """
     from plugin_channel import parse_plugin_tag, wheel_surface_offenders
 
@@ -738,13 +780,85 @@ def test_plugin_tag_leaves_wheel_surface_untouched() -> None:
         # belt), so a skip here turned develop red on the first CI run.
         return
     for name, (version, n) in sorted(anchored.items()):
-        offenders = wheel_surface_offenders(
-            f"v{version}", f"plugin-v{version}-{n}", cwd=REPO_ROOT
-        )
+        ref = f"plugin-v{version}-{n}"
+        target = _proof_target(name, ref)
+        offenders = wheel_surface_offenders(f"v{version}", target, cwd=REPO_ROOT)
         assert offenders == [], (
-            f"plugin {name}'s cut plugin-v{version}-{n} touches wheel-surface "
-            f"paths: {offenders}. A plugin cut may never alter wheel content."
+            f"plugin {name}'s cut {ref} (proof target {target}) touches "
+            f"wheel-surface paths: {offenders}. A plugin cut may never alter "
+            f"wheel content."
         )
+
+
+class TestProofTarget:
+    """The fallback branch of the proof, exercised directly: no plugin is
+    pinned anchored in the steady state, so the real-repo test above only
+    ever walks its trivial path — these pin the rule itself."""
+
+    REF = "plugin-v9.9.0-1"
+
+    @pytest.fixture(autouse=True)
+    def _stub_world(self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path):
+        module = sys.modules[__name__]
+        self.tag_resolves = False
+
+        def fake_git(*args: str) -> subprocess.CompletedProcess[str]:
+            if args[:2] == ("rev-parse", "--verify"):
+                rc = 0 if self.tag_resolves else 1
+                return subprocess.CompletedProcess(args, rc, stdout="", stderr="")
+            if args == ("rev-parse", "HEAD"):
+                return subprocess.CompletedProcess(args, 0, stdout="head-sha\n", stderr="")
+            raise AssertionError(f"unexpected git call {args}")
+
+        monkeypatch.setattr(module, "_git", fake_git)
+        self.in_window = True
+        monkeypatch.setattr(
+            module, "plugin_in_release_window", lambda name, ref: self.in_window
+        )
+        monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+        monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+        self.monkeypatch = monkeypatch
+        self.tmp_path = tmp_path
+
+    def test_a_resolving_tag_is_the_target(self) -> None:
+        self.tag_resolves = True
+        assert _proof_target("conexus", self.REF) == self.REF
+
+    def test_in_the_window_the_target_is_head_on_the_cut_branch(self) -> None:
+        assert _proof_target("conexus", self.REF) == "head-sha"
+
+    def test_in_the_window_on_a_pull_request_the_target_is_the_pr_head(self) -> None:
+        """The Critical the R2 review caught: on a pull_request event HEAD
+        is the synthetic merge ref; the PR's own head sha comes from the
+        event payload plugin-drift-ledger.yml fetched."""
+        event = self.tmp_path / "event.json"
+        event.write_text(
+            json.dumps({"pull_request": {"head": {"sha": "pr-head-sha"}}}), encoding="utf-8"
+        )
+        self.monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+        self.monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+        assert _proof_target("conexus", self.REF) == "pr-head-sha"
+
+    def test_a_non_pull_request_event_uses_head(self) -> None:
+        event = self.tmp_path / "event.json"
+        event.write_text(json.dumps({"after": "push-sha"}), encoding="utf-8")
+        self.monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        self.monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+        assert _proof_target("conexus", self.REF) == "head-sha"
+
+    def test_a_pull_request_payload_without_a_head_sha_fails_loud(self) -> None:
+        event = self.tmp_path / "event.json"
+        event.write_text(json.dumps({"pull_request": {}}), encoding="utf-8")
+        self.monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+        self.monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+        with pytest.raises(AssertionError, match="head.sha"):
+            _proof_target("conexus", self.REF)
+
+    def test_outside_the_window_a_missing_tag_stays_unresolvable(self) -> None:
+        """Never a silent pass: the unresolvable ref goes to
+        wheel_surface_offenders, which raises GitCommandError."""
+        self.in_window = False
+        assert _proof_target("conexus", self.REF) == self.REF
 
 
 def _cut_fixture_repo(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str]:
@@ -774,6 +888,12 @@ def _cut_fixture_repo(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str]:
         "conexus/plans/builtin/x.yml",
         "conexus/skills/ok.md",
         "sn/commands/ok.md",
+        # Never-delivered ride-alongs (NEVER_DELIVERED_PREFIXES): a test,
+        # a script, a doc and a workflow in the range are NOT offenders.
+        "tests/test_ok.py",
+        "scripts/tool.py",
+        "docs/note.md",
+        ".github/workflows/w.yml",
     ):
         target = repo / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -796,7 +916,9 @@ def test_the_wheel_surface_proof_reports_offenders(tmp_path: pathlib.Path) -> No
     src/nexus/cli.py is off-allowlist outright; conexus/plans/builtin/x.yml
     is inside the allowlist prefix but carved out by DENIED_PREFIXES (it is
     wheel package data). Empty DENIED_PREFIXES and this test fails — the
-    designed falsification.
+    designed falsification. The fixture's tests/, scripts/, docs/ and
+    .github/ files are in the same range and must NOT be reported: empty
+    NEVER_DELIVERED_PREFIXES and this test fails the other way.
     """
     from plugin_channel import wheel_surface_offenders
 
