@@ -79,6 +79,7 @@ surface by construction (pinned by tests/test_plugin_channel.py).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -93,7 +94,9 @@ __all__ = [
     "GitCommandError",
     "TagVisibilityError",
     "assert_tag_visibility",
+    "client_version_of",
     "current_branch_name",
+    "cut_head_sha",
     "format_plugin_tag",
     "is_channel_path",
     "is_cut_branch_for",
@@ -165,6 +168,61 @@ def parse_plugin_tag(ref: str) -> tuple[str, int] | None:
     if match is None:
         return None
     return match.group(1), int(match.group(2))
+
+
+_CLIENT_TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+)\Z")
+
+
+def client_version_of(ref: str) -> str | None:
+    """The client version a pinned ref anchors to, for EITHER invariant-R
+    shape: ``v{X.Y.Z}`` -> ``X.Y.Z``; ``plugin-v{X.Y.Z}-{n}`` -> ``X.Y.Z``;
+    anything else -> ``None``.
+
+    The one reader every pin consumer outside the channel should use.
+    The a2wmi.12 spike's third refusal was a hooks test doing
+    ``int(ref.lstrip("v").split(".")[0])`` on an anchored ref — RDR-197
+    Gap 2 ("every coupling that enforces the pin assumes one channel"),
+    missed by the coupling audit because the audit grepped for
+    ``source.ref`` readers, not for shape parses.
+    """
+    match = _CLIENT_TAG_RE.match(ref)
+    if match is not None:
+        return match.group(1)
+    parsed = parse_plugin_tag(ref)
+    return parsed[0] if parsed is not None else None
+
+
+def cut_head_sha(*, cwd: str | Path | None = None) -> str:
+    """The cut PR's HEAD COMMIT — the ANCHORING rule's pre-tag proof target.
+
+    On a ``pull_request`` event ``actions/checkout`` leaves HEAD on the
+    synthetic merge ref (``refs/pull/<n>/merge``), whose tree moves with
+    main between runs — a timing-dependent target. The PR's own head sha
+    is in the event payload, and plugin-drift-ledger.yml fetches exactly
+    that sha so it resolves. Anywhere else (the cut branch itself, a
+    developer checkout) HEAD IS the head commit. Raises
+    :class:`GitCommandError` when neither resolves — never an empty
+    target. Both proofs (tests/test_plugin_structure.py and
+    tests/test_plugin_release_drift_ledger.py) delegate here so the
+    merge-ref defect the a2wmi.12 R1 review caught cannot recur in one
+    of them alone.
+    """
+    event_path = os.environ.get("GITHUB_EVENT_PATH", "").strip()
+    if os.environ.get("GITHUB_EVENT_NAME", "").strip() == "pull_request" and event_path:
+        payload = json.loads(Path(event_path).read_text(encoding="utf-8"))
+        sha = str(payload.get("pull_request", {}).get("head", {}).get("sha", "")).strip()
+        if not sha:
+            raise GitCommandError(
+                "pull_request event payload carries no pull_request.head.sha"
+            )
+        return sha
+    probe = _run_git(["rev-parse", "HEAD"], cwd)
+    sha = probe.stdout.strip()
+    if probe.returncode != 0 or not sha:
+        raise GitCommandError(
+            f"HEAD does not resolve (rc {probe.returncode}): {probe.stderr.strip()}"
+        )
+    return sha
 
 
 def path_has_prefix(path: str, prefix: str) -> bool:
