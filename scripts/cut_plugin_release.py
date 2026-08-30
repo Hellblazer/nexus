@@ -348,18 +348,39 @@ def assert_branch_agreement(repo: Path, version: str, n: int) -> None:
 def _rewrite_ledger(repo: Path) -> None:
     """Empty the entries this cut covers; keep the rest verbatim.
 
-    Covered: every path-shaped backtick span in the entry lies inside
-    the channel allowlist — the wholesale import ships it. An entry
-    naming any path outside the allowlist (a split-delivery wheel half)
-    survives untouched, as does an entry naming no path at all.
+    Covered: the entry names at least one channel path and no
+    wheel-surface path (``_SHIPPED_SURFACE_PREFIXES`` — the straddle
+    predicate's own definition of content the import must hold back).
+    A backtick span is judged as a path ONLY under those two prefix
+    families; anything else in backticks is prose — a config-dir
+    placeholder, an HTTP route, a symbol — and says nothing about
+    delivery. The earlier rule ("every span containing ``/`` must be
+    allowlisted") read ``<config_dir>/data_token_lease.<digest>`` and
+    ``/v1/memory/projects`` as un-shippable paths, left a fully covered
+    entry in place, and the window tests refused the first real cut
+    (a2wmi.12 spike on nexus-znvjd, 2026-08-30). An entry naming a
+    wheel half (split delivery) or no channel path at all survives
+    untouched.
     """
     ledger = repo / LEDGER
     kept: list[str] = []
     for is_bullet, lines in _ledger_blocks(ledger.read_text(encoding="utf-8")):
         if is_bullet:
-            text = "".join(lines)
-            spans = [s for s in re.findall(r"`([^`]+)`", text) if "/" in s]
-            if bool(spans) and all(_is_allowlisted(s) for s in spans):
+            # A span is path-shaped only with a component after its first
+            # segment: a bare prefix root in prose (`conexus/`, `sn`) is
+            # not a file and must neither cover nor hold back an entry
+            # (R2 of the spike fix: is_channel_path("conexus/") is True).
+            spans = [
+                s for s in re.findall(r"`([^`]+)`", "".join(lines))
+                if "/" in s.strip("/")
+            ]
+            ships = any(_is_allowlisted(s) for s in spans)
+            holds_back = any(
+                path_has_prefix(s, prefix)
+                for s in spans
+                for prefix in _SHIPPED_SURFACE_PREFIXES
+            )
+            if ships and not holds_back:
                 continue  # covered: this cut ships it
         kept.extend(lines)
     ledger.write_text("".join(kept), encoding="utf-8")
