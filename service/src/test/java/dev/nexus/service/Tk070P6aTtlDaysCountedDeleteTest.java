@@ -218,9 +218,13 @@ class Tk070P6aTtlDaysCountedDeleteTest {
 
     private static void seedPlanRow(Connection c, String tenant, String project,
                                      String query, Integer ttl) throws Exception {
+        // verb: plans.verb is NOT NULL (hygiene-001-11, nexus-tk070.p6a
+        // follow-on) at the time this seed runs -- the ttl_days->ttl rename
+        // and CHECK drop above are historical-shape probes, they don't touch
+        // the verb column's constraint.
         try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.plans (tenant_id, project, query, plan_json, created_at, ttl) "
-            + "VALUES (?, ?, ?, '{}'::jsonb, now(), ?)")) {
+            "INSERT INTO nexus.plans (tenant_id, project, query, plan_json, created_at, ttl, verb) "
+            + "VALUES (?, ?, ?, '{}'::jsonb, now(), ?, 'research')")) {
             ps.setString(1, tenant);
             ps.setString(2, project);
             ps.setString(3, query);

@@ -1171,10 +1171,12 @@ class SoftDeleteTest {
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenantId + "', '"
             + collection + "') ON CONFLICT (tenant_id, name) DO NOTHING");
+        // hygiene-001 step 1 (nexus-tk070.p6a follow-on): source_uri is NOT NULL now too.
         su.createStatement().execute(
             "INSERT INTO nexus.document_aspects " +
-            "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id) " +
-            "VALUES ('" + tenantId + "', '" + collection + "', '" + sourcePath + "', NOW(), 'v1', 'docling', '" + tumbler + "') " +
+            "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) " +
+            "VALUES ('" + tenantId + "', '" + collection + "', '" + sourcePath + "', NOW(), 'v1', 'docling', '" + tumbler + "', " +
+            "'file:///" + sourcePath + "') " +
             "ON CONFLICT (tenant_id, collection, source_path) DO NOTHING");
     }
 

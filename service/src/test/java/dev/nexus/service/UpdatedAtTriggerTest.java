@@ -130,12 +130,17 @@ class UpdatedAtTriggerTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT + "', 'c') "
                 + "ON CONFLICT (tenant_id, name) DO NOTHING");
+            // hygiene-001 step 1 (nexus-tk070.p6a follow-on): doc_id/source_uri are NOT
+            // NULL now -- seed a real catalog-document parent and supply both.
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
+                + "VALUES ('" + TENANT + "', 'uat-doc-1', 'Doc', 'c') ON CONFLICT (tenant_id, tumbler) DO NOTHING");
             // nexus-cefa1.4: salient_sentences is jsonb now — bare 'before'/'after'
             // TEXT literals are no longer valid input; use quoted JSON strings.
             su.createStatement().execute(
                 "INSERT INTO nexus.document_aspects "
-                + "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, salient_sentences, updated_at) "
-                + "VALUES ('" + TENANT + "', 'c', 'p1', now(), 'v1', 'ex', '\"before\"', '" + OLD_TS + "')");
+                + "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, salient_sentences, updated_at, doc_id, source_uri) "
+                + "VALUES ('" + TENANT + "', 'c', 'p1', now(), 'v1', 'ex', '\"before\"', '" + OLD_TS + "', 'uat-doc-1', 'file:///p1')");
             // Partial UPDATE to salient_sentences (the path that bypasses extracted_at).
             su.createStatement().execute(
                 "UPDATE nexus.document_aspects SET salient_sentences = '\"after\"' "

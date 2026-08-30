@@ -172,7 +172,7 @@ class PlanHandlerTest {
     @Test
     void getByDimensions_emptyProject_afterSave_returns200() throws Exception {
         var save = post("/v1/plans/save", TENANT,
-            "{\"project\":\"\",\"query\":\"global research plan\","
+            "{\"project\":\"\",\"query\":\"global research plan\",\"verb\":\"research\","
             + "\"plan_json\":\"{\\\"steps\\\":[]}\",\"dimensions\":" + jsonString(GLOBAL_DIMS) + "}");
         assertThat(save.statusCode()).as("save with empty project must succeed").isEqualTo(200);
 
@@ -191,7 +191,7 @@ class PlanHandlerTest {
     void getByDimensions_nonEmptyProject_afterSave_returns200() throws Exception {
         String dims = "{\"scope\":\"code__nexus\",\"verb\":\"research\"}";
         var save = post("/v1/plans/save", TENANT,
-            "{\"project\":\"code__nexus\",\"query\":\"scoped plan\","
+            "{\"project\":\"code__nexus\",\"query\":\"scoped plan\",\"verb\":\"research\","
             + "\"plan_json\":\"{\\\"steps\\\":[]}\",\"dimensions\":" + jsonString(dims) + "}");
         assertThat(save.statusCode()).isEqualTo(200);
 
@@ -210,8 +210,11 @@ class PlanHandlerTest {
      */
     @Test
     void save_ttlZero_returns409WithRemedyNamingTheFix() throws Exception {
+        // verb is required (plans.verb NOT NULL, hygiene-001-11) -- supplied
+        // here so the ttl_days_positive CHECK, not the unrelated verb NOT
+        // NULL constraint, is what the save actually trips.
         var resp = post("/v1/plans/save", TENANT,
-            "{\"project\":\"ttl-zero-proj\",\"query\":\"ttl zero query\","
+            "{\"project\":\"ttl-zero-proj\",\"query\":\"ttl zero query\",\"verb\":\"research\","
             + "\"plan_json\":\"{\\\"steps\\\":[]}\",\"ttl\":0}");
         assertThat(resp.statusCode())
             .as("ttl=0 must still 409 (the CHECK, not a friendly 400 — plans has no "

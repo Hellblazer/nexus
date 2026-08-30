@@ -383,21 +383,25 @@ class VectorsUnifyCentroidsIntegrationTest {
             try (Connection su = rig.pg().createConnection("")) {
                 su.setAutoCommit(true);
 
-                // Zero embeddings -> rejected.
+                // Zero embeddings -> rejected. label supplied (hygiene-001-9b
+                // made taxonomy_centroids.label NOT NULL) so the
+                // exactly_one_embedding CHECK -- not the unrelated NOT NULL
+                // constraint -- is what fires here.
                 assertThatThrownBy(() -> {
                     try (var ps = su.prepareStatement(
-                            "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id) "
-                                + "VALUES ('t1', 'c', 100)")) {
+                            "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label) "
+                                + "VALUES ('t1', 'c', 100, 'zero-embedding-label')")) {
                         ps.executeUpdate();
                     }
                 }).as("zero-embedding row must violate taxonomy_centroids_exactly_one_embedding")
                   .hasMessageContaining("exactly_one_embedding");
 
-                // Two embeddings -> rejected.
+                // Two embeddings -> rejected. label supplied for the same reason.
                 assertThatThrownBy(() -> {
                     try (var ps = su.prepareStatement(
-                            "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, "
-                                + "embedding_384, embedding_768) VALUES ('t1', 'c', 101, ?::vector, ?::vector)")) {
+                            "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, "
+                                + "embedding_384, embedding_768) "
+                                + "VALUES ('t1', 'c', 101, 'two-embedding-label', ?::vector, ?::vector)")) {
                         String v384 = "[" + "0.01,".repeat(383) + "0.01]";
                         String v768 = "[" + "0.01,".repeat(767) + "0.01]";
                         ps.setString(1, v384);
@@ -407,14 +411,14 @@ class VectorsUnifyCentroidsIntegrationTest {
                 }).as("two-embedding row must violate taxonomy_centroids_exactly_one_embedding")
                   .hasMessageContaining("exactly_one_embedding");
 
-                // Exactly one, per dim -> accepted.
+                // Exactly one, per dim -> accepted. label supplied for the same reason.
                 int[] dims = {384, 768, 1024};
                 for (int i = 0; i < dims.length; i++) {
                     int dim = dims[i];
                     String vec = "[" + "0.01,".repeat(dim - 1) + "0.01]";
                     try (var ps = su.prepareStatement(
-                            "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, "
-                                + "embedding_" + dim + ") VALUES ('t1', 'c', ?, ?::vector)")) {
+                            "INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, "
+                                + "embedding_" + dim + ") VALUES ('t1', 'c', ?, 'one-embedding-label', ?::vector)")) {
                         ps.setLong(1, 200 + i);
                         ps.setString(2, vec);
                         assertThatCode(ps::executeUpdate)

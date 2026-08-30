@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-156 P4.1 (bead nexus-70r3c.14) — TDD-RED suite for the Phase-4 combined-query
@@ -353,7 +354,7 @@ class CombinedQueryParityTest {
     }
 
     /**
-     * Aspect-scoped fixture COLL_ASPECT (RDR-156 Decision 5, bead nexus-ubnwk) — five
+     * Aspect-scoped fixture COLL_ASPECT (RDR-156 Decision 5, bead nexus-ubnwk) — four
      * docs, each seeded via {@link #seedMetaDoc} (catalog doc + chunk + manifest):
      * <pre>
      *   doc   proposed_method            confidence  doc_id     dir        dist
@@ -361,15 +362,20 @@ class CombinedQueryParityTest {
      *   asp2  "Uses gradient boosting"   0.2         stamped    (0.8,0.6)  0.2
      *   asp3  (no document_aspects row)  —           —          (0.6,0.8)  0.4
      *   asp4  "Uses gradient descent"    0.9         stamped    (0.0,1.0)  1.0
-     *   asp5  "Uses gradient descent"    0.9         NULL       (-1.0,0.0) 2.0
      * </pre>
      * field=proposed_method, pattern="gradient" → matches asp1,asp2,asp4 (asp3 has no
-     * aspects row — INNER JOIN excludes it; asp5's doc_id is NULL — the join's own
-     * {@code a.doc_id = d.tumbler} condition excludes it even though its content
-     * matches, proving "NULL doc_id never matches" independent of any field/pattern).
+     * aspects row — INNER JOIN excludes it).
      * pattern="descent" → matches asp1,asp4 only (asp2 says "boosting"); asp2 is
      * nearer than asp4, so a top-K=2 vector-then-filter two-step misses asp4 entirely
      * — the GROUP 10 recall-superset probe.
+     *
+     * <p>A fifth doc ("asp5", NULL doc_id, content otherwise identical to asp1/asp4)
+     * used to sit here to prove the join's {@code a.doc_id = d.tumbler} condition
+     * excludes a NULL-doc_id row even when its content matches. document_aspects.doc_id
+     * is NOT NULL now (hygiene-001-1, nexus-tk070.p6a follow-on) — such a row can no
+     * longer be constructed at all, so that scenario is gone from this fixture; the
+     * (now strictly stronger) replacement assertion — the INSERT itself is rejected —
+     * lives in {@link #aspectDocId_nowRequired_insertWithNullDocIdRejected()}.
      */
     private void seedAspectFixture(Connection su) throws Exception {
         insertCollection(su, TENANT_A, COLL_ASPECT);
@@ -383,9 +389,6 @@ class CombinedQueryParityTest {
         // asp3 deliberately has NO document_aspects row at all.
         seedMetaDoc(su, 1024, COLL_ASPECT, "asp4", "paper", "asp", 2024, "research", 0.0, 1.0);
         insertAspectRow(su, TENANT_A, COLL_ASPECT, "asp4", "asp4",
-                        "Uses gradient descent", 0.9);
-        seedMetaDoc(su, 1024, COLL_ASPECT, "asp5", "paper", "asp", 2024, "research", -1.0, 0.0);
-        insertAspectRow(su, TENANT_A, COLL_ASPECT, "asp5", null,
                         "Uses gradient descent", 0.9);
 
         // Narrow fixture (GROUP 9-style exact recall): 3 chunks, all matching the
@@ -409,14 +412,19 @@ class CombinedQueryParityTest {
                                         String sourcePath, String docId,
                                         String proposedMethod, double confidence)
             throws Exception {
+        // source_uri: document_aspects.source_uri is NOT NULL (hygiene-001-1,
+        // nexus-tk070.p6a follow-on). No assertion in this class reads the
+        // column, so a synthetic per-row value satisfies the constraint
+        // without changing any assertion surface.
         su.createStatement().execute(
             "INSERT INTO nexus.document_aspects " +
             "  (tenant_id, collection, source_path, proposed_method, confidence, " +
-            "   extracted_at, model_version, extractor_name, doc_id) " +
+            "   extracted_at, model_version, extractor_name, doc_id, source_uri) " +
             "VALUES ('" + tenantId + "', '" + collection + "', '" + sourcePath + "', " +
             sqlText(proposedMethod) + ", " + confidence + ", " +
             "'2026-01-01T00:00:00+00'::timestamptz, 'cqp-test-model', 'cqp-test-extractor', " +
-            (docId == null ? "NULL" : sqlText(docId)) + ") " +
+            (docId == null ? "NULL" : sqlText(docId)) + ", " +
+            sqlText("cqp://" + collection + "/" + sourcePath) + ") " +
             "ON CONFLICT (tenant_id, collection, source_path) DO UPDATE SET " +
             "  proposed_method = EXCLUDED.proposed_method, " +
             "  confidence = EXCLUDED.confidence, doc_id = EXCLUDED.doc_id");
@@ -446,12 +454,14 @@ class CombinedQueryParityTest {
             "SELECT '" + TENANT_A + "', 'asx'||g, 0, decode(lpad((g+1000000)::text, 64, '0'), 'hex'), '" + COLL_ASPECT_EXPLAIN + "' " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         su.createStatement().execute(
+            // source_uri: document_aspects.source_uri is NOT NULL
+            // (hygiene-001-1) -- synthetic per-row value, no assertion reads it.
             "INSERT INTO nexus.document_aspects " +
             "  (tenant_id, collection, source_path, proposed_method, confidence, " +
-            "   extracted_at, model_version, extractor_name, doc_id) " +
+            "   extracted_at, model_version, extractor_name, doc_id, source_uri) " +
             "SELECT '" + TENANT_A + "', '" + COLL_ASPECT_EXPLAIN + "', 'asx'||g, " +
             "'Uses gradient descent', 0.9, '2026-01-01T00:00:00+00'::timestamptz, " +
-            "'cqp-test-model', 'cqp-test-extractor', 'asx'||g " +
+            "'cqp-test-model', 'cqp-test-extractor', 'asx'||g, 'cqp://' || '" + COLL_ASPECT_EXPLAIN + "' || '/asx'||g " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
     }
 
@@ -956,14 +966,12 @@ class CombinedQueryParityTest {
     }
 
     @Test @Order(101)
-    void aspect_fieldPatternFilter_exactRankedByDistance_excludesNoRowAndNullDocId() throws Exception {
+    void aspect_fieldPatternFilter_exactRankedByDistance_excludesNoRow() throws Exception {
         try (Connection su = pg.createConnection("")) {
             assertThat(callAspect(su, 1024, COLL_ASPECT, "proposed_method", "gradient", null, 10))
                 .as("field=proposed_method,pattern=gradient → {asp1,asp2,asp4} ranked by "
-                    + "distance (0.0,0.2,1.0); asp3 (no document_aspects row) and asp5 "
-                    + "(doc_id NULL, content otherwise matches) are BOTH excluded — the "
-                    + "INNER JOIN to document_aspects and the join's own "
-                    + "a.doc_id = d.tumbler condition")
+                    + "distance (0.0,0.2,1.0); asp3 (no document_aspects row) is excluded — "
+                    + "the INNER JOIN to document_aspects")
                 .containsExactly("asp1", "asp2", "asp4");
         }
     }
@@ -973,7 +981,7 @@ class CombinedQueryParityTest {
         try (Connection su = pg.createConnection("")) {
             assertThat(callAspect(su, 1024, COLL_ASPECT, null, null, 0.5, 10))
                 .as("min_confidence=0.5 → {asp1,asp4} (confidence 0.9); asp2 (0.2) excluded; "
-                    + "asp3 (no row) and asp5 (NULL doc_id) excluded regardless")
+                    + "asp3 (no row) excluded regardless")
                 .containsExactly("asp1", "asp4");
         }
     }
@@ -990,16 +998,21 @@ class CombinedQueryParityTest {
     }
 
     @Test @Order(104)
-    void aspect_nullDocId_neverMatchesEvenWithFullyMatchingContent() throws Exception {
+    void aspectDocId_nowRequired_insertWithNullDocIdRejected() throws Exception {
+        // hygiene-001-1 (nexus-tk070.p6a follow-on) made document_aspects.doc_id
+        // NOT NULL: the old asp5 fixture (a row with fully-matching content but
+        // doc_id IS NULL, proving the join's a.doc_id = d.tumbler condition
+        // excludes it) can no longer be constructed at all -- inverted here into
+        // the stronger guarantee that the INSERT itself is rejected, not merely
+        // that a NULL-doc_id row never surfaces in a query.
         try (Connection su = pg.createConnection("")) {
-            // asp5's document_aspects row matches field/pattern/confidence identically
-            // to asp1/asp4 — the ONLY difference is doc_id IS NULL. No call, with any
-            // combination of filters, can ever surface it.
-            assertThat(callAspect(su, 1024, COLL_ASPECT, "proposed_method", "descent", null, 10))
-                .as("pattern=descent → {asp1,asp4}; asp5 (identical content, NULL doc_id) "
-                    + "never appears")
-                .containsExactly("asp1", "asp4")
-                .doesNotContain("asp5");
+            su.setAutoCommit(true);
+            assertThatThrownBy(() ->
+                insertAspectRow(su, TENANT_A, COLL_ASPECT, "asp-null-doc-id-rejected", null,
+                                "Uses gradient descent", 0.9))
+                .as("document_aspects.doc_id must reject NULL (hygiene-001-1 SET NOT NULL)")
+                .isInstanceOf(Exception.class)
+                .hasMessageContaining("null value in column \"doc_id\"");
         }
     }
 
@@ -1066,7 +1079,7 @@ class CombinedQueryParityTest {
     @Test @Order(108)
     void parity_aspectScoped_equalsTwoStepOracle_whenNonSelective() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            // topK covers every fixture chunk in COLL_ASPECT (5) — no truncation loss,
+            // topK covers every fixture chunk in COLL_ASPECT (4) — no truncation loss,
             // so the two-step path and the combined query must agree exactly.
             List<String> twoStep = twoStepAspectOracle(su, 1024, COLL_ASPECT, "gradient", 10);
             assertThat(twoStep)

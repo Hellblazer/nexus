@@ -1300,6 +1300,15 @@ class StagingPromoteOpsIntegrationTest {
         // normalization -- an unregistered '' violates the FK. That gap is a
         // pre-existing Class-D promote behavior, out of scope for nexus-cefa1.4
         // (extras/salient_sentences only); route around it with a real tumbler.
+        //
+        // hygiene-001 step 1 (nexus-tk070.p6a follow-on): nexus.document_aspects
+        // .source_uri is NOT NULL now too. StagingPromoteOps' promote SELECT
+        // carries staging.document_aspects.source_uri straight through with the
+        // same no-normalization behavior as doc_id above (StagingPromoteOps.java
+        // ~L1148: "source_path/source_uri carry no in-flight rewrite here") --
+        // this is the identical pre-existing fixture gap, not an engine defect;
+        // supply a real source_uri here rather than leaving the staged column
+        // (nullable, no default) unset.
         String doc = "aspects-promote-json-doc";
         scope.withTenant(T1, ctx -> {
             ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
@@ -1308,9 +1317,9 @@ class StagingPromoteOpsIntegrationTest {
                 + "ON CONFLICT (tenant_id, tumbler) DO NOTHING", T1, doc, "aspects-promote-json fixture");
             ctx.execute("INSERT INTO staging.document_aspects "
                 + "(tenant_id, doc_id, collection, source_path, extracted_at, model_version, "
-                + "extractor_name, extras) VALUES (?, ?, ?, ?, '', 'v1', 'ex', ?)",
+                + "extractor_name, source_uri, extras) VALUES (?, ?, ?, ?, '', 'v1', 'ex', ?, ?)",
                 T1, doc, ASPECTS_PROMOTE_COLL, "aspects-promote-json.pdf",
-                "{\"venue\": \"VLDB\", \"year\": \"2023\"}");
+                "file:///aspects-promote-json.pdf", "{\"venue\": \"VLDB\", \"year\": \"2023\"}");
             return null;
         });
 

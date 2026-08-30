@@ -232,24 +232,43 @@ class ForeignKeyConstraintTest {
     }
 
     @Test @Order(2)
-    void docAspectsDocId_isNullable() throws Exception {
+    void docAspectsDocId_isNotNullable() throws Exception {
+        // hygiene-001 step 1 (nexus-tk070.p6a follow-on): document_aspects.doc_id
+        // reverses fk-001-2's nullable conversion -- it is NOT NULL again. Assert
+        // the constraint genuinely rejects a fresh NULL insert, not merely that
+        // information_schema reports it (the pattern Hygiene001NotNullMigrationRlsTest
+        // already uses for the same column). source_uri is supplied (also NOT NULL
+        // now, and ordered ahead of doc_id in the table definition, so an omitted
+        // source_uri would trip its own NOT NULL check first) so ONLY doc_id fires.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT is_nullable FROM information_schema.columns " +
-                "WHERE table_schema='nexus' AND table_name='document_aspects' AND column_name='doc_id'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("is_nullable")).isEqualTo("YES");
+            su.setAutoCommit(true);
+            Exception ex = assertThrows(PSQLException.class, () ->
+                su.createStatement().execute(
+                    "INSERT INTO nexus.document_aspects " +
+                    "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, source_uri) VALUES " +
+                    "('" + TENANT_A + "', 'knowledge__a', 'path/not-nullable-doc-id.pdf', NOW(), 'v1', 'docling', 'file:///path/not-nullable-doc-id.pdf')")
+            );
+            assertThat(ex.getMessage())
+                .as("document_aspects.doc_id must be NOT NULL (hygiene-001 step 1)")
+                .containsIgnoringCase("null value in column \"doc_id\"");
         }
     }
 
     @Test @Order(3)
-    void aspectQueueDocId_isNullable() throws Exception {
+    void aspectQueueDocId_isNotNullable() throws Exception {
+        // hygiene-001 step 2: aspect_extraction_queue.doc_id reverses fk-001-4's
+        // nullable conversion -- it is NOT NULL again.
         try (Connection su = pg.createConnection("")) {
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT is_nullable FROM information_schema.columns " +
-                "WHERE table_schema='nexus' AND table_name='aspect_extraction_queue' AND column_name='doc_id'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("is_nullable")).isEqualTo("YES");
+            su.setAutoCommit(true);
+            Exception ex = assertThrows(PSQLException.class, () ->
+                su.createStatement().execute(
+                    "INSERT INTO nexus.aspect_extraction_queue " +
+                    "(tenant_id, collection, source_path, enqueued_at) VALUES " +
+                    "('" + TENANT_A + "', 'knowledge__q', 'path/not-nullable-queue.pdf', NOW())")
+            );
+            assertThat(ex.getMessage())
+                .as("aspect_extraction_queue.doc_id must be NOT NULL (hygiene-001 step 2)")
+                .containsIgnoringCase("null value in column \"doc_id\"");
         }
     }
 
@@ -339,19 +358,22 @@ class ForeignKeyConstraintTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(20)
-    void aspect_nullDocId_isAccepted() throws Exception {
+    void aspect_nullDocId_isRejected() throws Exception {
+        // hygiene-001 step 1: doc_id=NULL is no longer valid -- the column is
+        // NOT NULL again, reversing fk-001-2's nullable conversion. source_uri
+        // is supplied (also NOT NULL now, ordered ahead of doc_id in the table
+        // definition) so ONLY doc_id's NOT NULL check fires.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            // doc_id=NULL is valid for a FK — no catalog reference required
-            su.createStatement().execute(
-                "INSERT INTO nexus.document_aspects " +
-                "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name) VALUES " +
-                "('" + TENANT_A + "', 'knowledge__a', 'path/null-doc.pdf', NOW(), 'v1', 'docling')");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT doc_id FROM nexus.document_aspects " +
-                "WHERE tenant_id='" + TENANT_A + "' AND source_path='path/null-doc.pdf'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("doc_id")).isNull();
+            Exception ex = assertThrows(PSQLException.class, () ->
+                su.createStatement().execute(
+                    "INSERT INTO nexus.document_aspects " +
+                    "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, source_uri) VALUES " +
+                    "('" + TENANT_A + "', 'knowledge__a', 'path/null-doc.pdf', NOW(), 'v1', 'docling', 'file:///path/null-doc.pdf')")
+            );
+            assertThat(ex.getMessage())
+                .as("document_aspects.doc_id must be NOT NULL (hygiene-001 step 1)")
+                .containsIgnoringCase("null value in column \"doc_id\"");
         }
     }
 
@@ -360,10 +382,11 @@ class ForeignKeyConstraintTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "3.1");
+            // hygiene-001 step 1: source_uri is NOT NULL now too, alongside doc_id.
             su.createStatement().execute(
                 "INSERT INTO nexus.document_aspects " +
-                "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id) VALUES " +
-                "('" + TENANT_A + "', 'knowledge__b', 'path/valid-doc.pdf', NOW(), 'v1', 'docling', '3.1')");
+                "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) VALUES " +
+                "('" + TENANT_A + "', 'knowledge__b', 'path/valid-doc.pdf', NOW(), 'v1', 'docling', '3.1', 'file:///path/valid-doc.pdf')");
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT doc_id FROM nexus.document_aspects " +
                 "WHERE tenant_id='" + TENANT_A + "' AND source_path='path/valid-doc.pdf'");
@@ -376,11 +399,13 @@ class ForeignKeyConstraintTest {
     void aspect_orphanDocId_rejectsWithFKViolation() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // hygiene-001 step 1: source_uri is NOT NULL now -- supply it so the
+            // NOT NULL check doesn't fire ahead of the FK check under test.
             Exception ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
                     "INSERT INTO nexus.document_aspects " +
-                    "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id) VALUES " +
-                    "('" + TENANT_A + "', 'knowledge__c', 'path/orphan.pdf', NOW(), 'v1', 'docling', 'no-such-tumbler')")
+                    "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) VALUES " +
+                    "('" + TENANT_A + "', 'knowledge__c', 'path/orphan.pdf', NOW(), 'v1', 'docling', 'no-such-tumbler', 'file:///path/orphan.pdf')")
             );
             assertThat(ex.getMessage()).containsIgnoringCase("foreign key");
         }
@@ -391,10 +416,11 @@ class ForeignKeyConstraintTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "3.99");
+            // hygiene-001 step 1: source_uri is NOT NULL now, alongside doc_id.
             su.createStatement().execute(
                 "INSERT INTO nexus.document_aspects " +
-                "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id) VALUES " +
-                "('" + TENANT_A + "', 'knowledge__d', 'path/cascade-aspect.pdf', NOW(), 'v1', 'docling', '3.99')");
+                "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) VALUES " +
+                "('" + TENANT_A + "', 'knowledge__d', 'path/cascade-aspect.pdf', NOW(), 'v1', 'docling', '3.99', 'file:///path/cascade-aspect.pdf')");
 
             su.createStatement().execute(
                 "DELETE FROM nexus.catalog_documents " +
@@ -417,10 +443,12 @@ class ForeignKeyConstraintTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "4.1");
+            // hygiene-001 step 3: source_uri and collection are NOT NULL now;
+            // 'knowledge__b' is pre-registered for TENANT_A in startAll() Phase 3.5.
             su.createStatement().execute(
                 "INSERT INTO nexus.document_highlights " +
-                "(tenant_id, doc_id, ingested_at) VALUES " +
-                "('" + TENANT_A + "', '4.1', NOW())");
+                "(tenant_id, doc_id, source_uri, collection, ingested_at) VALUES " +
+                "('" + TENANT_A + "', '4.1', 'file:///4.1', 'knowledge__b', NOW())");
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.document_highlights " +
                 "WHERE tenant_id='" + TENANT_A + "' AND doc_id='4.1'");
@@ -433,11 +461,13 @@ class ForeignKeyConstraintTest {
     void highlight_orphanDocId_rejectsWithFKViolation() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            // hygiene-001 step 3: source_uri/collection are NOT NULL now -- supply
+            // them so that check doesn't fire ahead of the doc-id FK check under test.
             Exception ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
                     "INSERT INTO nexus.document_highlights " +
-                    "(tenant_id, doc_id, ingested_at) VALUES " +
-                    "('" + TENANT_A + "', 'no-such-tumbler-hl', NOW())")
+                    "(tenant_id, doc_id, source_uri, collection, ingested_at) VALUES " +
+                    "('" + TENANT_A + "', 'no-such-tumbler-hl', 'file:///no-such-tumbler-hl', 'knowledge__c', NOW())")
             );
             assertThat(ex.getMessage()).containsIgnoringCase("foreign key");
         }
@@ -448,10 +478,11 @@ class ForeignKeyConstraintTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "4.99");
+            // hygiene-001 step 3: source_uri/collection are NOT NULL now.
             su.createStatement().execute(
                 "INSERT INTO nexus.document_highlights " +
-                "(tenant_id, doc_id, ingested_at) VALUES " +
-                "('" + TENANT_A + "', '4.99', NOW())");
+                "(tenant_id, doc_id, source_uri, collection, ingested_at) VALUES " +
+                "('" + TENANT_A + "', '4.99', 'file:///4.99', 'knowledge__d', NOW())");
 
             su.createStatement().execute(
                 "DELETE FROM nexus.catalog_documents " +
@@ -470,18 +501,20 @@ class ForeignKeyConstraintTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(40)
-    void queue_nullDocId_isAccepted() throws Exception {
+    void queue_nullDocId_isRejected() throws Exception {
+        // hygiene-001 step 2: aspect_extraction_queue.doc_id is NOT NULL again --
+        // reverses fk-001-4's nullable conversion.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.aspect_extraction_queue " +
-                "(tenant_id, collection, source_path, enqueued_at) VALUES " +
-                "('" + TENANT_A + "', 'knowledge__q', 'path/queue-null.pdf', NOW())");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT doc_id FROM nexus.aspect_extraction_queue " +
-                "WHERE tenant_id='" + TENANT_A + "' AND source_path='path/queue-null.pdf'");
-            assertThat(rs.next()).isTrue();
-            assertThat(rs.getString("doc_id")).isNull();
+            Exception ex = assertThrows(PSQLException.class, () ->
+                su.createStatement().execute(
+                    "INSERT INTO nexus.aspect_extraction_queue " +
+                    "(tenant_id, collection, source_path, enqueued_at) VALUES " +
+                    "('" + TENANT_A + "', 'knowledge__q', 'path/queue-null.pdf', NOW())")
+            );
+            assertThat(ex.getMessage())
+                .as("aspect_extraction_queue.doc_id must be NOT NULL (hygiene-001 step 2)")
+                .containsIgnoringCase("null value in column \"doc_id\"");
         }
     }
 
@@ -540,31 +573,12 @@ class ForeignKeyConstraintTest {
         }
     }
 
-    @Test @Order(44)
-    void queue_nullDocId_survivesDocDeletion() throws Exception {
-        // A queue item with doc_id=NULL is not bound to any catalog doc;
-        // deleting catalog docs must not affect it.
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            insertCatalogDocument(su, TENANT_A, "6.1");
-            su.createStatement().execute(
-                "INSERT INTO nexus.aspect_extraction_queue " +
-                "(tenant_id, collection, source_path, enqueued_at) VALUES " +
-                "('" + TENANT_A + "', 'knowledge__qq', 'path/queue-unbound.pdf', NOW())");
-
-            su.createStatement().execute(
-                "DELETE FROM nexus.catalog_documents " +
-                "WHERE tenant_id='" + TENANT_A + "' AND tumbler='6.1'");
-
-            // Unbound queue item (doc_id=NULL) must survive
-            ResultSet after = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.aspect_extraction_queue " +
-                "WHERE tenant_id='" + TENANT_A + "' AND source_path='path/queue-unbound.pdf'");
-            after.next();
-            assertThat(after.getInt(1))
-                .as("Unbound queue item (doc_id=NULL) must not be affected by doc deletion").isEqualTo(1);
-        }
-    }
+    // queue_nullDocId_survivesDocDeletion DELETED (hygiene-001 step 2,
+    // nexus-tk070.p6a follow-on): its subject -- a queue row unbound to any
+    // catalog doc (doc_id=NULL) surviving an unrelated doc deletion -- is no
+    // longer representable now that aspect_extraction_queue.doc_id is NOT
+    // NULL; an inverted "insert with NULL doc_id is rejected" assertion would
+    // only duplicate queue_nullDocId_isRejected above.
 
     // ══════════════════════════════════════════════════════════════════════════
     // TENANT-CORRECTNESS — the headline property
@@ -585,11 +599,13 @@ class ForeignKeyConstraintTest {
             // Tenant-A has a catalog document; Tenant-B tries to reference it
             insertCatalogDocument(su, TENANT_A, TUMBLER_A);
 
+            // hygiene-001 step 1: source_uri is NOT NULL now -- supply it so that
+            // check doesn't fire ahead of the composite FK check under test.
             Exception ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
                     "INSERT INTO nexus.document_aspects " +
-                    "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id) VALUES " +
-                    "('" + TENANT_B + "', 'knowledge__x', 'path/cross-tenant.pdf', NOW(), 'v1', 'docling', '" + TUMBLER_A + "')")
+                    "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) VALUES " +
+                    "('" + TENANT_B + "', 'knowledge__x', 'path/cross-tenant.pdf', NOW(), 'v1', 'docling', '" + TUMBLER_A + "', 'file:///path/cross-tenant.pdf')")
             );
             assertThat(ex.getMessage())
                 .as("FK must reject cross-tenant aspect reference")
@@ -603,11 +619,13 @@ class ForeignKeyConstraintTest {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, TUMBLER_A);
 
+            // hygiene-001 step 3: source_uri/collection are NOT NULL now --
+            // 'knowledge__x' is pre-registered for TENANT_B in Phase 3.5.
             Exception ex = assertThrows(PSQLException.class, () ->
                 su.createStatement().execute(
                     "INSERT INTO nexus.document_highlights " +
-                    "(tenant_id, doc_id, ingested_at) VALUES " +
-                    "('" + TENANT_B + "', '" + TUMBLER_A + "', NOW())")
+                    "(tenant_id, doc_id, source_uri, collection, ingested_at) VALUES " +
+                    "('" + TENANT_B + "', '" + TUMBLER_A + "', 'file:///cross-tenant-hl', 'knowledge__x', NOW())")
             );
             assertThat(ex.getMessage())
                 .as("FK must reject cross-tenant highlight reference")
@@ -812,10 +830,11 @@ class ForeignKeyConstraintTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertCatalogDocument(su, TENANT_A, "rls-asp-tumbler");
+            // hygiene-001 step 1: source_uri is NOT NULL now, alongside doc_id.
             su.createStatement().execute(
                 "INSERT INTO nexus.document_aspects " +
-                "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id) VALUES " +
-                "('" + TENANT_A + "', 'knowledge__rls', 'path/rls-aspect.pdf', NOW(), 'v1', 'docling', 'rls-asp-tumbler')");
+                "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) VALUES " +
+                "('" + TENANT_A + "', 'knowledge__rls', 'path/rls-aspect.pdf', NOW(), 'v1', 'docling', 'rls-asp-tumbler', 'file:///path/rls-aspect.pdf')");
         }
 
         try (Connection svc = svcDs.getConnection()) {
