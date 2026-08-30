@@ -24,6 +24,24 @@ from typing import Any
 
 import pytest
 
+from tests._catalog_fixture_ops import register_real_doc_id
+
+# hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
+# and document_aspects.doc_id now carry REAL FKs to
+# catalog_documents(tenant_id, tumbler) via the engine's POST
+# /v1/aspects/queue/enqueue and /v1/aspects/upsert 400s -- see the
+# identical cache in tests/test_document_aspects_store.py for the full
+# rationale. One real registration per test, memoized on the test's
+# freshly-minted NX_SERVICE_TOKEN.
+_doc_id_cache: dict[str, str] = {}
+
+
+def _shared_doc_id() -> str:
+    key = os.environ.get("NX_SERVICE_TOKEN", "")
+    if key not in _doc_id_cache:
+        _doc_id_cache[key] = register_real_doc_id()
+    return _doc_id_cache[key]
+
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -87,7 +105,8 @@ class TestClaimBatchMultiRow:
             # Enqueue 5 items.
             for i in range(5):
                 db.aspect_queue.enqueue(
-                    "code__coll", f"/path/file{i}.py", f"hash{i}"
+                    "code__coll", f"/path/file{i}.py", f"hash{i}",
+                    doc_id=_shared_doc_id(),
                 )
 
             result: list[Any] = []
@@ -125,7 +144,7 @@ class TestClaimBatchMultiRow:
         try:
             paths = [f"/path/file{i}.py" for i in range(3)]
             for i, path in enumerate(paths):
-                db.aspect_queue.enqueue("code__coll", path, f"hash{i}")
+                db.aspect_queue.enqueue("code__coll", path, f"hash{i}", doc_id=_shared_doc_id())
                 # Small sleep ensures distinct timestamps for ordering.
                 time.sleep(0.001)
 
@@ -147,8 +166,8 @@ class TestClaimBatchMultiRow:
         """claim_batch returns fewer rows than limit when queue runs dry."""
         db = _make_db(tmp_path)
         try:
-            db.aspect_queue.enqueue("code__coll", "/f1.py", "h1")
-            db.aspect_queue.enqueue("code__coll", "/f2.py", "h2")
+            db.aspect_queue.enqueue("code__coll", "/f1.py", "h1", doc_id=_shared_doc_id())
+            db.aspect_queue.enqueue("code__coll", "/f2.py", "h2", doc_id=_shared_doc_id())
 
             rows = db.aspect_queue.claim_batch(limit=10)
             assert len(rows) == 2, f"Expected 2 rows, got {len(rows)}"
@@ -186,7 +205,7 @@ class TestCompleteAspectAtomicity:
             "model_version": "test-model",
             "extractor_name": "test",
             "source_uri": None,
-            "doc_id": "",
+            "doc_id": _shared_doc_id(),
             "salient_sentences": [],
         }
 
@@ -195,7 +214,7 @@ class TestCompleteAspectAtomicity:
         db = _make_db(tmp_path)
         try:
             db.aspect_queue.enqueue(
-                "knowledge__test", "/doc.md", "abc123"
+                "knowledge__test", "/doc.md", "abc123", doc_id=_shared_doc_id(),
             )
 
             started = threading.Event()
@@ -241,7 +260,7 @@ class TestCompleteAspectAtomicity:
         """RENAME_LOCK is released after complete_aspect returns normally."""
         db = _make_db(tmp_path)
         try:
-            db.aspect_queue.enqueue("knowledge__test", "/doc.md", "abc123")
+            db.aspect_queue.enqueue("knowledge__test", "/doc.md", "abc123", doc_id=_shared_doc_id())
             fields = self._make_aspect_record_fields()
             db.complete_aspect(fields)
 
@@ -267,7 +286,7 @@ class TestCompleteAspectAtomicity:
         """
         db = _make_db(tmp_path)
         try:
-            db.aspect_queue.enqueue("knowledge__test", "/doc.md", "abc123")
+            db.aspect_queue.enqueue("knowledge__test", "/doc.md", "abc123", doc_id=_shared_doc_id())
             fields = self._make_aspect_record_fields()
 
             probe_results: list[bool] = []
@@ -332,7 +351,7 @@ class TestCompleteAspectAtomicity:
         """
         db = _make_db(tmp_path)
         try:
-            db.aspect_queue.enqueue("knowledge__test", "/doc.md", "abc123")
+            db.aspect_queue.enqueue("knowledge__test", "/doc.md", "abc123", doc_id=_shared_doc_id())
             fields = self._make_aspect_record_fields(
                 collection="knowledge__test", source_path="/doc.md"
             )
@@ -447,7 +466,7 @@ class TestMutatorLockGuardStructural:
     def test_complete_aspect_acquires_rename_lock(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)
         try:
-            db.aspect_queue.enqueue("knowledge__test", "/doc.md", "abc123")
+            db.aspect_queue.enqueue("knowledge__test", "/doc.md", "abc123", doc_id=_shared_doc_id())
             # Track at the T2Database level (complete_aspect uses self.RENAME_LOCK).
             tracking = self._TrackingRLock()
             db.RENAME_LOCK = tracking  # type: ignore[assignment]
@@ -467,7 +486,7 @@ class TestMutatorLockGuardStructural:
                 "model_version": "m",
                 "extractor_name": "test",
                 "source_uri": None,
-                "doc_id": "",
+                "doc_id": _shared_doc_id(),
                 "salient_sentences": [],
             }
             db.complete_aspect(fields)

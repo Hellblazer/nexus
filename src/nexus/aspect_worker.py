@@ -1385,6 +1385,32 @@ def _resolve_catalog_reader():
     return make_catalog_reader()
 
 
+def _resolve_doc_id_for_enqueue(collection: str, source_path: str) -> str:
+    """Best-effort catalog lookup for a doc_id, keyed on (collection,
+    source_path) — hygiene-001 (nexus-tk070.p6a follow-on), review round
+    item B (critic C2).
+
+    Called by :func:`aspect_extraction_enqueue_hook` ONLY when its caller
+    did not already supply a ``doc_id`` — never overrides a caller-supplied
+    value. Returns ``""`` on any failure (no catalog, unresolvable, catalog
+    error): the caller treats an empty result as still-unresolvable and
+    SKIPS the enqueue entirely rather than calling it with a blank doc_id
+    and letting the engine's 400 be swallowed as a best-effort log (the
+    prior behaviour this replaces — a real attribution gap hiding behind a
+    routine-looking warning).
+    """
+    try:
+        cat = _resolve_catalog_reader()
+    except Exception:  # noqa: BLE001 — best-effort catalog reader; any init failure degrades to unresolved
+        cat = None
+    if cat is None:
+        return ""
+    try:
+        return cat.lookup_doc_id_by_collection_and_path(collection, source_path) or ""
+    except Exception:  # noqa: BLE001 — best-effort resolve; any query error degrades to unresolved
+        return ""
+
+
 def _canonicalize_source_path(collection: str, source_path: str) -> str:
     """RDR-145 Gap-2: forward-only ``source_path`` canonicalization.
 
@@ -1526,12 +1552,22 @@ def aspect_extraction_enqueue_hook(
 
       1. Skips collections without a registered extractor config
          (currently ``knowledge__*``, ``rdr__*``, ``docs__*``).
-      2. Writes a pending row to ``aspect_extraction_queue``
+      2. Resolves ``doc_id`` when the caller did not supply one (hygiene-001,
+         nexus-tk070.p6a follow-on, review round item B): the queue's
+         ``doc_id`` carries a REAL FK to ``catalog_documents``, so a blank
+         one is refused by the engine. This is the CHOKE POINT for that
+         decision — every ``fire_document`` call site shares it, so the
+         resolve-or-skip logic lives here once. A caller-supplied doc_id is
+         never overridden; a blank one is looked up via the catalog reader
+         by ``(collection, source_path)``. Still unresolvable -> the
+         enqueue is SKIPPED entirely, logged as
+         ``aspect_enqueue_skipped_no_doc_id`` — never enqueued with ``""``.
+      3. Writes a pending row to ``aspect_extraction_queue``
          (microsecond-scale T2 INSERT). The row carries ``content``
          when non-empty (MCP path) so the worker has the document
          text without needing to re-read from disk; CLI paths pass
          ``content=""`` and the worker falls back to a file read.
-      3. Lazy-starts the worker if not already running.
+      4. Lazy-starts the worker if not already running.
 
     The hook is synchronous (RDR-089 P0.1 contract). It does not
     block on extraction; the worker drains in a background thread.
@@ -1551,6 +1587,29 @@ def aspect_extraction_enqueue_hook(
     # RDR-145 Gap-2: canonicalize a file-backed source_path against the
     # catalog before persisting the queue row (forward-only; never guesses).
     source_path = _canonicalize_source_path(collection, source_path)
+
+    # hygiene-001 (nexus-tk070.p6a follow-on), review round item B (critic
+    # C2): the CHOKE POINT for the blank-doc_id decision. All seven
+    # fire_document call sites (mcp/core.py, code_indexer.py, prose_indexer.py,
+    # doc_indexer.py x3, indexer.py) converge here, so the resolve-or-skip
+    # logic lives ONCE, not duplicated at each caller. A caller-supplied
+    # doc_id is never overridden; only a blank one triggers a catalog lookup
+    # by (collection, source_path). Still unresolvable -> SKIP the enqueue
+    # outright — never call enqueue() with doc_id="" and rely on the
+    # engine's 400 to be caught by the generic exception handler below and
+    # swallowed as a best-effort log (the prior behaviour: a real
+    # attribution gap hid behind a routine-looking "enqueue failed"
+    # warning, indistinguishable from a transient T2/network failure).
+    if not doc_id:
+        doc_id = _resolve_doc_id_for_enqueue(collection, source_path)
+    if not doc_id:
+        _log.warning(
+            "aspect_enqueue_skipped_no_doc_id",
+            collection=collection,
+            source_path=source_path,
+        )
+        return
+
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
     try:
         # RDR-128 P1 (kg8sj): route the enqueue through the daemon so the

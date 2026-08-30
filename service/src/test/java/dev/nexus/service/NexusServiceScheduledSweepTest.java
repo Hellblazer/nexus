@@ -144,6 +144,58 @@ class NexusServiceScheduledSweepTest {
         }
     }
 
+    /**
+     * hygiene-001 follow-on (coordinator scope addition): seeds a
+     * {@code nexus.plans} row directly via raw SQL rather than through
+     * {@code PlanRepository} — this test class exercises {@link NexusService}
+     * as a black box, mirroring {@link #insertDataToken}. {@code verb} is
+     * supplied explicitly because hygiene-001's own changeset (this same
+     * migration run) makes the column NOT NULL.
+     */
+    private long insertPlan(String tenant, String project, String query, Integer ttlDays,
+                             OffsetDateTime createdAt, OffsetDateTime lastUsed) throws Exception {
+        try (Connection su = pg.createConnection("");
+             PreparedStatement ps = su.prepareStatement(
+                 "INSERT INTO nexus.plans "
+                 + "(tenant_id, project, query, plan_json, outcome, tags, created_at, ttl_days, last_used, verb) "
+                 + "VALUES (?, ?, ?, '{}', 'success', 't', ?, ?, ?, 'research') RETURNING id")) {
+            ps.setString(1, tenant);
+            ps.setString(2, project);
+            ps.setString(3, query);
+            ps.setObject(4, createdAt);
+            if (ttlDays != null) {
+                ps.setInt(5, ttlDays);
+            } else {
+                ps.setNull(5, java.sql.Types.INTEGER);
+            }
+            ps.setObject(6, lastUsed);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    private boolean planExists(long id) throws Exception {
+        try (Connection su = pg.createConnection("");
+             PreparedStatement ps = su.prepareStatement("SELECT 1 FROM nexus.plans WHERE id = ?")) {
+            ps.setLong(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    /** Cleanup counterpart to {@link #insertPlan}, mirroring {@link #deleteTokens}. */
+    private void deletePlans(String tenant) throws Exception {
+        try (Connection su = pg.createConnection("");
+             PreparedStatement ps = su.prepareStatement(
+                 "DELETE FROM nexus.plans WHERE tenant_id = ?")) {
+            ps.setString(1, tenant);
+            ps.executeUpdate();
+        }
+    }
+
     @Test
     void runScheduledSweep_reapsExpiredDataTokens_andReportsTheCount() throws Exception {
         String tenant = "sched-sweep-" + System.nanoTime();
@@ -536,6 +588,70 @@ class NexusServiceScheduledSweepTest {
                     && m.contains("stalled=1"));
         } finally {
             service.dataTokenSweepOverride = null;
+            deleteTokens(tenant);
+        }
+    }
+
+    /**
+     * hygiene-001 follow-on (coordinator scope addition). The plan-expiry
+     * arm rides the SAME per-tenant loop and 6h schedule as the scratch/
+     * session/data-token arms above — this is the wiring proof for it,
+     * mirroring {@code runScheduledSweep_reapsExpiredDataTokens_andReportsTheCount}:
+     * before this, {@code PlanRepository.deleteExpiredPlans} had a unit test
+     * of its own, but nothing proved the scheduler ever called it.
+     */
+    @Test
+    void runScheduledSweep_reapsExpiredPlans_andSparesLiveOnes() throws Exception {
+        String tenant = "sched-sweep-plans-" + System.nanoTime();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        try {
+            // The sweep loop enumerates {DEFAULT_TENANT} u tokenStore.listKnownTenants()
+            // (service_tokens-derived) -- a plans-only tenant that never held a
+            // token is invisible to it. A live "marker" data token (never itself
+            // swept) makes this isolated tenant enumerable, the same idiom the
+            // sibling per-tenant tests above already use.
+            insertDataToken(tenant, "marker", now.toInstant().plusSeconds(300));
+            long expiredId = insertPlan(tenant, "proj", "expired plan", 30,
+                now.minusDays(400), null);
+            long liveId = insertPlan(tenant, "proj", "live plan", 30,
+                now.minusDays(5), now.minusDays(1));
+
+            service.runScheduledSweep(now);
+
+            assertThat(planExists(expiredId))
+                .as("the plan-expiry sweep arm must actually delete rows the "
+                    + "read-time predicate (PlanRepository.notExpiredCondition, "
+                    + "shared with listActivePlans/searchPlans/listPlans) filters "
+                    + "out of every read -- before this bead nothing ever deleted them")
+                .isFalse();
+            assertThat(planExists(liveId))
+                .as("a plan within its TTL, used recently, survives the sweep")
+                .isTrue();
+        } finally {
+            deletePlans(tenant);
+            deleteTokens(tenant);
+        }
+    }
+
+    @Test
+    void runScheduledSweep_logsPlanTtlSweepPerTenant() throws Exception {
+        String tenant = "sched-sweep-plans-log-" + System.nanoTime();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        try {
+            insertDataToken(tenant, "marker", now.toInstant().plusSeconds(300));
+            insertPlan(tenant, "proj", "expired plan for log check", 30,
+                now.minusDays(400), null);
+
+            java.util.List<String> messages = captureLogs(() -> service.runScheduledSweep(now));
+
+            assertThat(messages)
+                .as("the plan-expiry arm logs its per-tenant deleted count on the "
+                    + "same cycle as the scratch/session/data-token arms")
+                .anyMatch(m -> m.startsWith("event=plan_ttl_sweep")
+                    && m.contains("tenant=" + tenant)
+                    && m.contains("deleted="));
+        } finally {
+            deletePlans(tenant);
             deleteTokens(tenant);
         }
     }

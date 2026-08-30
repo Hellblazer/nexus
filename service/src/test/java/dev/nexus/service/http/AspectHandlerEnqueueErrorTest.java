@@ -44,8 +44,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>Integration (Testcontainers): a real {@link AspectRepository} enqueue with a
  *       non-blank UNREGISTERED {@code doc_id} hits the {@code aspect_extraction_queue.doc_id}
  *       FK (bug nexus-ov0sw) and the handler responds 409 with the sqlstate — NOT a bare
- *       500 and NOT a silent 200. A blank {@code doc_id} (nullIfBlank → NULL → no FK) still
- *       returns 200 (unchanged behaviour).</li>
+ *       500 and NOT a silent 200. A blank/missing {@code doc_id} 400s at the boundary now
+ *       (hygiene-001, nexus-tk070.p6a follow-on: {@code aspect_extraction_queue.doc_id} is
+ *       NOT NULL, superseding the original nullIfBlank-to-NULL-then-200 behaviour this class
+ *       used to pin).</li>
  * </ol>
  *
  * <p>Hermetic: embedded Postgres (Testcontainers pgvector), requires Docker. Drives the
@@ -184,26 +186,53 @@ class AspectHandlerEnqueueErrorTest {
     }
 
     @Test
-    void enqueue_blankDocId_returns200() throws Exception {
+    void enqueue_blankDocId_returns400() throws Exception {
+        // hygiene-001 (nexus-tk070.p6a follow-on) SUPERSEDES this test's
+        // original pin (blank -> nullIfBlank -> NULL -> 200): aspect_
+        // extraction_queue.doc_id is NOT NULL now, so AspectRepository.
+        // buildEnqueueQuery refuses a blank doc_id at the boundary, before
+        // ANY statement reaches Postgres -- a clean 400, not a class-23
+        // FK/NOT-NULL violation surfacing as a 409/500.
         CapturingExchange ex = post("/v1/aspects/queue/enqueue",
             "{\"collection\":\"coll-enq-ok\",\"source_path\":\"ok-src.pdf\",\"doc_id\":\"\"}");
         handleWithTenant(ex);
-        assertThat(ex.status)
-            .as("blank doc_id → nullIfBlank → NULL → no FK violation → unchanged 200")
-            .isEqualTo(200);
-        // Non-vacuity: the row must carry doc_id IS NULL (not ""). An empty string
-        // would also dodge the FK, so a status-only assertion can't tell nullIfBlank
-        // apart from a broken coercion. Superuser connection bypasses RLS.
+        assertThat(ex.status).as("blank doc_id must 400 now").isEqualTo(400);
+        assertThat(ex.bodyString()).isEqualTo("{\"error\":\"doc_id required\"}");
+
+        // Non-vacuity: no row must have landed at all -- the whole write is
+        // refused, not partially applied.
         try (Connection su = pg.createConnection("");
              var st = su.createStatement();
              var rs = st.executeQuery(
-                 "SELECT doc_id FROM nexus.aspect_extraction_queue "
+                 "SELECT 1 FROM nexus.aspect_extraction_queue "
                  + "WHERE tenant_id='" + TENANT + "' AND collection='coll-enq-ok' "
                  + "AND source_path='ok-src.pdf'")) {
-            assertThat(rs.next()).as("the blank-doc_id enqueue must have landed a row").isTrue();
-            rs.getString("doc_id");
-            assertThat(rs.wasNull()).as("doc_id must be SQL NULL, not empty string").isTrue();
+            assertThat(rs.next()).as("a rejected enqueue must not land a row").isFalse();
         }
+    }
+
+    @Test
+    void enqueue_missingDocId_returns400() throws Exception {
+        CapturingExchange ex = post("/v1/aspects/queue/enqueue",
+            "{\"collection\":\"coll-enq-missing\",\"source_path\":\"missing-src.pdf\"}");
+        handleWithTenant(ex);
+        assertThat(ex.status).as("missing doc_id must 400").isEqualTo(400);
+        assertThat(ex.bodyString()).isEqualTo("{\"error\":\"doc_id required\"}");
+    }
+
+    @Test
+    void enqueueMany_oneRowWithBlankDocId_returns400_abortsWholeBatch() throws Exception {
+        // buildEnqueueQuery is called per-row, unguarded by try/catch, inside
+        // enqueueMany's loop -- a blank doc_id on ANY well-formed row throws
+        // and propagates, 400-ing the WHOLE batch (not a per-row skip, unlike
+        // a blank collection/source_path).
+        CapturingExchange ex = post("/v1/aspects/queue/enqueue_many",
+            "{\"rows\":[{\"collection\":\"coll-enqmany-ok\",\"source_path\":\"a.pdf\","
+            + "\"doc_id\":\"unregistered-but-nonblank\"},"
+            + "{\"collection\":\"coll-enqmany-ok\",\"source_path\":\"b.pdf\",\"doc_id\":\"\"}]}");
+        handleWithTenant(ex);
+        assertThat(ex.status).as("any row's blank doc_id must 400 the whole batch").isEqualTo(400);
+        assertThat(ex.bodyString()).isEqualTo("{\"error\":\"doc_id required\"}");
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────

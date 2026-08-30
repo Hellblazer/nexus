@@ -59,7 +59,7 @@ class TestSC6Delegation:
 
         db = T2Database(tmp_path / "memory.db")
         try:
-            row_id = db.plans.save_plan("test query", '{"plan": "test"}')
+            row_id = db.plans.save_plan("test query", '{"plan": "test"}', verb="query")
             assert isinstance(row_id, int) and row_id > 0
         finally:
             db.close()

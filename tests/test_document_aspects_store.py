@@ -23,6 +23,7 @@ twin is ``tests/db/test_http_aspects_stores_integration.py``.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -30,6 +31,25 @@ import pytest
 
 from nexus.db.t2 import T2Database
 from nexus.db.t2.records import AspectRecord
+
+from tests._catalog_fixture_ops import register_real_doc_id
+
+# hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id now
+# carries a REAL FK to catalog_documents(tenant_id, tumbler) -- a fixture
+# record that actually reaches the engine needs a doc_id naming a document
+# that genuinely exists, not an arbitrary string. One real registration per
+# test (memoized on the test's freshly-minted NX_SERVICE_TOKEN, so a new
+# test never reuses a prior test's now-invisible tumbler) is enough --
+# the FK only checks presence, not that it matches this record's own
+# collection/source_path.
+_doc_id_cache: dict[str, str] = {}
+
+
+def _shared_doc_id() -> str:
+    key = os.environ.get("NX_SERVICE_TOKEN", "")
+    if key not in _doc_id_cache:
+        _doc_id_cache[key] = register_real_doc_id()
+    return _doc_id_cache[key]
 
 
 def _make_record(
@@ -46,6 +66,7 @@ def _make_record(
     extracted_at: str = "2026-04-25T17:00:00+00:00",
     model_version: str = "claude-haiku-4-5-20251001",
     extractor_name: str = "haiku-aspect-v1",
+    doc_id: str | None = None,
 ) -> AspectRecord:
     return AspectRecord(
         collection=collection,
@@ -60,6 +81,7 @@ def _make_record(
         extracted_at=extracted_at,
         model_version=model_version,
         extractor_name=extractor_name,
+        doc_id=doc_id if doc_id is not None else _shared_doc_id(),
     )
 
 

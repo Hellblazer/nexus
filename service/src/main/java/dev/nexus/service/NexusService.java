@@ -146,6 +146,14 @@ public final class NexusService {
     private final CatalogRepository catalogRepo;
 
     /**
+     * hygiene-001 follow-on (coordinator scope addition): {@link
+     * #runScheduledSweep}'s plans-expiry arm needs it; PlanHandler needs it
+     * too, so it is a field rather than a constructor-local like scratchRepo
+     * and catalogRepo above.
+     */
+    private final PlanRepository planRepo;
+
+    /**
      * Convenience constructor: no vector backend (original signature for existing tests).
      * The {@code /v1/vectors/*} routes answer 503 (explicit refusal, never a 404 or NPE).
      *
@@ -302,7 +310,9 @@ public final class NexusService {
         this.tokenCache = new TokenCache(tokenStore, java.time.Clock.systemUTC());
 
         var memoryRepo    = new MemoryRepository(tenantScope);
-        var planRepo      = new PlanRepository(tenantScope);
+        // Field, not a constructor local (mirrors scratchRepo/catalogRepo above):
+        // runScheduledSweep's plan-expiry arm (hygiene-001 follow-on) needs it.
+        this.planRepo     = new PlanRepository(tenantScope);
         var telemetryRepo = new TelemetryRepository(tenantScope);
         this.scratchRepo  = new ScratchRepository(tenantScope);
         var taxonomyRepo  = new TaxonomyRepository(tenantScope);
@@ -605,6 +615,19 @@ public final class NexusService {
                             + "last_error=\"{}\"",
                         tenant, streak, ex.getMessage());
                 }
+            }
+            // hygiene-001 follow-on (coordinator scope addition): plans whose
+            // read-time expiry predicate (PlanRepository.notExpiredCondition,
+            // shared with listActivePlans/searchPlans/listPlans) says NOT
+            // active are filtered out of every read but were never deleted by
+            // any sweep — riding this SAME per-tenant loop and 6h schedule,
+            // same reasoning as the session/data-token arms above.
+            try {
+                int plansDeleted = planRepo.deleteExpiredPlans(tenant, statementTimeout);
+                log.info("event=plan_ttl_sweep tenant={} deleted={}", tenant, plansDeleted);
+            } catch (Exception ex) {
+                log.warn("event=plan_ttl_sweep_tenant_failed tenant={} error={}",
+                    tenant, ex.getMessage(), ex);
             }
         }
         // nexus-4tosp: ONE line per scheduled run, unconditional (a zero-

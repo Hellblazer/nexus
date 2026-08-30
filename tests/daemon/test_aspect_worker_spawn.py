@@ -178,5 +178,12 @@ def test_enqueue_hook_service_mode_reaches_daemon_spawn(tmp_path, monkeypatch) -
                         lambda **k: _FakePopen(["spawned"], tenant=k.get("tenant")))
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
-    aw.aspect_extraction_enqueue_hook("/p/doc.pdf", "knowledge__o__m__v1", "content")
+    # hygiene-001 review round item B: this test is about daemon-spawn
+    # wiring, not doc_id resolution -- t2_index_write is stubbed to a
+    # no-op above, so no real engine FK check happens; supply an explicit
+    # doc_id so the hook's new resolve-or-skip gate never short-circuits
+    # before reaching the daemon-spawn path this test asserts on.
+    aw.aspect_extraction_enqueue_hook(
+        "/p/doc.pdf", "knowledge__o__m__v1", "content", doc_id="1.2.3",
+    )
     assert len(_FakePopen.calls) == 1   # the hook chain reached the daemon-spawn path

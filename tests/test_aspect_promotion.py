@@ -15,11 +15,13 @@ behaviour is asserted ABSENT rather than left as a hole.
 """
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from tests._catalog_fixture_ops import register_real_doc_id
 from tests._t2_fixture_ops import bootstrap_migration_source
 from click.testing import CliRunner
 
@@ -27,6 +29,21 @@ from nexus.aspect_extractor import AspectRecord
 from nexus.aspect_promotion import PROMOTION_RETIRED, list_promotions
 from nexus.commands.enrich import enrich
 from nexus.db.t2 import T2Database
+
+# hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id now
+# carries a REAL FK to catalog_documents(tenant_id, tumbler) -- see the
+# identical cache in tests/test_document_aspects_store.py for the full
+# rationale. One real registration per test, memoized on the test's
+# freshly-minted NX_SERVICE_TOKEN.
+_doc_id_cache: dict[str, str] = {}
+
+
+def _shared_doc_id() -> str:
+    key = os.environ.get("NX_SERVICE_TOKEN", "")
+    if key not in _doc_id_cache:
+        _doc_id_cache[key] = register_real_doc_id()
+    return _doc_id_cache[key]
+
 
 def _make_record(*, source_path: str = "/p1.pdf", extras: dict | None = None) -> AspectRecord:
     return AspectRecord(
@@ -42,6 +59,7 @@ def _make_record(*, source_path: str = "/p1.pdf", extras: dict | None = None) ->
         extracted_at=datetime.now(UTC).isoformat(),
         model_version="claude-haiku-4-5-20251001",
         extractor_name="scholarly-paper-v1",
+        doc_id=_shared_doc_id(),
     )
 
 

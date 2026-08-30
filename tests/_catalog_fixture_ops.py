@@ -37,9 +37,48 @@ __all__ = [
     "documents_by_title",
     "fk_dropped_for_dangling_seed",
     "only_document",
+    "register_real_doc_id",
     "seed_manifest_chunks",
     "unroutable_write_target",
 ]
+
+
+def register_real_doc_id(
+    *,
+    title: str = "aspect fixture doc",
+    physical_collection: str = "knowledge__delos",
+    owner_name: str = "test-aspect-fixture-owner",
+) -> str:
+    """Register a real ``catalog_documents`` row and return its tumbler.
+
+    hygiene-001-1 (nexus-tk070.p6a follow-on): ``document_aspects.doc_id``
+    now carries a REAL foreign key to ``catalog_documents(tenant_id,
+    tumbler)`` (``fk_doc_aspects_catalog_doc``, fk-001) — an arbitrary
+    string doc_id is rejected engine-side (FK violation), not merely
+    discouraged. Any test fixture whose record actually reaches the real
+    engine (``upsert`` / ``enqueue``) needs a doc_id that names a document
+    that genuinely exists.
+
+    ``register_owner`` is an idempotent upsert (safe to call repeatedly
+    with the same ``owner_name`` within one tenant — returns the same
+    prefix); ``register`` mints a fresh document each call. No caching
+    here — callers that want one shared doc_id per test should memoize
+    the result themselves (e.g. keyed on the test's minted
+    ``NX_SERVICE_TOKEN``, which is fresh per test via the autouse
+    ``t2_service_env`` fixture).
+    """
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+    with HttpCatalogClient() as cat:
+        owner = cat.register_owner(
+            owner_name, "repo", repo_hash="test-aspect-fixture-hash",
+        )
+        tumbler = cat.register(
+            owner, title,
+            content_type="paper",
+            physical_collection=physical_collection,
+        )
+    return str(tumbler)
 
 
 def active_reader() -> Any:

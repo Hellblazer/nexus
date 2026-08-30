@@ -199,15 +199,19 @@ class PgBouncerTenantIsolationTest {
         // multiplexing every transaction onto a single server backend. Each repo
         // call is one withTenant transaction (GUC set + query), so a reliance on
         // session-scoped state would fail here. Unique tenants keep the test
-        // self-contained (RLS isolates; no truncation needed). doc_id omitted so no
-        // catalog_documents FK seeding is required.
+        // self-contained (RLS isolates; no truncation needed). hygiene-001
+        // (nexus-tk070.p6a follow-on): doc_id is required now, so each
+        // isolated tenant gets its own throwaway fixture document.
         String tenantA = "pgb-aspect-a-" + System.nanoTime();
         String tenantB = "pgb-aspect-b-" + System.nanoTime();
         String coll = "pgb-aspect-coll";
+        registerFixtureDoc(tenantA, "pgb-aspect-doc-a");
+        registerFixtureDoc(tenantB, "pgb-aspect-doc-b");
 
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection", coll);
         body.put("source_path", "ladder.pdf");
+        body.put("doc_id", "pgb-aspect-doc-a");
         queue.enqueue(tenantA, body);
 
         // claim -> in_progress, single transaction through the pooler.
@@ -253,6 +257,7 @@ class PgBouncerTenantIsolationTest {
         var bodyB = new java.util.LinkedHashMap<String, Object>();
         bodyB.put("collection", coll);
         bodyB.put("source_path", "b-only.pdf");
+        bodyB.put("doc_id", "pgb-aspect-doc-b");
         queue.enqueue(tenantB, bodyB);
         var claimedB = queue.claimNext(tenantB);
         assertThat(claimedB)
@@ -261,6 +266,25 @@ class PgBouncerTenantIsolationTest {
         assertThat(claimedB.get().get("source_path"))
             .as("tenant B must see only its own row, never tenant A's")
             .isEqualTo("b-only.pdf");
+    }
+
+    /**
+     * hygiene-001 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
+     * is NOT NULL now and still FK-checked against catalog_documents(tenant_id,
+     * tumbler) -- mirrors AspectRepositoryTest's identical helper.
+     */
+    private void registerFixtureDoc(String tenant, String tumbler) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            try (var ps = su.prepareStatement(
+                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
+                    + "VALUES (?, ?, 'hygiene-001 test fixture') "
+                    + "ON CONFLICT (tenant_id, tumbler) DO NOTHING")) {
+                ps.setString(1, tenant);
+                ps.setString(2, tumbler);
+                ps.executeUpdate();
+            }
+        }
     }
 
     /** Read next_retry_at for a row via the superuser connection (bypasses RLS). */

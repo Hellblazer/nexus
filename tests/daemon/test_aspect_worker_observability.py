@@ -86,8 +86,14 @@ def test_enqueue_hook_service_mode_unreachable_emits_signal(monkeypatch) -> None
                         lambda **_k: (_ for _ in ()).throw(RuntimeError("unreachable")))
     monkeypatch.setattr(aw, "_best_effort_queue_depth", lambda: 3)
 
+    # hygiene-001 review round item B: this test is about the daemon-
+    # unreachable signal, not doc_id resolution -- supply an explicit
+    # doc_id so the hook's new resolve-or-skip gate never short-circuits
+    # before reaching the daemon-spawn attempt this test asserts on.
     with capture_logs() as logs:
-        aw.aspect_extraction_enqueue_hook("/p/doc.pdf", "knowledge__o__m__v1", "content")
+        aw.aspect_extraction_enqueue_hook(
+            "/p/doc.pdf", "knowledge__o__m__v1", "content", doc_id="1.2.3",
+        )
     assert [e for e in logs if e.get("event") == "aspect_worker.daemon_unreachable"]
 
 

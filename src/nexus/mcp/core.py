@@ -3816,11 +3816,30 @@ def store_put(
         # the t3.put chunk natural-id (sha256(content)[:32]) — a chunk hash
         # is never a tumbler and 500s the service enqueue, which the best-
         # effort hook then swallows (silent, total loss of RDR-089 aspects in
-        # service mode). When no tumbler was minted, catalog_doc_id is '' —
-        # the blank sentinel the service NULL-coerces (nullIfBlank), which
-        # satisfies the FK and still extracts from the queued content. This
-        # matches every other fire_document caller (doc_indexer, pipeline_
-        # stages, code_indexer, prose_indexer), which all pass catalog_doc_id.
+        # service mode). This matches every other fire_document caller
+        # (doc_indexer, pipeline_stages, code_indexer, prose_indexer), which
+        # all pass catalog_doc_id.
+        #
+        # hygiene-001 (nexus-tk070.p6a follow-on): when no tumbler was minted,
+        # catalog_doc_id is "" — SUPERSEDES the prior "blank sentinel the
+        # service NULL-coerces" comment above. aspect_extraction_queue.doc_id
+        # is NOT NULL now and the engine refuses a blank doc_id at the
+        # boundary (400 "doc_id required").
+        #
+        # Review round item B (critic C2): the resolve-or-skip decision for a
+        # blank doc_id moved to the CHOKE POINT, aspect_extraction_enqueue_hook
+        # itself — the one place all seven fire_document call sites (this one
+        # included) converge, rather than seven copies of the same guard. So
+        # this call site no longer pre-empts the hook by skipping it here;
+        # catalog_doc_id is forwarded VERBATIM, blank or not, and the hook's
+        # own resolve-by-(collection, source_path) fallback (via the catalog
+        # reader) or its aspect_enqueue_skipped_no_doc_id warning is now the
+        # ONLY place this decision is made. At the MCP boundary source_path
+        # (the ``doc_id`` local below) is a content-hash, not a real
+        # file_path/title, so the hook's catalog-lookup fallback cannot
+        # resolve one for this specific call site either -- the practical
+        # outcome here is unchanged (still skips), but the decision itself is
+        # no longer duplicated.
         _hooks.fire_document(doc_id, col_name, content, doc_id=catalog_doc_id)
         # RDR-061 E2: log relevance correlation for the most recent search in
         # this session. Only the newest trace is used to minimize noise —

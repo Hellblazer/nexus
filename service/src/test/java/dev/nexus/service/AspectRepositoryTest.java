@@ -120,10 +120,12 @@ class AspectRepositoryTest {
             // GRANT ... ON ALL TABLES IN SCHEMA nexus; the test role is scoped explicitly).
             su.createStatement().execute(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_collections TO " + SVC_ROLE);
-            // nexus-mlu3k: listWithoutCatalogDocument anti-joins document_aspects to
-            // catalog_documents (aspects-004's predicate, negated). Production's nexus_svc
-            // holds SELECT there via grants-nexus-svc's schema-wide loop; this explicitly
-            // scoped test role must be granted it by hand, same as catalog_collections above.
+            // registerFixtureDoc (hygiene-001, nexus-tk070.p6a follow-on) and other
+            // FK-fixture helpers in this file SELECT/INSERT catalog_documents rows
+            // directly for doc_id FK satisfaction. Production's nexus_svc holds
+            // SELECT there via grants-nexus-svc's schema-wide loop; this explicitly
+            // scoped test role must be granted it by hand, same as catalog_collections
+            // above.
             su.createStatement().execute(
                 "GRANT SELECT ON nexus.catalog_documents TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -205,11 +207,16 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(2)
-    void upsertAspect_reupsertWithoutDocId_keepsTheExistingAttribution() {
-        // nexus-x1de2 (52): the client stamps doc_id when it knows it; a later
-        // write that omits it (a null-fields retry, an older client) must not
-        // strip the attribution — COALESCE(excluded, existing), like the other
-        // two document_aspects writers already do.
+    void upsertAspect_reupsertWithBlankDocId_rejected() {
+        // hygiene-001 (nexus-tk070.p6a follow-on, Sam decision) SUPERSEDES
+        // nexus-x1de2's original id-less-re-upsert-preserves-attribution
+        // behavior this test used to pin: document_aspects.doc_id is
+        // NOT NULL now, and Postgres checks NOT NULL on the PROPOSED INSERT
+        // row before it even evaluates whether an ON CONFLICT arm applies —
+        // so an id-less re-upsert can no longer bind NULL at all, regardless
+        // of the EX_DOC_ID_COALESCE the DO UPDATE arm still carries (now
+        // vacuous, since the boundary check below fires first). Every
+        // upsert, first-time or re-upsert, must re-supply doc_id.
         var attributed = makeAspect("coll-coalesce", "keep.pdf");
         assertThat(attributed.get("doc_id")).isEqualTo("1.2.3");
         repo.upsertAspect(TENANT_A, attributed);
@@ -217,12 +224,56 @@ class AspectRepositoryTest {
         var idless = new java.util.HashMap<String, Object>(attributed);
         idless.put("doc_id", "");
         idless.put("model_version", "v3");
-        repo.upsertAspect(TENANT_A, idless);
+        assertThatThrownBy(() -> repo.upsertAspect(TENANT_A, idless))
+            .as("doc_id is required on every upsert, including a re-upsert of an existing row")
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessage("doc_id required");
 
         Optional<Map<String, Object>> rec = repo.getAspect(TENANT_A, "coll-coalesce", "keep.pdf");
         assertThat(rec).isPresent();
-        assertThat(rec.get().get("doc_id")).as("attribution survives an id-less re-upsert").isEqualTo("1.2.3");
-        assertThat(rec.get().get("model_version")).as("the rest of the row still updates").isEqualTo("v3");
+        assertThat(rec.get().get("doc_id"))
+            .as("the rejected call must not have touched the row at all")
+            .isEqualTo("1.2.3");
+        assertThat(rec.get().get("model_version"))
+            .as("the rejected call's OTHER field changes must not land either -- "
+                + "the whole write is refused, not partially applied")
+            .isNotEqualTo("v3");
+    }
+
+    @Test @Order(2)
+    void upsertAspect_reupsertWithExplicitDocId_stillUpdatesOtherFields() {
+        // Companion to the rejection test above: a re-upsert that RE-SUPPLIES
+        // the doc_id it already has (rather than omitting it) still works
+        // exactly as before -- hygiene-001 only closes the omission path.
+        var attributed = makeAspect("coll-coalesce-explicit", "keep2.pdf");
+        repo.upsertAspect(TENANT_A, attributed);
+
+        var reupserted = new java.util.HashMap<String, Object>(attributed);
+        reupserted.put("model_version", "v3");
+        repo.upsertAspect(TENANT_A, reupserted);
+
+        Optional<Map<String, Object>> rec = repo.getAspect(TENANT_A, "coll-coalesce-explicit", "keep2.pdf");
+        assertThat(rec).isPresent();
+        assertThat(rec.get().get("doc_id")).isEqualTo(attributed.get("doc_id"));
+        assertThat(rec.get().get("model_version")).isEqualTo("v3");
+    }
+
+    @Test @Order(2)
+    void upsertAspect_blankDocId_rejected() {
+        var body = makeAspect("coll-nodocid", "nodocid.pdf");
+        body.put("doc_id", "");
+        assertThatThrownBy(() -> repo.upsertAspect(TENANT_A, body))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessage("doc_id required");
+    }
+
+    @Test @Order(2)
+    void upsertAspect_missingDocId_rejected() {
+        var body = makeAspect("coll-nodocid2", "nodocid2.pdf");
+        body.remove("doc_id");
+        assertThatThrownBy(() -> repo.upsertAspect(TENANT_A, body))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessage("doc_id required");
     }
 
     @Test @Order(2)
@@ -656,10 +707,12 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(31)
-    void enqueue_reEnqueue_resetsToPending() {
+    void enqueue_reEnqueue_resetsToPending() throws Exception {
+        registerFixtureDoc(TENANT_A, "reenqueue-doc");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "reenqueue-coll");
         body.put("source_path", "re.pdf");
+        body.put("doc_id",      "reenqueue-doc");
         repo.enqueue(TENANT_A, body);
 
         // Claim it (in_progress)
@@ -674,11 +727,14 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(70)
-    void enqueue_blankDocIdReEnqueue_preservesExistingLinkage() {
-        // nexus-nyout: a doc_id-less re-enqueue (collection re-embed passes
-        // catalog_doc_id="" across multi-doc batches; nullIfBlank -> NULL)
-        // must NOT amnesia an existing correct tumbler — same document,
-        // same queue key, identity survives.
+    void enqueue_blankDocIdReEnqueue_rejected() {
+        // hygiene-001 SUPERSEDES nexus-nyout's original COALESCE-preserve
+        // pin: aspect_extraction_queue.doc_id is NOT NULL now, and Postgres
+        // checks NOT NULL on the proposed INSERT row before it even evaluates
+        // ON CONFLICT, so a doc_id-less re-enqueue can no longer bind NULL at
+        // all -- the boundary check refuses it before the statement runs, and
+        // the caller must now re-supply the doc_id it already has (see
+        // enqueue_realDocIdReEnqueue_stillOverwrites below for that path).
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "coalesce-coll");
         body.put("source_path", "coalesce.md");
@@ -688,14 +744,16 @@ class AspectRepositoryTest {
         var blank = new java.util.LinkedHashMap<String, Object>();
         blank.put("collection",  "coalesce-coll");
         blank.put("source_path", "coalesce.md");
-        blank.put("doc_id",      "");  // nullIfBlank -> NULL
-        repo.enqueue(TENANT_A, blank);
+        blank.put("doc_id",      "");
+        assertThatThrownBy(() -> repo.enqueue(TENANT_A, blank))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessage("doc_id required");
 
         Map<String, Object> row = repo.listPending(TENANT_A, 100).stream()
             .filter(r -> "coalesce.md".equals(r.get("source_path")))
             .findFirst().orElseThrow();
         assertThat(row.get("doc_id"))
-            .as("blank re-enqueue must preserve the existing doc_id linkage")
+            .as("the rejected re-enqueue must not have touched the existing row")
             .isEqualTo("coalesce-doc-1");
     }
 
@@ -722,30 +780,29 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(72)
-    void enqueue_freshBlankDocId_staysNull() {
+    void enqueue_freshBlankDocId_rejected() {
+        // hygiene-001 SUPERSEDES this test's original pin (fresh blank enqueue
+        // stored as NULL and read back as "") -- aspect_extraction_queue.doc_id
+        // is NOT NULL now, so a fresh (or re-) enqueue with no doc_id at all is
+        // refused at the boundary rather than silently storing NULL.
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "coalesce-coll");
         body.put("source_path", "coalesce-fresh.md");
         body.put("doc_id",      "");
-        repo.enqueue(TENANT_A, body);
-
-        Map<String, Object> row = repo.listPending(TENANT_A, 100).stream()
-            .filter(r -> "coalesce-fresh.md".equals(r.get("source_path")))
-            .findFirst().orElseThrow();
-        // Stored as NULL (the composite FK would reject a literal ''), and
-        // the read path normalizes NULL -> "" per the QueueRow contract
-        // ("empty doc_id = fall back to source_path").
-        assertThat(row.get("doc_id"))
-            .as("fresh blank enqueue reads back as the empty-doc_id sentinel")
-            .isEqualTo("");
+        assertThatThrownBy(() -> repo.enqueue(TENANT_A, body))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessage("doc_id required");
     }
 
     @Test @Order(73)
-    void enqueueMany_batchesHeterogeneousRowsInOneRoundTrip() {
+    void enqueueMany_batchesHeterogeneousRowsInOneRoundTrip() throws Exception {
         // nexus-nj4ch: replaces N serial enqueue() calls with one
         // enqueueMany() batch — rows may carry DIFFERENT optional fields
-        // (doc_id present or absent), mirroring updateDocumentsMany's
+        // (content present or absent -- doc_id itself is required on every
+        // row since hygiene-001, no longer the heterogeneous field this test
+        // originally demonstrated), mirroring updateDocumentsMany's
         // heterogeneous-SET-clause shape.
+        registerFixtureDoc(TENANT_A, "many-doc-b");
         var rowA = new java.util.LinkedHashMap<String, Object>();
         rowA.put("collection", "enqmany-coll");
         rowA.put("source_path", "many-a.md");
@@ -753,6 +810,7 @@ class AspectRepositoryTest {
         var rowB = new java.util.LinkedHashMap<String, Object>();
         rowB.put("collection", "enqmany-coll");
         rowB.put("source_path", "many-b.md");
+        rowB.put("doc_id", "many-doc-b");
         rowB.put("content", "content for b");
 
         int n = repo.enqueueMany(TENANT_A, List.of(rowA, rowB));
@@ -767,16 +825,20 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(74)
-    void enqueueMany_skipsMalformedRowsWithoutAbortingBatch() {
+    void enqueueMany_skipsMalformedRowsWithoutAbortingBatch() throws Exception {
         // A row missing collection/source_path must not sink the rest of
         // the batch -- ghost-class isolation, mirroring register_many's
-        // per-doc failure tolerance.
+        // per-doc failure tolerance. (badRow is skipped on its blank
+        // collection BEFORE the doc_id check ever runs, so it needs no
+        // fixture doc of its own.)
+        registerFixtureDoc(TENANT_A, "enqmany-skip-doc");
         var badRow = new java.util.LinkedHashMap<String, Object>();
         badRow.put("collection", "");
         badRow.put("source_path", "bad.md");
         var goodRow = new java.util.LinkedHashMap<String, Object>();
         goodRow.put("collection", "enqmany-skip-coll");
         goodRow.put("source_path", "good.md");
+        goodRow.put("doc_id", "enqmany-skip-doc");
 
         int n = repo.enqueueMany(TENANT_A, List.of(badRow, goodRow));
 
@@ -786,12 +848,14 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(75)
-    void enqueueMany_reEnqueue_resetsToPending() {
+    void enqueueMany_reEnqueue_resetsToPending() throws Exception {
         // Same ON CONFLICT DO UPDATE semantics as the single-row enqueue()
         // path -- a batch re-enqueue at an existing key resets to pending.
+        registerFixtureDoc(TENANT_A, "enqmany-reenq-doc");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection", "enqmany-reenq-coll");
         body.put("source_path", "reenq.md");
+        body.put("doc_id", "enqmany-reenq-doc");
         repo.enqueue(TENANT_A, body);
         repo.claimNext(TENANT_A);
 
@@ -820,10 +884,12 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(33)
-    void markFailed_andMarkRetry_stateTransitions() {
+    void markFailed_andMarkRetry_stateTransitions() throws Exception {
+        registerFixtureDoc(TENANT_A, "failretry-doc");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "failretry-coll");
         body.put("source_path", "fr.pdf");
+        body.put("doc_id",      "failretry-doc");
         repo.enqueue(TENANT_A, body);
         repo.claimNext(TENANT_A);
 
@@ -836,10 +902,12 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(34)
-    void reclaimStale_reclaims_longRunningInProgress() throws InterruptedException {
+    void reclaimStale_reclaims_longRunningInProgress() throws Exception {
+        registerFixtureDoc(TENANT_A, "stale-doc");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "stale-coll");
         body.put("source_path", "stale.pdf");
+        body.put("doc_id",      "stale-doc");
         repo.enqueue(TENANT_A, body);
         repo.claimNext(TENANT_A);
 
@@ -849,12 +917,14 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(35)
-    void listPending_returnsFifoOrder() {
+    void listPending_returnsFifoOrder() throws Exception {
+        registerFixtureDoc(TENANT_A, "fifo-doc");
         // Enqueue with different timestamps via body to verify FIFO
         for (int i = 3; i >= 1; i--) {
             var body = new java.util.LinkedHashMap<String, Object>();
             body.put("collection",  "fifo-coll");
             body.put("source_path", "fifo-" + i + ".pdf");
+            body.put("doc_id",      "fifo-doc");
             body.put("enqueued_at", "2026-06-0" + i + "T00:00:00.000000Z");
             repo.enqueue(TENANT_A, body);
         }
@@ -869,10 +939,12 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(36)
-    void renameQueueCollection_movesRows() {
+    void renameQueueCollection_movesRows() throws Exception {
+        registerFixtureDoc(TENANT_A, "qrename-doc");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "qrename-src");
         body.put("source_path", "qr.pdf");
+        body.put("doc_id",      "qrename-doc");
         repo.enqueue(TENANT_A, body);
 
         int n = repo.renameQueueCollection(TENANT_A, "qrename-src", "qrename-dst");
@@ -884,19 +956,24 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(37)
-    void importQueueRow_fidelity_neverDowngradesInProgress() {
+    void importQueueRow_fidelity_neverDowngradesInProgress() throws Exception {
         // Use a unique TENANT to avoid cross-test state from other tests that also
         // use TENANT_A and leave in-progress or pending rows in the shared DB.
         String testTenant = "etl-fidelity-tenant-" + System.nanoTime();
         String uniquePath  = "etl-q.pdf";
 
-        // Seed a row then claim it (in_progress).
-        // doc_id omitted (NULL) — FK to catalog_documents requires matching (tenant_id, tumbler),
-        // and this test uses a dynamic tenant; omitting doc_id is fine since we're testing
-        // status non-downgrade behavior, not doc_id handling.
+        // Seed a row then claim it (in_progress). hygiene-001: doc_id is
+        // NOT NULL now on aspect_extraction_queue -- including via the
+        // importQueueRow fidelity path below, because Postgres checks a
+        // proposed INSERT's NOT NULL constraints before it even evaluates
+        // whether ON CONFLICT applies, so the pre-hygiene-001 "importBody
+        // omits doc_id, no FK issue" comment this line used to carry no
+        // longer holds even for an existing row's conflict-triggered UPDATE.
+        registerFixtureDoc(testTenant, "etl-q-fidelity-doc");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "etl-queue-coll");
         body.put("source_path", uniquePath);
+        body.put("doc_id",      "etl-q-fidelity-doc");
         repo.enqueue(testTenant, body);
 
         // In this tenant's isolated namespace, claimNext MUST claim this specific row
@@ -910,7 +987,7 @@ class AspectRepositoryTest {
         var importBody = new java.util.LinkedHashMap<String, Object>();
         importBody.put("collection",    "etl-queue-coll");
         importBody.put("source_path",   uniquePath);
-        // doc_id omitted (NULL) — matches the enqueue body above (no FK issue)
+        importBody.put("doc_id",        "etl-q-fidelity-doc");
         importBody.put("status",        "pending");    // stale source
         importBody.put("retry_count",   0);
         importBody.put("enqueued_at",   "2025-01-01T00:00:00.000000Z");
@@ -930,11 +1007,16 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(38)
-    void importQueueRow_greatest_retryCount() {
+    void importQueueRow_greatest_retryCount() throws Exception {
+        // hygiene-001 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
+        // is NOT NULL now, including on the import/fidelity path -- there is no
+        // legitimate blank state left for this FK-checked identity column.
+        registerFixtureDoc(TENANT_A, "greatest-doc");
         // Seed with retry_count=3
         var importBody = new java.util.LinkedHashMap<String, Object>();
         importBody.put("collection",  "greatest-coll");
         importBody.put("source_path", "gr.pdf");
+        importBody.put("doc_id",      "greatest-doc");
         importBody.put("status",      "pending");
         importBody.put("retry_count", 3);
         importBody.put("enqueued_at", "2026-01-01T00:00:00.000000Z");
@@ -957,7 +1039,7 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(39)
-    void importQueueRow_least_enqueuedAt_keepsEarliest() {
+    void importQueueRow_least_enqueuedAt_keepsEarliest() throws Exception {
         // LEAST(existing.enqueued_at, EXCLUDED.enqueued_at): a later re-import must NOT
         // push enqueued_at forward. A plain EXCLUDED.enqueued_at overwrite would replace
         // the earlier value and pass any "row exists" assertion — so read the value back.
@@ -965,10 +1047,12 @@ class AspectRepositoryTest {
         String path   = "least.pdf";
         String early  = "2025-01-01T00:00:00.000000Z";
         String later  = "2026-06-01T00:00:00.000000Z";
+        registerFixtureDoc(tenant, "least-doc");
 
         var seed = new java.util.LinkedHashMap<String, Object>();
         seed.put("collection",  "least-coll");
         seed.put("source_path", path);
+        seed.put("doc_id",      "least-doc");
         seed.put("status",      "pending");
         seed.put("retry_count", 0);
         seed.put("enqueued_at", early);
@@ -992,10 +1076,12 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(39)
-    void queue_rls_isolation() {
+    void queue_rls_isolation() throws Exception {
+        registerFixtureDoc(TENANT_A, "rls-queue-doc");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "rls-queue-coll");
         body.put("source_path", "rls-q.pdf");
+        body.put("doc_id",      "rls-queue-doc");
         repo.enqueue(TENANT_A, body);
 
         // TENANT_B must not see TENANT_A's queued rows
@@ -1006,12 +1092,14 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(40)
-    void claimBatch_returnsUpToLimit() {
+    void claimBatch_returnsUpToLimit() throws Exception {
+        registerFixtureDoc(TENANT_A, "claimbatch-doc");
         // Enqueue 5 fresh rows
         for (int i = 0; i < 5; i++) {
             var body = new java.util.LinkedHashMap<String, Object>();
             body.put("collection",  "batch-coll");
             body.put("source_path", "batch-" + System.nanoTime() + "-" + i + ".pdf");
+            body.put("doc_id",      "claimbatch-doc");
             repo.enqueue(TENANT_A, body);
         }
         List<Map<String, Object>> batch = repo.claimBatch(TENANT_A, 3);
@@ -1025,9 +1113,11 @@ class AspectRepositoryTest {
     void claimNext_skipsRowWithFutureNextRetryAt() throws Exception {
         // Isolated tenant so claimNext sees ONLY this row.
         String tenant = "nra-future-tenant-" + System.nanoTime();
+        registerFixtureDoc(tenant, "nra-doc");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "nra-coll");
         body.put("source_path", "future.pdf");
+        body.put("doc_id",      "nra-doc");
         repo.enqueue(tenant, body);
 
         // Back the row off one hour into the future (server clock).
@@ -1043,11 +1133,13 @@ class AspectRepositoryTest {
     @Test @Order(42)
     void claimNext_claimsRowWhenNextRetryAtNullOrElapsed() throws Exception {
         String tenant = "nra-ready-tenant-" + System.nanoTime();
+        registerFixtureDoc(tenant, "nra-doc");
 
         // Row 1: next_retry_at elapsed (5 min in the past) -> claimable.
         var past = new java.util.LinkedHashMap<String, Object>();
         past.put("collection",  "nra-coll");
         past.put("source_path", "past.pdf");
+        past.put("doc_id",      "nra-doc");
         repo.enqueue(tenant, past);
         setNextRetryAt(tenant, "past.pdf",
             OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(5));
@@ -1056,6 +1148,7 @@ class AspectRepositoryTest {
         var nul = new java.util.LinkedHashMap<String, Object>();
         nul.put("collection",  "nra-coll");
         nul.put("source_path", "null.pdf");
+        nul.put("doc_id",      "nra-doc");
         repo.enqueue(tenant, nul);
 
         // Both branches of the gate (IS NULL OR <= now()) must admit a claim.
@@ -1069,9 +1162,11 @@ class AspectRepositoryTest {
     @Test @Order(43)
     void reclaimStale_leavesNextRetryAtUnchanged_andRowImmediatelyClaimable() throws Exception {
         String tenant = "nra-reclaim-tenant-" + System.nanoTime();
+        registerFixtureDoc(tenant, "nra-doc");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "nra-coll");
         body.put("source_path", "reclaim.pdf");
+        body.put("doc_id",      "nra-doc");
         repo.enqueue(tenant, body);
 
         // Stamp a known PAST next_retry_at so the row is claimable, then claim it
@@ -1109,9 +1204,11 @@ class AspectRepositoryTest {
         // Complement to Order(43): the common pre-P1 state is next_retry_at NULL.
         // reclaimStale must not invent a value (which would back off a crash-victim).
         String tenant = "nra-reclaim-null-tenant-" + System.nanoTime();
+        registerFixtureDoc(tenant, "nra-doc");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "nra-coll");
         body.put("source_path", "reclaim-null.pdf");
+        body.put("doc_id",      "nra-doc");
         repo.enqueue(tenant, body);                 // next_retry_at left NULL (default)
 
         assertThat(repo.claimNext(tenant))
@@ -1130,9 +1227,11 @@ class AspectRepositoryTest {
     @Test @Order(46)
     void markRetry_stampsNextRetryAtServerSide_andBacksOffClaim() throws Exception {
         String tenant = "markretry-tenant-" + System.nanoTime();
+        registerFixtureDoc(tenant, "mr-doc");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "mr-coll");
         body.put("source_path", "mr.pdf");
+        body.put("doc_id",      "mr-doc");
         repo.enqueue(tenant, body);
         repo.claimNext(tenant);                       // -> in_progress
 
@@ -1170,9 +1269,11 @@ class AspectRepositoryTest {
         // it must also clear next_retry_at — otherwise a row backed off by a prior
         // mark_retry stays silently held until the old backoff elapses.
         String tenant = "reenqueue-backoff-tenant-" + System.nanoTime();
+        registerFixtureDoc(tenant, "rb-doc");
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("collection",  "rb-coll");
         body.put("source_path", "rb.pdf");
+        body.put("doc_id",      "rb-doc");
         repo.enqueue(tenant, body);
 
         // Back the row off far into the future (simulating a prior mark_retry).
@@ -1180,7 +1281,8 @@ class AspectRepositoryTest {
         assertThat(repo.claimNext(tenant))
             .as("precondition: a backed-off row is not claimable").isEmpty();
 
-        // Re-enqueue at the same key: must clear the backoff and be claimable now.
+        // Re-enqueue at the same key (doc_id re-supplied, hygiene-001): must
+        // clear the backoff and be claimable now.
         repo.enqueue(tenant, body);
         assertThat(readNextRetryAt(tenant, "rb.pdf"))
             .as("re-enqueue must clear stale next_retry_at").isNull();
@@ -1189,23 +1291,26 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(48)
-    void listFailed_returnsOnlyFailedRows_collectionScoped() {
-        // Isolated tenant so listFailed sees only this test's rows. doc_id omitted
-        // (NULL) to avoid the catalog_documents FK; doc_id round-trip is covered by
-        // the SQLite/HTTP list_failed tests and is structurally identical to the
-        // already-tested listPending map.
+    void listFailed_returnsOnlyFailedRows_collectionScoped() throws Exception {
+        // Isolated tenant so listFailed sees only this test's rows. hygiene-001:
+        // doc_id is required now, so this dynamic tenant gets its own fixture
+        // document (doc_id round-trip itself is covered by the SQLite/HTTP
+        // list_failed tests and the already-tested listPending map).
         String tenant = "list-failed-tenant-" + System.nanoTime();
+        registerFixtureDoc(tenant, "lf-doc");
         for (String[] cs : new String[][]{
                 {"lf-a", "a1.pdf"}, {"lf-a", "a2.pdf"}, {"lf-b", "b1.pdf"}}) {
             var body = new java.util.LinkedHashMap<String, Object>();
             body.put("collection", cs[0]);
             body.put("source_path", cs[1]);
+            body.put("doc_id", "lf-doc");
             repo.enqueue(tenant, body);
             repo.markFailed(tenant, cs[0], cs[1], "boom");
         }
         var pending = new java.util.LinkedHashMap<String, Object>();
         pending.put("collection", "lf-a");
         pending.put("source_path", "ok.pdf");
+        pending.put("doc_id", "lf-doc");
         repo.enqueue(tenant, pending);   // stays pending
 
         // All failed (pending excluded), FIFO by enqueued_at.
@@ -1221,6 +1326,31 @@ class AspectRepositoryTest {
             .containsExactly("a1.pdf", "a2.pdf");
         assertThat(scoped).allSatisfy(r ->
             assertThat(r.get("collection")).isEqualTo("lf-a"));
+    }
+
+    /**
+     * hygiene-001 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
+     * is NOT NULL now, and the composite FK to catalog_documents(tenant_id,
+     * tumbler) is unaffected by that -- a non-null doc_id must still name a
+     * LIVE document for that tenant, or the INSERT fails FK-dangling. Every
+     * queue test that used to enqueue with doc_id omitted (NULL trivially
+     * satisfies any FK) now registers a throwaway fixture document first,
+     * mirroring startAll()'s own TENANT_A tumbler-seeding loop but scoped to
+     * whatever tenant (often a dynamically-generated isolated one) the test
+     * actually uses.
+     */
+    private void registerFixtureDoc(String tenant, String tumbler) throws SQLException {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            try (var ps = su.prepareStatement(
+                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
+                    + "VALUES (?, ?, 'hygiene-001 test fixture') "
+                    + "ON CONFLICT (tenant_id, tumbler) DO NOTHING")) {
+                ps.setString(1, tenant);
+                ps.setString(2, tumbler);
+                ps.executeUpdate();
+            }
+        }
     }
 
     /** Set next_retry_at on a specific row via a superuser connection (bypasses RLS). */
@@ -1259,12 +1389,14 @@ class AspectRepositoryTest {
 
     @Test @Order(45)
     void claimNext_concurrent_eachWorkerGetsDistinctRow() throws Exception {
+        registerFixtureDoc(TENANT_A, "concurrent-doc");
         // Enqueue N rows for this test — must be >= worker count
         int N = 8;
         for (int i = 0; i < N; i++) {
             var body = new java.util.LinkedHashMap<String, Object>();
             body.put("collection",  "concurrent-coll");
             body.put("source_path", "concurrent-" + i + "-" + System.nanoTime() + ".pdf");
+            body.put("doc_id",      "concurrent-doc");
             repo.enqueue(TENANT_A, body);
         }
 
@@ -1529,18 +1661,22 @@ class AspectRepositoryTest {
     // method still looping per-row .execute() inside its transaction.
 
     @Test @Order(66)
-    void importQueueBatch_insertsAll_acrossCollections_oneStatement() {
+    void importQueueBatch_insertsAll_acrossCollections_oneStatement() throws Exception {
         String t = "qbatch-tenant-" + System.nanoTime();
+        registerFixtureDoc(t, "qbatch-doc");
         var r1 = new java.util.LinkedHashMap<String, Object>();
         r1.put("collection", "qbatch-coll-a"); r1.put("source_path", "a1.pdf");
+        r1.put("doc_id", "qbatch-doc");
         r1.put("status", "pending"); r1.put("enqueued_at", "2025-05-01T00:00:00.000000Z");
         var r2 = new java.util.LinkedHashMap<String, Object>();
         r2.put("collection", "qbatch-coll-a"); r2.put("source_path", "a2.pdf");
+        r2.put("doc_id", "qbatch-doc");
         r2.put("status", "failed"); r2.put("retry_count", 2);
         r2.put("enqueued_at", "2025-05-02T00:00:00.000000Z");
         r2.put("last_error", "database is locked");
         var r3 = new java.util.LinkedHashMap<String, Object>();
         r3.put("collection", "qbatch-coll-b"); r3.put("source_path", "b1.md");
+        r3.put("doc_id", "qbatch-doc");
         r3.put("status", "pending"); r3.put("enqueued_at", "2025-05-03T00:00:00.000000Z");
 
         int n = repo.importQueueBatch(t, List.of(r1, r2, r3));
@@ -1553,16 +1689,19 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(67)
-    void importQueueBatch_intraBatchDuplicate_lastWins_noError() {
+    void importQueueBatch_intraBatchDuplicate_lastWins_noError() throws Exception {
         // One multi-row INSERT ... ON CONFLICT cannot touch the same
         // (tenant, collection, source_path) twice — repo must dedupe, last wins.
         String t = "qbatch-tenant2-" + System.nanoTime();
+        registerFixtureDoc(t, "qbatch-dup-doc");
         var first = new java.util.LinkedHashMap<String, Object>();
         first.put("collection", "qbatch-dup"); first.put("source_path", "dup.pdf");
+        first.put("doc_id", "qbatch-dup-doc");
         first.put("status", "pending"); first.put("retry_count", 1);
         first.put("enqueued_at", "2025-06-01T00:00:00.000000Z");
         var second = new java.util.LinkedHashMap<String, Object>();
         second.put("collection", "qbatch-dup"); second.put("source_path", "dup.pdf");
+        second.put("doc_id", "qbatch-dup-doc");
         second.put("status", "failed"); second.put("retry_count", 4);
         second.put("enqueued_at", "2025-06-09T00:00:00.000000Z");
         second.put("last_error", "boom");
@@ -1574,17 +1713,20 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(68)
-    void importQueueBatch_fidelity_neverDowngradesInProgress_viaBatchPath() {
+    void importQueueBatch_fidelity_neverDowngradesInProgress_viaBatchPath() throws Exception {
         // The batch path must preserve the single-row ON CONFLICT semantics
         // verbatim: a stale 'pending' import must not downgrade in_progress.
         String t = "qbatch-tenant3-" + System.nanoTime();
+        registerFixtureDoc(t, "qbatch-fid-doc");
         var seed = new java.util.LinkedHashMap<String, Object>();
         seed.put("collection", "qbatch-fid"); seed.put("source_path", "fid.pdf");
+        seed.put("doc_id", "qbatch-fid-doc");
         repo.enqueue(t, seed);
         assertThat(repo.claimNext(t)).isPresent(); // now in_progress
 
         var stale = new java.util.LinkedHashMap<String, Object>();
         stale.put("collection", "qbatch-fid"); stale.put("source_path", "fid.pdf");
+        stale.put("doc_id", "qbatch-fid-doc");
         stale.put("status", "pending");
         stale.put("enqueued_at", "2025-01-01T00:00:00.000000Z");
         int n = repo.importQueueBatch(t, List.of(stale));
@@ -1594,81 +1736,13 @@ class AspectRepositoryTest {
             .isEmpty();
     }
 
-    /**
-     * nexus-mlu3k: the read-only census of aspect rows no live catalog document
-     * claims. Seeds five legacy (doc_id NULL) rows and three catalog documents:
-     * a live one matching row A (excluded), a tombstoned one matching row B
-     * (included, flagged), and a tombstoned ALIAS matching row E (included, NOT
-     * flagged: the flag negates only deleted_at, aliases never match). Rows C
-     * (no scheme) and D (chroma://) have no catalog document at all. Also pins
-     * the page ceiling: limit 0 is one full page, never everything.
-     */
-    @Test @Order(77)
-    void listWithoutCatalogDocument_negatesTheAspects004Predicate_andFlagsTombstonedMatches() throws Exception {
-        String col = "knowledge__mlu3k";
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri) VALUES ('"
-                + TENANT_A + "', 'mlu3k.1', 'live match', 'file:///repo/a.md') ON CONFLICT (tenant_id, tumbler) DO NOTHING");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri, deleted_at) VALUES ('"
-                + TENANT_A + "', 'mlu3k.2', 'tombstoned match', 'file:///repo/b.md', now()) ON CONFLICT (tenant_id, tumbler) DO NOTHING");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri, alias_of, deleted_at) VALUES ('"
-                + TENANT_A + "', 'mlu3k.3', 'tombstoned alias', 'file:///repo/e.md', 'mlu3k.1', now()) ON CONFLICT (tenant_id, tumbler) DO NOTHING");
-        }
-        for (String[] row : new String[][] {
-                {"a.md", "file:///repo/a.md"}, {"b.md", "file:///repo/b.md"},
-                {"c.md", "repo/c.md"}, {"d.md", "chroma://knowledge__mlu3k/d.md"},
-                {"e.md", "file:///repo/e.md"}}) {
-            var body = makeAspect(col, row[0]);
-            body.remove("doc_id");             // legacy shape: doc_id NULL
-            body.put("source_uri", row[1]);
-            assertThat(repo.upsertAspect(TENANT_A, body)).isPositive();
-        }
-
-        var byUri = new java.util.LinkedHashMap<String, Map<String, Object>>();
-        for (var r : listAllWithoutCatalogDocument(TENANT_A)) {
-            if (col.equals(r.get("collection"))) byUri.put((String) r.get("source_uri"), r);
-        }
-
-        assertThat(byUri.keySet())
-            .as("the live-matched row is excluded; tombstoned, tombstoned-alias, no-scheme and chroma rows are listed")
-            .containsExactlyInAnyOrder("file:///repo/b.md", "file:///repo/e.md", "repo/c.md", "chroma://knowledge__mlu3k/d.md");
-        assertThat(byUri.get("file:///repo/b.md").get("tombstoned_match")).isEqualTo(true);
-        assertThat(byUri.get("file:///repo/e.md").get("tombstoned_match"))
-            .as("a tombstoned ALIAS is not a would-have-matched document").isEqualTo(false);
-        assertThat(byUri.get("repo/c.md").get("tombstoned_match")).isEqualTo(false);
-        assertThat(byUri.get("chroma://knowledge__mlu3k/d.md").get("extractor_name")).isEqualTo("scholarly-paper");
-
-        assertThat(repo.listWithoutCatalogDocument(TENANT_A, 1, 0)).as("limit is honoured").hasSize(1);
-        assertThat(repo.listWithoutCatalogDocument(TENANT_A, 0, 0).size())
-            .as("limit 0 is one full page, never unbounded")
-            .isLessThanOrEqualTo(AspectRepository.MAX_PAGE_ROWS);
-        assertThat(repo.listWithoutCatalogDocument(TENANT_A, 10_000, 0).size())
-            .as("an over-large limit is clamped, not rejected")
-            .isLessThanOrEqualTo(AspectRepository.MAX_PAGE_ROWS);
-
-        assertThat(listAllWithoutCatalogDocument(TENANT_B))
-            .as("RLS: tenant B sees none of tenant A's rows").noneMatch(r -> col.equals(r.get("collection")));
-    }
-
-    /** Page through {@code listWithoutCatalogDocument} the way the client verb does. */
-    private List<Map<String, Object>> listAllWithoutCatalogDocument(String tenant) {
-        List<Map<String, Object>> all = new ArrayList<>();
-        for (int offset = 0; ; offset += AspectRepository.MAX_PAGE_ROWS) {
-            var page = repo.listWithoutCatalogDocument(tenant, AspectRepository.MAX_PAGE_ROWS, offset);
-            all.addAll(page);
-            if (page.size() < AspectRepository.MAX_PAGE_ROWS) return all;
-        }
-    }
-
     @Test @Order(69)
-    void importQueueBatch_skipsRowsMissingKeys_countsOnlyKept() {
+    void importQueueBatch_skipsRowsMissingKeys_countsOnlyKept() throws Exception {
         String t = "qbatch-tenant4-" + System.nanoTime();
+        registerFixtureDoc(t, "qbatch-skip-doc");
         var good = new java.util.LinkedHashMap<String, Object>();
         good.put("collection", "qbatch-skip"); good.put("source_path", "ok.pdf");
+        good.put("doc_id", "qbatch-skip-doc");
         good.put("status", "pending"); good.put("enqueued_at", "2025-07-01T00:00:00.000000Z");
         var noColl = new java.util.LinkedHashMap<String, Object>();
         noColl.put("source_path", "orphan.pdf");

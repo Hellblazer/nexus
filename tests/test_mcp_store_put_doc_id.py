@@ -250,31 +250,42 @@ def test_mcp_store_put_forwards_catalog_tumbler_as_fire_document_doc_id(
 # reachable trigger), and the service-side counterpart it named lives in
 # tests/test_e9ru2_catalog_gate_sweep.py::
 # test_register_or_lookup_fresh_box_no_local_catalog_created.
-def test_mcp_store_put_forwards_blank_doc_id_when_catalog_hook_raises(
+def test_mcp_store_put_skips_aspect_enqueue_when_catalog_hook_raises(
     inject_local_t3: T3Database,
     catalog_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RDR-172 / nexus-pyn35: when ``catalog_store_hook`` RAISES (the
+    """RDR-172 / nexus-pyn35, SUPERSEDED TWICE by hygiene-001
+    (nexus-tk070.p6a follow-on): when ``catalog_store_hook`` RAISES (the
     best-effort boundary catch in store_put), ``catalog_doc_id`` stays the
-    pre-initialized '' and store_put forwards ``doc_id=''`` — never the
-    chunk natural-id, never a crash. Distinct from the no-catalog path
-    (LOW-2 / substantive-critic Significant: the swallow must degrade to
-    the blank sentinel, which the service NULL-coerces).
+    pre-initialized ''.
+
+    Review round item B (critic C2) supersedes the prior-turn contract
+    pinned here (store_put itself skipping ``fire_document`` outright): the
+    resolve-or-skip decision for a blank doc_id moved to the CHOKE POINT,
+    ``aspect_extraction_enqueue_hook`` itself, which every ``fire_document``
+    call site (this one included) now shares -- so store_put no longer
+    pre-empts the hook by skipping the call here. It forwards
+    ``catalog_doc_id`` VERBATIM, blank or not, and lets the hook's own
+    resolve-by-(collection, source_path) fallback or its
+    ``aspect_enqueue_skipped_no_doc_id`` warning make the call (covered
+    directly by ``tests/test_aspect_worker.py::TestEnqueueHookDocIdWiring``,
+    not here -- ``fire_document`` is mocked in this test, so the real hook
+    body never runs). store_put itself must still not crash.
     """
-    import hashlib
+    import structlog.testing
 
     from nexus.mcp.core import store_put
     local_t3 = inject_local_t3
 
     content = "# Hook-raises finding\n\nThe catalog hook will blow up."
-    captured: dict[str, str] = {}
+    called: list[dict] = []
 
     def _capture_fire_document(
         source_path: str, collection: str, doc_content: str,
         *, doc_id: str = "", **_kw,
     ) -> None:
-        captured["doc_id"] = doc_id
+        called.append({"doc_id": doc_id})
 
     with patch("nexus.catalog.store_hook.catalog_store_hook_tracked",
                side_effect=RuntimeError("catalog boom")), \
@@ -283,7 +294,8 @@ def test_mcp_store_put_forwards_blank_doc_id_when_catalog_hook_raises(
          patch("nexus.mcp.core._hooks.fire_batch", side_effect=_no_op), \
          patch("nexus.mcp.core._hooks.fire_document",
                side_effect=_capture_fire_document), \
-         patch("nexus.mcp.core._catalog_auto_link", return_value=0):
+         patch("nexus.mcp.core._catalog_auto_link", return_value=0), \
+         structlog.testing.capture_logs() as cap:
         result = store_put(
             content=content,
             collection="knowledge",
@@ -294,13 +306,9 @@ def test_mcp_store_put_forwards_blank_doc_id_when_catalog_hook_raises(
         f"store_put must not crash when catalog_store_hook raises: {result}"
     )
 
-    chunk_id = hashlib.sha256(content.encode()).hexdigest()[:32]
-    assert captured.get("doc_id") == "", (
-        "swallowed catalog_store_hook exception must degrade to doc_id='' "
-        f"(blank->NULL sentinel), got {captured.get('doc_id')!r}"
-    )
-    assert captured.get("doc_id") != chunk_id, (
-        "must not fall back to the chunk natural-id on hook failure"
+    assert called == [{"doc_id": ""}], (
+        "store_put must forward catalog_doc_id verbatim to fire_document, "
+        f"blank included -- the hook itself now decides resolve-or-skip; got {called!r}"
     )
 
 

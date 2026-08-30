@@ -49,6 +49,28 @@ from typing import Any
 
 import pytest
 
+from tests._catalog_fixture_ops import register_real_doc_id
+
+# hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
+# and document_aspects.doc_id now carry REAL FKs to
+# catalog_documents(tenant_id, tumbler) via the engine's POST
+# /v1/aspects/queue/enqueue and /v1/aspects/upsert 400s -- see the
+# identical cache in tests/test_document_aspects_store.py for the full
+# rationale. One real registration per test, memoized on the test's
+# freshly-minted NX_SERVICE_TOKEN. This suite's own doc_id="" fields
+# predate that constraint and are not testing doc_id semantics at all
+# (see the module docstring -- the subject here is the RENAME_LOCK race,
+# not attribution), so they get a real one rather than a special-cased
+# exemption.
+_doc_id_cache: dict[str, str] = {}
+
+
+def _shared_doc_id() -> str:
+    key = os.environ.get("NX_SERVICE_TOKEN", "")
+    if key not in _doc_id_cache:
+        _doc_id_cache[key] = register_real_doc_id()
+    return _doc_id_cache[key]
+
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -78,7 +100,7 @@ def _aspect_fields(collection: str, source_path: str) -> dict[str, Any]:
         "model_version": "test-model",
         "extractor_name": "test",
         "source_uri": None,
-        "doc_id": "",
+        "doc_id": _shared_doc_id(),
         "salient_sentences": [],
     }
 
@@ -163,7 +185,7 @@ class TestCompleteAspectCascadeAtomicity:
         db_path = tmp_path / "memory.db"
         db = _make_db(db_path)
         try:
-            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id="")
+            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id=_shared_doc_id())
             db.aspect_queue.claim_next()
             db.complete_aspect(_aspect_fields(_OLD, _SRC))
             db.rename_collection_cascade(old=_OLD, new=_NEW)
@@ -189,7 +211,7 @@ class TestCompleteAspectCascadeAtomicity:
         db_path = tmp_path / "memory.db"
         db = _make_db(db_path)
         try:
-            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id="")
+            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id=_shared_doc_id())
             db.aspect_queue.claim_next()
 
             mid_call = threading.Event()
@@ -269,7 +291,7 @@ class TestGap3StaleCollectionResidue:
         db_path = tmp_path / "memory.db"
         db = _make_db(db_path)
         try:
-            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id="")
+            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id=_shared_doc_id())
             db.aspect_queue.claim_next()
             db.rename_collection_cascade(old=_OLD, new=_NEW)
             # complete_aspect with the stale OLD collection captured at claim.
@@ -332,7 +354,7 @@ class TestRenameThroughput:
         latencies: list[float] = []
         coll = _OLD
         for i in range(n):
-            db.aspect_queue.enqueue(coll, f"f{i}.py", content_hash="h", doc_id="")
+            db.aspect_queue.enqueue(coll, f"f{i}.py", content_hash="h", doc_id=_shared_doc_id())
             t0 = time.perf_counter()
             db.aspect_queue.claim_next()
             latencies.append(time.perf_counter() - t0)
@@ -422,7 +444,7 @@ class TestReadOnlyMethodsDoNotSerialize:
     def test_read_only_methods_omit_rename_lock(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path / "memory.db")
         try:
-            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id="")
+            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id=_shared_doc_id())
             tracking = _TrackingRLock()
             db.aspect_queue.rename_lock = tracking  # type: ignore[assignment]
 
@@ -451,7 +473,7 @@ class TestCompleteAspectReleasesLockOnError:
     def test_lock_released_after_upsert_raises(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path / "memory.db")
         try:
-            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id="")
+            db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id=_shared_doc_id())
             db.aspect_queue.claim_next()
 
             def boom(_record: Any) -> Any:

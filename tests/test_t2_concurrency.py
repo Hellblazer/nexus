@@ -59,7 +59,7 @@ def test_concurrent_domain_writes_no_contention(tmp_path: Path) -> None:
             start = time.perf_counter()
             try:
                 for i in range(n):
-                    db.save_plan(query=f"plan {i}", plan_json='{"step":"x"}', tags="conc")
+                    db.save_plan(query=f"plan {i}", plan_json='{"step":"x"}', tags="conc", verb="query")
             except BaseException as exc:  # pragma: no cover
                 errors.append(exc)
             timings["plans"] = (time.perf_counter() - start) * 1000
@@ -411,6 +411,7 @@ def test_memory_get_under_concurrent_write_load(tmp_path: Path) -> None:
                         query=f"plan {i}",
                         plan_json='{"step":"x"}',
                         tags="load",
+                        verb="query",
                     )
                     i += 1
             except BaseException as exc:  # pragma: no cover
@@ -578,6 +579,7 @@ def test_memory_search_under_concurrent_write_load(tmp_path: Path) -> None:
                         query=f"plan {i}",
                         plan_json='{"step":"x"}',
                         tags="load",
+                        verb="query",
                     )
                     i += 1
             except BaseException as exc:  # pragma: no cover

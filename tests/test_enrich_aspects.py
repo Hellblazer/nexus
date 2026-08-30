@@ -26,7 +26,22 @@ from click.testing import CliRunner
 
 from nexus.aspect_extractor import AspectRecord
 from nexus.commands.enrich import _PER_PAPER_COST_USD, enrich
-from tests._catalog_fixture_ops import ActiveCatalog
+from tests._catalog_fixture_ops import ActiveCatalog, register_real_doc_id
+
+# hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id now
+# carries a REAL FK to catalog_documents(tenant_id, tumbler) -- see the
+# identical cache in tests/test_document_aspects_store.py for the full
+# rationale. One real registration per test, memoized on the test's
+# freshly-minted NX_SERVICE_TOKEN.
+_doc_id_cache: dict[str, str] = {}
+
+
+def _shared_doc_id() -> str:
+    key = os.environ.get("NX_SERVICE_TOKEN", "")
+    if key not in _doc_id_cache:
+        _doc_id_cache[key] = register_real_doc_id()
+    return _doc_id_cache[key]
+
 
 # nexus-aqbrk: the dies-roster that used to cover 18 tests here was
 # OVER-BROAD, and its reason was wrong. It read "rich SQLite Catalog stack
@@ -78,6 +93,7 @@ def _make_record(
     problem_formulation: str | None = "P",
     proposed_method: str | None = "M",
     model_version: str = "claude-haiku-4-5-20251001",
+    doc_id: str | None = None,
 ) -> AspectRecord:
     from nexus.aspect_readers import uri_for
     collection = "knowledge__delos"
@@ -97,6 +113,7 @@ def _make_record(
         # Mirror the going-forward writer contract: extract_aspects'
         # _build_record / _empty_record populate source_uri via uri_for.
         source_uri=uri_for(collection, source_path),
+        doc_id=doc_id if doc_id is not None else _shared_doc_id(),
     )
 
 
@@ -1021,6 +1038,7 @@ class TestDay2Ops:
                 model_version="claude-haiku-4-5-20251001",
                 extractor_name="scholarly-paper-v1",
                 source_uri=None,  # legacy / unbackfilled
+                doc_id=_shared_doc_id(),
             ))
 
         runner = CliRunner()
@@ -1062,6 +1080,7 @@ class TestDay2Ops:
                 model_version="claude-haiku-4-5-20251001",
                 extractor_name="scholarly-paper-v1",
                 source_uri="file:///local.md",
+                doc_id=_shared_doc_id(),
             ))
 
         runner = CliRunner()

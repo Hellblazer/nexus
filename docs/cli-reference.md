@@ -611,22 +611,6 @@ Resolves the tumbler (or document title) via the catalog, looks up the aspect ro
 | `--json` | Emit JSON instead of human-readable form |
 | `--field NAME` | Project a single aspect field (`problem_formulation`, `proposed_method`, `experimental_datasets`, `experimental_baselines`, `experimental_results`, `extras`, `confidence`). Output is the raw value |
 
-### nx enrich aspects-without-catalog
-
-```
-nx enrich aspects-without-catalog [--limit N] [--match-basenames] [--json]
-nx enrich aspects-without-catalog --sweep [--apply] [--json]
-```
-
-Read-only census of `document_aspects` rows that NO live catalog document claims (nexus-mlu3k). The engine applies aspects-004's attribution predicate, negated (`GET /v1/aspects/list_without_catalog_document`): `doc_id IS NULL` and no same-tenant, non-alias, non-tombstoned catalog document has a byte-equal `source_uri`. Each row carries `tombstoned_match` (a deleted document does match — registered then removed — vs never registered). The verb buckets the result so the number is explained rather than eyeballed as backfill failure: by URI scheme (`file` / `chroma` / none / other), tombstoned matches, extraction month and `extractor@model` (era), and for `file://` rows whether the path still exists on this box; `--match-basenames` adds one full catalog scan reporting whether the same basename IS registered under another URI (the URI-normalisation-drift signature). The engine serves at most 300 rows per call (clamped, never rejected); the verb pages through, and `--limit N` caps the total (0 = all). Live census 2026-08-28 for reference: 846 such rows = 555 `chroma://` (structural, by design until re-extraction) + 231 `file://` with no document + 60 with no scheme; that total is CORRECT after the aspects-004 walk, not a shortfall. Exit 2 when the deployed engine has no such route — an unverifiable census is never reported as empty.
-
-**`--sweep`** (nexus-kkumv) turns the same census into a cleanup pass over two orphan classes, EXCLUDING `chroma://` rows (the internal store_put-origin marker, left untouched by design — see `nx catalog backfill-source-uri` for the *different* `chroma://` population that verb targets): class A is a `file://` row whose path sits under a worktree/tmp-dir marker or no longer exists on disk; class B is a row with NULL `source_uri` (the identity-attribution defect nexus-r0kum's writer fix closes going forward — `--sweep` cleans up the rows it already produced). Every matching row is deleted; when a LIVE canonical document shares its basename (`--match-basenames` machinery, forced on under `--sweep`) and has no aspect row of its own, that document is additionally re-enqueued for extraction. `--sweep` alone reports what would happen; add `--apply` to perform the writes. Never silent — a delete failure is reported per row and the command exits non-zero.
-
-| Flag | Description |
-|------|-------------|
-| `--sweep` | Delete class-A/class-B orphan rows (dry-run unless `--apply`); implies `--match-basenames` |
-| `--apply` | Perform the writes `--sweep` reports (refused without `--sweep`) |
-
 ### nx enrich aspects-list
 
 List aspect records for a collection, or the gaps with `--missing`.

@@ -7,6 +7,7 @@ import org.jooq.JSONB;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -248,10 +249,7 @@ public final class PlanRepository {
             // COALESCE, not last_used alone: a plan that has NEVER been used
             // must still age out from creation, or the library would accrete
             // every never-matched experiment forever.
-            Condition expiry = PLANS.TTL_DAYS.isNull().or(
-                field("extract(epoch from now() - coalesce(last_used, created_at)) / 86400",
-                      Double.class)
-                    .le(PLANS.TTL_DAYS.cast(Double.class)));
+            Condition expiry = notExpiredCondition();
             Condition active = PLANS.DISABLED_AT.isNull();
             Condition cond = PLANS.OUTCOME.eq(outcome).and(expiry).and(active);
             if (project != null && !project.isBlank()) {
@@ -300,10 +298,7 @@ public final class PlanRepository {
             // COALESCE, not last_used alone: a plan that has NEVER been used
             // must still age out from creation, or the library would accrete
             // every never-matched experiment forever.
-            Condition expiry = PLANS.TTL_DAYS.isNull().or(
-                field("extract(epoch from now() - coalesce(last_used, created_at)) / 86400",
-                      Double.class)
-                    .le(PLANS.TTL_DAYS.cast(Double.class)));
+            Condition expiry = notExpiredCondition();
             Condition active = PLANS.DISABLED_AT.isNull();
             // OR'd tsquery: prose stemming (english) + exact identifier match (simple)
             Condition fts = condition(
@@ -346,10 +341,7 @@ public final class PlanRepository {
             // COALESCE, not last_used alone: a plan that has NEVER been used
             // must still age out from creation, or the library would accrete
             // every never-matched experiment forever.
-            Condition expiry = PLANS.TTL_DAYS.isNull().or(
-                field("extract(epoch from now() - coalesce(last_used, created_at)) / 86400",
-                      Double.class)
-                    .le(PLANS.TTL_DAYS.cast(Double.class)));
+            Condition expiry = notExpiredCondition();
             Condition cond = expiry;
             if (!includeDisabled) {
                 cond = cond.and(PLANS.DISABLED_AT.isNull());
@@ -823,5 +815,49 @@ public final class PlanRepository {
                                    ? UTC_SECOND.format(r.getDisabledAt().withOffsetSameInstant(ZoneOffset.UTC))
                                    : null);
         return m;
+    }
+
+    // ── TTL sweep ───────────────────────────────────────────────────────────────
+
+    /**
+     * The read-time expiry predicate shared by {@link #listActivePlans},
+     * {@link #searchPlans}, and {@link #listPlans} — extracted to ONE place
+     * (coordinator scope addition, hygiene-001 follow-on) so the read filter
+     * and {@link #deleteExpiredPlans} cannot diverge. Returns TRUE for a plan
+     * that is still active: {@code ttl_days IS NULL} (permanent) or its age
+     * since last use (falling back to creation) is within {@code ttl_days}.
+     */
+    private static Condition notExpiredCondition() {
+        return PLANS.TTL_DAYS.isNull().or(
+            field("extract(epoch from now() - coalesce(last_used, created_at)) / 86400",
+                  Double.class)
+                .le(PLANS.TTL_DAYS.cast(Double.class)));
+    }
+
+    /**
+     * Delete every plan for {@code tenant} that {@link #notExpiredCondition()}
+     * says is NOT active — i.e. {@code ttl_days IS NOT NULL} and its age past
+     * last use (or creation) exceeds {@code ttl_days}. Coordinator scope
+     * addition (hygiene-001 follow-on): reads have filtered these rows out
+     * since nexus-sbl4m, but nothing ever deleted them — the live "nexus"
+     * tenant held 49 plans of which ~29 were expired dead rows never reaped
+     * by any sweep. Rides {@link NexusService}'s existing 6h scheduled-sweep
+     * cycle (same tenant loop as the scratch/session/data-token arms).
+     *
+     * <p>Logging: the caller ({@link NexusService}'s scheduled-sweep loop)
+     * logs {@code event=plan_ttl_sweep} once per tenant with the returned
+     * count — this method does not also log it (review round: was
+     * duplicated in both layers).
+     *
+     * @param statementTimeout per-statement ceiling, or null for none —
+     *     mirrors {@link ScratchRepository#sweepTenant(String, OffsetDateTime, Duration)}'s bound.
+     */
+    public int deleteExpiredPlans(String tenant, Duration statementTimeout) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            SweepBounds.applyStatementTimeout(ctx, statementTimeout);
+            return ctx.deleteFrom(PLANS)
+                .where(notExpiredCondition().not())
+                .execute();
+        });
     }
 }

@@ -277,12 +277,6 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         'operator_confidence_aggregate': ['source_uris', 'reducer_kind'],
         'operator_filter': ['source_uris', 'field', 'predicate'],
         'operator_groupby': ['source_uris', 'field'],
-        # nexus-mlu3k: the read-only census of aspect rows no live catalog
-        # document claims (GET /v1/aspects/list_without_catalog_document).
-        # A service-only READ with no SQLite twin by construction — the
-        # anti-join runs against catalog_documents in the engine's PG.
-        'list_without_catalog_document': ['limit', 'offset'],
-        'iter_without_catalog_document': ['max_rows', 'page_size'],
     },
     'document_highlights': {
         'rename_collection': ['old', 'new'],

@@ -417,7 +417,7 @@ class TestSavePlan:
     # share the same synthetic-identifier put/get/upsert/delete shape.
 
     def test_save_roundtrip_get(self, client):
-        pid = client.save_plan(
+        pid = client.save_plan(verb="query", 
             query="Test round-trip query",
             plan_json='{"v":1}',
             outcome="success",
@@ -432,7 +432,7 @@ class TestSavePlan:
         assert row["project"] == "proj"
 
     def test_save_missing_outcome_defaults_success(self, client):
-        pid = client.save_plan(query="Default outcome", plan_json="{}")
+        pid = client.save_plan(verb="query", query="Default outcome", plan_json="{}")
         row = client.get_plan(pid)
         assert row["outcome"] == "success"
 
@@ -442,7 +442,7 @@ class TestGetPlan:
     # in test_t2_store_crud_contract.py (test-suite-compression P1d).
 
     def test_get_by_dimensions(self, client):
-        pid = client.save_plan(
+        pid = client.save_plan(verb="query", 
             query="Dim query",
             plan_json="{}",
             project="dimproj",
@@ -464,20 +464,20 @@ class TestDeletePlan:
     def test_delete_removes_row(self, client):
         """Store-specific detail beyond the generic contract: a deleted
         plan is truly gone from get_plan(), not merely reported deleted."""
-        pid = client.save_plan(query="To delete", plan_json="{}")
+        pid = client.save_plan(verb="query", query="To delete", plan_json="{}")
         assert client.delete_plan(pid) == 1
         assert client.get_plan(pid) is None
 
 
 class TestDisableEnable:
     def test_disable_sets_disabled_at(self, client):
-        pid = client.save_plan(query="Disable test", plan_json="{}")
+        pid = client.save_plan(verb="query", query="Disable test", plan_json="{}")
         assert client.set_plan_disabled(pid)
         row = client.get_plan(pid)
         assert row["disabled_at"] is not None
 
     def test_enable_clears_disabled_at(self, client):
-        pid = client.save_plan(query="Enable test", plan_json="{}")
+        pid = client.save_plan(verb="query", query="Enable test", plan_json="{}")
         client.set_plan_disabled(pid)
         assert client.set_plan_enabled(pid)
         row = client.get_plan(pid)
@@ -487,7 +487,7 @@ class TestDisableEnable:
         assert not client.set_plan_disabled(99999)
 
     def test_disable_with_reason_appends_tag(self, client):
-        pid = client.save_plan(query="Reason tag test", plan_json="{}", tags="existing-tag")
+        pid = client.save_plan(verb="query", query="Reason tag test", plan_json="{}", tags="existing-tag")
         assert client.set_plan_disabled(pid, reason="too slow")
         row = client.get_plan(pid)
         assert "disable-reason:too slow" in row["tags"], (
@@ -495,7 +495,7 @@ class TestDisableEnable:
         assert "existing-tag" in row["tags"], "existing tag must be preserved"
 
     def test_disable_with_reason_replaces_old_reason(self, client):
-        pid = client.save_plan(query="Replace reason test", plan_json="{}")
+        pid = client.save_plan(verb="query", query="Replace reason test", plan_json="{}")
         client.set_plan_disabled(pid, reason="first reason")
         client.set_plan_disabled(pid, reason="second reason")
         row = client.get_plan(pid)
@@ -504,7 +504,7 @@ class TestDisableEnable:
             "old disable-reason must be replaced, not duplicated")
 
     def test_disable_without_reason_leaves_tags_unchanged(self, client):
-        pid = client.save_plan(query="No reason test", plan_json="{}", tags="keep-this")
+        pid = client.save_plan(verb="query", query="No reason test", plan_json="{}", tags="keep-this")
         client.set_plan_disabled(pid)
         row = client.get_plan(pid)
         assert row["tags"] == "keep-this", (
@@ -513,8 +513,8 @@ class TestDisableEnable:
 
 class TestListActivePlans:
     def test_excludes_disabled(self, client):
-        pid_active   = client.save_plan(query="Active plan", plan_json="{}", project="lp")
-        pid_disabled = client.save_plan(query="Disabled plan", plan_json="{}", project="lp")
+        pid_active   = client.save_plan(verb="query", query="Active plan", plan_json="{}", project="lp")
+        pid_disabled = client.save_plan(verb="query", query="Disabled plan", plan_json="{}", project="lp")
         client.set_plan_disabled(pid_disabled)
 
         active = client.list_active_plans(project="lp")
@@ -547,7 +547,7 @@ class TestSearchPlans:
 
 class TestPlanExists:
     def test_exists_true_for_tag(self, client):
-        client.save_plan(
+        client.save_plan(verb="query", 
             query="Existence check query",
             plan_json="{}",
             tags="builtin-template,research",
@@ -555,7 +555,7 @@ class TestPlanExists:
         assert client.plan_exists("Existence check query", "builtin-template")
 
     def test_exists_false_for_prefix(self, client):
-        client.save_plan(
+        client.save_plan(verb="query", 
             query="Prefix check query",
             plan_json="{}",
             tags="builtin-template,research",
@@ -568,35 +568,35 @@ class TestPlanExists:
 
 class TestMetrics:
     def test_increment_match_metrics_without_confidence(self, client):
-        pid = client.save_plan(query="Metrics test", plan_json="{}")
+        pid = client.save_plan(verb="query", query="Metrics test", plan_json="{}")
         client.increment_match_metrics(pid, confidence=None)
         row = client.get_plan(pid)
         assert row["match_count"] == 1
         assert row["match_conf_sum"] == 0.0
 
     def test_increment_match_metrics_with_confidence(self, client):
-        pid = client.save_plan(query="Conf metrics test", plan_json="{}")
+        pid = client.save_plan(verb="query", query="Conf metrics test", plan_json="{}")
         client.increment_match_metrics(pid, confidence=0.75)
         row = client.get_plan(pid)
         assert row["match_count"] == 1
         assert abs(row["match_conf_sum"] - 0.75) < 1e-9
 
     def test_increment_run_started(self, client):
-        pid = client.save_plan(query="Run started test", plan_json="{}")
+        pid = client.save_plan(verb="query", query="Run started test", plan_json="{}")
         client.increment_run_started(pid)
         row = client.get_plan(pid)
         assert row["use_count"] == 1
         assert row["last_used"] is not None
 
     def test_increment_run_outcome_success(self, client):
-        pid = client.save_plan(query="Run outcome success", plan_json="{}")
+        pid = client.save_plan(verb="query", query="Run outcome success", plan_json="{}")
         client.increment_run_outcome(pid, success=True)
         row = client.get_plan(pid)
         assert row["success_count"] == 1
         assert row["failure_count"] == 0
 
     def test_increment_run_outcome_failure(self, client):
-        pid = client.save_plan(query="Run outcome failure", plan_json="{}")
+        pid = client.save_plan(verb="query", query="Run outcome failure", plan_json="{}")
         client.increment_run_outcome(pid, success=False)
         row = client.get_plan(pid)
         assert row["success_count"] == 0
@@ -739,7 +739,7 @@ class TestNormalize:
     was 5 single-assertion tests each doing its own isolated save+get."""
 
     def test_fresh_plan_normalization_invariants(self, client):
-        pid = client.save_plan(query="Normalize invariants", plan_json="{}")
+        pid = client.save_plan(verb="query", query="Normalize invariants", plan_json="{}")
         row = client.get_plan(pid)
 
         assert isinstance(row["id"], int)
@@ -752,7 +752,7 @@ class TestNormalize:
 
 class TestSetScopeTags:
     def test_set_scope_tags_updates(self, client):
-        pid = client.save_plan(query="Scope tags plan", plan_json="{}")
+        pid = client.save_plan(verb="query", query="Scope tags plan", plan_json="{}")
         result = client.set_scope_tags(pid, "knowledge__nexus,rdr__nexus")
         assert result
         row = client.get_plan(pid)
@@ -761,8 +761,8 @@ class TestSetScopeTags:
 
 class TestListPlans:
     def test_list_excludes_disabled_by_default(self, client):
-        pid_a = client.save_plan(query="List plan A", plan_json="{}", project="list-proj")
-        pid_d = client.save_plan(query="List plan D", plan_json="{}", project="list-proj")
+        pid_a = client.save_plan(verb="query", query="List plan A", plan_json="{}", project="list-proj")
+        pid_d = client.save_plan(verb="query", query="List plan D", plan_json="{}", project="list-proj")
         client.set_plan_disabled(pid_d)
 
         rows   = client.list_plans(project="list-proj")
@@ -771,8 +771,8 @@ class TestListPlans:
         assert pid_d not in row_ids
 
     def test_list_include_disabled(self, client):
-        pid_a = client.save_plan(query="List inc A", plan_json="{}", project="list-inc")
-        pid_d = client.save_plan(query="List inc D", plan_json="{}", project="list-inc")
+        pid_a = client.save_plan(verb="query", query="List inc A", plan_json="{}", project="list-inc")
+        pid_d = client.save_plan(verb="query", query="List inc D", plan_json="{}", project="list-inc")
         client.set_plan_disabled(pid_d)
 
         rows   = client.list_plans(project="list-inc", include_disabled=True)

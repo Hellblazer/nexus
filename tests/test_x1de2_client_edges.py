@@ -184,15 +184,17 @@ def store(monkeypatch):
     return s, posted
 
 
-def test_unattributed_upsert_is_loud_but_not_refused(store):
+def test_unattributed_upsert_is_refused(store):
+    # hygiene-001 (nexus-tk070.p6a follow-on) SUPERSEDES nexus-x1de2's
+    # original warn-and-proceed contract: document_aspects.doc_id is NOT
+    # NULL now and the engine refuses a blank doc_id (Sam decision: every
+    # aspect row must attribute to a live catalog document). The client
+    # raises before ever posting, one call earlier than the engine's own
+    # 400 "doc_id required".
     s, posted = store
-    with capture_logs() as cap:
-        assert s.upsert(_record()) is True
-    assert posted and posted[0]["doc_id"] == ""
-    events = [e for e in cap if e.get("event") == "document_aspects_upsert_unattributed"]
-    assert len(events) == 1
-    assert events[0]["collection"] == "knowledge__x"
-    assert events[0]["source_path"] == "/p/a.pdf"
+    with pytest.raises(ValueError, match="doc_id required"):
+        s.upsert(_record())
+    assert not posted
 
 
 def test_attributed_upsert_is_quiet(store):

@@ -59,14 +59,18 @@ def _seed_plan(
 ) -> int:
     """Save one plan through the public API and return its row id.
 
-    ``save_plan`` without verb/scope leaves dimensions NULL, so rows do
-    not collide on the (project, dimensions) uniqueness the dimensional
-    save path enforces; distinct *project* values keep that true even if
-    a caller adds dimensions later.
+    ``verb`` is a fixed, arbitrary "query" here — hygiene-001 (nexus-tk070.p6a
+    follow-on) made ``plans.verb`` NOT NULL, so every save needs a real one.
+    ``dimensions`` is a SEPARATE kwarg this helper never sets (stays NULL
+    regardless of ``verb``), so ``save_plan`` without an explicit
+    ``dimensions=`` still leaves dimensions NULL — rows do not collide on
+    the (project, dimensions) uniqueness the dimensional save path
+    enforces; distinct *project* values keep that true even if a caller
+    adds dimensions later.
     """
     return db.plans.save_plan(
         query=query, plan_json=plan_json, project=project,
-        tags=tags, name=name,
+        tags=tags, name=name, verb="query",
     )
 
 

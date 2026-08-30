@@ -188,7 +188,7 @@ CRUD_CASES: list[CrudCase] = sorted(
             handler_cls=_FakePlanHandler,
             reset_state=_reset_plan_library,
             make_store=lambda url: HttpPlanLibrary(base_url=url, _token=PLAN_TOKEN),
-            do_put=lambda store, tag: store.save_plan(
+            do_put=lambda store, tag: store.save_plan(verb="query", 
                 query="crud-plan-query",
                 plan_json=f'{{"tag":"{tag}"}}',
                 project="crud-plan-proj",
@@ -311,7 +311,7 @@ AUTH_CASES: list[AuthCase] = sorted(
             handler_cls=_FakePlanHandler,
             reset_state=_reset_plan_library,
             make_bad_store=lambda url: HttpPlanLibrary(base_url=url, _token="wrong-token"),
-            do_write=lambda store: store.save_plan(query="auth-fail", plan_json="{}"),
+            do_write=lambda store: store.save_plan(verb="query", query="auth-fail", plan_json="{}"),
         ),
         AuthCase(
             store_id="telemetry",

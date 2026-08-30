@@ -24,6 +24,7 @@ file tests the drain ORCHESTRATION in ``nexus.aspect_worker`` on top of it.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -31,6 +32,23 @@ from pathlib import Path
 import pytest
 
 from nexus.db.t2 import T2Database
+
+from tests._catalog_fixture_ops import register_real_doc_id
+
+# hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
+# now carries a REAL FK to catalog_documents(tenant_id, tumbler) via the
+# engine's POST /v1/aspects/queue/enqueue 400 -- see the identical cache in
+# tests/test_document_aspects_store.py for the full rationale. One real
+# registration per test, memoized on the test's freshly-minted
+# NX_SERVICE_TOKEN.
+_doc_id_cache: dict[str, str] = {}
+
+
+def _shared_doc_id() -> str:
+    key = os.environ.get("NX_SERVICE_TOKEN", "")
+    if key not in _doc_id_cache:
+        _doc_id_cache[key] = register_real_doc_id()
+    return _doc_id_cache[key]
 
 
 # nexus-9eaz family flake-skip helper retired 2026-05-22: RDR-120 P3b
@@ -382,7 +400,7 @@ class TestDrain:
         # Insert a pending row, claim it (make in_progress), then resolve
         # it from a background thread after a short delay.
         with T2Database(queue_path) as db:
-            db.aspect_queue.enqueue("knowledge__test", "/async.pdf")
+            db.aspect_queue.enqueue("knowledge__test", "/async.pdf", doc_id=_shared_doc_id())
             db.aspect_queue.claim_next()
 
         def resolve_after_delay():
@@ -410,7 +428,7 @@ class TestDrain:
         from nexus.aspect_worker import DrainTimeoutError, drain_worker
 
         with T2Database(queue_path) as db:
-            db.aspect_queue.enqueue("knowledge__test", "/stuck.pdf")
+            db.aspect_queue.enqueue("knowledge__test", "/stuck.pdf", doc_id=_shared_doc_id())
             db.aspect_queue.claim_next()
             # Never mark_done -- row stays in_progress
 
@@ -440,7 +458,7 @@ class TestDrain:
         from nexus.aspect_worker import drain_worker
 
         with T2Database(queue_path) as db:
-            db.aspect_queue.enqueue("knowledge__test", "/fail.pdf")
+            db.aspect_queue.enqueue("knowledge__test", "/fail.pdf", doc_id=_shared_doc_id())
             db.aspect_queue.claim_next()
             db.aspect_queue.mark_failed("knowledge__test", "/fail.pdf", "broken")
 
@@ -517,7 +535,7 @@ class TestWorkerDrainIntegration:
 
             # Enqueue a new row after restart
             with T2Database(queue_path) as db:
-                db.aspect_queue.enqueue("knowledge__test", "/new.pdf")
+                db.aspect_queue.enqueue("knowledge__test", "/new.pdf", doc_id=_shared_doc_id())
 
             # Poll until the queue is drained (row claimed + marked_done)
             # or 3 seconds pass.

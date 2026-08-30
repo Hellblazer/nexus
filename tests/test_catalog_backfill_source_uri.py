@@ -57,7 +57,7 @@ def test_dry_run_reports_candidates_and_markers_without_writing(monkeypatch):
     ]
     result = _invoke(monkeypatch, docs, ["--json"])
     assert result.exit_code == 0, result.output
-    report = json.loads(result.output)
+    report = json.loads(result.stdout)
     assert report["total_chroma_rows"] == 2
     assert report["by_collection"]["rdr__x"] == {"count": 1, "candidate": True}
     assert report["by_collection"]["knowledge__x"] == {"count": 1, "candidate": False}
@@ -102,7 +102,7 @@ def test_refuses_relative_path_without_writing(monkeypatch):
     writer = _FakeWriter()
     result = _invoke(monkeypatch, docs, ["--apply", "--json"], writer=writer)
     assert result.exit_code == 0, result.output
-    report = json.loads(result.output)
+    report = json.loads(result.stdout)
     assert report["rederivable"] == 0
     assert report["refused"] == 1
     assert "not absolute" in report["refusals"][0]["reason"]
@@ -112,7 +112,7 @@ def test_refuses_relative_path_without_writing(monkeypatch):
 def test_knowledge_collections_never_become_candidates(monkeypatch):
     docs = [_FakeDoc("1.1.1", "knowledge__x", "chroma://knowledge__x/Title")]
     result = _invoke(monkeypatch, docs, ["--json"])
-    report = json.loads(result.output)
+    report = json.loads(result.stdout)
     assert report["candidates"] == 0
     assert report["updates"] == []
 
