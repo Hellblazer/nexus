@@ -468,6 +468,50 @@ class TestEnqueueHook:
         assert get_worker() is None  # no lazy start either
 
 
+class TestEnqueueHookWakeSignal:
+    """nexus-59611 stage 2: the hook's enqueue path is the choke point
+    every producer shares (MCP store_put / CLI ingest). A successful
+    enqueue must signal the local wake; a failed one must not."""
+
+    def test_successful_enqueue_signals_wake(
+        self, _isolate_t2: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+
+        monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
+        monkeypatch.setattr(mod, "_resolve_catalog_reader", lambda: None)
+        calls: list[None] = []
+        monkeypatch.setattr(mod, "signal_aspect_wake", lambda *a, **k: calls.append(None))
+
+        aspect_extraction_enqueue_hook(
+            source_path="/p1.pdf", collection="knowledge__delos", content="x",
+        )
+        assert len(calls) == 1
+
+    def test_failed_enqueue_does_not_signal_wake(
+        self, _isolate_t2: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+
+        monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
+        monkeypatch.setattr(mod, "_resolve_catalog_reader", lambda: None)
+
+        def _boom(self, *a, **k):
+            raise RuntimeError("enqueue boom")
+
+        monkeypatch.setattr(HttpAspectQueue, "enqueue", _boom)
+        calls: list[None] = []
+        monkeypatch.setattr(mod, "signal_aspect_wake", lambda *a, **k: calls.append(None))
+
+        aspect_extraction_enqueue_hook(
+            source_path="/p1.pdf", collection="knowledge__delos", content="x",
+        )
+        assert calls == []
+
+
 class TestGap2SourcePathNormalization:
     """RDR-145 Phase 1 (P1.2, nexus-syga3): forward-only ``source_path``
     canonicalization in ``aspect_extraction_enqueue_hook``.
@@ -1230,15 +1274,230 @@ class TestEnqueueHookDocIdWiring:
         assert row.doc_id == ""
 
 
+class TestAspectWakeSignal:
+    """nexus-59611 stage 2: signal_aspect_wake() is the one producer-facing
+    name every enqueue call site imports."""
+
+    def test_creates_wake_file_when_absent(self, tmp_path: Path) -> None:
+        from nexus.aspect_worker import ASPECT_WAKE_FILENAME, signal_aspect_wake
+
+        config_dir = tmp_path / "cfg"
+        signal_aspect_wake(config_dir)
+        assert (config_dir / ASPECT_WAKE_FILENAME).exists()
+
+    def test_touches_existing_file_to_a_newer_mtime(self, tmp_path: Path) -> None:
+        import os
+
+        from nexus.aspect_worker import ASPECT_WAKE_FILENAME, signal_aspect_wake
+
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir()
+        wake_path = config_dir / ASPECT_WAKE_FILENAME
+        wake_path.touch()
+        old_mtime = wake_path.stat().st_mtime
+        os.utime(wake_path, (old_mtime - 10, old_mtime - 10))
+
+        signal_aspect_wake(config_dir)
+
+        assert wake_path.stat().st_mtime > old_mtime - 10
+
+    def test_resolves_config_dir_via_nexus_config_dir_when_omitted(self) -> None:
+        """No config_dir arg -> falls back to nexus_config_dir(), already
+        isolated to a tmp path by the suite-wide autouse fixture."""
+        from nexus import config as _config
+        from nexus.aspect_worker import ASPECT_WAKE_FILENAME, signal_aspect_wake
+
+        signal_aspect_wake()
+
+        assert (_config.nexus_config_dir() / ASPECT_WAKE_FILENAME).exists()
+
+    def test_oserror_is_swallowed_not_raised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Best-effort: a touch failure must never fail the enqueue that
+        just succeeded."""
+        from nexus.aspect_worker import signal_aspect_wake
+
+        def _boom(self, *a, **k):  # noqa: ANN001, ARG001
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "touch", _boom)
+
+        signal_aspect_wake(tmp_path / "cfg")  # must not raise
+
+
+class TestWaitForWakeOrTimeout:
+    """nexus-59611 stage 2: AspectExtractionWorker._wait_for_wake_or_timeout
+    is the consumer half of the wake mechanism. WAKE_CHECK_INTERVAL_S is
+    monkeypatched down in this class so these tests observe real (but tiny)
+    elapsed time rather than burning real multi-second sleeps."""
+
+    @pytest.fixture(autouse=True)
+    def _fast_tick(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import nexus.aspect_worker as mod
+        monkeypatch.setattr(mod, "WAKE_CHECK_INTERVAL_S", 0.02)
+
+    @staticmethod
+    def _worker():
+        from nexus.aspect_worker import AspectExtractionWorker
+
+        w = AspectExtractionWorker()
+        # Baseline as start() would, without spawning the run-loop thread.
+        w._last_wake_mtime = w._read_wake_mtime()
+        return w
+
+    def test_times_out_when_no_wake(self) -> None:
+        w = self._worker()
+        started = time.monotonic()
+        w._wait_for_wake_or_timeout(0.1)
+        assert time.monotonic() - started >= 0.1
+
+    def test_returns_early_on_new_touch_during_wait(self) -> None:
+        import threading
+
+        from nexus.aspect_worker import signal_aspect_wake
+
+        w = self._worker()
+        timer = threading.Timer(0.05, signal_aspect_wake)
+        timer.start()
+        try:
+            started = time.monotonic()
+            w._wait_for_wake_or_timeout(5.0)
+            elapsed = time.monotonic() - started
+        finally:
+            timer.cancel()
+        assert elapsed < 1.0  # woke early, nowhere near the 5s timeout
+
+    def test_touch_before_baseline_does_not_cause_spurious_wake(self) -> None:
+        """A wake that landed BEFORE the baseline was captured (e.g. a stale
+        touch from before start()) must not fire the very first wait — it
+        is already the remembered baseline, not a new change."""
+        from nexus.aspect_worker import signal_aspect_wake
+
+        signal_aspect_wake()  # touch BEFORE the worker baselines
+        w = self._worker()  # baseline captures this touch's mtime
+
+        started = time.monotonic()
+        w._wait_for_wake_or_timeout(0.1)
+        assert time.monotonic() - started >= 0.1  # no spurious immediate wake
+
+    def test_stop_event_interrupts_wait_immediately(self) -> None:
+        import threading
+
+        w = self._worker()
+        timer = threading.Timer(0.05, w._stop_event.set)
+        timer.start()
+        try:
+            started = time.monotonic()
+            w._wait_for_wake_or_timeout(5.0)
+            elapsed = time.monotonic() - started
+        finally:
+            timer.cancel()
+        assert elapsed < 1.0
+
+    def test_explicit_config_dir_is_the_wake_source(self, tmp_path: Path) -> None:
+        """nexus-59611 stage 2 (review): a worker bound to an explicit
+        config_dir (the daemon's --config-dir) wakes on a touch THERE and
+        ignores the ambient dir, which is where a producer running without
+        the flag would write."""
+        import threading
+
+        from nexus.aspect_worker import AspectExtractionWorker, signal_aspect_wake
+
+        cfg = tmp_path / "cfg"
+        w = AspectExtractionWorker(config_dir=cfg)
+        w._last_wake_mtime = w._read_wake_mtime()
+
+        # Ambient touch: not our dir, must NOT wake.
+        signal_aspect_wake()
+        started = time.monotonic()
+        w._wait_for_wake_or_timeout(0.1)
+        assert time.monotonic() - started >= 0.1
+
+        # Touch in the bound dir: wakes.
+        timer = threading.Timer(0.05, signal_aspect_wake, args=(cfg,))
+        timer.start()
+        try:
+            started = time.monotonic()
+            w._wait_for_wake_or_timeout(5.0)
+            elapsed = time.monotonic() - started
+        finally:
+            timer.cancel()
+        assert elapsed < 1.0
+
+    def test_bind_config_dir_rebaselines(self, tmp_path: Path) -> None:
+        """A touch that predates bind_config_dir() is the baseline, not a wake."""
+        from nexus.aspect_worker import AspectExtractionWorker, signal_aspect_wake
+
+        cfg = tmp_path / "cfg"
+        signal_aspect_wake(cfg)
+        w = AspectExtractionWorker()
+        w.bind_config_dir(cfg)
+        assert w._wake_config_dir() == cfg
+        started = time.monotonic()
+        w._wait_for_wake_or_timeout(0.1)
+        assert time.monotonic() - started >= 0.1
+
+    def test_a_touch_wakes_exactly_once(self) -> None:
+        """After a wake fires one wait early, the NEXT wait (a fresh call)
+        must not immediately re-fire on that same, now-stale touch."""
+        from nexus.aspect_worker import signal_aspect_wake
+
+        w = self._worker()
+        signal_aspect_wake()
+        w._wait_for_wake_or_timeout(5.0)  # consumes the touch, returns early
+
+        started = time.monotonic()
+        w._wait_for_wake_or_timeout(0.1)  # no NEW touch -> must time out
+        assert time.monotonic() - started >= 0.1
+
+
+class TestWaitForWakeOrTimeoutBackstopDeadline:
+    """The backstop's deadline arithmetic under a fake clock — proves
+    DEFAULT_POLL_INTERVAL_S is genuinely waited out (no wake, no stop)
+    without burning 300 real seconds."""
+
+    def test_backstop_still_fires_at_full_poll_interval(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import AspectExtractionWorker, DEFAULT_POLL_INTERVAL_S
+
+        fake_now = [0.0]
+        monkeypatch.setattr(mod.time, "monotonic", lambda: fake_now[0])
+
+        class _FakeEvent:
+            def wait(self, timeout: float) -> bool:
+                fake_now[0] += timeout
+                return False
+
+        w = AspectExtractionWorker()
+        w._last_wake_mtime = w._read_wake_mtime()
+        w._stop_event = _FakeEvent()
+
+        w._wait_for_wake_or_timeout(DEFAULT_POLL_INTERVAL_S)
+
+        assert fake_now[0] >= DEFAULT_POLL_INTERVAL_S
+        # Ticked in WAKE_CHECK_INTERVAL_S-sized steps, not one big sleep.
+        assert fake_now[0] < DEFAULT_POLL_INTERVAL_S + mod.WAKE_CHECK_INTERVAL_S
+
+
 class TestDefaultPollInterval:
-    """nexus-59611 stop-loss: the idle ``claim_batch`` poll is the dominant
-    edge load (measured 2026-08-28 by conexus: 99.05% of claim_batch
-    responses empty over 6h, ~45k requests/day, ~80% of ALL edge traffic,
-    against an arrival rate of ~16 items/hour). There is no server-held
-    long poll and no env/config override, so the constructor default IS
-    the production cadence. Pin it on every entry point that can build a
-    worker, and pin the floor with the measurement, so a future
-    "make it snappier" edit has to argue with the numbers.
+    """nexus-59611: the idle ``claim_batch`` poll is the dominant edge load
+    (measured 2026-08-28 by conexus: 99.05% of claim_batch responses empty
+    over 6h, ~45k requests/day, ~80% of ALL edge traffic, against an arrival
+    rate of ~16 items/hour). There is no server-held long poll and no
+    env/config override, so the constructor default IS the production
+    cadence. Pin it on every entry point that can build a worker, and pin
+    the floor with the measurement, so a future "make it snappier" edit has
+    to argue with the numbers.
+
+    Stage 2 (2026-08-29) restates the floor: this constant is now a
+    BACKSTOP, not the real-time claim cadence — a same-box producer wakes
+    the worker immediately via the local wake file (see
+    ``TestAspectWakeSignal`` / ``TestWaitForWakeOrTimeout`` below), so
+    ``DEFAULT_POLL_INTERVAL_S`` only needs to be short enough to catch a
+    cross-box arrival or a missed wake, not the real arrival rate.
     """
 
     def test_every_entry_point_shares_one_default(self) -> None:
@@ -1259,13 +1518,15 @@ class TestDefaultPollInterval:
         # The production constructor (RDR-173 leased daemon host).
         assert _default_worker_factory()._poll_interval == DEFAULT_POLL_INTERVAL_S
 
-    def test_default_is_the_stop_loss_cadence(self) -> None:
+    def test_default_is_the_backstop_cadence(self) -> None:
         from nexus.aspect_worker import DEFAULT_POLL_INTERVAL_S
 
-        # 30s cuts ~93% of the measured request volume and still samples
-        # ~8x faster than items arrive. Below this the poll re-becomes the
-        # edge's dominant load; a cut BELOW 30 needs a fresh measurement.
-        assert DEFAULT_POLL_INTERVAL_S >= 30.0
+        # 300s backstop + local wake (stage 2): same-box arrivals are
+        # claimed near-immediately via the wake file, so the backstop only
+        # has to catch a cross-box arrival or a missed wake — it no longer
+        # needs to track the real arrival rate. A cut BELOW 300 needs a
+        # fresh measurement showing the wake path is insufficient on its own.
+        assert DEFAULT_POLL_INTERVAL_S >= 300.0
         # Explicit overrides still work — tests drive the loop at 50 ms.
         from nexus.aspect_worker import AspectExtractionWorker
 

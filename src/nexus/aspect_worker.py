@@ -97,18 +97,54 @@ _RETRY_MAX_ATTEMPTS: int = 5          # terminal mark_failed once retry_count >=
 _RETRY_BASE_SECONDS: float = 30.0     # interval = base * 2**retry_count, jittered
 _RETRY_JITTER_FRACTION: float = 0.2   # ±20% — spreads re-claims when a wide outage clears
 
-#: Idle ``claim_batch`` poll cadence (nexus-59611 stop-loss, 2026-08-28). This
-#: default IS the production cadence: the leased daemon host builds the worker
-#: zero-arg, there is no env/config override, and the engine holds no long
-#: poll (``AspectHandler`` reads ``limit`` and answers immediately). At the
-#: prior 2 s the poll was ~45k requests/day, ~80% of ALL edge traffic, 99.05%
-#: of them empty (conexus edge measurement, conexus-ppwe) against an arrival
-#: rate of ~16 items/hour — ~115x over-sampled. 30 s cuts ~93% of that and
-#: still samples ~8x faster than items arrive; extraction is async (~26 s
-#: median per doc) so a <=30 s claim latency is invisible to any consumer.
-#: Deliberately NOT a knob: stage 2 of nexus-59611 is event-driven wake-up
-#: (producer and consumer are both in nexus), which this forecloses nothing of.
-DEFAULT_POLL_INTERVAL_S: float = 30.0
+#: Idle ``claim_batch`` poll BACKSTOP cadence (nexus-59611 stage 2,
+#: 2026-08-29). This default IS the production cadence: the leased daemon
+#: host builds the worker zero-arg, there is no env/config override, and the
+#: engine holds no long poll (``AspectHandler`` reads ``limit`` and answers
+#: immediately). Real-time claiming for the arrivals that matter no longer
+#: depends on this interval: the producer and consumer are both nexus, and
+#: for a same-box enqueue (the common case — the indexing box's own
+#: aspect-worker daemon claims what it just enqueued) the producer touches
+#: the local wake file (``signal_aspect_wake``) after a successful enqueue,
+#: which wakes ``_wait_for_wake_or_timeout`` within one ``WAKE_CHECK_INTERVAL_S``
+#: tick. This constant now covers only the residual cases the wake file
+#: cannot: cross-box arrivals (cloud, a different box's enqueue) and a missed
+#: or lost wake signal. At the stage-1 30 s the poll was still ~93% empty
+#: (conexus edge measurement, conexus-ppwe) against an arrival rate of ~16
+#: items/hour; 300 s removes nearly all of the remaining self-generated edge
+#: load while the wake path keeps same-box claim latency effectively
+#: immediate. Deliberately NOT a knob.
+DEFAULT_POLL_INTERVAL_S: float = 300.0
+
+#: Filename of the local same-box wake signal, under ``nexus_config_dir()``.
+#: No wire change, no LISTEN/NOTIFY: a producer that just enqueued a row
+#: touches this file; the worker's poll wait notices the mtime change.
+ASPECT_WAKE_FILENAME: str = "aspect_wake"
+
+#: How often the poll wait re-checks the wake file's mtime (and the stop
+#: event), in seconds. Bounds worst-case wake latency and stop-signal
+#: latency to one tick regardless of ``poll_interval``.
+WAKE_CHECK_INTERVAL_S: float = 1.0
+
+
+def signal_aspect_wake(config_dir: Path | None = None) -> None:
+    """Touch the local wake file so a same-box aspect worker's poll wait
+    returns within one ``WAKE_CHECK_INTERVAL_S`` tick instead of waiting out
+    ``DEFAULT_POLL_INTERVAL_S`` (nexus-59611 stage 2).
+
+    Best-effort by design: producer and consumer are both nexus and, for the
+    arrivals that matter, on the same box — but a cross-box arrival (cloud,
+    a different box's enqueue) has no local worker to wake and is covered by
+    the backstop poll instead, so a failure to touch here is never fatal to
+    the caller. Any ``OSError`` (missing/unwritable config dir, races) is
+    logged at debug and swallowed; it must never fail an enqueue.
+    """
+    path = (config_dir if config_dir is not None else _config.nexus_config_dir()) / ASPECT_WAKE_FILENAME
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    except OSError as exc:
+        _log.debug("aspect_wake_signal_failed", error=str(exc))
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -295,7 +331,14 @@ class AspectExtractionWorker:
         stale_timeout_seconds: int = 60,
         batch_size: int = _DEFAULT_BATCH_SIZE,
         on_self_fault: Callable[[str], None] | None = None,
+        config_dir: Path | None = None,
     ) -> None:
+        # nexus-59611 stage 2 (review): the wake file lives under the config
+        # dir the PRODUCER writes to. A daemon started with --config-dir X
+        # diverges from the ambient dir by design, so the host binds its own
+        # dir here (or via bind_config_dir); None means the ambient
+        # nexus_config_dir(), which is the loose in-process worker's case.
+        self._config_dir: Path | None = config_dir
         self._poll_interval = poll_interval
         self._stale_timeout_seconds = stale_timeout_seconds
         self._batch_size = batch_size
@@ -309,6 +352,10 @@ class AspectExtractionWorker:
         self._on_self_fault: Callable[[str], None] | None = on_self_fault
         self._self_fault: str | None = None
         self._self_fault_lock = threading.Lock()
+        # nexus-59611 stage 2: mtime baseline for the local wake file, so a
+        # touch is consumed exactly once. None means "no wake file observed
+        # yet" (absent, or not yet baselined by start()).
+        self._last_wake_mtime: float | None = None
 
     def set_self_fault_handler(self, handler: Callable[[str], None] | None) -> None:
         """Install the host's stand-down hook after construction.
@@ -336,6 +383,11 @@ class AspectExtractionWorker:
             # the NEXT stand-down entirely (the latch also gates _stop_event).
             with self._self_fault_lock:
                 self._self_fault = None
+            # nexus-59611 stage 2: baseline the wake file's current mtime (or
+            # None if absent) so a stale touch from BEFORE this start() does
+            # not fire the very first wait — only a touch AFTER this point
+            # counts as a wake.
+            self._last_wake_mtime = self._read_wake_mtime()
             self._thread = threading.Thread(
                 target=self._run_loop,
                 name="aspect-extraction-worker",
@@ -396,6 +448,51 @@ class AspectExtractionWorker:
         """
         return self._stop_event.is_set()
 
+    def bind_config_dir(self, config_dir: Path) -> None:
+        """Point the wake-file read at *config_dir* (the host daemon's own
+        dir) and re-baseline so a touch that predates the bind is not
+        mistaken for a fresh wake (nexus-59611 stage 2)."""
+        self._config_dir = Path(config_dir)
+        self._last_wake_mtime = self._read_wake_mtime()
+
+    def _wake_config_dir(self) -> Path:
+        return self._config_dir if self._config_dir is not None else _config.nexus_config_dir()
+
+    def _read_wake_mtime(self) -> float | None:
+        """Current mtime of the local wake file, or ``None`` if absent."""
+        try:
+            return (self._wake_config_dir() / ASPECT_WAKE_FILENAME).stat().st_mtime
+        except OSError:
+            return None
+
+    def _wait_for_wake_or_timeout(self, timeout: float) -> None:
+        """Sleep up to *timeout* seconds, returning early on ``stop()`` /
+        ``stop_claiming()`` or a NEW touch of the local wake file
+        (nexus-59611 stage 2).
+
+        Checked every ``WAKE_CHECK_INTERVAL_S`` so the stop signal keeps
+        interrupting the wait promptly (unchanged contract — the stop event
+        alone already wakes ``Event.wait`` immediately when set from another
+        thread; the tick exists for the wake-file check, which has no
+        cross-thread event to wait on). ``_last_wake_mtime`` is instance
+        state, not re-baselined per call: a touch is consumed exactly
+        once — a touch that landed before this wait began is already the
+        remembered baseline and does not fire, and a touch observed mid-wait
+        both wakes THIS call and becomes the new baseline so it cannot also
+        wake the NEXT call.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            if self._stop_event.wait(min(WAKE_CHECK_INTERVAL_S, remaining)):
+                return
+            current = self._read_wake_mtime()
+            if current != self._last_wake_mtime:
+                self._last_wake_mtime = current
+                return
+
     def _run_loop(self) -> None:
         """Drain loop. Runs until ``_stop_event`` is set.
 
@@ -431,7 +528,7 @@ class AspectExtractionWorker:
             # cannot reach (workers resident in other nx-mcp processes). The
             # worker resumes on its next cycle once the sentinel clears (UNLOCK).
             if _migration_in_progress():
-                self._stop_event.wait(self._poll_interval)
+                self._wait_for_wake_or_timeout(self._poll_interval)
                 continue
             try:
                 # RDR-128 P3 (nexus-sbxbe.3): route the claim through the
@@ -466,11 +563,11 @@ class AspectExtractionWorker:
                 ]
             except Exception:  # noqa: BLE001 — best-effort claim loop: must not crash worker thread, logged + retried
                 _log.warning("aspect_worker_claim_failed", exc_info=True)
-                self._stop_event.wait(self._poll_interval)
+                self._wait_for_wake_or_timeout(self._poll_interval)
                 continue
 
             if not rows:
-                self._stop_event.wait(self._poll_interval)
+                self._wait_for_wake_or_timeout(self._poll_interval)
                 continue
 
             if len(rows) == 1:

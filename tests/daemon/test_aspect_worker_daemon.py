@@ -68,6 +68,29 @@ def _registry(config_dir: Path) -> ServiceRegistry:
     return ServiceRegistry(dir=config_dir, tier=_ASPECT_TIER, ttl=ttl_for_tier(_ASPECT_TIER))
 
 
+class _BindingFakeWorker(_FakeWorker):
+    """A fake exposing the wake-file binding hook (nexus-59611 stage 2)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bound: Path | None = None
+
+    def bind_config_dir(self, config_dir: Path) -> None:
+        self.bound = config_dir
+
+
+def test_start_binds_the_daemons_config_dir_to_the_worker(tmp_path: Path) -> None:
+    """The wake file is read from the daemon's --config-dir, not the ambient
+    one: start() hands the worker the dir it was constructed with."""
+    worker = _BindingFakeWorker()
+    d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker, queue_factory=_NoopQueue)
+    d.start()
+    try:
+        assert worker.bound == tmp_path
+    finally:
+        d.stop()
+
+
 def test_start_publishes_per_tenant_lease(tmp_path: Path) -> None:
     worker = _FakeWorker()
     d = AspectWorkerDaemon(config_dir=tmp_path, tenant="tenant-A", worker_factory=lambda: worker, queue_factory=_NoopQueue)
