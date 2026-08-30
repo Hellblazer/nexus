@@ -379,7 +379,15 @@ from __future__ import annotations
 #: engine below this floor lacks the ttl_days schema those clients bind.
 #: Schema note: v0.1.84's renames are forward-only — a v0.1.83 image cannot
 #: write against the walked schema.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 89)
+#: ->(0,1,91) 2026-08-30 for 7.24.0 (nexus-zu9ln, paired): hygiene-001-not-null
+#: (13 changesets: identity columns NOT NULL, orphan aspect rows and dead plans
+#: deleted at the walk, plan_ttl_sweep) + nexus-4tosp stall events. NOT
+#: additive: the engine 400s a blank doc_id at aspects upsert/enqueue, 409s a
+#: NULL plan verb, and the aspects census route is gone; this client raises
+#: before the wire and no longer has the census verb. v0.1.90 was burned on a
+#: stale native-smoke.sh probe and ships to nobody. PITR fork-walk CLEAN,
+#: every NOTICE count matched; --acquire PASSED on the published bytes.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 91)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

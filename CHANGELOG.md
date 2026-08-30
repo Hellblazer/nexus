@@ -6,6 +6,97 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.24.0] - 2026-08-30
+
+Paired release with `engine-service-v0.1.91` (tagged on `762b9d7ba`;
+`REQUIRED_ENGINE_VERSION` bumped in this release, deploy fires at the
+client-tag push). The engine tag carries the hygiene-001 Liquibase changeset
+(`hygiene-001-not-null.xml`, 13 changesets) and per-tenant data-token sweep
+stall detection (nexus-4tosp). The changeset was rehearsed on a PITR fork of
+the managed service before this release: every RAISE NOTICE count matched the
+prediction (554 orphan aspect rows deleted, 260 + 165 timestamps and 22,304
+manifest `chunk_index` values backfilled, 29 expired plans deleted, 0
+legacy-width rows). `engine-service-v0.1.90` was burned on a stale
+release-smoke probe and ships to nobody.
+
+NOT additive: a 7.23.0 client against a 0.1.91 engine logs a best-effort 400
+on aspect enqueues for `store_put`-origin documents and gets a 404 from the
+retired census route, so the managed engine goes live at this release's tag
+push (nexus-1emxn).
+
+No plugin-surface change; `conexus/PENDING_RELEASE.md` was already empty.
+
+### Changed
+
+- **Identity columns are NOT NULL at the schema** (nexus-zu9ln, hygiene-001).
+  `document_aspects.doc_id`/`source_uri`, `aspect_extraction_queue.doc_id`,
+  `document_highlights.source_uri`/`collection`, the `catalog_documents`
+  identity columns, `chunks.metadata`, `catalog_collections.created_at`
+  (stamped on insert for the first time), `catalog_links.created_at`,
+  `catalog_document_chunks.chunk_index` (a BEFORE INSERT trigger fills it
+  from `position`), `relevance_log.collection`, `taxonomy_centroids.label`
+  and `plans.verb`. The walk deletes what cannot be attributed (aspect rows
+  with no document, TTL-expired and verb-less plans) and backfills the rest,
+  each step counted in a RAISE NOTICE; legacy-width chash rows are deleted,
+  never rekeyed. The engine returns 400 on a blank `doc_id` at
+  `POST /v1/aspects/upsert` and `queue/enqueue{,_many}` and 409 on a NULL
+  verb at `POST /v1/plans/save`; `HttpDocumentAspectsStore.upsert` and
+  `HttpPlanLibrary.save_plan` raise before the wire, and the aspect enqueue
+  hook resolves a blank `doc_id` through the catalog or skips loudly. Expired
+  plans are swept by the engine on its 6 h cycle (`plan_ttl_sweep`); reads
+  already filtered them, nothing deleted them.
+- **The aspect worker wakes within 1 s of an enqueue** (nexus-59611 stage 2).
+  Every enqueue touches `<config_dir>/aspect_wake`; the worker waits on that
+  file's mtime and the edge poll becomes a 300 s backstop for cross-box
+  arrivals. The daemon binds its own `--config-dir` to the worker so the wake
+  file is read where the producer writes it. No env or config knob.
+- **Supervisor readiness is migration-aware** (GH #1486, nexus-8vp0i). The
+  engine runs Liquibase before it binds HTTP, and the fixed 60 s readiness
+  timeout killed it mid-changeset on any longer migration, leaving
+  `databasechangeloglock` held by a dead pid and a launchd respawn loop.
+  Readiness is now a state machine fed by the engine log, a
+  `pg_stat_activity` probe and `/health`: 60 s from the last progress event
+  outside a migration, 600 s of no progress inside one, 3600 s when the probe
+  is unavailable. A stale lock is released before every spawn and after a
+  kill the supervisor performed, gated on no live engine process for the
+  config dir and no executing backend, bundled cluster only.
+
+### Fixed
+
+- **Orphan aspect rows** (nexus-kkumv, nexus-r0kum, nexus-poigc). Every
+  orphan was a `doc_id`-NULL row the fk-001 cascade cannot reach. The worker's
+  row and batch paths and `nx enrich aspects` now attribute `source_uri` from
+  the catalog document and refuse (`unattributable_identity`) rather than
+  upsert a row that can never be found again; `nx catalog
+  backfill-source-uri [--apply]` re-derives `chroma://` source URIs for
+  file-routed collections and prints a per-collection census; registration
+  canonicalizes `/.claude/worktrees/<agent>/<rel>` to the primary checkout's
+  path at the curator bulk hooks. The one-time sweep ran live before the
+  schema change closed the class (835 -> 554 rows, the remainder deleted by
+  hygiene-001 step 1).
+- **`memory_put`'s docstring states the 30-day default TTL; `memory_get` and
+  the put confirmation show the stored TTL** (nexus-sv152).
+- **Release smoke probes run in the unit suite** (nexus-cm5km).
+  `native-smoke.sh`'s two real-Python-client probes are files under
+  `service/smoke-probes/` executed by the script and by
+  `tests/test_native_smoke_client_probes.py` against the substrate engine, so
+  a probe that drifts from the client contract fails the fast loop instead of
+  the release workflow (how v0.1.90 burned).
+
+### Removed
+
+- **`nx enrich aspects-without-catalog` and
+  `GET /v1/aspects/list_without_catalog_document`** (nexus-zu9ln; the verb
+  shipped in 7.23.0 for nexus-mlu3k). With `document_aspects.doc_id` NOT NULL
+  under the fk-001 cascade an orphan aspect row cannot exist, so the census
+  has nothing to count. A 7.23.0 client's verb exits 2 naming the missing
+  route against a 0.1.91 engine.
+
+### Engine
+
+- `REQUIRED_ENGINE_VERSION` -> (0, 1, 91) (`PINNED_SERVICE_TAG` moves with
+  it). `engine-service-v0.1.91` = `762b9d7ba`; v0.1.90 is a skipped version.
+
 ## [7.23.0] - 2026-08-29
 
 Paired release with `engine-service-v0.1.89` (tagged on `55be868db`;
