@@ -44,6 +44,7 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "CHROMA_IDENTITY_FIELD",
+    "FILE_ROUTED_PREFIXES",
     "ReadFail",
     "ReadFailReason",
     "ReadOk",
@@ -61,6 +62,18 @@ __all__ = [
 
 # ── URI construction (RDR-096 P2.1) ──────────────────────────────────────────
 
+
+#: Collection prefixes whose ``uri_for`` identity routes to ``file://``
+#: (RDR-108: document identity is ``source_uri``, a filesystem path).
+#: Every other prefix (``knowledge__`` and any future one) routes to
+#: ``chroma://`` — the internal store_put-origin marker
+#: (``nexus.commands.catalog_cmds.reconcile_stale._STORE_PUT_URI_PREFIX``),
+#: unrelated to the retired ChromaDB dependency (RDR-155 P4b). Single
+#: source of truth so :func:`uri_for` and every caller that needs to
+#: know "does this collection get a file:// identity" (nexus-poigc's
+#: backfill candidate filter, nexus-r0kum's aspect-writer attribution
+#: guard) cannot silently diverge from each other.
+FILE_ROUTED_PREFIXES: tuple[str, ...] = ("rdr__", "docs__", "code__")
 
 
 _unanchored_relative_warned: set[str] = set()
@@ -139,7 +152,7 @@ def uri_for(
 
     if not source_path:
         return None
-    if collection.startswith(("rdr__", "docs__", "code__")):
+    if collection.startswith(FILE_ROUTED_PREFIXES):
         # nexus-yg70j defect B / nexus-3e4s: NEVER anchor on the process CWD.
         #
         # `os.path.abspath` on a RELATIVE path calls getcwd(), which makes this

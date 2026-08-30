@@ -886,10 +886,24 @@ def _register_or_lookup_doc_id(
         # normally carry an empty repo_root, so this is a documented
         # residual, not a gap this call site closes on its own.
         from nexus.repo_identity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.repo_identity)
+            canonicalize_worktree_path,
+            is_worktree_or_tempdir_path,
             owner_repo_root_best_effort,
             should_skip_ephemeral_registration,
         )
         _owner_repo_root = owner_repo_root_best_effort(reader, owner)
+        # nexus-kkumv: when the owner's own root is NOT itself worktree/
+        # tempdir-rooted (i.e. NOT the deliberate throwaway-owner
+        # population the guard below exempts), rewrite a worktree-marker
+        # ``fp`` to its primary-repo identity BEFORE the refusal check —
+        # but only when the primary-repo mirror genuinely exists on disk
+        # (mirrors indexer.py's worktree-unique-file precedent). A file
+        # that only exists inside the worktree still falls through to the
+        # refusal below, unchanged.
+        if not is_worktree_or_tempdir_path(_owner_repo_root):
+            _canonical_fp = canonicalize_worktree_path(fp)
+            if _canonical_fp != fp and Path(_canonical_fp).is_file():
+                fp = _canonical_fp
         if should_skip_ephemeral_registration(fp, _owner_repo_root):
             _log.warning(
                 "ephemeral_path_registration_skipped",
@@ -3023,10 +3037,20 @@ def _catalog_markdown_hook(
             # this only stops NEW pollution, not a re-index of something
             # registered before this guard existed.
             from nexus.repo_identity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.repo_identity)
+                canonicalize_worktree_path,
+                is_worktree_or_tempdir_path,
                 owner_repo_root_best_effort,
                 should_skip_ephemeral_registration,
             )
             _owner_repo_root = owner_repo_root_best_effort(reader, owner)
+            # nexus-kkumv: same worktree-to-primary canonicalization as
+            # ``_register_or_lookup_doc_id`` above — only when the owner
+            # root is not itself a deliberate worktree/tempdir throwaway,
+            # and only when the primary-repo mirror exists on disk.
+            if not is_worktree_or_tempdir_path(_owner_repo_root):
+                _canonical_fp = canonicalize_worktree_path(fp)
+                if _canonical_fp != fp and Path(_canonical_fp).is_file():
+                    fp = _canonical_fp
             if should_skip_ephemeral_registration(fp, _owner_repo_root):
                 _log.warning(
                     "ephemeral_path_registration_skipped",

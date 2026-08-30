@@ -1532,6 +1532,31 @@ def _run_extraction(
             # nexus-x1de2 (52): the entry IS the catalog identity — stamp
             # it so the row is attributable (the extractor never sets it).
             record = with_doc_id(record, str(getattr(entry, "tumbler", "") or ""))
+            # nexus-r0kum (review S2): the SAME refusal the worker paths apply —
+            # a file-routed row with no source_uri is unfindable by construction.
+            # The catalog entry IS the identity, so take its source_uri when the
+            # extractor left the field empty; refuse (count, never upsert) only
+            # when the entry cannot supply one either.
+            if not record.source_uri:
+                entry_uri = str(getattr(entry, "source_uri", "") or "")
+                if entry_uri:
+                    record = _dataclasses.replace(record, source_uri=entry_uri)
+            from nexus.aspect_worker import _is_unattributable  # noqa: PLC0415 — deferred import, heavy module (same pattern as the worker paths)
+            if _is_unattributable(record):
+                _log.warning(
+                    "aspect_extract_skip",
+                    uri=source_path,
+                    reason="unattributable_identity",
+                    collection=collection,
+                    extractor_name=extractor_name,
+                )
+                skipped_unreadable += 1
+                by_reason["unattributable_identity"] = by_reason.get("unattributable_identity", 0) + 1
+                click.echo(
+                    f"  [{i}/{len(entries)}] {Path(source_path).name}: "
+                    "skipped (reason=unattributable_identity)"
+                )
+                continue
             try:
                 t2_index_write(
                     lambda t2db, _rec=record: t2db.complete_aspect(
@@ -2168,7 +2193,23 @@ def aspects_show_cmd(tumbler_or_title: str, as_json: bool, field: str) -> None:
     "--json", "as_json", is_flag=True,
     help="Emit the rows and buckets as JSON instead of the human report.",
 )
-def aspects_without_catalog_cmd(limit: int, match_basenames: bool, as_json: bool) -> None:
+@click.option(
+    "--sweep", is_flag=True,
+    help=(
+        "Delete orphaned rows (worktree/tmp-path or missing-on-disk "
+        "file:// rows, plus NULL-source_uri rows), excluding chroma:// "
+        "store_put-origin markers. Re-enqueues a basename-matched live "
+        "canonical document that has no aspect row of its own. Dry-run "
+        "unless --apply."
+    ),
+)
+@click.option(
+    "--apply", "do_apply", is_flag=True,
+    help="Perform the writes --sweep reports (default: dry-run).",
+)
+def aspects_without_catalog_cmd(
+    limit: int, match_basenames: bool, as_json: bool, sweep: bool, do_apply: bool,
+) -> None:
     """Census of aspect rows that no live catalog document claims (nexus-mlu3k).
 
     The engine applies aspects-004's attribution predicate, negated, and
@@ -2183,8 +2224,22 @@ def aspects_without_catalog_cmd(limit: int, match_basenames: bool, as_json: bool
     scan to say whether the same basename IS registered under another URI
     (the URI-normalisation-drift signature).
 
-    Read-only. The engine serves at most 300 rows per call; the verb pages
-    through. Exit 2 when the engine has no such route (older engine) — an
+    Read-only by default. ``--sweep`` (nexus-kkumv) turns the same census
+    into a cleanup pass over two orphan classes, EXCLUDING ``chroma://``
+    rows (the store_put-origin marker, bocft WONTFIX — this verb never
+    touches those): class A is a ``file://`` row whose path sits under a
+    worktree/tmp-dir marker OR no longer exists on disk; class B is a row
+    with NULL ``source_uri`` (nexus-r0kum's unattributable-identity
+    class). Every matching row is deleted; when a LIVE canonical document
+    shares its basename (the ``--match-basenames`` machinery, forced on
+    under ``--sweep``) and carries no aspect row of its own, that document
+    is additionally re-enqueued for extraction. ``--sweep`` alone reports
+    what WOULD happen; pair it with ``--apply`` to perform the writes.
+    Never silent: a delete failure is reported per-row and the command
+    exits non-zero.
+
+    The engine serves at most 300 rows per call; the verb pages through.
+    Exit 2 when the engine has no such route (older engine) — an
     unverifiable census is never reported as empty.
     """
     import os  # noqa: PLC0415 — command-local
@@ -2195,6 +2250,11 @@ def aspects_without_catalog_cmd(limit: int, match_basenames: bool, as_json: bool
 
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
+
+    if do_apply and not sweep:
+        raise click.ClickException("--apply only applies alongside --sweep.")
+    if sweep:
+        match_basenames = True
 
     try:
         with T2Database(default_db_path()) as db:  # boundary-allow: read-only T2 access (RDR-128 P3)
@@ -2229,6 +2289,7 @@ def aspects_without_catalog_cmd(limit: int, match_basenames: bool, as_json: bool
         return text[:7] if len(text) >= 7 else "unknown"
 
     basenames: dict[str, list[str]] = {}
+    uri_to_entry: dict[str, Any] = {}
     if match_basenames:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
@@ -2239,6 +2300,7 @@ def aspects_without_catalog_cmd(limit: int, match_basenames: bool, as_json: bool
             uri = getattr(doc, "source_uri", "") or ""
             if uri:
                 basenames.setdefault(os.path.basename(uri.rstrip("/")), []).append(uri)
+                uri_to_entry[uri] = doc
 
     enriched: list[dict[str, Any]] = []
     for r in rows:
@@ -2255,6 +2317,12 @@ def aspects_without_catalog_cmd(limit: int, match_basenames: bool, as_json: bool
                     u for u in basenames.get(os.path.basename(path), []) if u != uri
                 ]
         enriched.append(e)
+
+    if sweep:
+        _run_aspects_sweep(
+            enriched, basenames, uri_to_entry, apply=do_apply, as_json=as_json,
+        )
+        return
 
     by_scheme = Counter(e["scheme"] for e in enriched)
     tombstoned = sum(1 for e in enriched if e.get("tombstoned_match"))
@@ -2311,6 +2379,184 @@ def aspects_without_catalog_cmd(limit: int, match_basenames: bool, as_json: bool
         )
     if len(enriched) > 10:
         click.echo(f"    … {len(enriched) - 10} more (--json for all)")
+
+
+def _run_aspects_sweep(
+    enriched: "list[dict[str, Any]]",
+    basenames: "dict[str, list[str]]",
+    uri_to_entry: "dict[str, Any]",
+    *,
+    apply: bool,
+    as_json: bool,
+) -> None:
+    """nexus-kkumv sweep: delete the two orphan classes over *enriched*
+    (already-built ``aspects-without-catalog`` rows), excluding
+    ``chroma://`` store_put-origin markers, and re-enqueue a recoverable
+    canonical document where one exists.
+
+    Class A: a ``file://`` row whose path is a worktree/tmp-dir marker
+    OR does not exist on disk. Class B: a row with NULL ``source_uri``
+    (nexus-r0kum's writer-side defect class, cleaned up here for the
+    rows it already produced). Every matching row is deleted; when
+    ``uri_to_entry`` (built from ``--match-basenames``, forced on by the
+    caller) has a LIVE entry sharing the row's basename at a DIFFERENT
+    URI and that entry has no aspect row of its own, it is additionally
+    re-enqueued for extraction.
+
+    ``apply=False`` (the default) reports what would happen without
+    writing. Never silent: a delete failure is counted and reported per
+    row, and the process exits non-zero when any occurred.
+    """
+    import os  # noqa: PLC0415 — command-local
+    from urllib.parse import urlparse  # noqa: PLC0415 — command-local
+
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.repo_identity import is_worktree_or_tempdir_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+
+    class_a: list[dict[str, Any]] = []
+    class_b: list[dict[str, Any]] = []
+    excluded_chroma = 0
+    for e in enriched:
+        sch = e["scheme"]
+        if sch == "chroma":
+            # bocft WONTFIX: the internal store_put-origin marker, never
+            # this sweep's concern.
+            excluded_chroma += 1
+            continue
+        if sch == "file":
+            # Every file:// row in this population is an orphan by
+            # construction — the route returns doc_id-NULL rows with NO
+            # catalog document (by doc_id or byte-equal source_uri), so
+            # nothing can ever claim it and the doc_id NOT NULL step
+            # would have to delete it anyway. Whether the file still
+            # exists on THIS box is reported as a sub-bucket, never used
+            # as a delete trigger (review: a box-local exists() must not
+            # decide deletion on a multi-box tenant). Recovery is what
+            # the file's presence is good for: a canonical document with
+            # the same basename gets re-enqueued.
+            uri = str(e.get("source_uri") or "")
+            path = urlparse(uri).path
+            if is_worktree_or_tempdir_path(path):
+                e["class_a_reason"] = "ephemeral_path"
+            elif not e.get("exists_on_disk"):
+                e["class_a_reason"] = "missing_on_disk"
+            else:
+                e["class_a_reason"] = "present_no_document"
+            class_a.append(e)
+            continue
+        if not (e.get("source_uri") or ""):
+            class_b.append(e)
+        # scheme "other"/"none"-with-content: neither class, left alone.
+
+    def _recovery_target(e: "dict[str, Any]") -> Any | None:
+        uri = str(e.get("source_uri") or "")
+        if not uri:
+            return None  # class B has no URI to derive a basename from
+        basename = os.path.basename(uri.rstrip("/"))
+        for cand_uri in basenames.get(basename, []):
+            if cand_uri == uri:
+                continue
+            entry = uri_to_entry.get(cand_uri)
+            if entry is None:
+                continue
+            try:
+                with T2Database(default_db_path()) as db:  # boundary-allow: read-only existence check before the write decision
+                    existing = db.document_aspects.get_by_doc_id(str(entry.tumbler))
+            except Exception:  # noqa: BLE001 — best-effort recovery probe; a failed check just skips recovery for this row
+                existing = None
+            if existing is None:
+                return entry
+        return None
+
+    orphans = class_a + class_b
+    deleted = 0
+    delete_failures = 0
+    enqueued = 0
+    actions: list[dict[str, Any]] = []
+    for e in orphans:
+        collection = str(e.get("collection") or "")
+        source_path = str(e.get("source_path") or "")
+        cls = "A" if e in class_a else "B"
+        recovery = _recovery_target(e)
+        action: dict[str, Any] = {
+            "collection": collection, "source_path": source_path, "class": cls,
+            "reason": e.get("class_a_reason") if cls == "A" else "null_source_uri",
+        }
+        if recovery is not None:
+            action["recovery_doc_id"] = str(recovery.tumbler)
+        if not apply:
+            action["would_delete"] = True
+            actions.append(action)
+            continue
+        from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
+        try:
+            n = t2_index_write(
+                lambda db, _c=collection, _s=source_path: db.document_aspects.delete(_c, _s)
+            )
+        except Exception as exc:  # noqa: BLE001 — a per-row delete failure must never abort the sweep; counted + reported
+            delete_failures += 1
+            action["delete_error"] = str(exc)
+            actions.append(action)
+            continue
+        deleted += int(n or 0)
+        action["deleted"] = int(n or 0)
+        if recovery is not None:
+            try:
+                t2_index_write(
+                    lambda db, _r=recovery: db.aspect_queue.enqueue(
+                        _r.physical_collection, _r.file_path or _r.source_uri,
+                        content="", doc_id=str(_r.tumbler),
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — enqueue is a best-effort recovery bonus; the delete already succeeded
+                action["enqueue_error"] = str(exc)
+            else:
+                enqueued += 1
+                action["enqueued"] = True
+        actions.append(action)
+
+    report = {
+        "apply": apply,
+        "class_a": len(class_a),
+        "class_a_by_reason": {
+            k: sum(1 for e in class_a if e.get("class_a_reason") == k)
+            for k in ("ephemeral_path", "missing_on_disk", "present_no_document")
+        },
+        "class_b": len(class_b),
+        "excluded_store_put_origin_marker": excluded_chroma,
+        "deleted": deleted,
+        "delete_failures": delete_failures,
+        "enqueued": enqueued,
+        "actions": actions,
+    }
+    if as_json:
+        click.echo(json.dumps(report, indent=2, default=str))
+    else:
+        verb = "Deleted" if apply else "Would delete"
+        click.echo(
+            f"{verb} {len(orphans)} orphan row(s) "
+            f"(class A: {len(class_a)}, class B: {len(class_b)}, "
+            f"excluded store_put-origin markers: {excluded_chroma})"
+        )
+        if apply:
+            click.echo(f"  deleted: {deleted}, delete failures: {delete_failures}, re-enqueued: {enqueued}")
+        else:
+            would_enqueue = sum(1 for a in actions if "recovery_doc_id" in a)
+            click.echo(f"  would additionally re-enqueue: {would_enqueue}")
+            click.echo("Re-run with --apply to perform the writes.")
+        for a in actions[:10]:
+            flag = ""
+            if a.get("recovery_doc_id"):
+                flag = f"  [recovery -> {a['recovery_doc_id']}{'  enqueued' if a.get('enqueued') else ''}]"
+            if a.get("delete_error"):
+                flag = f"  [DELETE FAILED: {a['delete_error']}]"
+            click.echo(f"    {a['class']}  {a['collection']}  {a['source_path']}{flag}")
+        if len(actions) > 10:
+            click.echo(f"    … {len(actions) - 10} more (--json for all)")
+
+    if delete_failures:
+        raise click.exceptions.Exit(1)
 
 
 @enrich.command(name="aspects-list")

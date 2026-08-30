@@ -692,10 +692,21 @@ def _catalog_pdf_hook(
             # unless this owner's own repo_root is itself rooted there.
             # See ``nexus.repo_identity.should_skip_ephemeral_registration``.
             from nexus.repo_identity import (  # noqa: PLC0415 - circular-dep avoidance (nexus.repo_identity)
+                canonicalize_worktree_path,
+                is_worktree_or_tempdir_path,
                 owner_repo_root_best_effort,
                 should_skip_ephemeral_registration,
             )
             _owner_repo_root = owner_repo_root_best_effort(reader, owner)
+            # nexus-kkumv: rewrite a worktree-marker file_path_str to its
+            # primary-repo identity before the refusal check — only when
+            # the owner root is not itself a deliberate worktree/tempdir
+            # throwaway AND the primary-repo mirror exists on disk.
+            # Mirrors doc_indexer.py's identical guard.
+            if not is_worktree_or_tempdir_path(_owner_repo_root):
+                _canonical_fp = canonicalize_worktree_path(file_path_str)
+                if _canonical_fp != file_path_str and Path(_canonical_fp).is_file():
+                    file_path_str = _canonical_fp
             if should_skip_ephemeral_registration(file_path_str, _owner_repo_root):
                 _log.warning(
                     "ephemeral_path_registration_skipped",

@@ -82,6 +82,100 @@ def test_enrich_gap_fill_attributes_the_catalog_entry():
     assert "asdict(_rec)" in src  # the stamped record is what gets completed
 
 
+# ── nexus-r0kum: resolve-or-refuse a file-routed row with no source_uri ────
+
+
+class _FakeEntry:
+    def __init__(self, physical_collection: str, source_uri: str):
+        self.physical_collection = physical_collection
+        self.source_uri = source_uri
+
+
+class _FakeCatalog:
+    def __init__(self, entries: dict[str, _FakeEntry]):
+        self._entries = entries
+
+    def by_doc_id(self, doc_id: str):
+        return self._entries.get(doc_id)
+
+
+def test_attributed_resolves_source_uri_for_file_routed_row_via_doc_id(monkeypatch):
+    """The rdr-frontmatter-v1 writer path: source_path is a T3 chash (not
+    a filesystem path), so uri_for correctly returns None for it. When
+    the queue row carries a resolvable catalog tumbler, its OWN
+    source_uri is the real identity."""
+    monkeypatch.setattr(
+        aspect_worker, "_resolve_catalog_reader",
+        lambda: _FakeCatalog({"1.2.3": _FakeEntry("rdr__x", "file:///abs/rdr-1.md")}),
+    )
+    record = _record(
+        collection="rdr__x", source_path="7e00d7d567d326ec6a6b595a4fbf12fc",
+        source_uri=None,
+    )
+    row = dataclasses.make_dataclass("Row", [("doc_id", str)])("1.2.3")
+    attributed = aspect_worker._attributed(record, row)
+    assert attributed.doc_id == "1.2.3"
+    assert attributed.source_uri == "file:///abs/rdr-1.md"
+
+
+def test_attributed_leaves_non_file_routed_collection_uri_alone(monkeypatch):
+    """knowledge__ rows are attributed by title, not source_uri — a
+    missing source_uri there is not this bead's defect class and must
+    never trigger a catalog lookup."""
+    calls: list[str] = []
+
+    def _boom_reader():
+        calls.append("called")
+        raise AssertionError("must not resolve the catalog for a non-file-routed collection")
+
+    monkeypatch.setattr(aspect_worker, "_resolve_catalog_reader", _boom_reader)
+    record = _record(collection="knowledge__x", source_uri=None)
+    row = dataclasses.make_dataclass("Row", [("doc_id", str)])("1.2.3")
+    attributed = aspect_worker._attributed(record, row)
+    assert attributed.source_uri is None
+    assert calls == []
+
+
+def test_attributed_cross_collection_mismatch_is_refused(monkeypatch):
+    """A resolvable tumbler belonging to a DIFFERENT collection must
+    never re-point this row's source_uri at it."""
+    monkeypatch.setattr(
+        aspect_worker, "_resolve_catalog_reader",
+        lambda: _FakeCatalog({"1.2.3": _FakeEntry("rdr__other", "file:///abs/other.md")}),
+    )
+    record = _record(collection="rdr__x", source_uri=None)
+    row = dataclasses.make_dataclass("Row", [("doc_id", str)])("1.2.3")
+    attributed = aspect_worker._attributed(record, row)
+    assert attributed.source_uri is None
+
+
+def test_is_unattributable_true_for_file_routed_missing_uri():
+    rec = _record(collection="rdr__x", source_uri=None, doc_id="")
+    assert aspect_worker._is_unattributable(rec) is True
+
+
+def test_is_unattributable_false_once_source_uri_resolved():
+    rec = _record(collection="rdr__x", source_uri="file:///abs/rdr-1.md", doc_id="1.2.3")
+    assert aspect_worker._is_unattributable(rec) is False
+
+
+def test_is_unattributable_false_for_non_file_routed_collection():
+    rec = _record(collection="knowledge__x", source_uri=None, doc_id="")
+    assert aspect_worker._is_unattributable(rec) is False
+
+
+def test_worker_completion_paths_refuse_unattributable_rows():
+    """Wiring pin, mirroring test_worker_completion_paths_attribute_the_
+    queue_row above: both completion paths must check _is_unattributable
+    and route a positive to a terminal mark_failed(..., error=
+    "unattributable_identity") instead of completing an unfindable row."""
+    batch = inspect.getsource(aspect_worker.AspectExtractionWorker._process_batch)
+    single = inspect.getsource(aspect_worker.AspectExtractionWorker._process_row)
+    for name, src in (("_process_batch", batch), ("_process_row", single)):
+        assert "_is_unattributable(attributed)" in src, f"{name} must refuse an unattributable row"
+        assert "unattributable_identity" in src, f"{name} must mark_failed with the named reason"
+
+
 @pytest.fixture
 def store(monkeypatch):
     posted: list[dict] = []

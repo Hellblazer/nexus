@@ -94,6 +94,46 @@ def is_worktree_or_tempdir_path(path_str: str) -> bool:
     return path_str.startswith(_TEMP_DIR_PREFIXES)
 
 
+def canonicalize_worktree_path(path_str: str) -> str:
+    """Rewrite a Claude Code agent-worktree path to its primary-repo form.
+
+    nexus-kkumv prevention half. A worktree lives at
+    ``<primary>/.claude/worktrees/<agent>/<rel>`` — a git worktree
+    nested INSIDE the repo it was spun from. A bulk indexing hook that
+    registers a document by its raw on-disk absolute path (the curator-
+    owner call sites in ``doc_indexer.py``/``pipeline_stages.py``, whose
+    owner carries an empty ``repo_root`` by design and so never trips
+    :func:`should_skip_ephemeral_registration`'s owner-root exception)
+    mints a catalog identity that points at the worktree instead of the
+    primary checkout. Once the worktree is torn down that row orphans
+    permanently — the 133-row ``.claude/worktrees/agent-*`` class in the
+    nexus-mlu3k census.
+
+    Returns *path_str* unchanged when it carries no worktree marker.
+    When it does, returns ``<primary-root>/<rel>`` — *primary-root* is
+    everything before ``/.claude/worktrees/`` and *rel* is everything
+    after the worktree's own agent-directory segment (the first path
+    component past the marker). A worktree-root path with no ``rel``
+    (nothing past the agent segment) returns the bare primary root.
+
+    Pure path arithmetic — never touches the filesystem or asserts the
+    rewritten path exists. Callers that must not register a document
+    under a primary-repo path with no on-disk mirror there (a
+    worktree-unique draft) check ``Path(result).is_file()`` themselves,
+    mirroring the existing ``indexer.py`` precedent for the same
+    hazard on the ``nx index repo`` path.
+    """
+    idx = path_str.find(_WORKTREE_MARKER)
+    if idx == -1:
+        return path_str
+    primary_root = path_str[:idx]
+    rest = path_str[idx + len(_WORKTREE_MARKER):]
+    _agent, _sep, rel = rest.partition("/")
+    if not rel:
+        return primary_root
+    return f"{primary_root}/{rel}"
+
+
 def owner_repo_root_best_effort(reader: Any, owner: Any) -> str:
     """Best-effort fetch of *owner*'s ``repo_root`` from *reader*.
 

@@ -696,7 +696,26 @@ class AspectExtractionWorker:
                         row.collection, row.source_path,
                     )
                     continue
-                db.complete_aspect(dataclasses.asdict(_attributed(record, row)))
+                attributed = _attributed(record, row)
+                if _is_unattributable(attributed):
+                    # nexus-r0kum: refuse to upsert a file-routed row with
+                    # no source_uri — it can never be attributed by
+                    # aspects-004 and is invisible to search_aspect_scoped
+                    # by construction. Terminal fail (never retried
+                    # automatically): the identity gap is in the writer
+                    # that enqueued it, not a transient condition a retry
+                    # would clear.
+                    _log.warning(
+                        "aspect_worker_unattributable_identity",
+                        collection=row.collection,
+                        source_path=row.source_path,
+                    )
+                    db.aspect_queue.mark_failed(
+                        row.collection, row.source_path,
+                        error="unattributable_identity",
+                    )
+                    continue
+                db.complete_aspect(dataclasses.asdict(attributed))
         try:
             t2_index_write(_persist_all)
         except Exception:  # noqa: BLE001 — batch persist best-effort; failure logged via log.warning
@@ -920,9 +939,20 @@ class AspectExtractionWorker:
             # daemon-routed call (``complete_aspect``) so the worker
             # never writes memory.db directly. asdict() because the wire
             # protocol decodes a dataclass arg to its field dict.
+            attributed = _attributed(record, row)
+            if _is_unattributable(attributed):
+                # nexus-r0kum: same terminal refusal as the batch path —
+                # see _persist_all's matching comment.
+                _log.warning(
+                    "aspect_worker_unattributable_identity",
+                    collection=row.collection,
+                    source_path=row.source_path,
+                )
+                self._mark_failed_routed(row, "unattributable_identity")
+                return
             t2_index_write(
-                lambda db: db.complete_aspect(
-                    dataclasses.asdict(_attributed(record, row))
+                lambda db, _r=attributed: db.complete_aspect(
+                    dataclasses.asdict(_r)
                 )
             )
         except Exception as exc:  # noqa: BLE001 — persist is best-effort; failure logged via log.warning
@@ -1268,10 +1298,83 @@ def _attributed(record: "AspectRecord", row: object) -> "AspectRecord":
     row carries the one captured at enqueue (nexus-tdgc). Both completion
     paths (batch ``_persist_all`` and the single-row ``_process_row``) go
     through here so a row with a known identity is never persisted
-    unattributed."""
+    unattributed.
+
+    nexus-r0kum: also resolves a missing ``source_uri`` on a file-routed
+    collection (``rdr__``/``docs__``/``code__``) via the record's
+    (now-stamped) ``doc_id``. ``uri_for`` (the extractor's writer) only
+    ever sees ``(collection, source_path)`` — for an MCP ``store_put``
+    into one of these collections, ``source_path`` is the T3 chunk chash,
+    not a filesystem path, so ``uri_for`` correctly returns ``None`` for
+    it (a chash is never absolute and there is no ``repo_root`` to anchor
+    a relative one against). When the catalog tumbler is known, its own
+    ``file_path``/``source_uri`` IS the real identity — this looks it up
+    and re-derives ``source_uri`` from it rather than persisting the
+    chash-shaped non-identity. See :func:`_is_unattributable` for the
+    refusal this enables when resolution still comes up empty."""
     from nexus.db.t2.records import with_doc_id  # noqa: PLC0415 — deferred to avoid circular import (db.t2 <-> aspect_worker)
 
-    return with_doc_id(record, getattr(row, "doc_id", "") or "")
+    record = with_doc_id(record, getattr(row, "doc_id", "") or "")
+    if not record.source_uri and record.doc_id:
+        from nexus.aspect_readers import FILE_ROUTED_PREFIXES  # noqa: PLC0415 — deferred to avoid circular import (aspect_readers)
+        if record.collection.startswith(FILE_ROUTED_PREFIXES):
+            resolved_uri = _resolve_source_uri_from_doc_id(
+                record.collection, record.doc_id,
+            )
+            if resolved_uri:
+                import dataclasses  # noqa: PLC0415 — stdlib import deferred to function scope (rare branch)
+                record = dataclasses.replace(record, source_uri=resolved_uri)
+    return record
+
+
+def _is_unattributable(record: "AspectRecord") -> bool:
+    """True when *record* is a file-routed row (``rdr__``/``docs__``/
+    ``code__``) that STILL carries no ``source_uri`` after
+    :func:`_attributed`'s resolution attempt (nexus-r0kum).
+
+    A file-routed row with no ``source_uri`` can never be attributed by
+    aspects-004 (byte-equal ``source_uri`` join) and is invisible to
+    ``search_aspect_scoped`` by construction — persisting it manufactures
+    exactly the 51-row ``rdr-frontmatter-v1`` class the census found.
+    Callers refuse to upsert when this is True: mark the queue row failed
+    with reason ``unattributable_identity`` instead of writing a row that
+    can never be found again. Not file-routed (``knowledge__`` etc.) is
+    always attributable-by-title, so this only ever fires for the
+    filesystem-identity collections.
+    """
+    from nexus.aspect_readers import FILE_ROUTED_PREFIXES  # noqa: PLC0415 — deferred to avoid circular import (aspect_readers)
+
+    return bool(
+        not record.source_uri and record.collection.startswith(FILE_ROUTED_PREFIXES)
+    )
+
+
+def _resolve_source_uri_from_doc_id(collection: str, doc_id: str) -> str:
+    """Best-effort ``source_uri`` lookup for a known catalog tumbler.
+
+    Returns ``""`` on any failure (no catalog, unresolvable tumbler,
+    cross-collection mismatch) — the caller (`_attributed`) treats an
+    empty result as "still unattributed", never as an error to raise.
+    The cross-collection guard mirrors ``_entry_by_source_uri``'s
+    precedent: a tumbler that resolves but belongs to a DIFFERENT
+    collection is refused rather than used, so this can never re-point
+    an aspect row at a document living in another collection.
+    """
+    try:
+        cat = _resolve_catalog_reader()
+    except Exception:  # noqa: BLE001 — best-effort catalog reader; any init failure degrades to empty
+        cat = None
+    if cat is None:
+        return ""
+    try:
+        entry = cat.by_doc_id(doc_id)
+    except Exception:  # noqa: BLE001 — best-effort resolve; any query error degrades to empty
+        entry = None
+    if entry is None:
+        return ""
+    if (getattr(entry, "physical_collection", "") or "") != collection:
+        return ""
+    return getattr(entry, "source_uri", "") or ""
 
 
 def _resolve_catalog_reader():
