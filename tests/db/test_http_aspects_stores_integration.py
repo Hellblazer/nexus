@@ -521,19 +521,30 @@ class TestQueueMVV:
         """
         import httpx, json as _json, time as _time
         base_url, token, _ = service
+        # AuthFilter (Phase E, nexus-gmiaf.32.5) binds tenant to the presented
+        # bearer token server-side; the per-test X-Nexus-Tenant value below is
+        # NOT honored (it's logged at debug on mismatch) — every call using the
+        # root NX_SERVICE_TOKEN actually lands in tenant='default' regardless
+        # of this header. "queue-mvv-f-..." only keeps source_path/content_hash
+        # collision-free across parallel test runs. doc_id must therefore
+        # reference a catalog_documents row seeded under 'default' —
+        # "doc-fk-control" (seeded in _seed_catalog_docs) fits.
         tenant = f"queue-mvv-f-{_time.time_ns()}"
+        doc_id = "doc-fk-control"
         headers = {
             "Authorization": f"Bearer {token}",
             "X-Nexus-Tenant": tenant,
             "Content-Type": "application/json",
         }
         with httpx.Client(base_url=base_url, headers=headers) as client:
-            # Enqueue with doc_id omitted (NULL) so no catalog FK is required.
+            # hygiene-001: doc_id is NOT NULL on aspect_extraction_queue now,
+            # and must reference a real catalog_documents row for this tenant.
             enq = client.post("/v1/aspects/queue/enqueue", content=_json.dumps({
                 "collection": "knowledge__queue-inttest",
                 "source_path": "/queue/doc-f.pdf",
                 "content_hash": "hash-f",
                 "content": "Content F",
+                "doc_id": doc_id,
             }))
             assert enq.status_code == 200, f"enqueue failed: {enq.text}"
 
@@ -562,16 +573,24 @@ class TestQueueMVV:
         claimed nothing (claim_batch raised every poll -> document_aspects=0,
         ALL service-mode aspect extraction dead). Only a real round-trip
         through the client catches the contract — exactly the 'integration over
-        mocks' lesson. Isolated tenant so claim_batch is deterministic."""
+        mocks' lesson. Isolated tenant so claim_batch is deterministic.
+
+        AuthFilter binds tenant to the presented bearer token server-side
+        (Phase E, nexus-gmiaf.32.5); the `tenant=` constructor arg below only
+        sets the X-Nexus-Tenant header, which is not honored for a non-minted
+        tenant token — the root token used here always resolves to 'default'.
+        doc_id must therefore reference a 'default'-tenant catalog document —
+        "doc-fk-control" (seeded in _seed_catalog_docs) fits."""
         import time as _time
         from nexus.db.t2.http_aspect_queue import HttpAspectQueue
 
         base_url, token, _ = service
         tenant = f"queue-claimbatch-{_time.time_ns()}"
+        doc_id = "doc-fk-control"
         q = HttpAspectQueue(base_url=base_url, tenant=tenant, _token=token)
         coll = "knowledge__claimbatch-inttest"
         for i in range(3):
-            q.enqueue(coll, f"/cb/doc{i}.pdf", content_hash=f"h{i}", content="x")
+            q.enqueue(coll, f"/cb/doc{i}.pdf", content_hash=f"h{i}", content="x", doc_id=doc_id)
 
         rows = q.claim_batch(10)
         assert len(rows) == 3, f"client claim_batch must return the 3 enqueued rows, got {rows}"
@@ -582,13 +601,20 @@ class TestQueueMVV:
     def test_j_etl_never_downgrade_in_progress(self, service) -> None:
         """j) import_queue_row never downgrades in_progress rows; GREATEST retry_count.
 
-        Uses a fresh isolated tenant to guarantee deterministic claim_next behavior.
+        Uses a fresh unique source_path so claim_next deterministically grabs
+        this row (AuthFilter binds every call on this root token to
+        tenant='default' regardless of X-Nexus-Tenant — see test_f's
+        comment — so real isolation comes from no other 'default'-tenant
+        pending row existing yet at this point in the file's test order, not
+        from the tenant header). doc_id references the 'default'-tenant
+        "doc-fk-control" catalog document seeded in _seed_catalog_docs.
         """
         import httpx, json as _json, time as _time
         base_url, token, _ = service
         unique = f"{_time.time_ns()}"
         tenant = f"queue-etl-{unique}"
         unique_path = f"/etl/{unique}.pdf"
+        doc_id = "doc-fk-control"
 
         headers = {
             "Authorization": f"Bearer {token}",
@@ -596,13 +622,14 @@ class TestQueueMVV:
             "Content-Type": "application/json",
         }
         with httpx.Client(base_url=base_url, headers=headers) as client:
-            # Enqueue with no doc_id (NULL) to avoid catalog FK dependency on
-            # a per-run-unique identifier.
+            # hygiene-001: doc_id is NOT NULL on aspect_extraction_queue now;
+            # must reference a real catalog_documents row for this tenant.
             enq = client.post("/v1/aspects/queue/enqueue", content=_json.dumps({
                 "collection": "knowledge__queue-etl-inttest",
                 "source_path": unique_path,
                 "content_hash": f"hash-{unique}",
                 "content": "ETL content",
+                "doc_id": doc_id,
             }))
             assert enq.status_code == 200
 
@@ -617,10 +644,14 @@ class TestQueueMVV:
             )
             assert row["status"] == "in_progress"
 
-            # Try to import with 'pending' status — must NOT downgrade to pending
+            # Try to import with 'pending' status — must NOT downgrade to pending.
+            # hygiene-001: the ON CONFLICT DO UPDATE arm sets doc_id =
+            # EXCLUDED.doc_id, and the column is NOT NULL now, so a re-import
+            # must re-supply the same doc_id the row already carries.
             imp = client.post("/v1/aspects/queue/import", content=_json.dumps({
                 "collection": "knowledge__queue-etl-inttest",
                 "source_path": unique_path,
+                "doc_id": doc_id,
                 "content_hash": f"hash-{unique}",
                 "content": "ETL content",
                 "status": "pending",
@@ -661,12 +692,20 @@ class TestQueueConcurrency:
     def seed_concurrency_queue(self, service) -> None:
         """Seed N rows for the concurrency tenant via direct HTTP.
 
-        doc_id is omitted (NULL) so no catalog_documents FK is triggered for
-        the per-run-isolated concurrency tenant.
+        hygiene-001: doc_id is NOT NULL on aspect_extraction_queue now, and
+        fk_aspect_queue_catalog_doc requires a real catalog_documents row.
+        AuthFilter binds every call on this root token to tenant='default'
+        regardless of X-Nexus-Tenant (Phase E, nexus-gmiaf.32.5 — see
+        test_f's comment in TestQueueMVV); "isolated" here means no other
+        'default'-tenant pending row exists yet at this point in the file's
+        test order (TestQueueMVV fully drains its own rows), not real
+        per-tenant isolation. doc_id references the already-seeded
+        'default'-tenant "doc-fk-control" catalog document.
         """
         import httpx, json as _json, time as _time
         base_url, token, _ = service
         tenant = f"concurrency-tenant-{_time.time_ns()}"
+        doc_id = "doc-fk-control"
         self.__class__._base_url = base_url
         self.__class__._token = token
         self.__class__._tenant = tenant
@@ -683,6 +722,7 @@ class TestQueueConcurrency:
                     "source_path": f"/concurrent/doc-{i}.pdf",
                     "content_hash": f"hash-{i}",
                     "content": f"Content {i}",
+                    "doc_id": doc_id,
                 }))
                 assert resp.status_code == 200, f"seed enqueue failed: {resp.text}"
 

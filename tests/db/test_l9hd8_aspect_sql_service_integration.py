@@ -231,6 +231,44 @@ def java_service(pg_instance):
                 pass
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _seed_catalog_docs(pg_instance, java_service) -> None:
+    """Seed catalog_documents rows referenced by this file's aspect fixtures.
+
+    hygiene-001 (nexus-tk070.p6a follow-on): document_aspects.doc_id is
+    NOT NULL now and fk_doc_aspects_catalog_doc requires a matching
+    (tenant_id, tumbler) catalog_documents row for every non-null doc_id.
+    ``aspects_client``'s bearer is the root NX_SERVICE_TOKEN, which
+    AuthFilter binds server-side to tenant='default' regardless of the
+    'l9hd8-tenant' name passed to HttpDocumentAspectsStore's constructor
+    (Phase E, nexus-gmiaf.32.5 — the X-Nexus-Tenant header/tenant param is
+    advisory only for a non-minted token); every doc_id below must
+    therefore resolve under tenant_id='default'. Superuser psql bypasses
+    FORCE RLS.
+    """
+    suffixes = [
+        "filter-paxos", "filter-raft", "filter-dynamo",
+        "groupby-vldb", "groupby-sosp", "groupby-sosp2", "groupby-nv",
+        "conf-a", "conf-b", "conf-c",
+        "rls-paxos",
+    ]
+    values = ",".join(
+        f"('default', 'doc-l9hd8-{s}', 'seed-doc-l9hd8-{s}')" for s in suffixes
+    )
+    sql = (
+        "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
+        f"VALUES {values} ON CONFLICT (tenant_id, tumbler) DO NOTHING;"
+    )
+    proc = subprocess.run(
+        [str(_PSQL), "-h", "127.0.0.1", "-p", str(pg_instance["port"]),
+         "-U", pg_instance["user"], "-d", pg_instance["dbname"],
+         "-v", "ON_ERROR_STOP=1", "-c", sql],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"catalog-doc seed failed:\n{proc.stderr}")
+
+
 @pytest.fixture(scope="module")
 def aspects_client(java_service):
     """HttpDocumentAspectsStore (tenant='l9hd8-tenant') connected to the live service."""
@@ -314,7 +352,10 @@ def _make_aspect(
         # uri_for must match what try_filter/_groupby/_aggregate compute
         # from (collection, source_path); mismatched URIs → zero hits.
         source_uri=uri_for(collection, source_path) or "",
-        # doc_id left as "" (default) → nullIfBlank in Java → SQL NULL → satisfies FK
+        # hygiene-001: doc_id is NOT NULL now and must reference a real
+        # catalog_documents row — seeded (tenant_id='default') by the
+        # module-scoped _seed_catalog_docs fixture, keyed on this suffix.
+        doc_id=f"doc-l9hd8-{suffix}",
         salient_sentences=[f"Finding {suffix}."],
     )
 

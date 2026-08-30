@@ -313,6 +313,10 @@ class TestPlansMVV:
         pid = plan_store.save_plan(
             query="Untagged plan integration test",
             plan_json="{}",
+            # hygiene-001: plans.verb is NOT NULL now (nexus-tk070.p6a
+            # follow-on); the assertion under test is tags-default, not
+            # verb, so any real verb value satisfies it.
+            verb="research",
         )
         row = plan_store.get_plan(pid)
         assert row["tags"] == "", f"untagged plan tags must be ''; got {row['tags']!r}"
@@ -336,7 +340,9 @@ class TestPlansMVV:
 
     def test_d_created_at_utc_format(self, plan_store):
         """d) created_at returned as UTC second-precision Z string."""
-        pid = plan_store.save_plan(query="Timestamp format test", plan_json="{}")
+        # hygiene-001: plans.verb is NOT NULL now; unrelated to this test's
+        # timestamp-format assertion, so any real verb value satisfies it.
+        pid = plan_store.save_plan(query="Timestamp format test", plan_json="{}", verb="research")
         row = plan_store.get_plan(pid)
         ts = row.get("created_at")
         assert ts is not None, "created_at must be present"
@@ -345,10 +351,13 @@ class TestPlansMVV:
 
     def test_e_cross_tenant_rls_negative(self, plan_store, other_plan_store):
         """e) tenant default's plans invisible to tenant other-tenant."""
+        # hygiene-001: plans.verb is NOT NULL now; unrelated to the RLS
+        # assertion under test, so any real verb value satisfies it.
         pid = plan_store.save_plan(
             query="Private plan for tenant isolation test",
             plan_json="{}",
             project="rls-test",
+            verb="research",
         )
         # Tenant default can see the plan
         assert plan_store.get_plan(pid) is not None
@@ -379,10 +388,13 @@ class TestPlansMVV:
         cross_store = HttpPlanLibrary(base_url=base_url, tenant="gamma-plans", _token=gamma_token)
         try:
             # Write under gamma-plans, then assert the default tenant cannot see it.
+            # hygiene-001: plans.verb is NOT NULL now; unrelated to the
+            # cross-tenant-write assertion under test.
             pid = cross_store.save_plan(
                 query="Cross-tenant write attempt",
                 plan_json="{}",
                 project="gamma-proj",
+                verb="research",
             )
             # Plan was saved under gamma-plans tenant, not under default
             # default store should NOT see it
@@ -403,6 +415,11 @@ class TestPlansMVV:
         src_created = "2025-06-01T10:30:00Z"
         src_last    = "2025-06-10T08:00:00Z"
 
+        # hygiene-001: plans.verb is NOT NULL now (nexus-tk070.p6a
+        # follow-on) — /v1/plans/import rejects a verb-less row with a 409
+        # integrity constraint violation. Unrelated to this test's ETL
+        # fidelity assertions (created_at, counters), so any real verb
+        # value satisfies it.
         pid = plan_store.import_plan(
             project="etl-int-proj",
             query="ETL integration fidelity probe",
@@ -410,6 +427,7 @@ class TestPlansMVV:
             outcome="success",
             tags="etl,integration",
             created_at=src_created,
+            verb="research",
             use_count=42,
             last_used=src_last,
             match_count=99,
@@ -444,6 +462,7 @@ class TestPlansMVV:
             outcome="success",
             tags="etl,integration",
             created_at=src_created,
+            verb="research",
             use_count=42,
             last_used=src_last,
             match_count=99,
@@ -455,9 +474,12 @@ class TestPlansMVV:
 
     def test_h_metrics_increment(self, plan_store):
         """h) increment_match_metrics, increment_run_started, increment_run_outcome."""
+        # hygiene-001: plans.verb is NOT NULL now; unrelated to the metrics
+        # assertions under test, so any real verb value satisfies it.
         pid = plan_store.save_plan(
             query="Metrics integration test plan",
             plan_json="{}",
+            verb="research",
         )
 
         plan_store.increment_match_metrics(pid, confidence=None)
@@ -485,10 +507,14 @@ class TestPlansMVV:
 
     def test_i_disable_enable_list_active(self, plan_store):
         """i) set_plan_disabled / set_plan_enabled / list_active excludes disabled."""
+        # hygiene-001: plans.verb is NOT NULL now; unrelated to the
+        # disable/enable/list_active assertions under test.
         pid_active   = plan_store.save_plan(
-            query="Active plan for disable test", plan_json="{}", project="dis-int")
+            query="Active plan for disable test", plan_json="{}", project="dis-int",
+            verb="research")
         pid_disabled = plan_store.save_plan(
-            query="Disabled plan for disable test", plan_json="{}", project="dis-int")
+            query="Disabled plan for disable test", plan_json="{}", project="dis-int",
+            verb="research")
 
         assert plan_store.set_plan_disabled(pid_disabled)
 
@@ -506,10 +532,13 @@ class TestPlansMVV:
 
     def test_j_plan_exists_boundary_safe(self, plan_store):
         """j) plan_exists comma-boundary tag match (not substring)."""
+        # hygiene-001: plans.verb is NOT NULL now; unrelated to the
+        # tag-boundary-match assertion under test.
         plan_store.save_plan(
             query="Exists boundary test",
             plan_json="{}",
             tags="builtin-template,research,rdr",
+            verb="research",
         )
         assert plan_store.plan_exists("Exists boundary test", "builtin-template")
         assert plan_store.plan_exists("Exists boundary test", "research")
@@ -527,7 +556,11 @@ class TestPlansMVV:
         Non-vacuous: this test FAILS if the SQL still uses GREATEST (source < live
         means GREATEST would keep live, not replace with source).
         """
-        # Seed with source counters
+        # Seed with source counters.
+        # hygiene-001: plans.verb is NOT NULL now — /v1/plans/import rejects
+        # a verb-less row with a 409 integrity constraint violation.
+        # Unrelated to this test's GREATEST-vs-source-authoritative
+        # assertions on the additive counters.
         pid = plan_store.import_plan(
             project="src-auth-int",
             query="Source-authoritative merge integration test",
@@ -535,6 +568,7 @@ class TestPlansMVV:
             outcome="success",
             tags="src-auth-test",
             created_at="2025-03-01T00:00:00Z",
+            verb="research",
             use_count=5,
             match_count=10,
             match_conf_sum=2.5,
@@ -563,6 +597,7 @@ class TestPlansMVV:
             outcome="success",
             tags="src-auth-test",
             created_at="2025-03-01T00:00:00Z",
+            verb="research",
             use_count=5,       # source value (< live use_count)
             match_count=10,    # source value (< live match_count=13)
             match_conf_sum=2.5,  # source value (< live conf_sum=5.2)
@@ -591,10 +626,13 @@ class TestPlansMVV:
 
     def test_l_disable_reason_tag(self, plan_store):
         """l) disable with reason appends disable-reason:<reason> to tags via real service."""
+        # hygiene-001: plans.verb is NOT NULL now; unrelated to the
+        # disable-reason-tag assertions under test.
         pid = plan_store.save_plan(
             query="Disable reason integration test",
             plan_json="{}",
             tags="base-tag",
+            verb="research",
         )
 
         # Disable with a reason
@@ -618,6 +656,7 @@ class TestPlansMVV:
             query="No reason disable integration",
             plan_json="{}",
             tags="keep-this-tag",
+            verb="research",
         )
         assert plan_store.set_plan_disabled(pid2)
         row3 = plan_store.get_plan(pid2)
