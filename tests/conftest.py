@@ -544,10 +544,12 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # orchestrating session -- independent of the pytest subprocess
     # under test.
     "t1_session_lease.",
-    # The client's cross-process DATA-TOKEN lease and its mint lock
-    # (RDR-005 pass-through; ``nexus.db.data_token`` ``_data_token_lease_
-    # path`` / ``_data_token_mint_lock_path``, both keyed
-    # ``sha256(host\x00tenant)``). On an ARMED box (``mint_token``
+    # The client's cross-process DATA-TOKEN lease (RDR-005 pass-through;
+    # ``nexus.db.data_token._data_token_lease_path``, keyed
+    # ``sha256(host\x00tenant)``). NOT its sibling mint lock: only the lease
+    # was measured changing, and ``test_election_flock_allowance_stays_
+    # narrow`` pins ``data_token_mint_lock.*`` as the ``.lock`` shape this
+    # allowlist must never grow to cover. On an ARMED box (``mint_token``
     # configured) every live ``nx-mcp`` host and the aspect-worker daemon
     # re-mints and rewrites the lease when its 1 h TTL crosses the 20 %
     # refresh threshold -- entirely independent of pytest. MEASURED
@@ -560,7 +562,6 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # mid-session. Unit tests resolve the config dir through the autouse
     # ``_isolate_config_dir`` tmp path and never reach the real lease.
     "data_token_lease.",
-    "data_token_mint_lock.",
     # The per-session mint-or-borrow lock guarding
     # `_lock_guarded_mint_or_borrow` (`db/t1.py:879`
     # `_t1_session_mint_lock_path`), written by the live MCP server's

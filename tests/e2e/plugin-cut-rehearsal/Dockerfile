@@ -19,10 +19,20 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python \
 RUN uv python install 3.12 \
     && ln -s "$(uv python find 3.12)" /usr/local/bin/python3.12
 
+# NON-ROOT: the cut's battery runs release-sandbox smoke, whose `nx init`
+# provisions a bundled Postgres, and initdb refuses to run as root (the first
+# container run failed exactly there). Same shape as the migration rehearsal.
+# The cache and tmp mountpoints exist in the image, owned by this user, so
+# the named volumes and the host-mounted TMPDIR inherit that ownership.
+RUN useradd -m -u 1000 -s /bin/bash nexus \
+    && mkdir -p /home/nexus/.cache/uv /home/nexus/.cache/nexus /home/nexus/tmp \
+    && chown -R nexus:nexus /home/nexus
+USER nexus
+ENV HOME=/home/nexus
 # The bind-mounted source is owned by the host user; git refuses to read it
 # otherwise. Identity is what the cut script's own `git commit` needs.
 RUN git config --global --add safe.directory '*' \
     && git config --global user.name plugin-cut-rehearsal \
     && git config --global user.email rehearsal@invalid
 
-WORKDIR /work
+WORKDIR /home/nexus
