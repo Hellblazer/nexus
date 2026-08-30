@@ -338,4 +338,205 @@ class NexusServiceScheduledSweepTest {
             blocker.rollback();
         }
     }
+
+    /**
+     * Attaches a {@link ch.qos.logback.core.read.ListAppender} to the ROOT
+     * logger for the duration of {@code body}, then hands back every captured
+     * message. Pattern matches {@code IndexRunFenceTest}'s established use of
+     * a root-logger ListAppender to assert on structured log lines.
+     */
+    private java.util.List<String> captureLogs(ThrowingRunnable body) throws Exception {
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            body.run();
+            return logs.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .toList();
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
+    private interface ThrowingRunnable {
+        void run() throws Exception;
+    }
+
+    /**
+     * nexus-4tosp: PER-TENANT escalation, as distinct from the fleet-wide
+     * counter covered above. That counter only trips when EVERY tenant fails
+     * in the same cycle -- it is blind to exactly the bead's headline
+     * scenario, a single tenant whose sweep never completes while other
+     * tenants (the default tenant included) keep succeeding. These four
+     * tests exercise the per-tenant map via {@link NexusService#dataTokenSweepOverride},
+     * a test seam that replaces the real {@code TokenStore} call so failure
+     * can be injected deterministically without a live 30s statement-timeout
+     * race. The override intercepts every tenant in the cycle, not only the
+     * target, so every other tenant (the default tenant included) is routed
+     * to a trivial success (0 deleted) to keep these tests fast and isolated
+     * from the real data-token rows other tests in this class leave behind.
+     */
+    @Test
+    void perTenantSweep_belowThreshold_logsOnlyTheWarnLine() throws Exception {
+        String tenant = "sched-sweep-pertenant-below-" + System.nanoTime();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        insertDataToken(tenant, "marker", now.toInstant().plusSeconds(300));
+
+        try {
+            java.util.List<String> messages = captureLogs(() -> {
+                for (int cycle = 1; cycle < NexusService.DATA_SWEEP_STALL_CYCLES; cycle++) {
+                    service.dataTokenSweepOverride = t -> {
+                        if (t.equals(tenant)) {
+                            throw new RuntimeException("simulated failure cycle");
+                        }
+                        return 0;
+                    };
+                    service.runScheduledSweep(now);
+                }
+            });
+            service.dataTokenSweepOverride = null;
+
+            assertThat(service.dataSweepFailuresForTenant(tenant))
+                .as("below threshold, the per-tenant streak still climbs")
+                .isEqualTo(NexusService.DATA_SWEEP_STALL_CYCLES - 1);
+            assertThat(messages)
+                .as("every failed cycle logs the existing WARN, unchanged")
+                .filteredOn(m -> m.startsWith("event=t1_scheduled_data_token_sweep_tenant_failed")
+                    && m.contains("tenant=" + tenant))
+                .hasSize(NexusService.DATA_SWEEP_STALL_CYCLES - 1);
+            assertThat(messages)
+                .as("below the threshold, the per-tenant ERROR must not fire")
+                .noneMatch(m -> m.startsWith("event=t1_data_token_sweep_tenant_stalled")
+                    && m.contains("tenant=" + tenant));
+        } finally {
+            service.dataTokenSweepOverride = null;
+            deleteTokens(tenant);
+        }
+    }
+
+    @Test
+    void perTenantSweep_thirdConsecutiveFailure_logsStalledError() throws Exception {
+        String tenant = "sched-sweep-pertenant-stall-" + System.nanoTime();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        insertDataToken(tenant, "marker", now.toInstant().plusSeconds(300));
+
+        try {
+            java.util.List<String> messages = captureLogs(() -> {
+                for (int cycle = 1; cycle <= NexusService.DATA_SWEEP_STALL_CYCLES; cycle++) {
+                    service.dataTokenSweepOverride = t -> {
+                        if (t.equals(tenant)) {
+                            throw new RuntimeException("simulated failure cycle");
+                        }
+                        return 0;
+                    };
+                    service.runScheduledSweep(now);
+                }
+            });
+            service.dataTokenSweepOverride = null;
+
+            assertThat(service.dataSweepFailuresForTenant(tenant))
+                .isEqualTo(NexusService.DATA_SWEEP_STALL_CYCLES);
+            assertThat(messages)
+                .as("the Nth consecutive failure for THIS tenant escalates to a distinct "
+                    + "ERROR naming the tenant, the streak, and the last error, independent "
+                    + "of whether any other tenant succeeded that same cycle")
+                .anyMatch(m -> m.startsWith("event=t1_data_token_sweep_tenant_stalled")
+                    && m.contains("tenant=" + tenant)
+                    && m.contains("consecutive_failures=" + NexusService.DATA_SWEEP_STALL_CYCLES)
+                    && m.contains("last_error="));
+        } finally {
+            service.dataTokenSweepOverride = null;
+            deleteTokens(tenant);
+        }
+    }
+
+    @Test
+    void perTenantSweep_recoveryAfterStall_logsRecoveredAndResetsTheStreak() throws Exception {
+        String tenant = "sched-sweep-pertenant-recover-" + System.nanoTime();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        insertDataToken(tenant, "marker", now.toInstant().plusSeconds(300));
+
+        try {
+            for (int cycle = 1; cycle <= NexusService.DATA_SWEEP_STALL_CYCLES; cycle++) {
+                service.dataTokenSweepOverride = t -> {
+                    if (t.equals(tenant)) {
+                        throw new RuntimeException("simulated failure cycle");
+                    }
+                    return 0;
+                };
+                service.runScheduledSweep(now);
+            }
+            assertThat(service.dataSweepFailuresForTenant(tenant))
+                .isEqualTo(NexusService.DATA_SWEEP_STALL_CYCLES);
+
+            java.util.List<String> messages = captureLogs(() -> {
+                service.dataTokenSweepOverride = t -> t.equals(tenant) ? 1 : 0;
+                service.runScheduledSweep(now);
+            });
+            service.dataTokenSweepOverride = null;
+
+            assertThat(service.dataSweepFailuresForTenant(tenant))
+                .as("a successful sweep for the tenant clears its streak")
+                .isEqualTo(0);
+            assertThat(messages)
+                .as("recovery after a real stall logs a distinct INFO naming the tenant and "
+                    + "how many consecutive failures preceded it -- a latched flag with no "
+                    + "recovery signal is a wolf-crier")
+                .anyMatch(m -> m.startsWith("event=t1_data_token_sweep_tenant_recovered")
+                    && m.contains("tenant=" + tenant)
+                    && m.contains("after_failures=" + NexusService.DATA_SWEEP_STALL_CYCLES));
+        } finally {
+            service.dataTokenSweepOverride = null;
+            deleteTokens(tenant);
+        }
+    }
+
+    @Test
+    void perRunSummary_reportsFailedAndStalledTenantCounts() throws Exception {
+        String tenant = "sched-sweep-pertenant-summary-" + System.nanoTime();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        insertDataToken(tenant, "marker", now.toInstant().plusSeconds(300));
+
+        try {
+            // Drive the tenant to exactly the stall threshold first, quietly.
+            for (int cycle = 1; cycle < NexusService.DATA_SWEEP_STALL_CYCLES; cycle++) {
+                service.dataTokenSweepOverride = t -> {
+                    if (t.equals(tenant)) {
+                        throw new RuntimeException("simulated failure cycle");
+                    }
+                    return 0;
+                };
+                service.runScheduledSweep(now);
+            }
+
+            java.util.List<String> messages = captureLogs(() -> {
+                service.dataTokenSweepOverride = t -> {
+                    if (t.equals(tenant)) {
+                        throw new RuntimeException("simulated failure cycle");
+                    }
+                    return 0;
+                };
+                service.runScheduledSweep(now);
+            });
+            service.dataTokenSweepOverride = null;
+
+            assertThat(messages)
+                .as("one run-summary line per scheduled cycle, so a scheduler that never "
+                    + "fires is distinguishable from one that fired and failed -- this cycle "
+                    + "has exactly one failed tenant that has also just crossed the stall "
+                    + "threshold")
+                .anyMatch(m -> m.startsWith("event=t1_scheduled_data_token_sweep_run")
+                    && m.contains("failed=1")
+                    && m.contains("stalled=1"));
+        } finally {
+            service.dataTokenSweepOverride = null;
+            deleteTokens(tenant);
+        }
+    }
 }
