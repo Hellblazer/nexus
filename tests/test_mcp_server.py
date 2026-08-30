@@ -550,6 +550,19 @@ def test_memory_get_by_title(t2_path):
     assert "retrievable content" in memory_get(project="testproj", title="doc.md")
 
 
+def test_memory_get_shows_default_ttl_of_30_days(t2_path):
+    """nexus-sv152: omitting ttl on memory_put stores a 30-day row, and
+    memory_get is the surface that says so."""
+    memory_put(content="expires", project="ttlproj", title="default.md")
+    assert "TTL: 30 days" in memory_get(project="ttlproj", title="default.md")
+
+
+def test_memory_get_shows_permanent_for_explicit_none_ttl(t2_path):
+    """nexus-sv152: only an explicit ttl=None yields a permanent row."""
+    memory_put(content="forever", project="ttlproj", title="perm.md", ttl=None)
+    assert "TTL: permanent" in memory_get(project="ttlproj", title="perm.md")
+
+
 def test_memory_get_empty_title_lists(t2_path):
     memory_put(content="entry1", project="listproj", title="a.md")
     memory_put(content="entry2", project="listproj", title="b.md")

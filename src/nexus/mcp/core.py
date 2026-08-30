@@ -4494,9 +4494,15 @@ def memory_put(
         project: Project namespace (e.g. "nexus", "nexus_active")
         title: Entry title (unique within project)
         tags: Comma-separated tags
-        ttl: Time-to-live in days (default 30). Omit or pass ``None``/``null``
-            for a permanent entry — that is the ONLY way to get a permanent
-            row. ``ttl=0`` is RETIRED (RDR-194 D5, nexus-tk070.p6a): this tool
+        ttl: Time-to-live in days. DEFAULT 30: an entry whose call does not
+            name a ttl EXPIRES in 30 days (extended by reads: effective ttl =
+            ttl * (1 + ln(access_count + 1)), so the row nobody reads is the
+            one that goes). Pass ``None``/``null`` EXPLICITLY for a permanent
+            row; omitting the argument does NOT make it permanent — the
+            signature's default wins (nexus-sv152; a previous version of this
+            text said the opposite and every caller that believed it persisted
+            nothing). ``memory_get`` shows the stored value on its ``TTL:``
+            line. ``ttl=0`` is RETIRED (RDR-194 D5, nexus-tk070.p6a): this tool
             no longer coerces it to ``None``, and the engine itself now
             REJECTS ``ttl=0`` (and any ``ttl<=0``) with a loud 400 naming the
             fix, for every caller and every path — ``POST /v1/memory/put``
@@ -4575,9 +4581,19 @@ def memory_put(
                 f"memory_put reported success but the row did not land "
                 f"({verdict}): {detail}"
             )
-        return f"Stored: [{row_id}] {project}/{title}"
+        return f"Stored: [{row_id}] {project}/{title} (ttl: {_render_ttl(ttl)})"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("memory_put", e)
+
+
+def _render_ttl(ttl: object) -> str:
+    """``permanent`` for a NULL ttl, else ``<n> days`` (nexus-sv152)."""
+    if ttl is None or ttl == "":
+        return "permanent"
+    try:
+        return f"{int(ttl)} days"
+    except (TypeError, ValueError):
+        return str(ttl)
 
 
 @mcp.tool(
@@ -4614,7 +4630,10 @@ def memory_get(project: str, title: str = "") -> str:
                     return (
                         f"[{entry['id']}] {entry['project']}/{entry['title']}\n"
                         f"Tags: {entry.get('tags', '')}\n"
-                        f"Updated: {entry.get('timestamp', '')}\n\n"
+                        f"Updated: {entry.get('timestamp', '')}\n"
+                        # nexus-sv152: the stored ttl is otherwise invisible to
+                        # every read surface, and memory_put's default is 30 days.
+                        f"TTL: {_render_ttl(entry.get('ttl'))}\n\n"
                         f"{entry['content']}"
                     )
                 if candidates:
