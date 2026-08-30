@@ -562,6 +562,17 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # mid-session. Unit tests resolve the config dir through the autouse
     # ``_isolate_config_dir`` tmp path and never reach the real lease.
     "data_token_lease.",
+    # The aspect worker's local WAKE file (nexus-59611 stage 2, shipped in
+    # 7.24.0): ``nexus.aspect_worker.signal_aspect_wake`` touches
+    # ``<config_dir>/aspect_wake`` from ``HttpAspectQueue`` after EVERY
+    # successful enqueue, i.e. from any live nx-mcp host or CLI on the box
+    # that stores or indexes, in any session -- independent of pytest.
+    # MEASURED 2026-08-30 (plugin-cut rehearsal, final host run): the guard
+    # failed a 481-passed / 0-failed tests/hooks run on exactly ``MODIFIED
+    # aspect_wake``; the live file's mtime was one minute old at the time,
+    # with two other Claude sessions active on the box. Unit tests resolve
+    # the config dir through the autouse ``_isolate_config_dir`` tmp path.
+    "aspect_wake",
     # The per-session mint-or-borrow lock guarding
     # `_lock_guarded_mint_or_borrow` (`db/t1.py:879`
     # `_t1_session_mint_lock_path`), written by the live MCP server's
