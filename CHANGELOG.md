@@ -6,6 +6,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.24.1] - 2026-08-30
+
+### Fixed
+
+- **T1 session lifecycle on armed pass-through boxes (nexus-maf9l).** On a box
+  armed for data-token self-minting (RDR-005 step (d)), the persisted
+  `service_token` is the scope=mint-locked credential, and the engine rejects
+  mint scopes outside the mint surface — so the T1 session mint 401'd on
+  `/v1/sessions/start` and T1 scratch died box-wide once pre-armed leases
+  expired (T2/T3 were unaffected). The four session-lifecycle call sites now
+  present the client's minted data token (`HttpTokenStore(prefer_data_token=True)`),
+  with invalidate-and-retry-once on a stale token; unarmed and local installs
+  are unchanged. The engine half (data-scoped session mints, ceiling-bounded)
+  has been live since engine-service-v0.1.91.
+
+### Infrastructure
+
+- **RDR-197 plugin channel: first real cut shipped and the machinery hardened
+  (nexus-a2wmi.12).** `plugin-v7.24.0-1` (the SessionStart T2-summary fix for
+  armed boxes, nexus-znvjd) was the channel's first cut; the ten machinery
+  defects it surfaced are fixed (PRs #1492–#1494, #1496), the back-merge has a
+  dedicated resolver (`scripts/plugin_cut_back_merge.sh`), and every future cut
+  is preceded by the end-to-end rehearsal `tests/e2e/plugin-cut-rehearsal/run.sh`
+  (fake origin; the cut's own battery; the cut PR's CI on depth-1 merge-ref and
+  tagless shard shapes; the tag workflow's steps; the back-merge). This release
+  resets both plugin pins from the anchored form to `v7.24.1`.
+- The suite's real-config-dir guard allowlists the two ambient writers an armed
+  box has (`data_token_lease.<digest>`, `aspect_wake`), with measured evidence.
+
+### Known issues
+
+- The engine resolves its ONNX models from the passwd `user.home` while the
+  client provisions them under `$HOME` (nexus-ogccs): any HOME override yields
+  a green `nx init` then an engine crash at first boot. Fix requires an
+  engine+client pair; tracked for the next engine cut.
+
 ## [7.24.0] - 2026-08-30
 
 Paired release with `engine-service-v0.1.91` (tagged on `762b9d7ba`;

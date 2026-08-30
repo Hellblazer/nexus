@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.24.1] - 2026-08-30
+
+Plugin version aligned with conexus 7.24.1. The `plugin-v7.24.0-1` cut's
+content (the SessionStart T2-summary data-token fix, nexus-znvjd) is
+included in this tag; both plugin pins return to the client form
+(`v7.24.1`). No further plugin-side changes.
+
 ## [7.24.0] - 2026-08-30
 
 Plugin version aligned with conexus 7.24.0. No plugin-side changes.
