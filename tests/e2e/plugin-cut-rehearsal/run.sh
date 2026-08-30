@@ -135,7 +135,8 @@ if [ "$MODE" = container ]; then
         --tmpfs /home/nexus:exec,uid=1000,gid=1000,size=16g \
         -v "$SOURCE_REPO:/src:ro" \
         -v "$HOST_ARTIFACTS:/home/nexus/artifacts" \
-        -v nexus-plugin-cut-rehearsal-uv-cache:/home/nexus/.cache/uv \
+        -v nexus-plugin-cut-rehearsal-uv-cache:/home/nexus/uv-cache \
+        -e UV_CACHE_DIR=/home/nexus/uv-cache \
         -e NX_REHEARSAL_ARTIFACTS=/home/nexus/artifacts \
         -e NX_REHEARSAL_IN_CONTAINER=1 \
         "$IMAGE" bash /src/tests/e2e/plugin-cut-rehearsal/run.sh \
