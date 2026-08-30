@@ -50,6 +50,21 @@ class HttpTokenStore:
             host/port env-vars are ignored; the token env-var is still required unless
             ``_token`` is passed explicitly.
         tenant:   Tenant header to stamp (the wildcard bootstrap token requires one).
+        prefer_data_token: nexus-maf9l — the SESSION-lifecycle call sites
+            (T1 session start/close in ``db/t1.py``, ``mcp/core.py``,
+            ``operators/dispatch.py``) pass True so an ARMED pass-through
+            box presents its minted DATA token instead of the static
+            credential: there the static token is scope=mint-locked and the
+            engine rejects it outside the mint surface, which killed every
+            T1 session mint on the first armed box (RDR-005 step (d),
+            2026-08-30) the moment its pre-armed leases expired. Mirrors
+            the ``bearer_for``-beats-static contract every other store
+            carries. The default False is LOAD-BEARING: the admin surface
+            (``nx tenant`` / service-token verbs) 403s mint- and
+            data-scoped bearers wholesale, so preferring a data token
+            there would break admin flows. Unarmed boxes see no change
+            (``bearer_for`` returns ``None``); a mint failure raises
+            ``DataTokenMintError`` — the designed no-fallback path.
     """
 
     def __init__(
@@ -58,6 +73,7 @@ class HttpTokenStore:
         tenant: str = DEFAULT_TENANT,
         *,
         _token: str | None = None,
+        prefer_data_token: bool = False,
     ) -> None:
         if base_url is not None:
             if _token is None:
@@ -69,9 +85,27 @@ class HttpTokenStore:
             self._base_url, token = _resolve_endpoint()
             _token = token
         self._tenant = tenant
+        self._prefer_data_token = prefer_data_token
+        self._using_data_token = False
         self._auth_token = _token or ""
+        self._apply_data_token_preference()
         self._client = self._build_client()
         _log.debug("http_token_store.init", base_url=self._base_url)
+
+    def _apply_data_token_preference(self) -> None:
+        """Replace the static token with the manager's DATA token when
+        ``prefer_data_token`` and minting is configured (``bearer_for``
+        returns ``None`` otherwise — the unarmed no-op). Re-run after any
+        event that overwrites ``_auth_token`` (endpoint rebind), so the
+        preference survives it."""
+        if not self._prefer_data_token:
+            return
+        from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+
+        token = get_data_token_manager().bearer_for(self._base_url, self._tenant)
+        if token is not None:
+            self._auth_token = token
+            self._using_data_token = True
 
     def _build_client(self) -> httpx.Client:
         # RDR-198 (closed, declined): this client carries a BAKED
@@ -122,6 +156,8 @@ class HttpTokenStore:
         self._base_url = new_url
         if new_token:
             self._auth_token = new_token
+            self._using_data_token = False
+        self._apply_data_token_preference()
         try:
             self._client.close()
         except Exception:  # noqa: BLE001 — best-effort close of stale client during reset
@@ -151,6 +187,28 @@ class HttpTokenStore:
             # lease and retry ONCE.
             if not self._rebind_from_lease():
                 raise
+            resp = self._client.post(path, json=body)
+        if (
+            resp.status_code == 401
+            and self._prefer_data_token
+            and self._using_data_token
+        ):
+            # nexus-maf9l, the adopters' invalidate-and-reresolve contract:
+            # one 401 on a DATA token means the cached token went stale
+            # server-side (expiry, rotation); invalidate, re-mint via
+            # bearer_for, rebuild the baked client, retry ONCE. A second
+            # 401 raises. Static-token 401s stay loud immediately.
+            from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+
+            manager = get_data_token_manager()
+            manager.invalidate(self._base_url, self._tenant)
+            self._using_data_token = False
+            self._apply_data_token_preference()
+            try:
+                self._client.close()
+            except Exception:  # noqa: BLE001 — best-effort close of the stale client before rebuild
+                pass
+            self._client = self._build_client()
             resp = self._client.post(path, json=body)
         resp.raise_for_status()
         return resp.json()

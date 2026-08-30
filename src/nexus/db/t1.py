@@ -1218,7 +1218,10 @@ def mint_t1_session_token(session_id: str, *, context: str) -> dict:
     from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred import (rare/branch-local path)
 
     try:
-        with HttpTokenStore() as token_store:
+        # nexus-maf9l: the session mint is a data-path action — on an armed
+        # box the static token is mint-locked and the engine rejects it
+        # here; the store presents the minted DATA token instead.
+        with HttpTokenStore(prefer_data_token=True) as token_store:
             return token_store.start_session(session_id)
     except Exception as exc:  # noqa: BLE001 — clean-error boundary, see docstring
         raise RuntimeError(
