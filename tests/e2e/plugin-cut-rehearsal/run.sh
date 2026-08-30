@@ -174,6 +174,12 @@ cleanup() {
         if [ -d "$CLONE/.git" ]; then
             { git -C "$CLONE" rev-parse --abbrev-ref HEAD; git -C "$CLONE" log --oneline -8; git -C "$CLONE" status --short; } > "$dest/git-state.txt" 2>&1 || true
         fi
+        # The cut's battery runs release-sandbox smoke under $HOME/nexus-sandbox;
+        # its engine/PG logs are the diagnosis when `nx init` fails to serve.
+        if [ -d "$HOME/nexus-sandbox/.config/nexus/logs" ]; then
+            mkdir -p "$dest/nexus-sandbox-logs"
+            cp "$HOME"/nexus-sandbox/.config/nexus/logs/*.log "$dest/nexus-sandbox-logs/" 2>/dev/null || true
+        fi
         echo "failure artifacts copied to $dest"
     fi
 }
