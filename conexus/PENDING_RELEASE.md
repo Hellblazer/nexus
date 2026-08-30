@@ -31,5 +31,14 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.24.0)
 
-Nothing pending. v7.24.0 advanced the pin, so everything previously
-listed here is live in installed sessions.
+- `conexus/hooks/scripts/t2_prefix_scan.py` — bead nexus-znvjd: the
+  SessionStart T2 summary prefers the client's cached data-token lease
+  (`<config_dir>/data_token_lease.<digest>`, written by
+  `nexus.db.data_token`) for the resolved host over the static
+  `service_token`, on every resolution leg; a 401 with no usable lease
+  names the lease path. Until this ships, every session on an armed
+  pass-through box (RDR-005 step (d): the persisted service_token is the
+  scope=mint-locked credential) prints `WARNING: T2 memory unreachable:
+  ... HTTP 401 for /v1/memory/projects` and injects no T2 summary. nx CLI
+  and MCP T2 reads are unaffected; only this hook presented the static
+  token.

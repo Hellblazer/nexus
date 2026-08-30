@@ -11,6 +11,7 @@ endpoint-resolution and two-arm freshness-assert design notes.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import sys
@@ -85,6 +86,18 @@ _DEFAULT_HTTP_TIMEOUT_S = 3.0
 #: ``<config_dir>/storage_service_addr.<uid>``.
 _STORAGE_SERVICE_TIER = "storage_service"
 
+#: nexus-znvjd: the client's cross-process DATA-token lease, written by
+#: ``nexus.db.data_token.DataTokenManager._write_lease`` at
+#: ``<config_dir>/data_token_lease.<sha256(host[:port]\x00tenant)>``. On an
+#: armed pass-through box (RDR-005 step (d)) the persisted ``service_token``
+#: is the scope=mint-locked credential: it can mint data tokens but cannot
+#: read data paths, so presenting it to ``/v1/memory`` is a 401 every
+#: session. The client mints and caches the real bearer here; this hook
+#: (stdlib-only, cannot import ``nexus``, must never mint — a mint has no
+#: fallback by design) borrows it when fresh and falls back otherwise.
+_DATA_TOKEN_LEASE_PREFIX = "data_token_lease."
+_DATA_TOKEN_LEASE_FORMAT_VERSION = 1
+
 #: Engine timestamp format: UTC second-precision ISO
 #: (MemoryHandler.recordToMap / MemoryRepository.UTC_SECOND on the Java side).
 _TIMESTAMP_FMT = "%Y-%m-%dT%H:%M:%SZ"
@@ -97,7 +110,13 @@ class _Unreachable(Exception):
     Caught once at the top of ``main()``; the caller renders a single
     visible warning line into stdout rather than silently producing no
     output — the exact failure mode nexus-8fvp2 exists to close.
+
+    ``http_status`` carries the engine's status code when the failure was
+    a non-2xx response (nexus-znvjd: ``main`` keys the credential hint on
+    401), else ``None``.
     """
+
+    http_status: int | None = None
 
 
 def _default_config_dir() -> Path:
@@ -154,6 +173,46 @@ def _read_lease(config_dir: Path) -> dict[str, Any] | None:
     if (time.time() - heartbeat_epoch) >= ttl:
         return None
     return {"host": host, "port": port, "token": token}
+
+
+def _read_data_token_lease(config_dir: Path, base_url: str) -> str | None:
+    """Best-effort read of the client's cached DATA token for *base_url*
+    (nexus-znvjd) — the freshest unexpired lease whose digest matches
+    ``(host[:port], its own tenant)``, or ``None``.
+
+    Stdlib mirror of ``DataTokenManager._read_lease``: same format-version
+    check, same digest rule (``sha256(host\x00tenant)``, host =
+    ``urlsplit(base_url).netloc``), same fail-safe stance — absent,
+    unreadable, malformed, wrong digest, or expired all resolve to ``None``
+    and the caller keeps today's static-token path. The tenant is read
+    from each lease's own ``tenant`` field (the caller-passed tenant the
+    client keyed on; NOT ``mint_tenant``, which is a mint-request
+    override), so the hook derives nothing from config. Never mints, never
+    raises.
+    """
+    host = urllib.parse.urlsplit(base_url).netloc or base_url
+    now = time.time()
+    best_token, best_expiry = "", 0.0
+    try:
+        candidates = sorted(config_dir.glob(f"{_DATA_TOKEN_LEASE_PREFIX}*"))
+    except OSError:
+        return None
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text())
+            if data.get("format_version") != _DATA_TOKEN_LEASE_FORMAT_VERSION:
+                continue
+            tenant = str(data["tenant"])
+            digest = hashlib.sha256(f"{host}\x00{tenant}".encode("utf-8")).hexdigest()
+            if data.get("base_url_digest") != digest:
+                continue
+            token = str(data["token"])
+            expires_at = float(data["expires_at"])
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            continue
+        if token and expires_at > now and expires_at > best_expiry:
+            best_token, best_expiry = token, expires_at
+    return best_token or None
 
 
 def _read_config_yml_credentials(config_dir: Path) -> dict[str, str]:
@@ -223,8 +282,11 @@ def _read_config_yml_credentials(config_dir: Path) -> dict[str, str]:
     return result
 
 
-def _resolve_endpoint(config_dir: Path) -> tuple[str, str]:
-    """Resolve ``(base_url, token)`` for the nexus-service T2 HTTP API.
+def _resolve_endpoint(config_dir: Path) -> tuple[str, str, bool]:
+    """Resolve ``(base_url, token, via_data_token)`` for the nexus-service
+    T2 HTTP API; ``via_data_token`` says whether *token* came from the
+    data-token lease (so ``main`` can key its 401 hint on what was
+    actually presented, not on a second, later lease read).
 
     Stdlib-only mirror of
     ``nexus.db.service_endpoint.resolve_service_endpoint`` — bare
@@ -245,6 +307,14 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str]:
          ``resolve_service_config``, the real client's counterpart for this
          leg (host/port are env/lease only, never persisted).
 
+    On every leg, once the base URL is known, a fresh data-token lease for
+    that host (:func:`_read_data_token_lease`, nexus-znvjd) wins over the
+    static token however the static token was supplied — mirroring the
+    real client, where ``DataTokenManager.bearer_for`` beats the static
+    credential whenever minting is configured. A lease for a different
+    host never matches (digest keyed on host:port), so an unarmed box
+    resolves exactly as before.
+
     Raises:
         _Unreachable: no endpoint/token combination is resolvable.
     """
@@ -255,6 +325,9 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str]:
     if not url:
         url = yaml_creds.get("service_url", "").strip().rstrip("/")
     if url:
+        data_token = _read_data_token_lease(config_dir, url)
+        if data_token:
+            return url, data_token, True
         token = os.environ.get("NX_SERVICE_TOKEN", "").strip()
         if not token:
             token = yaml_creds.get("service_token", "").strip()
@@ -266,7 +339,7 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str]:
                 "is resolvable — export NX_SERVICE_TOKEN or run "
                 "`nx config set service_token <bearer>`"
             )
-        return url, token
+        return url, token, False
 
     port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
     if port_str:
@@ -277,6 +350,9 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str]:
                 f"NX_SERVICE_PORT is not an integer: {port_str!r}"
             ) from exc
         host = os.environ.get("NX_SERVICE_HOST", "").strip() or "127.0.0.1"
+        data_token = _read_data_token_lease(config_dir, f"http://{host}:{port}")
+        if data_token:
+            return f"http://{host}:{port}", data_token, True
         token = os.environ.get("NX_SERVICE_TOKEN", "").strip() or (
             lease["token"] if lease else ""
         )
@@ -285,10 +361,14 @@ def _resolve_endpoint(config_dir: Path) -> tuple[str, str]:
                 "NX_SERVICE_PORT is set but no NX_SERVICE_TOKEN and no live "
                 "supervisor lease is resolvable"
             )
-        return f"http://{host}:{port}", token
+        return f"http://{host}:{port}", token, False
 
     if lease is not None:
-        return f"http://{lease['host']}:{lease['port']}", lease["token"]
+        url = f"http://{lease['host']}:{lease['port']}"
+        data_token = _read_data_token_lease(config_dir, url)
+        if data_token:
+            return url, data_token, True
+        return url, lease["token"], False
 
     lease_path = config_dir / f"{_STORAGE_SERVICE_TIER}_addr.{os.getuid()}"
     raise _Unreachable(
@@ -322,9 +402,11 @@ def _http_get_json(
         detail = ""
         with contextlib.suppress(Exception):
             detail = exc.read().decode("utf-8", "replace")
-        raise _Unreachable(
+        err = _Unreachable(
             f"T2 engine returned HTTP {exc.code} for {path}: {detail[:200]}"
-        ) from exc
+        )
+        err.http_status = exc.code
+        raise err from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise _Unreachable(f"T2 engine unreachable at {base_url}{path}: {exc}") from exc
     try:
@@ -486,14 +568,32 @@ def main() -> None:
         os.environ.get("NX_T2_SCAN_BUDGET_S", str(_DEFAULT_SCAN_BUDGET_S))
     )
 
+    base_url, via_data_token = "", False
     try:
-        base_url, token = _resolve_endpoint(config_dir)
+        base_url, token, via_data_token = _resolve_endpoint(config_dir)
         namespaces = _get_namespaces(base_url, token, project_name, timeout)
     except _Unreachable as exc:
         # nexus-8fvp2 arm 2: source-unreachable is ALWAYS a visible line —
         # never a silent no-op, and never confused with "reachable but
         # genuinely empty" (a fresh install with no T2 entries yet).
-        print(f"WARNING: T2 memory unreachable: {exc}")
+        hint = ""
+        if exc.http_status == 401 and base_url and not via_data_token:
+            # nexus-znvjd: the static token was presented because no fresh
+            # data-token lease matched this host at resolution time (keyed
+            # on what was actually sent — never a second lease read, which
+            # could disagree with the first). On an armed pass-through box
+            # that token is mint-locked and this 401 is permanent until the
+            # client mints a lease — say so, rather than reading as a
+            # generic bad-token line.
+            host = urllib.parse.urlsplit(base_url).netloc or base_url
+            hint = (
+                f" (no fresh data-token lease for {host} under "
+                f"{config_dir}/{_DATA_TOKEN_LEASE_PREFIX}*, so the static "
+                "service_token was presented; on an armed pass-through box "
+                "that credential is mint-locked — run `nx search` once to "
+                "mint a lease)"
+            )
+        print(f"WARNING: T2 memory unreachable: {exc}{hint}")
         return
 
     if not namespaces:
