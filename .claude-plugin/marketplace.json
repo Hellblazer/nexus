@@ -11,7 +11,7 @@
         "source": "git-subdir",
         "url": "https://github.com/Hellblazer/nexus.git",
         "path": "conexus",
-        "ref": "v7.24.0"
+        "ref": "plugin-v7.24.0-1"
       },
       "description": "Self-hosted three-tier knowledge management with 13 specialized agents, plan-centric retrieval via nx_answer, semantic search, and RDR decision tracking for Claude Code.",
       "version": "7.24.0"
