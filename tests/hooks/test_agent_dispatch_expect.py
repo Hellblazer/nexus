@@ -655,7 +655,13 @@ class TestPluginWiring:
         pin = json.loads(
             (REPO_ROOT / ".claude-plugin" / "marketplace.json").read_text()
         )["plugins"][0]["source"]["ref"]
-        if tuple(int(x) for x in pin.lstrip("v").split(".")) >= (7, 0, 0):
+        from plugin_channel import client_version_of
+
+        version = client_version_of(pin)
+        assert version is not None, (
+            f"marketplace pin {pin!r} matches neither invariant-R ref shape"
+        )
+        if tuple(int(x) for x in version.split(".")) >= (7, 0, 0):
             # Shipped at 7.0.0: the hook lives in the pinned tag now. The
             # ledger owes an entry only if the file drifts AGAIN, which the
             # drift-ledger tests enforce generically.

@@ -200,7 +200,9 @@ echo "== M9: ledger entry removed =="
 # there and expecting red is a vacuous pin, not a gate. Skip it out loud
 # rather than let it print "stayed GREEN" every run after a release.
 M9_PIN="$(python3 -c 'import json;print(json.load(open(".claude-plugin/marketplace.json"))["plugins"][0]["source"]["ref"])')"
-if python3 -c 'import sys;v=tuple(int(x) for x in sys.argv[1].lstrip("v").split("."));sys.exit(0 if v >= (7,0,0) else 1)' "$M9_PIN"; then
+# Either invariant-R shape (v<X.Y.Z> or plugin-v<X.Y.Z>-<n>, RDR-197): an
+# anchored pin must not crash this parse (a2wmi.12 spike, round 3).
+if python3 -c 'import re,sys;m=re.fullmatch(r"v(\d+\.\d+\.\d+)|plugin-v(\d+\.\d+\.\d+)-[1-9]\d*",sys.argv[1]);v=(m.group(1) or m.group(2)) if m else None;sys.exit(0 if v and tuple(int(x) for x in v.split(".")) >= (7,0,0) else 1)' "$M9_PIN"; then
     echo "M9 SKIPPED: pin $M9_PIN >= v7.0.0 — the hook is in the pinned tag and test_declared_in_pending_release_ledger returns early by design; nothing to mutate"
 else
 python3 - <<'PY'

@@ -16,6 +16,7 @@ a refusing check aborts before any branch or file mutation.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import subprocess
 
@@ -427,6 +428,145 @@ class TestLedger:
         after = (repo / "conexus" / "PENDING_RELEASE.md").read_text(encoding="utf-8")
         assert "nexus-znvjd" not in after  # covered: emptied
         assert after == "# Pending\n" + split + no_path + bare_root  # the rest survives verbatim
+
+
+BACK_MERGE = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "plugin_cut_back_merge.sh"
+
+
+def _merge_cut_into_origin_main(repo: pathlib.Path, branch: str) -> str:
+    """What the human's `gh pr merge --merge` leaves on origin: main with the
+    cut merged (no-ff), pushed. Returns main's ledger text."""
+    _run(repo, "checkout", "-q", "main")
+    _run(repo, "merge", "-q", "--no-ff", "--no-edit", branch)
+    _run(repo, "push", "-q", "origin", "main")
+    return (repo / "conexus" / "PENDING_RELEASE.md").read_text(encoding="utf-8")
+
+
+class TestBackMerge:
+    """scripts/plugin_cut_back_merge.sh — the back-merge after a cut.
+
+    Rehearsal finding (2026-08-30): the cut commit empties the ledger
+    entries it ships while develop still carries them, so a bare
+    `git merge origin/main` on develop conflicts on PENDING_RELEASE.md
+    EVERY time (the RDR said "expected conflict-free"). The script owns
+    the resolution; these pin it against the real cut fixture.
+    """
+
+    def test_a_bare_merge_conflicts_on_the_ledger_by_construction(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        repo = _mini_nexus(tmp_path)
+        branch = _cut(repo)["branch"]
+        _merge_cut_into_origin_main(repo, branch)
+        _run(repo, "checkout", "-q", "develop")
+        proc = subprocess.run(
+            ["git", "merge", "--no-edit", "origin/main"],
+            cwd=repo, capture_output=True, text=True,
+        )
+        assert proc.returncode != 0, "the conflict this script exists for did not occur"
+        unmerged = _run(repo, "diff", "--name-only", "--diff-filter=U").split()
+        assert unmerged == ["conexus/PENDING_RELEASE.md"], unmerged
+        _run(repo, "merge", "--abort")
+
+    def test_the_ledger_conflict_is_resolved_main_wins(self, tmp_path: pathlib.Path) -> None:
+        repo = _mini_nexus(tmp_path)
+        branch = _cut(repo)["branch"]
+        main_ledger = _merge_cut_into_origin_main(repo, branch)
+        assert "nexus-aaaaa" not in main_ledger and "nexus-ccccc" in main_ledger
+        develop_before = _run(repo, "rev-parse", "develop").strip()
+        proc = subprocess.run(
+            ["bash", str(BACK_MERGE), str(repo), "--no-verify"],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "resolved to main's version" in proc.stdout
+        assert _run(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == "develop"
+        after = (repo / "conexus" / "PENDING_RELEASE.md").read_text(encoding="utf-8")
+        assert after == main_ledger
+        assert "<<<<<<<" not in after
+        # develop now contains origin/main, and moved past where it was.
+        ancestor = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", "origin/main", "develop"],
+            cwd=repo, capture_output=True, text=True,
+        )
+        assert ancestor.returncode == 0
+        assert _run(repo, "rev-parse", "develop").strip() != develop_before
+        assert not (repo / ".git" / "MERGE_HEAD").exists()
+
+    def test_the_verify_net_runs_after_the_merge_and_fails_loud(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """VERIFY=1 is the script's whole safety net for an entry develop
+        added after the cut: it must run AFTER the resolution commit and a
+        red verify must exit 1 with the merge commit standing (the operator
+        re-adds on top of it). Plumbing pinned with a stub verify command;
+        the drift contract's own semantics live in its own module."""
+        repo = _mini_nexus(tmp_path)
+        branch = _cut(repo)["branch"]
+        main_ledger = _merge_cut_into_origin_main(repo, branch)
+        marker = tmp_path / "verify-ran"
+        env = dict(os.environ, PLUGIN_CUT_BACK_MERGE_VERIFY_CMD=f"touch {marker} && false")
+        proc = subprocess.run(
+            ["bash", str(BACK_MERGE), str(repo)], capture_output=True, text=True, env=env,
+        )
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert marker.exists(), "verify command never ran"
+        assert "drift contract is RED" in proc.stderr
+        # The merge commit stands (resolution kept) — the operator fixes on top.
+        assert not (repo / ".git" / "MERGE_HEAD").exists()
+        assert (repo / "conexus" / "PENDING_RELEASE.md").read_text(encoding="utf-8") == main_ledger
+        # A green verify is a clean exit 0 on the same state.
+        env["PLUGIN_CUT_BACK_MERGE_VERIFY_CMD"] = "true"
+        proc = subprocess.run(
+            ["bash", str(BACK_MERGE), str(repo)], capture_output=True, text=True, env=env,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    def test_a_failed_resolution_commit_aborts_the_merge(self, tmp_path: pathlib.Path) -> None:
+        """If the resolution commit itself fails (a rejecting hook stands in
+        for GPG/disk), the script must not leave the checkout mid-merge."""
+        repo = _mini_nexus(tmp_path)
+        branch = _cut(repo)["branch"]
+        _merge_cut_into_origin_main(repo, branch)
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        hook.chmod(0o755)
+        _run(repo, "checkout", "-q", "develop")
+        develop_before = _run(repo, "rev-parse", "develop").strip()
+        proc = subprocess.run(
+            ["bash", str(BACK_MERGE), str(repo), "--no-verify"], capture_output=True, text=True,
+        )
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "merge ABORTED" in proc.stderr
+        assert not (repo / ".git" / "MERGE_HEAD").exists()
+        assert _run(repo, "rev-parse", "develop").strip() == develop_before
+        assert _run(repo, "status", "--porcelain").strip() == ""
+
+    def test_a_conflict_outside_the_ledger_is_refused_and_aborted(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """Only the cut's own conflict is the script's to resolve."""
+        repo = _mini_nexus(tmp_path)
+        branch = _cut(repo)["branch"]
+        _merge_cut_into_origin_main(repo, branch)
+        # A competing edit to a plugin file on BOTH sides after the cut.
+        _write(repo, "conexus/hooks/hook.py", "main-side edit after the cut\n")
+        _run(repo, "commit", "-q", "-am", "main edit")
+        _run(repo, "push", "-q", "origin", "main")
+        _run(repo, "checkout", "-q", "develop")
+        _write(repo, "conexus/hooks/hook.py", "develop-side edit after the cut\n")
+        _run(repo, "commit", "-q", "-am", "develop edit")
+        develop_before = _run(repo, "rev-parse", "develop").strip()
+        proc = subprocess.run(
+            ["bash", str(BACK_MERGE), str(repo), "--no-verify"],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "conflicts outside the ledger" in proc.stderr
+        assert "conexus/hooks/hook.py" in proc.stderr
+        assert not (repo / ".git" / "MERGE_HEAD").exists(), "merge must be aborted"
+        assert _run(repo, "rev-parse", "develop").strip() == develop_before
+        assert _run(repo, "status", "--porcelain").strip() == ""
 
 
 class TestBatteryAndWindow:

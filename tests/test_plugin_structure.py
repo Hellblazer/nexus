@@ -12,6 +12,7 @@ import pytest
 
 from plugin_channel import (
     assert_tag_visibility,
+    cut_head_sha,
     parse_plugin_tag,
     wheel_surface_offenders,
 )
@@ -860,9 +861,10 @@ class TestMarketplaceVersion:
 
 def _resolve_ref_or_head(ref: str, *, cwd: Path) -> str:
     """The proof's target: *ref* itself when it resolves as a tag, else the
-    checkout's HEAD commit -- the cut PR's head commit before the tag
-    exists. Per the ANCHORING rule: never a merge base, never a branch
-    that tracks ongoing development.
+    cut PR's head commit before the tag exists (``plugin_channel.cut_head_sha``:
+    the pull_request payload's head sha in CI — HEAD there is the synthetic
+    merge ref — and HEAD on the cut branch). Per the ANCHORING rule: never
+    a merge base, never a branch that tracks ongoing development.
     """
     probe = subprocess.run(
         ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
@@ -870,11 +872,7 @@ def _resolve_ref_or_head(ref: str, *, cwd: Path) -> str:
     )
     if probe.returncode == 0:
         return ref
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=cwd, capture_output=True, text=True, check=True,
-    )
-    return head.stdout.strip()
+    return cut_head_sha(cwd=cwd)
 
 
 def _assert_ref_valid_for_plugin(

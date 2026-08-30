@@ -132,7 +132,13 @@ jobs:
           fi
 
       - name: Run tests/test_plugin_structure.py
-        run: uv run pytest tests/test_plugin_structure.py -q
+        # The module is `lint`-marked and pyproject's addopts deselects
+        # `lint` by default: without `-m lint` this step collects nothing
+        # and pytest exits 5, failing the verify on every real tag. Found
+        # by tests/e2e/plugin-cut-rehearsal (the first time this workflow's
+        # steps ever ran, 2026-08-30) — the lint bucket step below also
+        # covers the module; this one runs it first and by name.
+        run: uv run pytest -m lint tests/test_plugin_structure.py -q
 
       - name: Run tests/hooks/
         run: uv run pytest tests/hooks/ -q
@@ -145,7 +151,17 @@ jobs:
         # correctness. The RDR's cost discipline says the battery bends,
         # not the fetch; the module still runs in ci.yml's dedicated lint
         # job, which checks out with fetch-depth 0 for exactly this need.
-        run: uv run pytest -m lint -q --ignore=tests/test_wire_contract_pairing_lint.py
+        # test_rehearsal_native_legs_refuse_no_build.py is EXCLUDED for the
+        # same reason: it runs the migration rehearsal's PREV_RELEASE
+        # derivation, which walks published v* tags for an older engine pin
+        # and hits "FATAL: cannot derive PREV_RELEASE" on this depth-1,
+        # two-tag checkout (found by tests/e2e/plugin-cut-rehearsal's
+        # depth-1 tag leg, 2026-08-30 — six failures, all this one cause);
+        # ci.yml's lint job still runs it with full history.
+        run: >-
+          uv run pytest -m lint -q
+          --ignore=tests/test_wire_contract_pairing_lint.py
+          --ignore=tests/test_rehearsal_native_legs_refuse_no_build.py
 
       - name: Assert PENDING_RELEASE.md carries no entry for this cut's own range
         run: |

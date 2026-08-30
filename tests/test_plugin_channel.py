@@ -26,6 +26,8 @@ from plugin_channel import (
     ALLOWED_PREFIXES,
     DENIED_PREFIXES,
     NEVER_DELIVERED_PREFIXES,
+    client_version_of,
+    cut_head_sha,
     PLUGIN_BY_ALLOWLIST_PREFIX,
     GitCommandError,
     TagVisibilityError,
@@ -265,6 +267,92 @@ def test_scripts_is_off_the_wheel_and_sdist_surface() -> None:
     for entry in _wheel_and_sdist_entries():
         assert not path_has_prefix(entry, "scripts"), entry
         assert not path_has_prefix("scripts", entry), entry
+
+
+@pytest.mark.parametrize(
+    ("ref", "expected"),
+    [
+        ("v7.24.0", "7.24.0"),
+        ("plugin-v7.24.0-1", "7.24.0"),
+        ("plugin-v7.24.0-12", "7.24.0"),
+        ("7.24.0", None),
+        ("v7.24", None),
+        ("plugin-v7.24.0-0", None),
+        ("plugin-v7.24.0", None),
+        ("", None),
+    ],
+)
+def test_client_version_of_reads_either_ref_shape(ref: str, expected: str | None) -> None:
+    """The canonical pin reader: both invariant-R shapes yield the client
+    version, everything else None (never a ValueError from int('plugin-v7'))."""
+    assert client_version_of(ref) == expected
+
+
+class TestCutHeadSha:
+    """The canonical pre-tag proof target (ANCHORING rule)."""
+
+    @pytest.fixture
+    def repo(self, tmp_path: Path) -> Path:
+        repo = tmp_path / "r"
+        repo.mkdir()
+        _git("init", "-q", "-b", "main", cwd=repo)
+        _git("config", "user.email", "t@t.invalid", cwd=repo)
+        _git("config", "user.name", "t", cwd=repo)
+        (repo / "seed").write_text("seed\n", encoding="utf-8")
+        _git("add", "seed", cwd=repo)
+        _git("commit", "-q", "-m", "seed", cwd=repo)
+        return repo
+
+    @pytest.fixture(autouse=True)
+    def _no_github_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+        monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+
+    def test_outside_github_the_target_is_head(self, repo: Path) -> None:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        assert cut_head_sha(cwd=repo) == head
+
+    def test_on_a_pull_request_event_the_target_is_the_pr_head(
+        self, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R1 of the a2wmi.12 fix: HEAD on a pull_request checkout is the
+        synthetic merge ref; the payload's pull_request.head.sha is the cut."""
+        event = tmp_path / "event.json"
+        event.write_text(json.dumps({"pull_request": {"head": {"sha": "pr-head-sha"}}}))
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+        monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+        assert cut_head_sha(cwd=repo) == "pr-head-sha"
+
+    def test_a_non_pull_request_event_uses_head(
+        self, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        event = tmp_path / "event.json"
+        event.write_text(json.dumps({"after": "push-sha"}))
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        assert cut_head_sha(cwd=repo) == head
+
+    def test_a_pull_request_payload_without_a_head_sha_raises(
+        self, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        event = tmp_path / "event.json"
+        event.write_text(json.dumps({"pull_request": {}}))
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+        monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+        with pytest.raises(GitCommandError, match="head.sha"):
+            cut_head_sha(cwd=repo)
+
+    def test_an_unresolvable_head_raises(self, tmp_path: Path) -> None:
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        _git("init", "-q", "-b", "main", cwd=empty)
+        with pytest.raises(GitCommandError, match="HEAD does not resolve"):
+            cut_head_sha(cwd=empty)
 
 
 def test_never_delivered_prefixes_are_off_the_wheel_and_sdist_surface() -> None:
