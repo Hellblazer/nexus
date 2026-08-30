@@ -657,11 +657,16 @@ class TaxonomyAssignFromChashesRepositoryTest {
             su.setAutoCommit(true);
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.taxonomy_centroids"
-                    + " (tenant_id, collection, topic_id, embedding_" + dim + ") VALUES (?, ?, ?, ?::vector)")) {
+                    // label: taxonomy_centroids.label is NOT NULL (hygiene-001-9b,
+                    // nexus-tk070.p6a follow-on) -- no test in this class asserts
+                    // on the label value, so a fixed placeholder satisfies the
+                    // constraint without changing any assertion surface.
+                    + " (tenant_id, collection, topic_id, label, embedding_" + dim + ") VALUES (?, ?, ?, ?, ?::vector)")) {
                 ps.setString(1, tenant);
                 ps.setString(2, collection);
                 ps.setLong(3, topicId);
-                ps.setString(4, vectorLiteral(emb));
+                ps.setString(4, "seed-centroid-label");
+                ps.setString(5, vectorLiteral(emb));
                 ps.executeUpdate();
             }
         }

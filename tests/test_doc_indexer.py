@@ -822,6 +822,89 @@ class TestCatalogMarkdownHookEphemeralPathGuard:
         docs = documents_by_file_path(str(md_path))
         assert len(docs) == 1
 
+    def test_worktree_marker_path_canonicalizes_when_primary_mirror_exists(
+        self, tmp_path, monkeypatch,
+    ):
+        """nexus-kkumv: a clean (non-worktree/tempdir) owner root, indexing
+        a file reached via ``.claude/worktrees/<agent>/<rel>`` whose
+        primary-repo mirror ALSO exists on disk, registers the document
+        under the CANONICAL primary-repo identity instead of skipping it
+        outright (the pre-fix behaviour pinned by
+        ``test_worktree_marker_path_with_clean_owner_root_is_skipped``
+        above, which stays green because it never creates the primary
+        mirror file)."""
+        monkeypatch.setattr(
+            "nexus.repo_identity._TEMP_DIR_PREFIXES", ("/nonexistent-tmp-prefix/",),
+        )
+
+        cat = ActiveCatalog()
+        corpus = "kkumv-md-canon"
+        clean_root = tmp_path / "clean-repo"
+        clean_root.mkdir()
+        primary_md = clean_root / "docs" / "rdr" / "rdr-999.md"
+        primary_md.parent.mkdir(parents=True)
+        primary_md.write_text("# RDR 999\n", encoding="utf-8")
+
+        cat.register_owner(corpus, "curator", repo_root=str(clean_root))
+
+        worktree_md = (
+            clean_root / ".claude" / "worktrees"
+            / "agent-z" / "docs" / "rdr" / "rdr-999.md"
+        )
+        worktree_md.parent.mkdir(parents=True)
+        worktree_md.write_text("# RDR 999\n", encoding="utf-8")
+
+        from nexus.doc_indexer import _catalog_markdown_hook
+
+        import structlog.testing
+        with structlog.testing.capture_logs() as logs:
+            _catalog_markdown_hook(
+                worktree_md, "rdr__kkumv-md-canon", "rdr", corpus, 3,
+            )
+
+        assert documents_by_file_path(str(worktree_md)) == []
+        canonical_docs = documents_by_file_path(str(primary_md))
+        assert len(canonical_docs) == 1
+        skipped = [
+            log_entry for log_entry in logs
+            if log_entry.get("event") == "ephemeral_path_registration_skipped"
+        ]
+        assert skipped == []
+
+    def test_worktree_marker_path_without_primary_mirror_still_skipped(
+        self, tmp_path, monkeypatch,
+    ):
+        """A worktree-unique file (no mirror at the primary-repo relative
+        path) is still refused, not canonicalized to a non-existent
+        path — the safety rail that keeps canonicalization from minting
+        an identity for content that only exists in the worktree."""
+        monkeypatch.setattr(
+            "nexus.repo_identity._TEMP_DIR_PREFIXES", ("/nonexistent-tmp-prefix/",),
+        )
+
+        cat = ActiveCatalog()
+        corpus = "kkumv-md-no-mirror"
+        clean_root = tmp_path / "clean-repo-2"
+        clean_root.mkdir()
+        cat.register_owner(corpus, "curator", repo_root=str(clean_root))
+
+        worktree_md = (
+            clean_root / ".claude" / "worktrees"
+            / "agent-z" / "docs" / "rdr" / "rdr-unique.md"
+        )
+        worktree_md.parent.mkdir(parents=True)
+        worktree_md.write_text("# unique\n", encoding="utf-8")
+
+        from nexus.doc_indexer import _catalog_markdown_hook
+
+        _catalog_markdown_hook(
+            worktree_md, "rdr__kkumv-md-no-mirror", "rdr", corpus, 3,
+        )
+
+        assert documents_by_file_path(str(worktree_md)) == []
+        primary_mirror = clean_root / "docs" / "rdr" / "rdr-unique.md"
+        assert documents_by_file_path(str(primary_mirror)) == []
+
 
 def test_batch_index_markdowns_skips_malformed_frontmatter_and_continues(
     tmp_path, monkeypatch,

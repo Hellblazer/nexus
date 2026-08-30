@@ -61,8 +61,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *   <li>{@link #crossShardPkCollision_haltsMigrationLoudly()} — N7.</li>
  *   <li>{@link #exactlyOneEmbedding_rejectsZeroAndTwo_acceptsOnePerDim()} —
  *       bead .12's direct acceptance line.</li>
- *   <li>{@link #unRekeyedLegacyChash_bootSurvives_octetCheckStaysNotValid()} —
- *       F14b / bead .13's core boot-brick guard.</li>
+ *   <li>F14b / bead .13's core boot-brick guard was originally
+ *       {@code unRekeyedLegacyChash_bootSurvives_octetCheckStaysNotValid()},
+ *       DELETED (hygiene-001-not-null.xml follow-on, nexus-tk070.p6a) once
+ *       hygiene-001-5/-8 started deleting un-rekeyed legacy-width rows
+ *       instead of leaving them in place; see {@link Hygiene001NotNullMigrationRlsTest
+ *       #hygieneChangeset_deletesOrphansAndBackfillsAcrossTwoTenants_andNotNullTakesEffect}
+ *       for the replacement (delete-side) coverage.</li>
  *   <li>{@link #allThreeHnswIndexes_areFull_noPartialPredicate()} — F13/C4,
  *       queried against the LIVE database per the plan-audit finding on bead
  *       .12 (not a grep of the changelog XML).</li>
@@ -545,76 +550,32 @@ class VectorsUnifyChunksIntegrationTest {
     }
 
     // ── Test 6: un-rekeyed legacy chash — F14b boot-brick guard ─────────────
-
-    /**
-     * A pre-rekey store carries 16-byte legacy chash values. A width CHECK
-     * present VALID (or added before the copy) would reject them mid-migration
-     * — the exact GH #1390 crash-loop shape. This test's premise was falsified
-     * manually (not left in the suite) by temporarily reordering the changeset
-     * to add the octet CHECK VALID and before the copy and confirming this
-     * test goes red — see the developer's completion report for that
-     * kill-control demonstration.
-     *
-     * <p>MUST seed BEFORE {@code rdr180-11-octet-checks-not-valid} runs:
-     * {@code NOT VALID} exempts only rows that PRE-EXIST the {@code ADD
-     * CONSTRAINT} — a row inserted AFTER that changeset is fully checked like
-     * any other write (rdr180-001-bytea-chash.xml's own header, "MEASURED and
-     * still binding"). Seeding after a full head migration (as the other
-     * tests in this class do) would therefore hit chunks_1024's OWN octet
-     * CHECK immediately, never reaching this changeset at all.
-     */
-    @Test
-    void unRekeyedLegacyChash_bootSurvives_octetCheckStaysNotValid() throws Exception {
-        Rig rig = newRig("legacy16");
-        try {
-            migrateUpTo(rig.adminDs(), "rdr180-11-octet-checks-not-valid");
-            // 16-byte legacy chash, not the post-rekey 32-byte form -- PRE-EXISTS
-            // the octet CHECK that is about to be added, so NOT VALID exempts it.
-            byte[] legacy16 = new byte[16];
-            java.util.Arrays.fill(legacy16, (byte) 0x5a);
-            try (Connection su = rig.pg().createConnection("")) {
-                try (PreparedStatement stub = su.prepareStatement(
-                        "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
-                            + "ON CONFLICT (tenant_id, name) DO NOTHING")) {
-                    stub.setString(1, "t1");
-                    stub.setString(2, "legacy__demo__voyage__v1");
-                    stub.executeUpdate();
-                }
-                try (PreparedStatement ps = su.prepareStatement(
-                        "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) "
-                            + "VALUES (?, ?, ?, ?, ?::vector)")) {
-                    ps.setString(1, "t1");
-                    ps.setString(2, "legacy__demo__voyage__v1");
-                    ps.setBytes(3, legacy16);
-                    ps.setString(4, "un-rekeyed row");
-                    ps.setString(5, "[" + "0.01,".repeat(1023) + "0.01]");
-                    ps.executeUpdate();
-                }
-            }
-
-            // Resume the rest of the head migration (rdr180-11 onward — the
-            // octet CHECK is added NOT VALID and correctly exempts this
-            // pre-existing row) before applying the unify changeset.
-            assertThatCode(() -> SchemaMigrator.migrate(rig.adminDs()))
-                .as("resuming the head migration past rdr180-11 must not throw -- the "
-                    + "pre-existing 16-byte row is exempted by NOT VALID")
-                .doesNotThrowAnyException();
-
-            assertThatCode(() -> applyUnifyChangeset(rig.adminDs()))
-                .as("boot against an un-rekeyed store (16-byte legacy chash) must complete — "
-                    + "a VALID or pre-copy octet CHECK would crash-loop here (F14b, GH #1390 shape)")
-                .doesNotThrowAnyException();
-
-            try (Connection conn = rig.pg().createConnection("")) {
-                assertThat(rowCount(conn, "nexus.chunks")).isEqualTo(1L);
-                assertThat(constraintValidated(conn, "chunks_chash_octet_check"))
-                    .as("octet CHECK must remain NOT VALID -- it is never validated at boot time")
-                    .isFalse();
-            }
-        } finally {
-            rig.close();
-        }
-    }
+    //
+    // unRekeyedLegacyChash_bootSurvives_octetCheckStaysNotValid was DELETED
+    // here (hygiene-001-not-null.xml follow-on, nexus-tk070.p6a). Its premise
+    // — a 16-byte legacy-width chash row SURVIVES the boot migration with the
+    // octet CHECK left NOT VALID — is inverted by hygiene-001-5/-8: those
+    // steps now DELETE any nexus.chunks / nexus.catalog_document_chunks row
+    // with octet_length(chash) <> 32 (counted, RAISE NOTICE'd — the
+    // nexus-lgdel "no path back past the 32-byte cutover" deletion arc) as
+    // part of the SAME SchemaMigrator.migrate() head run this test drove past
+    // rdr180-11. So the row this test seeded into chunks_1024 -- copied into
+    // the unified nexus.chunks table by vectors-004-unify-chunks.xml, which
+    // still runs before hygiene-001 in db.changelog-master.xml -- is gone by
+    // the time this method's assertions ran, not present as it asserted.
+    //
+    // The replacement coverage (seed a legacy-width chunks row + its
+    // catalog_document_chunks manifest row pre-walk, run the full migration,
+    // assert BOTH rows are DELETED) already exists:
+    // Hygiene001NotNullMigrationRlsTest
+    // .hygieneChangeset_deletesOrphansAndBackfillsAcrossTwoTenants_andNotNullTakesEffect
+    // seeds exactly this shape (seedLegacyChunkAndManifest, two tenants) and
+    // asserts both the chunks row (chunkGone) and the manifest row
+    // (manifestGone) are absent post-migration — the DELETE side hygiene-001-5
+    // and hygiene-001-8 add. The octet CHECK's NOT VALID state is unchanged by
+    // this changeset (no VALIDATE CONSTRAINT statement anywhere in
+    // hygiene-001-not-null.xml), so there is no new assertion surface to add
+    // for that half of the old premise.
 
     // ── Test 7: all three HNSW indexes are FULL, no partial predicate (F13/C4) ──
 

@@ -3816,11 +3816,30 @@ def store_put(
         # the t3.put chunk natural-id (sha256(content)[:32]) — a chunk hash
         # is never a tumbler and 500s the service enqueue, which the best-
         # effort hook then swallows (silent, total loss of RDR-089 aspects in
-        # service mode). When no tumbler was minted, catalog_doc_id is '' —
-        # the blank sentinel the service NULL-coerces (nullIfBlank), which
-        # satisfies the FK and still extracts from the queued content. This
-        # matches every other fire_document caller (doc_indexer, pipeline_
-        # stages, code_indexer, prose_indexer), which all pass catalog_doc_id.
+        # service mode). This matches every other fire_document caller
+        # (doc_indexer, pipeline_stages, code_indexer, prose_indexer), which
+        # all pass catalog_doc_id.
+        #
+        # hygiene-001 (nexus-tk070.p6a follow-on): when no tumbler was minted,
+        # catalog_doc_id is "" — SUPERSEDES the prior "blank sentinel the
+        # service NULL-coerces" comment above. aspect_extraction_queue.doc_id
+        # is NOT NULL now and the engine refuses a blank doc_id at the
+        # boundary (400 "doc_id required").
+        #
+        # Review round item B (critic C2): the resolve-or-skip decision for a
+        # blank doc_id moved to the CHOKE POINT, aspect_extraction_enqueue_hook
+        # itself — the one place all seven fire_document call sites (this one
+        # included) converge, rather than seven copies of the same guard. So
+        # this call site no longer pre-empts the hook by skipping it here;
+        # catalog_doc_id is forwarded VERBATIM, blank or not, and the hook's
+        # own resolve-by-(collection, source_path) fallback (via the catalog
+        # reader) or its aspect_enqueue_skipped_no_doc_id warning is now the
+        # ONLY place this decision is made. At the MCP boundary source_path
+        # (the ``doc_id`` local below) is a content-hash, not a real
+        # file_path/title, so the hook's catalog-lookup fallback cannot
+        # resolve one for this specific call site either -- the practical
+        # outcome here is unchanged (still skips), but the decision itself is
+        # no longer duplicated.
         _hooks.fire_document(doc_id, col_name, content, doc_id=catalog_doc_id)
         # RDR-061 E2: log relevance correlation for the most recent search in
         # this session. Only the newest trace is used to minimize noise —
@@ -4475,9 +4494,15 @@ def memory_put(
         project: Project namespace (e.g. "nexus", "nexus_active")
         title: Entry title (unique within project)
         tags: Comma-separated tags
-        ttl: Time-to-live in days (default 30). Omit or pass ``None``/``null``
-            for a permanent entry — that is the ONLY way to get a permanent
-            row. ``ttl=0`` is RETIRED (RDR-194 D5, nexus-tk070.p6a): this tool
+        ttl: Time-to-live in days. DEFAULT 30: an entry whose call does not
+            name a ttl EXPIRES in 30 days (extended by reads: effective ttl =
+            ttl * (1 + ln(access_count + 1)), so the row nobody reads is the
+            one that goes). Pass ``None``/``null`` EXPLICITLY for a permanent
+            row; omitting the argument does NOT make it permanent — the
+            signature's default wins (nexus-sv152; a previous version of this
+            text said the opposite and every caller that believed it persisted
+            nothing). ``memory_get`` shows the stored value on its ``TTL:``
+            line. ``ttl=0`` is RETIRED (RDR-194 D5, nexus-tk070.p6a): this tool
             no longer coerces it to ``None``, and the engine itself now
             REJECTS ``ttl=0`` (and any ``ttl<=0``) with a loud 400 naming the
             fix, for every caller and every path — ``POST /v1/memory/put``
@@ -4556,9 +4581,19 @@ def memory_put(
                 f"memory_put reported success but the row did not land "
                 f"({verdict}): {detail}"
             )
-        return f"Stored: [{row_id}] {project}/{title}"
+        return f"Stored: [{row_id}] {project}/{title} (ttl: {_render_ttl(ttl)})"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("memory_put", e)
+
+
+def _render_ttl(ttl: object) -> str:
+    """``permanent`` for a NULL ttl, else ``<n> days`` (nexus-sv152)."""
+    if ttl is None or ttl == "":
+        return "permanent"
+    try:
+        return f"{int(ttl)} days"
+    except (TypeError, ValueError):
+        return str(ttl)
 
 
 @mcp.tool(
@@ -4595,7 +4630,10 @@ def memory_get(project: str, title: str = "") -> str:
                     return (
                         f"[{entry['id']}] {entry['project']}/{entry['title']}\n"
                         f"Tags: {entry.get('tags', '')}\n"
-                        f"Updated: {entry.get('timestamp', '')}\n\n"
+                        f"Updated: {entry.get('timestamp', '')}\n"
+                        # nexus-sv152: the stored ttl is otherwise invisible to
+                        # every read surface, and memory_put's default is 30 days.
+                        f"TTL: {_render_ttl(entry.get('ttl'))}\n\n"
                         f"{entry['content']}"
                     )
                 if candidates:

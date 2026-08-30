@@ -130,6 +130,58 @@ class TestIsWorktreeOrTempdirPath:
         assert not is_worktree_or_tempdir_path("/Users/hal/git/nexus/src/real.py")
 
 
+class TestCanonicalizeWorktreePath:
+    """nexus-kkumv prevention half: rewrite a worktree-marker path to its
+    primary-repo equivalent, or leave it untouched when there is no
+    marker to rewrite."""
+
+    def test_rewrites_worktree_path_to_primary_root(self):
+        from nexus.repo_identity import canonicalize_worktree_path
+
+        result = canonicalize_worktree_path(
+            "/Users/hal/git/nexus/.claude/worktrees/agent-z/docs/rdr/rdr-999.md"
+        )
+        assert result == "/Users/hal/git/nexus/docs/rdr/rdr-999.md"
+
+    def test_clean_path_unchanged(self):
+        from nexus.repo_identity import canonicalize_worktree_path
+
+        assert (
+            canonicalize_worktree_path("/Users/hal/git/nexus/docs/rdr/rdr-999.md")
+            == "/Users/hal/git/nexus/docs/rdr/rdr-999.md"
+        )
+
+    def test_tempdir_only_path_unchanged(self):
+        """No worktree marker present -- /tmp alone is not this function's
+        concern (is_worktree_or_tempdir_path covers that class)."""
+        from nexus.repo_identity import canonicalize_worktree_path
+
+        assert (
+            canonicalize_worktree_path("/tmp/some-scratch/file.md")
+            == "/tmp/some-scratch/file.md"
+        )
+
+    def test_worktree_root_with_no_relative_tail_returns_bare_primary_root(self):
+        from nexus.repo_identity import canonicalize_worktree_path
+
+        assert (
+            canonicalize_worktree_path(
+                "/Users/hal/git/nexus/.claude/worktrees/agent-z"
+            )
+            == "/Users/hal/git/nexus"
+        )
+
+    def test_worktree_root_with_trailing_slash_returns_bare_primary_root(self):
+        from nexus.repo_identity import canonicalize_worktree_path
+
+        assert (
+            canonicalize_worktree_path(
+                "/Users/hal/git/nexus/.claude/worktrees/agent-z/"
+            )
+            == "/Users/hal/git/nexus"
+        )
+
+
 class TestShouldSkipEphemeralRegistration:
     """nexus-u8n4r guard semantics: skip only when the REGISTERED path
     matches the worktree/tempdir predicate AND the owner's own repo_root

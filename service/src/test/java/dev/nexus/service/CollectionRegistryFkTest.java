@@ -841,8 +841,12 @@ class CollectionRegistryFkTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(80)
-    void catalogCollections_createdAt_isTimestamptzNullable() throws Exception {
-        // RED until P0.2 hygiene changeset converts created_at to timestamptz NULL.
+    void catalogCollections_createdAt_isTimestamptzNotNull() throws Exception {
+        // hygiene-001-6 (nexus-tk070.p6a follow-on) SUPERSEDES P0.2's nullable
+        // conversion this test used to pin: the engine NEVER wrote created_at
+        // (CatalogRepository only SELECTed it), so production held 260/260
+        // NULL rows -- hygiene-001-6 backfills them and makes the column
+        // NOT NULL DEFAULT now() again, closing the gap P0.2 opened.
         try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT data_type, is_nullable " +
@@ -851,11 +855,11 @@ class CollectionRegistryFkTest {
                 "  AND column_name='created_at'");
             assertThat(rs.next()).as("created_at column must exist in catalog_collections").isTrue();
             assertThat(rs.getString("data_type"))
-                .as("catalog_collections.created_at must be 'timestamp with time zone' after P0.2 hygiene")
+                .as("catalog_collections.created_at must be 'timestamp with time zone'")
                 .isEqualTo("timestamp with time zone");
             assertThat(rs.getString("is_nullable"))
-                .as("catalog_collections.created_at must be nullable after P0.2 hygiene (SQLite heritage was NOT NULL)")
-                .isEqualTo("YES");
+                .as("catalog_collections.created_at is NOT NULL again after hygiene-001-6")
+                .isEqualTo("NO");
         }
     }
 

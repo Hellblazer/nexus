@@ -37,6 +37,14 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * <p>One container for the whole set (each service test class starts its own
  * Testcontainers PG — see {@link PgContainerHelper}); grouping keeps the
  * suite's container count flat while the arc lands eight beads.
+ *
+ * <p>{@code j80w_emptyCreatedAtRowIsUnmatchableByBeforeFilter} DELETED
+ * (hygiene-001 step 7, nexus-tk070.p6a follow-on): catalog_links.created_at
+ * is NOT NULL DEFAULT now() now, and the SAME commit's paired Java fix moved
+ * {@code CatalogRepository.doImportLink}/{@code importLinksBatch} off
+ * {@code tsOrNull} onto {@code createdAtOrNow} — an absent created_at can no
+ * longer produce the NULL/unmatchable row this test's entire premise depended
+ * on; every link now carries a real timestamp by construction.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CatalogEngineDefects70Test {
@@ -1526,30 +1534,6 @@ class CatalogEngineDefects70Test {
     }
 
     @Test
-    void j80w_emptyCreatedAtRowIsUnmatchableByBeforeFilter() {
-        var p = linkPair("j80w-empty-unmatchable");
-        // importLink is the ETL leg and, since catalog-031 (nexus-cefa1.2), writes
-        // NULL created_at when the caller supplies none (tsOrNull; the pre-031
-        // '' sentinel rows became NULL under NULLIF in the migration). This is the
-        // undated-row shape nexus-4j80w requires to be UNMATCHABLE by a before-
-        // filter — now by natural SQL NULL semantics (NULL < ts is NULL), with the
-        // old CREATED_AT.ne("") guards deleted.
-        repo.importLink(TENANT, Map.of(
-            "from_tumbler", p[0], "to_tumbler", p[1], "link_type", "cites",
-            "created_by", "j80w-test"));
-
-        var results = repo.queryLinks(TENANT, p[0], null, null, null,
-            "9999-12-31T00:00:00+00:00", 100, 0, "both", null);
-        assertThat(results)
-            .as("a NULL created_at row must be UNMATCHABLE by a before-filter (fail-safe)")
-            .isEmpty();
-
-        int deleted = repo.bulkDeleteLinks(TENANT, p[0], null, null, null, "9999-12-31T00:00:00+00:00");
-        assertThat(deleted).isZero();
-        assertThat(repo.linksFrom(TENANT, p[0], List.of("cites"))).hasSize(1);
-    }
-
-    @Test
     void j80w_realTimestampRowStillMatchableByBeforeFilter() {
         var p = linkPair("j80w-real-matchable");
         repo.importLink(TENANT, Map.of(
@@ -1600,25 +1584,33 @@ class CatalogEngineDefects70Test {
         String future = repo.registerDocument(TENANT, owner, Map.of(
             "title", "bulkdel-future", "content_type", "paper",
             "source_uri", "file:///defects70/j80w-bulkdel/future.md"));
-        String blank = repo.registerDocument(TENANT, owner, Map.of(
-            "title", "bulkdel-blank", "content_type", "paper",
-            "source_uri", "file:///defects70/j80w-bulkdel/blank.md"));
+        String recent = repo.registerDocument(TENANT, owner, Map.of(
+            "title", "bulkdel-recent", "content_type", "paper",
+            "source_uri", "file:///defects70/j80w-bulkdel/recent.md"));
 
         repo.importLink(TENANT, Map.of("from_tumbler", a, "to_tumbler", past,
             "link_type", "cites", "created_by", "j80w-test", "created_at", "2000-01-01T00:00:00+00:00"));
         repo.importLink(TENANT, Map.of("from_tumbler", a, "to_tumbler", future,
             "link_type", "cites", "created_by", "j80w-test", "created_at", "2999-01-01T00:00:00+00:00"));
-        repo.importLink(TENANT, Map.of("from_tumbler", a, "to_tumbler", blank,
+        // hygiene-001 step 7 (nexus-tk070.p6a follow-on): catalog_links.created_at is
+        // NOT NULL DEFAULT now() now, and the same commit's paired Java fix moved
+        // CatalogRepository.doImportLink off tsOrNull onto createdAtOrNow -- an
+        // absent created_at no longer produces an unmatchable NULL row (the former
+        // "blank" case here); it lands "now", which is before this test's
+        // far-future cutoff exactly like the explicit PAST row.
+        repo.importLink(TENANT, Map.of("from_tumbler", a, "to_tumbler", recent,
             "link_type", "cites", "created_by", "j80w-test"));
 
         int deleted = repo.bulkDeleteLinks(TENANT, a, null, null, null, "2500-01-01T00:00:00+00:00");
-        assertThat(deleted).as("only the PAST-timestamped edge is before the cutoff").isEqualTo(1);
+        assertThat(deleted)
+            .as("the PAST-timestamped edge and the now-stamped (created_at-absent) edge are both before the cutoff")
+            .isEqualTo(2);
 
         var remaining = repo.linksFrom(TENANT, a, List.of("cites"));
-        assertThat(remaining).hasSize(2);
+        assertThat(remaining).hasSize(1);
         assertThat(remaining.stream().map(e -> e.get("to_tumbler")).toList())
-            .as("the future-dated and blank-created_at edges must both survive")
-            .containsExactlyInAnyOrder(future, blank);
+            .as("only the future-dated edge must survive")
+            .containsExactly(future);
     }
 
     // ══════════════════════════════════════════════════════════════════════════

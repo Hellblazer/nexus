@@ -121,9 +121,9 @@ class CatalogRenameCollectionTest {
         assertThat(c.get("topics")).as("topics").isEqualTo(1);
         assertThat(c.get("taxonomy_meta")).as("taxonomy_meta (RESTRICT child)").isEqualTo(1);
         assertThat(c.get("taxonomy_centroids")).as("taxonomy_centroids (unified, 1+1+1)").isEqualTo(3);
-        assertThat(c.get("document_aspects")).as("document_aspects (incl doc-less)").isEqualTo(2);
+        assertThat(c.get("document_aspects")).as("document_aspects (both rows doc-rooted, hygiene-001)").isEqualTo(2);
         assertThat(c.get("document_highlights")).as("document_highlights").isEqualTo(1);
-        assertThat(c.get("aspect_extraction_queue")).as("aspect_extraction_queue (incl doc-less)").isEqualTo(2);
+        assertThat(c.get("aspect_extraction_queue")).as("aspect_extraction_queue (both rows doc-rooted, hygiene-001)").isEqualTo(2);
         assertThat(c.get("catalog_documents")).as("catalog_documents").isEqualTo(1);
         assertThat(c.get("relevance_log")).as("relevance_log (re-homed, no FK)").isEqualTo(2);
         assertThat(c.get("search_telemetry")).as("search_telemetry (re-homed, no FK)").isEqualTo(2);
@@ -523,25 +523,35 @@ class CatalogRenameCollectionTest {
         // PK is (tenant_id, collection, topic_id) -- three DIFFERENT topic_ids, not
         // the shared `topicId` above (would collide on the unified PK; pre-unification
         // these lived in three separate physical tables and could share one topic_id).
-        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_384) "
-            + "VALUES ('" + tenant + "', '" + coll + "', " + topicId + ", " + vec(384) + "::vector)");
-        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_768) "
-            + "VALUES ('" + tenant + "', '" + coll + "', " + (topicId + 1) + ", " + vec(768) + "::vector)");
-        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_1024) "
-            + "VALUES ('" + tenant + "', '" + coll + "', " + (topicId + 2) + ", " + vec(1024) + "::vector)");
-        // document_aspects: 2 — one doc-rooted, one DOC-LESS
-        st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id) "
-            + "VALUES ('" + tenant + "', '" + coll + "', '/p/a1.md', NOW(), 'v1', 'docling', 'rn-doc-1')");
-        st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id) "
-            + "VALUES ('" + tenant + "', '" + coll + "', '/p/a2.md', NOW(), 'v1', 'docling', NULL)");
-        // document_highlights: 1
-        st.execute("INSERT INTO nexus.document_highlights (tenant_id, doc_id, collection, highlights_md, ingested_at) "
-            + "VALUES ('" + tenant + "', 'rn-doc-1', '" + coll + "', 'hi', NOW())");
-        // aspect_extraction_queue: 2 — one doc-rooted, one DOC-LESS
+        // hygiene-001 step 9b (nexus-tk070.p6a follow-on): label is NOT NULL now,
+        // no default -- supply it explicitly.
+        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, embedding_384) "
+            + "VALUES ('" + tenant + "', '" + coll + "', " + topicId + ", '', " + vec(384) + "::vector)");
+        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, embedding_768) "
+            + "VALUES ('" + tenant + "', '" + coll + "', " + (topicId + 1) + ", '', " + vec(768) + "::vector)");
+        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, embedding_1024) "
+            + "VALUES ('" + tenant + "', '" + coll + "', " + (topicId + 2) + ", '', " + vec(1024) + "::vector)");
+        // document_aspects: 2, both doc-rooted at rn-doc-1 (the collection's only
+        // registered catalog_documents row -- catalog_documents count elsewhere in
+        // this fixture is asserted ==1, so a second row cannot be introduced here).
+        // hygiene-001 step 1 (nexus-tk070.p6a follow-on): doc_id/source_uri are both
+        // NOT NULL now, reversing fk-001-2's nullable conversion -- the second row
+        // used to be DOC-LESS (doc_id=NULL); that state is no longer representable,
+        // so it is now a second row against the same doc, distinguished by source_path.
+        st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) "
+            + "VALUES ('" + tenant + "', '" + coll + "', '/p/a1.md', NOW(), 'v1', 'docling', 'rn-doc-1', 'file:///p/a1.md')");
+        st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) "
+            + "VALUES ('" + tenant + "', '" + coll + "', '/p/a2.md', NOW(), 'v1', 'docling', 'rn-doc-1', 'file:///p/a2.md')");
+        // document_highlights: 1. hygiene-001 step 3: source_uri is NOT NULL now too.
+        st.execute("INSERT INTO nexus.document_highlights (tenant_id, doc_id, collection, source_uri, highlights_md, ingested_at) "
+            + "VALUES ('" + tenant + "', 'rn-doc-1', '" + coll + "', 'file:///rn-doc-1-hl', 'hi', NOW())");
+        // aspect_extraction_queue: 2, both doc-rooted at rn-doc-1 (hygiene-001 step 2:
+        // doc_id is NOT NULL now -- see the document_aspects comment above for why
+        // the second row is no longer DOC-LESS).
         st.execute("INSERT INTO nexus.aspect_extraction_queue (tenant_id, collection, source_path, status, enqueued_at, doc_id) "
             + "VALUES ('" + tenant + "', '" + coll + "', '/p/q1.md', 'pending', NOW(), 'rn-doc-1')");
         st.execute("INSERT INTO nexus.aspect_extraction_queue (tenant_id, collection, source_path, status, enqueued_at, doc_id) "
-            + "VALUES ('" + tenant + "', '" + coll + "', '/p/q2.md', 'pending', NOW(), NULL)");
+            + "VALUES ('" + tenant + "', '" + coll + "', '/p/q2.md', 'pending', NOW(), 'rn-doc-1')");
         // search_telemetry: 2 (no FK, but re-homed)
         st.execute("INSERT INTO nexus.search_telemetry (tenant_id, ts, query_hash, collection, raw_count, kept_count) "
             + "VALUES ('" + tenant + "', NOW(), 'qh1', '" + coll + "', 10, 5)");

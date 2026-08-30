@@ -150,7 +150,7 @@ def test_verified_write_returns_the_original_string_exactly(monkeypatch):
         resolve=lambda p, t: (_entry("findings"), []),
         content="findings",
     )
-    assert out == "Stored: [42] p/t"
+    assert out == "Stored: [42] p/t (ttl: 30 days)"  # nexus-sv152: the stored ttl rides the confirmation
 
 
 def test_empty_content_is_still_rejected_before_any_write(monkeypatch):

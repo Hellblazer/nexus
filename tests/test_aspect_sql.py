@@ -22,6 +22,22 @@ from nexus.aspect_extractor import AspectRecord
 from nexus.db.t2 import T2Database
 from nexus.operators import aspect_sql
 
+from tests._catalog_fixture_ops import register_real_doc_id
+
+# hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id now
+# carries a REAL FK to catalog_documents(tenant_id, tumbler) -- see the
+# identical cache in tests/test_document_aspects_store.py for the full
+# rationale. One real registration per test, memoized on the test's
+# freshly-minted NX_SERVICE_TOKEN.
+_doc_id_cache: dict[str, str] = {}
+
+
+def _shared_doc_id() -> str:
+    key = os.environ.get("NX_SERVICE_TOKEN", "")
+    if key not in _doc_id_cache:
+        _doc_id_cache[key] = register_real_doc_id()
+    return _doc_id_cache[key]
+
 
 @pytest.fixture(autouse=True)
 def _no_live_claude_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -66,6 +82,7 @@ def _make_record(
         # Mirror the going-forward writer contract from
         # aspect_extractor._build_record / _empty_record.
         source_uri=uri_for(collection, source_path),
+        doc_id=_shared_doc_id(),
     )
 
 

@@ -160,7 +160,14 @@ public final class AspectRepository {
      * (document_highlights.collection is nullable — MATCH SIMPLE lets null escape the FK).
      */
     private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
-        if (collection == null || collection.isBlank()) return;
+        // hygiene-001 (nexus-tk070.p6a follow-on): "" is a legitimate value to
+        // register now -- document_highlights.collection is NOT NULL AND FK'd
+        // to catalog_collections (document_highlights_collection_fk), so a
+        // caller that nne()-defaults a blank collection to "" needs that row
+        // to actually exist. null alone still means "nothing to register"
+        // (the aspect/queue callers already reject a blank collection before
+        // reaching here, so they never hit this branch in practice).
+        if (collection == null) return;
         ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
            .values(tenant, collection)
            .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
@@ -189,6 +196,16 @@ public final class AspectRepository {
         if (collection == null || sourcePath == null || extractedAt == null
                 || modelVersion == null || extractorName == null) {
             throw new IllegalArgumentException("aspect upsert: required fields missing");
+        }
+        // hygiene-001 (nexus-tk070.p6a follow-on, Sam decision): document_aspects
+        // .doc_id is NOT NULL now (reverses fk-001-2's nullable conversion) — an
+        // aspect row with no attributable document is not representable going
+        // forward. Refuse at the boundary with the exact message the route
+        // javadoc documents, rather than letting a blank doc_id reach the DB and
+        // fail an opaque NOT NULL violation.
+        String docId = (String) body.get("doc_id");
+        if (docId == null || docId.isBlank()) {
+            throw new IllegalArgumentException("doc_id required");
         }
 
         OffsetDateTime extractedAtTs = parseTs(extractedAt);
@@ -226,9 +243,13 @@ public final class AspectRepository {
                     extractedAtTs,
                     modelVersion,
                     extractorName,
-                    (String) body.get("source_uri"),
+                    // hygiene-001: source_uri is NOT NULL now too; nne() guards
+                    // against a caller that omits it (was a silent NULL write
+                    // before this migration, matching CatalogRepository's own
+                    // nne()-guarded NOT NULL text columns).
+                    nne((String) body.get("source_uri")),
                     jsonbOrNull((String) body.get("salient_sentences")),
-                    nullIfBlank((String) body.get("doc_id")))
+                    docId)
                 .onConflict(
                     DOCUMENT_ASPECTS.TENANT_ID,
                     DOCUMENT_ASPECTS.COLLECTION,
@@ -343,84 +364,6 @@ public final class AspectRepository {
             var rows = (limit > 0 ? q.limit(limit).offset(offset) : q).fetch();
             List<Map<String, Object>> out = new ArrayList<>();
             for (var r : rows) out.add(recordToMap(r));
-            return out;
-        });
-    }
-
-    /**
-     * Page ceiling for {@link #listWithoutCatalogDocument}: one call returns at
-     * most this many rows, whatever {@code limit} says (0 or negative means "a
-     * full page", never "everything"). The live population this route was
-     * built to explain was 846 rows on 2026-08-28 — already ~3x this ceiling —
-     * so an unclamped default would have issued one unbounded query on its very
-     * first real run. Same convention as {@code TelemetryHandler}'s
-     * {@code MAX_QUERY_RUNS_LIMIT}: clamp, never 400; a caller that wants more
-     * pages by {@code offset}.
-     */
-    public static final int MAX_PAGE_ROWS = 300;
-
-    /**
-     * Aspect rows that NO live catalog document claims (nexus-mlu3k, read-only).
-     *
-     * <p>Uses aspects-004's attribution predicate verbatim, negated: a row is
-     * listed when {@code doc_id IS NULL} and no same-tenant, non-alias,
-     * non-tombstoned {@code catalog_documents} row has a byte-equal
-     * {@code source_uri}. Each row carries {@code tombstoned_match}: whether a
-     * document that would otherwise have matched (same tenant, same
-     * {@code source_uri}, not an alias) exists but is TOMBSTONED — so a caller
-     * can tell "never registered" from "registered, then deleted" without a
-     * second query. A tombstoned ALIAS is deliberately not a match: the flag
-     * negates exactly one clause of the live predicate ({@code deleted_at}),
-     * nothing else. Ordered by {@code source_uri} then {@code collection} for
-     * stable paging; each call returns at most {@link #MAX_PAGE_ROWS} rows.
-     * This is the census the live cluster needed a nexus_diag session for; the
-     * client verb ({@code nx enrich aspects-without-catalog}) pages through and
-     * buckets what comes back.
-     */
-    public List<Map<String, Object>> listWithoutCatalogDocument(String tenant, int limit, int offset) {
-        int page = limit <= 0 ? MAX_PAGE_ROWS : Math.min(limit, MAX_PAGE_ROWS);
-        int skip = Math.max(offset, 0);
-        return tenantScope.withTenant(tenant, ctx -> {
-            var live = ctx.selectOne().from(CATALOG_DOCUMENTS)
-                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(DOCUMENT_ASPECTS.TENANT_ID))
-                .and(CATALOG_DOCUMENTS.SOURCE_URI.eq(DOCUMENT_ASPECTS.SOURCE_URI))
-                .and(CATALOG_DOCUMENTS.SOURCE_URI.ne(""))
-                .and(CATALOG_DOCUMENTS.ALIAS_OF.eq(""))
-                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull());
-            var tombstoned = exists(ctx.selectOne().from(CATALOG_DOCUMENTS)
-                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(DOCUMENT_ASPECTS.TENANT_ID))
-                .and(CATALOG_DOCUMENTS.SOURCE_URI.eq(DOCUMENT_ASPECTS.SOURCE_URI))
-                .and(CATALOG_DOCUMENTS.SOURCE_URI.ne(""))
-                .and(CATALOG_DOCUMENTS.ALIAS_OF.eq(""))
-                .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()));
-            var q = ctx.select(
-                    DOCUMENT_ASPECTS.COLLECTION,
-                    DOCUMENT_ASPECTS.SOURCE_PATH,
-                    DOCUMENT_ASPECTS.SOURCE_URI,
-                    DOCUMENT_ASPECTS.EXTRACTED_AT,
-                    DOCUMENT_ASPECTS.MODEL_VERSION,
-                    DOCUMENT_ASPECTS.EXTRACTOR_NAME,
-                    DOCUMENT_ASPECTS.CONFIDENCE,
-                    tombstoned.as("tombstoned_match"))
-                .from(DOCUMENT_ASPECTS)
-                .where(DOCUMENT_ASPECTS.DOC_ID.isNull())
-                .and(notExists(live))
-                .orderBy(DOCUMENT_ASPECTS.SOURCE_URI.asc(), DOCUMENT_ASPECTS.COLLECTION.asc());
-            var rows = q.limit(page).offset(skip).fetch();
-            List<Map<String, Object>> out = new ArrayList<>();
-            for (var r : rows) {
-                Map<String, Object> m = new LinkedHashMap<>();
-                m.put("collection",       r.get(DOCUMENT_ASPECTS.COLLECTION));
-                m.put("source_path",      r.get(DOCUMENT_ASPECTS.SOURCE_PATH));
-                m.put("source_uri",       r.get(DOCUMENT_ASPECTS.SOURCE_URI));
-                var at = r.get(DOCUMENT_ASPECTS.EXTRACTED_AT);
-                m.put("extracted_at",     at == null ? null : at.toString());
-                m.put("model_version",    r.get(DOCUMENT_ASPECTS.MODEL_VERSION));
-                m.put("extractor_name",   r.get(DOCUMENT_ASPECTS.EXTRACTOR_NAME));
-                m.put("confidence",       r.get(DOCUMENT_ASPECTS.CONFIDENCE));
-                m.put("tombstoned_match", Boolean.TRUE.equals(r.get("tombstoned_match", Boolean.class)));
-                out.add(m);
-            }
             return out;
         });
     }
@@ -622,7 +565,12 @@ public final class AspectRepository {
                             extractedAtTs,
                             (String) body.get("model_version"),
                             (String) body.get("extractor_name"),
-                            (String) body.get("source_uri"),
+                            // hygiene-001 (nexus-tk070.p6a follow-on): source_uri is
+                            // NOT NULL now. doc_id stays nullIfBlank (NOT nne()) --
+                            // "" would satisfy NOT NULL but violate the FK to
+                            // catalog_documents(tumbler); a blank doc_id here is a
+                            // genuine caller error, same as the live upsert path.
+                            nne((String) body.get("source_uri")),
                             jsonbOrNull((String) body.get("salient_sentences")),
                             nullIfBlank((String) body.get("doc_id")));
                 }
@@ -692,7 +640,9 @@ public final class AspectRepository {
                     extractedAtTs,
                     (String) body.get("model_version"),
                     (String) body.get("extractor_name"),
-                    (String) body.get("source_uri"),
+                    // hygiene-001: source_uri is NOT NULL now (see importAspectsBatch's
+                    // identical comment for why doc_id stays nullIfBlank).
+                    nne((String) body.get("source_uri")),
                     jsonbOrNull((String) body.get("salient_sentences")),
                     nullIfBlank((String) body.get("doc_id")))
                 .onConflict(
@@ -736,7 +686,9 @@ public final class AspectRepository {
 
         OffsetDateTime ingestedAtTs = parseTs(ingestedAt);
         tenantScope.withTenant(tenant, ctx -> {
-            ensureCollectionRegistered(ctx, tenant, (String) body.get("collection"));
+            // hygiene-001: register the SAME nne()-defaulted collection value
+            // the INSERT below binds, or a blank collection 404s the FK.
+            ensureCollectionRegistered(ctx, tenant, nne((String) body.get("collection")));
             ctx.insertInto(DOCUMENT_HIGHLIGHTS,
                     DOCUMENT_HIGHLIGHTS.TENANT_ID,
                     DOCUMENT_HIGHLIGHTS.DOC_ID,
@@ -748,8 +700,10 @@ public final class AspectRepository {
                 .values(
                     tenant,
                     docId,
-                    (String) body.get("source_uri"),
-                    (String) body.get("collection"),
+                    // hygiene-001 (nexus-tk070.p6a follow-on): source_uri/collection
+                    // are NOT NULL now.
+                    nne((String) body.get("source_uri")),
+                    nne((String) body.get("collection")),
                     highlightsMd,
                     mentionsMd,
                     ingestedAtTs)
@@ -865,10 +819,12 @@ public final class AspectRepository {
             }
             if (kept.isEmpty()) return 0;
 
+            // hygiene-001: register the nne()-defaulted value (never raw
+            // null/blank) -- a row whose collection lands as "" still needs
+            // that row registered, or the batch INSERT below 404s the FK.
             var collections = new java.util.LinkedHashSet<String>();
             for (var body : kept) {
-                String c = (String) body.get("collection");
-                if (c != null) collections.add(c);
+                collections.add(nne((String) body.get("collection")));
             }
             for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
 
@@ -894,8 +850,8 @@ public final class AspectRepository {
                     insert = insert.values(
                             tenant,
                             (String) body.get("doc_id"),
-                            (String) body.get("source_uri"),
-                            (String) body.get("collection"),
+                            nne((String) body.get("source_uri")),
+                            nne((String) body.get("collection")),
                             (String) body.getOrDefault("highlights_md", ""),
                             (String) body.getOrDefault("mentions_md", ""),
                             ingestedAtTs);
@@ -920,7 +876,9 @@ public final class AspectRepository {
         OffsetDateTime ingestedAtTs = parseTs(ingestedAt);
 
         {
-            ensureCollectionRegistered(ctx, tenant, (String) body.get("collection"));
+            // hygiene-001: register the SAME nne()-defaulted collection value
+            // the INSERT below binds, or a blank collection 404s the FK.
+            ensureCollectionRegistered(ctx, tenant, nne((String) body.get("collection")));
             return ctx.insertInto(DOCUMENT_HIGHLIGHTS,
                     DOCUMENT_HIGHLIGHTS.TENANT_ID,
                     DOCUMENT_HIGHLIGHTS.DOC_ID,
@@ -932,8 +890,8 @@ public final class AspectRepository {
                 .values(
                     tenant,
                     docId,
-                    (String) body.get("source_uri"),
-                    (String) body.get("collection"),
+                    nne((String) body.get("source_uri")),
+                    nne((String) body.get("collection")),
                     (String) body.getOrDefault("highlights_md", ""),
                     (String) body.getOrDefault("mentions_md", ""),
                     ingestedAtTs)
@@ -983,6 +941,23 @@ public final class AspectRepository {
      * None} gate already filters out rows that don't need enqueueing
      * before this is ever called, so a skip here should be rare (a
      * genuine caller bug, not a routine collection-type filter).
+     *
+     * <p><strong>A blank {@code doc_id} is NOT a per-row skip</strong>
+     * (hygiene-001, nexus-tk070.p6a follow-on): {@link #buildEnqueueQuery}
+     * throws {@code IllegalArgumentException("doc_id required")}
+     * synchronously the moment it sees one, same message as {@link
+     * #enqueue}. Unlike the collection/source_path check above — which is
+     * a per-row {@code continue} inside this method's own loop — that
+     * exception propagates straight out of {@code buildEnqueueQuery} and
+     * out of {@code enqueueMany} itself, ABORTING THE WHOLE CALL: no row
+     * built before the offending one is ever added to {@code queries},
+     * {@code ctx.batch(queries).execute()} is never reached, and rows
+     * after the offending one in the input list are never even
+     * considered. There is no all-or-nothing DB-level fallback path here
+     * either — {@code aspect_extraction_queue.doc_id}'s own NOT NULL
+     * constraint would reject a blank value just as hard if one ever did
+     * reach Postgres, but this Java-level check fires first. Every
+     * enqueue, first-time or re-enqueue, must re-supply {@code doc_id}.
      */
     public int enqueueMany(String tenant, List<Map<String, Object>> rows) {
         if (rows.isEmpty()) return 0;
@@ -1014,6 +989,17 @@ public final class AspectRepository {
         String sourcePath = (String) body.get("source_path");
         if (collection == null || collection.isBlank()) throw new IllegalArgumentException("collection required");
         if (sourcePath == null || sourcePath.isBlank()) throw new IllegalArgumentException("source_path required");
+        // hygiene-001 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
+        // is NOT NULL now (reverses fk-001-4's nullable conversion). This is a
+        // hard requirement on EVERY enqueue, not only the first: an INSERT ...
+        // ON CONFLICT DO UPDATE statement's proposed row must satisfy every
+        // NOT NULL constraint before Postgres even evaluates the conflict, so
+        // the pre-hygiene-001 "doc_id-less re-enqueue relies on COALESCE to
+        // keep the existing linkage" pattern (nexus-nyout, still documented
+        // below on the DO UPDATE arm) can no longer bind NULL at all — a
+        // re-enqueue must now re-supply the doc_id it already has.
+        String docId = (String) body.get("doc_id");
+        if (docId == null || docId.isBlank()) throw new IllegalArgumentException("doc_id required");
         String enqueuedAt = (String) body.getOrDefault("enqueued_at",
             OffsetDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME));
         OffsetDateTime enqueuedAtTs = parseTs(enqueuedAt);
@@ -1033,7 +1019,7 @@ public final class AspectRepository {
                 ASPECT_EXTRACTION_QUEUE.LAST_ERROR)
             .values(
                 tenant, collection, sourcePath,
-                nullIfBlank((String) body.get("doc_id")),
+                docId,
                 (String) body.getOrDefault("content_hash", ""),
                 (String) body.getOrDefault("content", ""),
                 "pending", 0, enqueuedAtTs, null, null)
@@ -1048,6 +1034,11 @@ public final class AspectRepository {
             // a real incoming tumbler still overwrites. The queue IMPORT
             // path stays verbatim EXCLUDED.doc_id: fidelity import
             // reproduces exported rows exactly, including blanks.
+            // hygiene-001: EX_Q_DOC_ID can no longer BE null (the boundary
+            // check above refuses a blank doc_id before this statement is
+            // even built), so this COALESCE is now vacuously EX_Q_DOC_ID —
+            // left in place rather than simplified away, since it stays
+            // correct either way and documents the pre-hygiene-001 intent.
             .set(ASPECT_EXTRACTION_QUEUE.DOC_ID,
                  coalesce(EX_Q_DOC_ID, ASPECT_EXTRACTION_QUEUE.DOC_ID))
             .set(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,    EX_Q_CONTENT_HASH)
@@ -2014,6 +2005,16 @@ public final class AspectRepository {
      */
     private static String nullIfBlank(String s) {
         return (s == null || s.isBlank()) ? null : s;
+    }
+
+    /**
+     * Non-null empty: returns "" if null. hygiene-001 (nexus-tk070.p6a
+     * follow-on) — mirrors CatalogRepository's identical helper, used to
+     * guard NOT NULL text columns (document_aspects.source_uri) against a
+     * caller that omits the field.
+     */
+    private static String nne(String v) {
+        return v != null ? v : "";
     }
 
     private static Map<String, Object> highlightToMap(org.jooq.Record r) {

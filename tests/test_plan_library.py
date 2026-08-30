@@ -12,10 +12,71 @@ from tests._t2_fixture_ops import (
 
 @pytest.fixture
 def plan_db(tmp_path: Path) -> T2Database:
-    """Fresh T2Database for plan library tests."""
+    """Fresh T2Database for plan library tests.
+
+    ``save_plan`` is wrapped to default ``verb="query"`` when a caller
+    omits it (hygiene-001, nexus-tk070.p6a follow-on: ``plans.verb`` is
+    NOT NULL now, and this file's ~45 direct ``plan_db.save_plan(...)``
+    calls predate that constraint — none of them are testing verb
+    semantics itself). A test that DOES care about the verb value passes
+    its own ``verb=`` explicitly and this wrapper never touches it; a
+    test that wants to exercise the verb-less REFUSAL calls
+    ``database.plans.save_plan(..., verb=None)`` directly, bypassing this
+    facade-level wrapper entirely (see
+    ``test_save_plan_blank_verb_is_refused_client_side`` below).
+    """
     database = T2Database(tmp_path / "plans.db")
+    _original_save_plan = database.save_plan
+
+    def _save_plan_defaulting_verb(*args, **kwargs):
+        kwargs.setdefault("verb", "query")
+        return _original_save_plan(*args, **kwargs)
+
+    database.save_plan = _save_plan_defaulting_verb
     yield database
     database.close()
+
+
+def test_save_plan_blank_verb_is_refused_client_side(plan_db: T2Database) -> None:
+    """hygiene-001 (nexus-tk070.p6a follow-on): a verb-less save_plan call
+    is refused BEFORE the wire, not left to the engine's plans.verb NOT
+    NULL 409 -- verb-less rows are the nexus-fiovt pollution class by
+    contract (the library is verb-dimensional, RDR-078). Calls the
+    UNDERLYING ``database.plans.save_plan`` directly, bypassing this
+    file's ``plan_db`` fixture wrapper (which defaults verb for every
+    OTHER test here)."""
+    with pytest.raises(ValueError, match="verb required"):
+        plan_db.plans.save_plan(
+            query="verb-less save attempt",
+            plan_json='{"steps": []}',
+            verb=None,
+        )
+    with pytest.raises(ValueError, match="verb required"):
+        plan_db.plans.save_plan(
+            query="blank-string verb attempt",
+            plan_json='{"steps": []}',
+            verb="   ",
+        )
+
+
+def test_import_plan_blank_verb_is_refused_loudly(plan_db: T2Database) -> None:
+    """hygiene-001 (nexus-tk070.p6a follow-on): unlike ``save_plan``,
+    ``import_plan`` carries no client-side verb guard -- it is the
+    fidelity-preserving import path, and a verb-less row reaching it is
+    itself importing pollution (the nexus-fiovt class), not a caller
+    convenience to smooth over. The engine's plans.verb NOT NULL
+    constraint (hygiene-001-11) must refuse it outright, LOUDLY, as a
+    genuine HTTP 409 -- never silently dropped or coerced to some
+    placeholder verb."""
+    import httpx
+
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+        plan_db.plans.import_plan(
+            project="", query="verb-less import attempt", plan_json='{"steps": []}',
+            outcome="success", tags="", created_at="2026-01-01T00:00:00Z",
+            verb=None,
+        )
+    assert excinfo.value.response.status_code == 409
 
 
 def test_save_plan(plan_db: T2Database) -> None:

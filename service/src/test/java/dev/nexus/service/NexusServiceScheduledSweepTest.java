@@ -144,6 +144,58 @@ class NexusServiceScheduledSweepTest {
         }
     }
 
+    /**
+     * hygiene-001 follow-on (coordinator scope addition): seeds a
+     * {@code nexus.plans} row directly via raw SQL rather than through
+     * {@code PlanRepository} — this test class exercises {@link NexusService}
+     * as a black box, mirroring {@link #insertDataToken}. {@code verb} is
+     * supplied explicitly because hygiene-001's own changeset (this same
+     * migration run) makes the column NOT NULL.
+     */
+    private long insertPlan(String tenant, String project, String query, Integer ttlDays,
+                             OffsetDateTime createdAt, OffsetDateTime lastUsed) throws Exception {
+        try (Connection su = pg.createConnection("");
+             PreparedStatement ps = su.prepareStatement(
+                 "INSERT INTO nexus.plans "
+                 + "(tenant_id, project, query, plan_json, outcome, tags, created_at, ttl_days, last_used, verb) "
+                 + "VALUES (?, ?, ?, '{}', 'success', 't', ?, ?, ?, 'research') RETURNING id")) {
+            ps.setString(1, tenant);
+            ps.setString(2, project);
+            ps.setString(3, query);
+            ps.setObject(4, createdAt);
+            if (ttlDays != null) {
+                ps.setInt(5, ttlDays);
+            } else {
+                ps.setNull(5, java.sql.Types.INTEGER);
+            }
+            ps.setObject(6, lastUsed);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    private boolean planExists(long id) throws Exception {
+        try (Connection su = pg.createConnection("");
+             PreparedStatement ps = su.prepareStatement("SELECT 1 FROM nexus.plans WHERE id = ?")) {
+            ps.setLong(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    /** Cleanup counterpart to {@link #insertPlan}, mirroring {@link #deleteTokens}. */
+    private void deletePlans(String tenant) throws Exception {
+        try (Connection su = pg.createConnection("");
+             PreparedStatement ps = su.prepareStatement(
+                 "DELETE FROM nexus.plans WHERE tenant_id = ?")) {
+            ps.setString(1, tenant);
+            ps.executeUpdate();
+        }
+    }
+
     @Test
     void runScheduledSweep_reapsExpiredDataTokens_andReportsTheCount() throws Exception {
         String tenant = "sched-sweep-" + System.nanoTime();
@@ -336,6 +388,271 @@ class NexusServiceScheduledSweepTest {
 
             assertThat(elapsedMs).isLessThan(30_000);
             blocker.rollback();
+        }
+    }
+
+    /**
+     * Attaches a {@link ch.qos.logback.core.read.ListAppender} to the ROOT
+     * logger for the duration of {@code body}, then hands back every captured
+     * message. Pattern matches {@code IndexRunFenceTest}'s established use of
+     * a root-logger ListAppender to assert on structured log lines.
+     */
+    private java.util.List<String> captureLogs(ThrowingRunnable body) throws Exception {
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            body.run();
+            return logs.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .toList();
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
+    private interface ThrowingRunnable {
+        void run() throws Exception;
+    }
+
+    /**
+     * nexus-4tosp: PER-TENANT escalation, as distinct from the fleet-wide
+     * counter covered above. That counter only trips when EVERY tenant fails
+     * in the same cycle -- it is blind to exactly the bead's headline
+     * scenario, a single tenant whose sweep never completes while other
+     * tenants (the default tenant included) keep succeeding. These four
+     * tests exercise the per-tenant map via {@link NexusService#dataTokenSweepOverride},
+     * a test seam that replaces the real {@code TokenStore} call so failure
+     * can be injected deterministically without a live 30s statement-timeout
+     * race. The override intercepts every tenant in the cycle, not only the
+     * target, so every other tenant (the default tenant included) is routed
+     * to a trivial success (0 deleted) to keep these tests fast and isolated
+     * from the real data-token rows other tests in this class leave behind.
+     */
+    @Test
+    void perTenantSweep_belowThreshold_logsOnlyTheWarnLine() throws Exception {
+        String tenant = "sched-sweep-pertenant-below-" + System.nanoTime();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        insertDataToken(tenant, "marker", now.toInstant().plusSeconds(300));
+
+        try {
+            java.util.List<String> messages = captureLogs(() -> {
+                for (int cycle = 1; cycle < NexusService.DATA_SWEEP_STALL_CYCLES; cycle++) {
+                    service.dataTokenSweepOverride = t -> {
+                        if (t.equals(tenant)) {
+                            throw new RuntimeException("simulated failure cycle");
+                        }
+                        return 0;
+                    };
+                    service.runScheduledSweep(now);
+                }
+            });
+            service.dataTokenSweepOverride = null;
+
+            assertThat(service.dataSweepFailuresForTenant(tenant))
+                .as("below threshold, the per-tenant streak still climbs")
+                .isEqualTo(NexusService.DATA_SWEEP_STALL_CYCLES - 1);
+            assertThat(messages)
+                .as("every failed cycle logs the existing WARN, unchanged")
+                .filteredOn(m -> m.startsWith("event=t1_scheduled_data_token_sweep_tenant_failed")
+                    && m.contains("tenant=" + tenant))
+                .hasSize(NexusService.DATA_SWEEP_STALL_CYCLES - 1);
+            assertThat(messages)
+                .as("below the threshold, the per-tenant ERROR must not fire")
+                .noneMatch(m -> m.startsWith("event=t1_data_token_sweep_tenant_stalled")
+                    && m.contains("tenant=" + tenant));
+        } finally {
+            service.dataTokenSweepOverride = null;
+            deleteTokens(tenant);
+        }
+    }
+
+    @Test
+    void perTenantSweep_thirdConsecutiveFailure_logsStalledError() throws Exception {
+        String tenant = "sched-sweep-pertenant-stall-" + System.nanoTime();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        insertDataToken(tenant, "marker", now.toInstant().plusSeconds(300));
+
+        try {
+            java.util.List<String> messages = captureLogs(() -> {
+                for (int cycle = 1; cycle <= NexusService.DATA_SWEEP_STALL_CYCLES; cycle++) {
+                    service.dataTokenSweepOverride = t -> {
+                        if (t.equals(tenant)) {
+                            throw new RuntimeException("simulated failure cycle");
+                        }
+                        return 0;
+                    };
+                    service.runScheduledSweep(now);
+                }
+            });
+            service.dataTokenSweepOverride = null;
+
+            assertThat(service.dataSweepFailuresForTenant(tenant))
+                .isEqualTo(NexusService.DATA_SWEEP_STALL_CYCLES);
+            assertThat(messages)
+                .as("the Nth consecutive failure for THIS tenant escalates to a distinct "
+                    + "ERROR naming the tenant, the streak, and the last error, independent "
+                    + "of whether any other tenant succeeded that same cycle")
+                .anyMatch(m -> m.startsWith("event=t1_data_token_sweep_tenant_stalled")
+                    && m.contains("tenant=" + tenant)
+                    && m.contains("consecutive_failures=" + NexusService.DATA_SWEEP_STALL_CYCLES)
+                    && m.contains("last_error="));
+        } finally {
+            service.dataTokenSweepOverride = null;
+            deleteTokens(tenant);
+        }
+    }
+
+    @Test
+    void perTenantSweep_recoveryAfterStall_logsRecoveredAndResetsTheStreak() throws Exception {
+        String tenant = "sched-sweep-pertenant-recover-" + System.nanoTime();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        insertDataToken(tenant, "marker", now.toInstant().plusSeconds(300));
+
+        try {
+            for (int cycle = 1; cycle <= NexusService.DATA_SWEEP_STALL_CYCLES; cycle++) {
+                service.dataTokenSweepOverride = t -> {
+                    if (t.equals(tenant)) {
+                        throw new RuntimeException("simulated failure cycle");
+                    }
+                    return 0;
+                };
+                service.runScheduledSweep(now);
+            }
+            assertThat(service.dataSweepFailuresForTenant(tenant))
+                .isEqualTo(NexusService.DATA_SWEEP_STALL_CYCLES);
+
+            java.util.List<String> messages = captureLogs(() -> {
+                service.dataTokenSweepOverride = t -> t.equals(tenant) ? 1 : 0;
+                service.runScheduledSweep(now);
+            });
+            service.dataTokenSweepOverride = null;
+
+            assertThat(service.dataSweepFailuresForTenant(tenant))
+                .as("a successful sweep for the tenant clears its streak")
+                .isEqualTo(0);
+            assertThat(messages)
+                .as("recovery after a real stall logs a distinct INFO naming the tenant and "
+                    + "how many consecutive failures preceded it -- a latched flag with no "
+                    + "recovery signal is a wolf-crier")
+                .anyMatch(m -> m.startsWith("event=t1_data_token_sweep_tenant_recovered")
+                    && m.contains("tenant=" + tenant)
+                    && m.contains("after_failures=" + NexusService.DATA_SWEEP_STALL_CYCLES));
+        } finally {
+            service.dataTokenSweepOverride = null;
+            deleteTokens(tenant);
+        }
+    }
+
+    @Test
+    void perRunSummary_reportsFailedAndStalledTenantCounts() throws Exception {
+        String tenant = "sched-sweep-pertenant-summary-" + System.nanoTime();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        insertDataToken(tenant, "marker", now.toInstant().plusSeconds(300));
+
+        try {
+            // Drive the tenant to exactly the stall threshold first, quietly.
+            for (int cycle = 1; cycle < NexusService.DATA_SWEEP_STALL_CYCLES; cycle++) {
+                service.dataTokenSweepOverride = t -> {
+                    if (t.equals(tenant)) {
+                        throw new RuntimeException("simulated failure cycle");
+                    }
+                    return 0;
+                };
+                service.runScheduledSweep(now);
+            }
+
+            java.util.List<String> messages = captureLogs(() -> {
+                service.dataTokenSweepOverride = t -> {
+                    if (t.equals(tenant)) {
+                        throw new RuntimeException("simulated failure cycle");
+                    }
+                    return 0;
+                };
+                service.runScheduledSweep(now);
+            });
+            service.dataTokenSweepOverride = null;
+
+            assertThat(messages)
+                .as("one run-summary line per scheduled cycle, so a scheduler that never "
+                    + "fires is distinguishable from one that fired and failed -- this cycle "
+                    + "has exactly one failed tenant that has also just crossed the stall "
+                    + "threshold")
+                .anyMatch(m -> m.startsWith("event=t1_scheduled_data_token_sweep_run")
+                    && m.contains("failed=1")
+                    && m.contains("stalled=1"));
+        } finally {
+            service.dataTokenSweepOverride = null;
+            deleteTokens(tenant);
+        }
+    }
+
+    /**
+     * hygiene-001 follow-on (coordinator scope addition). The plan-expiry
+     * arm rides the SAME per-tenant loop and 6h schedule as the scratch/
+     * session/data-token arms above — this is the wiring proof for it,
+     * mirroring {@code runScheduledSweep_reapsExpiredDataTokens_andReportsTheCount}:
+     * before this, {@code PlanRepository.deleteExpiredPlans} had a unit test
+     * of its own, but nothing proved the scheduler ever called it.
+     */
+    @Test
+    void runScheduledSweep_reapsExpiredPlans_andSparesLiveOnes() throws Exception {
+        String tenant = "sched-sweep-plans-" + System.nanoTime();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        try {
+            // The sweep loop enumerates {DEFAULT_TENANT} u tokenStore.listKnownTenants()
+            // (service_tokens-derived) -- a plans-only tenant that never held a
+            // token is invisible to it. A live "marker" data token (never itself
+            // swept) makes this isolated tenant enumerable, the same idiom the
+            // sibling per-tenant tests above already use.
+            insertDataToken(tenant, "marker", now.toInstant().plusSeconds(300));
+            long expiredId = insertPlan(tenant, "proj", "expired plan", 30,
+                now.minusDays(400), null);
+            long liveId = insertPlan(tenant, "proj", "live plan", 30,
+                now.minusDays(5), now.minusDays(1));
+
+            service.runScheduledSweep(now);
+
+            assertThat(planExists(expiredId))
+                .as("the plan-expiry sweep arm must actually delete rows the "
+                    + "read-time predicate (PlanRepository.notExpiredCondition, "
+                    + "shared with listActivePlans/searchPlans/listPlans) filters "
+                    + "out of every read -- before this bead nothing ever deleted them")
+                .isFalse();
+            assertThat(planExists(liveId))
+                .as("a plan within its TTL, used recently, survives the sweep")
+                .isTrue();
+        } finally {
+            deletePlans(tenant);
+            deleteTokens(tenant);
+        }
+    }
+
+    @Test
+    void runScheduledSweep_logsPlanTtlSweepPerTenant() throws Exception {
+        String tenant = "sched-sweep-plans-log-" + System.nanoTime();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        try {
+            insertDataToken(tenant, "marker", now.toInstant().plusSeconds(300));
+            insertPlan(tenant, "proj", "expired plan for log check", 30,
+                now.minusDays(400), null);
+
+            java.util.List<String> messages = captureLogs(() -> service.runScheduledSweep(now));
+
+            assertThat(messages)
+                .as("the plan-expiry arm logs its per-tenant deleted count on the "
+                    + "same cycle as the scratch/session/data-token arms")
+                .anyMatch(m -> m.startsWith("event=plan_ttl_sweep")
+                    && m.contains("tenant=" + tenant)
+                    && m.contains("deleted="));
+        } finally {
+            deletePlans(tenant);
+            deleteTokens(tenant);
         }
     }
 }

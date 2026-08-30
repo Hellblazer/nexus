@@ -443,7 +443,9 @@ class TestRequiredEngineVersion:
         # ->(0,1,89) for 7.23.0 (paired): GET /v1/catalog/search ORDER BY tumbler
         # (nexus-fgxmk) and the read-only aspects census route (nexus-mlu3k);
         # no changeset.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 89)
+        # ->(0,1,91) 2026-08-30 for 7.24.0 (nexus-zu9ln): hygiene-001 NOT NULL
+        # schema + writer refusals + retired census route, paired deploy.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 91)
 
 
 class TestParseEngineVersion:

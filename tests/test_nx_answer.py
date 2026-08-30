@@ -896,6 +896,7 @@ class TestPlanLibraryMetrics:
             query="anchor probe",
             plan_json=json.dumps({"steps": []}),
             tags="test",
+            verb="query",
         )
         return lib, plan_id
 

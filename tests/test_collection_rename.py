@@ -23,11 +23,28 @@ T2+T3 land, mirroring the delete-cascade contract.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
+
+from tests._catalog_fixture_ops import register_real_doc_id
+
+# hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id now
+# carries a REAL FK to catalog_documents(tenant_id, tumbler) -- see the
+# identical cache in tests/test_document_aspects_store.py for the full
+# rationale. One real registration per test, memoized on the test's
+# freshly-minted NX_SERVICE_TOKEN.
+_doc_id_cache: dict[str, str] = {}
+
+
+def _shared_doc_id() -> str:
+    key = os.environ.get("NX_SERVICE_TOKEN", "")
+    if key not in _doc_id_cache:
+        _doc_id_cache[key] = register_real_doc_id()
+    return _doc_id_cache[key]
 
 
 @pytest.fixture
@@ -251,6 +268,7 @@ class TestDocumentAspectsRename:
             extracted_at="2026-05-09T00:00:00Z",
             model_version="v1",
             extractor_name=extractor,
+            doc_id=_shared_doc_id(),
         )
 
     def _seed(self, tmp_path: Path):

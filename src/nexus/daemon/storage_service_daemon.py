@@ -86,6 +86,7 @@ from typing import Any, Callable, Optional
 import structlog
 
 from nexus import pdeathsig as _pdeathsig
+from nexus.daemon import readiness
 from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
     ServiceRegistry,
@@ -142,11 +143,29 @@ class HealthProbe(Enum):
 #: Path suffix of the spawn lock file inside config_dir.
 _SPAWN_LOCK_FILE: str = "storage_service_spawn.lock"
 
-#: How long to wait for the service /health to return 200 before failing.
+#: How long to wait for the service /health to return 200 before failing,
+#: OUTSIDE a migration (PRE_MIGRATION / POST_MIGRATION phases — see
+#: nexus.daemon.readiness). Unchanged from the historical constant.
 _READY_TIMEOUT: float = 60.0
+
+#: nexus-8vp0i (GH #1486): the engine runs Liquibase BEFORE binding HTTP, so
+#: /health is unreachable for the whole migration — a real first-boot
+#: migration on a large store runs 20-25 minutes (rdr180-001 on 107k
+#: chunks). The old fixed 60s _READY_TIMEOUT killed the engine mid-changeset
+#: on every such boot. These bound the MIGRATING phase instead: 600s of no
+#: progress (no new log line AND no executing admin backend) is a stall;
+#: 3600s when the PG probe itself is unavailable (managed PG, no local
+#: psql) and log lines are the only evidence. See readiness.py.
+_MIGRATION_STALL_TIMEOUT: float = readiness.DEFAULT_MIGRATION_STALL_TIMEOUT
+_MIGRATION_UNOBSERVABLE_TIMEOUT: float = readiness.DEFAULT_MIGRATION_UNOBSERVABLE_TIMEOUT
 
 #: Interval between /health polls during startup.
 _READY_POLL_INTERVAL: float = 0.5
+
+#: Minimum interval between "migration in progress" structlog lines while
+#: MIGRATING (nexus-8vp0i) — every poll tick would be log spam over a
+#: 20+ minute migration.
+_MIGRATION_PROGRESS_LOG_INTERVAL: float = 30.0
 
 #: After SIGTERM, wait this long before escalating to SIGKILL.
 _GRACEFUL_STOP_TIMEOUT: float = 5.0
@@ -524,6 +543,100 @@ _pid_is_alive = pid_alive
 _pid_is_running = pid_running
 
 
+# ── Log tailer (nexus-8vp0i / GH #1486) ─────────────────────────────────────
+
+
+class _LogTailer:
+    """Returns newly-appended, complete log lines since a starting offset.
+
+    The engine log is opened O_APPEND (nexus-ovbr7) and never truncated, so
+    a respawned process's fresh output lands in the SAME file right after
+    the previous incarnation's tail. The starting offset must therefore be
+    captured at spawn time (``_spawn_service``'s ``self._log_offset_at_spawn``)
+    — reading from offset 0, or from "current size at first read", would
+    replay the previous process's final lines as if they were this boot's
+    progress.
+
+    A missing file (not yet created) reads as no new lines, not an error.
+    """
+
+    def __init__(self, path: Path, start_offset: int) -> None:
+        self._path = path
+        self._offset = start_offset
+        self._partial = b""
+
+    def __call__(self) -> list[str]:
+        try:
+            with open(self._path, "rb") as fh:
+                fh.seek(self._offset)
+                chunk = fh.read()
+        except OSError:
+            return []
+        if not chunk:
+            return []
+        self._offset += len(chunk)
+        data = self._partial + chunk
+        lines = data.split(b"\n")
+        # The last element is either an empty bytestring (chunk ended
+        # exactly on a newline) or a not-yet-terminated partial line —
+        # buffer it for the next call either way.
+        self._partial = lines.pop()
+        return [line.decode("utf-8", errors="replace") for line in lines]
+
+
+def _default_engine_liveness_scan(config_dir: Path, binary_path: Path) -> list[tuple[int, str]]:
+    """Real engine-liveness scan (nexus-8vp0i review round 2, substantive-
+    critic Critical 1): ``[(pid, command)]`` for engine processes belonging
+    to *config_dir* that are ACTUALLY ALIVE right now — the precondition
+    ``_release_stale_changelog_lock`` requires before it ever terminates a
+    backend or clears the lock row.
+
+    Delegates to ``nexus.upgrade_finish.service_stack_pids(config_dir)``
+    (deferred import — both this function and ``upgrade_finish.py``'s own
+    deferred import of ``storage_service_daemon`` for the migration-aware
+    restart check are function-scoped, so there is no import-TIME cycle;
+    neither module imports the other at module level), which already
+    matches the ENGINE by ``argv[0] == the binary path under config_dir``
+    and the SUPERVISOR by an exact ``--config-dir`` token — filtered here
+    to rows whose command actually contains ``str(binary_path)``, which
+    keeps only the engine rows (the supervisor's own argv, ``nx daemon
+    service start --foreground --config-dir <dir>``, never contains the
+    engine binary path, so it is excluded by construction, not by a
+    separate check).
+    """
+    from nexus.upgrade_finish import service_stack_pids  # noqa: PLC0415 — deferred import, avoids a module-level cross-import cycle
+
+    binary_str = str(binary_path)
+    return [
+        (pid, command)
+        for pid, command in service_stack_pids(config_dir)
+        if binary_str in command
+    ]
+
+
+def _admin_dbname(creds: dict[str, str]) -> str:
+    """Extract the database name from ``NX_DB_ADMIN_URL`` (a JDBC URL:
+    ``jdbc:postgresql://host:port/dbname``), defaulting to ``nexus``. Mirrors
+    ``health._check_migration_state``'s identical parse — kept duplicated
+    rather than imported (a 3-line parse, and importing ``health`` here for
+    just this would be a heavier coupling than the duplication it avoids)."""
+    db_url = creds.get("NX_DB_ADMIN_URL", "")
+    if "/" in db_url:
+        return db_url.rstrip("/").rsplit("/", 1)[-1] or "nexus"
+    return "nexus"
+
+
+def _readiness_health_answer(probe: "HealthProbe") -> readiness.HealthAnswer:
+    """Map the supervisor's tri-state HealthProbe onto readiness.HealthAnswer
+    (kept as two separate enums deliberately — readiness.py must not import
+    this module, the pure primitive does not depend on its OS-facing caller)."""
+    if probe is HealthProbe.OK:
+        return readiness.HealthAnswer.OK
+    if probe is HealthProbe.UNREADY:
+        return readiness.HealthAnswer.UNREADY
+    return readiness.HealthAnswer.UNKNOWN
+
+
 # ── Version helper ─────────────────────────────────────────────────────────────
 
 
@@ -579,6 +692,7 @@ class StorageServiceSupervisor:
         launch_kind: str = "native",
         lease_clock: Callable[[], float] = time.time,
         supervised: bool = False,
+        engine_liveness_scan: Callable[[Path, Path], list[tuple[int, str]]] | None = None,
     ) -> None:
         # RDR-161: the cosign-verified native binary is the production launch
         # artifact. ``launch_kind="jar"`` is the explicit dev/test opt-in
@@ -606,8 +720,20 @@ class StorageServiceSupervisor:
         self._creds = creds
         self._lease_clock = lease_clock
         self._supervised = supervised
+        # nexus-8vp0i review round 2 (substantive-critic Critical 1): the
+        # liveness gate _release_stale_changelog_lock consults before ever
+        # terminating/releasing anything — injectable so tests cover both
+        # the "live engine found, skip" and "none found, proceed" branches
+        # deterministically. Defaults to the real process-table scan.
+        self._engine_liveness_scan = engine_liveness_scan or _default_engine_liveness_scan
         self._scope = str(os.getuid())
         self._proc: subprocess.Popen[bytes] | None = None
+        # nexus-8vp0i: the byte offset into the engine log at the moment THIS
+        # process was spawned, and the log path itself — captured in
+        # _spawn_service, consumed by _wait_for_service_ready's log tailer so
+        # a respawn never reads the previous incarnation's lines as progress.
+        self._log_path: Path = config_dir / "logs" / f"{self._svc_log_name}.log"
+        self._log_offset_at_spawn: int = 0
         self._registry: ServiceRegistry | None = None
         self._supervisor: ServiceSupervisor | None = None
         # Consecutive unhealthy heartbeats counter: process alive but /health
@@ -813,6 +939,16 @@ class StorageServiceSupervisor:
         from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
         svc_log = open_child_log_or_devnull(self._svc_log_name, self._config_dir)
+        # nexus-8vp0i: capture the readiness log-tailer's starting offset NOW
+        # — after any open-time rotation (open_child_log_or_devnull), before
+        # this process writes a single byte. Without this a respawn's tailer
+        # would read the previous incarnation's tail and misread it as this
+        # boot's progress (the file is O_APPEND, never truncated — nexus-ovbr7).
+        self._log_path = self._config_dir / "logs" / f"{self._svc_log_name}.log"
+        try:
+            self._log_offset_at_spawn = self._log_path.stat().st_size
+        except OSError:
+            self._log_offset_at_spawn = 0
         try:
             proc = _popen(
                 argv,
@@ -914,39 +1050,217 @@ class StorageServiceSupervisor:
         """Return True iff the Postgres port accepts TCP."""
         return _port_accepting(_SERVICE_HOST, self._pg_port, timeout=0.5)
 
-    def _wait_for_service_ready(
-        self,
-        proc: subprocess.Popen[bytes],
-        port: int,
-        timeout: float = _READY_TIMEOUT,
-    ) -> None:
-        """Poll ``/health`` until 200 or timeout.
+    def _build_log_tailer(self) -> _LogTailer:
+        """A fresh log reader seeded at THIS process's spawn-time offset —
+        see ``_spawn_service``'s capture of ``self._log_offset_at_spawn``."""
+        return _LogTailer(self._log_path, self._log_offset_at_spawn)
 
-        On timeout: send SIGTERM + grace window + SIGKILL (matching _stop_service,
-        so the service can flush), then raise loudly.
-        Raises :class:`StorageServiceStartError` — the LOUD failure contract.
+    def _migration_pg_probe(self) -> readiness.PgActivity:
+        """PG probe for the readiness monitor (nexus-8vp0i): EXECUTING iff an
+        admin-user backend on the nexus database is ``state='active'`` and
+        NOT waiting on a lock (CPU, IO, Timeout/pg_sleep all count — a
+        changeset that emits nothing to the log, like rdr180-001, is still
+        visible here). Reuses ``health._run_psql`` rather than duplicating
+        the psql-invocation boilerplate. Guarded to the bundled cluster the
+        same way as ``_backfill_provision_grants`` / ``_release_stale_
+        changelog_lock`` — a managed/BYO Postgres (no PG_DATA) reports
+        UNAVAILABLE, which widens the caller's stall bound to 3600s.
         """
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                raise StorageServiceStartError(
-                    f"Storage service process (pid={proc.pid}) exited with code "
-                    f"{proc.returncode} before /health became ready on port {port}. "
-                    "Check service logs for details."
-                )
-            if self._service_healthy(port):
-                _log.info("storage_service_ready", port=port, pid=proc.pid)
-                return
-            time.sleep(_READY_POLL_INTERVAL)
+        if not self._creds.get("PG_DATA", "").strip():
+            return readiness.PgActivity.UNAVAILABLE
+        try:
+            from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred import
+                PgBinaryNotFoundError,
+                discover_pg_binaries,
+            )
+            from nexus.health import _run_psql  # noqa: PLC0415 — deferred import, reuse rather than duplicate
 
-        # Timeout: SIGTERM + grace + SIGKILL (matches _stop_service, not bare SIGKILL)
-        # so the service can flush open connections and logs before the kill.
-        _log.warning(
-            "storage_service_readiness_timeout",
-            port=port,
-            timeout=timeout,
-            pid=proc.pid,
-        )
+            try:
+                psql_bin = discover_pg_binaries().psql
+            except PgBinaryNotFoundError:
+                return readiness.PgActivity.UNAVAILABLE
+
+            host, port = _SERVICE_HOST, self._pg_port
+            dbname = _admin_dbname(self._creds)
+            user = self._creds.get("NX_DB_ADMIN_USER", "nexus_admin")
+            password = self._creds.get("NX_DB_ADMIN_PASS", "")
+            sql = (
+                "SELECT COUNT(*) FROM pg_stat_activity WHERE "
+                "datname = current_database() AND usename = current_user "
+                "AND state = 'active' AND wait_event_type IS DISTINCT FROM 'Lock' "
+                "AND pid != pg_backend_pid();"
+            )
+            proc = _run_psql(psql_bin, host, port, dbname, user, password, sql)
+            if proc.returncode != 0:
+                return readiness.PgActivity.UNAVAILABLE
+            try:
+                n = int(proc.stdout.strip())
+            except ValueError:
+                return readiness.PgActivity.UNAVAILABLE
+            return readiness.PgActivity.EXECUTING if n > 0 else readiness.PgActivity.IDLE
+        except Exception:  # noqa: BLE001 — best-effort probe; unavailable is a valid, expected outcome
+            return readiness.PgActivity.UNAVAILABLE
+
+    def _release_stale_changelog_lock(self, *, reason: str) -> None:
+        """Best-effort: terminate orphaned admin backends and release a
+        stuck ``databasechangeloglock`` row (nexus-8vp0i / GH #1486).
+
+        Liquibase's lock row has no session binding, so a killed JVM leaves
+        it ``locked=true`` forever — the exact shape that turned a single
+        readiness-timeout kill into a permanent crash-loop under launchd
+        KeepAlive (spawn -> wait -> kill at 60s -> respawn, forever blocked
+        on a lock nothing will ever release). The supervisor is the sole
+        spawner of the bundled-cluster engine and the party that kills it on
+        a stall, so it owns this cleanup.
+
+        Called from two places: before every spawn (``_start_locked`` Step
+        1.5) and after a readiness-timeout OR process-exit failure
+        (``_wait_for_service_ready``). NOT called on ``waiting_for_lock``
+        observation alone (nexus-8vp0i review round 2) — see
+        ``_wait_for_service_ready``'s docstring for why.
+
+        Guarded to the bundled cluster exactly like
+        ``_backfill_provision_grants`` — never runs against a managed/BYO
+        Postgres (no ``PG_DATA`` in ``pg_credentials``). Best-effort: a
+        failure here degrades to Liquibase's own lock-wait behaviour, never
+        blocks a service start.
+
+        LIVENESS GATE (nexus-8vp0i review round 2, substantive-critic
+        Critical 1 — macOS has no ``PR_SET_PDEATHSIG``, so an orphaned
+        engine from a dead supervisor is a real, reachable state there, not
+        a theoretical one): before any terminate/release, this method
+        confirms nothing could legitimately still be running the
+        migration it is about to interrupt.
+
+        1. Skip if any ENGINE process for this ``config_dir`` is alive
+           (``self._engine_liveness_scan`` — the injected process-table
+           scan; a live process is conclusive regardless of what the PG
+           probe below sees, since it might be between queries).
+        2. Skip if ``self._migration_pg_probe()`` reports ``EXECUTING`` (an
+           admin backend is actively running DDL right now — even if the
+           process scan somehow missed it, e.g. a standalone engine run
+           against the same cluster from OUTSIDE this config_dir's stack).
+
+        Either skip is a WARNING, not a silent no-op — it means a lock this
+        supervisor expected to be stale is not, and an operator should know
+        why cleanup did not run.
+        """
+        if not self._creds.get("PG_DATA", "").strip():
+            _log.debug(
+                "storage_service_lock_cleanup_skipped",
+                reason=reason,
+                cleanup_reason="no PG_DATA in pg_credentials — managed/BYO Postgres",
+            )
+            return
+
+        try:
+            alive_engine_pids = self._engine_liveness_scan(self._config_dir, self._binary_path)
+        except Exception as exc:  # noqa: BLE001 — a scan failure must not be read as "confirmed dead"
+            _log.warning(
+                "storage_service_lock_cleanup_liveness_scan_failed",
+                reason=reason,
+                error=str(exc),
+            )
+            alive_engine_pids = None
+        if alive_engine_pids:
+            _log.warning(
+                "storage_service_lock_cleanup_skipped_live_engine",
+                reason=reason,
+                pids=[pid for pid, _cmd in alive_engine_pids],
+            )
+            return
+        if alive_engine_pids is None:
+            # Scan itself failed: cannot confirm dead, so do not proceed —
+            # a failed scan is not evidence of absence.
+            return
+
+        if self._migration_pg_probe() is readiness.PgActivity.EXECUTING:
+            _log.warning(
+                "storage_service_lock_cleanup_skipped_active_backend",
+                reason=reason,
+            )
+            return
+
+        try:
+            from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred import
+                PgBinaryNotFoundError,
+                discover_pg_binaries,
+            )
+            from nexus.health import _run_psql  # noqa: PLC0415 — deferred import, reuse rather than duplicate
+
+            try:
+                psql_bin = discover_pg_binaries().psql
+            except PgBinaryNotFoundError:
+                return
+
+            host, port = _SERVICE_HOST, self._pg_port
+            dbname = _admin_dbname(self._creds)
+            user = self._creds.get("NX_DB_ADMIN_USER", "nexus_admin")
+            password = self._creds.get("NX_DB_ADMIN_PASS", "")
+
+            # Snapshot who holds the lock BEFORE releasing it, so the
+            # WARNING below is a visible correction (who/since), not silent.
+            select_sql = (
+                "SELECT lockedby, lockgranted FROM databasechangeloglock "
+                "WHERE id=1 AND locked=true;"
+            )
+            snap = _run_psql(psql_bin, host, port, dbname, user, password, select_sql)
+            if snap.returncode != 0:
+                _log.debug(
+                    "storage_service_lock_probe_failed",
+                    reason=reason,
+                    stderr=(snap.stderr or "").strip()[:200],
+                )
+                return
+            raw = snap.stdout.strip()
+            if not raw:
+                return  # not locked — nothing to clean up
+            parts = raw.split("|")
+            lockedby = parts[0] if parts else ""
+            lockgranted = parts[1] if len(parts) > 1 else ""
+
+            # Their DDL is doomed work now (the liveness gate above already
+            # confirmed no live engine and no actively-executing backend) —
+            # freeing it is what lets the release below succeed immediately
+            # instead of waiting out an idle-in-transaction session.
+            # nexus-8vp0i review round 2 (code-review-expert Significant 2):
+            # SELECT the pid alongside pg_terminate_backend's own boolean
+            # result so a postmortem can see exactly what was hit, rather
+            # than discarding that evidence.
+            terminate_sql = (
+                "SELECT pid, pg_terminate_backend(pid) FROM pg_stat_activity WHERE "
+                "datname = current_database() AND usename = current_user AND "
+                "state != 'idle' AND pid != pg_backend_pid();"
+            )
+            terminated = _run_psql(psql_bin, host, port, dbname, user, password, terminate_sql)
+            terminated_pids: list[int] = []
+            if terminated.returncode == 0:
+                for line in terminated.stdout.strip().splitlines():
+                    pid_field = line.split("|", 1)[0].strip()
+                    if pid_field.isdigit():
+                        terminated_pids.append(int(pid_field))
+
+            release_sql = (
+                "UPDATE databasechangeloglock SET locked=false, lockgranted=NULL, "
+                "lockedby=NULL WHERE id=1 AND locked=true;"
+            )
+            released = _run_psql(psql_bin, host, port, dbname, user, password, release_sql)
+            if released.returncode == 0:
+                _log.warning(
+                    "storage_service_stale_changelog_lock_released",
+                    reason=reason,
+                    lockedby=lockedby,
+                    lockgranted=lockgranted,
+                    terminated_pids=terminated_pids,
+                )
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup; never blocks a service start
+            _log.warning("storage_service_lock_cleanup_failed", reason=reason, error=str(exc))
+
+    def _kill_after_readiness_failure(self, proc: subprocess.Popen[bytes]) -> None:
+        """SIGTERM + grace window + SIGKILL, matching ``_stop_service`` (not
+        a bare SIGKILL) so the service can flush before it dies. Best-effort
+        — a signal failure (process already gone) must never mask the
+        ``StorageServiceStartError`` this precedes."""
         with contextlib.suppress(Exception):
             from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
             safe_killpg(proc.pid, signal.SIGTERM)
@@ -956,10 +1270,126 @@ class StorageServiceSupervisor:
             if _pid_is_alive(proc.pid):
                 safe_killpg(proc.pid, signal.SIGKILL)
 
-        raise StorageServiceStartError(
-            f"Storage service did not become healthy at http://{_SERVICE_HOST}:{port}/health "
-            f"within {timeout:.0f}s. The service or Postgres may not have started correctly."
+    def _wait_for_service_ready(
+        self,
+        proc: subprocess.Popen[bytes],
+        port: int,
+        timeout: float = _READY_TIMEOUT,
+    ) -> None:
+        """Migration-aware wait for ``/health`` 200 (nexus-8vp0i / GH #1486).
+
+        Delegates phase/deadline tracking to :class:`readiness.
+        ReadinessMonitor`: ``timeout`` bounds the PRE_MIGRATION and
+        POST_MIGRATION phases (default ``_READY_TIMEOUT``, unchanged), while
+        the MIGRATING phase gets its own 600s stall / 3600s log-only bound
+        (``_MIGRATION_STALL_TIMEOUT`` / ``_MIGRATION_UNOBSERVABLE_TIMEOUT``).
+        A healthy fast boot with no migration never leaves PRE_MIGRATION.
+
+        On any terminal failure — a stalled phase, process exit, or a
+        migration-failed log marker — the process is killed the same way as
+        before (SIGTERM + grace + SIGKILL; process-exit skips the kill, it
+        is already dead — but still triggers the stale-lock cleanup, since a
+        JVM crash mid-changeset is exactly the exit shape that leaves the
+        lock stuck) and a stale changelog lock is released, then
+        :class:`StorageServiceStartError` is raised (the LOUD failure
+        contract). A plain (non-migration) readiness timeout keeps its
+        historical message text.
+
+        nexus-8vp0i review round 2 (substantive-critic Critical 1): the
+        ``waiting_for_lock`` observation does NOT trigger cleanup here —
+        that would risk terminating a lock legitimately held by a LIVE
+        engine (this process is not necessarily the only writer; a
+        standalone engine run against the same cluster, or a parent-death
+        watchdog that failed to arm off Linux, is a real live holder).
+        Liquibase itself gives up waiting after ``changeLogLockWaitTime``
+        (``StandardLockService``, 10 minutes) with a ``LockException``, so a
+        genuinely stuck lock makes THIS engine exit non-zero on its own —
+        which reaches the ``ReadinessProcessExitedError`` branch below, and
+        THAT is what triggers cleanup, exactly like every other exit path.
+        ``TickResult.waiting_for_lock`` is kept for observability only (the
+        progress log below still reports it via the phase, not a dedicated
+        line).
+        """
+        log_reader = self._build_log_tailer()
+        last_progress_log_at = 0.0
+
+        def on_tick(result: readiness.TickResult) -> None:
+            nonlocal last_progress_log_at
+            if result.migration_active:
+                now = time.monotonic()
+                if now - last_progress_log_at >= _MIGRATION_PROGRESS_LOG_INTERVAL:
+                    last_progress_log_at = now
+                    _log.info(
+                        "storage_service_migration_in_progress",
+                        changeset=result.changeset,
+                        pending=result.pending,
+                        elapsed=round(result.elapsed_in_phase, 1),
+                        waiting_for_lock=result.waiting_for_lock,
+                    )
+
+        monitor = readiness.ReadinessMonitor(
+            log_reader=log_reader,
+            pg_probe=self._migration_pg_probe,
+            health_probe=lambda: _readiness_health_answer(self._probe_service_health(port)),
+            process_poll=proc.poll,
+            pre_migration_timeout=timeout,
+            post_migration_timeout=timeout,
+            migration_stall_timeout=_MIGRATION_STALL_TIMEOUT,
+            migration_unobservable_timeout=_MIGRATION_UNOBSERVABLE_TIMEOUT,
         )
+
+        try:
+            monitor.wait_ready(poll_interval=_READY_POLL_INTERVAL, on_tick=on_tick)
+        except readiness.ReadinessProcessExitedError as exc:
+            # nexus-8vp0i review round 2 (code-review-expert Significant 1):
+            # a JVM crash mid-changeset (OOM, SIGKILL, or the LockException
+            # Liquibase itself raises after its own 10-minute lock-wait
+            # timeout — see this method's docstring) is exactly the exit
+            # shape that leaves databasechangeloglock stuck. No kill needed
+            # (already dead) but the cleanup still runs, so the NEXT spawn's
+            # Step 1.5 pre-spawn cleanup is not the only chance to clear it.
+            self._release_stale_changelog_lock(reason="process_exited")
+            raise StorageServiceStartError(
+                f"Storage service process (pid={proc.pid}) exited with code "
+                f"{exc.returncode} before /health became ready on port {port}. "
+                "Check service logs for details."
+            ) from exc
+        except readiness.ReadinessMigrationFailedError as exc:
+            _log.warning("storage_service_migration_failed", port=port, pid=proc.pid, line=exc.raw_line)
+            self._kill_after_readiness_failure(proc)
+            self._release_stale_changelog_lock(reason="migration_failed")
+            raise StorageServiceStartError(
+                f"Schema migration failed on port {port}: {exc.raw_line}. "
+                "Check service logs for details."
+            ) from exc
+        except readiness.ReadinessStalledError as exc:
+            _log.warning(
+                "storage_service_readiness_timeout",
+                port=port,
+                phase=exc.phase.value,
+                timeout=exc.timeout,
+                elapsed=exc.elapsed,
+                changeset=exc.changeset,
+                pending=exc.pending,
+                pid=proc.pid,
+            )
+            self._kill_after_readiness_failure(proc)
+            self._release_stale_changelog_lock(reason="readiness_timeout")
+            if exc.phase is readiness.ReadinessPhase.MIGRATING:
+                raise StorageServiceStartError(
+                    f"Storage service migration stalled on port {port}: no progress "
+                    f"for {exc.elapsed:.0f}s (timeout={exc.timeout:.0f}s); "
+                    f"changeset={exc.changeset!r}, pending={exc.pending!r}. "
+                    "Check service logs for details."
+                ) from exc
+            # Plain (non-migration) timeout: keep the historical message —
+            # tests and operators alike key on this exact wording.
+            raise StorageServiceStartError(
+                f"Storage service did not become healthy at http://{_SERVICE_HOST}:{port}/health "
+                f"within {timeout:.0f}s. The service or Postgres may not have started correctly."
+            ) from exc
+        else:
+            _log.info("storage_service_ready", port=port, pid=proc.pid)
 
     def _publish(self, port: int) -> None:
         """Publish the lease to the registry AFTER service is healthy.
@@ -1112,6 +1542,14 @@ class StorageServiceSupervisor:
 
         # Step 1: ensure Postgres is accepting connections on the provisioned port.
         self._ensure_pg_running()
+
+        # Step 1.5 (nexus-8vp0i / GH #1486): release any stale changelog lock
+        # left by a previously killed engine BEFORE spawning a new one — a
+        # killed JVM leaves databasechangeloglock.locked=true forever
+        # (Liquibase's lock has no session binding to clear it), which would
+        # otherwise block the fresh engine's Liquibase run indefinitely.
+        # Best-effort and guarded to the bundled cluster (skips on managed PG).
+        self._release_stale_changelog_lock(reason="pre_spawn")
 
         # RDR-161: the legacy schema-skew gate (nexus-pebfx.4) is expunged with
         # the legacy launch path. A native binary ships its Liquibase changelog baked
@@ -1468,8 +1906,6 @@ def _load_credentials(config_dir: Path) -> dict[str, str]:
         _persist_service_token(creds_path, secrets.token_hex(32))
         creds = _read_pg_credentials(creds_path)
     return creds
-
-
 
 
 def start_storage_service(

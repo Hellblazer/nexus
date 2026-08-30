@@ -215,6 +215,18 @@ _PROGRESS_EVERY = 100
 _ORPHANED_REASONS = ("file_missing", "owner_root_gone")
 _UNRESOLVABLE_REASONS = ("no_repo_root", "malformed_tumbler", "source_uri_only", "no_provenance")
 _STORE_PUT_ORIGIN_REASONS = ("chroma_uri", "knowledge_single_chunk_no_path")
+# nexus-poigc: this is an INTERNAL origin marker, not a reference to the
+# retired ChromaDB dependency (RDR-155 P4b dropped it from uv.lock
+# entirely). ``nexus.aspect_readers.uri_for`` mints a ``chroma://<collection>/
+# <path>`` identity for every collection prefix OUTSIDE
+# ``FILE_ROUTED_PREFIXES`` (``rdr__``/``docs__``/``code__``) — today that is
+# ``knowledge__`` documents minted via ``nx store put`` / MCP ``store_put``,
+# and this classifier's ``chroma_uri`` reason keys on exactly that shape. A
+# ``chroma://`` row under a FILE-ROUTED collection prefix is a different,
+# migration-residue population (an older ``uri_for`` build that predated
+# those prefixes routing to ``file://``) — ``nx catalog backfill-source-uri``
+# re-derives those, it does not touch the marker rows this constant exists
+# to recognize.
 _STORE_PUT_URI_PREFIX = "chroma://"
 
 # nexus-wq1e4: paths under a Claude Code worktree, or shaped like a system

@@ -146,11 +146,11 @@ class PlanRepositoryTest {
         // Save initial
         long id1 = repo.savePlan(TENANT_A, "proj-conflict", "Conflict query test",
                                  "{\"v\":1}", "success", "test", null,
-                                 null, null, null, null, null, null, "", "Conflict query test");
+                                 null, "test", null, null, null, null, "", "Conflict query test");
         // Save again with same (tenant, project, query) — must update plan_json
         long id2 = repo.savePlan(TENANT_A, "proj-conflict", "Conflict query test",
                                  "{\"v\":2}", "success", "test", null,
-                                 null, null, null, null, null, null, "", "Conflict query test");
+                                 null, "test", null, null, null, null, "", "Conflict query test");
 
         // Both rows should be the same id (upsert)
         assertThat(id2).as("conflict save must return same id").isEqualTo(id1);
@@ -179,7 +179,7 @@ class PlanRepositoryTest {
     void savePlan_planJson_jsonbCanonicalizesWhitespaceAndKeyOrder() {
         long id = repo.savePlan(TENANT_A, "proj-canon", "Canonicalization probe",
                                 "{\"alpha\":1,\"zeta\":2}", "success", "", null,
-                                null, null, null, null, null, null, "", "");
+                                null, "test", null, null, null, null, "", "");
 
         var row = repo.getById(TENANT_A, id);
         assertThat(row).isPresent();
@@ -193,7 +193,7 @@ class PlanRepositoryTest {
     @Order(3)
     void rls_isolation_tenantBCannotSeeTenantsAPlans() {
         repo.savePlan(TENANT_A, "proj-rls", "Tenant A private plan",
-                      "{}", "success", "", null, null, null, null, null, null, null, "", "");
+                      "{}", "success", "", null, null, "test", null, null, null, null, "", "");
         var result = repo.listPlans(TENANT_B, "proj-rls", 100, true);
         assertThat(result)
             .as("tenant B must not see tenant A's plans (RLS isolation)")
@@ -205,7 +205,7 @@ class PlanRepositoryTest {
     void delete_removesRow() {
         long id = repo.savePlan(TENANT_A, "proj-del", "Plan to delete",
                                 "{}", "success", "", null,
-                                null, null, null, null, null, null, "", "");
+                                null, "test", null, null, null, null, "", "");
         assertThat(repo.getById(TENANT_A, id)).as("row exists before delete").isPresent();
 
         boolean deleted = repo.delete(TENANT_A, id);
@@ -308,6 +308,46 @@ class PlanRepositoryTest {
             .contains(id);
     }
 
+    // ── hygiene-001 follow-on (coordinator scope addition): deleteExpiredPlans
+    //    actually DELETES the rows notExpiredCondition() filters out of every
+    //    read, sharing the exact same predicate (PlanRepository.notExpiredCondition,
+    //    used by listActivePlans/searchPlans/listPlans AND this sweep) ─────────
+
+    private boolean planRowExists(long id) throws Exception {
+        try (Connection su = pg.createConnection("");
+             var ps = su.prepareStatement("SELECT 1 FROM nexus.plans WHERE id = ?")) {
+            ps.setLong(1, id);
+            try (var rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    @Test
+    @Order(24)
+    void deleteExpiredPlans_removesOnlyRowsTheSharedPredicateFiltersOut() throws Exception {
+        long expiredId = savePlanWithTtl("proj-ttl-sweep-expired", "expired sweep target", 30);
+        backdatePlan(expiredId, 400, null);
+        long liveId = savePlanWithTtl("proj-ttl-sweep-live", "live sweep target", 30);
+        backdatePlan(liveId, 5, 1);
+
+        int deleted = repo.deleteExpiredPlans(TENANT_A, null);
+
+        assertThat(deleted)
+            .as("at least this test's own expired row must be counted")
+            .isGreaterThanOrEqualTo(1);
+        assertThat(planRowExists(expiredId))
+            .as("deleteExpiredPlans must actually remove the row -- listActivePlans "
+                + "already proved the read-time predicate FILTERS it; nothing before "
+                + "this ever deleted it (the bug this bead closes)")
+            .isFalse();
+        assertThat(planRowExists(liveId))
+            .as("a plan within its TTL, used recently, survives the sweep -- the "
+                + "delete and the read use the identical Condition, so this cannot "
+                + "diverge from ttl_agedButRecentlyUsedPlan_survives above")
+            .isTrue();
+    }
+
     // ── nexus-tk070.p6a (RDR-194 D5): CHECK-layer proof, independent of any
     //    HTTP-boundary validation (plans has none by design -- see the bead's
     //    dev-notes scope decision) ──────────────────────────────────────────
@@ -330,7 +370,7 @@ class PlanRepositoryTest {
     void disable_and_enable_softDisable() {
         long id = repo.savePlan(TENANT_A, "proj-disable", "Plan to disable",
                                 "{}", "success", "", null,
-                                null, null, null, null, null, null, "", "");
+                                null, "test", null, null, null, null, "", "");
 
         // Disable
         assertThat(repo.disable(TENANT_A, id)).isTrue();
@@ -380,7 +420,7 @@ class PlanRepositoryTest {
     void incrementMatchMetrics_countersUpdate() {
         long id = repo.savePlan(TENANT_A, "proj-metrics", "Metrics test plan",
                                 "{}", "success", "", null,
-                                null, null, null, null, null, null, "", "");
+                                null, "test", null, null, null, null, "", "");
 
         // Without confidence (FTS fallback path)
         repo.incrementMatchMetrics(TENANT_A, id, null);
@@ -400,7 +440,7 @@ class PlanRepositoryTest {
     void incrementRunStarted_and_incrementRunOutcome_update() {
         long id = repo.savePlan(TENANT_A, "proj-run", "Run metrics plan",
                                 "{}", "success", "", null,
-                                null, null, null, null, null, null, "", "");
+                                null, "test", null, null, null, null, "", "");
 
         repo.incrementRunStarted(TENANT_A, id);
         var row = repo.getById(TENANT_A, id);
@@ -479,7 +519,7 @@ class PlanRepositoryTest {
     void planExists_boundaryTagMatch() {
         repo.savePlan(TENANT_A, "proj-exists", "Plan for exists check",
                       "{}", "success", "builtin-template,research", null,
-                      null, null, null, null, null, null, "", "Plan for exists check");
+                      null, "test", null, null, null, null, "", "Plan for exists check");
 
         assertThat(repo.planExists(TENANT_A, "Plan for exists check", "builtin-template"))
             .as("planExists must return true for exact comma-bounded token").isTrue();
@@ -494,7 +534,7 @@ class PlanRepositoryTest {
     void setScopeTags_updatesField() {
         long id = repo.savePlan(TENANT_A, "proj-scope", "Scope tags test",
                                 "{}", "success", "", null,
-                                null, null, null, null, null, null, "", "");
+                                null, "test", null, null, null, null, "", "");
         repo.setScopeTags(TENANT_A, id, "knowledge__nexus,rdr__nexus");
         var row = repo.getById(TENANT_A, id);
         assertThat(row.get().getScopeTags()).isEqualTo("knowledge__nexus,rdr__nexus");
@@ -504,9 +544,9 @@ class PlanRepositoryTest {
     @Order(12)
     void listPlans_excludesDisabledByDefault_includesWhenRequested() {
         long activeId   = repo.savePlan(TENANT_A, "proj-list", "Active plan",
-                                        "{}", "success", "", null, null, null, null, null, null, null, "", "");
+                                        "{}", "success", "", null, null, "test", null, null, null, null, "", "");
         long disabledId = repo.savePlan(TENANT_A, "proj-list", "Disabled plan",
-                                        "{}", "success", "", null, null, null, null, null, null, null, "", "");
+                                        "{}", "success", "", null, null, "test", null, null, null, null, "", "");
         repo.disable(TENANT_A, disabledId);
 
         var excluded = repo.listPlans(TENANT_A, "proj-list", 100, false);
@@ -532,7 +572,7 @@ class PlanRepositoryTest {
             TENANT_A,
             "proj-src-auth", "Source-authoritative merge test", "{\"v\":1}",
             "success", "test", OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC),
-            null, null, null, null, null, null, null,
+            null, null, "test", null, null, null, null,
             5, null, 10, 2.5, 4, 1,     // source counters
             "", "Source-authoritative merge test", null);
 
@@ -552,7 +592,7 @@ class PlanRepositoryTest {
             TENANT_A,
             "proj-src-auth", "Source-authoritative merge test", "{\"v\":1}",
             "success", "test", OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC),
-            null, null, null, null, null, null, null,
+            null, null, "test", null, null, null, null,
             5, null, 10, 2.5, 4, 1,     // source values (lower than live PG)
             "", "Source-authoritative merge test", null);
 
@@ -588,7 +628,7 @@ class PlanRepositoryTest {
             TENANT_A,
             "proj-src-auth", "Source-authoritative merge test", "{\"v\":1}",
             "success", "test", OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC),
-            null, null, null, null, null, null, null,
+            null, null, "test", null, null, null, null,
             5, newerLastUsed, 10, 2.5, 4, 1,
             "", "Source-authoritative merge test", null);
 
@@ -626,7 +666,7 @@ class PlanRepositoryTest {
     void disable_withReason_appendsTagAndStampsDisabledAt() {
         long id = repo.savePlan(TENANT_A, "proj-reason", "Plan for disable-reason test",
                                 "{}", "success", "existing-tag", null,
-                                null, null, null, null, null, null, "", "");
+                                null, "test", null, null, null, null, "", "");
 
         // Disable with a reason
         assertThat(repo.disable(TENANT_A, id, "too slow")).isTrue();
@@ -654,7 +694,7 @@ class PlanRepositoryTest {
         // Disable without reason — no tag added; existing tags unchanged
         long id2 = repo.savePlan(TENANT_A, "proj-reason", "Plan for no-reason disable",
                                  "{}", "success", "tag-a", null,
-                                 null, null, null, null, null, null, "", "");
+                                 null, "test", null, null, null, null, "", "");
         assertThat(repo.disable(TENANT_A, id2)).isTrue();
         row = repo.getById(TENANT_A, id2).get();
         assertThat(row.getTags()).as("no-reason disable must not modify tags").isEqualTo("tag-a");
@@ -702,7 +742,7 @@ class PlanRepositoryTest {
         // (source wins); last_used uses GREATEST (null-safe high-water mark).
         var seed = List.of(new PlanRepository.ImportRow(
             "proj-batch-reimport", "reimport query", "{\"v\":1}", "success", "test",
-            OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC), null, null, null, null,
+            OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC), null, null, "test", null,
             null, null, null, 5, null, 10, 2.5, 4, 1, "", "reimport query", null));
         repo.importBatch(TENANT_A, seed);
 
@@ -719,7 +759,7 @@ class PlanRepositoryTest {
         // Re-import (batch, one row) with LOWER counters + null last_used.
         var reimport = List.of(new PlanRepository.ImportRow(
             "proj-batch-reimport", "reimport query", "{\"v\":1}", "success", "test",
-            OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC), null, null, null, null,
+            OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC), null, null, "test", null,
             null, null, null, 5, null, 10, 2.5, 4, 1, "", "reimport query", null));
         repo.importBatch(TENANT_A, reimport);
 
@@ -734,7 +774,7 @@ class PlanRepositoryTest {
         OffsetDateTime newer = pgLastUsed.plusSeconds(3600);
         repo.importBatch(TENANT_A, List.of(new PlanRepository.ImportRow(
             "proj-batch-reimport", "reimport query", "{\"v\":1}", "success", "test",
-            OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC), null, null, null, null,
+            OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC), null, null, "test", null,
             null, null, null, 5, newer, 10, 2.5, 4, 1, "", "reimport query", null)));
         var afterNewer = repo.getById(TENANT_A, id).get();
         assertThat(afterNewer.getLastUsed().withOffsetSameInstant(ZoneOffset.UTC))
@@ -750,9 +790,9 @@ class PlanRepositoryTest {
         OffsetDateTime createdAt = OffsetDateTime.of(2025, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC);
         var rows = List.of(
             new PlanRepository.ImportRow("proj-batch-dup", "dup query", "{\"v\":\"a\"}", "success",
-                "", createdAt, null, null, null, null, null, null, null, 0, null, 0, 0.0, 0, 0, "", "", null),
+                "", createdAt, null, null, "test", null, null, null, null, 0, null, 0, 0.0, 0, 0, "", "", null),
             new PlanRepository.ImportRow("proj-batch-dup", "dup query", "{\"v\":\"b\"}", "success",
-                "", createdAt, null, null, null, null, null, null, null, 0, null, 0, 0.0, 0, 0, "", "", null));
+                "", createdAt, null, null, "test", null, null, null, null, 0, null, 0, 0.0, 0, 0, "", "", null));
 
         int n = repo.importBatch(TENANT_A, rows);
         assertThat(n).as("rows submitted (contract unchanged), not rows landed").isEqualTo(2);

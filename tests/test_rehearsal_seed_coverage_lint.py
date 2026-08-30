@@ -387,6 +387,28 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # survives untouched, FORCE restored on catalog_documents via the
         # existing generic check aspects-004-1 already exercises).
         ("catalog-034-0", "nexus-v3w9n"),
+        # hygiene-001-1..11 (nexus-tk070.p6a follow-on, coordinator review
+        # round item 2): the schema-hygiene NOT NULL arc's twelve FORCE-RLS
+        # row-DML changesets (hygiene-001-1..9, 9b, 10, 11 -- 8b is a
+        # BEFORE INSERT trigger, no row-DML, not in the hop derivation).
+        # Each is seeded with a DEDICATED row (or, for -4/-6/-7/-9, an
+        # EXISTING row from earlier in this same seed block whose relevant
+        # column was already left NULL by its own helper) and
+        # effect-asserted (deleted / backfilled / value-correct) — see the
+        # data leg's own per-changeset comments immediately above each
+        # seed/assert pair for the full per-row rationale.
+        ("hygiene-001-1", "nexus-tk070.p6a"),
+        ("hygiene-001-2", "nexus-tk070.p6a"),
+        ("hygiene-001-3", "nexus-tk070.p6a"),
+        ("hygiene-001-4", "nexus-tk070.p6a"),
+        ("hygiene-001-5", "nexus-tk070.p6a"),
+        ("hygiene-001-6", "nexus-tk070.p6a"),
+        ("hygiene-001-7", "nexus-tk070.p6a"),
+        ("hygiene-001-8", "nexus-tk070.p6a"),
+        ("hygiene-001-9", "nexus-tk070.p6a"),
+        ("hygiene-001-9b", "nexus-tk070.p6a"),
+        ("hygiene-001-10", "nexus-tk070.p6a"),
+        ("hygiene-001-11", "nexus-tk070.p6a"),
     }
 )
 

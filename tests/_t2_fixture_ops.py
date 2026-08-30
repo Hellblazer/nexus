@@ -226,6 +226,7 @@ def seed_plan(
     project: str = "",
     outcome: str = "success",
     tags: str = "",
+    verb: str = "query",
 ) -> int:
     """Save one plan carrying an explicit *created_at*. Returns its row id.
 
@@ -238,6 +239,12 @@ def seed_plan(
     ``import_plan`` writes ``created_at`` verbatim at INSERT time, whereas the
     SQLite store has no import path, so it saves first and rewrites after.
     Both end with one row at the requested timestamp.
+
+    ``verb`` defaults to a fixed, arbitrary "query" (hygiene-001,
+    nexus-tk070.p6a follow-on: ``plans.verb`` is NOT NULL now, and
+    ``import_plan`` writes fidelity fixtures that are otherwise pollution
+    by the same nexus-fiovt contract ``save_plan`` enforces client-side) —
+    override explicitly for a test that cares about the verb value itself.
     """
     store = db.plans
 
@@ -248,6 +255,7 @@ def seed_plan(
         outcome=outcome,
         tags=tags,
         created_at=created_at,
+        verb=verb,
     )
 
 

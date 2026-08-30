@@ -408,10 +408,12 @@ class AspectOperatorQueryTest {
 
     @Test @Order(40)
     void groupby_nestedExtrasKey_traversesCorrectly() {
-        // Seed a row with nested extras: {"meta": {"year": "2023"}}
+        // Seed a row with nested extras: {"meta": {"year": "2023"}}. hygiene-001:
+        // doc_id is required now (was null here, a legitimate pre-hygiene-001
+        // case); reuse an already-registered TENANT_A fixture tumbler.
         seed(TENANT_A, "coll-op", "nested-extras.pdf", "file:///nested-extras.pdf",
              "Nested method", "[]",
-             "{\"meta\":{\"year\":\"2023\"}}", 0.80, null);
+             "{\"meta\":{\"year\":\"2023\"}}", 0.80, "op-doc-1");
 
         // extras.meta.year — Postgres must use #>>'{meta,year}' (not ->>'meta.year')
         Map<String, String> groups = repo.groupByField(

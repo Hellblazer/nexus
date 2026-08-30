@@ -1,0 +1,754 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-tk070.p6a follow-on (T2 nexus/nullable-column-inventory-2026-08-29,
+    Sam decision) — schema-hygiene NOT NULL arc. Every table below carries
+    FORCE ROW LEVEL SECURITY and Liquibase runs as nexus_admin (owner,
+    NOBYPASSRLS, no nexus.tenant GUC set at migration time) — so migration-
+    time DML against it silently no-ops for EVERY tenant while the following
+    DDL (SET NOT NULL) sees every row and FAILS. That mismatch took down
+    engine-service-v0.1.33 in production while CI stayed green, because
+    Testcontainers runs Liquibase as the Postgres superuser (implicit
+    BYPASSRLS) and cannot reproduce the RLS-owner no-op. Every data step
+    below follows the catalog-013-1b / aspects-004-1 / catalog-034-0
+    toggle-wrapped pattern: ALTER TABLE ... NO FORCE ROW LEVEL SECURITY,
+    the DML (inside a DO $$ block, counted via GET DIAGNOSTICS and
+    RAISE NOTICE'd — a cleanup migration warns loudly and proceeds, it
+    never aborts an upgrade), then ALTER TABLE ... FORCE ROW LEVEL SECURITY
+    restored before the changeset ends. The SET NOT NULL / SET DEFAULT
+    statements that follow are ordinary DDL, RLS-exempt, unaffected by the
+    toggle.
+
+    Steps 1-9 mirror the ten-step spec in the T2 memo above (steps 1-9;
+    step 10 there is the explicit "do not touch" for topic_assignments —
+    RDR-194's walk owns it, unchanged here). Two coordinator-approved scope
+    additions land as steps 10 and 11:
+
+      10. plans: a live-population sweep gap unrelated to verb (found while
+          inspecting the three pre-refusal verb-less rows below) — reads
+          filter TTL-expired plans (PlanRepository.notExpiredCondition,
+          shared by listActivePlans/searchPlans/listPlans) but nothing ever
+          deleted them; the live "nexus" tenant held 49 plans of which ~29
+          were expired dead rows. Deleted here (counted, RAISE NOTICE'd,
+          same toggle pattern) as a one-time catch-up; PlanRepository.
+          deleteExpiredPlans + NexusService.runScheduledSweep's new
+          plan_ttl_sweep arm (same 6h cycle as the token sweeps) keep the
+          population from re-accumulating going forward.
+      11. plans.verb: the 3 verb-less rows (ids 67, 86, 117 in tenant
+          "nexus": "shakeout-510 plan probe", "shakeout-5104 plan probe",
+          "v0113 deploy smoke"; outcome=success, created 2026-05-26..
+          2026-07-01) were inspected by hand — pre-refusal shakeout residue
+          from before nexus-fiovt's verb refusal (539fb7dcb, 2026-07-05)
+          landed, not a live writer. All three are also caught by step 10's
+          expiry sweep (backdated shakeout residue), so by the time this
+          step runs against the live tenant there is nothing left for its
+          own DELETE to find — it ships as an unconditional, independently
+          correct step regardless of step 10's outcome (defensive: a box
+          where one of the three is NOT yet expired must not wedge on
+          SET NOT NULL). topic_assignments.assigned_at is explicitly OUT OF
+          SCOPE for this whole file — RDR-194's walk owns that column,
+          unchanged here.
+
+    catalog_documents.indexed_at / bib_enriched_at / index_started_at,
+    catalog_collections.superseded_at, and document_aspects.confidence /
+    problem_formulation / proposed_method / experimental_* / extras /
+    salient_sentences stay nullable by design (set-later timestamps,
+    optional bibliographic enrichment, free-text extraction fields) — not
+    touched here.
+
+    Placed after catalog-034-tumbler-grammar.xml (current tail) and before
+    the grants-nexus-svc.xml runAlways block, matching the established
+    late-append convention (D0.1) restated in every predecessor's own
+    <include> comment in db.changelog-master.xml.
+
+    LOCK TIMEOUT (review round, nexus-tk070.p6a follow-on, critic C1). Every
+    step below that ALTERs a hot table (chunks, document_aspects,
+    catalog_documents, catalog_collections, catalog_links,
+    catalog_document_chunks, plans) opens its DDL/DML sql block with
+    `SET LOCAL lock_timeout = '5s'; LOCK TABLE nexus.<table> IN ACCESS
+    EXCLUSIVE MODE;` — the exact pattern vectors-004-unify-chunks.xml's
+    Step 0 already established (lock-first, N2). SET LOCAL is
+    transaction-scoped: Liquibase runs a changeset's sql blocks in one
+    transaction by default, so setting it in the changeset's own leading
+    block covers every later statement in that same changeset. A lock
+    that cannot be acquired within 5s means a competing session already
+    holds a conflicting lock on the table (long-running query, a stuck
+    transaction, live traffic) — the timeout FAILS that changeset outright
+    rather than queuing indefinitely behind it. Liquibase does not retry a
+    failed changeset itself; failure surfaces as a non-zero-exit
+    schema_migration at engine boot, the engine-service OS unit restarts
+    per its own supervision policy, and the retry happens on the NEXT boot
+    attempt. This bounds how long a stalled changeset can block live
+    traffic to a single 5s window per attempt, rather than an unbounded
+    wait for whatever held the lock to release.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Step 1: document_aspects.doc_id / source_uri ──────────────────────── -->
+    <changeSet id="hygiene-001-1" author="nexus-tk070.p6a">
+        <comment>
+            document_aspects: delete doc_id-orphan rows (the 554-row chroma://
+            class with no live document; census tombstoned_match=0, so no
+            re-extraction backlog exists for them — the documents are gone),
+            backfill any straggler NULL source_uri to '', then SET NOT NULL
+            on both doc_id and source_uri. Reverses fk-001-2's nullable
+            conversion by design (Sam decision): every aspect row must
+            attribute to a live catalog document going forward. The FK
+            (fk_doc_aspects_catalog_doc, ON DELETE CASCADE) is unaffected —
+            NOT NULL and a nullable-target FK coexist normally.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+LOCK TABLE nexus.document_aspects IN ACCESS EXCLUSIVE MODE;
+        </sql>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.document_aspects NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_deleted_count BIGINT;
+    v_backfilled_count BIGINT;
+BEGIN
+    DELETE FROM nexus.document_aspects WHERE doc_id IS NULL;
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-001-1: deleted % document_aspects row(s) with doc_id IS NULL', v_deleted_count;
+
+    UPDATE nexus.document_aspects SET source_uri = '' WHERE source_uri IS NULL;
+    GET DIAGNOSTICS v_backfilled_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-001-1: backfilled % document_aspects.source_uri NULL row(s) to empty string', v_backfilled_count;
+END $$;
+
+ALTER TABLE nexus.document_aspects FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE nexus.document_aspects
+    ALTER COLUMN doc_id SET NOT NULL,
+    ALTER COLUMN source_uri SET NOT NULL;
+        </sql>
+        <rollback>
+            <!-- The DELETE is unrecoverable (no pre-image kept) — matching every
+                 prior counted-DELETE changeset's rollback discipline in this tree
+                 (plans-003-1, catalog-034-0). The NOT NULL constraints themselves
+                 are safely reversible. -->
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.document_aspects ALTER COLUMN source_uri DROP NOT NULL;
+ALTER TABLE nexus.document_aspects ALTER COLUMN doc_id DROP NOT NULL;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Step 2: aspect_extraction_queue.doc_id ─────────────────────────────── -->
+    <changeSet id="hygiene-001-2" author="nexus-tk070.p6a">
+        <comment>
+            aspect_extraction_queue: delete any doc_id-NULL rows (table empty
+            at census time, but the DELETE ships unconditionally per the
+            "warn loudly, delete whatever is found" convention), then
+            SET NOT NULL on doc_id. Reverses fk-001-4's nullable conversion,
+            same rationale as step 1 — a queue item with no attributable
+            document is not representable going forward.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.aspect_extraction_queue NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_deleted_count BIGINT;
+BEGIN
+    DELETE FROM nexus.aspect_extraction_queue WHERE doc_id IS NULL;
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-001-2: deleted % aspect_extraction_queue row(s) with doc_id IS NULL', v_deleted_count;
+END $$;
+
+ALTER TABLE nexus.aspect_extraction_queue FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE nexus.aspect_extraction_queue ALTER COLUMN doc_id SET NOT NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.aspect_extraction_queue ALTER COLUMN doc_id DROP NOT NULL;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Step 3: document_highlights.source_uri / collection ───────────────── -->
+    <changeSet id="hygiene-001-3" author="nexus-tk070.p6a">
+        <comment>
+            document_highlights: delete any rows with NULL source_uri or
+            collection (table empty at census time; ships unconditionally),
+            then SET NOT NULL on both.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.document_highlights NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_deleted_count BIGINT;
+BEGIN
+    DELETE FROM nexus.document_highlights WHERE source_uri IS NULL OR collection IS NULL;
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-001-3: deleted % document_highlights row(s) with NULL source_uri or collection', v_deleted_count;
+END $$;
+
+ALTER TABLE nexus.document_highlights FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE nexus.document_highlights
+    ALTER COLUMN source_uri SET NOT NULL,
+    ALTER COLUMN collection SET NOT NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.document_highlights ALTER COLUMN collection DROP NOT NULL;
+ALTER TABLE nexus.document_highlights ALTER COLUMN source_uri DROP NOT NULL;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Step 4: catalog_documents (5 columns) ──────────────────────────────── -->
+    <changeSet id="hygiene-001-4" author="nexus-tk070.p6a">
+        <comment>
+            catalog_documents: content_type / physical_collection / corpus /
+            file_path / chunk_count — live NULLs are 0 for all five (every
+            write site already stamps ""/0), but the backfill ships
+            unconditionally as a defensive catch-all before SET NOT NULL.
+            Also SET DEFAULT ''/0 (deviation from the plan-of-record's literal
+            text, which named only SET NOT NULL for this step): catalog_documents
+            is a widespread minimal (tenant_id, tumbler, title)-only raw-SQL FK
+            fixture target across the Java test suite (50 files) and the
+            catalog-013-1b/aspects-004-1/AspectDocIdBackfillTest lineage's own
+            established pattern — a NOT NULL with no DEFAULT would fail every
+            such fixture insert; the engine's own write paths already always
+            supply ""/0 (nne()/ni()-guarded) so the DEFAULT changes nothing for
+            them. Mirrors chunks.metadata's DEFAULT '{}' (step 5) and catalog_
+            collections/catalog_links' DEFAULT now() (steps 6-7) in this same
+            file.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+LOCK TABLE nexus.catalog_documents IN ACCESS EXCLUSIVE MODE;
+        </sql>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_content_type BIGINT;
+    v_physical_collection BIGINT;
+    v_corpus BIGINT;
+    v_file_path BIGINT;
+    v_chunk_count BIGINT;
+BEGIN
+    UPDATE nexus.catalog_documents SET content_type = '' WHERE content_type IS NULL;
+    GET DIAGNOSTICS v_content_type = ROW_COUNT;
+    UPDATE nexus.catalog_documents SET physical_collection = '' WHERE physical_collection IS NULL;
+    GET DIAGNOSTICS v_physical_collection = ROW_COUNT;
+    UPDATE nexus.catalog_documents SET corpus = '' WHERE corpus IS NULL;
+    GET DIAGNOSTICS v_corpus = ROW_COUNT;
+    UPDATE nexus.catalog_documents SET file_path = '' WHERE file_path IS NULL;
+    GET DIAGNOSTICS v_file_path = ROW_COUNT;
+    UPDATE nexus.catalog_documents SET chunk_count = 0 WHERE chunk_count IS NULL;
+    GET DIAGNOSTICS v_chunk_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-001-4: backfilled catalog_documents NULL row(s) -- content_type=% physical_collection=% corpus=% file_path=% chunk_count=%',
+        v_content_type, v_physical_collection, v_corpus, v_file_path, v_chunk_count;
+END $$;
+
+ALTER TABLE nexus.catalog_documents FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE nexus.catalog_documents
+    ALTER COLUMN content_type SET DEFAULT '',
+    ALTER COLUMN content_type SET NOT NULL,
+    ALTER COLUMN physical_collection SET DEFAULT '',
+    ALTER COLUMN physical_collection SET NOT NULL,
+    ALTER COLUMN corpus SET DEFAULT '',
+    ALTER COLUMN corpus SET NOT NULL,
+    ALTER COLUMN file_path SET DEFAULT '',
+    ALTER COLUMN file_path SET NOT NULL,
+    ALTER COLUMN chunk_count SET DEFAULT 0,
+    ALTER COLUMN chunk_count SET NOT NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_documents ALTER COLUMN chunk_count DROP NOT NULL;
+ALTER TABLE nexus.catalog_documents ALTER COLUMN chunk_count DROP DEFAULT;
+ALTER TABLE nexus.catalog_documents ALTER COLUMN file_path DROP NOT NULL;
+ALTER TABLE nexus.catalog_documents ALTER COLUMN file_path DROP DEFAULT;
+ALTER TABLE nexus.catalog_documents ALTER COLUMN corpus DROP NOT NULL;
+ALTER TABLE nexus.catalog_documents ALTER COLUMN corpus DROP DEFAULT;
+ALTER TABLE nexus.catalog_documents ALTER COLUMN physical_collection DROP NOT NULL;
+ALTER TABLE nexus.catalog_documents ALTER COLUMN physical_collection DROP DEFAULT;
+ALTER TABLE nexus.catalog_documents ALTER COLUMN content_type DROP NOT NULL;
+ALTER TABLE nexus.catalog_documents ALTER COLUMN content_type DROP DEFAULT;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Step 5: chunks.metadata ─────────────────────────────────────────────── -->
+    <changeSet id="hygiene-001-5" author="nexus-tk070.p6a">
+        <comment>
+            chunks.metadata: backfill NULL to '{}'::jsonb (0 live at census
+            time; unconditional), then DEFAULT '{}'::jsonb + SET NOT NULL.
+
+            RESTRICTED to octet_length(chash) = 32 rows (the exact predicate
+            chunks_chash_octet_check enforces, rdr180-001-bytea-chash.xml):
+            an UNRESTRICTED UPDATE re-validates EVERY CHECK constraint on
+            every row it touches (ordinary Postgres semantics — unlike
+            ALTER COLUMN ... SET NOT NULL, which does not rewrite tuples and
+            checks nothing but the named column), and rdr180-001 deliberately
+            left that constraint NOT VALID against pre-existing 16-byte
+            legacy rows ("existing rows are 16-byte legacy until the rekey
+            ... deliberately NOT a boot changeset" — its own header). Before
+            this file, NOTHING in the whole changelog chain ever UPDATEs such
+            a row, so the violation stays latent; an unrestricted backfill
+            here would be the first thing to crash on it —
+            SchemaUpgradeRehearsalIntegrationTest's aged-box rehearsal caught
+            this exactly as designed.
+
+            Any row STILL metadata IS NULL after the restricted UPDATE can
+            only be legacy-width (un-rekeyed): DELETE it, counted and
+            RAISE NOTICE'd. This is the nexus-lgdel deletion arc — the
+            32-byte cutover has no path back, so an un-rekeyed row's content
+            is unresolvable by construction, not merely inconvenient. A
+            cleanup migration warns loudly, deletes, and proceeds; it never
+            gates the upgrade on a legacy population it cannot fix in place.
+
+            FK ordering: catalog_document_chunks.fk_catalog_chunks_chunk
+            (catalog-029-manifest-chunk-fk.xml) references
+            chunks(tenant_id, collection, chash) with no explicit ON DELETE
+            clause -- Postgres defaults that to NO ACTION, not CASCADE -- and
+            catalog_document_chunks's own legacy-row cleanup does not run
+            until hygiene-001-8, later in this same file. Deleting a doomed
+            chunks row here, before that cleanup has run, would be rejected
+            outright by the FK. So this changeset deletes the referencing
+            catalog_document_chunks rows itself, first, in the same
+            transaction, before touching the chunks parent rows.
+            topic_assignments_chunk_fk (taxonomy-012-doc-id-chunk-fk.xml) is
+            ON DELETE CASCADE and needs no such handling.
+
+            DELETE PREDICATE (review round, critic census finding): both
+            deletes below key DIRECTLY on octet_length(chash) &lt;&gt; 32 OR
+            chash IS NULL -- not on "metadata IS NULL", which was only a
+            proxy true by the census's historical fact that 0 well-formed
+            rows carried NULL metadata at census time. A direct chash-width
+            check is correct regardless of any row written between census
+            and this changeset actually running. The `OR chash IS NULL` arm
+            is a genuine NULL hole in Postgres's three-valued logic:
+            octet_length(NULL) &lt;&gt; 32 evaluates to NULL, not TRUE, so a
+            bare octet_length(chash) &lt;&gt; 32 predicate would silently
+            SKIP a null-chash row rather than catching it (chash is NOT
+            NULL by schema today, so this arm cannot currently fire — it is
+            defensive completeness, not a live case). Census fact (T2
+            hygiene-001-predicted-walk-counts-2026-08-29): 0 non-32-byte
+            chash rows on the cloud in either table today; every live row
+            is already width 32.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+LOCK TABLE nexus.chunks, nexus.catalog_document_chunks IN ACCESS EXCLUSIVE MODE;
+        </sql>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chunks NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_backfilled_count BIGINT;
+    v_manifest_deleted_count BIGINT;
+    v_deleted_count BIGINT;
+BEGIN
+    UPDATE nexus.chunks SET metadata = '{}'::jsonb
+     WHERE metadata IS NULL AND octet_length(chash) = 32;
+    GET DIAGNOSTICS v_backfilled_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-001-5: backfilled % chunks.metadata NULL row(s) to {}', v_backfilled_count;
+
+    -- FK safety ahead of the chunks DELETE below: catalog_document_chunks
+    -- has no CASCADE toward chunks, so its rows referencing a doomed chunk
+    -- must go first or the parent DELETE is rejected.
+    DELETE FROM nexus.catalog_document_chunks cdc
+     USING nexus.chunks c
+     WHERE cdc.tenant_id = c.tenant_id
+       AND cdc.collection = c.collection
+       AND cdc.chash = c.chash
+       AND (octet_length(c.chash) &lt;&gt; 32 OR c.chash IS NULL);
+    GET DIAGNOSTICS v_manifest_deleted_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-001-5: deleted % catalog_document_chunks manifest row(s) referencing an un-rekeyed legacy-width chunk (FK safety ahead of the chunks delete below)', v_manifest_deleted_count;
+
+    DELETE FROM nexus.chunks WHERE octet_length(chash) &lt;&gt; 32 OR chash IS NULL;
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-001-5: deleted % chunks row(s) -- un-rekeyed legacy-width chash (RDR-180, nexus-lgdel deletion arc), unresolvable since the 32-byte cutover', v_deleted_count;
+END $$;
+
+ALTER TABLE nexus.catalog_document_chunks FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chunks FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE nexus.chunks
+    ALTER COLUMN metadata SET DEFAULT '{}'::jsonb,
+    ALTER COLUMN metadata SET NOT NULL;
+        </sql>
+        <rollback>
+            <!-- Both DELETEs (catalog_document_chunks manifest rows, then
+                 chunks) are unrecoverable (no pre-image kept, nexus-lgdel:
+                 an un-rekeyed row's content has no path back past the
+                 32-byte cutover) — matching every other counted-DELETE
+                 changeset's rollback discipline in this tree. The NOT NULL
+                 constraint itself is safely reversible. -->
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks ALTER COLUMN metadata DROP NOT NULL;
+ALTER TABLE nexus.chunks ALTER COLUMN metadata DROP DEFAULT;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Step 6: catalog_collections.created_at ─────────────────────────────── -->
+    <changeSet id="hygiene-001-6" author="nexus-tk070.p6a">
+        <comment>
+            catalog_collections.created_at: the engine has NEVER written it
+            (CatalogRepository only SELECTs F_COL_CRTAT; live 260/260 NULL) —
+            backfilled to the earliest indexed_at of the collection's own
+            documents where derivable, else migration time, then
+            SET NOT NULL DEFAULT now(). Both catalog_collections (the DML
+            target) and catalog_documents (read via the correlated
+            subquery) carry FORCE ROW LEVEL SECURITY, so both are toggled
+            (aspects-004-1 precedent: toggling only the target leaves the
+            join yielding zero rows for the non-bypass owner) — toggled in
+            this order, restored in reverse (LIFO).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+LOCK TABLE nexus.catalog_collections, nexus.catalog_documents IN ACCESS EXCLUSIVE MODE;
+        </sql>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.catalog_collections NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_backfilled_count BIGINT;
+BEGIN
+    UPDATE nexus.catalog_collections c
+       SET created_at = COALESCE(
+               (SELECT min(d.indexed_at) FROM nexus.catalog_documents d
+                 WHERE d.tenant_id = c.tenant_id
+                   AND d.physical_collection = c.name),
+               now())
+     WHERE c.created_at IS NULL;
+    GET DIAGNOSTICS v_backfilled_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-001-6: backfilled % catalog_collections.created_at NULL row(s)', v_backfilled_count;
+END $$;
+
+ALTER TABLE nexus.catalog_documents FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_collections FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE nexus.catalog_collections
+    ALTER COLUMN created_at SET DEFAULT now(),
+    ALTER COLUMN created_at SET NOT NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_collections ALTER COLUMN created_at DROP NOT NULL;
+ALTER TABLE nexus.catalog_collections ALTER COLUMN created_at DROP DEFAULT;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Step 7: catalog_links.created_at ───────────────────────────────────── -->
+    <changeSet id="hygiene-001-7" author="nexus-tk070.p6a">
+        <comment>
+            catalog_links.created_at: backfill NULL to now() (165 live at
+            census time, pre-nexus-4j80w legacy rows), then SET NOT NULL
+            DEFAULT now(). The engine's own insert path already stamps
+            createdAtOrNow() on every new link (nexus-4j80w); this closes
+            the remaining legacy population and the last engine-side gap
+            (CatalogRepository's collection insert paths — see this
+            changeset's paired Java fix in the same commit).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+LOCK TABLE nexus.catalog_links IN ACCESS EXCLUSIVE MODE;
+        </sql>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.catalog_links NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_backfilled_count BIGINT;
+BEGIN
+    UPDATE nexus.catalog_links SET created_at = now() WHERE created_at IS NULL;
+    GET DIAGNOSTICS v_backfilled_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-001-7: backfilled % catalog_links.created_at NULL row(s) to now()', v_backfilled_count;
+END $$;
+
+ALTER TABLE nexus.catalog_links FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE nexus.catalog_links
+    ALTER COLUMN created_at SET DEFAULT now(),
+    ALTER COLUMN created_at SET NOT NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_links ALTER COLUMN created_at DROP NOT NULL;
+ALTER TABLE nexus.catalog_links ALTER COLUMN created_at DROP DEFAULT;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Step 8: catalog_document_chunks.chunk_index ────────────────────────── -->
+    <changeSet id="hygiene-001-8" author="nexus-tk070.p6a">
+        <comment>
+            catalog_document_chunks.chunk_index: backfill NULL to the row's
+            own `position` (its documented duplicate; 22,298 / 7.8% live
+            NULL at census time — the wire field predates this guarantee),
+            then SET NOT NULL. The manifest write path
+            (CatalogRepository#insertManifestChunkRows) is fixed in the
+            same commit to fall back to `position` when a client omits
+            chunk_index, so the population cannot re-accumulate.
+
+            RESTRICTED to octet_length(chash) = 32 rows, same reasoning as
+            hygiene-001-5: an UNRESTRICTED UPDATE re-validates every CHECK
+            constraint on every touched row, including the NOT VALID
+            catalog_document_chunks_chash_octet_check
+            (rdr180-001-bytea-chash.xml) left unenforced against
+            pre-existing 16-byte legacy rows. Any row STILL chunk_index IS
+            NULL after the restricted UPDATE can only be legacy-width
+            (un-rekeyed): DELETE it, counted and RAISE NOTICE'd (nexus-lgdel
+            deletion arc — no path back past the 32-byte cutover). This
+            table has no downstream FK dependents (confirmed: nothing in
+            the changelog chain references catalog_document_chunks), so no
+            ordering hazard analogous to hygiene-001-5's applies here; some
+            of the rows this DELETE targets may already be gone via
+            hygiene-001-5's own FK-safety cleanup of manifest rows
+            referencing a doomed chunks row — harmless overlap, the second
+            DELETE simply finds nothing left to remove for those. An orphan
+            manifest row (legacy-width chash with no matching chunks row at
+            all) is NOT covered by hygiene-001-5's join-based cleanup;
+            this changeset's own direct chash-width predicate (below)
+            catches that case independently.
+
+            DELETE PREDICATE (review round, critic census finding): keys
+            DIRECTLY on octet_length(chash) &lt;&gt; 32 OR chash IS NULL —
+            not on "chunk_index IS NULL", which was only a proxy true by
+            the census's historical fact. See hygiene-001-5's comment for
+            the full rationale (identical NULL-hole and census-fact note;
+            0 non-32-byte chash rows on the cloud today).
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+LOCK TABLE nexus.catalog_document_chunks IN ACCESS EXCLUSIVE MODE;
+        </sql>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_backfilled_count BIGINT;
+    v_deleted_count BIGINT;
+BEGIN
+    UPDATE nexus.catalog_document_chunks SET chunk_index = position
+     WHERE chunk_index IS NULL AND octet_length(chash) = 32;
+    GET DIAGNOSTICS v_backfilled_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-001-8: backfilled % catalog_document_chunks.chunk_index NULL row(s) to position', v_backfilled_count;
+
+    DELETE FROM nexus.catalog_document_chunks WHERE octet_length(chash) &lt;&gt; 32 OR chash IS NULL;
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-001-8: deleted % catalog_document_chunks row(s) -- un-rekeyed legacy-width chash (RDR-180, nexus-lgdel deletion arc), unresolvable since the 32-byte cutover', v_deleted_count;
+END $$;
+
+ALTER TABLE nexus.catalog_document_chunks FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE nexus.catalog_document_chunks ALTER COLUMN chunk_index SET NOT NULL;
+        </sql>
+        <rollback>
+            <!-- The DELETE is unrecoverable (no pre-image kept, nexus-lgdel:
+                 an un-rekeyed row's content has no path back past the
+                 32-byte cutover) — matching every other counted-DELETE
+                 changeset's rollback discipline in this tree. The NOT NULL
+                 constraint itself is safely reversible. -->
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_document_chunks ALTER COLUMN chunk_index DROP NOT NULL;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Step 8b: catalog_document_chunks.chunk_index trigger backstop ─────── -->
+    <changeSet id="hygiene-001-8b" author="nexus-tk070.p6a">
+        <comment>
+            BEFORE INSERT trigger: chunk_index defaults to position when a
+            caller omits it. A plain column DEFAULT cannot reference a
+            sibling column (position), so this is the DDL-level equivalent
+            of the ""/0 column DEFAULTs step 4 added for catalog_documents —
+            the row-level backstop for the WIDESPREAD raw-SQL manifest
+            fixture pattern across the test suite (mirrors updated-at-001's
+            SECURITY INVOKER trigger-function template) and a second line of
+            defense behind CatalogRepository#insertManifestChunkRows'
+            application-level fallback (same commit).
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+-- CREATE TRIGGER takes the same ACCESS EXCLUSIVE lock as ALTER TABLE;
+-- bound the wait exactly as the sibling steps do (review re-check).
+SET LOCAL lock_timeout = '5s';
+LOCK TABLE nexus.catalog_document_chunks IN ACCESS EXCLUSIVE MODE;
+CREATE OR REPLACE FUNCTION nexus.default_chunk_index_from_position()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+BEGIN
+    IF NEW.chunk_index IS NULL THEN
+        NEW.chunk_index := NEW.position;
+    END IF;
+    RETURN NEW;
+END;
+$fn$;
+
+CREATE TRIGGER trg_catalog_document_chunks_chunk_index_default
+    BEFORE INSERT ON nexus.catalog_document_chunks
+    FOR EACH ROW
+    EXECUTE FUNCTION nexus.default_chunk_index_from_position();
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+DROP TRIGGER IF EXISTS trg_catalog_document_chunks_chunk_index_default ON nexus.catalog_document_chunks;
+DROP FUNCTION IF EXISTS nexus.default_chunk_index_from_position();
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Step 9a: relevance_log.collection ───────────────────────────────────── -->
+    <changeSet id="hygiene-001-9" author="nexus-tk070.p6a">
+        <comment>
+            relevance_log.collection: backfill NULL to '' (0 live at census
+            time; unconditional), then SET NOT NULL.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.relevance_log NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_backfilled_count BIGINT;
+BEGIN
+    UPDATE nexus.relevance_log SET collection = '' WHERE collection IS NULL;
+    GET DIAGNOSTICS v_backfilled_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-001-9: backfilled % relevance_log.collection NULL row(s) to empty string', v_backfilled_count;
+END $$;
+
+ALTER TABLE nexus.relevance_log FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE nexus.relevance_log ALTER COLUMN collection SET NOT NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.relevance_log ALTER COLUMN collection DROP NOT NULL;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Step 9b: taxonomy_centroids.label ───────────────────────────────────── -->
+    <changeSet id="hygiene-001-9b" author="nexus-tk070.p6a">
+        <comment>
+            taxonomy_centroids.label: backfill NULL to '' (0 live at census
+            time; unconditional), then SET NOT NULL.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.taxonomy_centroids NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_backfilled_count BIGINT;
+BEGIN
+    UPDATE nexus.taxonomy_centroids SET label = '' WHERE label IS NULL;
+    GET DIAGNOSTICS v_backfilled_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-001-9b: backfilled % taxonomy_centroids.label NULL row(s) to empty string', v_backfilled_count;
+END $$;
+
+ALTER TABLE nexus.taxonomy_centroids FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE nexus.taxonomy_centroids ALTER COLUMN label SET NOT NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.taxonomy_centroids ALTER COLUMN label DROP NOT NULL;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <!-- ── Step 10: plans — expired-row catch-up sweep (coordinator scope addition) ── -->
+    <changeSet id="hygiene-001-10" author="nexus-tk070.p6a">
+        <comment>
+            plans: one-time catch-up delete of every row PlanRepository's
+            own read-time expiry predicate (notExpiredCondition, shared by
+            listActivePlans/searchPlans/listPlans) already filters out of
+            every read but that no sweep had ever deleted (live "nexus"
+            tenant: 49 plans, ~29 expired). The predicate below is the
+            EXACT negation of notExpiredCondition() — ttl_days IS NOT NULL
+            AND its age past last use (or creation) exceeds ttl_days.
+            NexusService's new plan_ttl_sweep arm (same 6h cycle as the
+            token sweeps, same commit) keeps this from re-accumulating.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+LOCK TABLE nexus.plans IN ACCESS EXCLUSIVE MODE;
+        </sql>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.plans NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_deleted_count BIGINT;
+BEGIN
+    DELETE FROM nexus.plans
+     WHERE ttl_days IS NOT NULL
+       AND (extract(epoch from now() - coalesce(last_used, created_at)) / 86400) > ttl_days;
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-001-10: deleted % nexus.plans row(s) past their ttl_days -- read-filtered since nexus-sbl4m but never swept until now', v_deleted_count;
+END $$;
+
+ALTER TABLE nexus.plans FORCE ROW LEVEL SECURITY;
+        </sql>
+        <rollback>
+            <!-- Counted DELETE, no pre-image kept — matching plans-003-1's own
+                 rollback discipline for this same table. There is no DDL in
+                 this step to revert around it. -->
+        </rollback>
+    </changeSet>
+
+    <!-- ── Step 11: plans.verb ─────────────────────────────────────────────────── -->
+    <changeSet id="hygiene-001-11" author="nexus-tk070.p6a">
+        <comment>
+            plans.verb: delete any remaining verb-NULL rows (the 3 live ones
+            — ids 67/86/117 in tenant "nexus" — were inspected by hand and
+            are pre-refusal shakeout residue from before nexus-fiovt's verb
+            refusal, 539fb7dcb 2026-07-05, landed; not a live writer, and
+            already caught by step 10's expiry sweep in the common case —
+            this DELETE is the defensive backstop for a box where one is
+            not yet expired), then SET NOT NULL. topic_assignments
+            .assigned_at is explicitly OUT OF SCOPE — RDR-194's walk owns
+            it, unchanged by this file.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+LOCK TABLE nexus.plans IN ACCESS EXCLUSIVE MODE;
+        </sql>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.plans NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    v_deleted_count BIGINT;
+BEGIN
+    DELETE FROM nexus.plans WHERE verb IS NULL;
+    GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
+    RAISE NOTICE 'hygiene-001-11: deleted % nexus.plans row(s) with verb IS NULL -- pre-nexus-fiovt shakeout residue', v_deleted_count;
+END $$;
+
+ALTER TABLE nexus.plans FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE nexus.plans ALTER COLUMN verb SET NOT NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.plans ALTER COLUMN verb DROP NOT NULL;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

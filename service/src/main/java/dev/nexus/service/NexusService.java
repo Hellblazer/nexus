@@ -119,10 +119,39 @@ public final class NexusService {
         new java.util.concurrent.atomic.AtomicInteger();
 
     /**
+     * nexus-4tosp: PER-TENANT consecutive data-token sweep failures, keyed by
+     * tenant and cleared (entry removed) on that tenant's next successful
+     * sweep. Complements {@link #consecutiveDataSweepFailures} above, which
+     * only trips when EVERY tenant fails in the same cycle and is therefore
+     * blind to the bead's headline scenario: one tenant's backlog exceeds the
+     * statement bound every cycle while other tenants keep succeeding.
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, Integer> dataSweepFailuresByTenant =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * nexus-4tosp test seam: overrides the per-tenant data-token sweep call
+     * (tenant -&gt; deleted count; throw to simulate that tenant's failure) so
+     * a unit test can exercise per-tenant escalation without a live 30s
+     * statement-timeout race. Null in production, where the real
+     * {@link TokenStore#sweepExpiredDataTokens} call is used. Package-private
+     * so a same-package test can set it directly.
+     */
+    java.util.function.Function<String, Integer> dataTokenSweepOverride;
+
+    /**
      * nexus-tyxnh: owns the post-commit purge-trash VACUUM executor; shut down in
      * {@link #stop()} alongside {@code sweepScheduler}.
      */
     private final CatalogRepository catalogRepo;
+
+    /**
+     * hygiene-001 follow-on (coordinator scope addition): {@link
+     * #runScheduledSweep}'s plans-expiry arm needs it; PlanHandler needs it
+     * too, so it is a field rather than a constructor-local like scratchRepo
+     * and catalogRepo above.
+     */
+    private final PlanRepository planRepo;
 
     /**
      * Convenience constructor: no vector backend (original signature for existing tests).
@@ -281,7 +310,9 @@ public final class NexusService {
         this.tokenCache = new TokenCache(tokenStore, java.time.Clock.systemUTC());
 
         var memoryRepo    = new MemoryRepository(tenantScope);
-        var planRepo      = new PlanRepository(tenantScope);
+        // Field, not a constructor local (mirrors scratchRepo/catalogRepo above):
+        // runScheduledSweep's plan-expiry arm (hygiene-001 follow-on) needs it.
+        this.planRepo     = new PlanRepository(tenantScope);
         var telemetryRepo = new TelemetryRepository(tenantScope);
         this.scratchRepo  = new ScratchRepository(tenantScope);
         var taxonomyRepo  = new TaxonomyRepository(tenantScope);
@@ -502,6 +533,11 @@ public final class NexusService {
         // catch already handles correctly and must not trip the stall counter.
         boolean dataArmSucceededForAnyTenant = false;
         boolean dataArmFailedForAnyTenant = false;
+        // nexus-4tosp: per-CYCLE counts for the run-summary heartbeat below —
+        // distinct from the cumulative per-tenant streaks in
+        // dataSweepFailuresByTenant, which persist across cycles.
+        int dataArmFailedTenantsThisCycle = 0;
+        int dataArmStalledTenantsThisCycle = 0;
         for (String tenant : tenants) {
             try {
                 int deleted = scratchRepo.sweepTenant(tenant, cutoff, statementTimeout);
@@ -542,17 +578,63 @@ public final class NexusService {
             // service_tokens — the very table this arm sweeps. Any tenant
             // holding a sweepable row is in the list by construction.
             try {
-                int dataDeleted = tokenStore.sweepExpiredDataTokens(
-                    tenant, now.toInstant(), Duration.ofDays(SWEEP_DATA_TOKEN_GRACE_DAYS),
-                    statementTimeout);
+                int dataDeleted = dataTokenSweepOverride != null
+                    ? dataTokenSweepOverride.apply(tenant)
+                    : tokenStore.sweepExpiredDataTokens(
+                        tenant, now.toInstant(), Duration.ofDays(SWEEP_DATA_TOKEN_GRACE_DAYS),
+                        statementTimeout);
                 totalDataTokens += dataDeleted;
                 dataArmSucceededForAnyTenant = true;
+                // nexus-4tosp: per-tenant recovery. Only worth an INFO line
+                // when the tenant had actually crossed the stall threshold —
+                // a reset after 1-2 ordinary failures is not news.
+                Integer priorFailures = dataSweepFailuresByTenant.remove(tenant);
+                if (priorFailures != null && priorFailures >= DATA_SWEEP_STALL_CYCLES) {
+                    log.info("event=t1_data_token_sweep_tenant_recovered tenant={} after_failures={}",
+                        tenant, priorFailures);
+                }
             } catch (Exception ex) {
                 dataArmFailedForAnyTenant = true;
+                dataArmFailedTenantsThisCycle++;
                 log.warn("event=t1_scheduled_data_token_sweep_tenant_failed tenant={} error={}",
+                    tenant, ex.getMessage(), ex);
+                // nexus-4tosp: per-tenant stall escalation, distinct from the
+                // fleet-wide ERROR below. Fires every cycle at or past the
+                // threshold (not just on the crossing) so the alarm keeps
+                // signaling until the tenant recovers.
+                int streak = dataSweepFailuresByTenant.merge(tenant, 1, Integer::sum);
+                // Fires on EVERY cycle at/past the threshold, unlike the fleet-wide
+                // t1_scheduled_data_token_sweep_stalled gate below, which fires once on
+                // the crossing: this arm runs every 6 h and is read from the log window
+                // alone (conexus's DATA EFFECTS row), so a once-only line scrolls out of
+                // a 24 h window while the tenant is still stalled. Four lines a day per
+                // stalled tenant is the intended noise level (nexus-4tosp).
+                if (streak >= DATA_SWEEP_STALL_CYCLES) {
+                    dataArmStalledTenantsThisCycle++;
+                    log.error("event=t1_data_token_sweep_tenant_stalled tenant={} consecutive_failures={} "
+                            + "last_error=\"{}\"",
+                        tenant, streak, ex.getMessage());
+                }
+            }
+            // hygiene-001 follow-on (coordinator scope addition): plans whose
+            // read-time expiry predicate (PlanRepository.notExpiredCondition,
+            // shared with listActivePlans/searchPlans/listPlans) says NOT
+            // active are filtered out of every read but were never deleted by
+            // any sweep — riding this SAME per-tenant loop and 6h schedule,
+            // same reasoning as the session/data-token arms above.
+            try {
+                int plansDeleted = planRepo.deleteExpiredPlans(tenant, statementTimeout);
+                log.info("event=plan_ttl_sweep tenant={} deleted={}", tenant, plansDeleted);
+            } catch (Exception ex) {
+                log.warn("event=plan_ttl_sweep_tenant_failed tenant={} error={}",
                     tenant, ex.getMessage(), ex);
             }
         }
+        // nexus-4tosp: ONE line per scheduled run, unconditional (a zero-
+        // failure cycle included), so "scheduler never fired" is
+        // distinguishable from "fired and failed" from outside the logs.
+        log.info("event=t1_scheduled_data_token_sweep_run tenants={} failed={} stalled={}",
+            tenants.size(), dataArmFailedTenantsThisCycle, dataArmStalledTenantsThisCycle);
         // Emitted unconditionally, zero-delete cycles included: a cycle that
         // swept nothing must be distinguishable from a cycle that did not run.
         //
@@ -628,6 +710,16 @@ public final class NexusService {
      */
     boolean dataSweepStalled() {
         return consecutiveDataSweepFailures.get() >= DATA_SWEEP_STALL_CYCLES;
+    }
+
+    /**
+     * nexus-4tosp: per-tenant consecutive data-token sweep failures for the
+     * given tenant. Zero once that tenant has succeeded (or never failed).
+     * Package-private for the same reason as {@link #consecutiveDataSweepFailures()}:
+     * assertable by value, not a production surface.
+     */
+    int dataSweepFailuresForTenant(String tenant) {
+        return dataSweepFailuresByTenant.getOrDefault(tenant, 0);
     }
 
 

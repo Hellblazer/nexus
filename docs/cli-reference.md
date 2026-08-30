@@ -611,14 +611,6 @@ Resolves the tumbler (or document title) via the catalog, looks up the aspect ro
 | `--json` | Emit JSON instead of human-readable form |
 | `--field NAME` | Project a single aspect field (`problem_formulation`, `proposed_method`, `experimental_datasets`, `experimental_baselines`, `experimental_results`, `extras`, `confidence`). Output is the raw value |
 
-### nx enrich aspects-without-catalog
-
-```
-nx enrich aspects-without-catalog [--limit N] [--match-basenames] [--json]
-```
-
-Read-only census of `document_aspects` rows that NO live catalog document claims (nexus-mlu3k). The engine applies aspects-004's attribution predicate, negated (`GET /v1/aspects/list_without_catalog_document`): `doc_id IS NULL` and no same-tenant, non-alias, non-tombstoned catalog document has a byte-equal `source_uri`. Each row carries `tombstoned_match` (a deleted document does match — registered then removed — vs never registered). The verb buckets the result so the number is explained rather than eyeballed as backfill failure: by URI scheme (`file` / `chroma` / none / other), tombstoned matches, extraction month and `extractor@model` (era), and for `file://` rows whether the path still exists on this box; `--match-basenames` adds one full catalog scan reporting whether the same basename IS registered under another URI (the URI-normalisation-drift signature). The engine serves at most 300 rows per call (clamped, never rejected); the verb pages through, and `--limit N` caps the total (0 = all). Live census 2026-08-28 for reference: 846 such rows = 555 `chroma://` (structural, by design until re-extraction) + 231 `file://` with no document + 60 with no scheme; that total is CORRECT after the aspects-004 walk, not a shortfall. Exit 2 when the deployed engine has no such route — an unverifiable census is never reported as empty.
-
 ### nx enrich aspects-list
 
 List aspect records for a collection, or the gaps with `--missing`.
@@ -1130,6 +1122,21 @@ The mutation arm's availability depends on which engine build the tenant is conn
 Removed in 7.0.0 (nexus-i711w). The one-time RDR-137 P1.5a migration wrote
 through a raw SQLite handle on the local catalog, which no longer exists;
 it already refused in service mode, now the only mode.
+
+### nx catalog backfill-source-uri
+
+```
+nx catalog backfill-source-uri [--apply] [--json]
+```
+
+Re-derives `chroma://` catalog `source_uri` values for filesystem-backed collections (nexus-poigc). `chroma://` is ALSO the internal store_put-origin marker for `knowledge__` documents minted via `nx store put` / MCP `store_put` (see `_STORE_PUT_URI_PREFIX` in `commands/catalog_cmds/reconcile_stale.py`) — unrelated to the retired ChromaDB dependency (RDR-155 P4b) and left alone by this verb. It ONLY rewrites rows whose physical collection routes to `file://` in `nexus.aspect_readers.uri_for` (the `rdr__`/`docs__`/`code__` prefixes): those rows carry a `chroma://` identity solely because an older `uri_for` build minted it before those prefixes routed to `file://` — migration residue, not a legitimate origin marker.
+
+For each candidate, parses the path component out of the stored `chroma://<collection>/<path>` URI and re-derives through the CURRENT `uri_for(collection, path)`. Refuses (reports, never writes) a row whose parsed path is not absolute — there is no `repo_root` to anchor a relative one at backfill time, and this verb never guesses at one. Always prints a per-collection census of every `chroma://` row first — candidates (file-routed) vs. store_put-origin markers (left alone) — regardless of `--apply`.
+
+| Flag | Description |
+|------|-------------|
+| `--apply` | Perform the rewrite (default: dry-run report only) |
+| `--json` | Emit JSON instead of the human-readable report |
 
 ### nx catalog backfill-collections
 

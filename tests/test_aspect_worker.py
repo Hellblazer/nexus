@@ -26,8 +26,10 @@ Worker contract:
   bug) → queue ``mark_failed``. Triage via ``nx taxonomy status`` /
   manual sweep.
 """
+
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -36,6 +38,24 @@ import pytest
 
 from nexus.db.t2 import T2Database
 
+from tests._catalog_fixture_ops import register_real_doc_id
+
+# hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id (and,
+# since the same turn, aspect_extraction_queue.doc_id via the engine's
+# POST /v1/aspects/queue/enqueue[+_many] 400) now require a doc_id naming a
+# REAL catalog_documents row -- see the identical cache in
+# tests/test_document_aspects_store.py for the full rationale. One real
+# registration per test, memoized on the test's freshly-minted
+# NX_SERVICE_TOKEN.
+_doc_id_cache: dict[str, str] = {}
+
+
+def _shared_doc_id() -> str:
+    key = os.environ.get("NX_SERVICE_TOKEN", "")
+    if key not in _doc_id_cache:
+        _doc_id_cache[key] = register_real_doc_id()
+    return _doc_id_cache[key]
+
 
 @pytest.fixture(autouse=True)
 def _reset_worker():
@@ -43,6 +63,7 @@ def _reset_worker():
     a fresh module state.
     """
     from nexus.aspect_worker import reset_worker_for_tests
+
     reset_worker_for_tests()
     yield
     reset_worker_for_tests()
@@ -61,6 +82,7 @@ def _isolate_t2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     the tests that open the queue directly.
     """
     import nexus.mcp_infra as infra
+
     db_path = tmp_path / "worker_t2.db"
     monkeypatch.setattr(infra, "t2_ctx", lambda: T2Database(db_path))
 
@@ -86,7 +108,9 @@ class TestWorkerDrain:
 
         # Enqueue a row.
         with T2Database(_isolate_t2) as db:
-            db.aspect_queue.enqueue("knowledge__delos", "/p1.pdf")
+            db.aspect_queue.enqueue(
+                "knowledge__delos", "/p1.pdf", doc_id=_shared_doc_id()
+            )
 
         def fake_extract(content, source_path, collection, **_kw):
             return AspectRecord(
@@ -109,7 +133,8 @@ class TestWorkerDrain:
             worker.start()
             try:
                 _wait_until(
-                    lambda: _queue_size(_isolate_t2) == 0, timeout=5.0,
+                    lambda: _queue_size(_isolate_t2) == 0,
+                    timeout=5.0,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -151,7 +176,8 @@ class TestWorkerDrain:
         assert restored.doc_id == "1.2.3"
 
     def test_worker_unsupported_collection_drops_silently(
-        self, _isolate_t2: Path,
+        self,
+        _isolate_t2: Path,
     ) -> None:
         """If extract_aspects returns ``None`` (unsupported collection
         OR transient failure), the worker still mark_dones the queue
@@ -161,7 +187,7 @@ class TestWorkerDrain:
         from nexus.aspect_worker import AspectExtractionWorker
 
         with T2Database(_isolate_t2) as db:
-            db.aspect_queue.enqueue("code__nexus", "/p1.py")
+            db.aspect_queue.enqueue("code__nexus", "/p1.py", doc_id=_shared_doc_id())
 
         def fake_extract(content, source_path, collection, **_kw):
             return None  # unsupported collection
@@ -171,7 +197,8 @@ class TestWorkerDrain:
             worker.start()
             try:
                 _wait_until(
-                    lambda: _queue_size(_isolate_t2) == 0, timeout=5.0,
+                    lambda: _queue_size(_isolate_t2) == 0,
+                    timeout=5.0,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -181,7 +208,8 @@ class TestWorkerDrain:
         assert rec is None
 
     def test_worker_null_confidence_record_dropped_without_retry(
-        self, _isolate_t2: Path,
+        self,
+        _isolate_t2: Path,
     ) -> None:
         """nexus-17wf: a null-fields record (the failure shape that
         the extractor's internal 3-retry budget produces) carries
@@ -201,7 +229,9 @@ class TestWorkerDrain:
         from nexus.aspect_worker import AspectExtractionWorker
 
         with T2Database(_isolate_t2) as db:
-            db.aspect_queue.enqueue("knowledge__delos", "/p1.pdf")
+            db.aspect_queue.enqueue(
+                "knowledge__delos", "/p1.pdf", doc_id=_shared_doc_id()
+            )
 
         call_count = [0]
 
@@ -227,7 +257,8 @@ class TestWorkerDrain:
             worker.start()
             try:
                 _wait_until(
-                    lambda: _queue_size(_isolate_t2) == 0, timeout=5.0,
+                    lambda: _queue_size(_isolate_t2) == 0,
+                    timeout=5.0,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -244,7 +275,8 @@ class TestWorkerDrain:
         )
 
     def test_mcp_path_content_survives_the_queue(
-        self, _isolate_t2: Path,
+        self,
+        _isolate_t2: Path,
     ) -> None:
         """Critical-issue regression test (substantive critic finding):
         MCP ``store_put`` passes ``content=<full text>`` and
@@ -263,12 +295,16 @@ class TestWorkerDrain:
 
         # Simulate the MCP store_put boundary: source_path is a
         # 16-char content-hash doc_id, content is the full text.
+        # Not to be confused with the CATALOG doc_id the enqueue call
+        # attributes to below (_shared_doc_id()) -- that FK is unrelated
+        # to this content-hash identity.
         doc_id = "a3b9c2d1e4f5a6b7"
         full_text = "Paper introduces a new approach to BFT consensus."
         aspect_extraction_enqueue_hook(
             source_path=doc_id,
             collection="knowledge__delos",
             content=full_text,
+            doc_id=_shared_doc_id(),
         )
 
         # Capture what extract_aspects sees.
@@ -296,7 +332,8 @@ class TestWorkerDrain:
             worker.start()
             try:
                 _wait_until(
-                    lambda: _queue_size(_isolate_t2) == 0, timeout=5.0,
+                    lambda: _queue_size(_isolate_t2) == 0,
+                    timeout=5.0,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -321,7 +358,8 @@ class TestWorkerDrain:
         assert rec.problem_formulation == "P"
 
     def test_worker_uncaught_exception_marks_failed(
-        self, _isolate_t2: Path,
+        self,
+        _isolate_t2: Path,
     ) -> None:
         """A genuinely-broken state (T2 connection lost, programming
         bug) raises and is caught at the top of the worker loop. The
@@ -330,7 +368,9 @@ class TestWorkerDrain:
         from nexus.aspect_worker import AspectExtractionWorker
 
         with T2Database(_isolate_t2) as db:
-            db.aspect_queue.enqueue("knowledge__delos", "/p1.pdf")
+            db.aspect_queue.enqueue(
+                "knowledge__delos", "/p1.pdf", doc_id=_shared_doc_id()
+            )
 
         def fake_extract(content, source_path, collection, **_kw):
             raise RuntimeError("worker-level failure (not extractor)")
@@ -351,9 +391,7 @@ class TestWorkerDrain:
             # Service substrate: last_error is not exposed on the public
             # QueueRow surface; assert the observable failed-state via
             # list_failed (RDR-155 P4b P0a' has_raw_access branch).
-            failed = [
-                r for r in q.list_failed() if r.source_path == "/p1.pdf"
-            ]
+            failed = [r for r in q.list_failed() if r.source_path == "/p1.pdf"]
             assert len(failed) == 1
             assert failed[0].retry_count >= 1
 
@@ -388,7 +426,8 @@ class TestWorkerLifecycle:
             worker.stop(timeout=2.0)
 
     def test_ensure_worker_started_lazy_singleton(
-        self, _isolate_t2: Path,
+        self,
+        _isolate_t2: Path,
     ) -> None:
         """``ensure_worker_started`` returns the same singleton across
         calls and starts it on first call."""
@@ -415,7 +454,9 @@ class TestWorkerLifecycle:
 
 class TestEnqueueHook:
     def test_hook_enqueues_supported_collection(
-        self, _isolate_t2: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        _isolate_t2: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The registered hook writes a pending row for knowledge__*
         collections.
@@ -433,6 +474,7 @@ class TestEnqueueHook:
             source_path="/p1.pdf",
             collection="knowledge__delos",
             content="some text",
+            doc_id=_shared_doc_id(),
         )
         with T2Database(_isolate_t2) as db:
             rows = db.aspect_queue.list_pending()
@@ -441,7 +483,8 @@ class TestEnqueueHook:
         assert rows[0].collection == "knowledge__delos"
 
     def test_hook_skips_unsupported_collection(
-        self, _isolate_t2: Path,
+        self,
+        _isolate_t2: Path,
     ) -> None:
         """Hook is a no-op for collections that have no extractor
         config — no queue row, no worker started, no T3 read.
@@ -461,11 +504,70 @@ class TestEnqueueHook:
             source_path="/p1.py",
             collection="code__nexus",
             content="def foo(): pass",
+            doc_id=_shared_doc_id(),
         )
         with T2Database(_isolate_t2) as db:
             rows = db.aspect_queue.list_pending()
         assert rows == []
         assert get_worker() is None  # no lazy start either
+
+
+class TestEnqueueHookWakeSignal:
+    """nexus-59611 stage 2: the hook's enqueue path is the choke point
+    every producer shares (MCP store_put / CLI ingest). A successful
+    enqueue must signal the local wake; a failed one must not."""
+
+    def test_successful_enqueue_signals_wake(
+        self,
+        _isolate_t2: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+
+        monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
+        monkeypatch.setattr(mod, "_resolve_catalog_reader", lambda: None)
+        calls: list[None] = []
+        monkeypatch.setattr(
+            mod, "signal_aspect_wake", lambda *a, **k: calls.append(None)
+        )
+
+        aspect_extraction_enqueue_hook(
+            source_path="/p1.pdf",
+            collection="knowledge__delos",
+            content="x",
+            doc_id=_shared_doc_id(),
+        )
+        assert len(calls) == 1
+
+    def test_failed_enqueue_does_not_signal_wake(
+        self,
+        _isolate_t2: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+
+        monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
+        monkeypatch.setattr(mod, "_resolve_catalog_reader", lambda: None)
+
+        def _boom(self, *a, **k):
+            raise RuntimeError("enqueue boom")
+
+        monkeypatch.setattr(HttpAspectQueue, "enqueue", _boom)
+        calls: list[None] = []
+        monkeypatch.setattr(
+            mod, "signal_aspect_wake", lambda *a, **k: calls.append(None)
+        )
+
+        aspect_extraction_enqueue_hook(
+            source_path="/p1.pdf",
+            collection="knowledge__delos",
+            content="x",
+            doc_id=_shared_doc_id(),
+        )
+        assert calls == []
 
 
 class TestGap2SourcePathNormalization:
@@ -511,17 +613,25 @@ class TestGap2SourcePathNormalization:
         repo_hash = hashlib.sha256(repo_root.encode()).hexdigest()[:8]
         cat = ActiveCatalog()
         owner = cat.register_owner(
-            "seed-repo", "repo", repo_hash=repo_hash, repo_root=repo_root,
+            "seed-repo",
+            "repo",
+            repo_hash=repo_hash,
+            repo_root=repo_root,
         )
         cat.register(
-            owner, title, content_type="paper",
-            file_path=file_path, physical_collection=collection,
+            owner,
+            title,
+            content_type="paper",
+            file_path=file_path,
+            physical_collection=collection,
         )
         monkeypatch.setattr(mod, "_resolve_catalog_reader", active_reader)
 
-
     def test_resolving_absolute_path_normalizes_to_canonical_relative(
-        self, _isolate_t2: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        _isolate_t2: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A file-backed absolute ``source_path`` that resolves to a catalog
         entry whose stored ``file_path`` is the relative canonical form is
@@ -541,13 +651,17 @@ class TestGap2SourcePathNormalization:
         monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
         abs_path = "/Users/somebody/git/nexus-clone/papers/foo.md"
         self._seed_catalog(
-            tmp_path, monkeypatch,
+            tmp_path,
+            monkeypatch,
             collection="knowledge__delos",
             file_path="papers/foo.md",  # catalog canonical (relative)
-            title=abs_path,             # contrived: resolver hits on title probe
+            title=abs_path,  # contrived: resolver hits on title probe
         )
         aspect_extraction_enqueue_hook(
-            source_path=abs_path, collection="knowledge__delos", content="x",
+            source_path=abs_path,
+            collection="knowledge__delos",
+            content="x",
+            doc_id=_shared_doc_id(),
         )
         with T2Database(_isolate_t2) as db:
             rows = db.aspect_queue.list_pending()
@@ -555,7 +669,10 @@ class TestGap2SourcePathNormalization:
         assert rows[0].source_path == "papers/foo.md"
 
     def test_unresolved_path_left_as_is_and_warns(
-        self, _isolate_t2: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        _isolate_t2: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A file-backed ``source_path`` that does NOT resolve is left
         unchanged and a loud ``aspect_source_path_uncanonical`` warning is
@@ -567,7 +684,8 @@ class TestGap2SourcePathNormalization:
 
         monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
         self._seed_catalog(
-            tmp_path, monkeypatch,
+            tmp_path,
+            monkeypatch,
             collection="knowledge__delos",
             file_path="papers/known.md",
             title="papers/known.md",
@@ -575,7 +693,10 @@ class TestGap2SourcePathNormalization:
         stray = "/Users/nobody/git/nexus-ghost/papers/stray.md"
         with capture_logs() as cap:
             aspect_extraction_enqueue_hook(
-                source_path=stray, collection="knowledge__delos", content="x",
+                source_path=stray,
+                collection="knowledge__delos",
+                content="x",
+                doc_id=_shared_doc_id(),
             )
         with T2Database(_isolate_t2) as db:
             rows = db.aspect_queue.list_pending()
@@ -589,7 +710,10 @@ class TestGap2SourcePathNormalization:
         )
 
     def test_note_backed_chash_source_path_untouched_no_warn(
-        self, _isolate_t2: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        _isolate_t2: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A note-backed row whose ``source_path`` is a 32-hex chash is left
         unchanged with NO uncanonical warning — chashes are not filesystem
@@ -601,7 +725,8 @@ class TestGap2SourcePathNormalization:
 
         monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
         self._seed_catalog(
-            tmp_path, monkeypatch,
+            tmp_path,
+            monkeypatch,
             collection="knowledge__knowledge",
             file_path="",  # note-backed: no file_path
             title="A session note",
@@ -609,18 +734,21 @@ class TestGap2SourcePathNormalization:
         chash = "a" * 32
         with capture_logs() as cap:
             aspect_extraction_enqueue_hook(
-                source_path=chash, collection="knowledge__knowledge", content="x",
+                source_path=chash,
+                collection="knowledge__knowledge",
+                content="x",
+                doc_id=_shared_doc_id(),
             )
         with T2Database(_isolate_t2) as db:
             rows = db.aspect_queue.list_pending()
         assert len(rows) == 1
         assert rows[0].source_path == chash
-        assert not any(
-            e.get("event") == "aspect_source_path_uncanonical" for e in cap
-        )
+        assert not any(e.get("event") == "aspect_source_path_uncanonical" for e in cap)
 
     def test_catalog_reader_unavailable_is_silent_noop(
-        self, _isolate_t2: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        _isolate_t2: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """If the catalog reader cannot be built (raises), the hook degrades
         to a no-op: source_path unchanged, NO uncanonical warning (absence of
@@ -639,19 +767,22 @@ class TestGap2SourcePathNormalization:
         path = "/Users/x/git/repo/papers/foo.md"
         with capture_logs() as cap:
             aspect_extraction_enqueue_hook(
-                source_path=path, collection="knowledge__delos", content="x",
+                source_path=path,
+                collection="knowledge__delos",
+                content="x",
+                doc_id=_shared_doc_id(),
             )
         with T2Database(_isolate_t2) as db:
             rows = db.aspect_queue.list_pending()
         assert len(rows) == 1
         assert rows[0].source_path == path
-        assert not any(
-            e.get("event") == "aspect_source_path_uncanonical" for e in cap
-        )
-
+        assert not any(e.get("event") == "aspect_source_path_uncanonical" for e in cap)
 
     def test_resolved_but_canonical_is_absolute_left_as_is(
-        self, _isolate_t2: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        _isolate_t2: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A path that resolves but whose catalog file_path is itself absolute
         is NOT normalized (we only canonicalize toward a relative form) — and
@@ -669,21 +800,24 @@ class TestGap2SourcePathNormalization:
         abs_canonical = str(tmp_path / "repo" / "papers" / "canon.md")
         stray = "/Users/x/git/clone/papers/stray.md"
         self._seed_catalog(
-            tmp_path, monkeypatch,
+            tmp_path,
+            monkeypatch,
             collection="knowledge__delos",
-            file_path=abs_canonical, title=stray,
+            file_path=abs_canonical,
+            title=stray,
         )
         with capture_logs() as cap:
             aspect_extraction_enqueue_hook(
-                source_path=stray, collection="knowledge__delos", content="x",
+                source_path=stray,
+                collection="knowledge__delos",
+                content="x",
+                doc_id=_shared_doc_id(),
             )
         with T2Database(_isolate_t2) as db:
             rows = db.aspect_queue.list_pending()
         assert len(rows) == 1
         assert rows[0].source_path == stray  # absolute canonical -> not normalized
-        assert not any(
-            e.get("event") == "aspect_source_path_uncanonical" for e in cap
-        )
+        assert not any(e.get("event") == "aspect_source_path_uncanonical" for e in cap)
 
 
 class TestEnqueueFailureTripwire:
@@ -700,7 +834,9 @@ class TestEnqueueFailureTripwire:
     """
 
     def test_enqueue_failure_records_hook_failures_row(
-        self, _isolate_t2: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        _isolate_t2: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """NON-VACUITY (RF-7): a forced enqueue failure WRITES a structured
         hook_failures row keyed ``hook_name='aspect_extraction_enqueue_hook'``
@@ -731,7 +867,10 @@ class TestEnqueueFailureTripwire:
         monkeypatch.setattr(HttpTelemetryStore, "record_hook_failure", _spy)
 
         aspect_extraction_enqueue_hook(
-            source_path="/p1.pdf", collection="knowledge__delos", content="x",
+            source_path="/p1.pdf",
+            collection="knowledge__delos",
+            content="x",
+            doc_id=_shared_doc_id(),
         )
         assert len(recorded) == 1
         doc_id = recorded[0]["doc_id"]
@@ -746,7 +885,9 @@ class TestEnqueueFailureTripwire:
         assert chain == "document"
 
     def test_successful_enqueue_writes_no_hook_failures(
-        self, _isolate_t2: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        _isolate_t2: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """ASSERT-ZERO baseline (the CI invariant): a normal enqueue writes a
         queue row and ZERO hook_failures rows."""
@@ -768,7 +909,10 @@ class TestEnqueueFailureTripwire:
         monkeypatch.setattr(HttpTelemetryStore, "record_hook_failure", _spy)
 
         aspect_extraction_enqueue_hook(
-            source_path="/p1.pdf", collection="knowledge__delos", content="x",
+            source_path="/p1.pdf",
+            collection="knowledge__delos",
+            content="x",
+            doc_id=_shared_doc_id(),
         )
         with T2Database(_isolate_t2) as db:
             pending = db.aspect_queue.list_pending()
@@ -776,14 +920,19 @@ class TestEnqueueFailureTripwire:
             # — the spy above proves zero tripwire persists fired
             # (RDR-155 P4b P0a' has_raw_access branch).
             failures = len(
-                [r for r in recorded
-                 if r.get("hook_name") == "aspect_extraction_enqueue_hook"]
+                [
+                    r
+                    for r in recorded
+                    if r.get("hook_name") == "aspect_extraction_enqueue_hook"
+                ]
             )
         assert len(pending) == 1
         assert failures == 0
 
     def test_tripwire_persist_failure_never_blocks_ingest(
-        self, _isolate_t2: Path, monkeypatch: pytest.MonkeyPatch,
+        self,
+        _isolate_t2: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Best-effort: if BOTH the enqueue AND the tripwire persist raise, the
         hook still returns without propagating (ingest is never blocked)."""
@@ -806,7 +955,10 @@ class TestEnqueueFailureTripwire:
 
         # Must not raise.
         aspect_extraction_enqueue_hook(
-            source_path="/p1.pdf", collection="knowledge__delos", content="x",
+            source_path="/p1.pdf",
+            collection="knowledge__delos",
+            content="x",
+            doc_id=_shared_doc_id(),
         )
 
 
@@ -854,7 +1006,8 @@ class TestBatchPath:
     """Worker drains in batches when queue depth allows it."""
 
     def test_worker_drains_batch_in_one_extract_call(
-        self, _isolate_t2: Path,
+        self,
+        _isolate_t2: Path,
     ) -> None:
         """Five enqueues, batch_size=5: the worker calls
         extract_aspects_batch ONCE for all five, not five times."""
@@ -869,6 +1022,7 @@ class TestBatchPath:
                     "knowledge__delos",
                     f"/papers/p{i}.pdf",
                     content=f"content {i}",
+                    doc_id=_shared_doc_id(),
                 )
 
         batch_calls: list[int] = []
@@ -878,13 +1032,15 @@ class TestBatchPath:
             batch_calls.append(len(items))
             return [
                 AspectRecord(
-                    collection=c, source_path=sp,
+                    collection=c,
+                    source_path=sp,
                     problem_formulation=f"P-{sp}",
                     proposed_method="M",
                     experimental_datasets=["d"],
                     experimental_baselines=["b"],
                     experimental_results="R",
-                    extras={}, confidence=0.9,
+                    extras={},
+                    confidence=0.9,
                     extracted_at="2026-04-26T00:00:00+00:00",
                     model_version="claude-haiku-4-5-20251001",
                     extractor_name="scholarly-paper-v1",
@@ -896,15 +1052,19 @@ class TestBatchPath:
             single_calls.append(source_path)
             raise AssertionError("single path should not fire on batch>=2")
 
-        with patch("nexus.aspect_worker._extract_aspects_batch", fake_batch), \
-             patch("nexus.aspect_worker._extract_aspects", fake_single):
+        with (
+            patch("nexus.aspect_worker._extract_aspects_batch", fake_batch),
+            patch("nexus.aspect_worker._extract_aspects", fake_single),
+        ):
             worker = AspectExtractionWorker(
-                poll_interval=0.05, batch_size=5,
+                poll_interval=0.05,
+                batch_size=5,
             )
             worker.start()
             try:
                 _wait_until(
-                    lambda: _queue_size(_isolate_t2) == 0, timeout=5.0,
+                    lambda: _queue_size(_isolate_t2) == 0,
+                    timeout=5.0,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -917,12 +1077,17 @@ class TestBatchPath:
         # substrates, RDR-155 P4b P0a').
         with T2Database(_isolate_t2) as db:
             for i in range(5):
-                assert db.document_aspects.get(
-                    "knowledge__delos", f"/papers/p{i}.pdf",
-                ) is not None
+                assert (
+                    db.document_aspects.get(
+                        "knowledge__delos",
+                        f"/papers/p{i}.pdf",
+                    )
+                    is not None
+                )
 
     def test_worker_uses_single_path_when_only_one_row(
-        self, _isolate_t2: Path,
+        self,
+        _isolate_t2: Path,
     ) -> None:
         """One enqueue, batch_size=5: worker's single-row path fires
         rather than the batch path (no overhead amortisation
@@ -933,8 +1098,10 @@ class TestBatchPath:
         # Enqueue directly to T2 (bypass the hook).
         with T2Database(_isolate_t2) as db:
             db.aspect_queue.enqueue(
-                "knowledge__delos", "/p1.pdf",
+                "knowledge__delos",
+                "/p1.pdf",
                 content="content 1",
+                doc_id=_shared_doc_id(),
             )
 
         batch_calls: list[int] = []
@@ -947,27 +1114,33 @@ class TestBatchPath:
         def fake_single(content, source_path, collection, **_kw):
             single_calls.append(source_path)
             return AspectRecord(
-                collection=collection, source_path=source_path,
+                collection=collection,
+                source_path=source_path,
                 problem_formulation="P",
                 proposed_method="M",
                 experimental_datasets=["d"],
                 experimental_baselines=["b"],
                 experimental_results="R",
-                extras={}, confidence=0.9,
+                extras={},
+                confidence=0.9,
                 extracted_at="2026-04-26T00:00:00+00:00",
                 model_version="claude-haiku-4-5-20251001",
                 extractor_name="scholarly-paper-v1",
             )
 
-        with patch("nexus.aspect_worker._extract_aspects_batch", fake_batch), \
-             patch("nexus.aspect_worker._extract_aspects", fake_single):
+        with (
+            patch("nexus.aspect_worker._extract_aspects_batch", fake_batch),
+            patch("nexus.aspect_worker._extract_aspects", fake_single),
+        ):
             worker = AspectExtractionWorker(
-                poll_interval=0.05, batch_size=5,
+                poll_interval=0.05,
+                batch_size=5,
             )
             worker.start()
             try:
                 _wait_until(
-                    lambda: _queue_size(_isolate_t2) == 0, timeout=5.0,
+                    lambda: _queue_size(_isolate_t2) == 0,
+                    timeout=5.0,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -976,7 +1149,8 @@ class TestBatchPath:
         assert single_calls == ["/p1.pdf"]
 
     def test_worker_falls_through_to_per_row_on_heterogeneous_batch(
-        self, _isolate_t2: Path,
+        self,
+        _isolate_t2: Path,
     ) -> None:
         """When a claimed batch crosses ExtractorConfig boundaries
         (e.g. knowledge__ + rdr__ rows in the same claim), the worker
@@ -1000,12 +1174,14 @@ class TestBatchPath:
                     "knowledge__delos",
                     f"/papers/p{i}.pdf",
                     content=f"paper {i}",
+                    doc_id=_shared_doc_id(),
                 )
             for i in range(2):
                 db.aspect_queue.enqueue(
                     "rdr__test-aaaaaaaa",
                     f"/rdrs/r{i}.md",
                     content=f"---\ntitle: r{i}\n---\nbody",
+                    doc_id=_shared_doc_id(),
                 )
 
         batch_calls: list[int] = []
@@ -1013,34 +1189,38 @@ class TestBatchPath:
 
         def fake_batch(items, *_args, **_kwargs):
             batch_calls.append(len(items))
-            raise AssertionError(
-                "batch path must NOT fire on heterogeneous configs"
-            )
+            raise AssertionError("batch path must NOT fire on heterogeneous configs")
 
         def fake_single(content, source_path, collection, **_kw):
             single_calls.append(source_path)
             return AspectRecord(
-                collection=collection, source_path=source_path,
+                collection=collection,
+                source_path=source_path,
                 problem_formulation=f"P-{source_path}",
                 proposed_method="M",
                 experimental_datasets=["d"],
                 experimental_baselines=["b"],
                 experimental_results="R",
-                extras={}, confidence=0.9,
+                extras={},
+                confidence=0.9,
                 extracted_at="2026-05-06T00:00:00+00:00",
                 model_version="claude-haiku-4-5-20251001",
                 extractor_name="scholarly-paper-v1",
             )
 
-        with patch("nexus.aspect_worker._extract_aspects_batch", fake_batch), \
-             patch("nexus.aspect_worker._extract_aspects", fake_single):
+        with (
+            patch("nexus.aspect_worker._extract_aspects_batch", fake_batch),
+            patch("nexus.aspect_worker._extract_aspects", fake_single),
+        ):
             worker = AspectExtractionWorker(
-                poll_interval=0.05, batch_size=5,
+                poll_interval=0.05,
+                batch_size=5,
             )
             worker.start()
             try:
                 _wait_until(
-                    lambda: _queue_size(_isolate_t2) == 0, timeout=5.0,
+                    lambda: _queue_size(_isolate_t2) == 0,
+                    timeout=5.0,
                 )
             finally:
                 worker.stop(timeout=5.0)
@@ -1048,10 +1228,15 @@ class TestBatchPath:
         # Batch never fired — heterogeneity detected first.
         assert batch_calls == []
         # All 5 rows went through the single-row path.
-        assert sorted(single_calls) == sorted([
-            "/papers/p0.pdf", "/papers/p1.pdf", "/papers/p2.pdf",
-            "/rdrs/r0.md", "/rdrs/r1.md",
-        ])
+        assert sorted(single_calls) == sorted(
+            [
+                "/papers/p0.pdf",
+                "/papers/p1.pdf",
+                "/papers/p2.pdf",
+                "/rdrs/r0.md",
+                "/rdrs/r1.md",
+            ]
+        )
 
 
 # ── Bounded backoff-retry ladder (RDR-163 P1, nexus-ztpt6) ──────────────────
@@ -1064,22 +1249,27 @@ class TestRetryClassification:
         import httpx
 
         from nexus.aspect_worker import _is_retryable
+
         assert _is_retryable(httpx.ConnectError("connection refused"))
 
     def test_http_503_message_is_retryable(self) -> None:
         from nexus.aspect_worker import _is_retryable
+
         assert _is_retryable(Exception("upstream returned 503 service unavailable"))
 
     def test_value_error_is_not_retryable(self) -> None:
         from nexus.aspect_worker import _is_retryable
+
         assert not _is_retryable(ValueError("malformed record"))
 
     def test_type_error_is_not_retryable(self) -> None:
         from nexus.aspect_worker import _is_retryable
+
         assert not _is_retryable(TypeError("programming bug"))
 
     def test_plain_exception_is_not_retryable(self) -> None:
         from nexus.aspect_worker import _is_retryable
+
         assert not _is_retryable(Exception("nothing transient here"))
 
 
@@ -1137,14 +1327,20 @@ class TestRetryLadderRouting:
 
     def _row(self, retry_count: int):
         import types
+
         return types.SimpleNamespace(
-            collection="knowledge__delos", source_path="/p.pdf", retry_count=retry_count,
+            collection="knowledge__delos",
+            source_path="/p.pdf",
+            retry_count=retry_count,
         )
 
     def test_retryable_under_cap_marks_retry_with_backoff(self, monkeypatch) -> None:  # noqa: ANN001
         import httpx
+
         worker, db = self._worker_and_db(monkeypatch)
-        worker._mark_retry_or_fail_routed(self._row(0), httpx.ConnectError("connection refused"))
+        worker._mark_retry_or_fail_routed(
+            self._row(0), httpx.ConnectError("connection refused")
+        )
         assert len(db.aspect_queue.calls) == 1
         kind, _coll, _sp, interval = db.aspect_queue.calls[0]
         assert kind == "retry"
@@ -1159,9 +1355,11 @@ class TestRetryLadderRouting:
     def test_retryable_at_cap_marks_failed(self, monkeypatch) -> None:  # noqa: ANN001
         import httpx
         from nexus.aspect_worker import _RETRY_MAX_ATTEMPTS
+
         worker, db = self._worker_and_db(monkeypatch)
         worker._mark_retry_or_fail_routed(
-            self._row(_RETRY_MAX_ATTEMPTS), httpx.ConnectError("connection refused"),
+            self._row(_RETRY_MAX_ATTEMPTS),
+            httpx.ConnectError("connection refused"),
         )
         assert db.aspect_queue.calls[0][0] == "failed"
 
@@ -1191,10 +1389,13 @@ class TestEnqueueHookDocIdWiring:
 
         with HttpCatalogClient() as cat:
             owner = cat.register_owner(
-                "wiring-repo", "repo", repo_hash="deadbeef",
+                "wiring-repo",
+                "repo",
+                repo_hash="deadbeef",
             )
             tumbler = cat.register(
-                owner, "doc-id wiring doc",
+                owner,
+                "doc-id wiring doc",
                 content_type="paper",
                 physical_collection="knowledge__delos",
             )
@@ -1214,31 +1415,329 @@ class TestEnqueueHookDocIdWiring:
         assert row.doc_id == doc_id
         assert row.source_path == chunk_id
 
-    def test_enqueue_empty_doc_id_stays_empty(self, _isolate_t2):
-        """catalog absent -> doc_id stays "" (persists NULL service-side,
-        which the nullable FK accepts)."""
+    def test_enqueue_empty_doc_id_refused_and_logged(self, _isolate_t2, monkeypatch):
+        """hygiene-001 (nexus-tk070.p6a follow-on), review round item B
+        (critic C2) SUPERSEDES the original "doc_id stays empty" contract
+        AND the prior turn's "the engine's 400 is caught and logged as
+        aspect_extraction_enqueue_failed" contract: the resolve-or-skip
+        decision now happens BEFORE any enqueue call is attempted, at the
+        choke point (aspect_extraction_enqueue_hook itself). A blank
+        doc_id that the catalog cannot resolve by (collection, source_path)
+        SKIPS the enqueue entirely -- the engine's own 400 is never reached
+        at all, so the request-level "doc_id required" message is not the
+        right thing to look for any more; the hook's own
+        aspect_enqueue_skipped_no_doc_id warning is."""
+        from structlog.testing import capture_logs
+
+        import nexus.aspect_worker as mod
         from nexus.aspect_worker import aspect_extraction_enqueue_hook
 
+        # No catalog entry anywhere resolves this source_path -- pin that
+        # explicitly rather than relying on the test's tmp environment
+        # happening to have no matching catalog registration.
+        monkeypatch.setattr(mod, "_resolve_doc_id_for_enqueue", lambda *a, **k: "")
+
+        with capture_logs() as cap:
+            aspect_extraction_enqueue_hook(
+                source_path="c" * 32,
+                collection="knowledge__delos",
+                content="body",
+            )
+        with T2Database(_isolate_t2) as db:
+            row = db.aspect_queue.claim_next()
+        assert row is None, "an unresolvable doc_id must be refused, not enqueued"
+        skipped = [
+            e for e in cap if e.get("event") == "aspect_enqueue_skipped_no_doc_id"
+        ]
+        assert skipped, "the skip must be logged, not silently swallowed"
+        assert skipped[0].get("collection") == "knowledge__delos"
+        assert skipped[0].get("source_path") == "c" * 32
+
+    def test_enqueue_blank_doc_id_resolved_via_catalog_lookup_then_enqueued(
+        self, _isolate_t2, monkeypatch,
+    ):
+        """hygiene-001 review round item B: when the caller omits doc_id,
+        the hook resolves it via the catalog reader by
+        (collection, source_path) BEFORE deciding to skip -- a resolvable
+        document must still enqueue, using the resolved tumbler."""
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+
+        # A REAL registered catalog doc -- aspect_extraction_queue.doc_id
+        # carries a genuine FK to catalog_documents, so a fabricated tumbler
+        # like "1.2.3" 409s at the engine (integrity constraint violation).
+        resolved_doc_id = _shared_doc_id()
+        monkeypatch.setattr(
+            mod, "_resolve_doc_id_for_enqueue",
+            lambda collection, source_path: resolved_doc_id,
+        )
+
         aspect_extraction_enqueue_hook(
-            source_path="c" * 32,
+            source_path="resolvable.md",
             collection="knowledge__delos",
             content="body",
         )
         with T2Database(_isolate_t2) as db:
             row = db.aspect_queue.claim_next()
+        assert row is not None, "a resolvable doc_id must be enqueued, not skipped"
+        assert row.doc_id == resolved_doc_id
+
+    def test_enqueue_caller_supplied_doc_id_never_overridden_by_catalog_lookup(
+        self, _isolate_t2, monkeypatch,
+    ):
+        """A caller-supplied doc_id must win outright -- the catalog
+        resolution fallback must never even be consulted, let alone
+        override it."""
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import aspect_extraction_enqueue_hook
+
+        def _boom(*_a, **_k):
+            raise AssertionError(
+                "must not resolve via catalog when the caller already supplied doc_id"
+            )
+
+        monkeypatch.setattr(mod, "_resolve_doc_id_for_enqueue", _boom)
+
+        aspect_extraction_enqueue_hook(
+            source_path="/p1.pdf",
+            collection="knowledge__delos",
+            content="body",
+            doc_id=_shared_doc_id(),
+        )
+        with T2Database(_isolate_t2) as db:
+            row = db.aspect_queue.claim_next()
         assert row is not None
-        assert row.doc_id == ""
+        assert row.doc_id == _shared_doc_id()
+
+
+class TestAspectWakeSignal:
+    """nexus-59611 stage 2: signal_aspect_wake() is the one producer-facing
+    name every enqueue call site imports."""
+
+    def test_creates_wake_file_when_absent(self, tmp_path: Path) -> None:
+        from nexus.aspect_worker import ASPECT_WAKE_FILENAME, signal_aspect_wake
+
+        config_dir = tmp_path / "cfg"
+        signal_aspect_wake(config_dir)
+        assert (config_dir / ASPECT_WAKE_FILENAME).exists()
+
+    def test_touches_existing_file_to_a_newer_mtime(self, tmp_path: Path) -> None:
+        import os
+
+        from nexus.aspect_worker import ASPECT_WAKE_FILENAME, signal_aspect_wake
+
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir()
+        wake_path = config_dir / ASPECT_WAKE_FILENAME
+        wake_path.touch()
+        old_mtime = wake_path.stat().st_mtime
+        os.utime(wake_path, (old_mtime - 10, old_mtime - 10))
+
+        signal_aspect_wake(config_dir)
+
+        assert wake_path.stat().st_mtime > old_mtime - 10
+
+    def test_resolves_config_dir_via_nexus_config_dir_when_omitted(self) -> None:
+        """No config_dir arg -> falls back to nexus_config_dir(), already
+        isolated to a tmp path by the suite-wide autouse fixture."""
+        from nexus import config as _config
+        from nexus.aspect_worker import ASPECT_WAKE_FILENAME, signal_aspect_wake
+
+        signal_aspect_wake()
+
+        assert (_config.nexus_config_dir() / ASPECT_WAKE_FILENAME).exists()
+
+    def test_oserror_is_swallowed_not_raised(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Best-effort: a touch failure must never fail the enqueue that
+        just succeeded."""
+        from nexus.aspect_worker import signal_aspect_wake
+
+        def _boom(self, *a, **k):  # noqa: ANN001, ARG001
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "touch", _boom)
+
+        signal_aspect_wake(tmp_path / "cfg")  # must not raise
+
+
+class TestWaitForWakeOrTimeout:
+    """nexus-59611 stage 2: AspectExtractionWorker._wait_for_wake_or_timeout
+    is the consumer half of the wake mechanism. WAKE_CHECK_INTERVAL_S is
+    monkeypatched down in this class so these tests observe real (but tiny)
+    elapsed time rather than burning real multi-second sleeps."""
+
+    @pytest.fixture(autouse=True)
+    def _fast_tick(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import nexus.aspect_worker as mod
+
+        monkeypatch.setattr(mod, "WAKE_CHECK_INTERVAL_S", 0.02)
+
+    @staticmethod
+    def _worker():
+        from nexus.aspect_worker import AspectExtractionWorker
+
+        w = AspectExtractionWorker()
+        # Baseline as start() would, without spawning the run-loop thread.
+        w._last_wake_mtime = w._read_wake_mtime()
+        return w
+
+    def test_times_out_when_no_wake(self) -> None:
+        w = self._worker()
+        started = time.monotonic()
+        w._wait_for_wake_or_timeout(0.1)
+        assert time.monotonic() - started >= 0.1
+
+    def test_returns_early_on_new_touch_during_wait(self) -> None:
+        import threading
+
+        from nexus.aspect_worker import signal_aspect_wake
+
+        w = self._worker()
+        timer = threading.Timer(0.05, signal_aspect_wake)
+        timer.start()
+        try:
+            started = time.monotonic()
+            w._wait_for_wake_or_timeout(5.0)
+            elapsed = time.monotonic() - started
+        finally:
+            timer.cancel()
+        assert elapsed < 1.0  # woke early, nowhere near the 5s timeout
+
+    def test_touch_before_baseline_does_not_cause_spurious_wake(self) -> None:
+        """A wake that landed BEFORE the baseline was captured (e.g. a stale
+        touch from before start()) must not fire the very first wait — it
+        is already the remembered baseline, not a new change."""
+        from nexus.aspect_worker import signal_aspect_wake
+
+        signal_aspect_wake()  # touch BEFORE the worker baselines
+        w = self._worker()  # baseline captures this touch's mtime
+
+        started = time.monotonic()
+        w._wait_for_wake_or_timeout(0.1)
+        assert time.monotonic() - started >= 0.1  # no spurious immediate wake
+
+    def test_stop_event_interrupts_wait_immediately(self) -> None:
+        import threading
+
+        w = self._worker()
+        timer = threading.Timer(0.05, w._stop_event.set)
+        timer.start()
+        try:
+            started = time.monotonic()
+            w._wait_for_wake_or_timeout(5.0)
+            elapsed = time.monotonic() - started
+        finally:
+            timer.cancel()
+        assert elapsed < 1.0
+
+    def test_explicit_config_dir_is_the_wake_source(self, tmp_path: Path) -> None:
+        """nexus-59611 stage 2 (review): a worker bound to an explicit
+        config_dir (the daemon's --config-dir) wakes on a touch THERE and
+        ignores the ambient dir, which is where a producer running without
+        the flag would write."""
+        import threading
+
+        from nexus.aspect_worker import AspectExtractionWorker, signal_aspect_wake
+
+        cfg = tmp_path / "cfg"
+        w = AspectExtractionWorker(config_dir=cfg)
+        w._last_wake_mtime = w._read_wake_mtime()
+
+        # Ambient touch: not our dir, must NOT wake.
+        signal_aspect_wake()
+        started = time.monotonic()
+        w._wait_for_wake_or_timeout(0.1)
+        assert time.monotonic() - started >= 0.1
+
+        # Touch in the bound dir: wakes.
+        timer = threading.Timer(0.05, signal_aspect_wake, args=(cfg,))
+        timer.start()
+        try:
+            started = time.monotonic()
+            w._wait_for_wake_or_timeout(5.0)
+            elapsed = time.monotonic() - started
+        finally:
+            timer.cancel()
+        assert elapsed < 1.0
+
+    def test_bind_config_dir_rebaselines(self, tmp_path: Path) -> None:
+        """A touch that predates bind_config_dir() is the baseline, not a wake."""
+        from nexus.aspect_worker import AspectExtractionWorker, signal_aspect_wake
+
+        cfg = tmp_path / "cfg"
+        signal_aspect_wake(cfg)
+        w = AspectExtractionWorker()
+        w.bind_config_dir(cfg)
+        assert w._wake_config_dir() == cfg
+        started = time.monotonic()
+        w._wait_for_wake_or_timeout(0.1)
+        assert time.monotonic() - started >= 0.1
+
+    def test_a_touch_wakes_exactly_once(self) -> None:
+        """After a wake fires one wait early, the NEXT wait (a fresh call)
+        must not immediately re-fire on that same, now-stale touch."""
+        from nexus.aspect_worker import signal_aspect_wake
+
+        w = self._worker()
+        signal_aspect_wake()
+        w._wait_for_wake_or_timeout(5.0)  # consumes the touch, returns early
+
+        started = time.monotonic()
+        w._wait_for_wake_or_timeout(0.1)  # no NEW touch -> must time out
+        assert time.monotonic() - started >= 0.1
+
+
+class TestWaitForWakeOrTimeoutBackstopDeadline:
+    """The backstop's deadline arithmetic under a fake clock — proves
+    DEFAULT_POLL_INTERVAL_S is genuinely waited out (no wake, no stop)
+    without burning 300 real seconds."""
+
+    def test_backstop_still_fires_at_full_poll_interval(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import nexus.aspect_worker as mod
+        from nexus.aspect_worker import AspectExtractionWorker, DEFAULT_POLL_INTERVAL_S
+
+        fake_now = [0.0]
+        monkeypatch.setattr(mod.time, "monotonic", lambda: fake_now[0])
+
+        class _FakeEvent:
+            def wait(self, timeout: float) -> bool:
+                fake_now[0] += timeout
+                return False
+
+        w = AspectExtractionWorker()
+        w._last_wake_mtime = w._read_wake_mtime()
+        w._stop_event = _FakeEvent()
+
+        w._wait_for_wake_or_timeout(DEFAULT_POLL_INTERVAL_S)
+
+        assert fake_now[0] >= DEFAULT_POLL_INTERVAL_S
+        # Ticked in WAKE_CHECK_INTERVAL_S-sized steps, not one big sleep.
+        assert fake_now[0] < DEFAULT_POLL_INTERVAL_S + mod.WAKE_CHECK_INTERVAL_S
 
 
 class TestDefaultPollInterval:
-    """nexus-59611 stop-loss: the idle ``claim_batch`` poll is the dominant
-    edge load (measured 2026-08-28 by conexus: 99.05% of claim_batch
-    responses empty over 6h, ~45k requests/day, ~80% of ALL edge traffic,
-    against an arrival rate of ~16 items/hour). There is no server-held
-    long poll and no env/config override, so the constructor default IS
-    the production cadence. Pin it on every entry point that can build a
-    worker, and pin the floor with the measurement, so a future
-    "make it snappier" edit has to argue with the numbers.
+    """nexus-59611: the idle ``claim_batch`` poll is the dominant edge load
+    (measured 2026-08-28 by conexus: 99.05% of claim_batch responses empty
+    over 6h, ~45k requests/day, ~80% of ALL edge traffic, against an arrival
+    rate of ~16 items/hour). There is no server-held long poll and no
+    env/config override, so the constructor default IS the production
+    cadence. Pin it on every entry point that can build a worker, and pin
+    the floor with the measurement, so a future "make it snappier" edit has
+    to argue with the numbers.
+
+    Stage 2 (2026-08-29) restates the floor: this constant is now a
+    BACKSTOP, not the real-time claim cadence — a same-box producer wakes
+    the worker immediately via the local wake file (see
+    ``TestAspectWakeSignal`` / ``TestWaitForWakeOrTimeout`` below), so
+    ``DEFAULT_POLL_INTERVAL_S`` only needs to be short enough to catch a
+    cross-box arrival or a missed wake, not the real arrival rate.
     """
 
     def test_every_entry_point_shares_one_default(self) -> None:
@@ -1259,13 +1758,15 @@ class TestDefaultPollInterval:
         # The production constructor (RDR-173 leased daemon host).
         assert _default_worker_factory()._poll_interval == DEFAULT_POLL_INTERVAL_S
 
-    def test_default_is_the_stop_loss_cadence(self) -> None:
+    def test_default_is_the_backstop_cadence(self) -> None:
         from nexus.aspect_worker import DEFAULT_POLL_INTERVAL_S
 
-        # 30s cuts ~93% of the measured request volume and still samples
-        # ~8x faster than items arrive. Below this the poll re-becomes the
-        # edge's dominant load; a cut BELOW 30 needs a fresh measurement.
-        assert DEFAULT_POLL_INTERVAL_S >= 30.0
+        # 300s backstop + local wake (stage 2): same-box arrivals are
+        # claimed near-immediately via the wake file, so the backstop only
+        # has to catch a cross-box arrival or a missed wake — it no longer
+        # needs to track the real arrival rate. A cut BELOW 300 needs a
+        # fresh measurement showing the wake path is insufficient on its own.
+        assert DEFAULT_POLL_INTERVAL_S >= 300.0
         # Explicit overrides still work — tests drive the loop at 50 ms.
         from nexus.aspect_worker import AspectExtractionWorker
 

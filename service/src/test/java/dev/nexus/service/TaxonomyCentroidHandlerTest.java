@@ -176,9 +176,16 @@ class TaxonomyCentroidHandlerTest {
     }
 
     @Test
-    void byCollection_roundTripsEmbedding_andKeepsNullableKeys() throws Exception {
-        // No label / no doc_count → JsonInclude.ALWAYS must keep the keys as null.
-        upsert("knowledge__bc", 7L, 0.6f, 0.8f, null, null);
+    void byCollection_roundTripsEmbedding_requiresLabel_keepsDocCountNullable() throws Exception {
+        // hygiene-001-not-null.xml (nexus-tk070.p6a follow-on) made
+        // taxonomy_centroids.label NOT NULL: label is now REQUIRED on every
+        // row, so the fixture below supplies one -- the null-label case this
+        // test used to exercise no longer round-trips (the INSERT itself
+        // would violate the column's NOT NULL constraint). doc_count carries
+        // no such constraint and stays the genuinely nullable key: still
+        // omitted here so JsonInclude.ALWAYS's "keep nullable keys present as
+        // null" behavior stays covered.
+        upsert("knowledge__bc", 7L, 0.6f, 0.8f, "bc-label", null);
 
         var resp = get("/v1/taxonomy/centroids/by_collection?collection=knowledge__bc", TENANT);
         assertThat(resp.statusCode()).isEqualTo(200);
@@ -187,10 +194,12 @@ class TaxonomyCentroidHandlerTest {
         var row = rows.get(0);
         assertThat(((Number) row.get("topic_id")).longValue()).isEqualTo(7L);
         assertThat(row.get("collection")).isEqualTo("knowledge__bc");
-        assertThat(row).as("nullable keys present (JsonInclude.ALWAYS)")
+        assertThat(row).as("label and doc_count keys present (JsonInclude.ALWAYS)")
             .containsKeys("label", "doc_count", "embedding");
-        assertThat(row.get("label")).isNull();
-        assertThat(row.get("doc_count")).isNull();
+        assertThat(row.get("label")).as("label is required (NOT NULL) -- always populated now")
+            .isEqualTo("bc-label");
+        assertThat(row.get("doc_count")).as("doc_count carries no NOT NULL constraint -- still nullable")
+            .isNull();
         @SuppressWarnings("unchecked")
         var emb = (List<Number>) row.get("embedding");
         assertThat(emb).hasSize(384);

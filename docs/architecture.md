@@ -1049,6 +1049,32 @@ local T2 migrations — RDR-158 P4 Stage 4).
 See `src/nexus/db/t2/__init__.py` for the facade source and
 `tests/test_t2_concurrency.py` for the concurrency test suite.
 
+## Storage-Service Supervisor: Migration-Aware Readiness (nexus-8vp0i)
+
+`daemon/storage_service_daemon.py`'s `_wait_for_service_ready` used a flat
+60s timeout for the engine's `GET /health` to turn 200. The engine runs
+Liquibase BEFORE binding HTTP, so `/health` is unreachable for the entire
+migration — a real first-boot migration on a large store runs 20-25 minutes
+(rdr180-001 on 107k chunks) — and the old timeout killed the engine
+mid-changeset, leaving `databasechangeloglock` stuck `locked=true`
+(Liquibase's lock row has no session binding to clear it) and looping under
+launchd `KeepAlive`. `daemon/readiness.py`'s `ReadinessMonitor` (a pure state
+machine — clock/log-reader/pg-probe/health-probe/process-poll all injected,
+no I/O of its own) fixes the "wait vs kill" decision: a phase's deadline
+resets on any progress (a new log line, an admin backend `state='active'` in
+`pg_stat_activity`, or a `/health` answer), 60s outside a migration, 600s of
+silence inside one, widening to 3600s when Postgres can't be probed. The
+supervisor releases a stale `databasechangeloglock` before every spawn and
+after killing a stalled or crashed engine, but ONLY once a liveness gate
+clears — no live engine process for this `config_dir` (process-table scan)
+AND no admin backend actively `EXECUTING` — since a killed supervisor's
+engine can survive it (no `PR_SET_PDEATHSIG` off Linux), and terminating a
+still-migrating engine's connections would be worse than the stuck lock it
+is meant to fix. A "Waiting for changelog lock" log line alone never
+triggers this cleanup (Liquibase gives up on its own after its own 10-minute
+wait and exits, which is what actually triggers it); the terminated pids are
+logged, not discarded.
+
 ## Module Map
 
 | Area | Files | What they do |

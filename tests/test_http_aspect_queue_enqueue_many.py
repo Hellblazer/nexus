@@ -149,3 +149,71 @@ class TestEnqueueMany:
             n = queue.enqueue_many(rows)
 
         assert n == 1
+
+
+class TestEnqueueManyWakeSignal:
+    """nexus-59611 stage 2: enqueue_many's batch-success path bypasses
+    enqueue() entirely (it posts to /enqueue_many directly), so the wake
+    signal needs its own call site there — this pins it."""
+
+    def test_batch_success_signals_wake_once(
+        self, queue: HttpAspectQueue, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[None] = []
+        monkeypatch.setattr(
+            "nexus.aspect_worker.signal_aspect_wake",
+            lambda *a, **k: calls.append(None),
+        )
+        with patch(
+            "nexus.db.t2.http_aspect_queue.HttpAspectQueue._post",
+            return_value={"enqueued": 2},
+        ):
+            n = queue.enqueue_many([
+                {"collection": "code__x", "source_path": "a.py"},
+                {"collection": "code__x", "source_path": "b.py"},
+            ])
+        assert n == 2
+        assert len(calls) == 1
+
+    def test_batch_zero_enqueued_does_not_signal(
+        self, queue: HttpAspectQueue, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[None] = []
+        monkeypatch.setattr(
+            "nexus.aspect_worker.signal_aspect_wake",
+            lambda *a, **k: calls.append(None),
+        )
+        with patch(
+            "nexus.db.t2.http_aspect_queue.HttpAspectQueue._post",
+            return_value={"enqueued": 0},
+        ):
+            n = queue.enqueue_many([{"collection": "code__x", "source_path": "a.py"}])
+        assert n == 0
+        assert calls == []
+
+    def test_per_row_fallback_signals_once_per_successful_row(
+        self, queue: HttpAspectQueue, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The fallback loop calls enqueue() per row, which already signals —
+        no separate call site needed for the fallback branch itself."""
+        calls: list[None] = []
+        monkeypatch.setattr(
+            "nexus.aspect_worker.signal_aspect_wake",
+            lambda *a, **k: calls.append(None),
+        )
+
+        def _fake_post(path: str, body: dict) -> dict:
+            if path == "/enqueue_many":
+                raise RuntimeError("batch failed")
+            return {"enqueued": True}
+
+        with patch(
+            "nexus.db.t2.http_aspect_queue.HttpAspectQueue._post",
+            side_effect=_fake_post,
+        ):
+            n = queue.enqueue_many([
+                {"collection": "code__x", "source_path": "a.py"},
+                {"collection": "code__x", "source_path": "b.py"},
+            ])
+        assert n == 2
+        assert len(calls) == 2

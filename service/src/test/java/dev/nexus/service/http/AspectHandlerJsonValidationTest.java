@@ -74,9 +74,12 @@ class AspectHandlerJsonValidationTest {
         // propagates, so any status OTHER than 400 proves the request cleared the
         // JSON-validity gate (it then fails downstream against the null
         // DataSource, which is expected and irrelevant to this test).
+        // hygiene-001: doc_id is a SEPARATE required-field gate now (upsertAspect,
+        // ahead of the tenantScope call this test relies on failing) -- included
+        // here so this test still isolates the extras JSON-validity gate alone.
         CapturingExchange ex = post("/v1/aspects/upsert",
             "{\"collection\":\"c\",\"source_path\":\"p\",\"extracted_at\":\"2026-01-01T00:00:00Z\","
-            + "\"model_version\":\"v1\",\"extractor_name\":\"ex\",\"confidence\":0.9,"
+            + "\"model_version\":\"v1\",\"extractor_name\":\"ex\",\"confidence\":0.9,\"doc_id\":\"d1\","
             + "\"extras\":\"{\\\"venue\\\":\\\"VLDB\\\"}\"}");
         handleWithTenant(ex);
         assertThat(ex.status).as("valid JSON extras must not 400 the validation gate").isNotEqualTo(400);
@@ -84,11 +87,40 @@ class AspectHandlerJsonValidationTest {
 
     @Test
     void upsert_blankExtras_doesNotFailValidation() throws Exception {
+        // hygiene-001: doc_id included so this isolates the extras gate alone
+        // (see upsert_validExtrasString_doesNotFailValidation's comment).
         CapturingExchange ex = post("/v1/aspects/upsert",
             "{\"collection\":\"c\",\"source_path\":\"p\",\"extracted_at\":\"2026-01-01T00:00:00Z\","
-            + "\"model_version\":\"v1\",\"extractor_name\":\"ex\",\"confidence\":0.9,\"extras\":\"\"}");
+            + "\"model_version\":\"v1\",\"extractor_name\":\"ex\",\"confidence\":0.9,\"doc_id\":\"d1\","
+            + "\"extras\":\"\"}");
         handleWithTenant(ex);
         assertThat(ex.status).as("blank extras must not 400 (NULLIF semantics allow it)").isNotEqualTo(400);
+    }
+
+    // ── hygiene-001 (nexus-tk070.p6a follow-on): document_aspects.doc_id is
+    //    NOT NULL now -- upsertAspect refuses a missing/blank doc_id BEFORE
+    //    the repository ever touches the (null here) DataSource, so these
+    //    belong in this no-database-needed class alongside the JSON gates
+    //    above ─────────────────────────────────────────────────────────────
+
+    @Test
+    void upsert_missingDocId_returns400() throws Exception {
+        CapturingExchange ex = post("/v1/aspects/upsert",
+            "{\"collection\":\"c\",\"source_path\":\"p\",\"extracted_at\":\"2026-01-01T00:00:00Z\","
+            + "\"model_version\":\"v1\",\"extractor_name\":\"ex\",\"confidence\":0.9}");
+        handleWithTenant(ex);
+        assertThat(ex.status).as("missing doc_id must 400").isEqualTo(400);
+        assertThat(ex.bodyString()).isEqualTo("{\"error\":\"doc_id required\"}");
+    }
+
+    @Test
+    void upsert_blankDocId_returns400() throws Exception {
+        CapturingExchange ex = post("/v1/aspects/upsert",
+            "{\"collection\":\"c\",\"source_path\":\"p\",\"extracted_at\":\"2026-01-01T00:00:00Z\","
+            + "\"model_version\":\"v1\",\"extractor_name\":\"ex\",\"confidence\":0.9,\"doc_id\":\"\"}");
+        handleWithTenant(ex);
+        assertThat(ex.status).as("blank doc_id must 400").isEqualTo(400);
+        assertThat(ex.bodyString()).isEqualTo("{\"error\":\"doc_id required\"}");
     }
 
     @Test

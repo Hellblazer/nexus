@@ -262,11 +262,12 @@ class PlansSchemaLiquibaseTest {
             }
             su.createStatement().execute(
                 "INSERT INTO nexus.plans " +
-                "(tenant_id, project, query, plan_json, outcome, tags, match_text, created_at) " +
+                // verb: plans.verb is NOT NULL (hygiene-001-11).
+                "(tenant_id, project, query, plan_json, outcome, tags, match_text, verb, created_at) " +
                 "VALUES " +
                 "('fts-probe-tenant', 'probe-proj', 'FTS discrimination probe query'," +
                 " '{\"steps\":[]}', 'success', 'planning,rdr', " +
-                " 'How to perform searches across knowledge repositories', now())");
+                " 'How to perform searches across knowledge repositories', 'research', now())");
 
             ResultSet ftsCheck = su.createStatement().executeQuery(
                 // (1) Positive english: 'searching' and 'searches' share stem 'search'.
@@ -436,15 +437,19 @@ class PlansSchemaLiquibaseTest {
             tenantScope.withTenant("gamma-plans", ctx ->
                 ctx.execute(
                     "INSERT INTO nexus.plans " +
-                    "(tenant_id, project, query, plan_json, outcome, match_text, created_at) " +
+                    // verb supplied (plans.verb NOT NULL, hygiene-001-11) so the
+                    // RLS WITH CHECK violation this test is proving is what
+                    // actually fires, not an unrelated NOT NULL violation.
+                    "(tenant_id, project, query, plan_json, outcome, match_text, verb, created_at) " +
                     // nexus-cefa1.5: plan_json is jsonb now — see insertPlan's identical comment.
-                    "VALUES (?, ?, ?, ?::jsonb, ?, ?, now())",
+                    "VALUES (?, ?, ?, ?::jsonb, ?, ?, ?, now())",
                     "delta-plans",         // tenant_id mismatch — WITH CHECK must reject
                     "gamma-proj",
                     "Cross-tenant insert attempt",
                     "{}",
                     "success",
-                    "this should be rejected by RLS WITH CHECK"))
+                    "this should be rejected by RLS WITH CHECK",
+                    "research"))
         )
         .as("INSERT with tenant_id != GUC value must be rejected by RLS WITH CHECK")
         .isInstanceOf(Exception.class)
@@ -499,13 +504,15 @@ class PlansSchemaLiquibaseTest {
         }
         try (var ps = su.prepareStatement(
                 "INSERT INTO nexus.plans " +
-                "(tenant_id, project, query, plan_json, outcome, tags, match_text, created_at) " +
+                // verb: plans.verb is NOT NULL (hygiene-001-11, nexus-tk070.p6a
+                // follow-on) — every insertPlan call now supplies one.
+                "(tenant_id, project, query, plan_json, outcome, tags, match_text, verb, created_at) " +
                 // nexus-cefa1.5: plan_json is jsonb now (plans-002-jsonb.xml) — a raw
                 // JDBC varchar-bound parameter has no implicit assignment cast to
                 // jsonb, so the placeholder needs an explicit ::jsonb cast (same
                 // idiom as CatalogRepositoryTest / VectorsRepointFunctionsIntegrationTest's
                 // ?::jsonb raw-SQL inserts elsewhere in this test tree).
-                "VALUES (?, ?, ?, ?::jsonb, ?, ?, ?, now()) " +
+                "VALUES (?, ?, ?, ?::jsonb, ?, ?, ?, ?, now()) " +
                 "ON CONFLICT (tenant_id, project, query) DO NOTHING")) {
             ps.setString(1, tenant);
             ps.setString(2, project);
@@ -514,6 +521,7 @@ class PlansSchemaLiquibaseTest {
             ps.setString(5, "success");
             ps.setString(6, tags);
             ps.setString(7, matchText);
+            ps.setString(8, "research");
             ps.executeUpdate();
         }
     }

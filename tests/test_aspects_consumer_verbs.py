@@ -25,6 +25,23 @@ from click.testing import CliRunner
 
 from nexus.commands.aspects import aspects_group
 
+from tests._catalog_fixture_ops import register_real_doc_id
+
+# hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
+# now carries a REAL FK to catalog_documents(tenant_id, tumbler) via the
+# engine's POST /v1/aspects/queue/enqueue 400 -- see the identical cache in
+# tests/test_document_aspects_store.py for the full rationale. One real
+# registration per test, memoized on the test's freshly-minted
+# NX_SERVICE_TOKEN.
+_doc_id_cache: dict[str, str] = {}
+
+
+def _shared_doc_id() -> str:
+    key = os.environ.get("NX_SERVICE_TOKEN", "")
+    if key not in _doc_id_cache:
+        _doc_id_cache[key] = register_real_doc_id()
+    return _doc_id_cache[key]
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -203,13 +220,13 @@ class TestRequeueFailed:
             q = db.aspect_queue
             for coll, sp in [("knowledge__a", "x.pdf"), ("knowledge__a", "y.pdf"),
                              ("knowledge__b", "z.pdf")]:
-                q.enqueue(coll, sp, content="c")
+                q.enqueue(coll, sp, content="c", doc_id=_shared_doc_id())
                 # Claim first (pending -> in_progress) so mark_failed mirrors
                 # the worker's real state transitions on the engine.
                 claimed = q.claim_next()
                 assert claimed is not None and claimed.source_path == sp
                 q.mark_failed(coll, sp, "boom")
-            q.enqueue("knowledge__a", "ok.pdf")  # stays pending
+            q.enqueue("knowledge__a", "ok.pdf", doc_id=_shared_doc_id())  # stays pending
 
     def _status(self, db_path: Path, source_path: str) -> str:
         from nexus.db.t2 import T2Database
@@ -267,7 +284,7 @@ class TestRequeueFailed:
     def test_no_failed_rows_message(self, _queue_t2: Path) -> None:
         from nexus.db.t2 import T2Database
         with T2Database(_queue_t2) as db:
-            db.aspect_queue.enqueue("knowledge__a", "only-pending.pdf")
+            db.aspect_queue.enqueue("knowledge__a", "only-pending.pdf", doc_id=_shared_doc_id())
         res = CliRunner().invoke(aspects_group, ["requeue-failed"])
         assert res.exit_code == 0, res.output
         assert "no failed rows" in res.output

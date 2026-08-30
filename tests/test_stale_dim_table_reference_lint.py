@@ -511,7 +511,9 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     #    subject under test, not debris. Canonical LEGITIMATE per the bead's
     #    own caution. ──────────────────────────────────────────────────────
     "service/src/test/java/dev/nexus/service/VectorsUnifyChunksIntegrationTest.java": (
-        36,
+        35,
+        "-1 (36->35, 2026-08-30, f472cb3f8): unRekeyedLegacyChash_bootSurvives_"
+        "octetCheckStaysNotValid deleted, its premise inverted by hygiene-001-5/-8. "
         "RDR-191 Phase 4 core: the ALWAYS-COPY migration test collapsing "
         "nexus.chunks_384/768/1024 into ONE nexus.chunks (vectors-004-unify-"
         "chunks.xml). The per-dim names are this changeset's own subject "
@@ -540,7 +542,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "own caution about SchemaMigratorIntegrationTest."
     ),
     "service/src/test/java/dev/nexus/service/SchemaUpgradeRehearsalIntegrationTest.java": (
-        42,
+        41,
         "nexus-4m6i0.6 upgrade-rehearsal suite: injects a pre-unify schema "
         "divergence and upgrades it to HEAD across the vectors-004/"
         "taxonomy-007 changesets, then asserts the per-dim tables are GONE "

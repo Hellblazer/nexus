@@ -86,6 +86,30 @@ class TestUriFor:
         assert uri_for("rdr__nexus", "") is None
         assert uri_for("knowledge__delos", "") is None
 
+    def test_file_routed_prefix_never_yields_chroma_scheme(self):
+        """nexus-poigc acceptance criterion 4: no write path can mint a
+        chroma:// source_uri for a collection whose prefix routes to
+        file://. Exercises every value in FILE_ROUTED_PREFIXES (the
+        single source of truth ``uri_for`` itself, and the poigc backfill
+        verb's candidate filter, both key on) across absolute, relative-
+        with-root, relative-without-root, and empty source_path shapes —
+        none of them may ever produce a chroma:// result."""
+        from nexus.aspect_readers import FILE_ROUTED_PREFIXES, uri_for
+
+        for prefix in FILE_ROUTED_PREFIXES:
+            collection = f"{prefix}probe"
+            for source_path, repo_root in (
+                ("/abs/x.md", None),
+                ("rel/x.md", "/abs/root"),
+                ("rel/x.md", None),
+                ("", None),
+            ):
+                result = uri_for(collection, source_path, repo_root=repo_root)
+                assert result is None or not result.startswith("chroma://"), (
+                    f"{collection!r}, {source_path!r}, repo_root={repo_root!r} "
+                    f"yielded {result!r}"
+                )
+
 
 class TestIdentityFieldDispatch:
     """The dispatch table picks the right metadata field per collection

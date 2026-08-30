@@ -18,7 +18,6 @@ Interface parity (bead nexus-gmiaf.15, RDR-152 P2.5):
 """
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -26,7 +25,6 @@ from typing import Any
 import httpx
 import structlog
 
-from nexus.db.limits import MAX_QUERY_RESULTS
 from nexus.db.t2.records import AspectRecord, _safe_json_dict, _safe_json_list
 
 _log = structlog.get_logger(__name__)
@@ -172,19 +170,14 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         if not record.extractor_name:
             raise ValueError("extractor_name must not be empty")
         if not record.doc_id:
-            # nexus-x1de2 (52): the engine stores a blank doc_id as NULL
-            # (fk-001) — a row no catalog document can claim. The schema
-            # permits it and the enqueue contract allows an empty doc_id,
-            # so this is not refused, but it is never silent: every
-            # producer that knows the identity stamps it (with_doc_id),
-            # and a write that still lacks one is the signal the
-            # attribution gap has reopened.
-            _log.warning(
-                "document_aspects_upsert_unattributed",
-                collection=record.collection,
-                source_path=record.source_path,
-                extractor_name=record.extractor_name,
-            )
+            # hygiene-001 (nexus-tk070.p6a follow-on) SUPERSEDES nexus-x1de2's
+            # original warn-and-proceed: document_aspects.doc_id is NOT NULL
+            # now, and POST /v1/aspects/upsert refuses a blank doc_id with a
+            # 400 (Sam decision: every aspect row must attribute to a live
+            # catalog document going forward). Raise here instead of making
+            # the round trip just to hit the engine's own refusal — same
+            # message, one call earlier.
+            raise ValueError("doc_id required")
         r = self._post("/upsert", _record_to_body(record))
         return bool(r.get("written", False))
 
@@ -227,53 +220,6 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             params["limit"] = limit
         rows: list[dict] = self._get("/list_by_collection", params)
         return [_body_to_record(r) for r in rows]
-
-    def list_without_catalog_document(
-        self, limit: int | None = None, offset: int = 0,
-    ) -> list[dict[str, Any]]:
-        """Aspect rows no live catalog document claims (nexus-mlu3k, read-only).
-
-        ``GET /v1/aspects/list_without_catalog_document``: aspects-004's
-        attribution predicate, negated engine-side — ``doc_id IS NULL`` and no
-        same-tenant, non-alias, non-tombstoned catalog document with a
-        byte-equal ``source_uri``. Each row is a plain dict (``collection``,
-        ``source_path``, ``source_uri``, ``extracted_at``, ``model_version``,
-        ``extractor_name``, ``confidence``, ``tombstoned_match``) rather than
-        an :class:`AspectRecord`, because the census cares about identity and
-        era, not the extracted fields. Ordered by ``source_uri`` then
-        ``collection``. ONE PAGE: the engine clamps *limit* to
-        ``AspectRepository.MAX_PAGE_ROWS`` (300; ``None``/0 = one full page,
-        never everything), so walk with *offset* or use
-        :meth:`iter_without_catalog_document`. An engine without the route
-        404s — the caller reports that, never an empty census.
-        """
-        params: dict[str, Any] = {"offset": offset}
-        if limit is not None:
-            params["limit"] = limit
-        rows: list[dict[str, Any]] = self._get("/list_without_catalog_document", params)
-        return list(rows or [])
-
-    def iter_without_catalog_document(
-        self, max_rows: int | None = None, page_size: int = MAX_QUERY_RESULTS,
-    ) -> Iterator[dict[str, Any]]:
-        """Page through :meth:`list_without_catalog_document` until a short page.
-
-        *max_rows* caps the total (``None`` = all); *page_size* is the per-call
-        ``limit`` (defaults to the ``MAX_QUERY_RESULTS`` ceiling the engine
-        clamps to, so a full page is never silently a truncated one).
-        """
-        if page_size <= 0:
-            raise ValueError(f"page_size must be positive, got {page_size}")
-        offset = 0
-        yielded = 0
-        while max_rows is None or yielded < max_rows:
-            want = page_size if max_rows is None else min(page_size, max_rows - yielded)
-            page = self.list_without_catalog_document(limit=want, offset=offset)
-            yield from page
-            yielded += len(page)
-            offset += len(page)
-            if len(page) < want:
-                return
 
     def delete(self, collection: str, source_path: str) -> int:
         """Drop the row at (collection, source_path). Returns deleted count."""

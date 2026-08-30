@@ -81,6 +81,7 @@ def _seed_one(env, *, source_path: str = "docs/papers/p.pdf") -> str:
         model_version="claude-haiku-4-5-20251001",
         extractor_name="scholarly-paper-v1",
         source_uri=f"file:///tmp/myrepo/{source_path}",
+        doc_id=str(t),
     )
     with T2Database(db_path) as db:
         db.document_aspects.upsert(rec)
@@ -162,7 +163,7 @@ class TestAspectsList:
         )
         with T2Database(db_path) as db:
             for sp in paths:
-                cat.register(
+                doc_tumbler = cat.register(
                     owner, Path(sp).stem,
                     content_type="paper",
                     physical_collection="knowledge__myrepo-papers",
@@ -181,6 +182,7 @@ class TestAspectsList:
                     extracted_at=datetime.now(UTC).isoformat(),
                     model_version="m",
                     extractor_name="scholarly-paper-v1",
+                    doc_id=str(doc_tumbler),
                 ))
 
     def test_list_returns_all_rows_in_collection(self, env) -> None:

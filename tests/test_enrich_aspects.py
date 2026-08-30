@@ -26,7 +26,22 @@ from click.testing import CliRunner
 
 from nexus.aspect_extractor import AspectRecord
 from nexus.commands.enrich import _PER_PAPER_COST_USD, enrich
-from tests._catalog_fixture_ops import ActiveCatalog
+from tests._catalog_fixture_ops import ActiveCatalog, register_real_doc_id
+
+# hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id now
+# carries a REAL FK to catalog_documents(tenant_id, tumbler) -- see the
+# identical cache in tests/test_document_aspects_store.py for the full
+# rationale. One real registration per test, memoized on the test's
+# freshly-minted NX_SERVICE_TOKEN.
+_doc_id_cache: dict[str, str] = {}
+
+
+def _shared_doc_id() -> str:
+    key = os.environ.get("NX_SERVICE_TOKEN", "")
+    if key not in _doc_id_cache:
+        _doc_id_cache[key] = register_real_doc_id()
+    return _doc_id_cache[key]
+
 
 # nexus-aqbrk: the dies-roster that used to cover 18 tests here was
 # OVER-BROAD, and its reason was wrong. It read "rich SQLite Catalog stack
@@ -78,6 +93,7 @@ def _make_record(
     problem_formulation: str | None = "P",
     proposed_method: str | None = "M",
     model_version: str = "claude-haiku-4-5-20251001",
+    doc_id: str | None = None,
 ) -> AspectRecord:
     from nexus.aspect_readers import uri_for
     collection = "knowledge__delos"
@@ -97,6 +113,7 @@ def _make_record(
         # Mirror the going-forward writer contract: extract_aspects'
         # _build_record / _empty_record populate source_uri via uri_for.
         source_uri=uri_for(collection, source_path),
+        doc_id=doc_id if doc_id is not None else _shared_doc_id(),
     )
 
 
@@ -1021,6 +1038,7 @@ class TestDay2Ops:
                 model_version="claude-haiku-4-5-20251001",
                 extractor_name="scholarly-paper-v1",
                 source_uri=None,  # legacy / unbackfilled
+                doc_id=_shared_doc_id(),
             ))
 
         runner = CliRunner()
@@ -1062,6 +1080,7 @@ class TestDay2Ops:
                 model_version="claude-haiku-4-5-20251001",
                 extractor_name="scholarly-paper-v1",
                 source_uri="file:///local.md",
+                doc_id=_shared_doc_id(),
             ))
 
         runner = CliRunner()
@@ -1174,3 +1193,71 @@ class TestDay2Ops:
             assert db.document_aspects.get(
                 "knowledge__delos", "/p1.pdf",
             ) is not None
+
+
+# ── nexus-r0kum (review S2): the CLI batch path applies the same refusal ──────
+
+
+class TestCliBatchAttribution:
+    """`nx enrich aspects <collection>` is the third complete_aspect writer
+    (after the worker's row and batch paths). A file-routed record whose
+    extractor left source_uri empty takes the catalog entry's source_uri;
+    one that still has none is refused, never upserted."""
+
+    def _register_rdr_entries(self, cat: Catalog, source_paths: list[str]) -> None:
+        owner = cat.register_owner("rdr", "rdr-curator")
+        for sp in source_paths:
+            cat.register(
+                owner, Path(sp).stem, content_type="rdr",
+                physical_collection="rdr__nexus-foo", file_path=sp,
+            )
+
+    def test_empty_source_uri_is_attributed_from_the_entry(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import dataclasses as _dc
+
+        _, db_path, cat = env
+        self._register_rdr_entries(cat, ["/repo/docs/rdr/RDR-001.md"])
+
+        def fake_extract(content, source_path, collection, **_kw):
+            rec = _make_record(source_path=source_path)
+            return _dc.replace(rec, collection=collection, source_uri="")  # the r0kum writer shape
+
+        monkeypatch.setattr("nexus.aspect_extractor.extract_aspects", fake_extract)
+        result = CliRunner().invoke(
+            enrich, ["aspects", "rdr__nexus-foo", "--validate-sample", "0"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "1 extracted" in result.output
+        from nexus.db.t2 import T2Database
+        with T2Database(db_path) as db:
+            rows = db.document_aspects.list_by_collection("rdr__nexus-foo")
+        assert len(rows) == 1
+        assert rows[0].source_uri, "source_uri must be attributed from the catalog entry"
+        assert rows[0].source_uri.startswith("file://")
+
+    def test_unattributable_record_is_refused_not_upserted(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import dataclasses as _dc
+
+        _, db_path, cat = env
+        self._register_rdr_entries(cat, ["/repo/docs/rdr/RDR-002.md"])
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.extract_aspects",
+            lambda content, source_path, collection, **_kw: _dc.replace(
+                _make_record(source_path=source_path), collection=collection, source_uri="",
+            ),
+        )
+        # Force the refusal branch: the guard is the worker's, imported at the
+        # call site, so patching its home module is what the CLI sees.
+        monkeypatch.setattr("nexus.aspect_worker._is_unattributable", lambda _r: True)
+        result = CliRunner().invoke(
+            enrich, ["aspects", "rdr__nexus-foo", "--validate-sample", "0"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "skipped (reason=unattributable_identity)" in result.output
+        from nexus.db.t2 import T2Database
+        with T2Database(db_path) as db:
+            assert db.document_aspects.list_by_collection("rdr__nexus-foo") == []

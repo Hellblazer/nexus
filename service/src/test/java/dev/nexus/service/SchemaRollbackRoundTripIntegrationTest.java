@@ -1007,12 +1007,23 @@ class SchemaRollbackRoundTripIntegrationTest {
                 "INSERT INTO nexus.catalog_links "
                     + "(tenant_id, from_tumbler, to_tumbler, link_type, created_by, created_at) "
                     + "VALUES (?, ?, ?, ?, ?, ?)")) {
+            // hygiene-001-7 (nexus-tk070.p6a follow-on) SUPERSEDES this row's
+            // original NULL-created_at seed: catalog_links.created_at is
+            // NOT NULL now, so the "NULL survives a catalog-031-2 rollback,
+            // does not get COALESCEd to ''" scenario this row used to probe
+            // is permanently unreachable (a real timestamp is required at
+            // seed time, and stays required through the whole test's
+            // migrate/rollback/re-migrate cycle). Seeded with a real
+            // zero-microsecond value instead -- the round-trip assertions
+            // below now check ITS fidelity through rollback/re-migrate,
+            // same mechanism the second row (cck6z.doc.2/cites-back)
+            // already exercised.
             ps.setString(1, FIXTURE_TENANT);
             ps.setString(2, "cck6z.doc.1");
             ps.setString(3, "cck6z.doc.2");
             ps.setString(4, "cites");
             ps.setString(5, "cck6z-test");
-            ps.setNull(6, Types.TIMESTAMP_WITH_TIMEZONE);
+            ps.setObject(6, TS_ZERO_MICROS);
             ps.executeUpdate();
 
             ps.setString(1, FIXTURE_TENANT);
@@ -1040,10 +1051,17 @@ class SchemaRollbackRoundTripIntegrationTest {
 
             // catalog-002-1-temporal-typing: created_at NULL (never set), superseded_at
             // populated, nonzero micros — the complementary branch.
+            // hygiene-001-6 (nexus-tk070.p6a follow-on) SUPERSEDES this row's
+            // original NULL-created_at seed: catalog_collections.created_at is
+            // NOT NULL now (backfilled + DEFAULT now()), so "a NULL created_at
+            // COALESCEs to '' through the catalog-002-1 rollback" is
+            // permanently unreachable. Seeded with a real zero-microsecond
+            // value instead; the assertions below now check ITS round-trip
+            // fidelity through the SAME rollback path.
             ps.setString(1, FIXTURE_TENANT);
             ps.setString(2, "cck6z-legacy-false");
             ps.setBoolean(3, false);
-            ps.setNull(4, Types.TIMESTAMP_WITH_TIMEZONE);
+            ps.setObject(4, TS_ZERO_MICROS);
             ps.setObject(5, TS_COLLECTIONS_SUPERSEDED_AT);
             ps.executeUpdate();
 
@@ -1051,10 +1069,12 @@ class SchemaRollbackRoundTripIntegrationTest {
             // topics.collection both FK to catalog_collections(tenant_id, name) —
             // register the collection those two families' fixtures below use.
             // Neither created_at/superseded_at value is asserted for this row.
+            // hygiene-001-6: created_at is NOT NULL now -- a real value is
+            // required even though nothing asserts on it.
             ps.setString(1, FIXTURE_TENANT);
             ps.setString(2, "cck6z-coll");
             ps.setBoolean(3, false);
-            ps.setNull(4, Types.TIMESTAMP_WITH_TIMEZONE);
+            ps.setObject(4, TS_ZERO_MICROS);
             ps.setNull(5, Types.TIMESTAMP_WITH_TIMEZONE);
             ps.executeUpdate();
         }
@@ -1075,11 +1095,25 @@ class SchemaRollbackRoundTripIntegrationTest {
             ps.executeUpdate();
         }
 
+        // hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id
+        // and .source_uri are NOT NULL now (reverses fk-001-2's nullable
+        // conversion) -- neither field was set by this fixture originally
+        // (it exists to probe extras/salient_sentences jsonb round-trip,
+        // unrelated to doc_id/source_uri), so it needs a real catalog
+        // document to attribute to now.
+        try (PreparedStatement ps = su.prepareStatement(
+                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
+                    + "VALUES (?, ?, ?) ON CONFLICT (tenant_id, tumbler) DO NOTHING")) {
+            ps.setString(1, FIXTURE_TENANT);
+            ps.setString(2, "cck6z.aspects.doc");
+            ps.setString(3, "cck6z aspects fixture doc");
+            ps.executeUpdate();
+        }
         try (PreparedStatement ps = su.prepareStatement(
                 "INSERT INTO nexus.document_aspects "
                     + "(tenant_id, collection, source_path, extracted_at, model_version, "
-                    + " extractor_name, extras, salient_sentences) "
-                    + "VALUES (?, ?, ?, now(), ?, ?, ?::jsonb, ?::jsonb)")) {
+                    + " extractor_name, extras, salient_sentences, source_uri, doc_id) "
+                    + "VALUES (?, ?, ?, now(), ?, ?, ?::jsonb, ?::jsonb, ?, ?)")) {
             ps.setString(1, FIXTURE_TENANT);
             ps.setString(2, "cck6z-coll");
             ps.setString(3, "cck6z/doc1");
@@ -1087,6 +1121,8 @@ class SchemaRollbackRoundTripIntegrationTest {
             ps.setString(5, "cck6z-extractor");
             ps.setString(6, ASPECTS_EXTRAS_JSON);
             ps.setString(7, null);
+            ps.setString(8, "file:///cck6z/doc1");
+            ps.setString(9, "cck6z.aspects.doc");
             ps.executeUpdate();
 
             ps.setString(1, FIXTURE_TENANT);
@@ -1096,6 +1132,8 @@ class SchemaRollbackRoundTripIntegrationTest {
             ps.setString(5, "cck6z-extractor");
             ps.setString(6, null);
             ps.setString(7, ASPECTS_SALIENT_JSON);
+            ps.setString(8, "file:///cck6z/doc2");
+            ps.setString(9, "cck6z.aspects.doc");
             ps.executeUpdate();
         }
 
@@ -1118,10 +1156,13 @@ class SchemaRollbackRoundTripIntegrationTest {
             ps.executeUpdate();
         }
 
+        // hygiene-001-11 (nexus-tk070.p6a follow-on): plans.verb is NOT NULL
+        // now -- this fixture exists to probe plan_json/default_bindings
+        // jsonb round-trip, unrelated to verb, so a real verb is required.
         try (PreparedStatement ps = su.prepareStatement(
                 "INSERT INTO nexus.plans "
-                    + "(tenant_id, project, query, plan_json, created_at, default_bindings) "
-                    + "VALUES (?, ?, ?, ?::jsonb, now(), ?::jsonb)")) {
+                    + "(tenant_id, project, query, plan_json, created_at, default_bindings, verb) "
+                    + "VALUES (?, ?, ?, ?::jsonb, now(), ?::jsonb, 'research')")) {
             ps.setString(1, FIXTURE_TENANT);
             ps.setString(2, "cck6z-proj");
             ps.setString(3, "cck6z plan query 1");
@@ -1391,15 +1432,18 @@ class SchemaRollbackRoundTripIntegrationTest {
             .isEqualTo("");
 
         // ── catalog-031-2: catalog_links.created_at ──
+        // hygiene-001-7 SUPERSEDES the original nexus-cck6z NULL-created_at
+        // FINDING-CHECK here (see seedTypeHygieneFixtures's comment on this
+        // row): created_at is NOT NULL now, so this now checks the same
+        // fixed-width zero-microsecond rollback fidelity the second row
+        // (cck6z.doc.2/cites-back) already covers.
         assertThat(queryOneNullableString(su,
             "SELECT created_at FROM nexus.catalog_links "
                 + "WHERE tenant_id=? AND from_tumbler=? AND link_type=?",
             FIXTURE_TENANT, "cck6z.doc.1", "cites"))
-            .as("catalog-031-2 created_at rollback has NO COALESCE (nullable, no-default column "
-                + "pre-migration, per this changeset's own header) — a NULL created_at must stay "
-                + "NULL, not become ''. THE nexus-cck6z FINDING-CHECK: if the rollback were ever "
-                + "edited to add COALESCE(...,''), this assertion is what would catch it")
-            .isNull();
+            .as("catalog-031-2 created_at rollback: a populated zero-microsecond value must "
+                + "render with 6 zero digits")
+            .isEqualTo(EXPECTED_TEXT_ZERO_MICROS);
         assertThat(queryOneNullableString(su,
             "SELECT created_at FROM nexus.catalog_links "
                 + "WHERE tenant_id=? AND from_tumbler=? AND link_type=?",
@@ -1585,12 +1629,14 @@ class SchemaRollbackRoundTripIntegrationTest {
                 + "'' exactly, not NULL. Dropping the COALESCE would turn this red")
             .isEqualTo("");
 
+        String expectedCollectionsCreatedAtFalse = defaultTimestamptzText(su, TS_ZERO_MICROS);
         assertThat(queryOneNullableString(su,
             "SELECT created_at FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
             FIXTURE_TENANT, "cck6z-legacy-false"))
-            .as("catalog-002-1 created_at rollback: a NULL created_at must COALESCE to '' exactly, "
-                + "not NULL")
-            .isEqualTo("");
+            .as("catalog-002-1 created_at rollback: a populated value must round-trip to "
+                + "Postgres's DEFAULT timestamptz-to-text rendering, same oracle as the "
+                + "cck6z-legacy-true row above")
+            .isEqualTo(expectedCollectionsCreatedAtFalse);
         String expectedCollectionsSupersededAt = defaultTimestamptzText(su, TS_COLLECTIONS_SUPERSEDED_AT);
         assertThat(queryOneNullableString(su,
             "SELECT superseded_at FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
@@ -1618,9 +1664,9 @@ class SchemaRollbackRoundTripIntegrationTest {
         assertNullColumn(su,
             "SELECT superseded_at FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
             FIXTURE_TENANT, "cck6z-legacy-true");
-        assertNullColumn(su,
+        assertTimestampEquals(su,
             "SELECT created_at FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
-            FIXTURE_TENANT, "cck6z-legacy-false");
+            TS_ZERO_MICROS, FIXTURE_TENANT, "cck6z-legacy-false");
         assertTimestampEquals(su,
             "SELECT superseded_at FROM nexus.catalog_collections WHERE tenant_id=? AND name=?",
             TS_COLLECTIONS_SUPERSEDED_AT, FIXTURE_TENANT, "cck6z-legacy-false");
@@ -1668,10 +1714,10 @@ class SchemaRollbackRoundTripIntegrationTest {
             "SELECT index_started_at FROM nexus.catalog_documents WHERE tenant_id=? AND tumbler=?",
             FIXTURE_TENANT, "cck6z.doc.2");
 
-        assertNullColumn(su,
+        assertTimestampEquals(su,
             "SELECT created_at FROM nexus.catalog_links "
                 + "WHERE tenant_id=? AND from_tumbler=? AND link_type=?",
-            FIXTURE_TENANT, "cck6z.doc.1", "cites");
+            TS_ZERO_MICROS, FIXTURE_TENANT, "cck6z.doc.1", "cites");
         assertTimestampEquals(su,
             "SELECT created_at FROM nexus.catalog_links "
                 + "WHERE tenant_id=? AND from_tumbler=? AND link_type=?",

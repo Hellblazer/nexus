@@ -23,7 +23,8 @@ A reviewer seeing a lifecycle change that edits one tier's file without a corres
 | File | Purpose |
 |---|---|
 | `service_registry.py` | **The primitive.** `LeaseRecord`, `ServiceRegistry` (publish / heartbeat / discover / mark_shutting_down / relinquish, per-scope election flock, generation fencing), `ServiceSupervisor` (heartbeat cadence + version-skew cycle), `mint_owner_token`. Tier-parameterized by `tier=` + per-call `scope_key`, and **directory-scoped first**: leases live at `<dir>/<tier>_addr.<scope_key>` where `dir=nexus_config_dir()` — a `NEXUS_CONFIG_DIR` sandbox gets an independent lease from `~/.config/nexus` for the same uid (the nexus-tmsnz confusion). |
-| `storage_service_daemon.py` | Storage-service supervisor. Consumes `ServiceRegistry(tier="storage_service")`; supervises the native engine binary + Postgres. `scope_key=str(os.getuid())`; directory-scoped per the primitive above. |
+| `storage_service_daemon.py` | Storage-service supervisor. Consumes `ServiceRegistry(tier="storage_service")`; supervises the native engine binary + Postgres. `scope_key=str(os.getuid())`; directory-scoped per the primitive above. Readiness (nexus-8vp0i / GH #1486) delegates to `readiness.py`'s pure state machine so a real Liquibase migration (20-25 min, `/health` unreachable throughout) is never mistaken for a wedge. |
+| `readiness.py` | Pure migration-aware readiness state machine (nexus-8vp0i / GH #1486): `PRE_MIGRATION -> MIGRATING -> POST_MIGRATION -> READY`, every evidence source (clock/log-reader/pg-probe/health-probe/process-poll) injected, no I/O of its own. See docs/architecture.md § Storage-Service Supervisor: Migration-Aware Readiness. |
 | `aspect_worker_daemon.py` | Aspect-worker consumer. Leased, per-tenant host for the aspect queue. |
 | `binary_install.py` / `binary_lifecycle.py` | Engine-binary download, pin verification, and version-cycle wiring. |
 | `mineru_lifecycle.py` | MinerU sidecar lifecycle. |

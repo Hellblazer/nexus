@@ -256,10 +256,13 @@ class CatalogDocumentCascadeTest {
         // already registered under COLL, so stamp the manifest row the same.
         st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
             + "VALUES ('" + tenant + "', '" + tumbler + "', 0, '" + chash("man" + tenant + tumbler) + "', '" + COLL + "')");
-        st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', '/p/a-" + tenant + "-" + tumbler + ".md', NOW(), 'v1', 'docling', '" + tumbler + "')");
-        st.execute("INSERT INTO nexus.document_highlights (tenant_id, doc_id, collection, highlights_md, ingested_at) "
-            + "VALUES ('" + tenant + "', '" + tumbler + "', '" + COLL + "', 'hi', NOW())");
+        // hygiene-001 steps 1/3 (nexus-tk070.p6a follow-on): document_aspects.source_uri
+        // and document_highlights.source_uri are both NOT NULL now.
+        st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) "
+            + "VALUES ('" + tenant + "', '" + COLL + "', '/p/a-" + tenant + "-" + tumbler + ".md', NOW(), 'v1', 'docling', '" + tumbler + "', "
+            + "'file:///p/a-" + tenant + "-" + tumbler + ".md')");
+        st.execute("INSERT INTO nexus.document_highlights (tenant_id, doc_id, collection, source_uri, highlights_md, ingested_at) "
+            + "VALUES ('" + tenant + "', '" + tumbler + "', '" + COLL + "', 'file:///hl-" + tenant + "-" + tumbler + "', 'hi', NOW())");
         st.execute("INSERT INTO nexus.aspect_extraction_queue (tenant_id, collection, source_path, status, enqueued_at, doc_id) "
             + "VALUES ('" + tenant + "', '" + COLL + "', '/p/q-" + tenant + "-" + tumbler + ".md', 'pending', NOW(), '" + tumbler + "')");
     }

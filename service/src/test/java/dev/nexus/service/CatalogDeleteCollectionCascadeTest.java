@@ -26,8 +26,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>Verifies the single transactional service-side collection delete: it purges every
  * in-Postgres lifecycle table in dependency order (registry row last, RESTRICT FKs as a
  * safety net), returns per-table counts, leaves no orphans, and is tenant-isolated via RLS.
- * Two regression anchors: nexus-tquoj (aspect_extraction_queue purged, incl. doc-less
- * NULL-doc_id rows the fk-001 document cascade cannot reach) and nexus-cugrk
+ * Two regression anchors: nexus-tquoj (aspect_extraction_queue purged by its `collection`
+ * tag, not via any doc_id-keyed cascade the fk-001 document delete would otherwise have to
+ * reach through — originally proven with a doc-less NULL-doc_id row; hygiene-001 step 2
+ * (nexus-tk070.p6a follow-on) makes doc_id NOT NULL, so the fixture now proves the same
+ * purge-by-collection property with a second doc-rooted row instead) and nexus-cugrk
  * (taxonomy_centroids_* purged by collection — no FK to topics).
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -117,9 +120,9 @@ class CatalogDeleteCollectionCascadeTest {
         // collection_rename.py / collection_purge.py read this key literally as
         // "taxonomy_centroids" -- must not regress to a per-dim key shape.
         assertThat(counts.get("taxonomy_centroids")).as("taxonomy_centroids (unified, cugrk, 1+1+1)").isEqualTo(3);
-        assertThat(counts.get("document_aspects")).as("document_aspects (incl doc-less)").isEqualTo(2);
+        assertThat(counts.get("document_aspects")).as("document_aspects (both rows doc-rooted, hygiene-001)").isEqualTo(2);
         assertThat(counts.get("document_highlights")).as("document_highlights").isEqualTo(1);
-        assertThat(counts.get("aspect_extraction_queue")).as("aspect_extraction_queue (tquoj, incl doc-less)").isEqualTo(2);
+        assertThat(counts.get("aspect_extraction_queue")).as("aspect_extraction_queue (tquoj, both rows doc-rooted, hygiene-001)").isEqualTo(2);
         assertThat(counts.get("catalog_documents")).as("catalog_documents").isEqualTo(1);
         assertThat(counts.get("catalog_collections")).as("registry row").isEqualTo(1);
     }
@@ -365,25 +368,38 @@ class CatalogDeleteCollectionCascadeTest {
         // topic_ids, not the shared `topicId` above (which would collide on the
         // unified PK; pre-unification these lived in three separate physical
         // tables and could legally share one topic_id).
-        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_384) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', " + topicId + ", " + vec(384) + "::vector)");
-        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_768) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', " + (topicId + 1) + ", " + vec(768) + "::vector)");
-        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, embedding_1024) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', " + (topicId + 2) + ", " + vec(1024) + "::vector)");
-        // document_aspects: 2 — one doc-rooted, one DOC-LESS (doc_id=NULL)
-        st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', '/p/a1.md', NOW(), 'v1', 'docling', 'dc-doc-1')");
-        st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', '/p/a2.md', NOW(), 'v1', 'docling', NULL)");
-        // document_highlights: 1 (doc-rooted)
-        st.execute("INSERT INTO nexus.document_highlights (tenant_id, doc_id, collection, highlights_md, ingested_at) "
-            + "VALUES ('" + tenant + "', 'dc-doc-1', '" + COLL + "', 'hi', NOW())");
-        // aspect_extraction_queue: 2 — one doc-rooted, one DOC-LESS (doc_id=NULL) = the tquoj orphan class
+        // hygiene-001 step 9b (nexus-tk070.p6a follow-on): label is NOT NULL now,
+        // no default -- supply it explicitly.
+        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, embedding_384) "
+            + "VALUES ('" + tenant + "', '" + COLL + "', " + topicId + ", '', " + vec(384) + "::vector)");
+        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, embedding_768) "
+            + "VALUES ('" + tenant + "', '" + COLL + "', " + (topicId + 1) + ", '', " + vec(768) + "::vector)");
+        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, embedding_1024) "
+            + "VALUES ('" + tenant + "', '" + COLL + "', " + (topicId + 2) + ", '', " + vec(1024) + "::vector)");
+        // document_aspects: 2, both doc-rooted at dc-doc-1 (the collection's only
+        // registered catalog_documents row -- catalog_documents count elsewhere in
+        // this fixture is asserted ==1, so a second row cannot be introduced here).
+        // hygiene-001 step 1 (nexus-tk070.p6a follow-on): doc_id/source_uri are both
+        // NOT NULL now, reversing fk-001-2's nullable conversion -- the second row
+        // used to be the DOC-LESS (doc_id=NULL) class nexus-tquoj's regression anchor
+        // exercised; that state is no longer representable. The purge-by-collection
+        // property tquoj guards (deleteCollection purges rows the fk-001 document
+        // cascade cannot reach) can no longer be discriminated here: the doc-less
+        // state cannot exist, so both rows go by their `collection` tag
+        // (deleteCollectionTxn step 5), ahead of the doc_id-keyed cascade (step 6).
+        st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) "
+            + "VALUES ('" + tenant + "', '" + COLL + "', '/p/a1.md', NOW(), 'v1', 'docling', 'dc-doc-1', 'file:///p/a1.md')");
+        st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) "
+            + "VALUES ('" + tenant + "', '" + COLL + "', '/p/a2.md', NOW(), 'v1', 'docling', 'dc-doc-1', 'file:///p/a2.md')");
+        // document_highlights: 1 (doc-rooted). hygiene-001 step 3: source_uri NOT NULL now.
+        st.execute("INSERT INTO nexus.document_highlights (tenant_id, doc_id, collection, source_uri, highlights_md, ingested_at) "
+            + "VALUES ('" + tenant + "', 'dc-doc-1', '" + COLL + "', 'file:///dc-doc-1-hl', 'hi', NOW())");
+        // aspect_extraction_queue: 2, both doc-rooted at dc-doc-1 (hygiene-001 step 2:
+        // doc_id is NOT NULL now -- see the document_aspects comment above).
         st.execute("INSERT INTO nexus.aspect_extraction_queue (tenant_id, collection, source_path, status, enqueued_at, doc_id) "
             + "VALUES ('" + tenant + "', '" + COLL + "', '/p/q1.md', 'pending', NOW(), 'dc-doc-1')");
         st.execute("INSERT INTO nexus.aspect_extraction_queue (tenant_id, collection, source_path, status, enqueued_at, doc_id) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', '/p/q2.md', 'pending', NOW(), NULL)");
+            + "VALUES ('" + tenant + "', '" + COLL + "', '/p/q2.md', 'pending', NOW(), 'dc-doc-1')");
     }
 
     /** RDR-191 (nexus-o8dil.48): chunks_384/768/1024 unified into nexus.chunks --

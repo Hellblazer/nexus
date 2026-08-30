@@ -953,20 +953,23 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/mac-signed-binary-gate.sh:190",
         # --- service/native-smoke.sh (8 entries): native-image
         # release-only smoke; needs a real GraalVM native build to
-        # safely verify a rewrite. Retargeted (nexus-l8xnz, pre-existing
-        # drift found while gating this bead): the 64-hex doc_id fix
-        # (5d142ed72) added 3 comment lines before the T1 section, shifting
-        # every site from :126 onward by +3; the migration-check site at
-        # :76 is above that point and unmoved. Numbers regenerated from the
+        # safely verify a rewrite. Retargeted (nexus-cm5km): the two
+        # inline `uv run python -c '...'` heredocs (T1, then memory/
+        # plans/taxonomy/chash) were extracted into standalone files
+        # under service/smoke-probes/ so tests/test_native_smoke_client_
+        # probes.py can run the identical code against the unit suite's
+        # engine substrate -- this shrank the script from 497 to 391
+        # lines and shifted every site below the first extraction point
+        # (:107 in the pre-edit file). Numbers regenerated from the
         # detector itself (_early_exit_consumer_hits), not arithmetic.
-        "service/native-smoke.sh:129",
-        "service/native-smoke.sh:222",
-        "service/native-smoke.sh:354",
-        "service/native-smoke.sh:446",
-        "service/native-smoke.sh:484",
-        "service/native-smoke.sh:490",
-        "service/native-smoke.sh:493",
-        "service/native-smoke.sh:76",
+        "service/native-smoke.sh:82",
+        "service/native-smoke.sh:135",
+        "service/native-smoke.sh:196",
+        "service/native-smoke.sh:248",
+        "service/native-smoke.sh:340",
+        "service/native-smoke.sh:378",
+        "service/native-smoke.sh:384",
+        "service/native-smoke.sh:387",
         # --- service/linux-native-verify.sh:43 (1 entry): a GENUINE
         # FALSE POSITIVE, not a "needs live infra" deferral -- the
         # matched pipe (`native-image --version | head -1`) sits inside a

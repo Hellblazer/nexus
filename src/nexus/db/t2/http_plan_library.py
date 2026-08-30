@@ -107,7 +107,23 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         Unlike the direct SQLite path (which synthesizes match_text from
         verb/name/scope in Python), this client sends ``match_text`` built
         here so the service stores the correct FTS payload.
+
+        Raises:
+            ValueError: ``verb`` is blank. hygiene-001 (nexus-tk070.p6a
+                follow-on): ``plans.verb`` is NOT NULL now
+                (hygiene-001-11) — the library is verb-dimensional
+                (RDR-078) and a verb-less plan pollutes it (the
+                nexus-fiovt class). The MCP ``plan_save`` tool
+                (``mcp/core.py``) already refuses a blank verb with a
+                friendly message before ever calling this method, but
+                this is the actual choke point every ``save_plan``
+                caller (MCP tool, CLI, tests, ``nx_answer``'s grow
+                path) shares — raising here catches every OTHER caller
+                too, and does it before the round trip instead of
+                relying on the engine's own 409.
         """
+        if not verb or not verb.strip():
+            raise ValueError("verb required")
         # nexus-i711w Stage 2 Phase 0: the scope helpers were only RE-EXPORTED
         # by plan_library (they live in nexus.plans.scope), and match-text
         # synthesis now has its own home. Neither import touches a dying module.

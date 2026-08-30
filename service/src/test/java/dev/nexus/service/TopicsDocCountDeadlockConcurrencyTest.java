@@ -519,11 +519,15 @@ class TopicsDocCountDeadlockConcurrencyTest {
             su.setAutoCommit(true);
             try (PreparedStatement ps = su.prepareStatement(
                     "INSERT INTO nexus.taxonomy_centroids"
-                    + " (tenant_id, collection, topic_id, embedding_" + DIM + ") VALUES (?, ?, ?, ?::vector)")) {
+                    // label: taxonomy_centroids.label is NOT NULL (hygiene-001-9b,
+                    // nexus-tk070.p6a follow-on) -- no assertion in this class
+                    // reads the label value.
+                    + " (tenant_id, collection, topic_id, label, embedding_" + DIM + ") VALUES (?, ?, ?, ?, ?::vector)")) {
                 ps.setString(1, TENANT);
                 ps.setString(2, collection);
                 ps.setLong(3, topicId);
-                ps.setString(4, vectorLiteral(emb));
+                ps.setString(4, "seed-centroid-label");
+                ps.setString(5, vectorLiteral(emb));
                 ps.executeUpdate();
             }
         }

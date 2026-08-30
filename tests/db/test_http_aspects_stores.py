@@ -381,6 +381,32 @@ class TestHttpAspectQueue:
         with pytest.raises(ValueError, match="source_path"):
             store.enqueue("coll", "")
 
+    def test_enqueue_success_signals_local_wake(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """nexus-59611 stage 2: a successful enqueue touches the local wake
+        signal so a same-box worker's poll wait returns early instead of
+        waiting out DEFAULT_POLL_INTERVAL_S."""
+        calls: list[None] = []
+        monkeypatch.setattr(
+            "nexus.aspect_worker.signal_aspect_wake",
+            lambda *a, **k: calls.append(None),
+        )
+        store = self._queue({"/v1/aspects/queue/enqueue": {"ok": True}})
+        store.enqueue("coll", "doc.pdf")
+        assert len(calls) == 1
+
+    def test_enqueue_failure_does_not_signal_wake(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A failed enqueue must not touch the wake file — there is no new
+        row for a same-box worker to claim."""
+        calls: list[None] = []
+        monkeypatch.setattr(
+            "nexus.aspect_worker.signal_aspect_wake",
+            lambda *a, **k: calls.append(None),
+        )
+        store = self._queue({"/v1/aspects/queue/enqueue": RuntimeError("boom")})
+        with pytest.raises(Exception, match="boom"):
+            store.enqueue("coll", "doc.pdf")
+        assert calls == []
+
     def test_claim_next_returns_row(self):
         store = self._queue({
             "/v1/aspects/queue/claim_next": {

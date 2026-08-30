@@ -69,6 +69,7 @@ class TestSetScopeCommand:
             query="test plan query",
             plan_json='{"steps":[{"tool":"search","args":{"corpus":"all"}}]}',
             project=project,
+            verb="query",
         )
 
     def test_set_scope_is_registered(self) -> None:

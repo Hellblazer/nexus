@@ -392,6 +392,18 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   telemetry-006-2 nexus-tk070.p6b
                 //   aspects-004-1 nexus-ubnwk
                 //   catalog-034-0 nexus-v3w9n
+                //   hygiene-001-1 nexus-tk070.p6a
+                //   hygiene-001-2 nexus-tk070.p6a
+                //   hygiene-001-3 nexus-tk070.p6a
+                //   hygiene-001-4 nexus-tk070.p6a
+                //   hygiene-001-5 nexus-tk070.p6a
+                //   hygiene-001-6 nexus-tk070.p6a
+                //   hygiene-001-7 nexus-tk070.p6a
+                //   hygiene-001-8 nexus-tk070.p6a
+                //   hygiene-001-9 nexus-tk070.p6a
+                //   hygiene-001-9b nexus-tk070.p6a
+                //   hygiene-001-10 nexus-tk070.p6a
+                //   hygiene-001-11 nexus-tk070.p6a
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -678,6 +690,102 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     seedFrecencyTtlRow(su, "t1", "6".repeat(64), 0);
                     seedFrecencyTtlRow(su, "t1", "7".repeat(64), 45);
 
+                    // hygiene-001-1 (nexus-tk070.p6a follow-on, review round item 2 --
+                    // nexus-gm38i seed-coverage lint): document_aspects.doc_id/
+                    // source_uri NOT NULL. aspects-004-1's own seed above (the
+                    // ubnwk-aspect.md row) does NOT exercise this changeset's own
+                    // DELETE/UPDATE arms -- that row's doc_id is NULL at insert time
+                    // but its source_uri deliberately MATCHES a real catalog
+                    // document, so aspects-004-1 (which runs earlier in this same
+                    // hop) already converts it to a real doc_id before hygiene-001-1
+                    // ever sees it. Two DEDICATED rows, unconvertible by aspects-004-1
+                    // by construction:
+                    //   DELETE arm: doc_id NULL, source_uri that matches NO real
+                    //   catalog document (aspects-004-1's join misses, doc_id stays
+                    //   NULL all the way to hygiene-001-1).
+                    //   UPDATE arm: doc_id already set (bypasses aspects-004-1
+                    //   entirely, its predicate is doc_id IS NULL), source_uri NULL.
+                    try (var ps = su.prepareStatement(
+                        "INSERT INTO nexus.document_aspects "
+                        + "(tenant_id, collection, source_path, proposed_method, extracted_at, "
+                        + "model_version, extractor_name, source_uri, doc_id) "
+                        + "VALUES ('t1', 'code__x', 'seed/hygiene1-orphan.md', 'rehearsal-seeded', "
+                        + "now(), 'rehearsal-model', 'rehearsal-extractor', "
+                        + "'file:///seed/hygiene1-unconvertable.md', NULL)")) {
+                        ps.executeUpdate();
+                    }
+                    try (var ps = su.prepareStatement(
+                        "INSERT INTO nexus.document_aspects "
+                        + "(tenant_id, collection, source_path, proposed_method, extracted_at, "
+                        + "model_version, extractor_name, source_uri, doc_id) "
+                        + "VALUES ('t1', 'code__x', 'seed/hygiene1-legit.md', 'rehearsal-seeded', "
+                        + "now(), 'rehearsal-model', 'rehearsal-extractor', NULL, '1.1.100')")) {
+                        ps.executeUpdate();
+                    }
+
+                    // hygiene-001-2 (aspect_extraction_queue.doc_id NOT NULL):
+                    // reverses fk-001-4's nullable conversion (already applied at
+                    // OLD_TAG) -- doc_id NULL is representable at this seed point.
+                    try (var ps = su.prepareStatement(
+                        "INSERT INTO nexus.aspect_extraction_queue "
+                        + "(tenant_id, collection, source_path, doc_id, enqueued_at) "
+                        + "VALUES ('t1', 'code__x', 'seed/hygiene2-orphan.md', NULL, now())")) {
+                        ps.executeUpdate();
+                    }
+
+                    // hygiene-001-3 (document_highlights.source_uri/collection NOT
+                    // NULL): source_uri/collection are nullable at baseline (no
+                    // separate fk-00X conversion needed for THOSE columns), but
+                    // doc_id itself carries a real FK to catalog_documents by this
+                    // point in the changelog -- reuse the already-registered
+                    // 1.1.101 document (no OTHER document_highlights row claims it)
+                    // rather than a fabricated identity.
+                    try (var ps = su.prepareStatement(
+                        "INSERT INTO nexus.document_highlights "
+                        + "(tenant_id, doc_id, source_uri, collection, ingested_at) "
+                        + "VALUES ('t1', '1.1.101', NULL, NULL, now())")) {
+                        ps.executeUpdate();
+                    }
+
+                    // hygiene-001-9b (taxonomy_centroids.label NOT NULL): a dedicated
+                    // collection/topic_id, distinct from taxonomy-007-1's own
+                    // code__x/code__y/code__z rows above, so this row does not
+                    // perturb THEIR per-collection count assertions. No stub
+                    // registration needed (taxonomy_centroids_<dim> carries no FK to
+                    // catalog_collections or nexus.topics, per taxonomy-007-1's own
+                    // coverage note above). label=null binds SQL NULL via
+                    // PreparedStatement#setString.
+                    seedTaxonomyCentroidLegacyContent(
+                        su, 384, "t1", "code__hyg9b", 999L, null);
+
+                    // hygiene-001-10/-11 (nexus-tk070.p6a follow-on, coordinator scope
+                    // addition): plans TTL catch-up sweep + plans.verb NOT NULL. Two
+                    // DEDICATED rows, each isolated from the OTHER changeset's own
+                    // predicate so this rehearsal proves each independently:
+                    //   -10 row: verb set (dodges -11's verb-IS-NULL delete), ttl=1
+                    //   (survives plans-003-1's earlier ttl=0 delete, above), but
+                    //   created_at backdated 10 days -- age (10 days) > ttl_days (1)
+                    //   at hygiene-001-10's own predicate, so it is expired and
+                    //   deleted by THIS changeset specifically, not plans-003-1's
+                    //   ttl=0 arm.
+                    //   -11 row: verb NULL, ttl NULL (permanent -- dodges -10's
+                    //   `ttl_days IS NOT NULL` predicate entirely), so only
+                    //   hygiene-001-11's verb-IS-NULL delete can remove it.
+                    try (var ps = su.prepareStatement(
+                        "INSERT INTO nexus.plans "
+                        + "(tenant_id, project, query, plan_json, created_at, ttl, verb) "
+                        + "VALUES ('t1', 'p6a-proj', 'hygiene10 expired query', '{}'::jsonb, "
+                        + "now() - interval '10 days', 1, 'research')")) {
+                        ps.executeUpdate();
+                    }
+                    try (var ps = su.prepareStatement(
+                        "INSERT INTO nexus.plans "
+                        + "(tenant_id, project, query, plan_json, created_at, ttl, verb) "
+                        + "VALUES ('t1', 'p6a-proj', 'hygiene11 verbless query', '{}'::jsonb, "
+                        + "now(), NULL, NULL)")) {
+                        ps.executeUpdate();
+                    }
+
                     assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
                         .as("superuser ground truth after seeding").isEqualTo(5);
                     assertThat(count(su,
@@ -778,16 +886,28 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // catalog-014-0 leg: every seeded manifest row stamped with the
                     // owning document's physical_collection, none left NULL, and
                     // (now that the fixture backs each row with real content) still
-                    // present after catalog-025's dangling-row cleanup runs later in
-                    // this same hop.
+                    // present after catalog-025's dangling-row cleanup runs EARLIER
+                    // in this same hop -- but hygiene-001-5/-8 (nexus-tk070.p6a
+                    // follow-on, review round: the delete predicate was corrected
+                    // to key directly on octet_length(chash), not on a
+                    // metadata/chunk_index NULL proxy) now ALSO runs in this same
+                    // migrate() call, LATER, and unconditionally deletes every
+                    // legacy-width (16-byte, un-rekeyed) row regardless of stamp
+                    // or content -- both seeded chashes ("1"x32, "2"x32) are
+                    // exactly that. So the manifest_backfill()/catalog-025
+                    // survival this assertion used to pin is real but no longer
+                    // observable AT HEAD in a single full-hop migrate() call; it
+                    // remains directly observable at the intermediate checkpoint
+                    // this comment describes (proven by the two isEqualTo(0)
+                    // assertions below, which are the fact that survives to HEAD).
                     assertThat(count(su,
                         "SELECT count(*) FROM nexus.catalog_document_chunks "
                         + "WHERE collection = 'code__x'"))
-                        .as("catalog-014-0's manifest_backfill() must have stamped both "
-                            + "seeded rows from the owning doc's physical_collection, and "
-                            + "the stamp must survive catalog-025's later dangling-row "
-                            + "cleanup now that each row has matching chunks_384 content")
-                        .isEqualTo(2);
+                        .as("both 1.1.100 manifest rows are un-rekeyed legacy-width "
+                            + "(16-byte) chash -- hygiene-001-5's FK-safety cleanup "
+                            + "removes them (ahead of the chunks parent DELETE) by the "
+                            + "time this full hop reaches HEAD")
+                        .isEqualTo(0);
                     assertThat(count(su,
                         "SELECT count(*) FROM nexus.catalog_document_chunks "
                         + "WHERE collection IS NULL"))
@@ -885,24 +1005,42 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // merely completed without throwing. chunks_384's rows
                     // (the j862l seed, collection code__x) prove the same for
                     // that dim without a fresh seed.
+                    //
+                    // hygiene-001-5 (nexus-tk070.p6a follow-on, review round)
+                    // runs LATER in this SAME migrate() call and unconditionally
+                    // deletes every legacy-width (16-byte, un-rekeyed) chunks
+                    // row -- all four dim-seeded chashes here ("1"/"2"/"6"/"7"
+                    // x32) are exactly that, so by the time this full hop
+                    // reaches HEAD every one of them is gone, regardless of
+                    // which typed embedding column vectors-004-1 correctly
+                    // placed them under moments earlier in the same walk. The
+                    // isEqualTo(0) below is the fact that survives to HEAD; the
+                    // per-dim PLACEMENT property these comments describe is
+                    // real and was true at the intermediate point vectors-004-1
+                    // left it, just not independently observable from a single
+                    // full-hop migrate() call once a later, unrelated cleanup
+                    // also touches the same rows.
                     assertThat(count(su,
                         "SELECT count(*) FROM nexus.chunks WHERE tenant_id = 't1' "
                         + "AND collection = 'code__x' AND embedding_384 IS NOT NULL "
                         + "AND embedding_768 IS NULL AND embedding_1024 IS NULL"))
-                        .as("the two j862l chunks_384 rows landed under embedding_384 only")
-                        .isEqualTo(2);
+                        .as("the two j862l chunks_384 rows are legacy-width chash -- "
+                            + "hygiene-001-5 deletes them by HEAD")
+                        .isEqualTo(0);
                     assertThat(count(su,
                         "SELECT count(*) FROM nexus.chunks WHERE tenant_id = 't1' "
                         + "AND collection = 'code__y' AND embedding_768 IS NOT NULL "
                         + "AND embedding_384 IS NULL AND embedding_1024 IS NULL"))
-                        .as("the seeded chunks_768 row landed under embedding_768 only")
-                        .isEqualTo(1);
+                        .as("the seeded chunks_768 row is legacy-width chash -- "
+                            + "hygiene-001-5 deletes it by HEAD")
+                        .isEqualTo(0);
                     assertThat(count(su,
                         "SELECT count(*) FROM nexus.chunks WHERE tenant_id = 't2' "
                         + "AND collection = 'code__z' AND embedding_1024 IS NOT NULL "
                         + "AND embedding_384 IS NULL AND embedding_768 IS NULL"))
-                        .as("the seeded chunks_1024 row landed under embedding_1024 only")
-                        .isEqualTo(1);
+                        .as("the seeded chunks_1024 row is legacy-width chash -- "
+                            + "hygiene-001-5 deletes it by HEAD")
+                        .isEqualTo(0);
                     for (String t : new String[] {"chunks_384", "chunks_768", "chunks_1024"}) {
                         assertThat(count(su,
                             "SELECT count(*) FROM information_schema.tables "
@@ -969,7 +1107,21 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // the anti-join would see zero rows in nexus.chunks and WRONGLY
                     // delete the two content-backed 1.1.100 rows too (over-delete),
                     // and/or catalog-029-2's VALIDATE would fail against whatever
-                    // survived -- either failure mode is caught below.
+                    // survived -- either failure mode was caught below.
+                    //
+                    // COVERAGE NOTE (nexus-tk070.p6a follow-on, review round):
+                    // hygiene-001-5 now ALSO deletes these same two rows, later in
+                    // this same migrate() call (see the catalog-014-0/catalog-025-0
+                    // comment above for the full rationale) -- so a working
+                    // catalog-029-1 toggle (count stays 2, then hygiene-001-5 takes
+                    // it to 0) and a BROKEN one (over-delete takes it to 0 directly)
+                    // now converge on the SAME final count at HEAD, and the count
+                    // assertion below can no longer distinguish them from a single
+                    // full-hop migrate() call. catalog-029-1's toggle-correctness
+                    // mechanism itself stays covered independently by
+                    // ManifestChunkFkTest; the constraintExists/constraintValidated
+                    // checks above still hold as a (weaker, non-distinguishing)
+                    // sanity check.
                     assertThat(constraintExists(su, "fk_catalog_chunks_chunk"))
                         .as("fk_catalog_chunks_chunk must exist at HEAD (catalog-029-0)")
                         .isTrue();
@@ -981,10 +1133,115 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     assertThat(count(su,
                         "SELECT count(*) FROM nexus.catalog_document_chunks "
                         + "WHERE tenant_id = 't1' AND doc_id = '1.1.100'"))
-                        .as("the two content-backed 1.1.100 manifest rows must still exist at HEAD -- "
-                            + "a broken catalog-029-1 toggle (FORCE never turned off) would see zero "
-                            + "nexus.chunks rows and wrongly delete these two as false-dangling")
-                        .isEqualTo(2);
+                        .as("the two 1.1.100 manifest rows are legacy-width chash -- "
+                            + "hygiene-001-5 deletes them by HEAD regardless of "
+                            + "catalog-029-1's own (separately covered) toggle outcome")
+                        .isEqualTo(0);
+
+                    // hygiene-001-1: the DELETE-arm (doc_id NULL, unconvertible by
+                    // aspects-004-1) row must be gone; the UPDATE-arm row's
+                    // pre-existing doc_id must be untouched and its NULL source_uri
+                    // backfilled to ''.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.document_aspects "
+                        + "WHERE tenant_id = 't1' AND source_path = 'seed/hygiene1-orphan.md'"))
+                        .as("hygiene-001-1's DELETE WHERE doc_id IS NULL must remove the "
+                            + "unconvertible orphan row")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.document_aspects "
+                        + "WHERE tenant_id = 't1' AND source_path = 'seed/hygiene1-legit.md' "
+                        + "AND doc_id = '1.1.100' AND source_uri = ''"))
+                        .as("hygiene-001-1's UPDATE must backfill the legit row's NULL "
+                            + "source_uri to '', leaving its pre-existing doc_id untouched")
+                        .isEqualTo(1);
+
+                    // hygiene-001-2: the doc_id-NULL queue row must be gone.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.aspect_extraction_queue "
+                        + "WHERE tenant_id = 't1' AND source_path = 'seed/hygiene2-orphan.md'"))
+                        .as("hygiene-001-2's DELETE WHERE doc_id IS NULL must remove the "
+                            + "orphan queue row")
+                        .isEqualTo(0);
+
+                    // hygiene-001-3: the source_uri-and-collection-NULL highlight row
+                    // must be gone.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.document_highlights "
+                        + "WHERE tenant_id = 't1' AND doc_id = '1.1.101'"))
+                        .as("hygiene-001-3's DELETE WHERE source_uri IS NULL OR collection "
+                            + "IS NULL must remove the row")
+                        .isEqualTo(0);
+
+                    // hygiene-001-4: the 1.1.100 catalog_documents row (seeded above
+                    // with only tenant_id/tumbler/title/physical_collection) must have
+                    // its other four columns backfilled to their DEFAULT ''/0.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.catalog_documents "
+                        + "WHERE tenant_id = 't1' AND tumbler = '1.1.100' "
+                        + "AND content_type = '' AND corpus = '' AND file_path = '' "
+                        + "AND chunk_count = 0"))
+                        .as("hygiene-001-4 must backfill catalog_documents' NULL "
+                            + "content_type/corpus/file_path/chunk_count to ''/0")
+                        .isEqualTo(1);
+
+                    // hygiene-001-6: the code__x catalog_collections row (registered
+                    // above via registerCollection, which never sets created_at) must
+                    // end up with a non-null created_at.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.catalog_collections "
+                        + "WHERE tenant_id = 't1' AND name = 'code__x' AND created_at IS NOT NULL"))
+                        .as("hygiene-001-6 must backfill catalog_collections.created_at, "
+                            + "never leave it NULL")
+                        .isEqualTo(1);
+
+                    // hygiene-001-7: the 1.1.100->1.1.101 catalog_links row (seeded via
+                    // seedLink, which never sets created_at) must end up non-null.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.catalog_links "
+                        + "WHERE tenant_id = 't1' AND from_tumbler = '1.1.100' "
+                        + "AND to_tumbler = '1.1.101' AND created_at IS NOT NULL"))
+                        .as("hygiene-001-7 must backfill catalog_links.created_at to "
+                            + "now(), never leave it NULL")
+                        .isEqualTo(1);
+
+                    // hygiene-001-9: the canonical-width ("f"x64) relevance_log row
+                    // (legacy-001-2's own KEEP-arm seed, collection never set) must end
+                    // up with collection = ''.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.relevance_log "
+                        + "WHERE tenant_id = 't1' AND chunk_id = '" + "f".repeat(64) + "' "
+                        + "AND collection = ''"))
+                        .as("hygiene-001-9 must backfill relevance_log.collection to '', "
+                            + "never leave it NULL")
+                        .isEqualTo(1);
+
+                    // hygiene-001-9b: the dedicated code__hyg9b taxonomy_centroids row
+                    // (label=null at seed time) must end up with label = ''.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.taxonomy_centroids "
+                        + "WHERE tenant_id = 't1' AND collection = 'code__hyg9b' "
+                        + "AND topic_id = 999 AND label = ''"))
+                        .as("hygiene-001-9b must backfill taxonomy_centroids.label to "
+                            + "'', never leave it NULL")
+                        .isEqualTo(1);
+
+                    // hygiene-001-10/-11: both dedicated plans rows must be gone --
+                    // -10's expired-but-non-null-verb row via the TTL catch-up sweep,
+                    // -11's permanent-but-verb-null row via the verb backstop -- each
+                    // independent of the other changeset's own predicate.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.plans "
+                        + "WHERE tenant_id = 't1' AND query = 'hygiene10 expired query'"))
+                        .as("hygiene-001-10's TTL catch-up sweep must remove the expired, "
+                            + "non-null-verb plan row")
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.plans "
+                        + "WHERE tenant_id = 't1' AND query = 'hygiene11 verbless query'"))
+                        .as("hygiene-001-11's verb backstop must remove the permanent, "
+                            + "verb-null plan row")
+                        .isEqualTo(0);
 
                     // fk-004-0-reconcile-precount leg (nexus-iq0qr, RDR-191 Phase 5
                     // follow-up, seed-coverage lint follow-up): this READ-ONLY audit
@@ -1829,8 +2086,25 @@ class SchemaUpgradeRehearsalIntegrationTest {
     private static void seedChunk384LegacyContent(Connection c, String tenant, String collection,
                                                    String chash, String text) throws Exception {
         try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) "
-            + "VALUES (?, ?, ?, ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
+            // hygiene-001-5 (nexus-tk070.p6a follow-on): metadata is included
+            // (non-NULL) -- these rows carry the DELIBERATE 16-byte legacy
+            // chash shape rdr180-001's own header documents as
+            // un-rekeyed-and-tolerated (its octet CHECK stays NOT VALID for
+            // exactly such rows). Review round (critic census finding):
+            // hygiene-001-5's DELETE now keys DIRECTLY on
+            // octet_length(chash) <> 32, not on a metadata-NULL proxy, so
+            // this row IS deleted by hygiene-001-5 by the time a full hop
+            // reaches HEAD regardless of its metadata -- non-NULL metadata
+            // here no longer means "survives", it only means "this row was
+            // never a candidate for the metadata BACKFILL half of that
+            // changeset" (a real, distinct fact this test also exercises).
+            // The DELETE path itself is covered both here (see
+            // SchemaUpgradeRehearsalIntegrationTest's own isEqualTo(0)
+            // assertions against this exact seed) and by
+            // Hygiene001NotNullMigrationRlsTest's dedicated per-tenant
+            // legacy-width deletion coverage.
+            "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding, metadata) "
+            + "VALUES (?, ?, ?, ?, ?::vector, '{}'::jsonb) ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
             ps.setString(1, tenant);
             ps.setString(2, collection);
             ps.setString(3, chash);
@@ -1855,9 +2129,13 @@ class SchemaUpgradeRehearsalIntegrationTest {
     private static void seedChunkDimLegacyContent(Connection c, int dim, String tenant, String collection,
                                                    String chash, String text) throws Exception {
         try (var ps = c.prepareStatement(
+            // hygiene-001-5: metadata included non-NULL -- see
+            // seedChunk384LegacyContent's identical, fuller comment. This
+            // row IS deleted by hygiene-001-5's chash-width DELETE by HEAD
+            // regardless of its metadata (review round correction).
             "INSERT INTO nexus.chunks_" + dim
-            + " (tenant_id, collection, chash, chunk_text, embedding) "
-            + "VALUES (?, ?, ?, ?, ?::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
+            + " (tenant_id, collection, chash, chunk_text, embedding, metadata) "
+            + "VALUES (?, ?, ?, ?, ?::vector, '{}'::jsonb) ON CONFLICT (tenant_id, collection, chash) DO NOTHING")) {
             ps.setString(1, tenant);
             ps.setString(2, collection);
             ps.setString(3, chash);
@@ -1948,16 +2226,36 @@ class SchemaUpgradeRehearsalIntegrationTest {
         }
     }
 
-    /** Manifest row with {@code collection} deliberately NULL (pre-catalog-014 shape). */
+    /**
+     * Manifest row with {@code collection} deliberately NULL (pre-catalog-014
+     * shape). chunk_index is included, set equal to position (hygiene-001-8,
+     * nexus-tk070.p6a follow-on: chunk_index is NOT NULL now, and this row's
+     * 32-hex chash is the DELIBERATE 16-byte legacy shape rdr180-001's own
+     * header documents as un-rekeyed-and-tolerated -- its octet CHECK stays
+     * NOT VALID for exactly such rows). Review round (critic census
+     * finding): hygiene-001-5/-8's DELETEs now key DIRECTLY on
+     * octet_length(chash) &lt;&gt; 32, not on a chunk_index/metadata-NULL
+     * proxy -- every caller of this helper passes a legacy-width chash, so
+     * every row it seeds IS deleted by HEAD (hygiene-001-5's FK-safety
+     * cleanup for the ones referencing a doomed chunks row, hygiene-001-8's
+     * own DELETE for any orphan). Supplying chunk_index up front is no
+     * longer about survival; it only means "this row was never a candidate
+     * for the chunk_index BACKFILL half of hygiene-001-8" (a real, distinct
+     * fact, same as chunks.metadata above). The DELETE path is covered both
+     * here (this test's own isEqualTo(0) assertions against these exact
+     * seeds) and by Hygiene001NotNullMigrationRlsTest's dedicated
+     * per-tenant legacy-width deletion coverage.
+     */
     private static void seedManifestRow(Connection c, String tenant, String docId,
                                         int position, String chash) throws Exception {
         try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) "
-            + "VALUES (?, ?, ?, ?)")) {
+            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, chunk_index) "
+            + "VALUES (?, ?, ?, ?, ?)")) {
             ps.setString(1, tenant);
             ps.setString(2, docId);
             ps.setInt(3, position);
             ps.setString(4, chash);
+            ps.setInt(5, position);
             ps.executeUpdate();
         }
     }
@@ -2066,9 +2364,15 @@ class SchemaUpgradeRehearsalIntegrationTest {
      */
     private static void seedPlanRow(Connection c, String tenant, String project,
                                      String query, Integer ttl) throws Exception {
+        // hygiene-001-11 (nexus-tk070.p6a follow-on) DELETEs any verb-IS-NULL
+        // plans row (the pre-nexus-fiovt shakeout-residue class) regardless of
+        // ttl_days -- an independent, LATER sweep from plans-003-1's own
+        // ttl=0 DELETE this helper's two callers exist to probe. A real verb
+        // keeps both rows out of hygiene-001-11's WHERE clause so this
+        // helper continues to isolate plans-003-1's ttl selectivity alone.
         try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.plans (tenant_id, project, query, plan_json, created_at, ttl) "
-            + "VALUES (?, ?, ?, '{}'::jsonb, now(), ?)")) {
+            "INSERT INTO nexus.plans (tenant_id, project, query, plan_json, created_at, ttl, verb) "
+            + "VALUES (?, ?, ?, '{}'::jsonb, now(), ?, 'research')")) {
             ps.setString(1, tenant);
             ps.setString(2, project);
             ps.setString(3, query);

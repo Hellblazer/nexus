@@ -181,7 +181,7 @@ class TestPlanTTL:
     @pytest.mark.parametrize("ttl,expected_ttl", [(30, 30), (None, None)])
     def test_save_plan_ttl(self, tmp_path, ttl, expected_ttl):
         db = T2Database(tmp_path / "t2.db")
-        row_id = db.save_plan(query="plan", plan_json='{}', **({} if ttl is None else {"ttl": ttl}))
+        row_id = db.save_plan(query="plan", plan_json='{}', verb="query", **({} if ttl is None else {"ttl": ttl}))
         # Read back through the public surface (works on both the SQLite
         # and the service-backed substrate — RDR-155 P4b P0a').
         row = db.plans.get_plan(row_id)
@@ -192,7 +192,7 @@ class TestPlanTTL:
     @pytest.mark.parametrize("method", ["search_plans", "list_plans"])
     def test_ttl_in_results(self, tmp_path, method):
         db = T2Database(tmp_path / "t2.db")
-        db.save_plan(query="ttl plan", plan_json='{}', ttl=7)
+        db.save_plan(query="ttl plan", plan_json='{}', ttl=7, verb="query")
         results = getattr(db, method)("ttl plan") if method == "search_plans" else getattr(db, method)()
         assert len(results) == 1
         assert results[0]["ttl"] == 7
@@ -216,7 +216,7 @@ class TestPlanTTLEnforcement:
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
         return db.plans.import_plan(
             project="", query=query, plan_json='{}', outcome="success",
-            tags="", created_at=created_at, ttl=ttl,
+            tags="", created_at=created_at, ttl=ttl, verb="query",
         )
 
     @pytest.mark.parametrize("method", ["search_plans", "list_plans"])
@@ -233,7 +233,7 @@ class TestPlanTTLEnforcement:
 
     def test_fresh_plan_with_ttl_included(self, tmp_path):
         db = T2Database(tmp_path / "t2.db")
-        db.save_plan(query="fresh cached plan", plan_json='{}', ttl=30)
+        db.save_plan(query="fresh cached plan", plan_json='{}', ttl=30, verb="query")
         assert len(db.search_plans("fresh cached plan")) == 1
 
 

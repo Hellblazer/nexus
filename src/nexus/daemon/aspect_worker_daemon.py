@@ -189,6 +189,11 @@ class AspectWorkerDaemon:
         )
         self._supervisor.publish_once()
         self._worker = self._worker_factory()
+        # nexus-59611 stage 2 (review): the daemon's --config-dir is the one
+        # the wake file must be read from; fakes without the hook are untouched.
+        bind = getattr(self._worker, "bind_config_dir", None)
+        if callable(bind):
+            bind(self._config_dir)
         # nexus-yg70j: hand this daemon's stand-down hook to the worker. A
         # worker that detects its own environment is broken must be able to
         # stop the PROCESS -- stopping only its thread leaves this daemon

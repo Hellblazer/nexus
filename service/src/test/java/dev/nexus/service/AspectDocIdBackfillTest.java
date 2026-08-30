@@ -43,107 +43,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  * A shared, already-fully-migrated-to-HEAD template is unusable for this:
  * by the time such a template exists, the backfill has already run against
  * an empty table and there is nothing left to observe.
+ *
+ * <p>{@code backfill_stampsPreExistingNullDocIdRow_whenSourceUriMatches} DELETED
+ * (hygiene-001 step 1, nexus-tk070.p6a follow-on): its non-matching-source_uri
+ * "orphan stays doc_id IS NULL forever" companion row is no longer representable
+ * post-migration — hygiene-001-1 DELETEs every still-NULL-doc_id document_aspects
+ * row later in the same changelog walk this test applies, and that DELETE's own
+ * FORCE-RLS-toggle correctness is Hygiene001NotNullMigrationRlsTest's territory.
  */
 class AspectDocIdBackfillTest {
 
     private static final String TARGET_CHANGESET_ID = "aspects-004-1";
     private static final String MASTER_CHANGELOG = "db/changelog/db.changelog-master.xml";
-
-    @Test
-    void backfill_stampsPreExistingNullDocIdRow_whenSourceUriMatches() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
-        try {
-            final String role = "nexus_admin_aspect_backfill_test";
-            final String pass = "nexus_admin_aspect_backfill_test_pass";
-            bootstrapAdminRole(pg, role, pass);
-
-            var cfg = new com.zaxxer.hikari.HikariConfig();
-            cfg.setJdbcUrl(pg.getJdbcUrl());
-            cfg.setUsername(role);
-            cfg.setPassword(pass);
-            cfg.setMaximumPoolSize(2);
-            cfg.setPoolName("nexus-admin-aspect-backfill-test");
-
-            try (var adminDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
-                // Phase 1: migrate up to (NOT including) aspects-004-1, so the
-                // legacy row below can be seeded BEFORE the backfill ever runs.
-                migrateUpTo(adminDs, TARGET_CHANGESET_ID);
-
-                // Phase 2: seed a legacy state — a catalog document with a real
-                // source_uri, and a document_aspects row referencing the SAME
-                // source_uri whose doc_id predates the fk-001-2 nullable
-                // conversion's go-forward stamping (doc_id IS NULL).
-                try (Connection su = pg.createConnection("")) {
-                    su.setAutoCommit(true);
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                        + "VALUES ('backfill-tenant', 'knowledge__bf__voyage-context-3__v1')");
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.catalog_documents "
-                        + "  (tenant_id, tumbler, title, source_uri, physical_collection) "
-                        + "VALUES ('backfill-tenant', 'bf-doc-1', 'Doc', "
-                        + "'file:///legacy/paper.md', 'knowledge__bf__voyage-context-3__v1')");
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.document_aspects "
-                        + "  (tenant_id, collection, source_path, proposed_method, "
-                        + "   extracted_at, model_version, extractor_name, source_uri, doc_id) "
-                        + "VALUES ('backfill-tenant', 'knowledge__bf__voyage-context-3__v1', "
-                        + "'legacy/paper.md', 'legacy extraction', "
-                        + "'2025-01-01T00:00:00+00'::timestamptz, 'legacy-model', "
-                        + "'legacy-extractor', 'file:///legacy/paper.md', NULL)");
-
-                    // A second row that must NOT be touched: source_uri has no
-                    // matching catalog document at all — stays NULL (aspects-004's
-                    // own header: "not a bug, some legacy notes predate URI
-                    // normalization").
-                    su.createStatement().execute(
-                        "INSERT INTO nexus.document_aspects "
-                        + "  (tenant_id, collection, source_path, proposed_method, "
-                        + "   extracted_at, model_version, extractor_name, source_uri, doc_id) "
-                        + "VALUES ('backfill-tenant', 'knowledge__bf__voyage-context-3__v1', "
-                        + "'legacy/orphan.md', 'legacy extraction', "
-                        + "'2025-01-01T00:00:00+00'::timestamptz, 'legacy-model', "
-                        + "'legacy-extractor', 'file:///legacy/no-such-doc.md', NULL)");
-                }
-
-                // Phase 3: apply the rest of the changelog (aspects-004-1 onward).
-                try (Connection conn = adminDs.getConnection()) {
-                    Database database = DatabaseFactory.getInstance()
-                        .findCorrectDatabaseImplementation(new JdbcConnection(conn));
-                    try (Liquibase liquibase = new Liquibase(
-                            MASTER_CHANGELOG, new ClassLoaderResourceAccessor(), database)) {
-                        liquibase.update(new Contexts(), new LabelExpression());
-                    }
-                }
-
-                // Phase 4: assert the walk stamped the matching row and left the
-                // non-matching row alone.
-                try (Connection su = pg.createConnection("")) {
-                    ResultSet matched = su.createStatement().executeQuery(
-                        "SELECT doc_id FROM nexus.document_aspects "
-                        + "WHERE tenant_id = 'backfill-tenant' AND source_path = 'legacy/paper.md'");
-                    assertThat(matched.next()).isTrue();
-                    assertThat(matched.getString("doc_id"))
-                        .as("aspects-004-1's backfill must stamp doc_id = the matching "
-                            + "catalog document's tumbler for a pre-existing NULL-doc_id "
-                            + "row whose source_uri exactly matches a live, non-alias, "
-                            + "non-tombstoned catalog document")
-                        .isEqualTo("bf-doc-1");
-
-                    ResultSet orphan = su.createStatement().executeQuery(
-                        "SELECT doc_id FROM nexus.document_aspects "
-                        + "WHERE tenant_id = 'backfill-tenant' AND source_path = 'legacy/orphan.md'");
-                    assertThat(orphan.next()).isTrue();
-                    assertThat(orphan.getString("doc_id"))
-                        .as("a legacy row with no matching catalog source_uri must stay "
-                            + "doc_id IS NULL — never a bug, per the changeset's own header")
-                        .isNull();
-                }
-            }
-        } finally {
-            pg.stop();
-        }
-    }
 
     @Test
     void backfill_neverOverwritesAnAlreadyStampedDocId() throws Exception {

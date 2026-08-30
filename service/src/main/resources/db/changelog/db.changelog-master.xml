@@ -940,6 +940,21 @@
          above, which it does not depend on). -->
     <include file="db/changelog/catalog-034-tumbler-grammar.xml"/>
 
+    <!-- nexus-tk070.p6a follow-on (T2 nexus/nullable-column-inventory-2026-08-29,
+         Sam decision) — schema-hygiene NOT NULL arc across document_aspects,
+         aspect_extraction_queue, document_highlights, catalog_documents, chunks,
+         catalog_collections, catalog_links, catalog_document_chunks,
+         relevance_log, taxonomy_centroids, and plans (verb + a coordinator-
+         approved expired-row catch-up sweep). Depends on every table-creating
+         changeset it touches (all well before this point) and on
+         aspects-004-doc-id-backfill.xml (immediately above, in spirit — same
+         doc_id join identity). Placed after catalog-034-tumbler-grammar.xml
+         (current tail) and before the grants-nexus-svc.xml runAlways block,
+         matching the established late-append convention (D0.1). See the
+         file's own header for the FORCE-RLS toggle rationale and the full
+         per-step rationale. -->
+    <include file="db/changelog/hygiene-001-not-null.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

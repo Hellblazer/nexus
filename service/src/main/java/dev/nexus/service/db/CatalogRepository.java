@@ -3999,7 +3999,13 @@ public final class CatalogRepository {
                 CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
                 CATALOG_DOCUMENT_CHUNKS.COLLECTION);
         for (var row : rows) {
-            insert = insert.values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
+            // hygiene-001 (nexus-tk070.p6a follow-on): catalog_document_chunks.chunk_index
+            // is NOT NULL now — a client that omits it (the wire field predates this
+            // guarantee; 22,298 live rows were NULL before the backfill) falls back to
+            // the row's own `position`, its documented duplicate, rather than binding
+            // NULL and failing the constraint.
+            insert = insert.values(tenant, docId, i(row,"position"), s(row,"chash"),
+                    ni(i(row,"chunk_index"), i(row,"position")),
                     i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"), coll);
         }
         switch (mode) {
@@ -5964,7 +5970,11 @@ public final class CatalogRepository {
                        nne(s(coll, "model_version")), nne(s(coll, "display_name")),
                        nb(bFlag(coll, "legacy_grandfathered"), false),
                        nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
-                       tsOrNull(s(coll, "created_at")))
+                       // hygiene-001 (nexus-tk070.p6a follow-on): created_at is NOT NULL
+                       // now — the client never sends it (nexus-1wjmq class), so stamp
+                       // "now" on insert rather than binding NULL (mirrors createdAtOrNow's
+                       // existing catalog_links fix, nexus-4j80w).
+                       createdAtOrNow(s(coll, "created_at")))
                .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
                .doUpdate()
                .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
@@ -7749,7 +7759,11 @@ public final class CatalogRepository {
             insert = insert.values(DSL.val(tenant),
                     DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
                     DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
-                    DSL.val(nne(s(lnk,"created_by"))), DSL.val(tsOrNull(s(lnk,"created_at"))),
+                    DSL.val(nne(s(lnk,"created_by"))),
+                    // hygiene-001 (nexus-tk070.p6a follow-on): created_at is NOT
+                    // NULL now; stamp "now" when the import row doesn't carry one
+                    // (mirrors upsertCollection's identical fix).
+                    DSL.val(createdAtOrNow(s(lnk,"created_at"))),
                     jsonbVal(metaJson));
         }
         try {
@@ -7821,7 +7835,10 @@ public final class CatalogRepository {
                .values(DSL.val(tenant),
                        DSL.val(s(lnk,"from_tumbler")), DSL.val(s(lnk,"to_tumbler")), DSL.val(s(lnk,"link_type")),
                        DSL.val(nne(s(lnk,"from_span"))), DSL.val(nne(s(lnk,"to_span"))),
-                       DSL.val(nne(s(lnk,"created_by"))), DSL.val(tsOrNull(s(lnk,"created_at"))),
+                       DSL.val(nne(s(lnk,"created_by"))),
+                       // hygiene-001: created_at is NOT NULL now (see
+                       // insertImportLinkChunkUnchecked's identical fix).
+                       DSL.val(createdAtOrNow(s(lnk,"created_at"))),
                        jsonbVal(metaJson))
                .onConflict(CATALOG_LINKS.TENANT_ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE)
                .doNothing()
@@ -7969,7 +7986,9 @@ public final class CatalogRepository {
                             nne(s(coll, "model_version")), nne(s(coll, "display_name")),
                             nb(bFlag(coll, "legacy_grandfathered"), false),
                             nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
-                            tsOrNull(s(coll, "created_at")));
+                            // hygiene-001: created_at is NOT NULL now; stamp "now" when
+                            // the import row doesn't carry one (see upsertCollection).
+                            createdAtOrNow(s(coll, "created_at")));
                 }
                 insert.onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
                       .doUpdate()
@@ -8008,7 +8027,9 @@ public final class CatalogRepository {
                    nne(s(coll, "model_version")), nne(s(coll, "display_name")),
                    nb(bFlag(coll, "legacy_grandfathered"), false),
                    nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
-                   tsOrNull(s(coll, "created_at")));
+                   // hygiene-001: created_at is NOT NULL now; stamp "now" when the
+                   // import row doesn't carry one (see upsertCollection).
+                   createdAtOrNow(s(coll, "created_at")));
         insert.onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
               .doUpdate()
               .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
@@ -8056,11 +8077,16 @@ public final class CatalogRepository {
         m.put("title",               raw.getOrDefault("title", null));
         m.put("author",              raw.getOrDefault("author", null));
         m.put("year",                raw.getOrDefault("year", null));
-        m.put("content_type",        raw.getOrDefault("content_type", null));
-        m.put("file_path",           raw.getOrDefault("file_path", null));
-        m.put("corpus",              raw.getOrDefault("corpus", null));
-        m.put("physical_collection", raw.getOrDefault("physical_collection", null));
-        m.put("chunk_count",         raw.getOrDefault("chunk_count", null));
+        // hygiene-001 (nexus-tk070.p6a follow-on): these five columns are NOT NULL
+        // now — nne()/0 here is belt-and-suspenders documentation of that guarantee
+        // (every write site already stamps ""/0; see registerDocumentWithOutcome,
+        // doImportDocument, buildUpdateDocumentQuery's null-skip), not a live gap.
+        m.put("content_type",        nne((String) raw.getOrDefault("content_type", null)));
+        m.put("file_path",           nne((String) raw.getOrDefault("file_path", null)));
+        m.put("corpus",              nne((String) raw.getOrDefault("corpus", null)));
+        m.put("physical_collection", nne((String) raw.getOrDefault("physical_collection", null)));
+        m.put("chunk_count",         raw.getOrDefault("chunk_count", null) != null
+                                          ? raw.get("chunk_count") : 0);
         m.put("head_hash",           raw.getOrDefault("head_hash", null));
         // nexus-cefa1.2: indexed_at is timestamptz now (catalog-031-1-documents-temporal)
         // — .intoMap() hands back an OffsetDateTime, not a String; format for the wire.

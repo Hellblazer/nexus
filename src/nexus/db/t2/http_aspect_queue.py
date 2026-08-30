@@ -130,6 +130,16 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
     # ── Public API — mirrors AspectExtractionQueue ────────────────────────────
 
+    def _signal_wake(self) -> None:
+        """Best-effort same-box wake touch after a successful enqueue
+        (nexus-59611 stage 2). ``signal_aspect_wake`` already swallows its
+        own failures (an unwritable config dir, races); nothing here can
+        fail the enqueue that just succeeded.
+        """
+        from nexus.aspect_worker import signal_aspect_wake  # noqa: PLC0415 — deferred to avoid circular import (aspect_worker <-> db.t2)
+
+        signal_aspect_wake()
+
     def enqueue(
         self,
         collection: str,
@@ -155,6 +165,7 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "content": content,
             "doc_id": doc_id,
         })
+        self._signal_wake()
 
     def enqueue_many(self, rows: list[dict]) -> int:
         """Batch-enqueue N documents in ONE round trip (nexus-nj4ch,
@@ -184,7 +195,10 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             return 0
         try:
             result = self._post("/enqueue_many", {"rows": rows})
-            return int((result or {}).get("enqueued", 0))
+            enqueued = int((result or {}).get("enqueued", 0))
+            if enqueued:
+                self._signal_wake()
+            return enqueued
         except Exception:  # noqa: BLE001 — batch unrecoverable (e.g. one row's constraint violation); per-row isolation fallback
             _log.warning(
                 "aspect_enqueue_many_failed_falling_back_per_row",

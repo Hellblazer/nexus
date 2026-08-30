@@ -12,11 +12,29 @@ Tests covering:
 """
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+from tests._catalog_fixture_ops import register_real_doc_id
+
+# hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
+# now carries a REAL FK to catalog_documents(tenant_id, tumbler) via the
+# engine's POST /v1/aspects/queue/enqueue 400 -- see the identical cache in
+# tests/test_document_aspects_store.py for the full rationale. One real
+# registration per test, memoized on the test's freshly-minted
+# NX_SERVICE_TOKEN.
+_doc_id_cache: dict[str, str] = {}
+
+
+def _shared_doc_id() -> str:
+    key = os.environ.get("NX_SERVICE_TOKEN", "")
+    if key not in _doc_id_cache:
+        _doc_id_cache[key] = register_real_doc_id()
+    return _doc_id_cache[key]
 
 
 # ── T2Database has RENAME_LOCK ────────────────────────────────────────────────
@@ -235,7 +253,7 @@ class TestReentrantAcquisition:
         """
         from nexus.db.t2 import T2Database
         db = T2Database(tmp_path / "t2.db")
-        db.aspect_queue.enqueue("code__test", "/file.py", "abc123")
+        db.aspect_queue.enqueue("code__test", "/file.py", "abc123", doc_id=_shared_doc_id())
 
         # Scenario: cascade holds the lock for a moment.
         lock_released = threading.Event()
