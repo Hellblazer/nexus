@@ -126,11 +126,16 @@ if [ "$MODE" = container ]; then
     mkdir -p "$HOST_ARTIFACTS"
     echo "== running the rehearsal in $IMAGE (source bind-mounted read-only at /src; failure artifacts under $HOST_ARTIFACTS)"
     keep_flag=(); [ "$KEEP" = 1 ] && keep_flag+=(--keep); [ "$PROMOTE" = 1 ] && keep_flag+=(--promote-machinery)
+    # /home/nexus is a tmpfs: the clone, its venv and the smoke's sandbox in
+    # RAM. On the overlay filesystem the engine's first-boot Liquibase walk
+    # took 47 s per step and the supervisor's readiness window expired
+    # (container run 4; on tmpfs all 354 changesets walk in under a second).
+    # The uv cache volume and the artifacts dir are mounted beneath it.
     docker run --rm --init \
+        --tmpfs /home/nexus:exec,uid=1000,gid=1000,size=16g \
         -v "$SOURCE_REPO:/src:ro" \
         -v "$HOST_ARTIFACTS:/home/nexus/artifacts" \
         -v nexus-plugin-cut-rehearsal-uv-cache:/home/nexus/.cache/uv \
-        -v nexus-plugin-cut-rehearsal-nx-cache:/home/nexus/.cache/nexus \
         -e NX_REHEARSAL_ARTIFACTS=/home/nexus/artifacts \
         -e NX_REHEARSAL_IN_CONTAINER=1 \
         "$IMAGE" bash /src/tests/e2e/plugin-cut-rehearsal/run.sh \
