@@ -29,7 +29,8 @@
 #      release-window shapes tolerated), a pull_request event payload carrying
 #      the cut's head sha, GITHUB_HEAD_REF set, and the checks that read the
 #      pin or the proof target under that environment with the require flag
-#      and vacuity grep
+#      and vacuity grep; then the same pin-walking modules on ci.yml's
+#      SHARD shape (depth-1, no tags, no require flag), where they must skip
 #   5. merge into main and the annotated anchored tag, pushed to the fake origin
 #   6. the tag workflow's steps (.github/workflows/plugin-release.yml) on a
 #      DEPTH-1 checkout of the tag with ONLY the derived base tag fetched (the
@@ -351,6 +352,21 @@ if grep -qE '[0-9]+ skipped' "$DRIFT_LOG"; then _die "VACUITY: drift-ledger test
     || _die "tests/test_plugin_structure.py (the per-plugin proof) failed on the cut PR's merge ref"
 "${prci_env[@]}" bash -c "cd '$PRCI' && uv run pytest tests/test_plugin_channel.py tests/test_cut_plugin_release.py tests/hooks/test_agent_dispatch_expect.py tests/test_sn_plugin.py tests/hooks/test_version_lockstep_hook.py -q -p no:cacheprovider" \
     || _die "pin-reading checks failed on the cut PR's merge ref"
+# ci.yml's pytest SHARDS are a second CI shape on the same PR: a depth-1
+# checkout with NO tags and NO require flag (nexus-dhs30). Every test that
+# walks the pin must SKIP there, never raise — the first real cut PR
+# (#1495) went red on TagVisibilityError from a proof test that lacked the
+# taglessness guard, which the tag-fetching leg above cannot see.
+SHARD="$SANDBOX/shard"
+git init -q "$SHARD" && git -C "$SHARD" remote add origin "$ORIGIN"
+git -C "$SHARD" fetch -q --depth=1 --no-tags origin refs/pull/1/merge
+git -C "$SHARD" checkout -q --detach FETCH_HEAD
+[ "$(git -C "$SHARD" tag -l | wc -l | tr -d ' ')" = 0 ] || _die "the shard-shaped checkout must carry no tags"
+(cd "$SHARD" && uv sync -q --group dev) || _die "uv sync failed in the shard checkout"
+env -u NX_REQUIRE_PLUGIN_DRIFT_CHECK GITHUB_EVENT_NAME=pull_request "GITHUB_EVENT_PATH=$EVENT" "GITHUB_HEAD_REF=$BRANCH" GITHUB_BASE_REF=main \
+    bash -c "cd '$SHARD' && uv run pytest tests/test_plugin_release_drift_ledger.py tests/test_plugin_channel.py tests/test_cut_plugin_release.py tests/test_sn_plugin.py tests/hooks/test_agent_dispatch_expect.py -q -p no:cacheprovider" \
+    || _die "pin-walking tests must pass (skip, not raise) on a tagless shard-shaped checkout"
+echo "   shard-shaped (tagless depth-1) checkout: pin-walking modules pass"
 
 _step "merge into main and push the anchored tag $TAG to the fake origin"
 g checkout -q main
