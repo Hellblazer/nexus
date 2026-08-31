@@ -6,7 +6,12 @@ lost RESPONSE after a successful server-side apply double-applies on
 retry (a re-claimed queue row orphans the first claim; mark_retry
 double-increments the retry budget toward premature terminal failure;
 put_or_merge's merge branch appends the same content twice). Fix:
-``idempotent=False`` issues the request exactly once.
+``idempotent=False`` issues the request exactly once — with the
+nexus-ig3qe carve-out: a definitive 401 (auth-layer rejection BEFORE the
+handler runs, so the operation provably never applied) re-mints/
+re-resolves and retries exactly once, closing the long-running aspect
+worker's expired-data-token claim hammering (218 claim 401s measured
+2026-08-31). See ``TestNonIdempotent401Remint``.
 
 bgh2j — the two STANDALONE (non-mixin) stores resolved their endpoint at
 construction with the BARE resolver while every mixin adopter got the
@@ -41,11 +46,34 @@ class _Probe(RefreshableHttpStoreMixin):
         self.reresolves += 1
 
 
-def _gateway_503() -> httpx.HTTPStatusError:
+def _status_error(code: int) -> httpx.HTTPStatusError:
     req = httpx.Request("POST", "http://x/y")
     return httpx.HTTPStatusError(
-        "503", request=req, response=httpx.Response(503, request=req),
+        str(code), request=req, response=httpx.Response(code, request=req),
     )
+
+
+def _gateway_503() -> httpx.HTTPStatusError:
+    return _status_error(503)
+
+
+class _ResolutionProbe(_Probe):
+    """Unpinned probe — the aspect worker's shape: a resolution-constructed
+    store whose credential can be re-minted. ``heal=True`` clears the
+    failure on re-resolve (a fresh mint fixes an expired token);
+    ``heal=False`` models a credential that stays rejected."""
+
+    def __init__(self, heal: bool = True) -> None:
+        super().__init__()
+        self._base_url_pinned = False
+        self._token_pinned = False
+        self._tenant = "default"
+        self._heal = heal
+
+    def _invalidate_and_reresolve(self) -> None:
+        self.reresolves += 1
+        if self._heal:
+            self.fail_with = None
 
 
 class TestIdempotentOptOut:
@@ -104,6 +132,20 @@ class TestIdempotentOptOut:
             f"{verb} must pass idempotent=False (nexus-tjvgf)"
         )
 
+    def test_fully_pinned_401_stays_single_attempt(self) -> None:
+        """A fixture-pinned store (explicit base_url + token, e.g. against a
+        fake server) has nothing a re-resolve could change — the nexus-ig3qe
+        carve-out must NOT engage; the 401 propagates exactly as before.
+        ``_Probe`` bypasses ``__init__`` so the pin flags are absent, which
+        the mixin treats as pinned (the same ``getattr(..., True)`` default
+        ``_apply_data_token_override`` uses)."""
+        p = _Probe()
+        p.fail_with = _status_error(401)
+        with pytest.raises(httpx.HTTPStatusError):
+            p._post("/claim_batch", {}, idempotent=False)
+        assert p.attempts == 1
+        assert p.reresolves == 0
+
     def test_put_or_merge_opts_out(self, monkeypatch) -> None:
         from nexus.db.t2.http_memory_store import HttpMemoryStore
 
@@ -136,6 +178,58 @@ class TestIdempotentOptOut:
         store = HttpMemoryStore(base_url="http://127.0.0.1:9", _token="t")
         store.merge_memories(1, [2, 3], "merged")
         assert captured.get("idempotent") is False
+
+
+class TestNonIdempotent401Remint:
+    """nexus-ig3qe: the 401 carve-out from the tjvgf opt-out.
+
+    A definitive 401 is an auth-layer rejection BEFORE the handler runs
+    (engine AuthFilter), so the non-idempotent operation provably never
+    applied — one remint-and-retry cannot double-claim / double-increment /
+    double-append. Without it, the long-running aspect worker's data token
+    expires on TTL and its ``claim_batch`` hammers the engine with the
+    stale token forever (218 claim 401s measured by conexus 2026-08-31;
+    the worker's claim loop catches, logs ``aspect_worker_claim_failed``,
+    and re-polls with the same dead credential)."""
+
+    def test_401_reresolves_and_retries_exactly_once_then_succeeds(self) -> None:
+        p = _ResolutionProbe(heal=True)
+        p.fail_with = _status_error(401)
+        result = p._post("/claim_batch", {"limit": 5}, idempotent=False)
+        assert result == {"ok": True}
+        assert p.attempts == 2, "401 must retry exactly once with the fresh credential"
+        assert p.reresolves == 1
+
+    def test_persistent_401_raises_after_single_retry(self) -> None:
+        """A credential that stays rejected after remint propagates — no
+        retry loops (the worker's poll loop owns pacing, not this layer)."""
+        p = _ResolutionProbe(heal=False)
+        p.fail_with = _status_error(401)
+        with pytest.raises(httpx.HTTPStatusError):
+            p._post("/claim_batch", {"limit": 5}, idempotent=False)
+        assert p.attempts == 2
+        assert p.reresolves == 1
+
+    def test_403_is_not_the_carve_out(self) -> None:
+        """403 = authenticated but forbidden — a fresh mint changes nothing,
+        and only 401 carries the never-executed guarantee this carve-out
+        rests on. Single attempt, no re-resolve."""
+        p = _ResolutionProbe(heal=True)
+        p.fail_with = _status_error(403)
+        with pytest.raises(httpx.HTTPStatusError):
+            p._post("/claim_batch", {"limit": 5}, idempotent=False)
+        assert p.attempts == 1
+        assert p.reresolves == 0
+
+    def test_transport_failure_still_never_retries_unpinned(self) -> None:
+        """The double-apply hazard lives in lost-response transport shapes —
+        the carve-out must not widen to them even on an unpinned store."""
+        p = _ResolutionProbe(heal=True)
+        p.fail_with = httpx.ConnectError("refused")
+        with pytest.raises(httpx.ConnectError):
+            p._post("/claim_batch", {"limit": 5}, idempotent=False)
+        assert p.attempts == 1
+        assert p.reresolves == 0
 
 
 class TestConstructionEvidenceGate:

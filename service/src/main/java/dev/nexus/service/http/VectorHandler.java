@@ -193,6 +193,19 @@ public final class VectorHandler implements HttpHandler {
             // actionable detail, never an opaque 500.
             log.error("event=vector_upstream_auth_failed op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 502, json(Map.of("error", e.getMessage())));
+        } catch (dev.nexus.service.vectors.UpstreamRateLimitedException e) {
+            // nexus-99r7y: Voyage is rate limiting and the embedder's bounded
+            // budget could not absorb it. An HONEST 429 + Retry-After of our
+            // own, sent with ~10s of margin under the public edge's 30s
+            // upstream bound — never the opaque edge-timeout 5xx the
+            // 2026-08-15 incident produced. The header is what the client's
+            // rate brake (conexus-cy9u7) keys on.
+            log.warn("event=vector_upstream_rate_limited op={} retry_after_s={} error={}",
+                     op, e.retryAfterSeconds(), e.getMessage());
+            exchange.getResponseHeaders().set("Retry-After", Long.toString(e.retryAfterSeconds()));
+            HttpUtil.send(exchange, 429, json(Map.of(
+                "error", e.getMessage(),
+                "retry_after_seconds", e.retryAfterSeconds())));
         } catch (EmbeddingModelUnavailableException e) {
             // nexus-pebfx.2: well-formed request, unservable in this embedding
             // mode (e.g. voyage-* collection while the service has no Voyage

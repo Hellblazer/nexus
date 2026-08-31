@@ -197,6 +197,22 @@ public final class Main {
             System.exit(1);
         }
 
+        // nexus-4ktfm review fold: force NX_HNSW_EF_SEARCH validation NOW —
+        // PgSession resolves it in a static initializer, and without this
+        // boot-time touch a malformed value would surface only at the first
+        // query and then poison the class (NoClassDefFoundError) for the
+        // process's life, invisible to health checks. Same fail-fast-at-boot
+        // ordering as the PoolerModeCheck above. Throwable, not Exception:
+        // a static-init failure arrives as ExceptionInInitializerError.
+        try {
+            log.info("event=hnsw_ef_search_floor floor={}",
+                     dev.nexus.service.db.PgSession.startupEfSearchFloor());
+        } catch (Throwable t) {
+            ds.close();
+            log.error("event=hnsw_ef_search_env_invalid error=\"{}\"", t.getMessage(), t);
+            System.exit(1);
+        }
+
         var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo, reranker);
         service.start();
 

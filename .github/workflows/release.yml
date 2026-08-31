@@ -290,6 +290,32 @@ jobs:
           # already-published version a no-op here instead of a hard stop.
           skip-existing: true
 
+      - name: Wait for PyPI simple index to serve the release (nexus-r433b)
+        run: |
+          # PyPI's upload API acknowledges BEFORE the CDN-backed simple index
+          # serves the new version, and resolvers (uv, pip) read the SIMPLE
+          # index — so for ~10-25 min after the publish step above, any
+          # resolution pinned ==/>= this version hard-fails with "no matching
+          # version" (measured on 4 consecutive releases; the .mcpb bundle and
+          # release-notes followers are the user-facing casualties). The
+          # GitHub-release step below is the announcement AND the .mcpb
+          # download point, so it must not exist before the version is
+          # installable. Poll the resolver-visible signal (the simple index
+          # itself, with the PEP 691 JSON Accept header — NOT the JSON API,
+          # which led the simple index every measured time) until the version
+          # appears. On timeout this fails loud; the workflow_dispatch retry
+          # path re-runs safely (the PyPI step is skip-existing).
+          # --require-served: the step below is the ANNOUNCEMENT with no
+          # downstream check — if the index is already past this version and
+          # does not serve it (e.g. a workflow_dispatch retry of an old tag
+          # whose upload is missing), fail loud instead of proceeding.
+          python3 scripts/wait_pypi_simple_index.py \
+            --package conexus \
+            --version "$RELEASE_VERSION" \
+            --timeout-seconds 1800 \
+            --poll-seconds 30 \
+            --require-served
+
       - name: Create GitHub Release
         # Pinned to v2.6.2 SHA after the floating @v2 tag was implicated
         # in a "Bad credentials" failure during the 4.34.4 publish (run

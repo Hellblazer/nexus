@@ -360,7 +360,7 @@ nx dt index --selection --dry-run
 | `--link-semantic` | After a record indexes, create `relates` edges to its DT similarity + explicit-link neighbours already indexed in nexus (RDR-139 Layer B). DT unavailable → zero edges. Opt-in |
 | `--writeback` | After a record indexes, stamp the nexus identity back onto the DT record (RDR-139 Layer F): `nx-indexed` / `nx-tumbler:<t>` tags + a tumbler backlink annotation. nexus-owned namespace only; never edits user content. Opt-in |
 | `--enrich` | After indexing, run a DT-CrossRef bibliographic gap-fill over each touched collection (RDR-139 Layer C): the `auto` primary backend, then DT's CrossRef resolver fills only still-empty `bib_*` fields (lowest precedence, never overwrites S2/OpenAlex). Opt-in |
-| `--dt-content` | Index non-file-backed records (web archives, bookmarks, formatted notes) from DT's AI-extracted text instead of skipping them (RDR-139 Layer D). Every such chunk is stamped `extraction_source=dt_content`; file-backed records still index from their file. DT unavailable → records skipped as before. Opt-in |
+| `--dt-content` | Index non-file-backed records (web archives, bookmarks, formatted notes) from DT's AI-extracted text instead of skipping them (RDR-139 Layer D). Web-archive boilerplate (navigation chrome, cookie banners, footers) is stripped before chunking (nexus-mok9x). Every such chunk is stamped `extraction_source=dt_content`; file-backed records still index from their file. DT unavailable → records skipped as before. Opt-in |
 | `--highlights` | After a record indexes, ingest its DT highlights + mentions as a markdown note attached to the record's tumbler in the `document_highlights` T2 table (RDR-139 Layer E). Read back with `nx dt highlights`. Opt-in |
 
 **RDR-139 layered ingest.** The opt-in flags above compose: a single
@@ -784,6 +784,24 @@ nx catalog search QUERY [--limit N] [--offset N] [--json]
 ```
 
 Find documents by title, author, corpus, or file path. Returns tumbler, content type, and title.
+
+### nx catalog export / import
+
+```
+nx catalog export FILE     # write the recovery bundle (run BEFORE a reinstall)
+nx catalog import FILE     # restore it (after reinstall + re-index)
+```
+
+One paired recovery verb (GH #1419.9): a human-inspectable JSONL bundle
+carrying the catalog **link graph** and **store_put-origin knowledge
+content** — the two things a reinstall cannot regenerate. Identity is
+`source_uri` (tumblers are not stable across reindex); no embeddings are
+carried (import re-embeds through the real store_put chain, so the
+bundle survives an embedding-mode change); import is idempotent and
+reports every unresolvable link or failed doc without aborting the rest.
+See `docs/catalog.md` § Recovery bundle for the format contract. For an
+embedding-preserving per-collection backup use `nx export COLLECTION`
+(`.nxexp`) instead.
 
 ### nx catalog show
 

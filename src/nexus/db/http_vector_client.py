@@ -1131,9 +1131,15 @@ def _edge_server(headers: object) -> str | None:
     return None
 
 
-def _edge_refusal_remedy(server: str, code: int) -> str:
-    """Remedy naming the EDGE, for a response the application never saw."""
-    return (
+def _edge_refusal_remedy(server: str, code: int, request_body_text: str = "") -> str:
+    """Remedy naming the EDGE, for a response the application never saw.
+
+    ``request_body_text`` (nexus-cmzib): when the refused request's body is
+    available and carries the measured shell-substitution trigger, the
+    defang hint is appended — see
+    :func:`nexus.db.edge_refusal.shell_substitution_hint`.
+    """
+    msg = (
         f"this was rejected at the EDGE (server={server}), not by the nexus "
         f"application — the request never reached it, so the HTTP {code} says "
         "nothing about NX_SERVICE_TOKEN. An AWS WAF managed rule is the usual "
@@ -1143,6 +1149,13 @@ def _edge_refusal_remedy(server: str, code: int) -> str:
         "injection string) is the known trigger — see nexus-1jtob. Check the "
         "edge/WAF logs for the blocking rule, not your credentials."
     )
+    if request_body_text:
+        from nexus.db.edge_refusal import shell_substitution_hint  # noqa: PLC0415 — deferred to avoid circular import (edge_refusal imports this module)
+
+        hint = shell_substitution_hint(request_body_text)
+        if hint is not None:
+            msg += f" {hint}"
+    return msg
 
 
 def _managed_remedy() -> str | None:
@@ -1254,7 +1267,12 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
         # a rejection the credentials had nothing to do with.
         edge_server = _edge_server(e.headers)
         if edge_server:
-            remedy: str | None = _edge_refusal_remedy(edge_server, e.code)
+            # nexus-cmzib: the request body is in scope here — let the remedy
+            # name the shell-substitution trigger when it is the likely cause.
+            remedy: str | None = _edge_refusal_remedy(
+                edge_server, e.code,
+                json.dumps(body) if body is not None else "",
+            )
         else:
             remedy = _managed_remedy() if e.code in (401, 403) else None
             if remedy is None:

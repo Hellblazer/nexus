@@ -81,6 +81,8 @@ class CceEmbedderParallelTest {
     private final Map<String, AtomicInteger> failuresRemaining = new ConcurrentHashMap<>();
     /** text -> remaining scripted 429 count (each hit returns 429, then decrements). */
     private final Map<String, AtomicInteger> rateLimitsRemaining = new ConcurrentHashMap<>();
+    /** text -> Retry-After header value to attach to scripted 429s (nexus-99r7y). */
+    private final Map<String, String> rateLimitRetryAfter = new ConcurrentHashMap<>();
 
     private final List<String> requestTexts = new CopyOnWriteArrayList<>();
     private final AtomicInteger inFlight = new AtomicInteger(0);
@@ -91,6 +93,7 @@ class CceEmbedderParallelTest {
         latencyMs.clear();
         failuresRemaining.clear();
         rateLimitsRemaining.clear();
+        rateLimitRetryAfter.clear();
         requestTexts.clear();
         inFlight.set(0);
         maxInFlight.set(0);
@@ -117,6 +120,10 @@ class CceEmbedderParallelTest {
                 AtomicInteger rl = rateLimitsRemaining.get(text);
                 if (rl != null && rl.get() > 0) {
                     rl.decrementAndGet();
+                    String retryAfter = rateLimitRetryAfter.get(text);
+                    if (retryAfter != null) {
+                        exchange.getResponseHeaders().set("Retry-After", retryAfter);
+                    }
                     sendStatus(exchange, 429, "{\"detail\": \"rate limited\"}");
                     return;
                 }
@@ -196,6 +203,12 @@ class CceEmbedderParallelTest {
 
     private CceEmbedder embedderWithJitterSeed(int parallelism, long seed) {
         return new CceEmbedder("test-key", "document", url, 5L, parallelism, Optional.empty(), new Random(seed));
+    }
+
+    /** nexus-99r7y: injectable 429 budget so fail-fast tests need no wall clock. */
+    private CceEmbedder embedderWithBudget(int parallelism, long budgetMs) {
+        return new CceEmbedder("test-key", "document", url, 5L, parallelism,
+                               Optional.empty(), new Random(), budgetMs);
     }
 
     // ── (a) bit-identity: parallel batch == N sequential single-text calls ───
@@ -318,6 +331,140 @@ class CceEmbedderParallelTest {
             long rlARequests = requestTexts.stream().filter(t -> t.equals("rl-a")).count();
             assertThat(rlARequests).isEqualTo(2);
         }
+    }
+
+    // ── nexus-99r7y: sustained-429 budget + Retry-After ──────────────────────
+
+    @Test
+    void retryAfterExceedingBudgetFailsFastTyped() {
+        // Voyage says "come back in 60s" but our budget is 500ms: sleeping
+        // would guarantee an edge-timeout 5xx, so the call must fail fast
+        // with the typed exception carrying an honest Retry-After — after
+        // exactly ONE upstream request and with essentially no wall clock.
+        rateLimitsRemaining.put("ra-big", new AtomicInteger(999));
+        rateLimitRetryAfter.put("ra-big", "60");
+
+        long start = System.nanoTime();
+        try (CceEmbedder cce = embedderWithBudget(4, 500L)) {
+            assertThatThrownBy(() -> cce.embed(List.of("ra-big")))
+                    .isInstanceOf(UpstreamRateLimitedException.class)
+                    .hasMessageContaining("rate limiting")
+                    .satisfies(e -> assertThat(
+                            ((UpstreamRateLimitedException) e).retryAfterSeconds())
+                            .isEqualTo(60L));
+        }
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
+        assertThat(elapsedMs)
+                .as("fail-fast must not sleep out the advertised Retry-After")
+                .isLessThan(5_000L);
+        assertThat(requestTexts.stream().filter(t -> t.equals("ra-big")).count())
+                .isEqualTo(1);
+    }
+
+    @Test
+    void sustained429IsBudgetBoundedNotAttemptBounded() {
+        // The 2026-08-15 incident class: a minutes-long project-RPM ceiling.
+        // Old behavior burned MAX_RETRIES(3) attempts and threw a generic
+        // RuntimeException -> opaque 500. New behavior keeps absorbing 429s
+        // past 3 attempts while the budget lasts, then fails TYPED.
+        rateLimitsRemaining.put("rl-sustained", new AtomicInteger(999));
+
+        // Budget must clear MIN_CALL_ALLOWANCE_MS (1s) with room for several
+        // tiny-base (5ms) backoff sleeps — 2.5s yields ~8-9 attempts in ~1.5s
+        // of wall clock before the fail-fast trips.
+        try (CceEmbedder cce = embedderWithBudget(4, 2_500L)) {
+            assertThatThrownBy(() -> cce.embed(List.of("rl-sustained")))
+                    .isInstanceOf(UpstreamRateLimitedException.class);
+        }
+        long attempts = requestTexts.stream().filter(t -> t.equals("rl-sustained")).count();
+        assertThat(attempts)
+                .as("429s must be budget-bounded, not capped at MAX_RETRIES=3")
+                .isGreaterThan(3);
+    }
+
+    @Test
+    void retryAfterWithinBudgetIsHonouredThenSucceeds() {
+        // One 429 with Retry-After: 1 (1s fits the default 20s budget): the
+        // delay must respect the header (>= ~1s, not the ~5ms jitter base),
+        // then the retry succeeds.
+        rateLimitsRemaining.put("ra-ok", new AtomicInteger(1));
+        rateLimitRetryAfter.put("ra-ok", "1");
+
+        long start = System.nanoTime();
+        try (CceEmbedder cce = embedder(4)) {
+            List<float[]> out = cce.embed(List.of("ra-ok"));
+            assertThat(out.get(0)).isEqualTo(vectorFor("ra-ok"));
+        }
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
+        assertThat(elapsedMs)
+                .as("the sleep must honour the Retry-After header, not just the jitter base")
+                .isGreaterThanOrEqualTo(900L);
+        assertThat(requestTexts.stream().filter(t -> t.equals("ra-ok")).count())
+                .isEqualTo(2);
+    }
+
+    @Test
+    void sharedDeadlineBoundsTheWholeBatchNotPerCall() {
+        // substantive-critic ship-blocker (2026-08-31): a PER-CALL budget
+        // re-arms every fan-out wave — parallelism 1 with 3 sustained-429
+        // texts would burn ~3 budgets serially (the incident shape at batch
+        // scale). The shared deadline must bound the WHOLE embed call: the
+        // first worker consumes the budget, later workers see only the
+        // remainder and fail fast almost immediately.
+        //
+        // DISCRIMINATING POWER IS PROBABILISTIC, not deterministic (the
+        // critic's own fold-verification note, T2 [23850]): the semaphore is
+        // non-fair and embedParallel consumes futures in index order, so
+        // when index 0 wins the sole permit — the common scheduling — the
+        // old per-call code ALSO fails within ~one budget and this bound
+        // passes. The fix's correctness is pinned by source inspection of
+        // the shared newEmbedDeadlineNanos() threading; this test is the
+        // wall-clock sanity ceiling for the orderings where per-call
+        // budgets WOULD serialize. A fully deterministic discriminator
+        // needs success-before-failure timing scripts, which trade this
+        // caveat for real flake risk — deliberately not done.
+        for (String t : List.of("shared-a", "shared-b", "shared-c")) {
+            rateLimitsRemaining.put(t, new AtomicInteger(999));
+        }
+
+        long start = System.nanoTime();
+        try (CceEmbedder cce = embedderWithBudget(1, 2_000L)) {
+            assertThatThrownBy(() -> cce.embed(List.of("shared-a", "shared-b", "shared-c")))
+                    .isInstanceOf(UpstreamRateLimitedException.class);
+        }
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
+        assertThat(elapsedMs)
+                .as("the whole 3-text batch must be bounded by ONE budget, "
+                    + "not one budget per serialized call (~3x)")
+                .isLessThan(3_000L);
+    }
+
+    @Test
+    void serverErrorsKeepAttemptBoundedSemantics() {
+        // 5xx retains the old MAX_RETRIES contract even though 429 no longer
+        // does — regression pin against the budget rework widening it.
+        failuresRemaining.put("s5-poison", new AtomicInteger(10));
+
+        try (CceEmbedder cce = embedder(4)) {
+            assertThatThrownBy(() -> cce.embed(List.of("s5-poison")))
+                    .isInstanceOf(RuntimeException.class)
+                    .isNotInstanceOf(UpstreamRateLimitedException.class)
+                    .hasMessageContaining("500");
+        }
+        assertThat(requestTexts.stream().filter(t -> t.equals("s5-poison")).count())
+                .isEqualTo(3);
+    }
+
+    @Test
+    void parseRetryAfterMsHandlesSecondsDecimalAndGarbage() {
+        assertThat(CceEmbedder.parseRetryAfterMs("7")).isEqualTo(7_000L);
+        assertThat(CceEmbedder.parseRetryAfterMs("0.5")).isEqualTo(500L);
+        assertThat(CceEmbedder.parseRetryAfterMs(" 2 ")).isEqualTo(2_000L);
+        assertThat(CceEmbedder.parseRetryAfterMs(null)).isNull();
+        assertThat(CceEmbedder.parseRetryAfterMs("")).isNull();
+        assertThat(CceEmbedder.parseRetryAfterMs("-1")).isNull();
+        // HTTP-date form is advisory-only: ignored, never an error.
+        assertThat(CceEmbedder.parseRetryAfterMs("Wed, 21 Oct 2026 07:28:00 GMT")).isNull();
     }
 
     // ── (d) concurrency actually happens ──────────────────────────────────────

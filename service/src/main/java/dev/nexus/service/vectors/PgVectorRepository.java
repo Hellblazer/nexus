@@ -1097,6 +1097,10 @@ public final class PgVectorRepository {
             // collection + metadata predicates narrow the candidate set. SET LOCAL is
             // txn-scoped (same pool discipline as the TenantScope GUC stamp).
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
+            // nexus-4ktfm: widen the traversal's candidate list too — iterative scan
+            // cannot recover neighbors the ef-bounded traversal already pruned
+            // (cross-tenant crowd-out; see PgSession.DEFAULT_EF_SEARCH_FLOOR).
+            PgSession.setHnswEfSearch(ctx, nResults);
             return rawVectorFetch(ctx, sql.toString(), binds.toArray());
         });
 
@@ -1440,6 +1444,9 @@ public final class PgVectorRepository {
             }
             // HNSW-first for a dense gate: keep HNSW scanning past ef_search.
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
+            // nexus-4ktfm: crowd-out headroom for the traversal itself (see
+            // PgSession.DEFAULT_EF_SEARCH_FLOOR).
+            PgSession.setHnswEfSearch(ctx, nResults);
             String sql = "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
                 + " (" + DimTables.embeddingColumn(dim) + " <=> ?::vector) AS distance FROM " + table + gateSql
                 // nexus-74zvm DECISION (see method javadoc): same NULL-distance guard as
@@ -1915,7 +1922,7 @@ public final class PgVectorRepository {
                 queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn), embed.tokens());
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens());
     }
 
     /**
@@ -2009,7 +2016,7 @@ public final class PgVectorRepository {
                 queryVec, colls, field, pattern, minConfidence, whereJsonb, nResults);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn), embed.tokens());
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens());
     }
 
     /**
@@ -2049,7 +2056,7 @@ public final class PgVectorRepository {
             case 1024 -> SEARCH_TOPIC_SCOPED_1024.call(queryVec, topicLabel, collection, nResults);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQuery(tenant, fn), embed.tokens());
+        return new Tokened<>(runCombinedQuery(tenant, fn, nResults), embed.tokens());
     }
 
     /**
@@ -2144,7 +2151,7 @@ public final class PgVectorRepository {
                 queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults);
             default   -> throw new IllegalArgumentException("unsupported dim " + dim);
         };
-        return new Tokened<>(runCombinedQueryWithChash(tenant, fn), embed.tokens());
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn, nResults), embed.tokens());
     }
 
     /**
@@ -2227,9 +2234,12 @@ public final class PgVectorRepository {
      * allowlist).
      */
     private List<Map<String, Object>> runCombinedQuery(
-            String tenant, org.jooq.Table<?> fn) {
+            String tenant, org.jooq.Table<?> fn, int nResults) {
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
+            // nexus-4ktfm: crowd-out headroom — the combined-query SQL functions run
+            // inside this same transaction, so the GUC governs their HNSW scans.
+            PgSession.setHnswEfSearch(ctx, nResults);
             return ctx.selectFrom(fn).fetch();
         });
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
@@ -2250,9 +2260,11 @@ public final class PgVectorRepository {
      * topic function does not expose chash — {@code rec.get("chash", ...)} would throw.
      */
     private List<Map<String, Object>> runCombinedQueryWithChash(
-            String tenant, org.jooq.Table<?> fn) {
+            String tenant, org.jooq.Table<?> fn, int nResults) {
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
+            // nexus-4ktfm: same crowd-out headroom as runCombinedQuery.
+            PgSession.setHnswEfSearch(ctx, nResults);
             return ctx.selectFrom(fn).fetch();
         });
         List<Map<String, Object>> rows = new ArrayList<>(result.size());

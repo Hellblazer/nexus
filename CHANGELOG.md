@@ -6,7 +6,58 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [7.25.0] - 2026-08-31
+## [7.26.0] - 2026-08-31
+
+Paired release with `engine-service-v0.1.93` (tagged on `9edad9ea6`;
+`REQUIRED_ENGINE_VERSION` bumped in this release). Zero Liquibase changesets
+in the engine delta and an all-`[additive]` wire ledger, so the engine
+deployed BEFORE this release's tag (nexus-1emxn choreography (a)) — cloud
+was live and gated on v0.1.93 before any client could require it.
+
+### Added
+
+- **`nx catalog export` / `nx catalog import` — the recovery bundle
+  (nexus-xn3fr, GH #1419 Issue 9).** One paired verb carries the catalog
+  link graph plus store_put-origin knowledge content across a full
+  reinstall: source_uri identity, no embeddings in the bundle, idempotent
+  re-import, fail-loud summary. Imports re-derive collection identity
+  across an embedding-mode change (the recorded model-bearing name is
+  reduced to its mode-independent base and resolved under the target), and
+  chroma-URI link endpoints re-derive the same way. Vanished `chash:` spans
+  are stripped and counted rather than failing the link. TTLs are not
+  carried; see `docs/migration-runbook.md`.
+
+### Fixed
+
+- **Engine v0.1.93: serving `hnsw.ef_search` floor (nexus-4ktfm).**
+  `SET LOCAL hnsw.ef_search = clamp(max(200, n_results), 1, 1000)` on all
+  five vector-ranked paths ends shared-HNSW cross-tenant crowd-out: all ten
+  crowded gate queries recovered to Jaccard 1.000 (rdr-analytical-003
+  0.538 → 1.000, settling nexus-x9mly as crowding, not ranking). Floor is
+  env-tunable via `NX_HNSW_EF_SEARCH`, validated at engine boot. The
+  measured cost — plain `/v1/vectors/search` p95 rising to the new steady
+  state — is held-by-decision at floor 200 (hybrid p95 unaffected).
+- **Engine v0.1.93: budget-bounded 429 absorption with honest Retry-After
+  (nexus-99r7y).** Voyage rate-limit 429s are absorbed under a shared
+  20-second per-embed-request deadline instead of retrying unbounded;
+  VectorHandler and CatalogHandler surface an honest 429 + Retry-After
+  rather than a 5xx when the budget exhausts.
+- **Client: edge/WAF refusals surface structured errors (nexus-cmzib).**
+  An edge or WAF refusal on T1/T2/T3 paths now raises a structured,
+  actionable error instead of leaking raw HTML into tracebacks; the cloud
+  gate's leg E pins the passthrough as a regression tripwire.
+- **T2: 401 remint carve-out on `claim_batch` (nexus-ig3qe).** A 401 on the
+  aspect worker's claim path remints the data token and retries once —
+  the carve-out is 401-only; transport-shaped failures stay single-attempt
+  (nexus-tjvgf).
+- **DT: web-archive boilerplate stripped in the `--dt-content` writer
+  (nexus-mok9x).** Navigation chrome, cookie banners, and footers no longer
+  pollute dt_content chunks.
+- **Release machinery: PyPI propagation window closed (nexus-r433b).**
+  `release.yml` waits on the simple index with `--require-served`, the
+  `.mcpb` bootstrap resolve-retries, and the fresh-install MVV
+  wait-and-retries — a fresh install seconds after publish no longer races
+  the index.
 
 Paired release with `engine-service-v0.1.92` (tagged on `14bd80442`;
 `REQUIRED_ENGINE_VERSION` bumped in this release). The engine delta carries

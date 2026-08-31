@@ -75,6 +75,7 @@ Used by `nx enrich bib` to fetch bibliographic metadata (year, venue, authors, c
 | YAML path | Env var | Default | Description |
 |---|---|---|---|
 | `embeddings.rerankerModel` | `NX_EMBEDDINGS_RERANKER_MODEL` | `rerank-2.5` | RETIRED (RDR-188): reranking runs server-side; the engine picks the model via `NX_RERANK_MODEL` in its environment. A set value emits a deprecation notice and is otherwise ignored |
+| — (engine env) | `NX_HNSW_EF_SEARCH` | `200` | Engine-side serving floor for pgvector `hnsw.ef_search` on vector-ranked paths (engine ≥ 0.1.93, nexus-4ktfm). Effective ef is `clamp(max(floor, n_results), 1, 1000)`. Raises recall under shared-index cross-tenant crowding; higher values cost plain-search latency. Validated at engine boot — an out-of-range value refuses to start |
 | `install.mode` | — | (stamped by `nx init`) | Explicit mode record: `local` or `managed`. Written at init/onboarding; `is_local_mode()` reads it ahead of artifact inference (a configured `service_url` still wins over a stale `local` record, loudly) |
 | `client.host` | `NX_CLIENT_HOST` | `localhost` | Legacy ChromaDB host override; no-op as of 6.0 (the managed/local service URL is `NX_SERVICE_URL`). |
 | `pdf.extractor` | — | `auto` | PDF extraction backend: `auto`, `docling`, or `mineru`. Set globally with `nx config set pdf.extractor=mineru` |

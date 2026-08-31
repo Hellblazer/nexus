@@ -229,3 +229,118 @@ def test_non_vacuity_leg_list_is_mode_aware() -> None:
     text = _text()
     assert 'LEGS_TO_CHECK="install.log $LEGS_TO_CHECK"' in text
     assert 'LEGS_TO_CHECK="build.log $LEGS_TO_CHECK"' in text
+
+
+# ── nexus-r433b: the PyPI-propagation retry branch (review folds, 2026-08-31) ─
+
+
+def _load_mcpb_bootstrap():
+    import importlib.util
+
+    path = REPO_ROOT / "mcpb" / "src" / "bootstrap.py"
+    spec = importlib.util.spec_from_file_location("mcpb_bootstrap_parity", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+#: The one propagation-signature set, asserted present in BOTH consumers.
+#: Adding a phrase to either file without the other (and this list) fails here
+#: — the same drift-parity shape as test_gateway_constants_match_reference.
+_PROPAGATION_PHRASES = (
+    "no solution found",
+    "no version of conexus",
+    "not found in the package registry",
+)
+
+
+def test_retry_signature_parity_with_mcpb_bootstrap() -> None:
+    """code-review-expert + substantive-critic (2026-08-31): the shell retry
+    trigger and mcpb/src/bootstrap.py classify the SAME resolver-failure
+    concept; the shell grep initially shipped with one phrase missing and
+    no package-name anchor. Pin: every phrase appears in both files, the
+    shell trigger carries the conexus anchor bootstrap's classifier has,
+    and bootstrap's classifier actually accepts each phrase."""
+    text = _text()
+    bootstrap = _load_mcpb_bootstrap()
+    bootstrap_src = (REPO_ROOT / "mcpb" / "src" / "bootstrap.py").read_text()
+    for phrase in _PROPAGATION_PHRASES:
+        assert phrase in text, f"fresh-install-mvv.sh retry grep lost: {phrase!r}"
+        assert phrase in bootstrap_src, f"mcpb bootstrap classifier lost: {phrase!r}"
+        assert bootstrap._is_resolution_unavailable(f"error: conexus {phrase}") is True
+    # The anchor: bootstrap requires 'conexus' in the output; the shell
+    # trigger must too (an unrelated dependency conflict must not be
+    # classified as a propagation wait — critic finding 3).
+    assert 'grep -qi "conexus" "$LOGS/install.log"' in text
+
+
+def test_retry_branch_waits_then_retries_once_then_fails_loud(tmp_path) -> None:
+    """Functional pin of the retry branch (code-review-expert finding 2) —
+    no real network: a stub uv fails `tool install` with uv's real
+    no-solution text, and FRESH_MVV_INDEX_URL points the wait script at a
+    local fake index that already serves the requested version, so the
+    wait exits 0 immediately and the script retries the install exactly
+    once before failing loud with the propagation message."""
+    import http.server
+    import json as _json
+    import os
+    import threading
+
+    class _Index(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = _json.dumps({"versions": ["1.2.3", "7.25.0"]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.pypi.simple.v1+json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), _Index)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    counter = tmp_path / "install-calls.txt"
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir()
+    stub_uv = stub_dir / "uv"
+    stub_uv.write_text(
+        "#!/bin/bash\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        f'    echo x >> "{counter}"\n'
+        "    echo '  x No solution found when resolving dependencies:' >&2\n"
+        "    echo '  ... Because there is no version of conexus==1.2.3 ...' >&2\n"
+        "    exit 1\n"
+        "fi\n"
+        "exit 1\n"
+    )
+    stub_uv.chmod(0o755)
+
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_dir}:{env.get('PATH', '')}"
+    env["FRESH_MVV_INDEX_URL"] = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    try:
+        result = subprocess.run(
+            [str(SCRIPT), "--published", "1.2.3"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+    try:
+        assert result.returncode != 0
+        calls = counter.read_text().count("x") if counter.is_file() else 0
+        assert calls == 2, (
+            f"expected exactly 2 install attempts (initial + one post-wait "
+            f"retry), saw {calls}; stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "waiting on the PyPI simple index (nexus-r433b)" in result.stdout
+        assert "after the PyPI propagation wait" in result.stderr
+    finally:
+        match = re.search(r"FAILURE EVIDENCE PRESERVED: (\S+)", result.stderr)
+        if match:
+            import shutil
+
+            shutil.rmtree(Path(match.group(1)).parent, ignore_errors=True)

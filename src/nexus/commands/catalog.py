@@ -307,6 +307,7 @@ from nexus.commands.catalog_cmds import orphan_backfill as _orphan_backfill_cmds
 from nexus.commands.catalog_cmds import reconcile_stale as _reconcile_stale_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import purge_trash as _purge_trash_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import gc_audit as _gc_audit_cmds  # noqa: E402 — must follow the `catalog` group definition above
+from nexus.commands.catalog_cmds import recovery as _recovery_cmds  # noqa: E402 — must follow the `catalog` group definition above
 
 _owners_cmds.register(catalog)
 _backfill_cmds.register(catalog)
@@ -322,6 +323,7 @@ _orphan_backfill_cmds.register(catalog)
 _reconcile_stale_cmds.register(catalog)
 _purge_trash_cmds.register(catalog)
 _gc_audit_cmds.register(catalog)
+_recovery_cmds.register(catalog)
 
 
 @catalog.command("init")

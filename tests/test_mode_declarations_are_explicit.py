@@ -346,7 +346,14 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 59
 # rationale in conftest.py beside the entries. Found by the release
 # preflight's mode-census leg — the census self-skips under `-n auto`, so
 # the merged-tree full-suite pass never fired it.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 56
+# 56 -> 58 (nexus-xn3fr, 2026-08-31): +2 recovery-bundle mode-rederivation
+# tests (test_import_rederives_collection_under_changed_embedding_mode,
+# test_link_endpoint_fallback_rederives_chroma_identity) — reason
+# "string-literal-as-name": the voyage token is the monkeypatched
+# resolver's TARGET-collection answer, opaque stand-in data for a
+# mode-changed reinstall; no embedder, no credential, `is_local_mode`
+# never runs. Rationale in conftest.py beside the entries.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 58
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

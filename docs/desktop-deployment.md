@@ -71,7 +71,7 @@ Install:
 
 1. Download `conexus.mcpb` from the [latest GitHub release](https://github.com/Hellblazer/nexus/releases/latest).
 2. Double-click the file. Claude Desktop registers it under Settings → Connectors → Desktop as "Conexus".
-3. First launch: uv resolves Nexus's dependency stack (pydantic-core, tree-sitter, numpy, torch, onnxruntime, and friends — `chromadb` was removed from the dependency set at RDR-155 P4b). Cold install ~20s on a warm network; warm restarts ~5s.
+3. First launch: uv resolves Nexus's dependency stack (pydantic-core, tree-sitter, numpy, torch, onnxruntime, and friends — `chromadb` was removed from the dependency set at RDR-155 P4b). Cold install ~20s on a warm network; warm restarts ~5s. If the install lands inside PyPI's post-release propagation window (~10-25 min where the download index does not yet serve a just-published version — nexus-r433b), the bundle's bootstrap retries the resolution with backoff for ~15 min, logging `[conexus-mcpb] PyPI has not finished propagating…` to the extension's log each attempt, before giving up with a try-again-shortly message. `NX_MCPB_SKIP_RESOLVE_RETRY=1` disables the retry.
 4. **First launch installs and starts nothing else.** `nx-mcp` used to auto-install the T2 daemon here; that path retired with the daemon (`nexus-i711w`). The extension expects the storage service to already exist on the host — provision it once with `nx init`. Without it, tools that reach T2 or T3 fail with an unresolvable-endpoint error rather than silently starting anything.
 
 Tool names: `mcp__conexus__*` (no `plugin_` infix — this is the .mcpb namespace, distinct from the Claude Code plugin's).

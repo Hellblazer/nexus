@@ -237,7 +237,10 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         # nexus-tjvgf: claiming is NOT retry-safe — a lost response
         # after a successful server-side claim orphans the row
         # in_progress until reclaim_stale. Single attempt; the worker
-        # loop owns recovery.
+        # loop owns recovery. Exception (nexus-ig3qe): a definitive 401
+        # re-mints and retries once inside the mixin — the auth layer
+        # rejected the request before the claim SQL ran, so no row was
+        # claimed and no orphan is possible.
         r = self._post("/claim_next", {}, idempotent=False)
         if not r or r.get("claimed") is False or not r.get("row"):
             return None
@@ -247,7 +250,9 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """Claim up to *limit* pending rows in FIFO order."""
         if limit <= 0:
             return []
-        # nexus-tjvgf: see claim_next — single attempt.
+        # nexus-tjvgf: see claim_next — single attempt (with the mixin's
+        # nexus-ig3qe 401-remint carve-out; the long-running worker's data
+        # token expires on TTL and this is its claim path).
         r = self._post("/claim_batch", {"limit": limit}, idempotent=False)
         # nexus-575kd: the Java service sends a BARE JSON ARRAY here
         # (AspectHandler.handleQueueClaimBatch -> writeValueAsString(rows)),
@@ -300,7 +305,9 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         # nexus-tjvgf: retry_count = retry_count + 1 server-side — a
         # retried request double-increments the budget toward premature
-        # terminal mark_failed. Single attempt.
+        # terminal mark_failed. Single attempt (the mixin's nexus-ig3qe
+        # 401-remint carve-out applies: a 401'd request never reached the
+        # increment).
         self._post("/mark_retry", {
             "collection": collection,
             "source_path": source_path,

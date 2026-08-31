@@ -62,6 +62,11 @@ is not supported — DJL 0.30.0 ships no `osx-x86_64` tokenizers lib.)
 
 `NX_DB_URL` `NX_DB_USER` `NX_DB_PASS` (Postgres), `NX_SERVICE_PORT`,
 `NX_SERVICE_TOKEN`, `NX_EMBED_MODE=onnx`. See `Main.java` for the full set.
+`NX_HNSW_EF_SEARCH` (default 200, range 1..1000) overrides the serving
+`hnsw.ef_search` floor on every vector-ranked query — the cross-tenant
+crowd-out headroom (nexus-4ktfm; see `PgSession.DEFAULT_EF_SEARCH_FLOOR`).
+A malformed/out-of-range value fails the service AT BOOT with the parse
+error (validated from `Main`, never deferred to the first query).
 
 ### CI
 
