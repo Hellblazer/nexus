@@ -105,6 +105,13 @@ interrupted — the ETL paths are idempotent and re-converge on
 
 ## Restoring a `pg_dump` into a scratch cluster
 
+For a ROUTINE local reinstall you should not need any of this: run
+`nx catalog export recovery.jsonl` before the reinstall and
+`nx catalog import` after (see `docs/catalog.md` § Recovery bundle) — it
+carries the link graph and store_put-only knowledge content, which are
+exactly what the ad-hoc SQL below was invented to rescue. The `pg_dump`
+path remains the answer for a full forensic restore.
+
 Two things bite on the way to a read-only forensic restore. Both were hit
 during a real recovery (GH #1419) and neither is obvious from the error text.
 

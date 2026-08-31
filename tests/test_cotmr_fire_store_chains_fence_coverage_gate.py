@@ -86,6 +86,18 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
         ),
         fenced=False,
     ),
+    ("catalog/recovery_bundle.py", "_default_import_doc"): _Coverage(
+        reason=(
+            "nx catalog import (recovery bundle, nexus-xn3fr review-fold): "
+            "_fence_begin called in this same function before t3.put when a "
+            "catalog row was minted; manifest_complete rides the "
+            "fire_store_chains call at the tail, mirroring MCP "
+            "core.py::store_put's F2 pattern. Single-chunk by construction "
+            "(single_chunk_manifest_metadata), so the F2 shape transplants "
+            "directly, unlike exporter.py's multi-chunk groups."
+        ),
+        fenced=True,
+    ),
     ("commands/collection.py", "_reembed_collection"): _Coverage(
         reason=(
             "collection re-embed: this call passes catalog_doc_id='' "

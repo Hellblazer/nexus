@@ -348,6 +348,44 @@ nx catalog backfill            # re-populate catalog from T3 + backfill chunk_te
 
 `backfill` re-discovers documents from existing T3 collections and registered repos without re-indexing. Also adds `chunk_text_hash` metadata to any chunks missing it. Use after data recovery or if the catalog gets out of sync with T3.
 
+#### Recovery bundle: `nx catalog export` / `nx catalog import`
+
+```bash
+nx catalog export recovery.jsonl    # BEFORE a reinstall
+nx catalog import recovery.jsonl    # after the reinstall + re-index
+```
+
+Carries the two things a reinstall cannot regenerate: the **link graph**
+(cross-collection, and tumblers are NOT stable across reindex) and
+**store_put-origin knowledge content** (whose only copy is its indexed
+chunk). One human-inspectable JSONL file: a header line, then
+`knowledge_doc` records, then `link` records.
+
+Locked format decisions (design of record: T2
+`nexus/design-xn3fr-recovery-bundle.md`, GH #1419 Issue 9):
+
+- **Identity is `source_uri`, never tumblers.** Knowledge records also
+  carry `(collection, title)` so import re-derives the synthesized
+  identity under the target install's collection set (works across an
+  embedding-mode change).
+- **No embeddings.** Import re-runs the real store_put chain, which
+  re-embeds — the bundle is portable across embedding models. For an
+  embedding-preserving per-collection backup use `nx export COLLECTION`
+  (`.nxexp`) — a different tool for a different job.
+- **Fail-loud summary, never abort.** Unresolvable link endpoints and
+  per-doc failures are enumerated in the import report; the resolvable
+  remainder still imports. Exit 0 with the report visible.
+- **Idempotent.** Re-importing the same bundle merges (the engine's
+  duplicate-link `co_discovered_by` contract; store_put reconciles) —
+  zero net growth on a second pass.
+- **Spans degrade gracefully.** A `chash:`-anchored link span whose
+  chunk no longer exists on the target is stripped and counted in the
+  import report; the link itself still imports.
+- **TTL is not carried.** A store_put note that had a live TTL before
+  export imports as permanent — the bundle is a recovery artifact, and
+  silently expiring recovered content would be the worse failure. Re-set
+  TTLs after import if you need them.
+
 Missing `chunk_text_hash` metadata on an upgraded store is the ladder's job, not a verb's: run `nx upgrade`.
 
 ```bash

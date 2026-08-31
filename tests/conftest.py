@@ -2369,6 +2369,20 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_catalog_rename_collection_tombstone_probe.py::test_rename_rejects_tombstoned_old_with_actionable_message",
     "tests/test_catalog_rename_collection_tombstone_probe.py::test_rename_rejects_tombstoned_new_as_not_free_to_claim",
     #
+    # nexus-xn3fr recovery-bundle mode-rederivation — reason:
+    # "string-literal-as-name". Both tests pass
+    # "knowledge__knowledge__voyage-context-3__v1" as the TARGET collection
+    # of a mode-changed reinstall, purely as opaque stand-in data: the
+    # resolver is monkeypatched (`nexus.corpus.t3_collection_name` /
+    # `rb.target_collection_for` return the literal), so no embedder is
+    # constructed, no credential is read, and `is_local_mode` never runs.
+    # What is asserted is identity plumbing — the resolver sees the
+    # mode-independent base and the put/link lands under the resolver's
+    # answer. A voyage token is the honest simulation of a bge->voyage
+    # mode change; cloud_mode would change no assertion.
+    "tests/catalog/test_recovery_bundle.py::test_import_rederives_collection_under_changed_embedding_mode",
+    "tests/catalog/test_recovery_bundle.py::test_link_endpoint_fallback_rederives_chroma_identity",
+    #
     # nexus-ubnwk (search_aspect_scoped wire shape) — reason:
     # "string-literal-as-name". The four TestSearchAspectScoped tests pass
     # "knowledge__a__voyage-context-3__v1" as the collections argument and

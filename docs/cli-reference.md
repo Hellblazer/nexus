@@ -785,6 +785,24 @@ nx catalog search QUERY [--limit N] [--offset N] [--json]
 
 Find documents by title, author, corpus, or file path. Returns tumbler, content type, and title.
 
+### nx catalog export / import
+
+```
+nx catalog export FILE     # write the recovery bundle (run BEFORE a reinstall)
+nx catalog import FILE     # restore it (after reinstall + re-index)
+```
+
+One paired recovery verb (GH #1419.9): a human-inspectable JSONL bundle
+carrying the catalog **link graph** and **store_put-origin knowledge
+content** — the two things a reinstall cannot regenerate. Identity is
+`source_uri` (tumblers are not stable across reindex); no embeddings are
+carried (import re-embeds through the real store_put chain, so the
+bundle survives an embedding-mode change); import is idempotent and
+reports every unresolvable link or failed doc without aborting the rest.
+See `docs/catalog.md` § Recovery bundle for the format contract. For an
+embedding-preserving per-collection backup use `nx export COLLECTION`
+(`.nxexp`) instead.
+
 ### nx catalog show
 
 ```
