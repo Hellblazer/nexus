@@ -305,11 +305,16 @@ jobs:
           # which led the simple index every measured time) until the version
           # appears. On timeout this fails loud; the workflow_dispatch retry
           # path re-runs safely (the PyPI step is skip-existing).
+          # --require-served: the step below is the ANNOUNCEMENT with no
+          # downstream check — if the index is already past this version and
+          # does not serve it (e.g. a workflow_dispatch retry of an old tag
+          # whose upload is missing), fail loud instead of proceeding.
           python3 scripts/wait_pypi_simple_index.py \
             --package conexus \
             --version "$RELEASE_VERSION" \
             --timeout-seconds 1800 \
-            --poll-seconds 30
+            --poll-seconds 30 \
+            --require-served
 
       - name: Create GitHub Release
         # Pinned to v2.6.2 SHA after the floating @v2 tag was implicated

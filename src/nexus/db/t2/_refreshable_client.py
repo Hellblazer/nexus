@@ -723,6 +723,17 @@ class RefreshableHttpStoreMixin:
         before. The retry attempt itself stays single-shot (no gateway
         loop) and a second 401 propagates — no loops.
 
+        The never-executed claim is verified at the engine (stacked
+        review 2026-08-31: AuthFilter is the sole filter and always
+        rejects before chain.doFilter). The managed deployment's edge is
+        not verifiable from this repo; the argument extends to any sane
+        edge — an edge 401 means the edge rejected before forwarding
+        (never executed), and edge-synthesized failures for requests
+        already in flight at the engine are 5xx-class, not 401.
+        Residual (relayed to conexus): confirm their edge never
+        synthesizes 401 for a forwarded request; blast radius if wrong
+        is one re-claimed queue row, recovered by ``reclaim_stale``.
+
         Mirrors ``http_vector_client._request``'s FULL two-axis shape
         (nexus-1ytp6 — the original port carried only the first axis):
 

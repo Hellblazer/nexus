@@ -428,11 +428,17 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
         # already past the requested version (an operator typo is not a
         # propagation wait), and the retry then fails loud with uv's own
         # error. Every other failure shape fails immediately, unchanged.
+        # Signature set kept in parity with mcpb/src/bootstrap.py's
+        # _is_resolution_unavailable (pinned by
+        # test_fresh_install_mvv_published_mode.py::test_retry_signature_parity_with_mcpb_bootstrap).
+        # FRESH_MVV_INDEX_URL exists for the unit test's fake index only.
         if [ -n "$PUBLISHED_VERSION" ] \
-            && grep -qiE "no solution found|no version of conexus" "$LOGS/install.log"; then
+            && grep -qi "conexus" "$LOGS/install.log" \
+            && grep -qiE "no solution found|no version of conexus|not found in the package registry" "$LOGS/install.log"; then
             echo "  resolver does not see conexus==$PUBLISHED_VERSION yet — waiting on the PyPI simple index (nexus-r433b)"
             python3 "$REPO_ROOT/scripts/wait_pypi_simple_index.py" \
                 --package conexus --version "$PUBLISHED_VERSION" \
+                --index-url "${FRESH_MVV_INDEX_URL:-https://pypi.org/simple}" \
                 --timeout-seconds 1800 --poll-seconds 30 \
                 || _fail "PyPI simple index never served conexus==$PUBLISHED_VERSION within 30 min (propagation window exceeded — nexus-r433b; see $LOGS/install.log)"
             _published_install \

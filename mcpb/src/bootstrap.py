@@ -52,7 +52,16 @@ def _bundle_dir() -> str:
 
 def _is_resolution_unavailable(output: str) -> bool:
     """True when uv's failure output is the version-not-yet-served resolver
-    class (the PyPI propagation window), as opposed to any other failure."""
+    class (the PyPI propagation window), as opposed to any other failure.
+
+    Deliberately broad within that class: a genuine (non-propagation)
+    resolver conflict that mentions conexus also matches and rides the
+    ~15-min retry schedule before surfacing — bounded, and preferred over
+    a narrower match that misses a real propagation shape and kills the
+    extension with a bare resolver error. Kept in parity with the shell
+    grep in tests/e2e/fresh-install-mvv.sh's retry branch (pinned by
+    test_retry_signature_parity_with_mcpb_bootstrap).
+    """
     low = output.lower()
     if "conexus" not in low:
         return False

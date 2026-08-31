@@ -843,6 +843,12 @@ class TestMarketplaceVersion:
             "and the GitHub-release step — polling before publish waits on "
             "nothing, and polling after the GH release defeats the point."
         )
+        assert "--require-served" in body, (
+            "release.yml's wait step must pass --require-served: the next "
+            "step is the announcement with no downstream check, so the "
+            "below-served-max case must fail loud there, never fast-exit 0 "
+            "(substantive-critic finding, 2026-08-31)."
+        )
 
     def test_plugin_source_sha_is_well_formed_when_present(self) -> None:
         """Optional `source.sha` for tag-force-push protection. When

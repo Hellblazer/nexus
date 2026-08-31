@@ -129,6 +129,36 @@ def test_below_served_max_fast_exits_zero(server, capsys):
     assert "NOT A PROPAGATION WAIT" in capsys.readouterr().out
 
 
+def test_below_served_max_with_require_served_fails_loud(server, capsys):
+    """substantive-critic (2026-08-31): release.yml's next step is the
+    GitHub release — the announcement — with no downstream check, so the
+    below-max case must FAIL there, never proceed. Trigger: a
+    workflow_dispatch retry of an old tag after a newer version shipped,
+    with that old upload missing from the index."""
+    url = server([(200, _body(["7.24.1", "7.25.0"]))])
+    rc = gate.wait_for_version(
+        "conexus", "1.2.3", index_url=url, timeout_seconds=30, poll_seconds=5,
+        require_served=True,
+    )
+    assert rc == 1
+    assert len(_ScriptedHandler.seen) == 1
+    assert "require-served" in capsys.readouterr().err
+
+
+def test_require_served_does_not_affect_the_served_case(server):
+    url = server([(200, _body(["7.25.0"]))])
+    rc = gate.main(
+        [
+            "--version", "7.25.0",
+            "--index-url", url,
+            "--timeout-seconds", "5",
+            "--poll-seconds", "0.05",
+            "--require-served",
+        ]
+    )
+    assert rc == 0
+
+
 def test_ambiguous_version_never_fast_exits(server):
     """A version whose numeric prefix cannot be parsed confidently keeps
     polling (conservative) rather than risking a wrong fast-exit."""

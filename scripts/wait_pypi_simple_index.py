@@ -92,6 +92,7 @@ def wait_for_version(
     index_url: str = DEFAULT_INDEX_URL,
     timeout_seconds: float = 1800.0,
     poll_seconds: float = 30.0,
+    require_served: bool = False,
 ) -> int:
     url = f"{index_url.rstrip('/')}/{package}/"
     deadline = time.monotonic() + timeout_seconds
@@ -124,6 +125,26 @@ def wait_for_version(
                 (_numeric_prefix(v) for v in versions), default=()
             )
             if wanted and served_max and wanted < served_max:
+                if require_served:
+                    # release.yml passes --require-served (substantive-critic
+                    # finding, 2026-08-31): its next step CREATES the GitHub
+                    # release — the announcement — and has no downstream
+                    # check, so "absent and will never appear" must fail
+                    # loud there, never proceed. Realistic trigger: the
+                    # workflow_dispatch retry of an old tag after a newer
+                    # version shipped, with that old upload missing from
+                    # the index — proceeding would reopen the exact
+                    # announce-before-installable bug this script closes.
+                    print(
+                        f"FAIL: index already serves up to {newest} "
+                        f"(> {version}) and {package}=={version} is absent — "
+                        "it will not appear by waiting, and --require-served "
+                        "forbids proceeding without it. Verify the upload "
+                        "actually landed on PyPI before creating the "
+                        "announcement.",
+                        file=sys.stderr,
+                    )
+                    return 1
                 print(
                     f"NOT A PROPAGATION WAIT: index already serves up to "
                     f"{newest} (> {version}); {package}=={version} is absent "
@@ -158,6 +179,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--index-url", default=DEFAULT_INDEX_URL)
     parser.add_argument("--timeout-seconds", type=float, default=1800.0)
     parser.add_argument("--poll-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--require-served",
+        action="store_true",
+        help="fail (exit 1) instead of proceeding when the index is already "
+        "past the requested version but does not serve it — for callers "
+        "whose next step is an irreversible announcement (release.yml)",
+    )
     args = parser.parse_args(argv)
     return wait_for_version(
         package=args.package,
@@ -165,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
         index_url=args.index_url,
         timeout_seconds=args.timeout_seconds,
         poll_seconds=args.poll_seconds,
+        require_served=args.require_served,
     )
 
 
