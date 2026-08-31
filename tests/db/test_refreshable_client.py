@@ -1337,6 +1337,42 @@ class TestMintTokenResolutionSeam:
         finally:
             self._reset_manager()
 
+    def test_non_idempotent_401_remints_once_then_succeeds(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """nexus-ig3qe: the tjvgf opt-out's 401 carve-out, full-fidelity.
+
+        The aspect worker's ``claim_batch`` rides ``idempotent=False``; its
+        data token expires on TTL while the worker runs. A 401 there is an
+        auth-layer rejection BEFORE the handler runs (nothing applied), so
+        the mixin re-mints and retries exactly once even on the
+        non-idempotent path — measured absent, this was 218 claim 401s in
+        one day (conexus-07dz). Same revoke shape as
+        ``test_401_triggers_single_remint_then_succeeds`` above, but
+        through the opted-out transport."""
+        monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
+        self._reset_manager()
+        try:
+            store = _make_echo_store()
+
+            baseline = store._post("/v1/echo", {"value": "claim 1"}, idempotent=False)
+            assert baseline == {"echo": {"value": "claim 1"}}
+            assert _MINT_CALLS == 1
+
+            global _MINTED_DATA_TOKEN
+            _MINTED_DATA_TOKEN = "expired-on-ttl"  # engine no longer accepts the cached token
+
+            result = store._post("/v1/echo", {"value": "claim 2"}, idempotent=False)
+
+            assert result == {"echo": {"value": "claim 2"}}
+            assert _MINT_CALLS == 2, "expected exactly one re-mint, not zero and not a loop"
+            assert _REQUEST_COUNT["POST /v1/echo"] == 3, (
+                "baseline (1) + rejected attempt with the stale cached token (1) "
+                "+ success with the freshly re-minted token (1)"
+            )
+        finally:
+            self._reset_manager()
+
     def test_persistent_mint_rejection_fails_loud_not_silent_fallback(
         self, fake_service, monkeypatch: pytest.MonkeyPatch
     ) -> None:

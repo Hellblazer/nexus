@@ -608,8 +608,10 @@ class RefreshableHttpStoreMixin:
 
         ``idempotent=False`` (nexus-tjvgf) disables BOTH retry axes for
         operations where a lost-response retry double-applies server-side
-        (queue claims, counter increments, content-appending merges) —
-        see :meth:`_send`.
+        (queue claims, counter increments, content-appending merges), with
+        one carve-out: a definitive 401 still re-mints and retries once
+        (nexus-ig3qe — the operation provably never executed) — see
+        :meth:`_send`.
 
         ``timeout`` (nexus-y9t08) is an OPTIONAL per-request override —
         omitted (``None``, the default) means "no override", so the call
@@ -685,21 +687,41 @@ class RefreshableHttpStoreMixin:
         kwarg).
 
         ``idempotent=False`` (nexus-tjvgf): the request is issued EXACTLY
-        ONCE — no gateway 502/503/504 backoff loop, no endpoint
-        re-resolve-and-retry. For a non-idempotent server-side operation a
-        lost RESPONSE after a successful apply means a retry double-applies
-        (a re-claimed queue row orphaning the first claim; a retry-budget
-        counter double-incremented toward premature terminal failure; a
-        merge appending the same content twice). The caller sees the raise
-        and owns recovery — every production call site of the opted-out
-        verbs already sits under ``mcp_infra._service_t2_write_locked``,
-        which evicts + rebuilds the store singleton on a genuine
-        connectivity failure (``nexus.retry._is_connectivity_error`` —
+        ONCE per credential — no gateway 502/503/504 backoff loop, no
+        transport-error re-resolve-and-retry. For a non-idempotent
+        server-side operation a lost RESPONSE after a successful apply
+        means a retry double-applies (a re-claimed queue row orphaning the
+        first claim; a retry-budget counter double-incremented toward
+        premature terminal failure; a merge appending the same content
+        twice). The caller sees the raise and owns recovery — every
+        production call site of the opted-out verbs already sits under
+        ``mcp_infra._service_t2_write_locked``, which evicts + rebuilds
+        the store singleton on a genuine connectivity failure
+        (``nexus.retry._is_connectivity_error`` —
         ``httpx.TransportError``/``ConnectionError``/``TimeoutError``, not
         "any raise": nexus-0dpli narrowed this so a routine business
         exception no longer evicts a healthy singleton out from under
         concurrent sibling callers), so no supervisor-restart resilience
         is lost by opting out.
+
+        EXCEPTION carved out of the opt-out (nexus-ig3qe): a definitive
+        HTTP **401** re-mints/re-resolves the credential and retries
+        EXACTLY ONCE, even for non-idempotent verbs. The double-apply
+        hazard the opt-out guards against requires the server to have
+        POSSIBLY EXECUTED the operation — true for every lost-response
+        transport shape, false for a 401: the engine's AuthFilter rejects
+        the request BEFORE the handler runs, so a 401 response is proof
+        the operation did NOT apply and a single retry with a fresh
+        credential cannot double-claim/double-increment/double-append.
+        Without this carve-out the long-running aspect worker's
+        ``claim_batch`` hammered the managed engine with an expired data
+        token forever (218 claim 401s measured by conexus on 2026-08-31
+        alone — the token has a TTL and the opted-out path had no way to
+        re-mint). Skipped when BOTH halves were explicitly pinned at
+        construction (a test fixture against a fake server): re-resolving
+        could not change anything, so the 401 propagates exactly as
+        before. The retry attempt itself stays single-shot (no gateway
+        loop) and a second 401 propagates — no loops.
 
         Mirrors ``http_vector_client._request``'s FULL two-axis shape
         (nexus-1ytp6 — the original port carried only the first axis):
@@ -714,7 +736,28 @@ class RefreshableHttpStoreMixin:
           failure (of ANY kind) propagates untouched — no retry loops.
         """
         if not idempotent:
-            return self._request_once(method, path, **kwargs)
+            try:
+                return self._request_once(method, path, **kwargs)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 401:
+                    raise
+                if getattr(self, "_base_url_pinned", True) and getattr(self, "_token_pinned", True):
+                    raise  # fully pinned: nothing a re-resolve could change
+                # nexus-ig3qe: 401 = rejected by the auth layer BEFORE the
+                # handler ran — the operation provably did not apply, so one
+                # retry with a fresh credential is safe even here. See the
+                # docstring's carve-out paragraph.
+                _log.info(
+                    "refreshable_http_store.non_idempotent_401_remint",
+                    store=type(self).__name__,
+                    method=method,
+                    path=path,
+                )
+                from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred to avoid circular import
+
+                get_data_token_manager().invalidate(self._base_url, self._tenant)
+                self._invalidate_and_reresolve()
+                return self._request_once(method, path, **kwargs)
         try:
             return self._once_with_gateway_retry(method, path, **kwargs)
         except (
