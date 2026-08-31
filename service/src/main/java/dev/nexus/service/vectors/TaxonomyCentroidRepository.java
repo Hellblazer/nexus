@@ -186,6 +186,10 @@ public final class TaxonomyCentroidRepository {
             // (RDR-156 — without this, filtered HNSW silently under-returns). SET LOCAL is
             // txn-scoped, same pool discipline as the TenantScope GUC stamp.
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
+            // nexus-4ktfm: crowd-out headroom for the traversal (see
+            // PgSession.DEFAULT_EF_SEARCH_FLOOR) — centroid tables share the
+            // same one-index-all-tenants + RLS-after-scan shape as chunks.
+            PgSession.setHnswEfSearch(ctx, nResults);
             return ctx.fetch(
                 "SELECT topic_id, (" + embeddingCol + " <=> ?::vector) AS distance FROM "
                 + centroidTable(dim)
