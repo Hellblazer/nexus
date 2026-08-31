@@ -2,7 +2,8 @@
 title: "Independent Plugin Release Channel (plugin-vX.Y.Z-n)"
 id: RDR-197
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-08-31
 priority: high
 author: Hal Hildebrand
 reviewed-by: Sam (lgtm 2026-08-22); gate battery per References
