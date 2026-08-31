@@ -15,25 +15,28 @@ already stops appearing in search results the moment ``nx catalog delete``
 tombstones it. This verb reclaims the manifest/T3 storage those tombstoned
 docs still hold.
 
-AGE SEMANTICS ARE ASYMMETRIC — read this before relying on ``nx catalog
-delete``'s "a manual restore stays possible" note (nexus-xavu7): the
-underlying ``nexus.purge_trash(interval)`` SQL function's chunk sweep
-(Steps 1-3, catalog-003-soft-delete.xml) is NOT gated by
-``--older-than-days`` at all — EVERY tombstoned document's orphaned
-manifest-backed chunks are swept on the very next non-dry-run call,
-however recently that document was tombstoned. ONLY the ``catalog_
-documents`` row itself (Step 4, the physical row delete this verb reports
-as ``documents_purged``) waits for the age threshold. So "manual restore
-stays possible" is true only BEFORE the first ``--no-dry-run --confirm``
-run — after that run, EVERY currently-tombstoned document (not just ones
-past ``--older-than-days``) has lost its chunk content permanently, even
-though its catalog row may still be sitting there (not yet aged out).
-``--older-than-days`` only controls how soon the ROW disappears, never
-whether a given run's chunk sweep applies to it.
+AGE SEMANTICS ARE SYMMETRIC since catalog-026 (nexus-5da44, RDR-191
+GATE-2) — and this section previously documented the OPPOSITE, the
+original catalog-003 behaviour, for two weeks after the engine retired it
+(nexus-kcm6c: the 2026-08-27 shakedown read 0 stranded at the default 30d
+gate vs 1,041 at 1d and concluded the COUNTER was lying; it was this
+prose). Current contract, verified against catalog-026/catalog-033's
+function body: the chunk sweep (Steps 1-3) PROTECTS any chunk whose
+manifest row belongs to a document that is live OR tombstoned but still
+inside the ``--older-than-days`` grace window — the exact complement of
+Step 4's document-delete predicate. A tombstoned document inside its
+window keeps its catalog row, manifest rows, and chunks TOGETHER until
+the window passes, then loses all three together on the next execute.
+``nx catalog delete``'s "a manual restore stays possible" note
+(nexus-xavu7) is therefore genuinely true for the whole grace window.
+Consequence for the counts: the stranded-chunk preview IS scoped by
+``--older-than-days`` — a small number at the default 30d alongside a
+large one at 1d means recent tombstones are being protected, exactly as
+designed, not that either number is wrong.
 
 Default mode is a DRY-RUN count report (``dry_run=True`` on the wire) — a
-per-dim stranded-chunk count preview (age-independent — see above) plus an
-aged-tombstone document count (age-gated), printed and exit 0. Mutation
+per-dim stranded-chunk count preview plus an
+aged-tombstone document count (both age-gated — see above), printed and exit 0. Mutation
 (the real ``nexus.purge_trash(interval)`` call) is gated behind BOTH
 ``--no-dry-run`` AND ``--confirm`` (the reconcile-stale gate pattern,
 nexus-cdypx: a forgotten flag reports, it never mutates).
@@ -99,16 +102,16 @@ _POPULATION_NOTE = (
 
 
 def _echo_result(result: dict, older_than_days: int) -> None:
-    """Echo the engine's response, split into the AGE-GATED catalog-row count
-    (``documents_purged``) and the AGE-INDEPENDENT chunk-storage sweep
+    """Echo the engine's response, split into the catalog-row count
+    (``documents_purged``) and the chunk-storage sweep
     (``chunks_<dim>_stranded`` and anything else) — nexus-8j1zx fix round.
 
-    A prior flat listing under a single "(older than N day(s))" header made
-    it look like ``--older-than-days`` scoped the chunk counts too, when in
-    fact ``nexus.purge_trash``'s chunk sweep (Steps 1-3) sweeps EVERY
-    tombstoned doc's orphaned chunks on every non-dry-run call regardless of
-    age — see the module docstring's AGE SEMANTICS section. Only Step 4
-    (the ``catalog_documents`` row delete/count) honors the age threshold.
+    BOTH sides honor ``--older-than-days`` since catalog-026 (see the module
+    docstring's AGE SEMANTICS section — this function's heading claimed the
+    chunk counts were NOT age-gated for two weeks after the engine made them
+    so, which is what sent nexus-kcm6c hunting a counter bug that was
+    actually prose). The split heading remains because the two counts answer
+    different questions: rows deleted vs chunk storage reclaimed.
     ``documents_purged`` is the one field name this function hardcodes
     (it is part of the LOCKED nexus-3ck2g wire contract, T1 2fbc12df);
     everything else stays shape-agnostic so a future additional dim's
@@ -141,8 +144,9 @@ def _echo_result(result: dict, older_than_days: int) -> None:
     chunk_keys = sorted(k for k in result if k not in ("dry_run", docs_key, eligible_key))
     if chunk_keys:
         click.echo(
-            "  Chunk storage swept — NOT age-gated, every tombstoned doc's "
-            "orphaned chunks regardless of age (see module docstring):"
+            "  Chunk storage swept — age-gated like the row count since "
+            "catalog-026: tombstones inside the grace window keep their "
+            "chunks (see module docstring):"
         )
         for key in chunk_keys:
             value = result[key]
@@ -184,13 +188,13 @@ def purge_trash_cmd(older_than_days: int, dry_run: bool, confirm: bool, json_out
     """Physically reclaim tombstoned catalog rows + their orphaned T3 chunks (nexus-3ck2g).
 
     Default (no flags) is a read-only preview: per-dim stranded-chunk
-    counts (NOT age-gated — every tombstoned doc's orphaned chunks, any
-    age) and an aged-tombstone document count (age-gated by
-    --older-than-days), computed engine-side via
+    counts and an aged-tombstone document count, BOTH gated by
+    --older-than-days (catalog-026: tombstones inside the grace window
+    keep row, manifest, and chunks together), computed engine-side via
     ``nexus.purge_trash(older_than_days, dry_run=true)``. Nothing is
-    deleted in this mode. See the module docstring's AGE SEMANTICS ARE
-    ASYMMETRIC section before relying on ``nx catalog delete``'s
-    "manual restore stays possible" note.
+    deleted in this mode. A near-zero count at the default 30 days next
+    to a large count at ``--older-than-days 1`` means recent tombstones
+    are being protected — by design, not a counter defect (nexus-kcm6c).
 
     \\b
     To actually reclaim:

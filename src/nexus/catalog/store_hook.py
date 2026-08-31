@@ -708,15 +708,13 @@ def store_delete_catalog_cleanup(
     ``CatalogDocumentCascadeTest`` / ``SoftDeleteTest``). The manifest and
     T3 chunks survive until an operator runs ``nx catalog purge-trash
     --no-dry-run --confirm`` (the engine's ``nexus.purge_trash(interval)``,
-    wired to a caller by nexus-3ck2g) — CAVEAT (nexus-8j1zx fix round):
-    that reclaim is NOT age-gated the way "past the retention window"
-    might suggest. ``purge_trash``'s chunk sweep runs on EVERY currently-
-    tombstoned document on the very next non-dry-run invocation, regardless
-    of how recently it was deleted; only the catalog row's physical delete
-    honors ``--older-than-days``. So "manual restore stays possible" holds
-    only until the NEXT ``purge-trash --no-dry-run --confirm`` run anywhere
-    in the tenant, not until some age threshold for this particular
-    document. Until the engine ships the RDR-156 read-side tombstone
+    wired to a caller by nexus-3ck2g) — and since catalog-026 (nexus-5da44;
+    this caveat stated the earlier not-age-gated behaviour for two weeks
+    after the engine retired it, nexus-kcm6c) the chunk sweep protects
+    every tombstone still inside the ``--older-than-days`` grace window:
+    row, manifest, and chunks stay TOGETHER until the window passes, so
+    "manual restore stays possible" holds for the whole window, even
+    across purge runs. Until the engine ships the RDR-156 read-side tombstone
     filter (also nexus-3ck2g), the deleted content also stays fully
     searchable in the interim — this cleanup only stops the CATALOG ROW
     from resolving.

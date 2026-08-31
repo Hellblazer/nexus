@@ -5214,12 +5214,12 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
         # tombstones that catalog row. CORRECTED (nexus-3ck2g): this comment
         # previously claimed delete_document cascades the manifest rows —
         # false. The engine soft-tombstones only; document_chunks + the T3
-        # chunks survive until `nx catalog purge-trash` reclaims them — NOT
-        # gated by a retention window (nexus-8j1zx: the chunk sweep runs on
-        # every tombstoned doc on the NEXT --no-dry-run --confirm run,
-        # regardless of age; only the catalog row itself waits for
-        # --older-than-days — see store_hook.store_delete_catalog_cleanup's
-        # docstring for the full rationale). Cleanup failure here is
+        # chunks survive until `nx catalog purge-trash` reclaims them, and
+        # since catalog-026 the sweep honors the --older-than-days grace
+        # window (row, manifest, and chunks go together once it passes —
+        # see store_hook.store_delete_catalog_cleanup's docstring for the
+        # full rationale; nexus-kcm6c corrected the stale not-age-gated
+        # claim that used to live here). Cleanup failure here is
         # surfaced, never silent.
         #
         # nexus-c53hy (RDR-191 P2 round-2 fix): resolve-and-VERIFY before

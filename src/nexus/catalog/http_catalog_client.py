@@ -1491,22 +1491,20 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         the manual-restore path, nexus-xavu7); this is the caller that
         physically reclaims them.
 
-        CAVEAT (nexus-8j1zx fix round): the reclaim this method performs is
-        NOT age-gated the way "once the retention window has passed" might
-        suggest. The underlying ``nexus.purge_trash`` chunk sweep (Steps
-        1-3) runs on EVERY currently-tombstoned document on the very next
-        ``dry_run=False`` call, regardless of how recently it was
-        tombstoned — only the catalog row's physical delete (Step 4, the
-        ``documents_purged`` count) honors ``older_than_days``. So the
-        manual-restore path (nexus-xavu7) stays open only until the NEXT
-        ``dry_run=False`` call anywhere in the tenant, not until this
-        document individually ages past the threshold.
+        AGE SEMANTICS (catalog-026, nexus-5da44 — this docstring carried the
+        earlier not-age-gated caveat for two weeks after the engine retired
+        it, nexus-kcm6c): the ``nexus.purge_trash`` chunk sweep (Steps 1-3)
+        protects every tombstone still inside the ``older_than_days`` grace
+        window, the exact complement of Step 4's document-delete predicate —
+        row, manifest, and chunks stay together until the window passes, so
+        the manual-restore path (nexus-xavu7) holds for the whole window,
+        even across ``dry_run=False`` calls.
 
         Wire contract (LOCKED, design of record T1 scratch 2fbc12df): POST
         body ``{"older_than_days": int, "dry_run": bool}``; the engine's
-        JSON response — ``documents_purged`` (age-gated) plus per-dim
-        ``chunks_<dim>_stranded`` counts (age-INDEPENDENT, see the CAVEAT
-        above), plus the echoed ``dry_run`` flag — is returned to the
+        JSON response — ``documents_purged`` plus per-dim
+        ``chunks_<dim>_stranded`` counts (both scoped by ``older_than_days``
+        since catalog-026), plus the echoed ``dry_run`` flag — is returned to the
         caller verbatim as a ``dict``; this client does not interpret or
         reshape it. ``dry_run=True`` (the default) computes the same
         counts as a preview WITHOUT deleting anything; ``dry_run=False``
