@@ -682,6 +682,15 @@ class HttpScratchStore:
         except httpx.HTTPError as exc:
             raise RuntimeError(f"HttpScratchStore: network error on {path}: {exc}") from exc
         if resp.status_code == 401:
+            # nexus-cmzib (critic kopmj): an EDGE-authored 401 short-circuits
+            # BEFORE the self-heal chain — lease refresh / re-mint cannot fix
+            # a rejection the application never saw, and the heal's retry
+            # would just re-hit the edge. (conexus's edge audit says their
+            # edge never authors a post-forward 401; this guards the class,
+            # not the current topology.)
+            edge = self._edge_refusal(path, resp)
+            if edge is not None:
+                raise RuntimeError(edge)
             # nexus-g5hzk: the owner rotated the SESSION token; ours went
             # stale. Try that self-heal FIRST (unchanged precedence).
             healed = self._refresh_session_token_from_lease(sent_token)
@@ -699,6 +708,9 @@ class HttpScratchStore:
                         f"HttpScratchStore: network error on token-refresh retry {path}: {exc}"
                     ) from exc
         if not resp.is_success:
+            edge = self._edge_refusal(path, resp)
+            if edge is not None:
+                raise RuntimeError(edge)
             if resp.status_code == 401:
                 raise RuntimeError(
                     f"{SESSION_UNAUTHORIZED_MARKER} on {path}: {resp.text[:200]}"
@@ -707,6 +719,24 @@ class HttpScratchStore:
                 f"HttpScratchStore: {path} returned HTTP {resp.status_code}: {resp.text[:200]}"
             )
         return resp.json()
+
+    @staticmethod
+    def _edge_refusal(path: str, resp: httpx.Response) -> str | None:
+        """nexus-cmzib: structured message when the EDGE (WAF) refused the
+        request — never the raw HTML error page, and with the
+        shell-substitution defang hint when the body carries the trigger.
+        Checked BEFORE the 401 session-marker branch: an edge-authored
+        refusal says nothing about the session token, and the marker's
+        remint guidance would send the caller after the wrong cause."""
+        from nexus.db.edge_refusal import edge_refusal_message  # noqa: PLC0415 — deferred to avoid import-cycle risk at module load
+
+        try:
+            request_body = resp.request.content.decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 — request-body access is diagnostics-only; never fail the error path over it
+            request_body = ""
+        return edge_refusal_message(
+            f"HttpScratchStore {path}", resp.status_code, resp.headers, request_body,
+        )
 
     def _post_raw(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """POST *payload* to *path* and return parsed JSON without raising on 404-class."""
@@ -727,6 +757,11 @@ class HttpScratchStore:
         except httpx.HTTPError as exc:
             raise RuntimeError(f"HttpScratchStore: network error on {path}: {exc}") from exc
         if resp.status_code == 401:
+            # nexus-cmzib (critic kopmj): edge-authored 401 short-circuits the
+            # heal chain — see _post's matching comment.
+            edge = self._edge_refusal(path, resp)
+            if edge is not None:
+                raise RuntimeError(edge)
             # nexus-g5hzk: rotated SESSION token — try that self-heal first.
             healed = self._refresh_session_token_from_lease(sent_token)
             if not healed:
@@ -743,6 +778,9 @@ class HttpScratchStore:
         if resp.status_code == 404:
             return {"found": False}
         if not resp.is_success:
+            edge = self._edge_refusal(path, resp)
+            if edge is not None:
+                raise RuntimeError(edge)
             if resp.status_code == 401:
                 raise RuntimeError(
                     f"{SESSION_UNAUTHORIZED_MARKER} on {path}: {resp.text[:200]}"

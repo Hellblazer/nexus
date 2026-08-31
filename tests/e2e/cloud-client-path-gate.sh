@@ -78,12 +78,13 @@ _fail() { echo "CLOUD CLIENT-PATH GATE FAILED: $*" >&2; exit 1; }
 # side — a heredoc that dies mid-leg still counts as a leg that failed to
 # complete, never a leg that quietly did not run.
 #
-# EXPECTED_LEGS=3 (dated 2026-08-18): [A] /version, [B] /health
+# EXPECTED_LEGS=4 (dated 2026-08-31): [A] /version, [B] /health
 # authenticated, [C+D] client probe heredoc (one shell-side entry for the
-# combined python leg). Editing the battery means updating this constant in
-# the same diff.
+# combined python leg), [E] T2 write body carrying shell-substitution text
+# (nexus-cmzib WAF passthrough). Editing the battery means updating this
+# constant in the same diff.
 LEGS_RAN=0
-EXPECTED_LEGS=3
+EXPECTED_LEGS=4
 _leg_enter() { LEGS_RAN=$((LEGS_RAN + 1)); echo "[$1] $2"; }
 
 SERVICE_URL="$(uv run python - <<'PY'
@@ -206,6 +207,42 @@ except Exception as exc:
     bad = True
 
 sys.exit(1 if bad else 0)
+PY
+
+# ── Leg E: T2 write body carrying shell-substitution text (nexus-cmzib) ──
+# Measured 2026-08-20: the edge WAF (KnownBadInputs Log4JRCE_BODY) 403'd any
+# T2/T1 write whose JSON body contained shell-substitution syntax, so review
+# records and shell-guard notes could not be persisted verbatim. The edge
+# half was fixed 2026-08-23 (conexus PR #230 / conexus-04dp: the managed
+# rule group is split — the three _BODY sub-rules COUNT on /v1/*, enforce
+# elsewhere), verified live 2026-08-31 (this leg green, first run). The leg
+# stays as the REGRESSION TRIPWIRE for the recurrence class (conexus-5jm5:
+# the managed group grows new _BODY signatures over time): a leg-E-only red
+# means a NEW signature is blocking /v1 writes again — classify on the
+# response Server header (awselb/2.0 = WAF, absent/nginx = app) and relay
+# to conexus; the structured client error it prints (edge_refusal.py) names
+# the cause. Heredoc is quoted: the substitution text below is DATA.
+_leg_enter E "T2 write with shell-substitution body (WAF passthrough, nexus-cmzib)"
+uv run python - <<'PY' || _leg_fail "E: shell-substitution T2 write refused or mangled (see above)"
+import sys
+from nexus.db.t2.http_memory_store import HttpMemoryStore
+
+title = "cloud-gate-waf-probe"
+content = "waf probe: $(echo a) and ${x:-i} must persist verbatim"
+store = HttpMemoryStore()
+try:
+    store.put("nexus_gate_probes", title, content, tags="cloud-gate,nexus-cmzib", ttl=1)
+    row = store.get("nexus_gate_probes", title)
+    got = (row or {}).get("content", "")
+    if content not in got:
+        print(f"  VIOLATION [E]: probe stored but read back mangled: {got!r}", file=sys.stderr)
+        sys.exit(1)
+    print("  ok [E]: substitution-bearing body stored and read back verbatim")
+finally:
+    try:
+        store.delete("nexus_gate_probes", title)
+    except Exception:  # noqa: BLE001 — best-effort cleanup; ttl=1 reaps leftovers
+        pass
 PY
 
 if [ "$LEGS_RAN" -ne "$EXPECTED_LEGS" ]; then

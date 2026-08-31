@@ -723,16 +723,20 @@ class RefreshableHttpStoreMixin:
         before. The retry attempt itself stays single-shot (no gateway
         loop) and a second 401 propagates — no loops.
 
-        The never-executed claim is verified at the engine (stacked
-        review 2026-08-31: AuthFilter is the sole filter and always
-        rejects before chain.doFilter). The managed deployment's edge is
-        not verifiable from this repo; the argument extends to any sane
-        edge — an edge 401 means the edge rejected before forwarding
-        (never executed), and edge-synthesized failures for requests
-        already in flight at the engine are 5xx-class, not 401.
-        Residual (relayed to conexus): confirm their edge never
-        synthesizes 401 for a forwarded request; blast radius if wrong
-        is one re-claimed queue row, recovered by ``reclaim_stale``.
+        The never-executed claim is verified END TO END. Engine: stacked
+        review 2026-08-31 — AuthFilter is the sole filter and always
+        rejects before chain.doFilter. Edge: conexus verified per hop at
+        their main f664387 (2026-08-31 exchange, recorded on
+        conexus-07dz) — the ALB has no auth action (WAF blocks are 403),
+        the CP AuthFilter's both 401 sites return without invoking
+        downstream, EdgeProxyHandler authors zero 401s (post-forward
+        failures map exhaustively to 502/504) and relays the engine's
+        status verbatim, and the nginx TLS sidecar can author
+        400/413/502/504 but never 401. So every observed 401 is either
+        engine-authored-and-relayed or edge-authored strictly before
+        forwarding — never executed, both ways. Blast radius if some
+        future edge breaks this: one re-claimed queue row, recovered by
+        ``reclaim_stale``.
 
         Mirrors ``http_vector_client._request``'s FULL two-axis shape
         (nexus-1ytp6 — the original port carried only the first axis):
@@ -873,6 +877,21 @@ class RefreshableHttpStoreMixin:
         """
         if resp.is_success:
             return
+        # nexus-cmzib: an EDGE-refused request (WAF; positive Server-header
+        # test) must never surface its raw HTML error page — render the
+        # structured refusal, with the shell-substitution defang hint when
+        # the request body carries the measured trigger.
+        from nexus.db.edge_refusal import edge_refusal_message  # noqa: PLC0415 — deferred to avoid circular import
+
+        try:
+            request_body = resp.request.content.decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 — a streamed/absent request body is diagnostics-only; never fail the error path over it
+            request_body = ""
+        edge = edge_refusal_message(
+            f"{type(self).__name__}.{op}", resp.status_code, resp.headers, request_body,
+        )
+        if edge is not None:
+            raise httpx.HTTPStatusError(edge, request=resp.request, response=resp)
         try:
             detail = resp.json().get("error", resp.text)
         except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
