@@ -10,6 +10,7 @@ one root, rung for rung; the cross-language tests here pin the Java mirror
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -40,6 +41,30 @@ def test_blank_env_is_absence(monkeypatch):
         omr.service_onnx_models_root()
         == Path.home() / ".cache" / "nexus" / "onnx_models"
     )
+
+
+def test_home_env_wins(tmp_path, monkeypatch):
+    monkeypatch.delenv(omr.ENV_MODEL_DIR, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert (
+        omr.service_onnx_models_root()
+        == tmp_path / ".cache" / "nexus" / "onnx_models"
+    )
+
+
+def test_blank_home_falls_to_passwd_entry(monkeypatch):
+    """Rung parity for HOME="" (code-review-expert Important, 2026-08-30):
+    Java blank-checks HOME and falls to user.home; bare Path.home() is
+    presence-only and resolves HOME="" to ``/``. Both sides must land on the
+    passwd entry."""
+    import pwd
+
+    monkeypatch.delenv(omr.ENV_MODEL_DIR, raising=False)
+    monkeypatch.setenv("HOME", "")
+    expected = (
+        Path(pwd.getpwuid(os.getuid()).pw_dir) / ".cache" / "nexus" / "onnx_models"
+    )
+    assert omr.service_onnx_models_root() == expected
 
 
 # ── Cross-language rung parity with OnnxModelPaths.java ──────────────────────

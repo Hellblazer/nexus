@@ -15,9 +15,12 @@ Both sides now resolve the SAME root, rung for rung:
 1. ``NX_ONNX_MODEL_DIR`` — the onnx_models ROOT (not a per-model dir). The
    storage-service supervisor passes this explicitly in the engine's spawn env
    so supervisor and engine agree by construction.
-2. ``Path.home() / ".cache" / "nexus" / "onnx_models"`` — the pre-existing
-   default (Java side: ``$HOME``, falling back to ``user.home`` only when HOME
-   is absent entirely).
+2. ``$HOME/.cache/nexus/onnx_models`` — the pre-existing default. Blank-aware
+   on BOTH sides (review finding, 2026-08-30): the Java rung blank-checks HOME
+   and a present-but-EMPTY ``HOME=""`` must fall through here too — bare
+   ``Path.home()`` is presence-only and resolves ``HOME=""`` to ``/``.
+3. The passwd entry (Java: ``user.home``) — last resort when HOME is absent
+   or blank.
 
 Java mirror: ``service/src/main/java/dev/nexus/service/vectors/OnnxModelPaths.java``;
 ``tests/db/test_onnx_model_root.py`` pins the two against each other. No
@@ -34,9 +37,22 @@ from pathlib import Path
 ENV_MODEL_DIR = "NX_ONNX_MODEL_DIR"
 
 
+def _home_base() -> Path:
+    """HOME when set and non-blank, else the passwd entry — the Java rungs."""
+    home = os.environ.get("HOME", "").strip()
+    if home:
+        return Path(home)
+    try:
+        import pwd
+
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (ImportError, KeyError):  # non-POSIX / no passwd row: best effort
+        return Path.home()
+
+
 def service_onnx_models_root() -> Path:
     """The root directory the per-model ``<model>/onnx/`` dirs live under."""
     env = os.environ.get(ENV_MODEL_DIR, "").strip()
     if env:
         return Path(env)
-    return Path.home() / ".cache" / "nexus" / "onnx_models"
+    return _home_base() / ".cache" / "nexus" / "onnx_models"

@@ -1713,6 +1713,40 @@ class TestSpawnServiceOnnxModelRoot:
         env = self._spawn_env(config_dir, clock, monkeypatch)
         assert env["NX_ONNX_MODEL_DIR"] == "/custom/onnx-root"
 
+    def test_diverging_per_model_override_warns_at_spawn(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A Python-only per-model override off the root re-creates the
+        green-provision-then-crash shape (the engine reads only
+        <root>/<model>/onnx) — the supervisor must name the divergence at
+        spawn so the engine's model-not-found abort has a visible cause."""
+        monkeypatch.delenv("NX_ONNX_MODEL_DIR", raising=False)
+        monkeypatch.setenv("NX_SERVICE_BGE_DIR", "/nonstandard/bge-dir")
+        import structlog.testing
+
+        with structlog.testing.capture_logs() as logs:
+            self._spawn_env(config_dir, clock, monkeypatch)
+        diverges = [
+            e for e in logs if e["event"] == "onnx_per_model_override_diverges"
+        ]
+        assert len(diverges) == 1
+        assert diverges[0]["env_var"] == "NX_SERVICE_BGE_DIR"
+        assert diverges[0]["provisioner_dir"] == "/nonstandard/bge-dir"
+
+    def test_no_override_no_divergence_warning(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("NX_ONNX_MODEL_DIR", raising=False)
+        monkeypatch.delenv("NX_SERVICE_BGE_DIR", raising=False)
+        monkeypatch.delenv("NX_SERVICE_CROSSENCODER_DIR", raising=False)
+        import structlog.testing
+
+        with structlog.testing.capture_logs() as logs:
+            self._spawn_env(config_dir, clock, monkeypatch)
+        assert not [
+            e for e in logs if e["event"] == "onnx_per_model_override_diverges"
+        ]
+
 
 class TestCredsReloadAfterBackfill:
     """nexus-hzhgl round 3 review Significant-1: ``_backfill_provision_grants()``

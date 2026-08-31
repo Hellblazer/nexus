@@ -150,6 +150,36 @@ def test_env_override_directs_destination(tmp_path, monkeypatch):
     assert sbm.service_bge_model_dir() == custom
 
 
+def test_engine_dir_mismatch_detects_diverging_override(tmp_path, monkeypatch):
+    """NX_SERVICE_BGE_DIR off the root re-creates the nexus-ogccs shape (the
+    engine reads only <root>/<model>/onnx) — the helper must name both paths
+    so the supervisor can warn at spawn."""
+    monkeypatch.delenv("NX_ONNX_MODEL_DIR", raising=False)
+    custom = tmp_path / "custom-bge"
+    monkeypatch.setenv("NX_SERVICE_BGE_DIR", str(custom))
+    mismatch = sbm.service_bge_engine_dir_mismatch()
+    assert mismatch is not None
+    actual, expected = mismatch
+    assert actual == custom
+    assert expected == service_onnx_models_root() / "bge-base-en-v1.5" / "onnx"
+
+
+def test_engine_dir_mismatch_none_on_default(monkeypatch):
+    monkeypatch.delenv("NX_SERVICE_BGE_DIR", raising=False)
+    monkeypatch.delenv("NX_ONNX_MODEL_DIR", raising=False)
+    assert sbm.service_bge_engine_dir_mismatch() is None
+
+
+def test_engine_dir_mismatch_none_when_override_matches_root(tmp_path, monkeypatch):
+    """An override that lands exactly where the engine reads is not a
+    divergence — no warning noise for a consistent operator setup."""
+    monkeypatch.setenv("NX_ONNX_MODEL_DIR", str(tmp_path))
+    monkeypatch.setenv(
+        "NX_SERVICE_BGE_DIR", str(tmp_path / "bge-base-en-v1.5" / "onnx")
+    )
+    assert sbm.service_bge_engine_dir_mismatch() is None
+
+
 def test_python_path_matches_java_default(monkeypatch):
     """Cross-language drift guard: the Python destination must equal the Java
     Bge768Embedder.DEFAULT_MODEL_PATH (sans ~ expansion). Both sides hang off

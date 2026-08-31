@@ -164,6 +164,25 @@ def test_urls_are_pinned_revision_hf_resolves(ce_dir, monkeypatch):
     assert not any("/main/" in u for u in urls)
 
 
+def test_engine_dir_mismatch_detects_diverging_override(tmp_path, monkeypatch):
+    """Mirror of the bge helper — see test_service_bge_model.py for the full
+    rationale (nexus-ogccs second axis)."""
+    monkeypatch.delenv("NX_ONNX_MODEL_DIR", raising=False)
+    custom = tmp_path / "custom-ce"
+    monkeypatch.setenv("NX_SERVICE_CROSSENCODER_DIR", str(custom))
+    mismatch = scm.service_crossencoder_engine_dir_mismatch()
+    assert mismatch is not None
+    actual, expected = mismatch
+    assert actual == custom
+    assert expected == service_onnx_models_root() / "ms-marco-minilm-l6-v2" / "onnx"
+
+
+def test_engine_dir_mismatch_none_on_default(monkeypatch):
+    monkeypatch.delenv("NX_SERVICE_CROSSENCODER_DIR", raising=False)
+    monkeypatch.delenv("NX_ONNX_MODEL_DIR", raising=False)
+    assert scm.service_crossencoder_engine_dir_mismatch() is None
+
+
 def test_python_path_matches_java_default(monkeypatch):
     """Cross-language drift guard: the Python destination must equal the Java
     CrossEncoderReranker.DEFAULT_MODEL_PATH / DEFAULT_TOKENIZER_PATH. Both

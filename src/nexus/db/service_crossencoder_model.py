@@ -78,6 +78,12 @@ _MIN_MODEL_BYTES = 50_000_000
 _MIN_TOKENIZER_BYTES = 100_000
 
 
+#: Per-model segment under the shared onnx_models root — the ONLY place the
+#: engine looks for this model (``CrossEncoderReranker.DEFAULT_MODEL_PATH``
+#: appends the same segment to ``OnnxModelPaths.root()``).
+_MODEL_SUBDIR = "ms-marco-minilm-l6-v2/onnx"
+
+
 def service_crossencoder_model_dir() -> Path:
     """Canonical dir the Java service reads the cross-encoder from.
 
@@ -89,7 +95,18 @@ def service_crossencoder_model_dir() -> Path:
     env = os.environ.get(_ENV_DIR, "").strip()
     if env:
         return Path(env)
-    return service_onnx_models_root() / "ms-marco-minilm-l6-v2" / "onnx"
+    return service_onnx_models_root() / _MODEL_SUBDIR
+
+
+def service_crossencoder_engine_dir_mismatch() -> tuple[Path, Path] | None:
+    """``(provisioner_dir, engine_reads)`` when they diverge, else ``None``.
+
+    Mirror of ``service_bge_engine_dir_mismatch`` — see its docstring; the
+    engine reads only ``<root>/ms-marco-minilm-l6-v2/onnx``.
+    """
+    expected = service_onnx_models_root() / _MODEL_SUBDIR
+    actual = service_crossencoder_model_dir()
+    return None if actual == expected else (actual, expected)
 
 
 def service_crossencoder_model_present() -> bool:
