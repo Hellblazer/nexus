@@ -125,14 +125,22 @@ def check_wire_contract_ledger(ack_beads: list[str] | None = None) -> tuple[int,
 
     acked = set(ack_beads or [])
     missing = [e for e in ledger.unshipped.values() if e.bead not in acked]
-    if missing:
+    # nexus-1emxn choreography (a): an entry whose note carries the
+    # [additive] direction-safety token asserts OLD client + NEW engine is
+    # safe — deploying the engine AHEAD of the client tag cannot open a
+    # refusal window for that entry, so it authorizes rather than blocks
+    # the unpaired path. Absent/[not-additive] entries keep blocking
+    # exactly as before (additive is None is fail-safe not-additive).
+    blocking = [e for e in missing if e.additive is not True]
+    if blocking:
         print(
-            f"BLOCKED: {len(missing)} both-halves commit(s) in "
+            f"BLOCKED: {len(blocking)} both-halves commit(s) in "
             f"{_wire_ledger.DEFAULT_LEDGER_PATH} have an unshipped client "
-            "half and no acknowledgment:",
+            "half, no [additive] direction-safety token, and no "
+            "acknowledgment:",
             file=sys.stderr,
         )
-        for e in missing:
+        for e in blocking:
             print(
                 f"  {e.sha}  bead {e.bead}  engine tag {e.engine_tag}  "
                 f"({e.note})",
@@ -140,6 +148,16 @@ def check_wire_contract_ledger(ack_beads: list[str] | None = None) -> tuple[int,
             )
         print(f"\n{_LEDGER_REMEDY}", file=sys.stderr)
         return 1, False
+    if missing:
+        print(
+            f"wire-contract ledger: {len(missing)} unshipped both-halves "
+            "commit(s), ALL marked [additive] (old client + new engine safe) "
+            "— unpaired deploy authorized ahead of the client tag "
+            "(nexus-1emxn choreography (a)); pairing completes when the "
+            "client release carrying "
+            f"{', '.join(sorted({e.bead for e in missing}))} bumps the floor."
+        )
+        return 0, False
 
     print(
         f"wire-contract ledger: {len(ledger.unshipped)} unshipped "

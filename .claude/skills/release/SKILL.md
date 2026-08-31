@@ -381,6 +381,23 @@ Tradeoff: extra commit on main, but guards against the case where someone could 
 
 ### 9. Tag and push IMMEDIATELY after merge (triggers Release workflow + PyPI publish via OIDC)
 
+**PAIRED-RELEASE ARMING GATE (nexus-1emxn — measured twice 2026-08-29: the
+"deploy fires at tag push" relay is human-mediated, PyPI publishes in ~90 s,
+and the v7.23.0 refusal window sat open 48+ minutes on the releaser's own
+box).** Before pushing the client tag of a PAIRED release, settle which
+branch applies:
+
+- **All wire-ledger `## Unshipped` entries carry `[additive]`** (old client +
+  new engine safe — `check_client_release_precondition.py` accepts this
+  shape by name): have the engine DEPLOYED before this step. The client tag
+  then cannot open a window at all. This is the preferred branch whenever
+  the ledger allows it.
+- **Any entry is not additive**: do NOT push the tag until the relay is
+  ARMED with conexus — image built, redeploy staged on a named trigger
+  ("fires when vX.Y.Z appears on origin") — and that arming is CONFIRMED
+  back. An unarmed non-additive pairing does not tag; "I'll send the relay
+  right after" is the exact shape that opened both measured windows.
+
 After Step 7's PR merges, switch to main, fetch, and tag the merge commit:
 
 ```bash
@@ -481,6 +498,14 @@ step owns the UPGRADE axis against the REAL published engine identity,
 post-publish. See either script's header for the full ownership split.
 
 ### 12. Reinstall local tool and verify
+
+**CLOUD-MODE BOX GATE (nexus-1emxn (c)):** on a cloud-mode box, run the bare
+floor verify FIRST — `uv run python scripts/check_engine_release_floor.py`
+with the recording flags per Step 0's post-tag form. Exit 1 (cloud still
+behind the new floor) means new spawns after this reinstall would REFUSE the
+managed service (the GH #1402 class, on your own box): wait for the deploy
+to land and the verify to green before reinstalling. Local-mode boxes skip
+this gate — their engine converges from `PINNED_SERVICE_TAG` at reinstall.
 
 ```bash
 scripts/reinstall-tool.sh    # preserves [local] and other extras (mineru is now a default dep)

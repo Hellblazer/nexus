@@ -231,6 +231,69 @@ class TestWireContractLedger:
             )
         assert rc == 1
 
+    # ── nexus-1emxn choreography (a): the [additive] direction-safety token ──
+
+    _ADDITIVE_ENTRY = (
+        "- `cafebabecafebabecafebabecafebabecafebabe` -- bead nexus-addv -- "
+        "engine tag `engine-service-v9.9.9` -- [additive] env-var contract, "
+        "old client + new engine safe\n"
+    )
+    _NOT_ADDITIVE_ENTRY = (
+        "- `feedfacefeedfacefeedfacefeedfacefeedface` -- bead nexus-notad -- "
+        "engine tag `engine-service-v9.9.9` -- [not-additive] NOT NULL at "
+        "the store, deploy must be armed\n"
+    )
+
+    def test_all_additive_unshipped_authorizes_unpaired_deploy(self, tmp_path, capsys):
+        """An all-[additive] Unshipped section means old client + new engine
+        is safe for every entry — deploying the engine AHEAD of the client
+        tag cannot open a refusal window, so the gate authorizes with the
+        pairing named instead of blocking (the measured v0.1.88/v0.1.89
+        windows this bead exists to close)."""
+        ledger = self._write_ledger(tmp_path, self._ADDITIVE_ENTRY)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
+            rc = gate.check("engine-service-v0.0.0-nonexistent")
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "[additive]" in out
+        assert "nexus-addv" in out
+        assert "nexus-1emxn" in out
+
+    def test_mixed_ledger_blocks_and_lists_only_the_non_additive(self, tmp_path, capsys):
+        ledger = self._write_ledger(
+            tmp_path, self._ADDITIVE_ENTRY + self._NOT_ADDITIVE_ENTRY
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
+            rc = gate.check("engine-service-v0.0.0-nonexistent")
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "nexus-notad" in err
+        assert "nexus-addv" not in err
+
+    def test_tokenless_entry_stays_blocking(self, tmp_path):
+        """No token = not-additive, fail-safe: every pre-token entry keeps
+        exactly the blocking behaviour it had before the token existed."""
+        ledger = self._write_ledger(tmp_path, self._FAKE_ENTRY)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
+            rc = gate.check("engine-service-v0.0.0-nonexistent")
+        assert rc == 1
+
+    def test_both_tokens_is_not_additive(self, tmp_path):
+        """An authoring error carrying both tokens must fail safe."""
+        entry = (
+            "- `beadbeadbeadbeadbeadbeadbeadbeadbeadbead` -- bead nexus-both -- "
+            "engine tag `engine-service-v9.9.9` -- [additive] but also "
+            "[not-additive] contradictory fixture\n"
+        )
+        ledger = self._write_ledger(tmp_path, entry)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
+            rc = gate.check("engine-service-v0.0.0-nonexistent")
+        assert rc == 1
+
     def test_both_sources_empty_prints_distinct_combined_message(
         self, tmp_path, capsys
     ):
