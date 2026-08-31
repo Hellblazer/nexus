@@ -448,6 +448,43 @@ def _index_dt_content_record(
         _log.warning("dt_content_empty", uuid=uuid, extraction_source=extraction_source)
         return False
 
+    # nexus-mok9x: web-archive extractions carry the cookie-consent wall and
+    # inline base64 image payloads verbatim (measured: 59% of one CACM
+    # article, with the junk MORE retrievable than the article). Strip in the
+    # WRITER — the cache file is rewritten every run, so cleanup anywhere
+    # downstream cannot stick — and surface the loss instead of silently
+    # indexing it.
+    from nexus.dt_content_clean import BOILERPLATE_WARN_RATIO, clean_dt_content  # noqa: PLC0415 — command-local import
+
+    cleaned = clean_dt_content(text)
+    if cleaned.stripped_chars:
+        _log.info(
+            "dt_content_boilerplate_stripped",
+            uuid=uuid,
+            original_chars=cleaned.original_chars,
+            stripped_chars=cleaned.stripped_chars,
+            stripped_ratio=round(cleaned.stripped_ratio, 3),
+            data_uris_removed=cleaned.data_uris_removed,
+            consent_runs_removed=cleaned.consent_runs_removed,
+        )
+    if cleaned.stripped_ratio > BOILERPLATE_WARN_RATIO:
+        click.echo(
+            f"  WARNING: {cleaned.stripped_ratio:.0%} of {uuid}'s extracted text was "
+            f"boilerplate ({cleaned.data_uris_removed} inline data URI(s), "
+            f"{cleaned.consent_runs_removed} cookie-consent block(s) removed) — "
+            "the source is likely a raw web archive; consider a reader-view "
+            "capture for better quality (nexus-mok9x)."
+        )
+    if not cleaned.text.strip():
+        # Everything was boilerplate: indexing an empty husk would register a
+        # contentless document. Same fail-soft contract as empty extraction —
+        # and CLI-visible (critic fold: the 5xn3k.6 silent-skip gap must not
+        # come back through this new skip reason).
+        _log.warning("dt_content_all_boilerplate", uuid=uuid)
+        click.echo(f"  skipped: extraction was ALL boilerplate  {uuid}")
+        return False
+    text = cleaned.text
+
     name = _dt.dt_record_name(uuid) or uuid
     # JSON-quote the title so a name with a colon / quote can't break the
     # strict frontmatter parse. The body follows verbatim.
@@ -457,6 +494,26 @@ def _index_dt_content_record(
     cache_path = cache_dir / f"{uuid}.md"
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
+        # nexus-mok9x critic fold (the sequencing trap, named at the point of
+        # harm): when this record was indexed BEFORE the cleaner existed, the
+        # cleaned text differs from the cached dirty text, so the re-index
+        # below ADDS clean chunks while the old dirty chunks stay live in raw
+        # vector search (index_markdown replaces the MANIFEST, never deletes
+        # T3 chunks — the measured 1.12.102 trap). Warn so the operator runs
+        # the delete-then-index sweep (recipe on nexus-mok9x) instead of
+        # discovering doubled documents later.
+        if cleaned.stripped_chars:
+            try:
+                prior = cache_path.read_text(encoding="utf-8")
+            except OSError:
+                prior = None
+            if prior is not None and prior != front:
+                click.echo(
+                    f"  NOTE: {uuid} was previously indexed with boilerplate — "
+                    "this re-index adds clean chunks but the stale dirty chunks "
+                    "remain live in raw search until the delete-then-index "
+                    "sweep runs (recipe: nexus-mok9x)."
+                )
         cache_path.write_text(front, encoding="utf-8")
         count = index_markdown(
             cache_path,
