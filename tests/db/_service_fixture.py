@@ -228,8 +228,19 @@ def _self_provision_pg_bundle() -> Path | None:
         # Review finding (P0 remainder, Important 2): a signature/digest
         # verification failure is a security signal, categorically NOT a
         # benign offline-box condition — fail loud, never skip past it.
+        #
+        # nexus-v460j: BinaryDownloadError is the carve-out. binary_install
+        # raises it for could-not-FETCH (connection reset, 404, timeout) —
+        # transport, never a tamper signal — but it SUBCLASSES
+        # BinaryVerificationError for the product's fail-closed callers, so
+        # the name check below used to re-raise it and one reset connection
+        # aborted pytest collection with zero tests run (PR #1474).
+        from nexus.daemon.binary_install import BinaryDownloadError
+
         name = type(exc).__name__
-        if "Verification" in name or "sha256" in str(exc).lower():
+        if not isinstance(exc, BinaryDownloadError) and (
+            "Verification" in name or "sha256" in str(exc).lower()
+        ):
             raise
         import warnings
 

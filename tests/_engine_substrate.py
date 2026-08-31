@@ -154,12 +154,48 @@ _WORKER_SHARD_MAX_INDEX = (
     (_LOW_PORT_RANGE.stop - _LOW_PORT_RANGE.start) // _WORKER_SHARD_WIDTH - 1
 )
 
-#: Resolved at MODULE IMPORT time — conftest imports this module at
-#: collection start, before any per-test HOME/NEXUS_CONFIG_DIR
-#: monkeypatching, so the bundle-leg discovery sees the AMBIENT config
-#: dir (same contract as tests/db/_service_fixture.pg_bin_dir's own
+#: nexus-v460j: resolution is LAZY — the import-time ``pg_bin_dir()`` call
+#: this replaced could DOWNLOAD the PG bundle at collection start (cold
+#: cache), so every pytest leg had a hard network dependency before a
+#: single test ran; one reset connection killed the ``-m lint`` leg, a leg
+#: configured to touch no substrate at all (PR #1474, 2026-08-23).
+#:
+#: The AMBIENT-ENV contract the old import-time resolution existed for is
+#: kept by snapshotting the discovery-relevant env at MODULE IMPORT time
+#: (collection start, before any per-test HOME/NEXUS_CONFIG_DIR
+#: monkeypatching) and applying that snapshot around the deferred
+#: resolution — so a first use that happens to run under a monkeypatched
+#: test still discovers against the ambient config dir, exactly as before
+#: (same contract as tests/db/_service_fixture.pg_bin_dir's own
 #: import-time resolution note).
-_PG_BIN = pg_bin_dir()
+_PG_AMBIENT_ENV_KEYS = ("NEXUS_PG_BIN", "NEXUS_CONFIG_DIR", "HOME", "PATH")
+_PG_AMBIENT_ENV: dict[str, str | None] = {
+    k: os.environ.get(k) for k in _PG_AMBIENT_ENV_KEYS
+}
+_pg_bin_resolved: Path | None = None
+
+
+def _pg_bin() -> Path:
+    """The PG bundle ``bin/`` dir, resolved once on FIRST REAL USE under the
+    import-time ambient env snapshot (may download on a cold cache — which is
+    exactly why it must not run at collection time)."""
+    global _pg_bin_resolved
+    if _pg_bin_resolved is None:
+        saved = {k: os.environ.get(k) for k in _PG_AMBIENT_ENV_KEYS}
+        try:
+            for k, v in _PG_AMBIENT_ENV.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            _pg_bin_resolved = pg_bin_dir()
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+    return _pg_bin_resolved
 
 
 def _worker_shard_range() -> range:
@@ -407,7 +443,7 @@ def _boot() -> dict:
             "substrate is the real engine (RDR-155 P4b P0a', decision D-A) — "
             "build it with: mvn -f service/pom.xml package -DskipTests"
         )
-    bin_dir = _PG_BIN
+    bin_dir = _pg_bin()
     if not bin_dir.exists():
         raise RuntimeError(
             "T2 engine substrate unavailable: no PostgreSQL binaries "
@@ -970,7 +1006,7 @@ def _kill_postmaster_leg(pid: int, cluster_dir: Path, *, grace_s: float = 5.0) -
     from nexus.daemon.service_registry import pid_alive
 
     subprocess.run(
-        [str(_PG_BIN / "pg_ctl"), "-D", str(cluster_dir), "stop", "-m", "immediate"],
+        [str(_pg_bin() / "pg_ctl"), "-D", str(cluster_dir), "stop", "-m", "immediate"],
         capture_output=True,
     )
     deadline = time.monotonic() + grace_s
