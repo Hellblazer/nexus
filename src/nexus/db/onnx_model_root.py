@@ -43,7 +43,7 @@ def _home_base() -> Path:
     if home:
         return Path(home)
     try:
-        import pwd
+        import pwd  # noqa: PLC0415 — POSIX-only; the ImportError arm below IS the non-POSIX branch
 
         return Path(pwd.getpwuid(os.getuid()).pw_dir)
     except (ImportError, KeyError):  # non-POSIX / no passwd row: best effort
