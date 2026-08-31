@@ -43,6 +43,7 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
+- `5ac9f09e03e554d34acd17b6062cfbc16a6212d9` -- bead nexus-ogccs -- engine tag `next engine cut from develop tip (> engine-service-v0.1.91)` -- ONNX model root resolution (env/HOME, never bare passwd user.home). Engine half: OnnxModelPaths (NX_ONNX_MODEL_DIR -> $HOME/.cache/nexus/onnx_models -> user.home) feeds Bge768Embedder + CrossEncoderReranker DEFAULT_*_PATH, boot log event=onnx_model_root. Client half in the same commit: nexus.db.onnx_model_root shared root, provisioner dirs derive from it, supervisor pins NX_ONNX_MODEL_DIR in the engine spawn env. Not a wire-shape change (env-var contract, not HTTP): NEW client + OLD engine = env var ignored, pre-fix behaviour (HOME-override boxes keep crashing until the engine cut, no regression); NEW engine + OLD client = HOME rung alone fixes supervisor spawns. Ack condition: the client release whose REQUIRED_ENGINE_VERSION bumps to the first engine tag carrying OnnxModelPaths; the plugin-cut rehearsal Dockerfile's passwd-home==sandbox-HOME alignment comes out at the same time.
 
 ## Shipped
 
