@@ -449,7 +449,13 @@ class TestRequiredEngineVersion:
         # OnnxModelPaths env/HOME model-root resolution + truthful
         # schema_migration_complete counts (nexus-x0s52); zero changesets,
         # deploy authorized before the client tag.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 92)
+        # ->(0,1,93) 2026-08-31 for 7.26.0 (all-[additive], additive-first):
+        # hnsw.ef_search serving floor with boot-validated env override
+        # (nexus-4ktfm) + request-scoped 429 budget with honest Retry-After
+        # on VectorHandler/CatalogHandler (nexus-99r7y); zero changesets,
+        # engine deployed BEFORE the client tag (1emxn (a)), --acquire and
+        # cloud client-path gates green pre-bump.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 93)
 
 
 class TestParseEngineVersion:

@@ -395,7 +395,7 @@ from __future__ import annotations
 #: new_changesets/reexecuted_changesets/pending_at_start; applied_changesets
 #: deliberately gone). Zero Liquibase changesets in the delta — no fork walk;
 #: the [additive] ledger entry authorizes deploying BEFORE the client tag.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 92)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 93)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
