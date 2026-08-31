@@ -10,7 +10,6 @@ import java.net.ProxySelector;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.time.Duration;
@@ -94,7 +93,6 @@ public final class CceEmbedder implements Embedder {
 
     /** CCE endpoint — note: no hyphen, different from /v1/embeddings. */
     private static final String CCE_URL = "https://api.voyageai.com/v1/contextualizedembeddings";
-    private static final int    MAX_RETRIES   = 3;
     private static final long   RETRY_BASE_MS = 500L;
 
     /**
@@ -104,7 +102,7 @@ public final class CceEmbedder implements Embedder {
      * {@link UpstreamRateLimitedException} (nexus-99r7y). Sized well under
      * the public edge's 30s upstream bound: the 2026-08-15 incident
      * (engine-service-v0.1.76, conexus-ddh0) had sustained project-RPM 429s
-     * burn the fixed {@link #MAX_RETRIES} attempts inside the edge timeout,
+     * burn the fixed {@link VoyageRetryLoop#MAX_RETRIES} attempts inside the edge timeout,
      * so bulk {@code write_many} surfaced opaque 5xx while the engine was
      * idle.
      *
@@ -118,18 +116,15 @@ public final class CceEmbedder implements Embedder {
      * past N≈24. With the shared deadline, workers starting in later waves
      * see only the REMAINING budget and the whole request either completes
      * or answers an honest 429 + Retry-After inside the edge bound. 429
-     * attempts are bounded by THIS budget, not by {@link #MAX_RETRIES} —
-     * throttling is pacing, not failure; 5xx keeps the old per-call
-     * attempt-bounded semantics.
+     * attempts are bounded by THIS budget, not by
+     * {@link VoyageRetryLoop#MAX_RETRIES} — throttling is pacing, not
+     * failure; 5xx keeps the old per-call attempt-bounded semantics.
+     *
+     * <p>The loop itself now lives in {@link VoyageRetryLoop} (nexus-1vpal:
+     * the three private near-identical {@code callApi} loops consolidated);
+     * this constant remains the CCE production default fed into it.
      */
     private static final long RATE_LIMIT_BUDGET_MS = 20_000L;
-
-    /**
-     * Headroom a retry must leave inside the budget for the HTTP call
-     * itself — sleeping right up to the deadline just moves the timeout
-     * into the request.
-     */
-    private static final long MIN_CALL_ALLOWANCE_MS = 1_000L;
 
     /**
      * Bound on concurrent in-flight Voyage HTTPS calls for THIS embedder instance
@@ -155,8 +150,6 @@ public final class CceEmbedder implements Embedder {
     private final String     apiKey;
     private final String     inputType;  // "document" or "query"
     private final String     url;         // test-injectable; production = CCE_URL
-    private final long       retryBaseMs; // test-injectable; production = RETRY_BASE_MS
-    private final long       rateLimitBudgetMs; // test-injectable; production = RATE_LIMIT_BUDGET_MS
     private final HttpClient http;
     private final ObjectMapper mapper;
 
@@ -164,8 +157,23 @@ public final class CceEmbedder implements Embedder {
     private final ExecutorService executor;
     /** Actual concurrency governor — caps in-flight Voyage calls at construction-time bound. */
     private final Semaphore inFlight;
-    /** Jitter source for {@link #backoffDelayMs} — test-injectable, seeded for determinism. */
-    private final Random jitterRandom;
+    /** The consolidated retry choreography (nexus-1vpal) — owns backoff,
+     *  Retry-After, the 429 budget arithmetic, and the shared auth arm. */
+    private final VoyageRetryLoop retryLoop;
+
+    /** Terminal-failure vocabulary handed to {@link #retryLoop} — CCE has no
+     *  special statuses beyond the loop's shared arms. */
+    private static final VoyageRetryLoop.Failures CCE_FAILURES = new VoyageRetryLoop.Failures() {
+        @Override
+        public RuntimeException status(int status, String body) {
+            return new RuntimeException("Voyage AI CCE request failed: HTTP " + status + " body=" + body);
+        }
+
+        @Override
+        public RuntimeException wrap(String message, Throwable cause) {
+            return new RuntimeException(message, cause);
+        }
+    };
 
     /**
      * @param apiKey    Voyage AI API key
@@ -223,8 +231,8 @@ public final class CceEmbedder implements Embedder {
         this.apiKey      = apiKey;
         this.inputType   = inputType;
         this.url         = url;
-        this.retryBaseMs = retryBaseMs;
-        this.rateLimitBudgetMs = rateLimitBudgetMs;
+        this.retryLoop   = new VoyageRetryLoop("cce", "CCE embed", retryBaseMs,
+                                               rateLimitBudgetMs, jitterRandom, () -> { });
         // nexus-... egress proxy: java.net.http.HttpClient ignores https.proxyHost
         // system properties unless a proxy is set explicitly on the client. The cloud
         // deploy routes api.voyageai.com through squid (private subnet has no NAT), so
@@ -236,7 +244,6 @@ public final class CceEmbedder implements Embedder {
         this.mapper = new ObjectMapper();
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.inFlight = new Semaphore(parallelism);
-        this.jitterRandom = jitterRandom;
     }
 
     @Override
@@ -520,7 +527,7 @@ public final class CceEmbedder implements Embedder {
      * Equal-Jitter backoff delay (nexus-9okyk critic fix 1; AWS "Equal Jitter"
      * convention — <a href="https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/">
      * Exponential Backoff And Jitter</a>). Package-private so a test can call it
-     * directly with a seeded {@link #jitterRandom} and assert the formula without
+     * directly with a seeded jitter {@link Random} and assert the formula without
      * any wall-clock timing.
      *
      * <p>{@code cap = retryBaseMs * 2^(attempt-1)} is the OLD deterministic delay
@@ -547,25 +554,14 @@ public final class CceEmbedder implements Embedder {
      * backoff is for. Equal Jitter's floor avoids that while still fully
      * decorrelating the herd.
      *
-     * <p><strong>Scope note.</strong> {@link VoyageEmbedder#callApi} and {@link
-     * VoyageReranker} carry their own PRIVATE, un-jittered copies of the same
-     * exponential-backoff shape (not a shared helper — each class inlines it).
-     * Neither is fanned out concurrently by this bead (only CCE gained a
-     * parallel caller), so neither is fixed here; a future consolidation of
-     * the three near-identical {@code callApi} retry loops (including jitter)
-     * is worth its own bead if any of them gains concurrent callers too.
+     * <p><strong>Scope note — RESOLVED (nexus-1vpal).</strong> The three
+     * near-identical {@code callApi} retry loops this note used to flag are
+     * consolidated into {@link VoyageRetryLoop}; this method is a thin
+     * delegator kept package-private so the seeded-jitter formula tests
+     * continue to exercise the exact instance CCE retries with.
      */
     long backoffDelayMs(int attempt) {
-        // Exponent clamped (nexus-99r7y): 429 attempts are now budget-bounded
-        // rather than MAX_RETRIES-bounded, so `attempt` can exceed the old
-        // 1..3 range — an unclamped shift would overflow long past attempt 63
-        // and the envelope should stop growing once it is already
-        // budget-scale. 1..6 is unchanged for every pre-existing caller.
-        long cap = retryBaseMs * (1L << Math.min(attempt - 1, 5));
-        long floor = cap / 2;
-        long jitterSpan = cap - floor;  // remaining half; handles odd cap without losing a unit
-        long jitter = jitterSpan > 0 ? (long) (jitterRandom.nextDouble() * jitterSpan) : 0;
-        return floor + jitter;
+        return retryLoop.backoffDelayMs(attempt);
     }
 
     // nexus-ehc4q billing note: on transient-error retries, usage.total_tokens is
@@ -573,121 +569,35 @@ public final class CceEmbedder implements Embedder {
     // attempts are not accumulated — a billing UNDER-count on retried calls (safe
     // direction: under-charges the customer). Documented, not corrected.
     /**
-     * Parse a {@code Retry-After} header value as milliseconds.
-     *
-     * <p>Voyage sends delay-seconds (integer or decimal). The HTTP-date form
-     * and any unparsable value yield {@code null} — treated as "no header",
-     * falling back to the computed backoff, never failing the request over a
-     * malformed advisory header. Package-private for direct unit testing.
+     * Parse a {@code Retry-After} header value as milliseconds. Thin
+     * delegator to {@link VoyageRetryLoop#parseRetryAfterMs} (nexus-1vpal
+     * consolidation), kept package-private for the pre-existing direct unit
+     * tests.
      */
     static Long parseRetryAfterMs(String value) {
-        if (value == null || value.isBlank()) return null;
-        try {
-            double seconds = Double.parseDouble(value.trim());
-            if (seconds < 0) return null;
-            return (long) (seconds * 1000.0);
-        } catch (NumberFormatException e) {
-            return null;  // HTTP-date form or garbage: advisory only, ignore
-        }
+        return VoyageRetryLoop.parseRetryAfterMs(value);
     }
 
     /** Shared 429 deadline for ONE whole embed request (critic fold, see
      *  {@link #RATE_LIMIT_BUDGET_MS}). */
     private long newEmbedDeadlineNanos() {
-        return System.nanoTime() + rateLimitBudgetMs * 1_000_000L;
+        return retryLoop.newDeadlineNanos();
     }
 
     private String callApi(String json, long deadlineNanos) {
-        // nexus-99r7y: 429s are BUDGET-bounded (throttling is pacing, not
-        // failure — keep absorbing while the edge bound allows), while 5xx /
-        // network failures keep the old MAX_RETRIES attempt-bounded
-        // semantics via their own counter. The deadline is SHARED across the
-        // whole embed request's fan-out — passed in, never recomputed here.
-        int transientFailures = 0;
-        int consecutive429s = 0;
-        for (int attempt = 1; ; attempt++) {
-            try {
-                HttpRequest req = HttpRequest.newBuilder()
-                        .uri(URI.create(url))
-                        .header("Authorization", "Bearer " + apiKey)
-                        .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString(json))
-                        .timeout(Duration.ofSeconds(120))
-                        .build();
-
-                HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-                int status = resp.statusCode();
-
-                if (status == 200) return resp.body();
-
-                if (status == 429) {
-                    consecutive429s++;
-                    // Honour Voyage's own Retry-After when present; otherwise
-                    // the equal-jitter envelope paces the herd.
-                    Long retryAfterMs = parseRetryAfterMs(
-                            resp.headers().firstValue("Retry-After").orElse(null));
-                    long delay = Math.max(backoffDelayMs(attempt),
-                                          retryAfterMs != null ? retryAfterMs : 0L);
-                    long remainingMs = (deadlineNanos - System.nanoTime()) / 1_000_000L;
-                    if (delay + MIN_CALL_ALLOWANCE_MS > remainingMs) {
-                        // Fail fast and HONEST, with margin under the edge's
-                        // 30s bound: an engine-authored 429 + Retry-After
-                        // beats an opaque edge-timeout 5xx (the 2026-08-15
-                        // incident shape), and arms the client-side rate
-                        // brake (conexus-cy9u7) that keys on the header.
-                        long retryAfterS = Math.max(1L, (long) Math.ceil(delay / 1000.0));
-                        // Review fold (2026-08-31): no floor on remainingMs — a
-                        // negative remainder means the loop ran PAST the budget
-                        // (e.g. a slow in-flight call), and the log must say so
-                        // rather than under-report elapsed as exactly the budget.
-                        long elapsedMs = rateLimitBudgetMs - remainingMs;
-                        log.warn("event=cce_rate_limited attempts={} consecutive_429s={} elapsed_ms={} retry_after_s={}",
-                                 attempt, consecutive429s, elapsedMs, retryAfterS);
-                        throw new UpstreamRateLimitedException(
-                                "Voyage AI is rate limiting (HTTP 429 x" + consecutive429s
-                                + " within the " + rateLimitBudgetMs + "ms budget); failing"
-                                + " fast before the edge timeout. Retry after ~" + retryAfterS
-                                + "s. body=" + resp.body(), retryAfterS);
-                    }
-                    log.warn("event=cce_retry attempt={} status=429 delay_ms={} retry_after_header_ms={}",
-                             attempt, delay, retryAfterMs);
-                    Thread.sleep(delay);
-                    continue;
-                }
-                consecutive429s = 0;
-                if (status >= 500) {
-                    transientFailures++;
-                    if (transientFailures < MAX_RETRIES) {
-                        long delay = backoffDelayMs(transientFailures);
-                        log.warn("event=cce_retry attempt={} status={} delay_ms={}", attempt, status, delay);
-                        Thread.sleep(delay);
-                        continue;
-                    }
-                }
-                if (status == 401 || status == 403) {
-                    // nexus-pmhpc: credentials problem, not an engine defect —
-                    // typed so VectorHandler returns 502-with-detail, not 500.
-                    throw new UpstreamAuthException(
-                            "Voyage AI rejected the service's API key (HTTP " + status
-                            + "): the key is invalid, expired, or lacks scope. Rotate the"
-                            + " service's Voyage key and restart. body=" + resp.body());
-                }
-                throw new RuntimeException("Voyage AI CCE request failed: HTTP " + status + " body=" + resp.body());
-
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException("CCE embed interrupted", e);
-            } catch (RuntimeException e) {
-                throw e;
-            } catch (Exception e) {
-                transientFailures++;
-                if (transientFailures >= MAX_RETRIES) {
-                    throw new RuntimeException("CCE embed failed after " + MAX_RETRIES + " attempts", e);
-                }
-                try { Thread.sleep(backoffDelayMs(transientFailures)); }
-                catch (InterruptedException ix) { Thread.currentThread().interrupt(); throw new RuntimeException("interrupted", ix); }
-            }
-        }
+        // nexus-99r7y semantics, now in the consolidated VoyageRetryLoop:
+        // 429s are BUDGET-bounded (throttling is pacing, not failure), 5xx /
+        // network failures keep MAX_RETRIES attempt-bounded semantics. The
+        // deadline is SHARED across the whole embed request's fan-out —
+        // passed in, never recomputed here.
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Authorization", "Bearer " + apiKey)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(json))
+                .timeout(Duration.ofSeconds(120))
+                .build();
+        return retryLoop.send(http, req, deadlineNanos, CCE_FAILURES);
     }
 
     // ── Response parsers ──────────────────────────────────────────────────────

@@ -10,7 +10,6 @@ import java.net.ProxySelector;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -21,6 +20,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -61,7 +61,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       never seen to move a vector outside that repeat-variance band. Any live-Voyage equality
  *       assertion on batched output must tolerate ~2e-4 cosine, not demand bit-equality.</li>
  *   <li>Sort response {@code data[]} by {@code index} (API may return out-of-order)</li>
- *   <li>Retry on 429 / 5xx with exponential backoff (max 3 attempts)</li>
+ *   <li>Retry via the consolidated {@link VoyageRetryLoop} (nexus-1vpal): 429s are
+ *       budget-bounded per top-level embed call with {@code Retry-After} honoured and a
+ *       typed {@link UpstreamRateLimitedException} on exhaustion (the nexus-99r7y
+ *       semantics, previously CCE-only — {@code code__} collections share the same
+ *       account-wide Voyage RPM ceiling the 2026-08-15 incident hit); 5xx/network
+ *       failures keep the old max-3-attempts semantics, now equal-jittered</li>
  * </ul>
  *
  * <p>REST endpoint: {@code POST https://api.voyageai.com/v1/embeddings}
@@ -94,8 +99,20 @@ public final class VoyageEmbedder implements Embedder {
     private static final Logger log = LoggerFactory.getLogger(VoyageEmbedder.class);
 
     private static final String VOYAGE_URL = "https://api.voyageai.com/v1/embeddings";
-    private static final int    MAX_RETRIES = 3;
     private static final long   RETRY_BASE_MS = 500L;
+
+    /**
+     * Total 429-absorption budget for ONE top-level {@link #embed}/{@link #embedWithUsage}/
+     * {@link #embedDouble} call (nexus-1vpal, the nexus-99r7y semantics ported from
+     * {@link CceEmbedder#RATE_LIMIT_BUDGET_MS} — same 20s figure, same rationale: well
+     * under the public edge's 30s upstream bound). Request-scoped across ALL of the
+     * call's planned sub-batches AND any adaptive-halving recursion: {@link
+     * #executeWithHalving} mints the deadline once and threads it into every upstream
+     * POST, so a client-page-sized embed under sustained limiting answers one honest
+     * 429 + Retry-After instead of re-arming a fresh budget per sub-batch (up to ~4
+     * budgets per 300-chunk page — the incident shape at page scale).
+     */
+    private static final long RATE_LIMIT_BUDGET_MS = 20_000L;
 
     /**
      * Voyage {@code /v1/embeddings} hard input-count cap (Voyage AI docs, verified via
@@ -191,9 +208,12 @@ public final class VoyageEmbedder implements Embedder {
     private final String     apiKey;
     private final String     model;
     private final String     url;
-    private final long       retryBaseMs;
     private final HttpClient http;
     private final ObjectMapper mapper;
+
+    /** The consolidated retry choreography (nexus-1vpal) — owns backoff,
+     *  Retry-After, the 429 budget arithmetic, and the shared auth arm. */
+    private final VoyageRetryLoop retryLoop;
 
     /**
      * Non-vacuity test instrument (RDR-195, mirrors {@link Bge768Embedder#onnxInvocationCount}):
@@ -235,10 +255,24 @@ public final class VoyageEmbedder implements Embedder {
      */
     public VoyageEmbedder(String apiKey, String model, String url, long retryBaseMs,
                           Optional<ProxySelector> proxy) {
+        this(apiKey, model, url, retryBaseMs, proxy, new Random(), RATE_LIMIT_BUDGET_MS);
+    }
+
+    /**
+     * Full wiring — the single build path (nexus-1vpal, mirrors {@link CceEmbedder}'s
+     * widest constructor): adds the injectable jitter source and 429 budget so tests can
+     * assert the budget-bounded fail-fast without 20s of wall clock. Production always
+     * takes {@link #RATE_LIMIT_BUDGET_MS} and an unseeded {@link Random} via the shorter
+     * constructors.
+     */
+    VoyageEmbedder(String apiKey, String model, String url, long retryBaseMs,
+                   Optional<ProxySelector> proxy, Random jitterRandom, long rateLimitBudgetMs) {
         this.apiKey  = apiKey;
         this.model   = model;
         this.url     = url;
-        this.retryBaseMs = retryBaseMs;
+        this.retryLoop = new VoyageRetryLoop("voyage", "Voyage embed", retryBaseMs,
+                                             rateLimitBudgetMs, jitterRandom,
+                                             voyageRequestCount::incrementAndGet);
         // nexus-... egress proxy: java.net.http.HttpClient ignores https.proxyHost
         // system properties unless a proxy is set explicitly on the client. The cloud
         // deploy routes api.voyageai.com through squid (private subnet has no NAT), so
@@ -340,10 +374,14 @@ public final class VoyageEmbedder implements Embedder {
      */
     private List<SubBatchResponse> executeWithHalving(List<String> texts) {
         List<List<String>> planned = planBatches(texts);
+        // nexus-1vpal: ONE 429 deadline for the WHOLE top-level embed call,
+        // shared across every planned sub-batch and halving recursion — see
+        // RATE_LIMIT_BUDGET_MS's javadoc for why per-sub-batch would re-arm.
+        long deadlineNanos = retryLoop.newDeadlineNanos();
         List<SubBatchResponse> out = new ArrayList<>();
         for (List<String> batch : planned) {
             AtomicInteger subRequestBudget = new AtomicInteger(0);
-            collectWithHalving(batch, subRequestBudget, out, 0);
+            collectWithHalving(batch, subRequestBudget, out, 0, deadlineNanos);
         }
         return out;
     }
@@ -426,10 +464,10 @@ public final class VoyageEmbedder implements Embedder {
      *              from an adaptively-split one in {@code event=voyage_subrequest_sent}.
      */
     private void collectWithHalving(List<String> batch, AtomicInteger subRequestBudget,
-                                     List<SubBatchResponse> out, int depth) {
+                                     List<SubBatchResponse> out, int depth, long deadlineNanos) {
         String body;
         try {
-            body = sendSubBatch(batch, subRequestBudget, depth);
+            body = sendSubBatch(batch, subRequestBudget, depth, deadlineNanos);
         } catch (VoyageTooManyTokensException e) {
             if (batch.size() <= 1) {
                 throw e; // un-splittable — fail loud, never silently drop the text
@@ -437,8 +475,8 @@ public final class VoyageEmbedder implements Embedder {
             int mid = batch.size() / 2;
             log.warn("event=voyage_adaptive_split original_size={} left_size={} right_size={} model={}",
                     batch.size(), mid, batch.size() - mid, model);
-            collectWithHalving(new ArrayList<>(batch.subList(0, mid)), subRequestBudget, out, depth + 1);
-            collectWithHalving(new ArrayList<>(batch.subList(mid, batch.size())), subRequestBudget, out, depth + 1);
+            collectWithHalving(new ArrayList<>(batch.subList(0, mid)), subRequestBudget, out, depth + 1, deadlineNanos);
+            collectWithHalving(new ArrayList<>(batch.subList(mid, batch.size())), subRequestBudget, out, depth + 1, deadlineNanos);
             return;
         }
         out.add(new SubBatchResponse(batch, body));
@@ -461,7 +499,8 @@ public final class VoyageEmbedder implements Embedder {
      *         BATCH (see {@link #MAX_SUB_REQUESTS_PER_BATCH}'s javadoc for the exact scope)
      *         is exhausted, carrying the attempted count and the offending batch size
      */
-    private String sendSubBatch(List<String> batch, AtomicInteger subRequestBudget, int depth) {
+    private String sendSubBatch(List<String> batch, AtomicInteger subRequestBudget, int depth,
+                                long deadlineNanos) {
         int attemptNum = subRequestBudget.incrementAndGet();
         if (attemptNum > maxSubRequestsPerBatch) {
             throw new VoyageTooManyTokensException(
@@ -473,7 +512,7 @@ public final class VoyageEmbedder implements Embedder {
                     "TOO_MANY_TOKENS_IN_BATCH", model, batch.size(), attemptNum - 1);
         }
         String json = buildJson(batch);
-        String body = callApi(json, batch.size(), attemptNum);
+        String body = callApi(json, batch.size(), attemptNum, deadlineNanos);
         long estTokens = batch.stream().mapToLong(VoyageEmbedder::estimateTokens).sum();
         log.info("event=voyage_subrequest_sent model={} texts={} requestBytes={} estTokens={}"
                 + " usageTokens={} attempt={} splitDepth={}",
@@ -602,69 +641,44 @@ public final class VoyageEmbedder implements Embedder {
      *                   #MAX_SUB_REQUESTS_PER_BATCH}'s javadoc for scope) — populated into
      *                   the same exception, and also carried by the caller's
      *                   {@code event=voyage_subrequest_sent} log line.
+     * @param deadlineNanos the request-scoped 429 deadline minted once by
+     *                   {@link #executeWithHalving} — see {@link #RATE_LIMIT_BUDGET_MS}
      */
-    private String callApi(String json, int batchSize, int attemptNum) {
-        for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-            try {
-                HttpRequest req = HttpRequest.newBuilder()
-                        .uri(URI.create(url))
-                        .header("Authorization", "Bearer " + apiKey)
-                        .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString(json))
-                        .timeout(Duration.ofSeconds(120))
-                        .build();
-
-                voyageRequestCount.incrementAndGet();
-                HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-                int status = resp.statusCode();
-
-                if (status == 200) return resp.body();
-
-                boolean retryable = (status == 429 || status >= 500);
-                if (retryable && attempt < MAX_RETRIES) {
-                    long delay = retryBaseMs * (1L << (attempt - 1));
-                    log.warn("event=voyage_retry attempt={} status={} delay_ms={}", attempt, status, delay);
-                    Thread.sleep(delay);
-                    continue;
-                }
-                if (status == 401 || status == 403) {
-                    // nexus-pmhpc: credentials problem, not an engine defect —
-                    // typed so VectorHandler returns 502-with-detail, not 500.
-                    throw new UpstreamAuthException(
-                            "Voyage AI rejected the service's API key (HTTP " + status
-                            + "): the key is invalid, expired, or lacks scope. Rotate the"
-                            + " service's Voyage key and restart. body=" + resp.body());
-                }
-                if (status == 400 && isTooManyTokensBatchError(resp.body())) {
+    private String callApi(String json, int batchSize, int attemptNum, long deadlineNanos) {
+        // nexus-1vpal: retry choreography consolidated into VoyageRetryLoop
+        // (the nexus-99r7y semantics — budget-bounded 429s with Retry-After,
+        // attempt-bounded jittered 5xx/network, shared auth arm). Only the
+        // 400 TOO_MANY_TOKENS discrimination stays here, because it needs
+        // this call's batch context for the typed exception's fields.
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Authorization", "Bearer " + apiKey)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(json))
+                .timeout(Duration.ofSeconds(120))
+                .build();
+        return retryLoop.send(http, req, deadlineNanos, new VoyageRetryLoop.Failures() {
+            @Override
+            public RuntimeException status(int status, String body) {
+                if (status == 400 && isTooManyTokensBatchError(body)) {
                     // RDR-195 Gap 2: a precisely described, actionable 400 — surfaced typed
                     // so the sub-batch caller (collectWithHalving) can halve and retry,
                     // instead of falling through to the generic RuntimeException below.
-                    throw new VoyageTooManyTokensException(
+                    return new VoyageTooManyTokensException(
                             "Voyage AI rejected the batch as exceeding the per-request token"
                             + " ceiling (HTTP 400, error_code=TOO_MANY_TOKENS_IN_BATCH): "
-                            + resp.body(),
+                            + body,
                             "TOO_MANY_TOKENS_IN_BATCH", model, batchSize, attemptNum);
                 }
-                throw new RuntimeException(
-                        "Voyage AI request failed: HTTP " + status + " body=" + resp.body());
-
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException("Voyage embed interrupted", e);
-            } catch (RuntimeException e) {
-                throw e;
-            } catch (Exception e) {
-                if (attempt == MAX_RETRIES) {
-                    throw new RuntimeException("Voyage embed failed after " + MAX_RETRIES + " attempts", e);
-                }
-                try { Thread.sleep(retryBaseMs * (1L << (attempt - 1))); }
-                catch (InterruptedException ix) {
-                    Thread.currentThread().interrupt();
-                    throw new RuntimeException("interrupted", ix);
-                }
+                return new RuntimeException(
+                        "Voyage AI request failed: HTTP " + status + " body=" + body);
             }
-        }
-        throw new RuntimeException("Voyage embed: exhausted retries"); // unreachable
+
+            @Override
+            public RuntimeException wrap(String message, Throwable cause) {
+                return new RuntimeException(message, cause);
+            }
+        });
     }
 
     /**

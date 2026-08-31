@@ -314,6 +314,28 @@ class RerankStageIntegrationTest {
     }
 
     @Test
+    void sustainedRateLimitDegradesLoudInsteadOfFailingTheSearch() throws Exception {
+        // nexus-1vpal: the reranker's budget-bounded 429 absorption ends in
+        // the typed UpstreamRateLimitedException; the stage must DEGRADE
+        // (rows in hand, served in distance order, loud reason carrying the
+        // retry-after) — never propagate to the handler's whole-request 429
+        // arm. Rate-limited reranking is a degraded search, not a broken one.
+        for (int i = 0; i < 400; i++) {
+            scriptVoyage(429, "{\"detail\": \"rate limited\"}");
+        }
+
+        Map<String, Object> env = postOk(svcVoyage, "/v1/vectors/search",
+                searchBody("rerank", true));
+
+        assertThat(env.get("rerank_degraded")).isEqualTo(true);
+        assertThat((String) env.get("rerank_error")).contains("rate limiting");
+        assertThat((String) env.get("rerank_error")).contains("retry after");
+        List<Map<String, Object>> rows = results(env);
+        assertThat(rows).extracting(r -> r.get("id")).containsExactly(C1, C2, C3);
+        assertThat(rows.get(0)).doesNotContainKey("rerank_score");
+    }
+
+    @Test
     void upstreamAuthRejectionDegradesLoudNotA502() throws Exception {
         // The embed path maps UpstreamAuthException → 502 (no results exist
         // without embedding). The rerank stage has rows in hand: the same auth
