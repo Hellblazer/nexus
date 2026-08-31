@@ -29,12 +29,8 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release or plugin cut (pinned: v7.24.1)
+## Awaiting the next release or plugin cut (pinned: v7.25.0)
 
-- `conexus/hooks/scripts/pre_close_verification_hook.sh` — nexus-fgekf:
-  the review gate's T2 memory leg is RETIRED (T1-only coverage; a durable
-  marker must not satisfy a close in a session that performed no review).
-  The divergence the leg routed around is fixed (nexus-d76vc, nexus-f7xyq)
-  and was measured converged on a live session 2026-08-30. Until the pin
-  advances, installed sessions still run the dual-source gate — T2 markers
-  keep working there, which is the pre-fix behaviour, not a hazard.
+Nothing pending. v7.25.0 advanced the pin, so everything previously
+listed here (the pre_close_verification_hook.sh T2-leg retirement,
+nexus-fgekf) is live in installed sessions.

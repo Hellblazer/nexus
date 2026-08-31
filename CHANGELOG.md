@@ -6,6 +6,68 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.25.0] - 2026-08-31
+
+Paired release with `engine-service-v0.1.92` (tagged on `14bd80442`;
+`REQUIRED_ENGINE_VERSION` bumped in this release). The engine delta carries
+zero Liquibase changesets, and every wire-ledger entry was `[additive]`, so
+the engine deployed BEFORE this release's tag (nexus-1emxn choreography (a))
+— no refusal window can open.
+
+### Added
+
+- **`nx self install --extras <name>` (nexus-pffc4).** Add an extra (e.g.
+  `local`) to an existing generation install: repeatable / comma-separated,
+  PEP 685-normalized dedupe against the install receipt, MERGE never replace,
+  junk names refused at the CLI; off-generation installs get a refusal naming
+  the right next step for each non-generation shape. The degraded-bge and
+  MinerU health remedies now route through it.
+
+### Fixed
+
+- **ONNX model root on HOME-override boxes (nexus-ogccs — closes 7.24.1's
+  known issue).** The engine resolves its ONNX model root
+  `NX_ONNX_MODEL_DIR` → `HOME` → passwd `user.home` (OnnxModelPaths,
+  engine-service-v0.1.92), and the client supervisor pins the resolved root
+  in the engine spawn env — a HOME override no longer yields a green
+  `nx init` followed by an engine crash at first boot.
+- **`schema_migration_complete` reports the walk's real counts
+  (nexus-x0s52).** `new_changesets` / `reexecuted_changesets` /
+  `pending_at_start` replace `applied_changesets`, which logged the
+  pre-update pending count (a 12x overstatement on the v0.1.86 fork walk).
+  The old field name is deliberately gone so stale greps fail loud rather
+  than silently matching new semantics.
+- **`purge-trash` documentation caught up to catalog-026 (nexus-kcm6c).**
+  Both reported counts honor `--older-than-days` — row, manifest, and
+  chunks survive the grace window together. Seven client surfaces that
+  still documented the retired catalog-003 semantics are rewritten; the
+  engine counter was never wrong.
+- **pytest collection no longer depends on the network (nexus-v460j).**
+  Engine-binary resolution is lazy under an import-time ambient env
+  snapshot; CI's test-lint job gained the pinned-PG-bundle cache step it
+  never had.
+- **Bead-close review gate is T1-only (nexus-fgekf, plugin surface).** The
+  T2 memory-marker leg is retired: a durable marker no longer satisfies a
+  close in a session that performed no review. T1 reachable-and-empty
+  denies; T1 unreachable is a loud allow with `verification=unverified`.
+  Live once this release's plugin pin is installed.
+
+### Infrastructure
+
+- **Paired-release choreography hardened (nexus-1emxn).** Wire-ledger
+  entries lead with an `[additive]` / `[not-additive]` direction-safety
+  token (anchored parser, contradiction fails safe, lint requires the
+  reasoning prose); an all-additive Unshipped section authorizes deploying
+  the engine before the client tag by name. Release skill Step 9 arming
+  gate + Step 12 exit-code table; the mechanical arming attestation for
+  non-additive pairings is tracked as nexus-h0fo3.
+- **RDR-197 closed (nexus-a2wmi).** The plugin-only release channel is
+  delivered: first real cut shipped (plugin-v7.24.0-1), rehearsal mandatory
+  before every cut, runbook drift fixed in `docs/contributing.md`.
+- The raw-SQL gate sanctions the x0s52 Liquibase-connection reads
+  (`databasechangelog` counts + `now()` on Liquibase's own connection,
+  outside jOOQ codegen — the gate's designed escape hatch).
+
 ## [7.24.1] - 2026-08-30
 
 ### Fixed
