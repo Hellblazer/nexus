@@ -24,16 +24,12 @@ RUN uv python install 3.12 \
 # container run failed exactly there). Same shape as the migration rehearsal.
 # The cache and tmp mountpoints exist in the image, owned by this user, so
 # the named volumes and the host-mounted TMPDIR inherit that ownership.
-# PASSWD HOME == THE SANDBOX HOME, deliberately (nexus-ogccs). The cut's
-# battery runs release-sandbox smoke with HOME=$HOME/nexus-sandbox, and the
-# PINNED native engine (<= v0.1.91) resolves its ONNX models from Java's
-# user.home (the passwd entry, not $HOME). With ENV HOME=/home/nexus below
-# the smoke computes its sandbox at /home/nexus/nexus-sandbox, exactly this
-# user's passwd home, so the engine finds what `nx init` provisioned. The
-# fix is on develop (OnnxModelPaths: NX_ONNX_MODEL_DIR env, then HOME, then
-# user.home; the supervisor passes the resolved root at spawn) — remove this
-# alignment once the pinned engine tag carries it (first cut after v0.1.91).
-RUN useradd -u 1000 -d /home/nexus/nexus-sandbox -s /bin/bash nexus \
+# The passwd-home==sandbox-HOME alignment that used to sit here (nexus-ogccs)
+# came out when REQUIRED_ENGINE_VERSION moved to v0.1.92: the pinned engine
+# now carries OnnxModelPaths (NX_ONNX_MODEL_DIR env, then HOME, then passwd
+# user.home; the supervisor pins the resolved root at spawn), so the engine
+# finds what `nx init` provisioned regardless of where passwd says home is.
+RUN useradd -u 1000 -d /home/nexus -s /bin/bash nexus \
     && mkdir -p /home/nexus/.cache/uv /home/nexus/artifacts /etc/nexus-rehearsal \
     && chown -R nexus:nexus /home/nexus /etc/nexus-rehearsal
 # Git config lives OUTSIDE /home: run.sh mounts a tmpfs over /home/nexus (the
