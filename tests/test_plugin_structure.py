@@ -818,6 +818,32 @@ class TestMarketplaceVersion:
             "the sync guard must check the manifest version."
         )
 
+    def test_release_workflow_waits_for_simple_index_before_gh_release(self) -> None:
+        """nexus-r433b: PyPI's simple index lags the upload by ~10-25 min
+        (4 consecutive releases measured); resolvers read the simple
+        index, so a GitHub release created inside that window announces a
+        version that hard-fails ==/>= installs — the .mcpb download it
+        carries dies with a resolver error. release.yml must poll the
+        simple index AFTER the PyPI publish and BEFORE creating the
+        GitHub release, so announcement never precedes installability."""
+        workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
+        body = workflow.read_text()
+        publish = body.find("gh-action-pypi-publish")
+        wait = body.find("wait_pypi_simple_index.py")
+        gh_release = body.find("action-gh-release")
+        assert publish != -1, "release.yml no longer publishes via gh-action-pypi-publish?"
+        assert gh_release != -1, "release.yml no longer creates the GH release via action-gh-release?"
+        assert wait != -1, (
+            "release.yml has no wait_pypi_simple_index.py step; the GH release "
+            "(announcement + .mcpb download) can go live inside the PyPI "
+            "propagation window (nexus-r433b)."
+        )
+        assert publish < wait < gh_release, (
+            "release.yml's simple-index wait must sit between the PyPI publish "
+            "and the GitHub-release step — polling before publish waits on "
+            "nothing, and polling after the GH release defeats the point."
+        )
+
     def test_plugin_source_sha_is_well_formed_when_present(self) -> None:
         """Optional `source.sha` for tag-force-push protection. When
         present, must be a 40-character lowercase hex string (full

@@ -411,9 +411,36 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
     # the tool venv and its exposed console scripts land entirely inside
     # $HOME_DIR/.local/{share/uv/tools,bin} and NEVER touch the operator's
     # live ~/.local/share/uv or ~/.local/bin.
-    _uv_sandboxed tool install --python 3.12 "$PKG_SPEC" \
-        >"$LOGS/install.log" 2>&1 \
-        || _fail "uv tool install $PKG_SPEC failed (see $LOGS/install.log) — network unreachable, version not published on PyPI, or dependency resolution failed at the uv-tool layer (the nexus-l2ku5 layer); no skip-pass permitted"
+    _published_install() {
+        _uv_sandboxed tool install --python 3.12 "$PKG_SPEC" \
+            >"$LOGS/install.log" 2>&1
+    }
+    if ! _published_install; then
+        # nexus-r433b: PyPI's simple index lags the upload API by ~10-25 min,
+        # and uv resolves from the simple index — this gate's first
+        # post-publish run died on exactly that lag on 4 consecutive
+        # releases and passed on manual rerun. When (and only when) the
+        # failure is the resolver's no-matching-version class on an
+        # explicitly requested version, wait on the resolver-visible signal
+        # (the simple index itself, PEP 691 JSON — never the JSON API,
+        # which led every time) and retry ONCE, instead of normalizing the
+        # rerun ritual. The wait script fast-exits when the index is
+        # already past the requested version (an operator typo is not a
+        # propagation wait), and the retry then fails loud with uv's own
+        # error. Every other failure shape fails immediately, unchanged.
+        if [ -n "$PUBLISHED_VERSION" ] \
+            && grep -qiE "no solution found|no version of conexus" "$LOGS/install.log"; then
+            echo "  resolver does not see conexus==$PUBLISHED_VERSION yet — waiting on the PyPI simple index (nexus-r433b)"
+            python3 "$REPO_ROOT/scripts/wait_pypi_simple_index.py" \
+                --package conexus --version "$PUBLISHED_VERSION" \
+                --timeout-seconds 1800 --poll-seconds 30 \
+                || _fail "PyPI simple index never served conexus==$PUBLISHED_VERSION within 30 min (propagation window exceeded — nexus-r433b; see $LOGS/install.log)"
+            _published_install \
+                || _fail "uv tool install $PKG_SPEC failed even after the PyPI propagation wait (see $LOGS/install.log); no skip-pass permitted"
+        else
+            _fail "uv tool install $PKG_SPEC failed (see $LOGS/install.log) — network unreachable, version not published on PyPI, or dependency resolution failed at the uv-tool layer (the nexus-l2ku5 layer); no skip-pass permitted"
+        fi
+    fi
     TOOL_DIR="$(_uv_sandboxed tool dir)"
     TOOL_BIN_DIR="$(_uv_sandboxed tool dir --bin)"
     TOOL_VENV="$TOOL_DIR/conexus"

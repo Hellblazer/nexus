@@ -26,14 +26,15 @@
   ],
   "server": {
     "type": "uv",
-    "entry_point": "src/server.py",
+    "entry_point": "src/bootstrap.py",
     "mcp_config": {
       "command": "uv",
       "args": [
         "run",
+        "--no-project",
         "--directory",
         "${__dirname}",
-        "src/server.py"
+        "src/bootstrap.py"
       ]
     }
   },
