@@ -467,59 +467,54 @@ _stamp_ids() {
 }
 
 # ---------------------------------------------------------------------------
-# Coverage check, DUAL-SOURCE (nexus-4av2n round 2 Critical-1, substantive-
-# critic, empirically reproduced live): a review-completed marker written
-# via the MCP `scratch` tool is INVISIBLE to a T1-only check -- MCP-tool T1
-# is frozen to the session id at MCP-server spawn, while this hook's
-# detached CLI `nx scratch list` resolves a structurally different scope
-# (the pooled CLI-dedicated fallback, nexus-6a19f) whenever the CLI's own
-# T1 lease for that session isn't fresh (a documented, recurring state --
-# RDR-149 lease system). A T1-only gate therefore denies genuinely-reviewed
-# work whenever the CLI lease is stale, which erodes the gate into "always
-# override" rather than an audited exception.
+# Coverage check, T1-ONLY (nexus-fgekf, 2026-08-30 — retires the T2 memory
+# leg; Sam 2026-08-27: "t2 markers should not really exist... let's not
+# ensconce a workaround as a thing").
 #
-# FIX: for every bead id, try T1 scratch first (fast path, entry-anchored
-# match -- datum ii/iii). Anything T1 does not cover falls back to T2
-# memory (`nx memory search <id>`, PG-backed, the cross-process shared bus
-# BY DESIGN per AGENTS.md, visible regardless of which T1 scope wrote the
-# marker), LAZILY. Per-id final status is one of:
-#   covered   -- T1 or T2 found an entry-anchored review-completed marker.
-#   missing   -- T1 did not cover it AND T2 was reachable and also did not
-#                cover it. A real absence -- denies.
-#   uncertain -- T2 was reachable in general but this specific query failed
-#                (nx itself broken for that call) -- a capability gap,
-#                warns, never silently denies or silently passes.
-#   deadline  -- nexus-4av2n ROUND 3 (substantive-critic closure
-#                verification on the sibling push-gate; same fix applied
-#                here since this hook's lookup can ALSO stack up to 1
-#                (T1) + N (T2 per uncovered id) `nx` subprocess spawns,
-#                each ~400-500ms measured, against the SAME 5s PreToolUse
-#                timeout (hooks.json). Round 2's call-COUNT budget (5) did
-#                not bound wall-clock time. Replaced by a wall-clock
-#                deadline (DEADLINE_SECONDS, 3.5s default, comfortably
-#                under the 5s ceiling) the hook enforces on itself so it is
-#                NEVER killed by the harness mid-check -- a harness kill
-#                would either silently reproduce the 2026-07-31 vacuity
-#                (fail-open) or brick every multi-bead close (fail-closed).
-#                Exceeding the deadline before a bead's coverage is
-#                established DENIES (folds into "missing" below) rather
-#                than warning: "ran out of time while nx was reachable and
-#                working" is indistinguishable in effect from "would have
-#                found nothing", and deny-on-indeterminate is the only
-#                direction consistent with this bead's purpose.
+# HISTORY, so the leg is not re-added without re-reading it: the dual-source
+# shape (nexus-4av2n round 2 Critical-1) existed because a marker written
+# via the MCP `scratch` tool was INVISIBLE to this hook's detached CLI
+# `nx scratch list` whenever the CLI's T1 lease was stale — the CLI then
+# silently resolved the pooled fallback scope (nexus-6a19f) instead of the
+# session's. BOTH halves of that divergence are since fixed: nexus-d76vc
+# (2026-08-07) re-leases the MCP scope onto the new session id on
+# /clear//resume, and nexus-f7xyq made a dead lease under an explicit
+# session id FAIL LOUD (T1ServerNotFoundError) instead of silently reading
+# the pooled scope. Measured on a live session 2026-08-30 (nexus-fgekf
+# probe): an MCP-written scratch entry — including one written by a
+# subagent — is immediately visible to `nx scratch list`.
 #
-# WRITE-SIDE CONTRACT (documented here + PENDING_RELEASE.md + the sibling
-# push-gate's docstring): a marker is visible to this gate iff it exists in
-# T1 scratch (`nx scratch put` / `mcp__...__scratch put` when the CLI lease
-# is fresh) OR T2 memory (`nx memory put` / `mcp__...__memory_put`) with
-# content containing `review-completed` and the bead id. Write BOTH when in
-# doubt; T2-alone is the correct choice specifically when the CLI T1 lease
-# is known-stale.
+# WHY T1-only is the DESIGN, not just the simplification: T1 is
+# session-scoped and ephemeral, so a T1 marker cannot outlive the session
+# that wrote it — the marker and the close are the same session's work. A
+# durable T2 marker can satisfy a close in a much later session, for a
+# review nobody in that session performed. Every property that makes T2
+# right for knowledge makes it wrong for an attestation.
+#
+# Per-id final status is one of:
+#   covered   -- T1 found an entry-anchored review-completed marker naming
+#                the complete reviewer set.
+#   incomplete-- a marker exists but does not name the full set (nexus-e3mak).
+#   missing   -- T1 was reachable and holds no marker. A real absence --
+#                denies.
+#   uncertain -- T1 unreachable (nx missing, or `nx scratch list` failed —
+#                post-f7xyq that includes a dead CLI lease failing loud).
+#                A capability gap: warns + stamps unverified, never
+#                silently denies or silently passes (the same posture the
+#                dual-source shape used for total unreachability).
+#   deadline  -- the T1 read blew the wall-clock budget (DEADLINE_SECONDS,
+#                3.5s default, under the 5s PreToolUse ceiling —
+#                nexus-4av2n round 3). Denies: "ran out of time" is
+#                indistinguishable from "would have found nothing".
+#
+# WRITE-SIDE CONTRACT (documented here + PENDING_RELEASE.md): a marker is
+# visible to this gate iff it exists in THIS SESSION's T1 scratch
+# (`nx scratch put` / the MCP `scratch` tool — the scopes converge) with
+# content containing `review-completed`, the bead id, and both reviewer
+# names. T2 memory markers are NOT consulted (nexus-fgekf).
 #
 # Deny-on-absence STAYS: an allow-when-T1-empty fallback would re-vacuate
-# the gate for the 2026-07-31 no-markers-anywhere case this bead exists to
-# catch. This fix widens WHERE coverage can be found, not WHETHER absence
-# still denies.
+# the gate for the 2026-07-31 no-markers-anywhere case.
 # ---------------------------------------------------------------------------
 
 export NX_HOOK_BEAD_IDS_JSON="$BEAD_IDS_JSON"
@@ -609,25 +604,15 @@ def _parse_entries(raw):
             i += 1
     return entries
 
-def _t2_covers(bead_id, header, content):
-    # nexus-cr4lp B3: a T2 marker whose bead id lives ONLY in the TITLE
-    # (-t review-nexus-t5uol -- this hook's OWN printed remedy form) used
-    # to fail the strict lookbehind, because the hyphen in
-    # review-<bead-id> sits immediately left of the id. A second,
-    # narrower alternate matches that literal review-<bead-id> shape
-    # specifically without loosening the general match elsewhere.
-    combined = f'{header} {content}'.lower()
-    if 'review-completed' not in combined:
-        return False
-    escaped = re.escape(bead_id)
-    pat = re.compile(
-        r'(?<![A-Za-z0-9-])' + escaped + r'(?![A-Za-z0-9-])'
-        r'|(?<![A-Za-z0-9])review-' + escaped + r'(?![A-Za-z0-9-])',
-        re.IGNORECASE,
-    )
-    return bool(pat.search(combined))
-
+# nexus-fgekf: T2 memory is NOT consulted -- see the header block. The
+# _t2_covers/_t2_lookup pair and the per-id 'nx memory search' spawns are
+# deliberately GONE, not dormant. (No backticks in THIS comment: it lives
+# inside the double-quoted python3 -c string, where a backtick is live
+# bash command substitution -- the first draft of this very comment
+# EXECUTED nx memory search from inside the program that exists to prove
+# nothing calls it.)
 t1_reachable = False
+t1_timed_out = False
 t1_entries = []
 if shutil.which('nx'):
     try:
@@ -635,25 +620,14 @@ if shutil.which('nx'):
         if r.returncode == 0:
             t1_reachable = True
             t1_entries = _parse_entries(r.stdout)
+    except subprocess.TimeoutExpired:
+        # Time budget, not capability: deny-on-indeterminate (round 3
+        # doctrine) — distinct from rc!=0/nx-missing, which is a
+        # capability gap (post-f7xyq that includes a dead CLI lease
+        # failing loud).
+        t1_timed_out = True
     except Exception:
         pass
-
-t2_cache = {}
-
-def _t2_lookup(query):
-    if query in t2_cache:
-        return t2_cache[query]
-    if _deadline_exceeded() or shutil.which('nx') is None:
-        result = None if _deadline_exceeded() else (False, [])
-        t2_cache[query] = result
-        return result
-    try:
-        r = subprocess.run(['nx', 'memory', 'search', query], capture_output=True, text=True, timeout=_clamp_timeout())
-        result = (True, _parse_entries(r.stdout)) if r.returncode == 0 else (False, [])
-    except Exception:
-        result = (False, [])
-    t2_cache[query] = result
-    return result
 
 status = {}
 seen_names = {}
@@ -667,27 +641,12 @@ for bid in bead_ids:
         seen_names[bid] = _named_reviewers(_txt)
         status[bid] = 'incomplete'
         continue
-    if _deadline_exceeded():
+    if t1_timed_out or _deadline_exceeded():
         status[bid] = 'deadline'
-        continue
-    t2 = _t2_lookup(bid)
-    if t2 is None:
-        status[bid] = 'deadline'
-        continue
-    reachable, entries = t2
-    if not reachable:
+    elif not t1_reachable:
         status[bid] = 'uncertain'
     else:
-        _t2_hits = [(h, c) for h, c in entries if _t2_covers(bid, h, c)]
-        if _t2_hits:
-            _txt = ' '.join(h + ' ' + c for h, c in _t2_hits)
-            if _names_full_set(_txt):
-                status[bid] = 'covered'
-            else:
-                seen_names[bid] = _named_reviewers(_txt)
-                status[bid] = 'incomplete'
-        else:
-            status[bid] = 'missing'
+        status[bid] = 'missing'
 
 print(json.dumps({'t1_reachable': t1_reachable, 'status': status, 'deadline_seconds': DEADLINE_SECONDS, 'seen_names': seen_names}))
 " 2>/dev/null || echo '{"t1_reachable": false, "status": {}, "deadline_seconds": 3.5}')
@@ -725,12 +684,12 @@ except Exception:
 if [[ "$OVERRIDE" -eq 1 && ( -n "$MISSING_SPACE" || -n "$UNCERTAIN_SPACE" || -n "$DEADLINE_SPACE" || -n "$INCOMPLETE_SPACE" ) ]]; then
     _stamp_ids "$COVERED_SPACE" "passed" "review-completed marker verified at close"
     NOT_COVERED_SPACE="$MISSING_SPACE $UNCERTAIN_SPACE $DEADLINE_SPACE $INCOMPLETE_SPACE"
-    _stamp_ids "$NOT_COVERED_SPACE" "overridden" "NX_REVIEW_GATE_OVERRIDE=1; no confirmed review-completed coverage in T1 or T2 for: $NOT_COVERED_SPACE"
+    _stamp_ids "$NOT_COVERED_SPACE" "overridden" "NX_REVIEW_GATE_OVERRIDE=1; no confirmed review-completed coverage in T1 scratch for: $NOT_COVERED_SPACE"
     # nexus-cr4lp F2: every override use is auditable, logged BEFORE the
     # allow (env-sourced OR inline-command-text-sourced -- both routes
     # through the same OVERRIDE flag, same log call).
     _log_override_escape "$NOT_COVERED_SPACE"
-    allow "OVERRIDE (NX_REVIEW_GATE_OVERRIDE=1): no confirmed review-completed coverage in T1 scratch or T2 memory for $NOT_COVERED_SPACE — closing anyway. Stamped verification=overridden for those ids. This bypass is deliberate and audited."
+    allow "OVERRIDE (NX_REVIEW_GATE_OVERRIDE=1): no confirmed review-completed coverage in T1 scratch for $NOT_COVERED_SPACE — closing anyway. Stamped verification=overridden for those ids. This bypass is deliberate and audited."
 fi
 
 if [[ -n "$MISSING_SPACE" || -n "$DEADLINE_SPACE" || -n "$INCOMPLETE_SPACE" ]]; then
@@ -752,7 +711,7 @@ incomplete = os.environ.get('NX_HOOK_INCOMPLETE_SPACE', '').split()
 deadline_seconds = os.environ.get('NX_HOOK_DEADLINE_SECONDS_DISPLAY', '3.5')
 lines = []
 if missing:
-    lines.append('Close blocked: no review-completed marker found in T1 scratch or T2 memory for: ' + ' '.join(missing) + '.')
+    lines.append('Close blocked: no review-completed marker found in T1 scratch for: ' + ' '.join(missing) + '. (T2 memory markers are no longer consulted — nexus-fgekf: an attestation must come from the closing session, not a durable store.)')
 if incomplete:
     lines.append(
         'Close blocked: a review-completed marker exists but does NOT name the full required reviewer set for: '
@@ -772,21 +731,20 @@ lines.append(
     'ENTIRE command, including any marker write bundled ahead of it '
     '(nexus-cr4lp F4). Run the stacked reviewers (code-review-expert + substantive-critic), then write the'
 )
-lines.append('marker to T1 scratch AND/OR T2 memory (write to T2 when the CLI T1 lease is known-stale), e.g.:')
+lines.append('marker to T1 scratch (this session; the MCP scratch tool and the CLI converge):')
 lines.append('  nx scratch put \"review-completed: <bead-id> reviewers=code-review-expert,substantive-critic\" --tags \"review-completed,<bead-id>\"')
-lines.append('  nx memory put \"review-completed: <bead-id> reviewers=code-review-expert,substantive-critic\" -p <project> -t review-<bead-id>')
-lines.append('The marker MUST name both reviewers; naming one (or neither) is refused.')
+lines.append('The marker MUST name both reviewers; naming one (or neither) is refused. T2 memory markers do not satisfy this gate (nexus-fgekf).')
 lines.append('then re-run this close.')
 lines.append('Deliberate override (audited): set NX_REVIEW_GATE_OVERRIDE=1 and re-run.')
 print(chr(10).join(lines))
-" 2>/dev/null || echo "Close blocked: coverage could not be verified in T1 or T2. Set NX_REVIEW_GATE_OVERRIDE=1 to override.")
+" 2>/dev/null || echo "Close blocked: coverage could not be verified in T1 scratch. Set NX_REVIEW_GATE_OVERRIDE=1 to override.")
     deny "$DENY_MSG"
 fi
 
 if [[ -n "$UNCERTAIN_SPACE" ]]; then
     _stamp_ids "$COVERED_SPACE" "passed" "review-completed marker verified at close"
-    _stamp_ids "$UNCERTAIN_SPACE" "unverified" "T1/T2 unreachable at close time (capability gap, not a time-budget issue)"
-    allow "WARNING: could not verify review-completed coverage in T1 scratch OR T2 memory for $UNCERTAIN_SPACE (T1/T2 unreachable for these specific queries -- a capability gap, not a time-budget issue). Closing anyway (a broken verification path must not brick every bead close) but stamped verification=unverified for those ids, NOT passed. If review truly happened this is a capability gap, not a review gap — investigate T1/T2. To silence this deliberately, set NX_REVIEW_GATE_OVERRIDE=1."
+    _stamp_ids "$UNCERTAIN_SPACE" "unverified" "T1 scratch unreachable at close time (capability gap, not a time-budget issue)"
+    allow "WARNING: could not verify review-completed coverage in T1 scratch for $UNCERTAIN_SPACE — T1 unreachable (nx missing or 'nx scratch list' failed; post-nexus-f7xyq that includes a dead CLI T1 lease failing loud — check 'nx doctor --check-t1'). Closing anyway (a broken verification path must not brick every bead close) but stamped verification=unverified for those ids, NOT passed. If review truly happened this is a capability gap, not a review gap. To silence this deliberately, set NX_REVIEW_GATE_OVERRIDE=1."
 fi
 
 _stamp_ids "$COVERED_SPACE" "passed" "review-completed marker verified at close"

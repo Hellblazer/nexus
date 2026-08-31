@@ -10,11 +10,16 @@ record, which is what this fix removes.
 
 ROUND 2 (this file): after code-review-expert (T2 [21539]) and
 substantive-critic (T2 [21540], not-justified) both returned round 1, this
-file adds coverage for the DUAL-SOURCE fix (Critical-1: T1 scratch OR T2
-memory, since a marker written via the MCP scratch tool is invisible to a
-T1-only CLI check whenever the CLI's own T1 lease is stale), the T2 lookup
-budget, per-id differentiated stamping, loud stamp-failure warnings
-(Significant-d), and the tightened bd-verb matcher (Important-4).
+file added coverage for the DUAL-SOURCE fix (T1 scratch OR T2 memory),
+per-id differentiated stamping, loud stamp-failure warnings, and the
+tightened bd-verb matcher.
+
+nexus-fgekf (2026-08-30): the T2 leg is RETIRED — the divergence it routed
+around is fixed (nexus-d76vc handoff re-lease, nexus-f7xyq loud dead-lease
+failure; measured converged on a live session) and a durable marker must
+not satisfy a close in a session that performed no review. The old
+dual-source acceptance fixtures survive INVERTED as retirement pins; the
+`fake_nx` memory stub survives to prove memory is never consulted.
 """
 from __future__ import annotations
 
@@ -509,19 +514,21 @@ class TestAllowOnCoveredMarker:
         assert "nexus-tafjk verification=passed" in calls
 
 
-class TestDualSourceCoverage:
-    """nexus-4av2n round 2 Critical-1 (substantive-critic, empirically
-    reproduced live): a review-completed marker written via the MCP
-    scratch tool is INVISIBLE to a T1-only CLI check whenever the CLI's
-    own T1 lease for that session is stale (the pooled-scope fallback,
-    nexus-6a19f, resolves a DIFFERENT scope than the MCP-frozen one). The
-    fix widens coverage lookup to T1 OR T2 memory."""
+class TestT1OnlyCoverage:
+    """nexus-fgekf (2026-08-30): the T2 memory leg is RETIRED. It existed
+    for a CLI/MCP T1 scope divergence (nexus-4av2n round 2) whose both
+    halves are since fixed (nexus-d76vc handoff re-lease; nexus-f7xyq dead
+    lease fails loud), measured converged on a live session. A durable T2
+    marker could satisfy a close in a much later session for a review
+    nobody performed — every property that makes T2 right for knowledge
+    makes it wrong for an attestation."""
 
-    def test_t2_covers_when_t1_reachable_but_empty(
+    def test_t2_marker_no_longer_covers_when_t1_empty(
         self, mock_config_env, fake_nx, fake_bd
     ) -> None:
-        """THE regression this round fixes: T1 reachable-and-empty (the
-        scope-mismatch shape) falls back to T2 rather than denying."""
+        """THE retirement pin: the exact fixture that used to ALLOW via the
+        T2 fallback (a perfect full-set marker in memory, T1 empty) now
+        DENIES — a durable marker is not an attestation from this session."""
         env = mock_config_env({"on_close": True})
         fake_nx_bin = fake_nx(
             "No scratch entries.",
@@ -536,12 +543,16 @@ class TestDualSourceCoverage:
             env_overrides=env,
         )
         parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
-        assert "nexus-abc12 verification=passed" in log.read_text()
+        assert _get_decision(parsed) == "deny"
+        assert "T2" in _get_reason(parsed)  # the deny names the retirement
+        assert not log.exists() or log.read_text().strip() == ""
 
-    def test_t2_covers_when_t1_totally_unreachable(
+    def test_t1_unreachable_allows_unverified_regardless_of_t2(
         self, mock_config_env, fake_nx, fake_bd
     ) -> None:
+        """T1 unreachable is a capability gap (post-f7xyq: a dead CLI lease
+        fails loud): loud allow + unverified stamp, NEVER passed — and a T2
+        marker changes nothing about it."""
         env = mock_config_env({"on_close": True})
         fake_nx_bin = fake_nx(
             scratch_unreachable=True,
@@ -557,17 +568,22 @@ class TestDualSourceCoverage:
         )
         parsed = json.loads(result.stdout)
         assert _get_decision(parsed) == "allow"
-        assert "nexus-abc12 verification=passed" in log.read_text()
+        assert "WARNING" in _get_context(parsed) or "WARNING" in _get_reason(parsed)
+        calls = log.read_text()
+        assert "nexus-abc12 verification=unverified" in calls
+        assert "nexus-abc12 verification=passed" not in calls
 
-    def test_t1_covers_without_ever_needing_t2(
-        self, mock_config_env, fake_nx, fake_bd
+    def test_t1_covers_and_memory_is_never_consulted(
+        self, mock_config_env, fake_nx, fake_bd, tmp_path
     ) -> None:
-        """If T1 already covers, T2 must never even be consulted -- verify
-        by making T2 unreachable and confirming that doesn't matter."""
+        """Positive path + the structural proof the leg is gone: no
+        `nx memory search` call is EVER made, covered or not."""
         env = mock_config_env({"on_close": True})
+        call_log = tmp_path / "nx_calls.log"
         fake_nx_bin = fake_nx(
             _marker("review-completed,nexus-abc12", "review-completed: nexus-abc12"),
             memory_unreachable=True,
+            call_log=call_log,
         )
         fake_bd_bin, log = fake_bd()
         result = _run_hook(
@@ -578,14 +594,32 @@ class TestDualSourceCoverage:
         parsed = json.loads(result.stdout)
         assert _get_decision(parsed) == "allow"
         assert "nexus-abc12 verification=passed" in log.read_text()
+        assert "memory search" not in call_log.read_text()
 
-    def test_both_sources_reachable_and_empty_still_denies(
+    def test_uncovered_bead_makes_no_memory_call_either(
+        self, mock_config_env, fake_nx, tmp_path
+    ) -> None:
+        """The old shape's per-uncovered-id `nx memory search` spawns are
+        gone: an uncovered bead denies after the single scratch read."""
+        env = mock_config_env({"on_close": True})
+        call_log = tmp_path / "nx_calls.log"
+        fake_bin = fake_nx("No scratch entries.", call_log=call_log)
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        assert _get_decision(json.loads(result.stdout)) == "deny"
+        calls = call_log.read_text()
+        assert "memory search" not in calls
+        assert calls.count("scratch list") == 1
+
+    def test_t1_reachable_and_empty_denies(
         self, mock_config_env, fake_nx
     ) -> None:
-        """Dual-source widens WHERE coverage can be found; it must not
-        weaken WHETHER genuine absence still denies."""
+        """Deny-on-absence stays: reachable-and-empty is a real absence."""
         env = mock_config_env({"on_close": True})
-        fake_bin = fake_nx("No scratch entries.")  # both reachable, both empty
+        fake_bin = fake_nx("No scratch entries.")
         result = _run_hook(
             _make_payload(command="bd close nexus-abc12"),
             path_prefix=str(fake_bin),
@@ -598,8 +632,7 @@ class TestDualSourceCoverage:
     ) -> None:
         env = mock_config_env({"on_close": True})
         fake_bin = fake_nx(
-            "No scratch entries.",
-            memory_by_query={"nexus-covered": _t2_marker("nexus/x", "review-completed: nexus-covered")},
+            _marker("review-completed,nexus-covered", "review-completed: nexus-covered"),
         )
         result = _run_hook(
             _make_payload(command="for b in nexus-covered nexus-uncov; do bd close $b; done"),
@@ -652,7 +685,7 @@ class TestLoopVariableDatum:
         parsed = json.loads(result.stdout)
         assert _get_decision(parsed) == "deny"
         assert "nexus-uncov" in _get_reason(parsed)
-        assert "nexus-cotmr" not in _get_reason(parsed).split("Remedy")[0].split("found in T1 scratch or T2 memory for:")[1]
+        assert "nexus-cotmr" not in _get_reason(parsed).split("Remedy")[0].split("found in T1 scratch for:")[1]
 
     def test_no_literal_bead_id_is_indeterminate_not_denied(
         self, mock_config_env, fake_nx
@@ -714,12 +747,12 @@ class TestOverride:
 
 
 class TestCapabilityHonestBothSourcesDown:
-    """nexus-4av2n item 3(iv), widened round 2: 'uncertain' now requires
-    BOTH T1 and T2 to be unreachable (or the T2 budget exhausted) for a
-    given id -- either source alone can resolve coverage. Never brick the
-    close, but never claim 'passed' either."""
+    """nexus-4av2n item 3(iv), narrowed at nexus-fgekf (T2 leg retired):
+    'uncertain' is T1 unreachable — nx missing, or `nx scratch list`
+    failing (post-f7xyq that includes a dead CLI lease failing loud).
+    Never brick the close, but never claim 'passed' either."""
 
-    def test_both_sources_unreachable_allows_with_loud_warning_and_unverified_stamp(
+    def test_t1_unreachable_allows_with_loud_warning_and_unverified_stamp(
         self, mock_config_env, fake_nx, fake_bd
     ) -> None:
         env = mock_config_env({"on_close": True})
@@ -767,27 +800,23 @@ class TestCapabilityHonestBothSourcesDown:
 
 
 class TestDeadlineBudget:
-    """nexus-4av2n round 3 (Critical, substantive-critic closure
-    verification on the sibling push-gate; same fix applied here since
-    this hook's lookup can ALSO stack up to 1 (T1) + N (T2 per uncovered
-    id) `nx` subprocess spawns against the same 5s PreToolUse timeout).
-    The round-2 call-count budget did not bound wall-clock time; replaced
-    by a wall-clock deadline (NX_CLOSE_GATE_DEADLINE_SECONDS test seam)
-    the hook enforces on itself, denying deterministically rather than
-    ever risking a harness kill mid-check."""
+    """nexus-4av2n round 3: wall-clock deadline
+    (NX_CLOSE_GATE_DEADLINE_SECONDS test seam) the hook enforces on
+    itself, denying deterministically rather than ever risking a harness
+    kill mid-check. nexus-fgekf update: with the T2 leg retired, the
+    single subprocess left is `nx scratch list`, so the deadline trips
+    when THAT read blows the budget (its timeout is clamped to the
+    remaining budget → TimeoutExpired → status 'deadline', distinct from
+    the rc!=0 capability gap)."""
 
     def test_deadline_exceeded_denies_deterministically(
         self, mock_config_env, fake_nx, fake_bd
     ) -> None:
         """(a) deadline-trip deny path via a stubbed slow `nx`."""
         env = mock_config_env({"on_close": True})
-        # Slow-but-working nx: every call sleeps 0.35s. With a 0.5s
-        # deadline, T1 (0.35s, elapsed ~0.35s < 0.5s so it proceeds) then
-        # the T2 lookup for the bead (another 0.35s, elapsed ~0.70s) is
-        # attempted (deadline not yet exceeded when it STARTS) but by the
-        # time it returns the deadline has passed -- deterministic trip on
-        # the very next id, or immediately if there's a second id.
-        fake_nx_bin = fake_nx(scratch="No scratch entries.", sleep_seconds=0.35)
+        # nx sleeps LONGER than the whole 0.5s budget: the scratch read's
+        # clamped timeout expires -> TimeoutExpired -> deadline flavor.
+        fake_nx_bin = fake_nx(scratch="No scratch entries.", sleep_seconds=0.9)
         fake_bd_bin, log = fake_bd()
         result = _run_hook(
             _make_payload(command="for b in nexus-bud01 nexus-bud02; do bd close $b; done"),
@@ -804,7 +833,7 @@ class TestDeadlineBudget:
         self, mock_config_env, fake_nx
     ) -> None:
         env = mock_config_env({"on_close": True})
-        fake_bin = fake_nx(scratch="No scratch entries.", sleep_seconds=0.35)
+        fake_bin = fake_nx(scratch="No scratch entries.", sleep_seconds=0.9)
         result = _run_hook(
             _make_payload(command="for b in nexus-bud01 nexus-bud02; do bd close $b; done"),
             path_prefix=str(fake_bin),
@@ -818,7 +847,7 @@ class TestDeadlineBudget:
         self, mock_config_env, fake_nx, fake_bd
     ) -> None:
         env = mock_config_env({"on_close": True})
-        fake_nx_bin = fake_nx(scratch="No scratch entries.", sleep_seconds=0.35)
+        fake_nx_bin = fake_nx(scratch="No scratch entries.", sleep_seconds=0.9)
         fake_bd_bin, log = fake_bd()
         result = _run_hook(
             _make_payload(command="for b in nexus-bud01 nexus-bud02; do bd close $b; done"),
@@ -1090,12 +1119,13 @@ class TestF4RemedySeparateCallWarning:
 
 
 class TestB3T2TitleOnlyMarker:
-    """nexus-cr4lp B3 (latent, found during guard-evidence-cluster
-    forensics): a T2 marker whose bead id lives ONLY in the TITLE (this
-    hook's OWN printed ``-t review-<bead-id>`` form) must satisfy
-    coverage even when the CONTENT carries no bare bead id."""
+    """nexus-cr4lp B3's title-only T2 acceptance shape, INVERTED at
+    nexus-fgekf: with the T2 leg retired, even the hook's OWN former
+    printed ``-t review-<bead-id>`` T2 form must no longer satisfy
+    coverage — the strongest historical T2 shape is the right regression
+    fixture for the retirement."""
 
-    def test_t2_marker_covers_when_bead_id_is_only_in_the_title(
+    def test_former_t2_title_form_no_longer_covers(
         self, mock_config_env, fake_nx
     ) -> None:
         env = mock_config_env({"on_close": True})
@@ -1114,7 +1144,7 @@ class TestB3T2TitleOnlyMarker:
             env_overrides=env,
         )
         parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow", parsed
+        assert _get_decision(parsed) == "deny", parsed
 
 
 class TestF5RemedyRoundTripReal:
@@ -1130,7 +1160,10 @@ class TestF5RemedyRoundTripReal:
         d = Path(sys.executable).parent
         return d if (d / "nx").exists() else None
 
-    @pytest.mark.parametrize("remedy_kind", ["t1_scratch", "t2_memory"])
+    # nexus-fgekf: the t2_memory remedy form is retired with the leg — the
+    # hook prints only the T1 scratch form now, so that is the only remedy
+    # left to round-trip.
+    @pytest.mark.parametrize("remedy_kind", ["t1_scratch"])
     def test_printed_remedy_satisfies_the_hooks_own_lookup(
         self, remedy_kind, mock_config_env, t2_service_env
     ) -> None:
