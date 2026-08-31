@@ -310,6 +310,19 @@ public final class CatalogHandler implements HttpHandler {
             body.put("missing", e.missing);
             body.put("chunk_count", e.chunkCount);
             HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(body));
+        } catch (dev.nexus.service.vectors.UpstreamRateLimitedException e) {
+            // nexus-99r7y: the combined write's server-side embed
+            // (write_many -> CombinedWriteService -> CceEmbedder) hit
+            // sustained Voyage 429s past the bounded budget. This WAS the
+            // 2026-08-15 incident's exact surface: the old fixed retries
+            // burned inside the edge's 30s bound and this ladder's generic
+            // arm turned throttling into opaque 5xx while the engine was
+            // idle. Mirror VectorHandler's arm: honest 429 + Retry-After.
+            log.warn("event=catalog_upstream_rate_limited op={} tenant={} retry_after_s={} error={}",
+                     op, tenant, e.retryAfterSeconds(), e.getMessage());
+            exchange.getResponseHeaders().set("Retry-After", Long.toString(e.retryAfterSeconds()));
+            HttpUtil.send(exchange, 429, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage())
+                + ",\"retry_after_seconds\":" + e.retryAfterSeconds() + "}");
         } catch (Exception e) {
             // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
             // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.

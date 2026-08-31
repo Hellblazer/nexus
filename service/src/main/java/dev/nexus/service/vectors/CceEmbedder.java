@@ -98,6 +98,40 @@ public final class CceEmbedder implements Embedder {
     private static final long   RETRY_BASE_MS = 500L;
 
     /**
+     * Total wall-clock budget ONE WHOLE embed request (the full
+     * {@link #embedParallel} fan-out, however many texts) may spend absorbing
+     * Voyage 429s before failing fast with a typed
+     * {@link UpstreamRateLimitedException} (nexus-99r7y). Sized well under
+     * the public edge's 30s upstream bound: the 2026-08-15 incident
+     * (engine-service-v0.1.76, conexus-ddh0) had sustained project-RPM 429s
+     * burn the fixed {@link #MAX_RETRIES} attempts inside the edge timeout,
+     * so bulk {@code write_many} surfaced opaque 5xx while the engine was
+     * idle.
+     *
+     * <p><strong>Request-scoped, not per-call</strong> (substantive-critic
+     * ship-blocker, 2026-08-31): the deadline is minted ONCE in {@link #embed}/
+     * {@link #embedWithUsage}/{@link #embedDouble} and shared by every worker's
+     * {@link #callApi}. A per-call budget re-arms each fan-out wave — with
+     * {@link #CCE_PARALLELISM}=12 and the client's 300-record batch cap, a
+     * write_many under sustained-but-yielding limiting would grind through
+     * ~25 waves at up to a full budget each, reproducing the exact incident
+     * past N≈24. With the shared deadline, workers starting in later waves
+     * see only the REMAINING budget and the whole request either completes
+     * or answers an honest 429 + Retry-After inside the edge bound. 429
+     * attempts are bounded by THIS budget, not by {@link #MAX_RETRIES} —
+     * throttling is pacing, not failure; 5xx keeps the old per-call
+     * attempt-bounded semantics.
+     */
+    private static final long RATE_LIMIT_BUDGET_MS = 20_000L;
+
+    /**
+     * Headroom a retry must leave inside the budget for the HTTP call
+     * itself — sleeping right up to the deadline just moves the timeout
+     * into the request.
+     */
+    private static final long MIN_CALL_ALLOWANCE_MS = 1_000L;
+
+    /**
      * Bound on concurrent in-flight Voyage HTTPS calls for THIS embedder instance
      * (nexus-9okyk). Chosen inside the analysis's expected 8-16x win range.
      *
@@ -122,6 +156,7 @@ public final class CceEmbedder implements Embedder {
     private final String     inputType;  // "document" or "query"
     private final String     url;         // test-injectable; production = CCE_URL
     private final long       retryBaseMs; // test-injectable; production = RETRY_BASE_MS
+    private final long       rateLimitBudgetMs; // test-injectable; production = RATE_LIMIT_BUDGET_MS
     private final HttpClient http;
     private final ObjectMapper mapper;
 
@@ -170,10 +205,26 @@ public final class CceEmbedder implements Embedder {
      */
     CceEmbedder(String apiKey, String inputType, String url, long retryBaseMs,
                 int parallelism, Optional<ProxySelector> proxy, Random jitterRandom) {
+        this(apiKey, inputType, url, retryBaseMs, parallelism, proxy, jitterRandom,
+             RATE_LIMIT_BUDGET_MS);
+    }
+
+    /**
+     * Full wiring — the single build path. Adds the injectable 429 budget
+     * (nexus-99r7y) so a test can drive the budget-bounded fail-fast without
+     * 20s of wall clock; production always takes {@link #RATE_LIMIT_BUDGET_MS}
+     * via the shorter constructors.
+     *
+     * @param rateLimitBudgetMs total 429-absorption budget per {@link #callApi}
+     */
+    CceEmbedder(String apiKey, String inputType, String url, long retryBaseMs,
+                int parallelism, Optional<ProxySelector> proxy, Random jitterRandom,
+                long rateLimitBudgetMs) {
         this.apiKey      = apiKey;
         this.inputType   = inputType;
         this.url         = url;
         this.retryBaseMs = retryBaseMs;
+        this.rateLimitBudgetMs = rateLimitBudgetMs;
         // nexus-... egress proxy: java.net.http.HttpClient ignores https.proxyHost
         // system properties unless a proxy is set explicitly on the client. The cloud
         // deploy routes api.voyageai.com through squid (private subnet has no NAT), so
@@ -206,7 +257,11 @@ public final class CceEmbedder implements Embedder {
     @Override
     public List<float[]> embed(List<String> texts) {
         if (texts == null || texts.isEmpty()) return List.of();
-        return embedParallel(texts, this::embedOneFloat);
+        // nexus-99r7y critic fold: ONE deadline for the WHOLE request — see
+        // RATE_LIMIT_BUDGET_MS's javadoc. Binding it here (not per worker)
+        // is what makes the budget request-scoped.
+        long deadlineNanos = newEmbedDeadlineNanos();
+        return embedParallel(texts, t -> embedOneFloat(t, deadlineNanos));
     }
 
     /**
@@ -222,7 +277,8 @@ public final class CceEmbedder implements Embedder {
     @Override
     public EmbedResult embedWithUsage(List<String> texts) {
         if (texts == null || texts.isEmpty()) return new EmbedResult(List.of(), 0L);
-        List<EmbedResult> perChunk = embedParallel(texts, this::embedOneWithUsage);
+        long deadlineNanos = newEmbedDeadlineNanos();  // nexus-99r7y: request-scoped budget
+        List<EmbedResult> perChunk = embedParallel(texts, t -> embedOneWithUsage(t, deadlineNanos));
         List<float[]> result = new ArrayList<>(perChunk.size());
         long totalTokens = 0L;
         for (EmbedResult oneResult : perChunk) {
@@ -242,7 +298,8 @@ public final class CceEmbedder implements Embedder {
      */
     public List<double[]> embedDouble(List<String> texts) {
         if (texts == null || texts.isEmpty()) return List.of();
-        return embedParallel(texts, this::embedOneDouble);
+        long deadlineNanos = newEmbedDeadlineNanos();  // nexus-99r7y: request-scoped budget
+        return embedParallel(texts, t -> embedOneDouble(t, deadlineNanos));
     }
 
     /**
@@ -357,9 +414,9 @@ public final class CceEmbedder implements Embedder {
 
     // ── Per-text API call helpers ─────────────────────────────────────────────
 
-    private float[] embedOneFloat(String text) {
+    private float[] embedOneFloat(String text, long deadlineNanos) {
         String json = buildJson(text);
-        String body = callApi(json);
+        String body = callApi(json, deadlineNanos);
         try {
             return parseOneFloat(body);
         } catch (Exception e) {
@@ -382,9 +439,9 @@ public final class CceEmbedder implements Embedder {
      * <p>Parses the JSON body ONCE and extracts both the vector and the usage count
      * from the same {@code root} map (avoids double-deserialisation).
      */
-    private EmbedResult embedOneWithUsage(String text) {
+    private EmbedResult embedOneWithUsage(String text, long deadlineNanos) {
         String json = buildJson(text);
-        String body = callApi(json);
+        String body = callApi(json, deadlineNanos);
         try {
             return parseOneFloatWithUsage(body);
         } catch (Exception e) {
@@ -427,9 +484,9 @@ public final class CceEmbedder implements Embedder {
         return new EmbedResult(java.util.List.of(vec), tokens);
     }
 
-    private double[] embedOneDouble(String text) {
+    private double[] embedOneDouble(String text, long deadlineNanos) {
         String json = buildJson(text);
-        String body = callApi(json);
+        String body = callApi(json, deadlineNanos);
         try {
             float[] f32 = parseOneFloat(body);
             double[] f64 = new double[f32.length];
@@ -499,7 +556,12 @@ public final class CceEmbedder implements Embedder {
      * is worth its own bead if any of them gains concurrent callers too.
      */
     long backoffDelayMs(int attempt) {
-        long cap = retryBaseMs * (1L << (attempt - 1));
+        // Exponent clamped (nexus-99r7y): 429 attempts are now budget-bounded
+        // rather than MAX_RETRIES-bounded, so `attempt` can exceed the old
+        // 1..3 range — an unclamped shift would overflow long past attempt 63
+        // and the envelope should stop growing once it is already
+        // budget-scale. 1..6 is unchanged for every pre-existing caller.
+        long cap = retryBaseMs * (1L << Math.min(attempt - 1, 5));
         long floor = cap / 2;
         long jitterSpan = cap - floor;  // remaining half; handles odd cap without losing a unit
         long jitter = jitterSpan > 0 ? (long) (jitterRandom.nextDouble() * jitterSpan) : 0;
@@ -510,8 +572,40 @@ public final class CceEmbedder implements Embedder {
     // taken from the final successful response only; tokens from prior failed
     // attempts are not accumulated — a billing UNDER-count on retried calls (safe
     // direction: under-charges the customer). Documented, not corrected.
-    private String callApi(String json) {
-        for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    /**
+     * Parse a {@code Retry-After} header value as milliseconds.
+     *
+     * <p>Voyage sends delay-seconds (integer or decimal). The HTTP-date form
+     * and any unparsable value yield {@code null} — treated as "no header",
+     * falling back to the computed backoff, never failing the request over a
+     * malformed advisory header. Package-private for direct unit testing.
+     */
+    static Long parseRetryAfterMs(String value) {
+        if (value == null || value.isBlank()) return null;
+        try {
+            double seconds = Double.parseDouble(value.trim());
+            if (seconds < 0) return null;
+            return (long) (seconds * 1000.0);
+        } catch (NumberFormatException e) {
+            return null;  // HTTP-date form or garbage: advisory only, ignore
+        }
+    }
+
+    /** Shared 429 deadline for ONE whole embed request (critic fold, see
+     *  {@link #RATE_LIMIT_BUDGET_MS}). */
+    private long newEmbedDeadlineNanos() {
+        return System.nanoTime() + rateLimitBudgetMs * 1_000_000L;
+    }
+
+    private String callApi(String json, long deadlineNanos) {
+        // nexus-99r7y: 429s are BUDGET-bounded (throttling is pacing, not
+        // failure — keep absorbing while the edge bound allows), while 5xx /
+        // network failures keep the old MAX_RETRIES attempt-bounded
+        // semantics via their own counter. The deadline is SHARED across the
+        // whole embed request's fan-out — passed in, never recomputed here.
+        int transientFailures = 0;
+        int consecutive429s = 0;
+        for (int attempt = 1; ; attempt++) {
             try {
                 HttpRequest req = HttpRequest.newBuilder()
                         .uri(URI.create(url))
@@ -526,12 +620,49 @@ public final class CceEmbedder implements Embedder {
 
                 if (status == 200) return resp.body();
 
-                boolean retryable = (status == 429 || status >= 500);
-                if (retryable && attempt < MAX_RETRIES) {
-                    long delay = backoffDelayMs(attempt);
-                    log.warn("event=cce_retry attempt={} status={} delay_ms={}", attempt, status, delay);
+                if (status == 429) {
+                    consecutive429s++;
+                    // Honour Voyage's own Retry-After when present; otherwise
+                    // the equal-jitter envelope paces the herd.
+                    Long retryAfterMs = parseRetryAfterMs(
+                            resp.headers().firstValue("Retry-After").orElse(null));
+                    long delay = Math.max(backoffDelayMs(attempt),
+                                          retryAfterMs != null ? retryAfterMs : 0L);
+                    long remainingMs = (deadlineNanos - System.nanoTime()) / 1_000_000L;
+                    if (delay + MIN_CALL_ALLOWANCE_MS > remainingMs) {
+                        // Fail fast and HONEST, with margin under the edge's
+                        // 30s bound: an engine-authored 429 + Retry-After
+                        // beats an opaque edge-timeout 5xx (the 2026-08-15
+                        // incident shape), and arms the client-side rate
+                        // brake (conexus-cy9u7) that keys on the header.
+                        long retryAfterS = Math.max(1L, (long) Math.ceil(delay / 1000.0));
+                        // Review fold (2026-08-31): no floor on remainingMs — a
+                        // negative remainder means the loop ran PAST the budget
+                        // (e.g. a slow in-flight call), and the log must say so
+                        // rather than under-report elapsed as exactly the budget.
+                        long elapsedMs = rateLimitBudgetMs - remainingMs;
+                        log.warn("event=cce_rate_limited attempts={} consecutive_429s={} elapsed_ms={} retry_after_s={}",
+                                 attempt, consecutive429s, elapsedMs, retryAfterS);
+                        throw new UpstreamRateLimitedException(
+                                "Voyage AI is rate limiting (HTTP 429 x" + consecutive429s
+                                + " within the " + rateLimitBudgetMs + "ms budget); failing"
+                                + " fast before the edge timeout. Retry after ~" + retryAfterS
+                                + "s. body=" + resp.body(), retryAfterS);
+                    }
+                    log.warn("event=cce_retry attempt={} status=429 delay_ms={} retry_after_header_ms={}",
+                             attempt, delay, retryAfterMs);
                     Thread.sleep(delay);
                     continue;
+                }
+                consecutive429s = 0;
+                if (status >= 500) {
+                    transientFailures++;
+                    if (transientFailures < MAX_RETRIES) {
+                        long delay = backoffDelayMs(transientFailures);
+                        log.warn("event=cce_retry attempt={} status={} delay_ms={}", attempt, status, delay);
+                        Thread.sleep(delay);
+                        continue;
+                    }
                 }
                 if (status == 401 || status == 403) {
                     // nexus-pmhpc: credentials problem, not an engine defect —
@@ -549,14 +680,14 @@ public final class CceEmbedder implements Embedder {
             } catch (RuntimeException e) {
                 throw e;
             } catch (Exception e) {
-                if (attempt == MAX_RETRIES) {
+                transientFailures++;
+                if (transientFailures >= MAX_RETRIES) {
                     throw new RuntimeException("CCE embed failed after " + MAX_RETRIES + " attempts", e);
                 }
-                try { Thread.sleep(backoffDelayMs(attempt)); }
+                try { Thread.sleep(backoffDelayMs(transientFailures)); }
                 catch (InterruptedException ix) { Thread.currentThread().interrupt(); throw new RuntimeException("interrupted", ix); }
             }
         }
-        throw new RuntimeException("CCE embed: exhausted retries"); // unreachable
     }
 
     // ── Response parsers ──────────────────────────────────────────────────────
