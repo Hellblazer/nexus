@@ -206,6 +206,27 @@ def test_extras_flag_normalizes_case_against_the_receipt(bed, monkeypatch, capsy
     assert "Local" not in out, out
 
 
+def test_extras_flag_through_the_real_click_surface(bed, monkeypatch) -> None:
+    """Round-2 critique [23835]: every other test calls
+    perform_self_install() directly, bypassing Click's option parser — so
+    the one thing the USER types (`nx self install --extras local
+    --dry-run`) had no coverage of its own. Drive the real command."""
+    from click.testing import CliRunner
+
+    from nexus.commands.self_cmd import install_cmd
+
+    tools, _, src = bed
+    host = _hosting_generation(tools, "20260101T000000Z", extras=["local"], source=str(src))
+    (tools / "current").symlink_to(host)
+    monkeypatch.setattr(sys, "prefix", str(host))
+
+    result = CliRunner().invoke(
+        install_cmd, ["--extras", "dt", "--extras", "local", "--dry-run"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "--extras local,dt" in result.output, result.output
+
+
 def test_extras_flag_refuses_junk_names(bed, monkeypatch) -> None:
     """A bad name must fail HERE with its own message, not as an opaque uv
     resolution error deep inside the generation build."""
