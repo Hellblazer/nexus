@@ -103,6 +103,13 @@ public final class SchemaMigrator {
      *                        the walk minus the new rows — the {@code runAlways}
      *                        / {@code runOnChange} re-runs (a clean walk proves
      *                        they executed, not that their content is right)
+     *
+     * <p>Counts assume the single-instance-per-database boot this deployment
+     * runs. Two instances walking concurrently stay CORRECT on schema (the
+     * Liquibase changelog lock serializes the DDL) but can misattribute rows
+     * between their two log lines; a negative raw reading logs
+     * {@code event=schema_migration_count_anomaly} rather than clamping
+     * silently.
      */
     public record MigrationOutcome(
             int pendingAtStart, long newChangesets, long reexecutedChangesets) {}
@@ -163,11 +170,25 @@ public final class SchemaMigrator {
                 liquibase.update(new Contexts(), new LabelExpression());
 
                 long rowsAfter = countChangelogRows(conn);
-                long newChangesets = rowsBefore < 0
+                long rawNew = rowsBefore < 0
                         ? Math.max(rowsAfter, 0)
                         : rowsAfter - rowsBefore;
                 long touched = countChangelogRowsSince(conn, walkStart);
-                long reexecuted = Math.max(0, touched - newChangesets);
+                long rawReexecuted = touched - Math.max(0, rawNew);
+                // Review follow-up (x0s52 round 2): a negative RAW count means a
+                // concurrent writer moved databasechangelog under this walk (a
+                // multi-instance boot — Liquibase's lock serializes the DDL, not
+                // these diagnostics). Clamp for the report, but never silently:
+                // the anomaly line preserves the raw readings.
+                if (rawNew < 0 || rawReexecuted < 0) {
+                    log.warn("event=schema_migration_count_anomaly rows_before={} "
+                            + "rows_after={} touched={} — concurrent changelog "
+                            + "writer suspected; the completion counts below are "
+                            + "clamped and may misattribute rows between instances",
+                            rowsBefore, rowsAfter, touched);
+                }
+                long newChangesets = Math.max(0, rawNew);
+                long reexecuted = Math.max(0, rawReexecuted);
                 // The old line logged the PRE-update pending count as
                 // applied_changesets — a quantity the walk never computed
                 // (12x overstatement measured on the v0.1.86 fork walk). The
@@ -415,6 +436,11 @@ public final class SchemaMigrator {
      * gets the same clock. Idempotent; logs the transition when it happens.
      * {@code Main} also pins it before any datasource is built, because a
      * pooled connection negotiates its session zone at connect time.
+     *
+     * <p>The nexus-x0s52 completion counts depend on this pin too:
+     * {@code countChangelogRowsSince} windows {@code dateexecuted} against a
+     * server timestamp read in the UTC session — revert this pin and
+     * {@code reexecuted_changesets} silently skews by the zone offset.
      */
     public static void pinJvmTimeZoneToUtc() {
         TimeZone before = TimeZone.getDefault();

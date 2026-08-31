@@ -634,6 +634,8 @@ jobs:
         # then died here instead:
         #
         #   event=schema_migration_complete applied_changesets=206
+        #   (historical log shape — the field was renamed at nexus-x0s52 to
+        #   new_changesets/reexecuted_changesets/pending_at_start)
         #   Exception in thread "main" java.lang.IllegalStateException:
         #     Bge768Embedder: bge ONNX model not found at
         #     ~/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/model.onnx
