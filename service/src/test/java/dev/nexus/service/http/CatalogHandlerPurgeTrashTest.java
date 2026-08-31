@@ -40,7 +40,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * default for a PRESENT-but-wrong-typed body field (e.g. {@code "older_than_days":
  * "abc"}) instead of 400ing, unlike its own range-validation ({@code < 1}) which
  * already 400s correctly. Repository-level behavior ({@code purgeTrashPreview}/
- * {@code purgeTrash} semantics, age-independent chunk sweep) is covered by {@code
+ * {@code purgeTrash} semantics, grace-window-scoped chunk sweep — catalog-026;
+ * nexus-kcm6c retired the stale age-independent wording here) is covered by {@code
  * CatalogPurgeTrashTest}; this class pins the handler's own body-validation
  * branching only, same split as {@code CatalogHandlerSweepNextSeqDriftTest} vs its
  * repository-level sibling.

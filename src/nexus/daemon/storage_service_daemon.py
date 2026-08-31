@@ -87,6 +87,9 @@ import structlog
 
 from nexus import pdeathsig as _pdeathsig
 from nexus.daemon import readiness
+from nexus.db.onnx_model_root import ENV_MODEL_DIR, service_onnx_models_root
+from nexus.db.service_bge_model import service_bge_engine_dir_mismatch
+from nexus.db.service_crossencoder_model import service_crossencoder_engine_dir_mismatch
 from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
     ServiceRegistry,
@@ -843,6 +846,39 @@ class StorageServiceSupervisor:
         # dead supervisor never leaves an orphaned-but-serving service. NX_SERVICE_BIND
         # (container bind override, default loopback) passes through via env inheritance.
         env["NX_SERVICE_PARENT_DEATH_EXIT"] = "1"
+
+        # nexus-ogccs: pass the provisioner's resolved onnx_models root
+        # explicitly so supervisor and engine agree by construction. The
+        # engine's own fallback is user.home (the passwd entry), which
+        # diverges from the $HOME-derived path the provisioner writes under
+        # whenever HOME is overridden (containers, release-sandbox, CI) —
+        # green "model ready" then an engine crash at boot. Idempotent when
+        # the caller already set it: service_onnx_models_root() returns that
+        # same value.
+        env[ENV_MODEL_DIR] = str(service_onnx_models_root())
+        # A Python-only per-model override (NX_SERVICE_BGE_DIR /
+        # NX_SERVICE_CROSSENCODER_DIR) pointed off the root re-creates the
+        # same green-provision-then-crash shape on a second axis — the
+        # engine reads only <root>/<model>/onnx. Warn loudly at spawn so the
+        # engine's model-not-found abort has a named cause in the supervisor
+        # log (substantive-critic Significant-1 on nexus-ogccs).
+        for _env_name, _mismatch in (
+            ("NX_SERVICE_BGE_DIR", service_bge_engine_dir_mismatch()),
+            ("NX_SERVICE_CROSSENCODER_DIR", service_crossencoder_engine_dir_mismatch()),
+        ):
+            if _mismatch is not None:
+                _provisioner_dir, _engine_reads = _mismatch
+                _log.warning(
+                    "onnx_per_model_override_diverges",
+                    env_var=_env_name,
+                    provisioner_dir=str(_provisioner_dir),
+                    engine_reads=str(_engine_reads),
+                    remedy=(
+                        "the engine honours only NX_ONNX_MODEL_DIR (the root); "
+                        "unset the per-model override, or move the root so the "
+                        "override sits at <root>/<model>/onnx"
+                    ),
+                )
 
         # nexus-pebfx.2: the service only reads NX_VOYAGE_API_KEY; without it the
         # service embeds local ONNX (RDR-160: bge-768) and refuses every

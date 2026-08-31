@@ -215,6 +215,14 @@ _FILE_VERB_ALLOWLIST: dict[tuple[str, str], str] = {
     ("tests/e2e/upgrade-shakeout.sh", "guided-upgrade to"): (
         "planted RED fixture text for _check_no_demoted_verb's self-test"
     ),
+    # nexus-fgekf: extractor noise — the close gate's capability-gap warning
+    # says "the nx binary is absent, or 'nx scratch list' failed" and the
+    # extractor reads the prose after "nx" as a verb. Any wording that
+    # mentions the binary by name followed by prose parses the same way, so
+    # this is class-3 (mis-parsed ordinary prose), not rot.
+    ("conexus/hooks/scripts/pre_close_verification_hook.sh", "binary is"): (
+        "prose in the T1-unreachable warning naming the nx binary itself"
+    ),
 }
 
 

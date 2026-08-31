@@ -38,6 +38,7 @@ import structlog
 
 # Shared provisioning plumbing (atomic stream + retry/backoff + digest gate) —
 # single implementation, both model flows (no drift).
+from nexus.db.onnx_model_root import service_onnx_models_root
 from nexus.db.service_bge_model import Downloader, _file_ok, _httpx_stream, _verify_sha256
 
 _log = structlog.get_logger(__name__)
@@ -77,16 +78,35 @@ _MIN_MODEL_BYTES = 50_000_000
 _MIN_TOKENIZER_BYTES = 100_000
 
 
+#: Per-model segment under the shared onnx_models root — the ONLY place the
+#: engine looks for this model (``CrossEncoderReranker.DEFAULT_MODEL_PATH``
+#: appends the same segment to ``OnnxModelPaths.root()``).
+_MODEL_SUBDIR = "ms-marco-minilm-l6-v2/onnx"
+
+
 def service_crossencoder_model_dir() -> Path:
     """Canonical dir the Java service reads the cross-encoder from.
 
-    ``NX_SERVICE_CROSSENCODER_DIR`` overrides (operator/test); otherwise the
-    XDG-ish default mirroring ``CrossEncoderReranker.DEFAULT_MODEL_PATH``.
+    ``NX_SERVICE_CROSSENCODER_DIR`` overrides (operator/test — Python-side
+    only; the engine never read it); otherwise ``service_onnx_models_root()``
+    — the shared root both sides resolve identically (nexus-ogccs), mirroring
+    ``CrossEncoderReranker.DEFAULT_MODEL_PATH``.
     """
     env = os.environ.get(_ENV_DIR, "").strip()
     if env:
         return Path(env)
-    return Path.home() / ".cache" / "nexus" / "onnx_models" / "ms-marco-minilm-l6-v2" / "onnx"
+    return service_onnx_models_root() / _MODEL_SUBDIR
+
+
+def service_crossencoder_engine_dir_mismatch() -> tuple[Path, Path] | None:
+    """``(provisioner_dir, engine_reads)`` when they diverge, else ``None``.
+
+    Mirror of ``service_bge_engine_dir_mismatch`` — see its docstring; the
+    engine reads only ``<root>/ms-marco-minilm-l6-v2/onnx``.
+    """
+    expected = service_onnx_models_root() / _MODEL_SUBDIR
+    actual = service_crossencoder_model_dir()
+    return None if actual == expected else (actual, expected)
 
 
 def service_crossencoder_model_present() -> bool:

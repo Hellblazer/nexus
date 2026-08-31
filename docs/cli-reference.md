@@ -1316,7 +1316,7 @@ Physically reclaim tombstoned catalog rows and their manifest-orphaned T3 chunks
 
 Default is a read-only dry-run: a per-dim stranded-chunk count preview plus an aged-tombstone document count (`--older-than-days`, default 30, must be >= 1), computed engine-side and printed. Nothing is deleted in this mode, and `--json` emits the same counts as machine-parseable JSON.
 
-**Age semantics are asymmetric (nexus-8j1zx) — read before relying on "manual restore stays possible":** only the `documents_purged` count (the physical `catalog_documents` row delete) is gated by `--older-than-days`. The `chunks_<dim>_stranded` sweep is NOT age-gated at all — every currently-tombstoned document's orphaned manifest-backed chunks are swept on the very next `--no-dry-run --confirm` run, however recently that document was deleted. So a manual restore of a document's *content* stays possible only until the next mutating `purge-trash` run anywhere in the tenant, not until that document individually ages past the threshold; the catalog row itself may still be visible (not yet aged out) after its chunks are already gone. The default report's output visually separates the age-gated `documents_purged` line from the age-independent chunk-sweep section to make this explicit.
+**Age semantics are symmetric since catalog-026 (nexus-5da44, RDR-191 GATE-2; this paragraph described the earlier asymmetric behaviour for two weeks after the engine retired it — nexus-kcm6c):** both the `documents_purged` row delete AND the `chunks_<dim>_stranded` sweep honor `--older-than-days`. A tombstoned document inside the grace window keeps its catalog row, manifest rows, and chunks TOGETHER — the chunk sweep protects any chunk whose manifest row belongs to a live or still-in-window document, the exact complement of the row delete's predicate — and loses all three together once the window passes. "Manual restore stays possible" therefore genuinely holds for the whole window, even across mutating `purge-trash` runs. Consequence for reading the counts: a near-zero stranded count at the default 30 days next to a large one at `--older-than-days 1` means recent tombstones are being protected, by design — the 2026-08-27 shakedown read exactly that pair and concluded the counter was lying when the stale prose was (nexus-kcm6c).
 
 Mutation is gated behind BOTH `--no-dry-run` AND `--confirm` (same gate as `nx catalog reconcile-stale`): `--no-dry-run` alone still reports only, and `--json` cannot be combined with `--no-dry-run` (the mutation path prints a plain-text report, not JSON).
 
@@ -2927,7 +2927,7 @@ process precisely so that inheritance happens.
 ## nx self install
 
 ```
-nx self install [--keep N] [--version X.Y.Z] [--dry-run]
+nx self install [--keep N] [--version X.Y.Z] [--extras NAME] [--dry-run]
 ```
 
 Upgrade this install of `nx`. Installs are **side-by-side generations**: the
@@ -2937,6 +2937,17 @@ rewrites the shims in `<bin>`, then reaps old generations. Nothing is ever
 swapped underneath a running process — a live holder keeps executing its own
 generation byte-identically and converges at its next spawn, so no session has
 to be closed and there is nothing to force.
+
+**Adding an extra (nexus-pffc4):** `nx self install --extras local` builds the
+new generation with that extra ADDED — the flag MERGES with the extras the
+receipt already carries, never replaces them (repeatable, or comma-separated:
+`--extras local,dt`). This is the supported way to get `[local]` (bge-768)
+onto a box that installed without it; the legacy
+`uv tool install --reinstall "conexus[local]"` answer rebuilds uv's tree over
+the nexus-owned shims on a generation box and must not be used there.
+`--extras` applies to generation installs only — on an unconverged legacy uv
+box, converge first (`nx self install` with no flags), then re-run with the
+flag.
 
 **A uv takeover self-repairs (7.21.0).** Measured against uv 0.8: on a
 generation box a plain `uv tool install conexus` rebuilds uv's tree (a

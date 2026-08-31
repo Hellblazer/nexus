@@ -46,6 +46,7 @@ from nexus.engine_version import REQUIRED_ENGINE_VERSION
 _log = structlog.get_logger(__name__)
 
 __all__ = [
+    "BinaryDownloadError",
     "BinaryVerificationError",
     "CERT_IDENTITY_REGEXP",
     "CERT_OIDC_ISSUER",
@@ -119,6 +120,20 @@ _HASH_BLOCK = 1 << 20
 
 class BinaryVerificationError(Exception):
     """A verification gate failed. The binary must not be installed."""
+
+
+class BinaryDownloadError(BinaryVerificationError):
+    """An artifact could not be FETCHED — transport or availability, never a
+    tamper signal (nexus-v460j).
+
+    Subclass, deliberately: every product caller keeps catching
+    :class:`BinaryVerificationError` and stays fail-closed, unchanged. The
+    distinction exists for the test substrate's provisioning classifier,
+    which must degrade a connectivity-class miss to the documented
+    skip-sentinel while still re-raising genuine verification failures — a
+    connection reset during the sigstore-attestation download used to
+    name-match "Verification" and abort pytest collection with zero tests
+    run (PR #1474, 2026-08-23)."""
 
 
 # ── sha256 gate ─────────────────────────────────────────────────────────────
@@ -465,9 +480,9 @@ def _download(url: str, dest: Path, *, timeout: float = _DOWNLOAD_TIMEOUT_S) -> 
             for block in iter(lambda: resp.read(_HASH_BLOCK), b""):
                 out.write(block)
     except Exception as exc:  # network, 404 for a bad tag/platform, timeout
-        raise BinaryVerificationError(
-            f"failed to download {url}: {exc}. Check the tag exists and the "
-            "asset was published for this platform."
+        raise BinaryDownloadError(
+            f"failed to download {url}: {exc}. Check the tag exists, the "
+            "asset was published for this platform, and the network is up."
         ) from exc
 
 

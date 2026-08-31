@@ -38,13 +38,26 @@ carries no method signature for a contract change to reconcile against) is a
   UNPAIRED deploy path -- the ordinary "refresh the cloud engine" run that
   the paired-deploy branch above does not cover. Same `--ack-client-lag
   <bead-id>` escape shape.
+- **Direction-safety token** (nexus-1emxn choreography (a)): an Unshipped
+  entry whose note BEGINS with the literal `[additive]` asserts OLD client
+  + NEW engine is safe -- the engine half may deploy BEFORE the client
+  tag, so `check_client_release_precondition.py` treats an all-`[additive]`
+  Unshipped section as authorization for the unpaired deploy instead of a
+  block (no refusal window can open for such entries). `[not-additive]`
+  (or NO leading token -- the fail-safe default for every pre-token entry)
+  keeps the blocking behaviour. The token must LEAD the note (a
+  mid-sentence mention is prose, not a statement -- the parser is anchored)
+  and must be backed by the entry's own direction-safety prose naming both
+  directions; `tests/test_wire_contract_pairing_lint.py` enforces the
+  prose-presence half. It is an assertion of record, not a convenience.
 
 ---
 
 ## Unshipped
 
-
 ## Shipped
+
+- `5ac9f09e03e554d34acd17b6062cfbc16a6212d9` -- bead nexus-ogccs -- shipped in `v7.25.0` -- engine half engine-service-v0.1.92 (tagged 2026-08-31 on 14bd80442; pre-tag battery green — service-ci full suite, CANDIDATE SHAKEOUT PASSED incl. the native-smoke probe set, published-client write gate PASSED on the 7.24.1 client; ZERO Liquibase changesets in the delta so no PITR fork walk; all-[additive], so the deploy fires BEFORE the client tag per nexus-1emxn choreography (a)) -- [additive] ONNX model root resolution (env/HOME, never bare passwd user.home). Engine half: OnnxModelPaths (NX_ONNX_MODEL_DIR -> $HOME/.cache/nexus/onnx_models -> user.home) feeds Bge768Embedder + CrossEncoderReranker DEFAULT_*_PATH, boot log event=onnx_model_root. Client half in the same commit: nexus.db.onnx_model_root shared root, provisioner dirs derive from it, supervisor pins NX_ONNX_MODEL_DIR in the engine spawn env. Not a wire-shape change (env-var contract, not HTTP): NEW client + OLD engine = env var ignored, pre-fix behaviour; NEW engine + OLD client = HOME rung alone fixes supervisor spawns. Ack condition met: 7.25.0 bumps REQUIRED_ENGINE_VERSION to (0,1,92), and the plugin-cut rehearsal Dockerfile's passwd-home==sandbox-HOME alignment comes out in the same commit as the bump.
 
 - `b9ab656061182af607086e6cc2276825534d3637` -- bead nexus-zu9ln -- shipped in `v7.24.0` -- engine half engine-service-v0.1.91 (tagged 2026-08-30 on 762b9d7ba; v0.1.90 burned on a stale native-smoke.sh probe; pre-tag battery green, PITR fork-walk CLEAN with every NOTICE count matching, deploy fires at the v7.24.0 client-tag push per the paired choreography) (next cut from develop tip; PITR-fork walk rehearsal required, the changeset is cumulative) hygiene-001-not-null: `POST /v1/aspects/upsert` and `POST /v1/aspects/queue/enqueue` / `enqueue_many` now return 400 on a blank `doc_id` (engine half: AspectHandler + AspectRepository; schema: document_aspects.doc_id/source_uri and aspect_extraction_queue.doc_id NOT NULL); `POST /v1/plans/save` returns 409 on a NULL verb (plans.verb NOT NULL). Client half in the same commit: `aspect_extraction_enqueue_hook` resolves a blank doc_id through the catalog and skips loudly instead of enqueueing ""; `HttpDocumentAspectsStore.upsert` and `HttpPlanLibrary.save_plan` raise before the wire. Direction safety: NEW client + OLD engine = the client never sends a blank doc_id/verb, unchanged wire otherwise; OLD client + NEW engine = a pre-7.24 client that still enqueues store_put rows with doc_id="" gets a 400 it logs as a best-effort warning (aspect extraction for that ingest is skipped, never a crash), and its `nx enrich aspects-without-catalog` exits 2 on the retired route. NOT additive: the deploy must be ARMED before the client tag push (nexus-1emxn), and the client release bumps REQUIRED_ENGINE_VERSION to (0,1,91) (7.24.0).
 - `b9ab656061182af607086e6cc2276825534d3637` -- bead nexus-zu9ln -- shipped in `v7.24.0` -- engine half engine-service-v0.1.91 (tagged 2026-08-30 on 762b9d7ba; v0.1.90 burned on a stale native-smoke.sh probe; pre-tag battery green, PITR fork-walk CLEAN with every NOTICE count matching, deploy fires at the v7.24.0 client-tag push per the paired choreography) route REMOVED both halves in one commit: `GET /v1/aspects/list_without_catalog_document` (engine: AspectRepository.listWithoutCatalogDocument + AspectHandler) and its client `HttpDocumentAspectsStore.list_without_catalog_document` + `nx enrich aspects-without-catalog` (+ `--sweep`). With document_aspects.doc_id NOT NULL under the fk-001 cascade an orphan aspect row cannot exist, so the census had nothing left to count. OLD client + NEW engine = the verb exits 2 naming the missing route (nexus-mlu3k's designed behaviour); NEW client + OLD engine = no caller.

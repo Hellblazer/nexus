@@ -780,15 +780,13 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
     tombstone filter, the content stops appearing in search results
     immediately; on an older engine it stays fully searchable until that
     filter is deployed. The manifest/T3 rows are physically reclaimed later,
-    via ``nx catalog purge-trash --no-dry-run --confirm`` — but that
-    reclaim is NOT age-gated the way the phrase "retention window" might
-    suggest (nexus-8j1zx fix round): ``purge-trash``'s chunk sweep runs
-    on EVERY tombstoned document on its very next non-dry-run invocation,
-    regardless of how recently it was deleted; only the catalog row's
-    physical removal waits for ``--older-than-days``. So the manual-restore
-    path stays open only until the NEXT ``purge-trash --no-dry-run
-    --confirm`` run anywhere in the tenant, not until some age threshold
-    for THIS document. Existing links remain — use 'nx catalog links
+    via ``nx catalog purge-trash --no-dry-run --confirm``, and that reclaim
+    honors the grace window since catalog-026 (nexus-5da44; this docstring
+    described the earlier not-age-gated behaviour for two weeks after the
+    engine retired it — nexus-kcm6c): a tombstoned document inside
+    ``--older-than-days`` keeps its catalog row, manifest rows, and chunks
+    TOGETHER, so the manual-restore path (nexus-xavu7) stays open for the
+    whole window, and all three go together once it passes. Existing links remain — use 'nx catalog links
     --type ...' to find orphaned links.
     """
     cat = _get_catalog()
@@ -811,11 +809,10 @@ def delete_cmd(tumbler_or_title: str, yes: bool) -> None:
             f"Deleted: {t} ({entry.title}). Links preserved. "
             "Content stops appearing in search once the engine's tombstone "
             "read-filter is deployed (nexus-3ck2g); physical reclaim happens "
-            "via 'nx catalog purge-trash', whose chunk sweep is NOT age-gated "
-            "(it reclaims this doc's chunks on the very next --no-dry-run "
-            "--confirm run anywhere in the tenant, not after a retention "
-            "window for this doc specifically) — only the catalog row itself "
-            "waits for --older-than-days."
+            "via 'nx catalog purge-trash', which since catalog-026 keeps "
+            "this doc's row, manifest, and chunks together for the whole "
+            "--older-than-days grace window — a manual restore stays "
+            "possible until the window passes, even across purge runs."
         )
     else:
         click.echo(f"Not found: {t}")

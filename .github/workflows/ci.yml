@@ -634,6 +634,8 @@ jobs:
         # then died here instead:
         #
         #   event=schema_migration_complete applied_changesets=206
+        #   (historical log shape — the field was renamed at nexus-x0s52 to
+        #   new_changesets/reexecuted_changesets/pending_at_start)
         #   Exception in thread "main" java.lang.IllegalStateException:
         #     Bge768Embedder: bge ONNX model not found at
         #     ~/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/model.onnx
@@ -791,6 +793,20 @@ jobs:
           key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
           restore-keys: |
             uv-${{ runner.os }}-3.12-
+
+      - name: Cache the pinned PG bundle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          # nexus-v460j critique finding: several test modules still resolve
+          # pg_bin_dir() at module scope, so COLLECTION of the full tree (which
+          # `-m lint` performs) downloads the pinned PG bundle on a cold cache —
+          # this job had no substrate cache, so that download ran on EVERY PR.
+          # Same step, path and key as the `test` shard matrix above; a
+          # download failure degrades to a named skip (BinaryDownloadError
+          # classifier), never a collection abort, but the cache is what makes
+          # the leg genuinely network-quiet on the common path.
+          path: ~/.cache/nexus-test-substrate
+          key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
 
       - name: Install project + dev deps
         run: uv sync --group dev

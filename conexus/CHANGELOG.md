@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.25.0] - 2026-08-31
+
+- `pre_close_verification_hook.sh` (nexus-fgekf): the bead-close review
+  gate's T2 memory leg is retired — T1-only coverage. T1 reachable-and-empty
+  denies the close; T1 unreachable is a loud allow with
+  `verification=unverified` (the deliberately widened corner is named in the
+  hook header and pinned by test). This pin advance makes it live; T2
+  markers no longer satisfy the gate.
+
 ## [7.24.1] - 2026-08-30
 
 Plugin version aligned with conexus 7.24.1. The `plugin-v7.24.0-1` cut's

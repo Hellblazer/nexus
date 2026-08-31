@@ -31,18 +31,19 @@
 # Usage: tests/e2e/warm-reindex-skip-gate.sh
 # Exit 0 == WARM-REINDEX SKIP GATE PASSED (literal sentinel on the last line).
 #
-# KNOWN GAP (nexus-acvi7, 2026-08-10): this gate's server-side evidence,
-# event=combined_write_embed_partition, was added by engine commit 2b0c5908
-# and ships starting engine-service v0.1.70 — an UNRELEASED tag as of this
-# writing. `nx init` under NX_LOCAL=1 (step 2/8 below) downloads whatever
-# PINNED_SERVICE_TAG derives from REQUIRED_ENGINE_VERSION (currently
-# (0, 1, 69), src/nexus/engine_version.py:341), so THIS SCRIPT CANNOT REACH
-# ITS PASSED SENTINEL on any box until v0.1.70 is cut and the floor moves.
-# Step 3/8 below fails fast with a clear, distinguishable message rather
-# than let legs B/C run and misdiagnose "server-side skip not firing" on an
+# ENGINE FLOOR (nexus-acvi7 2026-08-10; header refreshed 2026-08-30,
+# nexus-29kr0 doc-rot finding): this gate's server-side evidence,
+# event=combined_write_embed_partition, ships starting engine-service
+# v0.1.70 (published but never pinned by any release — see the skip note in
+# src/nexus/engine_version.py — so the capability first reached installs at
+# v0.1.71). Every floor since then satisfies it; the gate
+# has been reaching its PASSED sentinel since 2026-08-10 (first green:
+# T2 [22178]). Step 3/8's MIN_ENGINE guard remains so a box pinned to a
+# pre-capability engine fails fast with a distinguishable message rather
+# than letting legs B/C misdiagnose "server-side skip not firing" on an
 # engine that simply cannot report it (T2 nexus/warm-reindex-gate-coupling-
 # verification). Do not remove step 3/8's guard to "get to green" — that
-# would silently reintroduce the exact misdiagnosis this bead exists to fix.
+# would silently reintroduce the exact misdiagnosis it exists to prevent.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

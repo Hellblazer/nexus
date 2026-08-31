@@ -387,7 +387,15 @@ from __future__ import annotations
 #: before the wire and no longer has the census verb. v0.1.90 was burned on a
 #: stale native-smoke.sh probe and ships to nobody. PITR fork-walk CLEAN,
 #: every NOTICE count matched; --acquire PASSED on the published bytes.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 91)
+#: ->(0,1,92) 2026-08-31 for 7.25.0 (nexus-ogccs, paired, all-[additive]):
+#: OnnxModelPaths resolves the ONNX model root NX_ONNX_MODEL_DIR -> HOME ->
+#: passwd user.home and the supervisor pins the root in the spawn env, so a
+#: HOME-override box no longer green-inits then crashes the engine; plus
+#: truthful schema_migration_complete counts (nexus-x0s52:
+#: new_changesets/reexecuted_changesets/pending_at_start; applied_changesets
+#: deliberately gone). Zero Liquibase changesets in the delta — no fork walk;
+#: the [additive] ledger entry authorizes deploying BEFORE the client tag.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 92)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

@@ -21,7 +21,7 @@ uv run python scripts/check_engine_release_floor.py
 
 If it exits non-zero, STOP — do not proceed with the PyPI release. The gate fails in TWO directions and the remedy differs:
 
-- **cloud BEHIND the pinned identity** → EITHER conexus has not deployed it yet (surface the deploy relay and wait), OR this is a **PAIRED release** (Hal directive 2026-08-02: the floor bump rides the SAME release as the engine's deploy, and the deploy relay fires at client-tag push, parallel with the PyPI publish — see AGENTS.md § Engine-service release). For a paired release, cloud-behind is the EXPECTED pre-tag state — mechanized via `--paired-deploy` (nexus-k1c08):
+- **cloud BEHIND the pinned identity** → EITHER conexus has not deployed it yet (surface the deploy relay and wait), OR this is a **PAIRED release** (Hal directive 2026-08-02: the floor bump rides the SAME release as the engine's deploy, and the deploy relay fires at client-tag push, parallel with the PyPI publish — see AGENTS.md § Engine-service release). For a paired release, cloud-behind is the EXPECTED pre-tag state ONLY on the non-additive branch — when every wire-ledger `## Unshipped` entry leads with `[additive]`, prefer deploying the engine BEFORE the client tag (nexus-1emxn; Step 9 carries the branch decision) and this state never arises. Otherwise mechanized via `--paired-deploy` (nexus-k1c08):
   ```bash
   uv run python scripts/check_engine_release_floor.py --paired-deploy engine-service-vX.Y.Z
   ```
@@ -381,6 +381,32 @@ Tradeoff: extra commit on main, but guards against the case where someone could 
 
 ### 9. Tag and push IMMEDIATELY after merge (triggers Release workflow + PyPI publish via OIDC)
 
+**PAIRED-RELEASE ARMING GATE (nexus-1emxn — measured twice 2026-08-29: the
+"deploy fires at tag push" relay is human-mediated, PyPI publishes in ~90 s,
+and the v7.23.0 refusal window sat open 48+ minutes on the releaser's own
+box).** Before pushing the client tag of a PAIRED release, settle which
+branch applies:
+
+- **All wire-ledger `## Unshipped` entries carry `[additive]`** (old client +
+  new engine safe — `check_client_release_precondition.py` accepts this
+  shape by name): have the engine DEPLOYED before this step. The client tag
+  then cannot open a window at all. This is the preferred branch whenever
+  the ledger allows it.
+- **Any entry is not additive**: do NOT push the tag until the relay is
+  ARMED with conexus — image built, redeploy staged on a named trigger
+  ("fires when vX.Y.Z appears on origin") — and that arming is CONFIRMED
+  back. An unarmed non-additive pairing does not tag; "I'll send the relay
+  right after" is the exact shape that opened both measured windows.
+  INTERIM HONESTY: this branch is currently prose-enforced — the
+  mechanical check (a conexus-written arming attestation the tag-push gate
+  reads, tracker-pattern) is nexus-h0fo3; a releaser-side self-attestation
+  was deliberately NOT built (self-attested gates are the shape this
+  project already deleted once).
+
+Authority for the protocol: AGENTS.md § Engine-service release
+(nexus-1emxn refinement paragraph) — this step carries the operational
+form; on any wording conflict, AGENTS.md wins.
+
 After Step 7's PR merges, switch to main, fetch, and tag the merge commit:
 
 ```bash
@@ -481,6 +507,30 @@ step owns the UPGRADE axis against the REAL published engine identity,
 post-publish. See either script's header for the full ownership split.
 
 ### 12. Reinstall local tool and verify
+
+**CLOUD-MODE BOX GATE (nexus-1emxn (c)):** on a cloud-mode box, run the
+post-tag floor verify FIRST, in the recording form Step 0 names:
+
+```bash
+uv run python scripts/check_engine_release_floor.py \
+  --record-deploy-from-gate-report <conexus checkout>/deploy   # or NX_GATE_REPORT_DIR
+```
+
+Exit codes, precisely (the 7.24.1 first preflight red'd on exactly the
+bare-form confusion — T2 [23807]):
+- **0** — cloud current; reinstall now.
+- **1** — cloud still BEHIND the new floor: new spawns after this
+  reinstall would REFUSE the managed service (the GH #1402 class, on your
+  own box). Wait for the deploy to land, re-verify, then reinstall.
+- **2** — cannot verify (network/API): fix connectivity and re-run; not
+  evidence either way.
+- **3** — you ran the BARE form with neither `--record-deploy-from-gate-report`
+  nor `--no-record-deploy "<reason>"`: BY DESIGN, not a deploy problem —
+  re-run in the recording form (or the explicit opt-out on a box without
+  the conexus reports).
+
+Local-mode boxes skip this gate — their engine converges from
+`PINNED_SERVICE_TAG` at reinstall.
 
 ```bash
 scripts/reinstall-tool.sh    # preserves [local] and other extras (mineru is now a default dep)

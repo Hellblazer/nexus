@@ -323,6 +323,14 @@ class LedgerEntry:
     note: str
     engine_tag: str | None = None
     shipped_in: str | None = None
+    #: Direction-safety token (nexus-1emxn choreography (a)): ``True`` when the
+    #: note carries ``[additive]`` — OLD client + NEW engine is safe, so the
+    #: engine may deploy BEFORE the client tag and no refusal window can open.
+    #: ``False`` for an explicit ``[not-additive]``; ``None`` when the entry
+    #: carries neither token. Consumers MUST treat ``None`` as not-additive
+    #: (fail-safe: an unmarked entry blocks exactly as every entry did before
+    #: the token existed).
+    additive: bool | None = None
 
 
 @dataclass
@@ -340,6 +348,32 @@ _UNSHIPPED_RE = re.compile(
 _SHIPPED_RE = re.compile(
     r"^- `([0-9a-f]{7,40})` -- bead (\S+) -- shipped in `([^`]+)` -- (.+)$"
 )
+
+
+def _additive_token(note: str) -> bool | None:
+    """Direction-safety token LEADING an Unshipped entry's note (nexus-1emxn).
+
+    ``[additive]`` asserts OLD client + NEW engine is safe (the entry's own
+    direction-safety prose must back it); ``[not-additive]`` asserts the
+    engine half must NOT deploy ahead of the client tag. Absent is ``None``
+    (consumers treat as not-additive; pre-token entries keep today's
+    blocking behaviour unchanged).
+
+    ANCHORED at the start of the note, deliberately (round-2 review,
+    T2 [23829] Important-1): an unanchored substring match would let an
+    entry's PROSE that merely mentions "[additive]" — contrasting itself
+    with a tagged sibling, say — false-positive into the UNSAFE direction
+    (authorizing an early engine deploy). A leading token is a statement;
+    a mid-sentence mention is not.
+    """
+    if note.startswith("[not-additive]"):
+        return False
+    if note.startswith("[additive]"):
+        # A [not-additive] appearing ANYWHERE later contradicts the leading
+        # assertion — fail safe (the lint flags the mid-note token so the
+        # author resolves it; until then the entry blocks).
+        return "[not-additive]" not in note
+    return None
 
 
 def parse_ledger(path: pathlib.Path) -> Ledger:
@@ -362,7 +396,8 @@ def parse_ledger(path: pathlib.Path) -> Ledger:
             if m:
                 sha, bead, tag, note = m.groups()
                 ledger.unshipped[sha] = LedgerEntry(
-                    sha=sha, bead=bead, note=note, engine_tag=tag
+                    sha=sha, bead=bead, note=note, engine_tag=tag,
+                    additive=_additive_token(note),
                 )
         elif section == "shipped":
             m = _SHIPPED_RE.match(line)

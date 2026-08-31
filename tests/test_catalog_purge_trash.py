@@ -32,9 +32,10 @@ class _FakeWriter:
         # nexus-8j1zx fix round: field names/shape now match the REAL wire
         # contract (T1 2fbc12df design of record; confirmed against
         # CatalogRepository.purgeTrashPreview/purgeTrash) — a flat dict with
-        # documents_purged (age-gated) and chunks_<dim>_stranded (age-
-        # independent), not the previous "aged_tombstones"/nested
-        # "stranded_chunks" shape that never existed on the wire.
+        # documents_purged and chunks_<dim>_stranded (both grace-window
+        # scoped since catalog-026, nexus-kcm6c), not the previous
+        # "aged_tombstones"/nested "stranded_chunks" shape that never
+        # existed on the wire.
         self._result = result if result is not None else {
             "dry_run": True,
             "documents_purged": 3,
@@ -96,7 +97,12 @@ class TestDryRunDefault:
         assert "documents_purged" in result.output
         assert "age-gated" in result.output.lower()
         assert "chunks_768_stranded: 12" in result.output
-        assert "not age-gated" in result.output.lower()
+        # nexus-kcm6c: the output claimed the chunk sweep was NOT age-gated
+        # for two weeks after catalog-026 age-gated it — the corrected text
+        # names the grace-window protection and must never regress to the
+        # old claim.
+        assert "not age-gated" not in result.output.lower()
+        assert "grace window" in result.output.lower()
         assert "dry-run" in result.output.lower()
         assert "no catalog/t3 rows purged" in result.output.lower()
 
@@ -118,12 +124,13 @@ class TestDryRunDefault:
         assert "population:" in result.output
         assert "tombstoned-doc chunks" in result.output
 
-    def test_default_invocation_labels_age_gated_and_age_independent_counts_separately(self, monkeypatch):
-        """nexus-3ck2g code-review Important / nexus-8j1zx fix round: the
-        report must visually distinguish the age-gated documents_purged
-        count from the age-independent chunks_<dim>_stranded counts — not
-        list them flat under one "(older than N day(s))" header, which
-        misattributed the age gate to the chunk sweep too."""
+    def test_default_invocation_labels_document_and_chunk_counts_separately(self, monkeypatch):
+        """nexus-3ck2g / nexus-8j1zx: the report distinguishes the
+        documents_purged row count from the chunks_<dim>_stranded storage
+        counts. nexus-kcm6c update: BOTH honor --older-than-days since
+        catalog-026, so the chunk heading now names the grace-window
+        protection instead of the retired NOT-age-gated claim (which sent
+        the 2026-08-27 shakedown hunting a counter bug that was prose)."""
         writer = _FakeWriter()
         _patch_writer(monkeypatch, writer)
 
@@ -136,9 +143,10 @@ class TestDryRunDefault:
         chunks_header = next(line for line in lines if "chunk storage swept" in line.lower())
         assert "45 day(s)" in docs_line
         assert "age-gated" in docs_line.lower()
-        assert "not age-gated" in chunks_header.lower()
-        # The chunk-storage section header must NOT itself carry the age
-        # qualifier — only the documents_purged line does.
+        assert "not age-gated" not in chunks_header.lower()
+        assert "grace window" in chunks_header.lower()
+        # The chunk-storage section header names the mechanism, not the
+        # specific day count — only the documents_purged line carries that.
         assert "45 day(s)" not in chunks_header
 
     def test_older_than_days_forwarded(self, monkeypatch):
@@ -353,10 +361,11 @@ class TestPartialPurgeIsNeverReportedAsSuccess:
         assert "partial purge" not in result.output.lower()
 
     def test_eligible_count_is_not_filed_under_the_chunk_storage_heading(self, monkeypatch):
-        """``documents_eligible`` is an age-GATED document count. The
-        shape-agnostic passthrough that prints ``chunks_<dim>_stranded``
-        would otherwise list it under the "NOT age-gated" chunk heading —
-        exactly the mislabelling nexus-8j1zx fixed for the other counts."""
+        """``documents_eligible`` is a document count. The shape-agnostic
+        passthrough that prints ``chunks_<dim>_stranded`` would otherwise
+        list it under the chunk-storage heading — the mislabelling class
+        nexus-8j1zx fixed for the other counts (document rows vs chunk
+        storage; both age-gated since catalog-026, nexus-kcm6c)."""
         _, result = self._execute(monkeypatch, {
             "dry_run": False, "documents_purged": 63, "documents_eligible": 63,
             "chunks_384_stranded": 0, "chunks_768_stranded": 0,

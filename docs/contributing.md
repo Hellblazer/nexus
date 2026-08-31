@@ -590,28 +590,54 @@ cutting.
 Command sequence (the script does the work; the human pushes):
 
 ```bash
+# Step 0 — MANDATORY before every cut (AGENTS.md usage-discipline rule 4):
+tests/e2e/plugin-cut-rehearsal/run.sh --promote-machinery   # container default; --host = fast loop
+# must end: PLUGIN-CUT REHEARSAL PASSED. A rehearsal that passed on a
+# full clone has not rehearsed CI — the runs cover the depth-1 tag leg
+# and the tagless shard leg too.
 uv run python scripts/cut_plugin_release.py vX.Y.Z   # the CURRENT released client tag
 # The script: verifies origin/main carries the channel machinery,
 # derives n from the tag list, runs the atomic-split check, branches
 # plugin-release/X.Y.Z-n off origin/main, imports the allowlist from
 # develop as a diff-and-apply, moves only the changed plugins' refs,
-# empties the covered PENDING_RELEASE.md entries, runs the minimal
+# empties the covered PENDING_RELEASE.md entries, runs the local
 # battery, and prints the commands below. It pushes and tags NOTHING.
 git push -u origin plugin-release/X.Y.Z-n
 gh pr create --base main --head plugin-release/X.Y.Z-n --title "plugin release: plugin-vX.Y.Z-n"
 gh pr merge <N> --merge
 git tag -a plugin-vX.Y.Z-n -m "plugin-vX.Y.Z-n" <merge-commit>
 git push origin plugin-vX.Y.Z-n     # fires the verify-only plugin-release.yml
-git checkout develop && git merge origin/main --no-edit && git push origin develop
+scripts/plugin_cut_back_merge.sh . && git push origin develop
 ```
 
-Minimal battery (run by the script, re-run by the tag workflow):
-`-m lint` (minus `test_wire_contract_pairing_lint.py`, which needs tag
-history the workflow's single-tag fetch does not carry),
-`tests/test_plugin_release_drift_ledger.py`, `tests/hooks/`, and
-`./tests/e2e/release-sandbox.sh smoke`. Deliberately skipped, because
-none of them executes plugin-loader content: substrate gates, migration
-rehearsal, fresh-install MVVs, shakedown, and the engine floor.
+The back-merge is NEVER a bare `git merge origin/main`: the cut commit
+empties the `conexus/PENDING_RELEASE.md` entries it ships while develop
+still carries them, so that file conflicts by construction on every cut.
+`scripts/plugin_cut_back_merge.sh` resolves exactly that one conflict
+(main wins), aborts on any other conflict, and runs develop's drift
+contract as the net.
+
+Minimal battery, two layers that deliberately differ:
+
+- **The cut script runs locally**, against the cut branch's mixed state:
+  the FULL `-m lint` bucket, `tests/test_plugin_release_drift_ledger.py`,
+  `tests/hooks/`, and `./tests/e2e/release-sandbox.sh smoke`.
+- **The tag workflow** (`plugin-release.yml`, verify-only, depth-1
+  two-tag checkout) runs: the wheel-surface proof + drift-ledger contract,
+  `tests/test_plugin_structure.py` under `-m lint` (the module is
+  lint-marked; without the marker pytest collects nothing and exits 5),
+  `tests/hooks/`, the `-m lint` bucket minus BOTH
+  `test_wire_contract_pairing_lint.py` and
+  `test_rehearsal_native_legs_refuse_no_build.py` (each walks `v*` tag
+  history the single-tag fetch cannot resolve; ci.yml's full-history lint
+  job still runs them), and `scripts/check_cut_ledger_clean.py` against
+  the cut's own range. It does NOT re-run release-sandbox smoke — that
+  runs only in the cut script's local battery today (CI wiring is
+  non-gating follow-on nexus-98gpl).
+
+Deliberately skipped everywhere, because none of them executes
+plugin-loader content: substrate gates, migration rehearsal,
+fresh-install MVVs, shakedown, and the engine floor.
 
 A CLIENT release needs no channel-specific step at all: the channel
 keeps no state a release would have to reset. The client release's own

@@ -1661,6 +1661,93 @@ class TestSpawnServiceVoyageKeyPlumbing:
         assert client_model in LOCAL_EMBEDDING_MODELS
 
 
+# ---------------------------------------------------------------------------
+# nexus-ogccs: supervisor passes the resolved onnx_models root to the engine
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnServiceOnnxModelRoot:
+    """The engine's own fallback is ``user.home`` (the passwd entry), which
+    diverges from the ``$HOME``-derived path the provisioner writes under
+    whenever HOME is overridden (containers, release-sandbox, CI): green
+    'model ready', then an engine crash at boot. The spawn env must pin
+    ``NX_ONNX_MODEL_DIR`` to the provisioner's resolved root so supervisor
+    and engine agree by construction."""
+
+    def _spawn_env(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> dict[str, str]:
+        """Run _spawn_service with Popen mocked; return the env it received."""
+        sup = _make_supervisor(config_dir, clock)
+        captured: dict[str, str] = {}
+
+        def _fake_popen(cmd, env=None, **kwargs):
+            captured.update(env or {})
+            return MagicMock(pid=43210)
+
+        monkeypatch.setattr(
+            "nexus.daemon.storage_service_daemon._popen", _fake_popen,
+        )
+        # Keep the voyage plumbing inert — this class tests the model root.
+        monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
+        monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+        with patch("nexus.config.get_credential", return_value=""):
+            sup._spawn_service()
+        return captured
+
+    def test_default_root_is_passed(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("NX_ONNX_MODEL_DIR", raising=False)
+        env = self._spawn_env(config_dir, clock, monkeypatch)
+        assert env["NX_ONNX_MODEL_DIR"] == str(
+            Path.home() / ".cache" / "nexus" / "onnx_models"
+        )
+
+    def test_explicit_caller_root_passes_through_unchanged(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An explicit NX_ONNX_MODEL_DIR is caller intent; the supervisor's
+        re-set is idempotent (the resolver returns the same value)."""
+        monkeypatch.setenv("NX_ONNX_MODEL_DIR", "/custom/onnx-root")
+        env = self._spawn_env(config_dir, clock, monkeypatch)
+        assert env["NX_ONNX_MODEL_DIR"] == "/custom/onnx-root"
+
+    def test_diverging_per_model_override_warns_at_spawn(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A Python-only per-model override off the root re-creates the
+        green-provision-then-crash shape (the engine reads only
+        <root>/<model>/onnx) — the supervisor must name the divergence at
+        spawn so the engine's model-not-found abort has a visible cause."""
+        monkeypatch.delenv("NX_ONNX_MODEL_DIR", raising=False)
+        monkeypatch.setenv("NX_SERVICE_BGE_DIR", "/nonstandard/bge-dir")
+        import structlog.testing
+
+        with structlog.testing.capture_logs() as logs:
+            self._spawn_env(config_dir, clock, monkeypatch)
+        diverges = [
+            e for e in logs if e["event"] == "onnx_per_model_override_diverges"
+        ]
+        assert len(diverges) == 1
+        assert diverges[0]["env_var"] == "NX_SERVICE_BGE_DIR"
+        assert diverges[0]["provisioner_dir"] == "/nonstandard/bge-dir"
+
+    def test_no_override_no_divergence_warning(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("NX_ONNX_MODEL_DIR", raising=False)
+        monkeypatch.delenv("NX_SERVICE_BGE_DIR", raising=False)
+        monkeypatch.delenv("NX_SERVICE_CROSSENCODER_DIR", raising=False)
+        import structlog.testing
+
+        with structlog.testing.capture_logs() as logs:
+            self._spawn_env(config_dir, clock, monkeypatch)
+        assert not [
+            e for e in logs if e["event"] == "onnx_per_model_override_diverges"
+        ]
+
+
 class TestCredsReloadAfterBackfill:
     """nexus-hzhgl round 3 review Significant-1: ``_backfill_provision_grants()``
     (called from ``_ensure_pg_running``) can rewrite ``pg_credentials`` on

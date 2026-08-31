@@ -445,7 +445,11 @@ class TestRequiredEngineVersion:
         # no changeset.
         # ->(0,1,91) 2026-08-30 for 7.24.0 (nexus-zu9ln): hygiene-001 NOT NULL
         # schema + writer refusals + retired census route, paired deploy.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 91)
+        # ->(0,1,92) 2026-08-31 for 7.25.0 (nexus-ogccs, all-[additive]):
+        # OnnxModelPaths env/HOME model-root resolution + truthful
+        # schema_migration_complete counts (nexus-x0s52); zero changesets,
+        # deploy authorized before the client tag.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 92)
 
 
 class TestParseEngineVersion:

@@ -42,6 +42,8 @@ from typing import Callable
 
 import structlog
 
+from nexus.db.onnx_model_root import service_onnx_models_root
+
 _log = structlog.get_logger(__name__)
 
 #: Upstream provenance of the hosted export: the standard (un-fused)
@@ -99,16 +101,39 @@ def _file_ok(path: Path, min_bytes: int) -> bool:
         return False
 
 
+#: Per-model segment under the shared onnx_models root — the ONLY place the
+#: engine looks for this model (``Bge768Embedder.DEFAULT_MODEL_PATH`` appends
+#: the same segment to ``OnnxModelPaths.root()``).
+_MODEL_SUBDIR = "bge-base-en-v1.5/onnx"
+
+
 def service_bge_model_dir() -> Path:
     """Canonical dir the Java service reads its bge model + tokenizer from.
 
-    ``NX_SERVICE_BGE_DIR`` overrides (operator/test); otherwise the XDG-ish
-    default that mirrors ``Bge768Embedder.DEFAULT_MODEL_PATH``.
+    ``NX_SERVICE_BGE_DIR`` overrides (operator/test — Python-side only; the
+    engine never read it); otherwise ``service_onnx_models_root()`` — the
+    shared root both sides resolve identically (nexus-ogccs), mirroring
+    ``Bge768Embedder.DEFAULT_MODEL_PATH``.
     """
     env = os.environ.get(_ENV_DIR, "").strip()
     if env:
         return Path(env)
-    return Path.home() / ".cache" / "nexus" / "onnx_models" / "bge-base-en-v1.5" / "onnx"
+    return service_onnx_models_root() / _MODEL_SUBDIR
+
+
+def service_bge_engine_dir_mismatch() -> tuple[Path, Path] | None:
+    """``(provisioner_dir, engine_reads)`` when they diverge, else ``None``.
+
+    The engine reads ONLY ``<root>/bge-base-en-v1.5/onnx`` under the root the
+    supervisor passes (``NX_ONNX_MODEL_DIR``); ``NX_SERVICE_BGE_DIR`` is a
+    Python-side override the engine has never honoured. Set to a nonstandard
+    dir it re-creates the nexus-ogccs shape — green provision, engine crash —
+    so the supervisor warns loudly at spawn (substantive-critic Significant-1,
+    2026-08-30).
+    """
+    expected = service_onnx_models_root() / _MODEL_SUBDIR
+    actual = service_bge_model_dir()
+    return None if actual == expected else (actual, expected)
 
 
 def service_bge_model_present() -> bool:
