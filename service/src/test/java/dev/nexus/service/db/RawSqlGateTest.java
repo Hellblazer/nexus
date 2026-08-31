@@ -353,7 +353,26 @@ class RawSqlGateTest {
             // pinJvmTimeZoneToUtc() still carries the old zone; this pins the
             // session directly. One statement, executed once per migrate() call.
             "migrate", Map.of(
-                ".execute(\"SET TIME ZONE 'UTC'\")", 1))),
+                ".execute(\"SET TIME ZONE 'UTC'\")", 1),
+            // SANCTIONED RAW (nexus-x0s52): databasechangelog is LIQUIBASE'S
+            // OWN bookkeeping table — outside jOOQ codegen (which models the
+            // nexus/staging application schemas), and deliberately referenced
+            // UNQUALIFIED on the SAME connection Liquibase itself uses, so the
+            // reads resolve to exactly the changelog Liquibase reads and
+            // writes (a DSL rendering over the pooled DSLContext would be a
+            // different session with a different search path). to_regclass()
+            // probes first-boot absence; both statements execute once per
+            // migrate() call, before and after the update.
+            "countChangelogRows", Map.of(
+                ".executeQuery(\"SELECT to_regclass('databasechangelog')\")", 1,
+                ".executeQuery(\"SELECT count(*) FROM databasechangelog\")", 1),
+            // SANCTIONED RAW (nexus-x0s52): now()::timestamp read on the
+            // migration connection itself — the same clock and session zone
+            // Liquibase stamps dateexecuted from (see the SET TIME ZONE entry
+            // above); no table involved, no jOOQ typed form for a bare
+            // server-clock read on a specific connection.
+            "serverNow", Map.of(
+                ".executeQuery(\"SELECT now()::timestamp\")", 1))),
         Map.entry("TaxonomyRepository.java", Map.of(
             // SANCTIONED RAW (rdr155-p4b F-C): setval / pg_get_serial_sequence /
             // sequence last_value are sequence-state functions with no generated
