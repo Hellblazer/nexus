@@ -203,7 +203,7 @@ class SchemaMigratorIntegrationTest {
     @Order(1)
     void nonSuperuserOwner_migrate_allTablesPresent_andIdempotent() throws Exception {
         // ── Act: non-superuser owner runs migration ───────────────────────────
-        SchemaMigrator.migrate(adminDs);
+        SchemaMigrator.MigrationOutcome first = SchemaMigrator.migrate(adminDs);
 
         // ── Assert: all expected tables in nexus schema ───────────────────────
         try (Connection conn = adminDs.getConnection()) {
@@ -225,7 +225,8 @@ class SchemaMigratorIntegrationTest {
                         + tablesInSchema(conn, "t1").size();
         }
 
-        SchemaMigrator.migrate(adminDs);  // second call — must not throw
+        SchemaMigrator.MigrationOutcome second =
+            SchemaMigrator.migrate(adminDs);  // second call — must not throw
 
         int afterCount;
         try (Connection conn = adminDs.getConnection()) {
@@ -235,6 +236,45 @@ class SchemaMigratorIntegrationTest {
         assertThat(afterCount)
             .as("second migrate() must not create new tables (idempotent)")
             .isEqualTo(beforeCount);
+
+        // ── Assert: nexus-x0s52 — the completion counts are the walk's REAL
+        // numbers, not the pre-update plan relogged under a result's name.
+        // Fresh walk: every pending changeset lands as a new changelog row and
+        // nothing pre-existed to re-stamp.
+        long changelogRows;
+        try (Connection conn = adminDs.getConnection()) {
+            ResultSet crs = conn.createStatement().executeQuery(
+                "SELECT COUNT(*) FROM public.\"databasechangelog\"");
+            crs.next();
+            changelogRows = crs.getLong(1);
+        }
+        assertThat(first.newChangesets())
+            .as("fresh walk: new_changesets == every changelog row")
+            .isEqualTo(changelogRows);
+        assertThat(first.pendingAtStart())
+            .as("fresh walk: the plan and the landing agree")
+            .isEqualTo(first.newChangesets());
+        assertThat(first.reexecutedChangesets())
+            .as("fresh walk re-stamps nothing")
+            .isZero();
+        // No-op walk: nothing new lands (the old line would have logged its
+        // runAlways-inflated pending here as 'applied'); the runAlways set
+        // re-stamps, and it is a strict subset of the changelog.
+        assertThat(second.newChangesets())
+            .as("no-op walk: new_changesets is 0 — 'did my changeset land' reads this")
+            .isZero();
+        assertThat(second.pendingAtStart())
+            .as("no-op walk: listUnrunChangeSets STILL counts the runAlways "
+                + "re-run plan (measured 11 here; the fork walk's logged '12' "
+                + "was 1 new + this plan) — the number the old line relogged "
+                + "as 'applied'. Nonzero on a no-op walk is the bug's anatomy; "
+                + "pinned so nobody 'simplifies' new_changesets back to it")
+            .isGreaterThan(0)
+            .isLessThan((int) changelogRows);
+        assertThat(second.reexecutedChangesets())
+            .as("runAlways/runOnChange re-runs are counted, and only them")
+            .isGreaterThan(0)
+            .isLessThan(changelogRows);
 
         // DATABASECHANGELOG must have records (not wiped).
         try (Connection conn = adminDs.getConnection()) {

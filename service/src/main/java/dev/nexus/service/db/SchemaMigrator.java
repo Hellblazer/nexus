@@ -79,6 +79,35 @@ public final class SchemaMigrator {
     private SchemaMigrator() { /* static utility */ }
 
     /**
+     * What a walk actually did, in truthfully named counts (nexus-x0s52).
+     *
+     * <p>The old {@code schema_migration_complete} line logged the PRE-update
+     * pending count under the name {@code applied_changesets}. Measured on the
+     * v0.1.86 PITR fork walk (2026-08-27): the line said 12 where 1 genuinely
+     * new changeset landed and 25 rows were touched (24 {@code runAlways}
+     * re-runs) — the logged number corresponded to NONE of the three
+     * quantities an operator might mean by "applied". These three fields are
+     * the real ones:
+     *
+     * @param pendingAtStart  {@code listUnrunChangeSets()} BEFORE the update.
+     *                        NOT "new changesets waiting": Liquibase counts the
+     *                        {@code runAlways} re-run plan here too (measured:
+     *                        11 on a no-op walk of this changelog), which is
+     *                        exactly how the old line came to claim 12 applied
+     *                        where 1 landed
+     * @param newChangesets   {@code databasechangelog} row-count delta across
+     *                        the update — changesets that genuinely landed for
+     *                        the first time ("did my one changeset land" reads
+     *                        THIS field)
+     * @param reexecutedChangesets rows whose {@code dateexecuted} moved during
+     *                        the walk minus the new rows — the {@code runAlways}
+     *                        / {@code runOnChange} re-runs (a clean walk proves
+     *                        they executed, not that their content is right)
+     */
+    public record MigrationOutcome(
+            int pendingAtStart, long newChangesets, long reexecutedChangesets) {}
+
+    /**
      * Applies all pending Liquibase changesets from the master changelog to the
      * database reachable via {@code ds}.
      *
@@ -88,10 +117,12 @@ public final class SchemaMigrator {
      * requests use it normally.
      *
      * @param ds migration-capable datasource (schema-owner or superuser rights)
+     * @return the walk's real counts — also logged as
+     *         {@code event=schema_migration_complete}
      * @throws MigrationException if Liquibase fails or the connection cannot be
      *                             obtained; caller should treat this as fatal
      */
-    public static void migrate(DataSource ds) {
+    public static MigrationOutcome migrate(DataSource ds) {
         log.info("event=schema_migration_start changelog={}", MASTER_CHANGELOG);
         pinJvmTimeZoneToUtc();
 
@@ -120,15 +151,87 @@ public final class SchemaMigrator {
                     new Contexts(), new LabelExpression()).size();
                 log.info("event=schema_migration_pending changesets={}", pending);
 
+                // nexus-x0s52: capture the changelog's pre-walk state so the
+                // completion line can report what the walk actually DID, not
+                // the pre-update plan under a name promising a result. Row
+                // count is -1 on first boot (table not created yet); walkStart
+                // is the server's own clock in this UTC-pinned session, the
+                // same clock Liquibase stamps dateexecuted from (nexus-rph82).
+                long rowsBefore = countChangelogRows(conn);
+                java.sql.Timestamp walkStart = serverNow(conn);
+
                 liquibase.update(new Contexts(), new LabelExpression());
 
-                log.info("event=schema_migration_complete applied_changesets={}", pending);
+                long rowsAfter = countChangelogRows(conn);
+                long newChangesets = rowsBefore < 0
+                        ? Math.max(rowsAfter, 0)
+                        : rowsAfter - rowsBefore;
+                long touched = countChangelogRowsSince(conn, walkStart);
+                long reexecuted = Math.max(0, touched - newChangesets);
+                // The old line logged the PRE-update pending count as
+                // applied_changesets — a quantity the walk never computed
+                // (12x overstatement measured on the v0.1.86 fork walk). The
+                // misleading field name is deliberately GONE, not repaired in
+                // place: a deploy grep for it should find nothing and force a
+                // read of the real fields, never silently match new semantics.
+                log.info("event=schema_migration_complete new_changesets={} "
+                        + "reexecuted_changesets={} pending_at_start={}",
+                        newChangesets, reexecuted, pending);
+                return new MigrationOutcome(pending, newChangesets, reexecuted);
             }
 
         } catch (SQLException e) {
             throw new MigrationException("Failed to obtain DB connection for migration", e);
         } catch (LiquibaseException e) {
             throw new MigrationException("Liquibase migration failed", e);
+        }
+    }
+
+    // ── nexus-x0s52: truthful walk counts ────────────────────────────────────
+    // Unqualified table references, deliberately: these run on the SAME
+    // connection Liquibase itself uses, so they resolve to exactly the
+    // databasechangelog Liquibase reads and writes.
+
+    /** Rows in {@code databasechangelog}, or -1 when the table does not exist
+     * yet (first boot — Liquibase creates it during the update). */
+    private static long countChangelogRows(Connection conn) throws SQLException {
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT to_regclass('databasechangelog')")) {
+            rs.next();
+            if (rs.getString(1) == null) {
+                return -1L;
+            }
+        }
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT count(*) FROM databasechangelog")) {
+            rs.next();
+            return rs.getLong(1);
+        }
+    }
+
+    /** Rows whose {@code dateexecuted} is at or after {@code since} — every row
+     * this walk touched (new rows plus {@code runAlways}/{@code runOnChange}
+     * re-stamps). Valid because the session and JVM are both UTC-pinned
+     * (nexus-rph82), so the stamp and the comparison share one clock. */
+    private static long countChangelogRowsSince(Connection conn, java.sql.Timestamp since)
+            throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT count(*) FROM databasechangelog WHERE dateexecuted >= ?")) {
+            ps.setTimestamp(1, since);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    /** The server's own clock as a session-zone (UTC) timestamp — the same
+     * clock Liquibase stamps {@code dateexecuted} from. */
+    private static java.sql.Timestamp serverNow(Connection conn) throws SQLException {
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery("SELECT now()::timestamp")) {
+            rs.next();
+            return rs.getTimestamp(1);
         }
     }
 
