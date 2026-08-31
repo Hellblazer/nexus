@@ -497,7 +497,7 @@ _stamp_ids() {
 #   incomplete-- a marker exists but does not name the full set (nexus-e3mak).
 #   missing   -- T1 was reachable and holds no marker. A real absence --
 #                denies.
-#   uncertain -- T1 unreachable (nx missing, or `nx scratch list` failed —
+#   uncertain -- T1 unreachable (the nx binary absent, or `nx scratch list` failed —
 #                post-f7xyq that includes a dead CLI lease failing loud).
 #                A capability gap: warns + stamps unverified, never
 #                silently denies or silently passes (the same posture the
@@ -761,7 +761,7 @@ fi
 if [[ -n "$UNCERTAIN_SPACE" ]]; then
     _stamp_ids "$COVERED_SPACE" "passed" "review-completed marker verified at close"
     _stamp_ids "$UNCERTAIN_SPACE" "unverified" "T1 scratch unreachable at close time (capability gap, not a time-budget issue)"
-    allow "WARNING: could not verify review-completed coverage in T1 scratch for $UNCERTAIN_SPACE — T1 unreachable (nx missing or 'nx scratch list' failed; post-nexus-f7xyq that includes a dead CLI T1 lease failing loud — check 'nx doctor --check-t1'). Closing anyway (a broken verification path must not brick every bead close) but stamped verification=unverified for those ids, NOT passed. If review truly happened this is a capability gap, not a review gap. To silence this deliberately, set NX_REVIEW_GATE_OVERRIDE=1."
+    allow "WARNING: could not verify review-completed coverage in T1 scratch for $UNCERTAIN_SPACE — T1 unreachable (the nx binary is absent, or 'nx scratch list' failed; post-nexus-f7xyq that includes a dead CLI T1 lease failing loud — check 'nx doctor --check-t1'). Closing anyway (a broken verification path must not brick every bead close) but stamped verification=unverified for those ids, NOT passed. If review truly happened this is a capability gap, not a review gap. To silence this deliberately, set NX_REVIEW_GATE_OVERRIDE=1."
 fi
 
 _stamp_ids "$COVERED_SPACE" "passed" "review-completed marker verified at close"

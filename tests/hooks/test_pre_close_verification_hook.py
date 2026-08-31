@@ -776,7 +776,7 @@ class TestOverride:
 
 class TestCapabilityHonestBothSourcesDown:
     """nexus-4av2n item 3(iv), narrowed at nexus-fgekf (T2 leg retired):
-    'uncertain' is T1 unreachable — nx missing, or `nx scratch list`
+    'uncertain' is T1 unreachable — the nx binary absent, or `nx scratch list`
     failing (post-f7xyq that includes a dead CLI lease failing loud).
     Never brick the close, but never claim 'passed' either."""
 

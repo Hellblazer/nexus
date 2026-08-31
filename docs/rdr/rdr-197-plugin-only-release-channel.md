@@ -4,6 +4,15 @@ id: RDR-197
 type: Architecture
 status: closed
 closed_date: 2026-08-31
+postmortem_waiver: >-
+  The arc's one transferable lesson — rehearse cut machinery end to end
+  against a fake origin, on every CI checkout shape, before the real run —
+  is already durably recorded in four places (AGENTS.md usage-discipline
+  rule 4, this RDR's own 2026-08-30 revision entries, the
+  feedback_rehearse_release_machinery_end_to_end_in_isolation memory, and
+  T2 plugin-cut-spike-a2wmi-12-rehearsal-2026-08-30 [23797]); a fifth
+  restatement would be filler. Waived at close, 2026-08-30, on Sam's
+  explicit close instruction.
 priority: high
 author: Hal Hildebrand
 reviewed-by: Sam (lgtm 2026-08-22); gate battery per References
