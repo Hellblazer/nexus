@@ -351,21 +351,28 @@ _SHIPPED_RE = re.compile(
 
 
 def _additive_token(note: str) -> bool | None:
-    """Direction-safety token in an Unshipped entry's note (nexus-1emxn).
+    """Direction-safety token LEADING an Unshipped entry's note (nexus-1emxn).
 
     ``[additive]`` asserts OLD client + NEW engine is safe (the entry's own
     direction-safety prose must back it); ``[not-additive]`` asserts the
-    engine half must NOT deploy ahead of the client tag. Both present is an
-    authoring error — treated as not-additive, fail-safe. Absent is ``None``
+    engine half must NOT deploy ahead of the client tag. Absent is ``None``
     (consumers treat as not-additive; pre-token entries keep today's
     blocking behaviour unchanged).
+
+    ANCHORED at the start of the note, deliberately (round-2 review,
+    T2 [23829] Important-1): an unanchored substring match would let an
+    entry's PROSE that merely mentions "[additive]" — contrasting itself
+    with a tagged sibling, say — false-positive into the UNSAFE direction
+    (authorizing an early engine deploy). A leading token is a statement;
+    a mid-sentence mention is not.
     """
-    has_add = "[additive]" in note
-    has_not = "[not-additive]" in note
-    if has_not:
+    if note.startswith("[not-additive]"):
         return False
-    if has_add:
-        return True
+    if note.startswith("[additive]"):
+        # A [not-additive] appearing ANYWHERE later contradicts the leading
+        # assertion — fail safe (the lint flags the mid-note token so the
+        # author resolves it; until then the entry blocks).
+        return "[not-additive]" not in note
     return None
 
 

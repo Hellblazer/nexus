@@ -290,6 +290,59 @@ def test_every_ledger_bullet_parses() -> None:
     )
 
 
+def test_additive_token_leads_and_carries_its_reasoning() -> None:
+    """nexus-1emxn round-2 controls on the [additive] direction-safety token.
+
+    The token is a bare self-assertion the gate ACTS on (it authorizes an
+    engine deploy ahead of the client tag), so two structural controls
+    apply to every LIVE ledger entry: (1) a token anywhere but the START of
+    the note is prose, not a statement — the anchored parser ignores it, and
+    this lint flags it so the author learns at commit time, not at deploy
+    time; (2) a leading [additive] must be accompanied by direction-safety
+    prose naming both directions ("old client" and "new engine",
+    case-insensitive) — presence of the reasoning, not proof of it, but a
+    token with no reasoning at all is exactly the rubber stamp the critique
+    (T2 [23828]) warned about."""
+    ledger = wctp.parse_ledger(wctp.DEFAULT_LEDGER_PATH)
+    problems: list[str] = []
+    for e in ledger.unshipped.values():
+        stray = (
+            "[additive]" in e.note and not e.note.startswith("[additive]")
+        ) or (
+            "[not-additive]" in e.note and not e.note.startswith("[not-additive]")
+        )
+        if stray:
+            problems.append(
+                f"{e.sha[:9]} ({e.bead}): direction-safety token appears "
+                "mid-note — the anchored parser ignores it; lead the note "
+                "with it or drop the mention"
+            )
+        if e.additive is True:
+            low = e.note.lower()
+            if not ("old client" in low and "new engine" in low):
+                problems.append(
+                    f"{e.sha[:9]} ({e.bead}): [additive] with no "
+                    "direction-safety prose naming both directions "
+                    "('old client' + 'new engine')"
+                )
+    assert not problems, "\n".join(problems)
+
+
+def test_mid_note_token_mention_is_not_a_statement(tmp_path: pathlib.Path) -> None:
+    """Anchoring pin (T2 [23829] Important-1): prose that MENTIONS
+    '[additive]' mid-note must not authorize anything."""
+    ledger_file = tmp_path / "ledger.md"
+    ledger_file.write_text(
+        "## Unshipped\n\n"
+        "- `abcdefabcdefabcdefabcdefabcdefabcdefabcd` -- bead nexus-prose -- "
+        "engine tag `engine-service-v9.9.9` -- unlike the sibling marked "
+        "[additive], this one changes the wire\n"
+        "## Shipped\n"
+    )
+    entry = next(iter(wctp.parse_ledger(ledger_file).unshipped.values()))
+    assert entry.additive is None
+
+
 def test_shipped_entry_counts_as_declared() -> None:
     """A flagged commit declared under ## Shipped is NOT undeclared
     (nexus-55r6o follow-up): the release-PR window moves an entry

@@ -39,14 +39,17 @@ carries no method signature for a contract change to reconcile against) is a
   the paired-deploy branch above does not cover. Same `--ack-client-lag
   <bead-id>` escape shape.
 - **Direction-safety token** (nexus-1emxn choreography (a)): an Unshipped
-  entry whose note carries the literal `[additive]` asserts OLD client +
-  NEW engine is safe -- the engine half may deploy BEFORE the client tag,
-  so `check_client_release_precondition.py` treats an all-`[additive]`
+  entry whose note BEGINS with the literal `[additive]` asserts OLD client
+  + NEW engine is safe -- the engine half may deploy BEFORE the client
+  tag, so `check_client_release_precondition.py` treats an all-`[additive]`
   Unshipped section as authorization for the unpaired deploy instead of a
   block (no refusal window can open for such entries). `[not-additive]`
-  (or NO token -- the fail-safe default for every pre-token entry) keeps
-  the blocking behaviour. The token must be backed by the entry's own
-  direction-safety prose; it is an assertion of record, not a convenience.
+  (or NO leading token -- the fail-safe default for every pre-token entry)
+  keeps the blocking behaviour. The token must LEAD the note (a
+  mid-sentence mention is prose, not a statement -- the parser is anchored)
+  and must be backed by the entry's own direction-safety prose naming both
+  directions; `tests/test_wire_contract_pairing_lint.py` enforces the
+  prose-presence half. It is an assertion of record, not a convenience.
 
 ---
 

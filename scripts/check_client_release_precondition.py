@@ -149,13 +149,20 @@ def check_wire_contract_ledger(ack_beads: list[str] | None = None) -> tuple[int,
         print(f"\n{_LEDGER_REMEDY}", file=sys.stderr)
         return 1, False
     if missing:
+        acked_count = len(ledger.unshipped) - len(missing)
+        acked_suffix = (
+            f" ({acked_count} further entr{'y' if acked_count == 1 else 'ies'} "
+            "acknowledged via --ack-client-lag)"
+            if acked_count else ""
+        )
         print(
-            f"wire-contract ledger: {len(missing)} unshipped both-halves "
-            "commit(s), ALL marked [additive] (old client + new engine safe) "
-            "— unpaired deploy authorized ahead of the client tag "
-            "(nexus-1emxn choreography (a)); pairing completes when the "
+            f"wire-contract ledger: {len(missing)} unacknowledged unshipped "
+            "both-halves commit(s), all marked [additive] (old client + new "
+            "engine safe) — unpaired deploy authorized ahead of the client "
+            "tag (nexus-1emxn choreography (a)); pairing completes when the "
             "client release carrying "
             f"{', '.join(sorted({e.bead for e in missing}))} bumps the floor."
+            f"{acked_suffix}"
         )
         return 0, False
 
