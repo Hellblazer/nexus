@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.26.0] - 2026-08-31
+
+- Plugin version aligned with conexus 7.26.0. No plugin-side changes
+  (zero commits under `conexus/`, `sn/`, or `.claude-plugin/` since
+  v7.25.0).
+
 ## [7.25.0] - 2026-08-31
 
 - `pre_close_verification_hook.sh` (nexus-fgekf): the bead-close review
