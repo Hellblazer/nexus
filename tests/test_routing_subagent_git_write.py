@@ -1257,27 +1257,69 @@ class TestNexus3c92mRound6SplicedExpansions:
             f"< {_MAX_LINEAR_RATIO}x)"
         )
 
-    def test_100kb_many_touching_letter_expansions_scans_well_under_50ms(self):
+    #: Hang-catch ceiling for the MATCH-DENSE letter-expansion shape,
+    #: per MB. The generic `_CEILING_MS_PER_MB` (2000) is calibrated on
+    #: the sparse chained shape and is provably insufficient here: the
+    #: 2026-08-31 develop push fdcd35c0c red'd this test's predecessor
+    #: (a single-pass absolute 50ms budget) TWICE on shard 4/4 at 449ms
+    #: and 543ms per ~100KB (~5.4s/MB) — ordinary contention after the
+    #: push's new test files reshuffled the shard composition, not a
+    #: regression (the same tree measured <50ms locally three times).
+    #: 20s/MB is ~3.7x that worst-on-record; contention cannot reach it,
+    #: while an outright hang still does. The quadratic-regression class
+    #: is the RATIO leg's job (2+ SECONDS on ~45KB when it was live —
+    #: ~100x ratio for a 10x input, unmissable at any machine speed).
+    _DENSE_CEILING_MS_PER_MB = 20_000
+
+    def test_touching_letter_expansions_scale_near_linearly(self):
         """Round-7-specific adversarial case: THIS is the shape that
         actually exercises `_adjacent_letter_fragments` per-match (the
         `$VAR`-only case above has no letters touching it, so it never
         stressed fragment extraction at all). Found and fixed during this
         round's own verification: a first-cut `_adjacent_letter_fragments`
         using `text[:start]` (an O(start) slice) on EVERY match went
-        quadratic -- 2+ SECONDS on this exact shape -- before being rewritten
-        as a bounded character walk."""
+        quadratic -- 2+ SECONDS on this exact shape -- before being
+        rewritten as a bounded character walk.
+
+        Redesigned 2026-08-31 from a single-pass absolute 50ms budget to
+        the file's ratio + best-of-3 + loose-ceiling doctrine (T2
+        review-3c92m-perf-budget-redesign) after the absolute budget
+        red'd twice on a contended shard — see `_DENSE_CEILING_MS_PER_MB`
+        for the measurements."""
         spec = importlib.util.spec_from_file_location("_nx3c92m_guard5", str(HOOK_SCRIPT))
         guard = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(guard)
-        big = "git " + (
-            chr(36) + "{v}ar" + chr(36) + "{i}able "
-        ) * 3000 + "checkout"
-        t0 = time.perf_counter()
-        normalized = guard._normalize_for_primary_scan(big)
-        guard._find_spliced_expansion(normalized)
-        guard._primary_match(normalized)
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-        assert elapsed_ms < 50, f"{elapsed_ms:.3f}ms >= 50ms budget"
+
+        def scan_ms(text: str) -> float:
+            best = float("inf")
+            for _ in range(3):
+                t0 = time.perf_counter()
+                normalized = guard._normalize_for_primary_scan(text)
+                guard._find_spliced_expansion(normalized)
+                guard._primary_match(normalized)
+                best = min(best, time.perf_counter() - t0)
+            return best * 1000
+
+        unit = chr(36) + "{v}ar" + chr(36) + "{i}able "
+        small = "git " + unit * 300 + "checkout"
+        large = "git " + unit * 3000 + "checkout"  # 10x small
+        ms_small = scan_ms(small)
+        ms_large = scan_ms(large)
+
+        ceiling = max(
+            float(_CEILING_MIN_MS),
+            self._DENSE_CEILING_MS_PER_MB * len(large) / 1_000_000,
+        )
+        assert ms_large < ceiling, (
+            f"10x dense input ({len(large)} bytes): {ms_large:.3f}ms >= "
+            f"{ceiling:.0f}ms dense-shape ceiling"
+        )
+        ratio = ms_large / max(ms_small, _RATIO_FLOOR_MS)
+        assert ratio < _MAX_LINEAR_RATIO, (
+            f"non-linear scaling: {ms_small:.3f}ms -> {ms_large:.3f}ms is "
+            f"{ratio:.1f}x for a 10x input (expected near-linear, "
+            f"< {_MAX_LINEAR_RATIO}x)"
+        )
 
 
 # ── nexus-3c92m round 7: the adjacency rule, SCOPED ───────────────────────────
