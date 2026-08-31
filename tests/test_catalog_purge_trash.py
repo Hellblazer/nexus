@@ -32,9 +32,10 @@ class _FakeWriter:
         # nexus-8j1zx fix round: field names/shape now match the REAL wire
         # contract (T1 2fbc12df design of record; confirmed against
         # CatalogRepository.purgeTrashPreview/purgeTrash) — a flat dict with
-        # documents_purged (age-gated) and chunks_<dim>_stranded (age-
-        # independent), not the previous "aged_tombstones"/nested
-        # "stranded_chunks" shape that never existed on the wire.
+        # documents_purged and chunks_<dim>_stranded (both grace-window
+        # scoped since catalog-026, nexus-kcm6c), not the previous
+        # "aged_tombstones"/nested "stranded_chunks" shape that never
+        # existed on the wire.
         self._result = result if result is not None else {
             "dry_run": True,
             "documents_purged": 3,
