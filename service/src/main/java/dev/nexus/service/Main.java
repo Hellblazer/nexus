@@ -160,6 +160,12 @@ public final class Main {
             // Local mode (RDR-160): bge-768 serves EVERY collection. MiniLM is
             // NOT loaded on the local path (Decision 5) — a non-bge collection
             // is REFUSED (422), never silently embedded at the wrong dim.
+            // nexus-ogccs: log the resolved onnx_models root BEFORE constructing
+            // the embedder — its fail-loud missing-model path should follow a
+            // line saying where the engine looked and why.
+            var onnxRoot = dev.nexus.service.vectors.OnnxModelPaths.resolved();
+            log.info("event=onnx_model_root root={} source={}",
+                    onnxRoot.root(), onnxRoot.source());
             Bge768Embedder bge = new Bge768Embedder();
             docEmbedRouter = new EmbedderRouter(bge, "document");
             qryEmbedRouter = new EmbedderRouter(bge, "query");

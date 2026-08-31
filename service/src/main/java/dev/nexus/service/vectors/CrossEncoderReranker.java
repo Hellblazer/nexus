@@ -58,14 +58,14 @@ public final class CrossEncoderReranker implements Reranker {
 
     private static final Logger log = LoggerFactory.getLogger(CrossEncoderReranker.class);
 
-    /** Canonical Java-read path (provisioned by the CLI, mirroring the bge flow). */
+    /** Canonical Java-read path (provisioned by the CLI, mirroring the bge flow).
+     * Root resolved via {@link OnnxModelPaths} (nexus-ogccs): env override, then HOME —
+     * matching where the provisioner actually writes, not the passwd entry. */
     public static final String DEFAULT_MODEL_PATH =
-            System.getProperty("user.home")
-            + "/.cache/nexus/onnx_models/ms-marco-minilm-l6-v2/onnx/model.onnx";
+            OnnxModelPaths.root() + "/ms-marco-minilm-l6-v2/onnx/model.onnx";
 
     public static final String DEFAULT_TOKENIZER_PATH =
-            System.getProperty("user.home")
-            + "/.cache/nexus/onnx_models/ms-marco-minilm-l6-v2/onnx/tokenizer.json";
+            OnnxModelPaths.root() + "/ms-marco-minilm-l6-v2/onnx/tokenizer.json";
 
     /** Same request-sanity cap as {@link VoyageReranker}: reject, never truncate. */
     public static final int MAX_DOCS_PER_REQUEST = 1000;

@@ -26,12 +26,13 @@ RUN uv python install 3.12 \
 # the named volumes and the host-mounted TMPDIR inherit that ownership.
 # PASSWD HOME == THE SANDBOX HOME, deliberately (nexus-ogccs). The cut's
 # battery runs release-sandbox smoke with HOME=$HOME/nexus-sandbox, and the
-# native engine resolves its ONNX models from Java's user.home (the passwd
-# entry, not $HOME): Bge768Embedder.java / CrossEncoderReranker.java hardcode
-# user.home + /.cache/nexus/onnx_models. With ENV HOME=/home/nexus below the
-# smoke computes its sandbox at /home/nexus/nexus-sandbox, exactly this
-# user's passwd home, so the engine finds what `nx init` provisioned. Remove
-# the alignment once the engine honours an explicit model-dir env.
+# PINNED native engine (<= v0.1.91) resolves its ONNX models from Java's
+# user.home (the passwd entry, not $HOME). With ENV HOME=/home/nexus below
+# the smoke computes its sandbox at /home/nexus/nexus-sandbox, exactly this
+# user's passwd home, so the engine finds what `nx init` provisioned. The
+# fix is on develop (OnnxModelPaths: NX_ONNX_MODEL_DIR env, then HOME, then
+# user.home; the supervisor passes the resolved root at spawn) — remove this
+# alignment once the pinned engine tag carries it (first cut after v0.1.91).
 RUN useradd -u 1000 -d /home/nexus/nexus-sandbox -s /bin/bash nexus \
     && mkdir -p /home/nexus/.cache/uv /home/nexus/artifacts /etc/nexus-rehearsal \
     && chown -R nexus:nexus /home/nexus /etc/nexus-rehearsal

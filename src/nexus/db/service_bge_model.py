@@ -42,6 +42,8 @@ from typing import Callable
 
 import structlog
 
+from nexus.db.onnx_model_root import service_onnx_models_root
+
 _log = structlog.get_logger(__name__)
 
 #: Upstream provenance of the hosted export: the standard (un-fused)
@@ -102,13 +104,15 @@ def _file_ok(path: Path, min_bytes: int) -> bool:
 def service_bge_model_dir() -> Path:
     """Canonical dir the Java service reads its bge model + tokenizer from.
 
-    ``NX_SERVICE_BGE_DIR`` overrides (operator/test); otherwise the XDG-ish
-    default that mirrors ``Bge768Embedder.DEFAULT_MODEL_PATH``.
+    ``NX_SERVICE_BGE_DIR`` overrides (operator/test — Python-side only; the
+    engine never read it); otherwise ``service_onnx_models_root()`` — the
+    shared root both sides resolve identically (nexus-ogccs), mirroring
+    ``Bge768Embedder.DEFAULT_MODEL_PATH``.
     """
     env = os.environ.get(_ENV_DIR, "").strip()
     if env:
         return Path(env)
-    return Path.home() / ".cache" / "nexus" / "onnx_models" / "bge-base-en-v1.5" / "onnx"
+    return service_onnx_models_root() / "bge-base-en-v1.5" / "onnx"
 
 
 def service_bge_model_present() -> bool:

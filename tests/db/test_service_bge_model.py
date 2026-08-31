@@ -20,6 +20,7 @@ import pytest
 
 from nexus.daemon import binary_install
 from nexus.db import service_bge_model as sbm
+from nexus.db.onnx_model_root import service_onnx_models_root
 
 _JAVA_EMBEDDER = (
     Path(__file__).resolve().parents[2]
@@ -151,29 +152,33 @@ def test_env_override_directs_destination(tmp_path, monkeypatch):
 
 def test_python_path_matches_java_default(monkeypatch):
     """Cross-language drift guard: the Python destination must equal the Java
-    Bge768Embedder.DEFAULT_MODEL_PATH (sans ~ expansion). If the Java constant
-    moves, this fails so the fetch target is updated in lockstep."""
+    Bge768Embedder.DEFAULT_MODEL_PATH (sans ~ expansion). Both sides hang off
+    the shared onnx_models root (nexus-ogccs) — the root's own rung parity is
+    pinned by ``test_onnx_model_root.py``; this test pins the per-model
+    suffix. If the Java constant moves, this fails so the fetch target is
+    updated in lockstep."""
     monkeypatch.delenv("NX_SERVICE_BGE_DIR", raising=False)
+    monkeypatch.delenv("NX_ONNX_MODEL_DIR", raising=False)
+    root = service_onnx_models_root()
     src = _JAVA_EMBEDDER.read_text()
-    # DEFAULT_MODEL_PATH = System.getProperty("user.home") + "/.cache/.../model.onnx"
+    # DEFAULT_MODEL_PATH = OnnxModelPaths.root() + "/bge-.../onnx/model.onnx"
     m = re.search(
-        r'DEFAULT_MODEL_PATH\s*=\s*\n?\s*System\.getProperty\("user\.home"\)\s*\+\s*"([^"]+)"',
+        r'DEFAULT_MODEL_PATH\s*=\s*\n?\s*OnnxModelPaths\.root\(\)\s*\+\s*"([^"]+)"',
         src,
     )
-    assert m is not None, "Java DEFAULT_MODEL_PATH literal not found"
-    java_rel = m.group(1).lstrip("/")  # ".cache/nexus/onnx_models/.../onnx/model.onnx"
-    java_full = Path.home() / java_rel
+    assert m is not None, "Java DEFAULT_MODEL_PATH must derive from OnnxModelPaths.root()"
+    java_full = root / m.group(1).lstrip("/")
     py_model = sbm.service_bge_model_dir() / sbm.MODEL_FILENAME
     assert py_model == java_full
 
     # tokenizer path too — declared as a separate Java constant, so guard it
     # independently against divergence.
     mt = re.search(
-        r'DEFAULT_TOKENIZER_PATH\s*=\s*\n?\s*System\.getProperty\("user\.home"\)\s*\+\s*"([^"]+)"',
+        r'DEFAULT_TOKENIZER_PATH\s*=\s*\n?\s*OnnxModelPaths\.root\(\)\s*\+\s*"([^"]+)"',
         src,
     )
-    assert mt is not None, "Java DEFAULT_TOKENIZER_PATH literal not found"
-    java_tok = Path.home() / mt.group(1).lstrip("/")
+    assert mt is not None, "Java DEFAULT_TOKENIZER_PATH must derive from OnnxModelPaths.root()"
+    java_tok = root / mt.group(1).lstrip("/")
     py_tok = sbm.service_bge_model_dir() / sbm.TOKENIZER_FILENAME
     assert py_tok == java_tok
 

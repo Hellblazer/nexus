@@ -87,6 +87,7 @@ import structlog
 
 from nexus import pdeathsig as _pdeathsig
 from nexus.daemon import readiness
+from nexus.db.onnx_model_root import ENV_MODEL_DIR, service_onnx_models_root
 from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
     ServiceRegistry,
@@ -843,6 +844,16 @@ class StorageServiceSupervisor:
         # dead supervisor never leaves an orphaned-but-serving service. NX_SERVICE_BIND
         # (container bind override, default loopback) passes through via env inheritance.
         env["NX_SERVICE_PARENT_DEATH_EXIT"] = "1"
+
+        # nexus-ogccs: pass the provisioner's resolved onnx_models root
+        # explicitly so supervisor and engine agree by construction. The
+        # engine's own fallback is user.home (the passwd entry), which
+        # diverges from the $HOME-derived path the provisioner writes under
+        # whenever HOME is overridden (containers, release-sandbox, CI) —
+        # green "model ready" then an engine crash at boot. Idempotent when
+        # the caller already set it: service_onnx_models_root() returns that
+        # same value.
+        env[ENV_MODEL_DIR] = str(service_onnx_models_root())
 
         # nexus-pebfx.2: the service only reads NX_VOYAGE_API_KEY; without it the
         # service embeds local ONNX (RDR-160: bge-768) and refuses every

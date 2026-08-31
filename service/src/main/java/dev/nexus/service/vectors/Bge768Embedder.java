@@ -60,14 +60,15 @@ public final class Bge768Embedder implements Embedder {
 
     private static final Logger log = LoggerFactory.getLogger(Bge768Embedder.class);
 
-    /** Canonical Java-read path for the standard bge ONNX (provisioned by {@code nx init --service}). */
+    /** Canonical Java-read path for the standard bge ONNX (provisioned by {@code nx init --service}).
+     * Root resolved via {@link OnnxModelPaths} (nexus-ogccs): env override, then HOME —
+     * the provisioner writes under HOME, and bare {@code user.home} (the passwd entry)
+     * diverges from it whenever HOME is overridden. */
     public static final String DEFAULT_MODEL_PATH =
-            System.getProperty("user.home") +
-            "/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/model.onnx";
+            OnnxModelPaths.root() + "/bge-base-en-v1.5/onnx/model.onnx";
 
     public static final String DEFAULT_TOKENIZER_PATH =
-            System.getProperty("user.home") +
-            "/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/tokenizer.json";
+            OnnxModelPaths.root() + "/bge-base-en-v1.5/onnx/tokenizer.json";
 
     /** bge-base-en-v1.5 supports 512-token context (MiniLM used 256). */
     private static final int MAX_SEQ_LEN = 512;

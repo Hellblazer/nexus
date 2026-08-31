@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from nexus.db import service_crossencoder_model as scm
+from nexus.db.onnx_model_root import service_onnx_models_root
 
 _JAVA_RERANKER = (
     Path(__file__).resolve().parents[2]
@@ -165,21 +166,26 @@ def test_urls_are_pinned_revision_hf_resolves(ce_dir, monkeypatch):
 
 def test_python_path_matches_java_default(monkeypatch):
     """Cross-language drift guard: the Python destination must equal the Java
-    CrossEncoderReranker.DEFAULT_MODEL_PATH / DEFAULT_TOKENIZER_PATH."""
+    CrossEncoderReranker.DEFAULT_MODEL_PATH / DEFAULT_TOKENIZER_PATH. Both
+    sides hang off the shared onnx_models root (nexus-ogccs) — the root's own
+    rung parity is pinned by ``test_onnx_model_root.py``; this test pins the
+    per-model suffix."""
     monkeypatch.delenv("NX_SERVICE_CROSSENCODER_DIR", raising=False)
+    monkeypatch.delenv("NX_ONNX_MODEL_DIR", raising=False)
+    root = service_onnx_models_root()
     src = _JAVA_RERANKER.read_text()
     m = re.search(
-        r'DEFAULT_MODEL_PATH\s*=\s*\n?\s*System\.getProperty\("user\.home"\)\s*\n?\s*\+\s*"([^"]+)"',
+        r'DEFAULT_MODEL_PATH\s*=\s*\n?\s*OnnxModelPaths\.root\(\)\s*\+\s*"([^"]+)"',
         src,
     )
-    assert m is not None, "Java DEFAULT_MODEL_PATH literal not found"
-    java_model = Path.home() / m.group(1).lstrip("/")
+    assert m is not None, "Java DEFAULT_MODEL_PATH must derive from OnnxModelPaths.root()"
+    java_model = root / m.group(1).lstrip("/")
     assert scm.service_crossencoder_model_dir() / scm.MODEL_FILENAME == java_model
 
     mt = re.search(
-        r'DEFAULT_TOKENIZER_PATH\s*=\s*\n?\s*System\.getProperty\("user\.home"\)\s*\n?\s*\+\s*"([^"]+)"',
+        r'DEFAULT_TOKENIZER_PATH\s*=\s*\n?\s*OnnxModelPaths\.root\(\)\s*\+\s*"([^"]+)"',
         src,
     )
-    assert mt is not None, "Java DEFAULT_TOKENIZER_PATH literal not found"
-    java_tok = Path.home() / mt.group(1).lstrip("/")
+    assert mt is not None, "Java DEFAULT_TOKENIZER_PATH must derive from OnnxModelPaths.root()"
+    java_tok = root / mt.group(1).lstrip("/")
     assert scm.service_crossencoder_model_dir() / scm.TOKENIZER_FILENAME == java_tok
