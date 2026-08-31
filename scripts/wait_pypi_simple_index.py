@@ -16,7 +16,11 @@ resolver-visible signal:
     Accept: application/vnd.pypi.simple.v1+json          (PEP 691)
 
 and succeeds when the requested version appears in the payload's
-``versions`` list.
+``versions`` list AND the payload's ``files`` array serves that version's
+wheel. The versions list alone is not installability: at the 7.26.0 publish
+(nexus-tt5vm) the index listed the version while the files themselves lagged
+~70s behind, so a wait keyed on ``versions`` green'd into a resolver that
+still had nothing to install.
 
 Callers:
 - ``.github/workflows/release.yml`` — between the PyPI publish and the
@@ -29,7 +33,11 @@ Callers:
 Transient failures (non-200, network error, malformed payload) are treated
 as "not yet" and polled through — the deadline is the only terminal failure.
 Exit 0 = version served; exit 1 = deadline exceeded (fail loud, never a
-silent pass).
+silent pass); exit 3 = the below-max fast-exit WITHOUT ``--require-served``
+(the requested version is below the index's max and absent — not a
+propagation wait; proceed, but do not keep retrying: the caller's resolver
+renders the loud verdict). 3 rather than 2 because argparse exits 2 on a
+usage error, and the fast-exit must never be conflated with a bad flag.
 
 Stdlib-only on purpose: release.yml runs it via bare ``python3`` and the
 e2e shell gates must not need a synced venv for it.
@@ -38,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -47,8 +56,8 @@ DEFAULT_INDEX_URL = "https://pypi.org/simple"
 SIMPLE_V1_JSON = "application/vnd.pypi.simple.v1+json"
 
 
-def probe_versions(url: str, timeout: float = 10.0) -> list[str] | None:
-    """One GET against the simple index. Returns the advertised versions,
+def probe_index(url: str, timeout: float = 10.0) -> dict | None:
+    """One GET against the simple index. Returns the PEP 691 payload dict,
     or None on any transient failure (treated as "not yet" by the caller)."""
     req = urllib.request.Request(
         url,
@@ -57,12 +66,50 @@ def probe_versions(url: str, timeout: float = 10.0) -> list[str] | None:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
-        versions = payload["versions"]
-    except (urllib.error.URLError, OSError, TimeoutError, ValueError, KeyError, TypeError):
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
         return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _payload_versions(payload: dict | None) -> list[str] | None:
+    if payload is None:
+        return None
+    versions = payload.get("versions")
     if not isinstance(versions, list):
         return None
     return [str(v) for v in versions]
+
+
+def _wheel_escape(component: str) -> str:
+    """PEP 427 filename escaping, the spec's own regex verbatim: runs of
+    characters outside [\\w.] become one ``_`` (note ``_`` itself is ``\\w``
+    and survives — a hand-rolled isalnum() loop gets that wrong)."""
+    return re.sub(r"[^\w.]+", "_", component)
+
+
+def serves_wheel(payload: dict, package: str, version: str) -> bool:
+    """True when the payload's ``files`` array holds a wheel for exactly
+    *version*. The versions list appearing WITHOUT the files is a measured
+    intermediate index state (nexus-tt5vm, 7.26.0 publish) in which a
+    resolver still fails; a missing/malformed files array is simply "not
+    yet"."""
+    files = payload.get("files")
+    if not isinstance(files, list):
+        return False
+    want_dist = _wheel_escape(package).lower()
+    want_version = _wheel_escape(version)
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        filename = str(entry.get("filename", ""))
+        if not filename.endswith(".whl"):
+            continue
+        parts = filename[: -len(".whl")].split("-")
+        if len(parts) >= 2 and parts[0].lower() == want_dist and parts[1] == want_version:
+            return True
+    return False
 
 
 def _numeric_prefix(v: str) -> tuple[int, ...]:
@@ -99,14 +146,22 @@ def wait_for_version(
     attempt = 0
     while True:
         attempt += 1
-        versions = probe_versions(url)
+        payload = probe_index(url)
+        versions = _payload_versions(payload)
         if versions is not None and version in versions:
-            print(
-                f"OK: simple index serves {package}=={version} "
-                f"(attempt {attempt})"
+            if payload is not None and serves_wheel(payload, package, version):
+                print(
+                    f"OK: simple index serves {package}=={version} "
+                    f"(wheel present, attempt {attempt})"
+                )
+                return 0
+            # nexus-tt5vm: version listed, wheel not yet in the files
+            # array — a resolver still fails here. Keep polling.
+            status = (
+                f"index lists {version} but its wheel is not yet in the "
+                "files array (nexus-tt5vm)"
             )
-            return 0
-        if versions is None:
+        elif versions is None:
             status = "index unreachable or payload unreadable (transient)"
         else:
             newest = versions[-1] if versions else "<none>"
@@ -114,12 +169,13 @@ def wait_for_version(
             # Below-max fast exit: propagation lag only ever affects the
             # NEWEST release — an index already serving versions strictly
             # past the requested one will never gain it later, so there is
-            # nothing to wait for. Exit 0 and let the caller's resolver
-            # render its own (loud) verdict; this is how an operator typo
-            # (`--published 7.9.0`) fails in seconds with uv's own error
-            # instead of burning the full poll budget. Strictly-less-than
-            # on confident numeric prefixes only; ambiguous parses keep
-            # polling (conservative).
+            # nothing to wait for. Exit 3 ("proceed, retry once at most")
+            # and let the caller's resolver render its own (loud) verdict;
+            # this is how an operator typo (`--published 7.9.0`) fails in
+            # seconds with uv's own error instead of burning the full poll
+            # budget — or the caller's bounded post-wait retry window
+            # (nexus-tt5vm). Strictly-less-than on confident numeric
+            # prefixes only; ambiguous parses keep polling (conservative).
             wanted = _numeric_prefix(version)
             served_max = max(
                 (_numeric_prefix(v) for v in versions), default=()
@@ -151,7 +207,11 @@ def wait_for_version(
                     "and will not appear by waiting. Proceeding — the "
                     "caller's resolver will report its own verdict."
                 )
-                return 0
+                # Exit 3, not 0 (nexus-tt5vm critic finding 2): callers
+                # that follow a 0 with a bounded retry window must not
+                # burn that window on a version that will never appear —
+                # 3 says "proceed, retry once at most".
+                return 3
         remaining = deadline - time.monotonic()
         if remaining <= poll_seconds:
             print(

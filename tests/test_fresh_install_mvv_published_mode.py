@@ -274,21 +274,38 @@ def test_retry_signature_parity_with_mcpb_bootstrap() -> None:
     assert 'grep -qi "conexus" "$LOGS/install.log"' in text
 
 
-def test_retry_branch_waits_then_retries_once_then_fails_loud(tmp_path) -> None:
-    """Functional pin of the retry branch (code-review-expert finding 2) —
-    no real network: a stub uv fails `tool install` with uv's real
-    no-solution text, and FRESH_MVV_INDEX_URL points the wait script at a
-    local fake index that already serves the requested version, so the
-    wait exits 0 immediately and the script retries the install exactly
-    once before failing loud with the propagation message."""
+_DEFAULT_INDEX_PAYLOAD = {
+    "versions": ["1.2.3", "7.25.0"],
+    "files": [
+        {"filename": "conexus-1.2.3-py3-none-any.whl"},
+        {"filename": "conexus-7.25.0-py3-none-any.whl"},
+    ],
+}
+
+
+def _run_retry_branch(
+    tmp_path,
+    extra_env: dict[str, str],
+    index_payload: dict | None = None,
+    succeed_on_call: int | None = None,
+) -> tuple:
+    """Drive the published-mode retry branch with no real network: a stub
+    uv fails `tool install` with uv's real no-solution text (succeeding
+    from call number ``succeed_on_call`` when given), and
+    FRESH_MVV_INDEX_URL points the wait script at a local fake index
+    serving ``index_payload`` (default: the requested version's wheel
+    present, so the wait exits 0 immediately — versions alone no longer
+    green the wait, nexus-tt5vm). Returns (result, install_call_count)."""
     import http.server
     import json as _json
     import os
     import threading
 
+    payload = _DEFAULT_INDEX_PAYLOAD if index_payload is None else index_payload
+
     class _Index(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            body = _json.dumps({"versions": ["1.2.3", "7.25.0"]}).encode()
+            body = _json.dumps(payload).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/vnd.pypi.simple.v1+json")
             self.end_headers()
@@ -304,13 +321,27 @@ def test_retry_branch_waits_then_retries_once_then_fails_loud(tmp_path) -> None:
     stub_dir = tmp_path / "stub-bin"
     stub_dir.mkdir()
     stub_uv = stub_dir / "uv"
+    succeed_gate = (
+        ""
+        if succeed_on_call is None
+        else (
+            f'    if [ "$(grep -c x "{counter}")" -ge {succeed_on_call} ]; then\n'
+            "        exit 0\n"
+            "    fi\n"
+        )
+    )
     stub_uv.write_text(
         "#!/bin/bash\n"
         'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
         f'    echo x >> "{counter}"\n'
+        f"{succeed_gate}"
         "    echo '  x No solution found when resolving dependencies:' >&2\n"
         "    echo '  ... Because there is no version of conexus==1.2.3 ...' >&2\n"
         "    exit 1\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        "    echo /nonexistent-stub-uv-tool-dir\n"
+        "    exit 0\n"
         "fi\n"
         "exit 1\n"
     )
@@ -319,6 +350,7 @@ def test_retry_branch_waits_then_retries_once_then_fails_loud(tmp_path) -> None:
     env = dict(os.environ)
     env["PATH"] = f"{stub_dir}:{env.get('PATH', '')}"
     env["FRESH_MVV_INDEX_URL"] = f"http://127.0.0.1:{httpd.server_address[1]}"
+    env.update(extra_env)
 
     try:
         result = subprocess.run(
@@ -329,18 +361,115 @@ def test_retry_branch_waits_then_retries_once_then_fails_loud(tmp_path) -> None:
         httpd.shutdown()
         httpd.server_close()
 
+    calls = counter.read_text().count("x") if counter.is_file() else 0
+    return result, calls
+
+
+def _cleanup_preserved_evidence(result) -> None:
+    match = re.search(r"FAILURE EVIDENCE PRESERVED: (\S+)", result.stderr)
+    if match:
+        import shutil
+
+        shutil.rmtree(Path(match.group(1)).parent, ignore_errors=True)
+
+
+def test_retry_branch_waits_then_retries_once_then_fails_loud(tmp_path) -> None:
+    """Functional pin of the retry branch (code-review-expert finding 2):
+    with the retry window collapsed to 0 the loop degenerates to exactly
+    one post-wait attempt — initial + retry = 2 install calls — before
+    failing loud with the propagation message."""
+    result, calls = _run_retry_branch(
+        tmp_path, {"FRESH_MVV_RETRY_WINDOW_SECONDS": "0"}
+    )
     try:
         assert result.returncode != 0
-        calls = counter.read_text().count("x") if counter.is_file() else 0
         assert calls == 2, (
             f"expected exactly 2 install attempts (initial + one post-wait "
-            f"retry), saw {calls}; stdout={result.stdout!r} stderr={result.stderr!r}"
+            f"retry at window=0), saw {calls}; stdout={result.stdout!r} "
+            f"stderr={result.stderr!r}"
         )
         assert "waiting on the PyPI simple index (nexus-r433b)" in result.stdout
         assert "after the PyPI propagation wait" in result.stderr
     finally:
-        match = re.search(r"FAILURE EVIDENCE PRESERVED: (\S+)", result.stderr)
-        if match:
-            import shutil
+        _cleanup_preserved_evidence(result)
 
-            shutil.rmtree(Path(match.group(1)).parent, ignore_errors=True)
+
+def test_retry_branch_bounded_window_keeps_retrying_then_fails_loud(tmp_path) -> None:
+    """nexus-tt5vm: the wait's green is this box's vantage of the index;
+    uv's CDN edge measured up to ~2 min staler at the 7.26.0 publish, so
+    one post-wait retry is not enough. While the failure stays the
+    propagation class the install retries for a bounded window, then fails
+    loud naming the bound — never a silent pass, never unbounded."""
+    result, calls = _run_retry_branch(
+        tmp_path,
+        {"FRESH_MVV_RETRY_WINDOW_SECONDS": "2", "FRESH_MVV_RETRY_POLL_SECONDS": "0.2"},
+    )
+    try:
+        assert result.returncode != 0
+        assert calls >= 3, (
+            f"expected the bounded window to allow multiple post-wait "
+            f"retries, saw only {calls} install attempts; "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "install retries" in result.stderr
+        assert "no skip-pass permitted" in result.stderr
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_retry_branch_succeeds_mid_window_and_proceeds(tmp_path) -> None:
+    """The happy path the fix exists to deliver (critic finding 3): the
+    live tt5vm incident was fail-then-succeed-~90s-later, so the loop must
+    EXIT into the rest of the gate when a mid-window retry succeeds — not
+    only fail loud at the bound. Stub uv succeeds on install call 3
+    (initial + retry1 fail, retry2 succeeds); the script then proceeds
+    past the retry machinery and fails at the NEXT assertion (the stub's
+    fake tool venv does not exist), proving the loop exited via success."""
+    result, calls = _run_retry_branch(
+        tmp_path,
+        {"FRESH_MVV_RETRY_WINDOW_SECONDS": "30", "FRESH_MVV_RETRY_POLL_SECONDS": "0.2"},
+        succeed_on_call=3,
+    )
+    try:
+        assert result.returncode != 0
+        assert calls == 3, (
+            f"expected exactly 3 install attempts (initial + 2 loop "
+            f"retries, succeeding on the 3rd), saw {calls}; "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert "reported success but" in result.stderr, (
+            f"script did not proceed past the retry loop after the "
+            f"successful install; stderr={result.stderr!r}"
+        )
+        assert "install retries" not in result.stderr
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_retry_branch_typo_version_fails_in_seconds_not_the_window(tmp_path) -> None:
+    """nexus-tt5vm critic finding 2: the wait's below-max fast-exit (rc 3)
+    must NOT feed the bounded retry window — a typo'd `--published`
+    version (absent, below the index's max, never going to appear) gets
+    exactly one post-wait retry and uv's own error in seconds, exactly the
+    pre-bounded-window behavior the fast-exit was built for."""
+    result, calls = _run_retry_branch(
+        tmp_path,
+        # Deliberately NO window/poll overrides: the point is that the
+        # 300s default window is never entered on this path.
+        {},
+        index_payload={
+            "versions": ["7.25.0"],
+            "files": [{"filename": "conexus-7.25.0-py3-none-any.whl"}],
+        },
+    )
+    try:
+        assert result.returncode != 0
+        assert calls == 2, (
+            f"expected exactly 2 install attempts (initial + the single "
+            f"fast-exit retry), saw {calls}; stdout={result.stdout!r} "
+            f"stderr={result.stderr!r}"
+        )
+        assert "will not appear by waiting" in result.stderr
+        assert "install retries" not in result.stderr
+    finally:
+        _cleanup_preserved_evidence(result)
