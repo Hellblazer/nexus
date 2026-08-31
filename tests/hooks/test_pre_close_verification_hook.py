@@ -576,8 +576,11 @@ class TestT1OnlyCoverage:
     def test_t1_covers_and_memory_is_never_consulted(
         self, mock_config_env, fake_nx, fake_bd, tmp_path
     ) -> None:
-        """Positive path + the structural proof the leg is gone: no
-        `nx memory search` call is EVER made, covered or not."""
+        """Positive path. Honest scope note (review [23832]): the COVERED
+        path never consulted T2 even under the old dual-source hook (lazy
+        short-circuit), so this test alone does not pin the retirement —
+        test_uncovered_bead_makes_no_memory_call_either is the pin (the
+        old hook demonstrably spawned `nx memory search` there)."""
         env = mock_config_env({"on_close": True})
         call_log = tmp_path / "nx_calls.log"
         fake_nx_bin = fake_nx(
@@ -613,6 +616,31 @@ class TestT1OnlyCoverage:
         calls = call_log.read_text()
         assert "memory search" not in calls
         assert calls.count("scratch list") == 1
+
+    def test_t1_down_with_empty_t2_allows_unverified_the_named_corner(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        """THE deliberately accepted corner change (critique [23831]):
+        under the old dual-source gate, T1-down + T2-reachable-and-EMPTY
+        was a DENY (both sources had to strike out). T1-only collapses
+        every T1-down shape into allow-unverified — wider allow, never
+        silent (stamps unverified, never passed). Named in the hook's
+        header; pinned here so the widening stays a decision, not drift."""
+        env = mock_config_env({"on_close": True})
+        # memory defaults to reachable-and-"No results found." — the exact
+        # old-deny fixture.
+        fake_nx_bin = fake_nx(scratch_unreachable=True)
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        calls = log.read_text()
+        assert "nexus-abc12 verification=unverified" in calls
+        assert "verification=passed" not in calls
 
     def test_t1_reachable_and_empty_denies(
         self, mock_config_env, fake_nx
@@ -1172,7 +1200,7 @@ class TestF5RemedyRoundTripReal:
             pytest.skip("dev checkout `nx` console script not found next to sys.executable")
         real_nx = str(real_nx_dir / "nx")
 
-        bead_id = f"nexus-r5{'a' if remedy_kind == 't1_scratch' else 'b'}01"
+        bead_id = "nexus-r5a01"  # single remedy form post-fgekf; dead t2 branch removed
         session_id = f"cr4lp-close-f5-{remedy_kind}"
 
         write_env = os.environ.copy()
@@ -1198,7 +1226,7 @@ class TestF5RemedyRoundTripReal:
             "test never exercises the remedy it is here to verify"
         )
 
-        want = "nx scratch put" if remedy_kind == "t1_scratch" else "nx memory put"
+        want = "nx scratch put"  # the only remedy form post-fgekf
         line = next(
             (ln.strip() for ln in reason.splitlines() if ln.strip().startswith(want)),
             None,

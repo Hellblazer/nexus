@@ -502,10 +502,26 @@ _stamp_ids() {
 #                A capability gap: warns + stamps unverified, never
 #                silently denies or silently passes (the same posture the
 #                dual-source shape used for total unreachability).
+#                NAMED CORNER CHANGE (fgekf critique, T2 [23831]): under
+#                the old dual-source gate, T1-down with T2 reachable-and-
+#                empty was a DENY (both sources had to strike out). T1-only
+#                collapses every T1-down shape into this allow-unverified
+#                branch — a WIDER allow than before, accepted deliberately:
+#                it is never silent (stamps unverified, never passed), and
+#                the detached-hook-with-no-live-lease shape is real enough
+#                that denying it would brick closes on healthy boxes.
 #   deadline  -- the T1 read blew the wall-clock budget (DEADLINE_SECONDS,
 #                3.5s default, under the 5s PreToolUse ceiling —
 #                nexus-4av2n round 3). Denies: "ran out of time" is
 #                indistinguishable from "would have found nothing".
+#                DELIBERATE ASYMMETRY vs `uncertain` (fgekf critique): a
+#                HANG denies while a CRASH allows-unverified. A crash is
+#                unambiguous breakage (the never-brick doctrine applies); a
+#                hang is ambiguous — slow-success and absence look the
+#                same — and deny is the fail-safe reading of ambiguity,
+#                with a cheap retry as the cost. The old N-spawn budget
+#                rationale is gone (one subprocess remains); this
+#                ambiguity argument is the surviving one.
 #
 # WRITE-SIDE CONTRACT (documented here + PENDING_RELEASE.md): a marker is
 # visible to this gate iff it exists in THIS SESSION's T1 scratch
@@ -675,7 +691,8 @@ except Exception:
     print(3.5)
 " 2>/dev/null || echo "3.5")
 
-# OVERRIDE wins over ALL THREE non-covered states uniformly (missing,
+# OVERRIDE wins over ALL FOUR non-covered states uniformly (missing,
+# incomplete,
 # uncertain, OR deadline) -- a deliberate operator override is a single
 # audit signal and must not be silently absorbed into "unverified" just
 # because the underlying reason happened to be a capability gap or a
