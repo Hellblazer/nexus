@@ -156,13 +156,11 @@ class TestPinnedInstall:
 
 
 class TestLocalExtraAdvice:
-    """nexus-hbgso: unlike every other function here, a generation box has
-    NO working remedy for adding the [local] extra to an EXISTING
-    generation -- extras are fixed at build time, and `nx self install`'s
-    upgrade path (self_cmd.py's `_converge_legacy_install` / upgrade flow)
-    is deliberately `NO --extras`. So the generation branch states the
-    limitation instead of naming a command, unlike upgrade_command /
-    pinned_install_command which always have a real command to give."""
+    """nexus-hbgso, updated at nexus-pffc4: the generation branch names the
+    REAL command now — `nx self install --extras local` (merge-with-receipt
+    rebuild) exists, so the honest-limitation sentence this class used to
+    pin is retired. The legacy branch is unchanged: on an unmigrated uv box
+    the uv form is still the correct answer."""
 
     def test_legacy_box_gets_the_reinstall_form(self, unmigrated) -> None:
         assert install_advice.local_extra_advice() == [
@@ -174,15 +172,14 @@ class TestLocalExtraAdvice:
             "custom-cmd",
         ]
 
-    def test_generation_box_states_the_limitation_not_a_command(
+    def test_generation_box_names_the_extras_command(
         self, migrated,
     ) -> None:
         out = install_advice.local_extra_advice()
         assert len(out) == 1
         joined = out[0]
-        assert "no in-place remedy" in joined
-        assert "[local]" in joined
-        # never a command that would look runnable but fail:
+        assert joined.startswith("nx self install --extras local"), joined
+        # the dead ends nexus-hbgso banned stay banned:
         assert "nx init" not in joined
         assert "pip install" not in joined
-        assert "nx self install" not in joined
+        assert "uv tool" not in joined

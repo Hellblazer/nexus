@@ -2284,7 +2284,9 @@ def _check_mineru_server() -> list[HealthResult]:
                 "math PDFs fall back to the in-process subprocess (OOM-risk)"
             ),
             fix_suggestions=[
-                "Install the local extras: uv tool install 'conexus[local]'",
+                # nexus-pffc4: layout-aware — the uv form rebuilds over the
+                # shims on a generation box; route through install_advice.
+                *_install_advice().local_extra_advice(),
                 f"Or point pdf.mineru_server_url at a reachable server "
                 f"(currently: {url})",
             ],

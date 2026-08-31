@@ -44,6 +44,7 @@ doing it by accident here is the specific thing the fence forbids.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -80,13 +81,24 @@ def running_generation() -> Path:
 
 
 def perform_self_install(
-    *, keep: int = 3, version: str | None = None, dry_run: bool = False
+    *, keep: int = 3, version: str | None = None, dry_run: bool = False,
+    add_extras: tuple[str, ...] = (),
 ) -> Path | None:
     """Build a new generation from the running one's receipt, flip, reap.
+
+    *add_extras* (nexus-pffc4) MERGES with the receipt's existing extras —
+    never replaces them — so ``nx self install --extras local`` is the
+    supported way to ADD an extra to an existing generation install (the
+    legacy answer, ``uv tool install --reinstall "conexus[local]"``, rebuilds
+    the uv tree over the nexus-owned shims on a migrated box). The merged
+    set travels through ``install_generation.sh --extras`` and is rendered
+    by ``install_layout.build_spec``, so spec and extras cannot disagree.
 
     Returns the new generation, or ``None`` on a dry run.
     """
     from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    new_extras = _normalize_extras(add_extras)
 
     install_dir = packaged_install_dir()
     tools = install_layout.tools_dir()
@@ -105,6 +117,18 @@ def perform_self_install(
     # expressly to converge that layout -- reachable only by cloning the repo.
     if host.parent == tools and host.name.startswith(install_layout.GENERATION_PREFIX):
         pass  # a generation: fall through to the upgrade path below
+    elif new_extras:
+        # nexus-pffc4: --extras is a GENERATION-install surface. The legacy
+        # convergence/repair branches below derive extras from their own
+        # bridging rules (see _converge_legacy_install's deliberate
+        # NO --extras); silently dropping a requested extra there would be
+        # the green-then-degraded shape the [local] extra exists to prevent.
+        raise click.ClickException(
+            "--extras applies to a generation install. This nx is not "
+            "running from one — converge first (`nx self install` with no "
+            "--extras migrates a legacy uv tree), then re-run "
+            "`nx self install --extras ...` from the generation."
+        )
     elif _running_from_legacy_tool_install():
         # A uv tree beside an EXISTING generation layout is a takeover, not a
         # box that never migrated: `uv tool install --force conexus` (or a
@@ -140,7 +164,9 @@ def perform_self_install(
     # WHAT TO INSTALL comes from the receipt of the generation we are running
     # from, not from `current`: a self-install reproduces THIS process's
     # install, and on a box whose current has already moved those differ.
-    build = _build_argv(install_dir, install_layout.read_receipt(host), version=version)
+    receipt = install_layout.read_receipt(host)
+    extras = _merge_extras(receipt.extras, new_extras)
+    build = _build_argv(install_dir, receipt, version=version, extras=extras)
     if dry_run:
         click.echo(" ".join(build))
         return None
@@ -175,7 +201,39 @@ def perform_self_install(
     return generation
 
 
-def _build_argv(install_dir: Path, receipt, *, version: str | None) -> list[str]:
+_EXTRA_NAME_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?")
+
+
+def _normalize_extras(raw: tuple[str, ...]) -> list[str]:
+    """Flatten repeatable/comma-separated ``--extras`` values, fail loud on
+    junk (nexus-pffc4). An invalid name would otherwise surface as an opaque
+    uv resolution error deep inside the generation build."""
+    names: list[str] = []
+    for chunk in raw:
+        for name in chunk.split(","):
+            name = name.strip()
+            if not name:
+                continue
+            if not _EXTRA_NAME_RE.fullmatch(name):
+                raise click.ClickException(
+                    f"--extras: {name!r} is not a valid extra name"
+                )
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _merge_extras(existing: list[str], new: list[str]) -> list[str]:
+    """Receipt extras first (order preserved), requested ones appended —
+    a MERGE, never a replace, so adding [local] cannot drop an extra the
+    box already has."""
+    return list(existing) + [n for n in new if n not in existing]
+
+
+def _build_argv(
+    install_dir: Path, receipt, *, version: str | None,
+    extras: list[str] | None = None,
+) -> list[str]:
     """The install_generation.sh argv that reproduces *receipt*'s install.
 
     EXTRAS ARE THREADED EXPLICITLY. This is the load-bearing reason the old
@@ -183,14 +241,17 @@ def _build_argv(install_dir: Path, receipt, *, version: str | None) -> list[str]
     the [local] extra and reintroduces the 5.6.2 local-search P0 (a 768-dim
     embedder silently replaced by a 384-dim one, against collections built
     at 768). There is no uv receipt to re-derive them from any more, so they
-    travel from nexus-install.json or they are lost.
+    travel from nexus-install.json or they are lost. *extras*, when given,
+    is the caller's already-merged set (receipt + requested, nexus-pffc4);
+    ``None`` means the receipt's own.
     """
+    effective = receipt.extras if extras is None else extras
     build = [
         "bash", str(install_dir / "install_generation.sh"),
         "--source", receipt.source,
     ]
-    if receipt.extras:
-        build += ["--extras", ",".join(receipt.extras)]
+    if effective:
+        build += ["--extras", ",".join(effective)]
     if version:
         build += ["--version", version]
     return build
@@ -484,9 +545,13 @@ def self_group() -> None:
               help="Generations to retain. The four never-delete rules still apply.")
 @click.option("--version", default=None,
               help="Install this version instead of whatever the source resolves to.")
+@click.option("--extras", "extras", multiple=True,
+              help="Extra(s) to ADD, e.g. --extras local (repeatable, or "
+                   "comma-separated). MERGED with the extras this install "
+                   "already has — never replaces them (nexus-pffc4).")
 @click.option("--dry-run", is_flag=True,
               help="Print the build command and stop.")
-def install_cmd(keep: int, version: str | None, dry_run: bool) -> None:
+def install_cmd(keep: int, version: str | None, extras: tuple[str, ...], dry_run: bool) -> None:
     """Install a new generation from the one this process is running from.
 
     Safe under live sessions: nothing is swapped underneath a running process.
@@ -495,7 +560,9 @@ def install_cmd(keep: int, version: str | None, dry_run: bool) -> None:
     This upgrades the BINARY only. Run `nx upgrade` separately for the
     migration ladder — they are two commands on purpose (RDR-143 CA-2).
     """
-    generation = perform_self_install(keep=keep, version=version, dry_run=dry_run)
+    generation = perform_self_install(
+        keep=keep, version=version, dry_run=dry_run, add_extras=extras,
+    )
     if generation is None:
         return
     click.echo(f"installed {generation.name}")

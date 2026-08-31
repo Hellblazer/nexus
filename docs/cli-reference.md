@@ -2927,7 +2927,7 @@ process precisely so that inheritance happens.
 ## nx self install
 
 ```
-nx self install [--keep N] [--version X.Y.Z] [--dry-run]
+nx self install [--keep N] [--version X.Y.Z] [--extras NAME] [--dry-run]
 ```
 
 Upgrade this install of `nx`. Installs are **side-by-side generations**: the
@@ -2937,6 +2937,17 @@ rewrites the shims in `<bin>`, then reaps old generations. Nothing is ever
 swapped underneath a running process — a live holder keeps executing its own
 generation byte-identically and converges at its next spawn, so no session has
 to be closed and there is nothing to force.
+
+**Adding an extra (nexus-pffc4):** `nx self install --extras local` builds the
+new generation with that extra ADDED — the flag MERGES with the extras the
+receipt already carries, never replaces them (repeatable, or comma-separated:
+`--extras local,dt`). This is the supported way to get `[local]` (bge-768)
+onto a box that installed without it; the legacy
+`uv tool install --reinstall "conexus[local]"` answer rebuilds uv's tree over
+the nexus-owned shims on a generation box and must not be used there.
+`--extras` applies to generation installs only — on an unconverged legacy uv
+box, converge first (`nx self install` with no flags), then re-run with the
+flag.
 
 **A uv takeover self-repairs (7.21.0).** Measured against uv 0.8: on a
 generation box a plain `uv tool install conexus` rebuilds uv's tree (a

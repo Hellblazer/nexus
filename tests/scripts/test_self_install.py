@@ -157,6 +157,69 @@ def test_extras_are_carried_forward(bed, monkeypatch) -> None:
     )
 
 
+def test_extras_flag_adds_to_an_existing_install(bed, monkeypatch) -> None:
+    """nexus-pffc4 THE FIX: `nx self install --extras dt` on a generation
+    whose receipt already carries [local] produces a build with BOTH —
+    merge, never replace (replacing would drop [local] and reintroduce the
+    5.6.2 768->384 embedder downgrade)."""
+    tools, _, src = bed
+    host = _hosting_generation(tools, "20260101T000000Z", extras=["local"], source=str(src))
+    (tools / "current").symlink_to(host)
+    monkeypatch.setattr(sys, "prefix", str(host))
+
+    _run_self_install(add_extras=("dt",))
+
+    new = (tools / "current").resolve()
+    receipt = json.loads((new / "nexus-install.json").read_text())
+    # The builder normalizes receipt order; BOTH surviving is the contract.
+    assert sorted(receipt["extras"]) == ["dt", "local"], receipt["extras"]
+
+
+def test_extras_flag_dry_run_shows_the_merged_set(bed, monkeypatch, capsys) -> None:
+    """The dry-run argv is the contract: receipt extras first, requested
+    appended, comma-joined for install_generation.sh --extras. Repeatable
+    and comma-separated forms both flatten; duplicates collapse."""
+    tools, _, src = bed
+    host = _hosting_generation(tools, "20260101T000000Z", extras=["local"], source=str(src))
+    (tools / "current").symlink_to(host)
+    monkeypatch.setattr(sys, "prefix", str(host))
+
+    assert _run_self_install(dry_run=True, add_extras=("dt,local", "dt")) is None
+
+    out = capsys.readouterr().out
+    assert "--extras local,dt" in out, out
+
+
+def test_extras_flag_refuses_junk_names(bed, monkeypatch) -> None:
+    """A bad name must fail HERE with its own message, not as an opaque uv
+    resolution error deep inside the generation build."""
+    tools, _, src = bed
+    host = _hosting_generation(tools, "20260101T000000Z", source=str(src))
+    (tools / "current").symlink_to(host)
+    monkeypatch.setattr(sys, "prefix", str(host))
+
+    with pytest.raises(click.ClickException) as exc:
+        _run_self_install(add_extras=("loc al",))
+    assert "not a valid extra name" in str(exc.value)
+
+
+def test_extras_flag_refuses_off_a_generation(bed, monkeypatch, tmp_path) -> None:
+    """--extras is a generation-install surface: the legacy convergence
+    branches bridge extras by their own rules, and silently dropping a
+    requested one there is the green-then-degraded shape [local] exists to
+    prevent. The refusal must say so, before any converge/refuse branching."""
+    from nexus.commands.self_cmd import perform_self_install
+
+    checkout_venv = tmp_path / "checkout" / ".venv"
+    checkout_venv.mkdir(parents=True)
+    monkeypatch.setattr(sys, "prefix", str(checkout_venv))
+
+    with pytest.raises(click.ClickException) as exc:
+        perform_self_install(add_extras=("local",))
+    message = str(exc.value)
+    assert "--extras applies to a generation install" in message, message
+
+
 @pytest.mark.parametrize("source_kind,source", [
     ("directory", None),   # None -> the bed's real source dir
     ("registry", "conexus"),
