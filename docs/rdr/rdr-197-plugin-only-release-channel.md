@@ -173,15 +173,19 @@ the first draft (both corrected below, at their sources).
 
 ### Critical Assumptions
 
-- [ ] The allowlist stays synchronized with the hatch build config.
-  **Status**: Unverified. **Method**: a test asserting every force-include
-  path in `pyproject.toml` is carved out of the allowlist.
-- [ ] The lockstep hook stays silent on a plugin-cut install.
-  **Status**: Unverified. **Method**: Spike (the one-time end-to-end cut,
-  checking `lockstep.log` for absence of an upgrade attempt).
-- [ ] The atomic-split precondition is checkable from ledger entries.
-  **Status**: Unverified. **Method**: Spike against the current ledger
-  (nexus-77cct is the test case).
+- [x] The allowlist stays synchronized with the hatch build config.
+  **Status**: Verified (R3 gate, 2026-08-30). **Evidence**:
+  `tests/test_plugin_channel.py` allowlist proof + hatch-sync assertion
+  (beads nexus-a2wmi.1/.2), green through the real cut's battery.
+- [x] The lockstep hook stays silent on a plugin-cut install.
+  **Status**: Verified (R3 gate, 2026-08-30). **Evidence**:
+  `tests/hooks/test_version_lockstep_hook.py::
+  test_plugin_cut_with_unchanged_version_is_silent` (bead nexus-a2wmi.5),
+  green through the real cut's battery.
+- [x] The atomic-split precondition is checkable from ledger entries.
+  **Status**: Verified (R3 gate, 2026-08-30). **Evidence**:
+  `tests/test_cut_plugin_release.py` split-check tests + T2 [23419]; the
+  real cut (`plugin-v7.24.0-1`) ran the check live against the ledger.
 
 ## Proposed Solution
 
@@ -410,6 +414,24 @@ Not yet run. Gate after Sam's review of this draft.
 
 ## Revision History
 
+- 2026-08-30 (a2wmi.13 R3 gate, both stacked reviewers): Critical
+  Assumptions flipped to verified with evidence pointers — bead .12's
+  acceptance required the flip and it had never been done. Operational-doc
+  drift fixed the same day: `docs/contributing.md`'s cut runbook still
+  showed the pre-spike bare back-merge (conflicts on
+  `conexus/PENDING_RELEASE.md` by construction; the sequence now uses
+  `scripts/plugin_cut_back_merge.sh`) and claimed the tag workflow re-runs
+  release-sandbox smoke (it deliberately does not — CI wiring for the
+  smoke is non-gating follow-on nexus-98gpl); the battery paragraph now
+  states the script layer and the workflow layer separately, and the
+  mandatory rehearsal is step 0 of the sequence. One validation item is
+  recorded as a GAP, not evidenced: "sandboxed `/plugin update` picks up
+  the anchored tag within one refresh" was never directly exercised
+  against `plugin-v7.24.0-1` — the anchored window closed when v7.24.1
+  reset the pins hours later; verify it at the next real cut. Record
+  correction: BOTH Implementation Plan item-4 follow-on beads were filed
+  2026-08-22 (nexus-98gpl open; nexus-zklff change-class battery closed by
+  Sam's 2026-08-29 groom — a deliberate ruling, not a lost item).
 - 2026-08-30 (a2wmi.12 spike: the first real cut, `plugin-v7.24.0-1` for
   nexus-znvjd): three machinery defects found by the cut's own battery and
   fixed in one PR to main. (1) The cut script's ledger rewrite judged any

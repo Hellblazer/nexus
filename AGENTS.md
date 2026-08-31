@@ -168,8 +168,10 @@ publishes nothing to PyPI: the `plugin-v*` tag fires a verify-only
 workflow (`.github/workflows/plugin-release.yml`), and the wheel-surface
 proof asserts the cut's range touches no wheel content. The cut itself
 is `scripts/cut_plugin_release.py` (a script with tests, never a
-checklist); invariants R and W live in `scripts/plugin_channel.py`'s
-docstring.
+checklist); the post-cut back-merge is `scripts/plugin_cut_back_merge.sh`,
+never a bare merge (`conexus/PENDING_RELEASE.md` conflicts by
+construction on every cut); invariants R and W live in
+`scripts/plugin_channel.py`'s docstring.
 
 **Usage discipline** (was this cut warranted?):
 1. Cut when accumulated plugin functionality is worth shipping and no
