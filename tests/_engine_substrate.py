@@ -168,34 +168,40 @@ _WORKER_SHARD_MAX_INDEX = (
 #: test still discovers against the ambient config dir, exactly as before
 #: (same contract as tests/db/_service_fixture.pg_bin_dir's own
 #: import-time resolution note).
-_PG_AMBIENT_ENV_KEYS = ("NEXUS_PG_BIN", "NEXUS_CONFIG_DIR", "HOME", "PATH")
+_PG_AMBIENT_ENV_KEYS = (
+    "NEXUS_PG_BIN", "NEXUS_PG_BUNDLE", "NEXUS_CONFIG_DIR", "HOME", "PATH",
+)
 _PG_AMBIENT_ENV: dict[str, str | None] = {
     k: os.environ.get(k) for k in _PG_AMBIENT_ENV_KEYS
 }
 _pg_bin_resolved: Path | None = None
+_pg_bin_lock = threading.Lock()
 
 
 def _pg_bin() -> Path:
     """The PG bundle ``bin/`` dir, resolved once on FIRST REAL USE under the
     import-time ambient env snapshot (may download on a cold cache — which is
-    exactly why it must not run at collection time)."""
+    exactly why it must not run at collection time). The lock serializes the
+    env-swap window against any concurrent in-process caller (review round 2:
+    ``sweep_stale_substrate_clusters`` can reach here from a test body)."""
     global _pg_bin_resolved
-    if _pg_bin_resolved is None:
-        saved = {k: os.environ.get(k) for k in _PG_AMBIENT_ENV_KEYS}
-        try:
-            for k, v in _PG_AMBIENT_ENV.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
-            _pg_bin_resolved = pg_bin_dir()
-        finally:
-            for k, v in saved.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
-    return _pg_bin_resolved
+    with _pg_bin_lock:
+        if _pg_bin_resolved is None:
+            saved = {k: os.environ.get(k) for k in _PG_AMBIENT_ENV_KEYS}
+            try:
+                for k, v in _PG_AMBIENT_ENV.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+                _pg_bin_resolved = pg_bin_dir()
+            finally:
+                for k, v in saved.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+        return _pg_bin_resolved
 
 
 def _worker_shard_range() -> range:

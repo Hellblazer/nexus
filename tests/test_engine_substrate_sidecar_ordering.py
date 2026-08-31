@@ -69,7 +69,7 @@ class TestSidecarWrittenBeforeTcpWait:
         )
         monkeypatch.setattr(sub, "_boot_semaphore_slot", contextlib.nullcontext)
         monkeypatch.setattr(sub, "jar_freshness_skip_reason", lambda *_a, **_kw: None)
-        monkeypatch.setattr(sub, "_PG_BIN", tmp_path)  # any dir that exists
+        monkeypatch.setattr(sub, "_pg_bin_resolved", tmp_path)  # any dir that exists
 
         def _fake_run(args, **_kwargs):
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
@@ -134,7 +134,7 @@ class TestSidecarWrittenBeforeTcpWait:
         )
         monkeypatch.setattr(sub, "_boot_semaphore_slot", contextlib.nullcontext)
         monkeypatch.setattr(sub, "jar_freshness_skip_reason", lambda *_a, **_kw: None)
-        monkeypatch.setattr(sub, "_PG_BIN", tmp_path)
+        monkeypatch.setattr(sub, "_pg_bin_resolved", tmp_path)
 
         def _fake_run(args, **_kwargs):
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
@@ -213,7 +213,7 @@ class TestClusterDirectoryNeverExistsWithoutASidecar:
             sub, "sweep_stale_substrate_clusters", lambda **_kw: sub.SweepResult(),
         )
         monkeypatch.setattr(sub, "jar_freshness_skip_reason", lambda *_a, **_kw: None)
-        monkeypatch.setattr(sub, "_PG_BIN", tmp_path)
+        monkeypatch.setattr(sub, "_pg_bin_resolved", tmp_path)
 
         class _FakePopen:
             def __init__(self, *_args, **_kwargs) -> None:

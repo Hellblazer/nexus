@@ -39,7 +39,6 @@ import pytest
 from nexus.daemon.service_registry import pid_alive, process_command
 from tests._engine_substrate import (
     _LOW_PORT_RANGE,
-    _PG_BIN,
     _SIDECAR_FILENAME,
     _WORKER_SHARD_MAX_INDEX,
     _WORKER_SHARD_WIDTH,
@@ -49,6 +48,7 @@ from tests._engine_substrate import (
     _kill_engine_leg,
     _kill_postmaster_leg,
     _owner_is_live,
+    _pg_bin,
     _read_postmaster_pid,
     _worker_shard_range,
     sweep_stale_substrate_clusters,
@@ -436,7 +436,9 @@ class TestKillPostmasterLegUsesPgCtl:
     a raw signal straight to the postmaster PID."""
 
     def test_stops_a_real_postmaster_via_pg_ctl_immediate(self) -> None:
-        if not _PG_BIN.exists():
+        # nexus-v460j: _pg_bin() resolves lazily at this first-use point
+        # (test RUN time, never collection time).
+        if not _pg_bin().exists():
             pytest.skip("no PG bundle discoverable for this throwaway cluster")
 
         import tempfile
@@ -449,7 +451,7 @@ class TestKillPostmasterLegUsesPgCtl:
         pgdata = Path(tempfile.mkdtemp(prefix="nexus_lgdy1_throwaway_pg_"))
         try:
             subprocess.run(
-                [str(_PG_BIN / "initdb"), "-D", str(pgdata), "--no-locale",
+                [str(_pg_bin() / "initdb"), "-D", str(pgdata), "--no-locale",
                  "-E", "UTF8", "--auth=trust"],
                 check=True, capture_output=True,
             )
@@ -457,7 +459,7 @@ class TestKillPostmasterLegUsesPgCtl:
                 # Unix socket only -- no TCP port needed for this test.
                 f.write("listen_addresses = ''\n")
             subprocess.run(
-                [str(_PG_BIN / "pg_ctl"), "-D", str(pgdata), "-l",
+                [str(_pg_bin() / "pg_ctl"), "-D", str(pgdata), "-l",
                  str(pgdata / "pg.log"), "-o", f"-k {pgdata}", "start", "-w"],
                 check=True, capture_output=True,
             )
@@ -473,7 +475,7 @@ class TestKillPostmasterLegUsesPgCtl:
                 )
             finally:
                 subprocess.run(
-                    [str(_PG_BIN / "pg_ctl"), "-D", str(pgdata),
+                    [str(_pg_bin() / "pg_ctl"), "-D", str(pgdata),
                      "stop", "-m", "immediate"],
                     capture_output=True,
                 )
