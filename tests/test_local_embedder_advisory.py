@@ -87,14 +87,13 @@ class TestState2DegradedBge:
         assert "pip install" not in joined
         assert 'uv tool install --reinstall "conexus[local]"' in joined
 
-    def test_generation_box_states_the_limitation_not_a_dead_command(
+    def test_generation_box_names_the_extras_command_not_a_dead_one(
         self, monkeypatch,
     ) -> None:
-        """On a generation install there is NO in-place remedy (extras are
-        fixed at build time; `nx self install`'s upgrade path bridges only
-        extras a generation already has). The advisory must say so plainly
-        rather than recommend `nx init` or `pip install`, both of which
-        abort or no-op on a generation box."""
+        """nexus-pffc4 retired the honest-limitation sentence this test used
+        to pin: `nx self install --extras local` is the real in-place remedy
+        now (merge-with-receipt rebuild). The advisory must name IT, and the
+        nexus-hbgso dead-end bans (`nx init`, `pip install`) still hold."""
         monkeypatch.setattr(
             "nexus.install_advice.has_generation_layout", lambda: True,
         )
@@ -103,8 +102,7 @@ class TestState2DegradedBge:
         joined = " ".join(r.fix_suggestions)
         assert "nx init" not in joined
         assert "pip install" not in joined
-        assert "no in-place remedy" in joined
-        assert "[local]" in joined
+        assert "nx self install --extras local" in joined
 
 
 class TestResolverServiceModeWarning:

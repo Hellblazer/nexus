@@ -123,10 +123,16 @@ def perform_self_install(
         # bridging rules (see _converge_legacy_install's deliberate
         # NO --extras); silently dropping a requested extra there would be
         # the green-then-degraded shape the [local] extra exists to prevent.
+        # The message covers every non-generation shape this branch
+        # intercepts (round-2 review [23834]): a legacy uv tree converges, a
+        # uv takeover repairs, a dev checkout uses the repo script — each
+        # via the plain `nx self install` (or reinstall-tool.sh) it names.
         raise click.ClickException(
-            "--extras applies to a generation install. This nx is not "
-            "running from one — converge first (`nx self install` with no "
-            "--extras migrates a legacy uv tree), then re-run "
+            "--extras applies to a generation install, and this nx is not "
+            "running from one. Get onto the generation layout first — "
+            "`nx self install` with no --extras converges a legacy uv tree "
+            "or repairs a uv takeover; a dev checkout uses "
+            "scripts/reinstall-tool.sh — then re-run "
             "`nx self install --extras ...` from the generation."
         )
     elif _running_from_legacy_tool_install():
@@ -207,7 +213,12 @@ _EXTRA_NAME_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?")
 def _normalize_extras(raw: tuple[str, ...]) -> list[str]:
     """Flatten repeatable/comma-separated ``--extras`` values, fail loud on
     junk (nexus-pffc4). An invalid name would otherwise surface as an opaque
-    uv resolution error deep inside the generation build."""
+    uv resolution error deep inside the generation build.
+
+    Names are PEP 685-normalized (lowercase, runs of ``-_.`` collapse to
+    ``-``) so ``--extras Local`` cannot land beside an existing ``local`` as
+    two "different" extras forever (round-2 review [23834]: nothing
+    downstream normalizes, so the dedupe here is the only one)."""
     names: list[str] = []
     for chunk in raw:
         for name in chunk.split(","):
@@ -218,6 +229,7 @@ def _normalize_extras(raw: tuple[str, ...]) -> list[str]:
                 raise click.ClickException(
                     f"--extras: {name!r} is not a valid extra name"
                 )
+            name = re.sub(r"[-_.]+", "-", name.lower())
             if name not in names:
                 names.append(name)
     return names
@@ -226,8 +238,13 @@ def _normalize_extras(raw: tuple[str, ...]) -> list[str]:
 def _merge_extras(existing: list[str], new: list[str]) -> list[str]:
     """Receipt extras first (order preserved), requested ones appended —
     a MERGE, never a replace, so adding [local] cannot drop an extra the
-    box already has."""
-    return list(existing) + [n for n in new if n not in existing]
+    box already has. Dedupe compares PEP 685-normalized forms so a
+    differently-spelled receipt entry still suppresses the duplicate."""
+    def _norm(n: str) -> str:
+        return re.sub(r"[-_.]+", "-", n.lower())
+
+    have = {_norm(n) for n in existing}
+    return list(existing) + [n for n in new if _norm(n) not in have]
 
 
 def _build_argv(

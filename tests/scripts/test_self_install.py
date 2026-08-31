@@ -190,6 +190,22 @@ def test_extras_flag_dry_run_shows_the_merged_set(bed, monkeypatch, capsys) -> N
     assert "--extras local,dt" in out, out
 
 
+def test_extras_flag_normalizes_case_against_the_receipt(bed, monkeypatch, capsys) -> None:
+    """PEP 685 dedupe (round-2 review [23834]): `--extras Local` against a
+    receipt already carrying `local` must NOT produce two extras — nothing
+    downstream normalizes, so a missed dedupe here persists forever."""
+    tools, _, src = bed
+    host = _hosting_generation(tools, "20260101T000000Z", extras=["local"], source=str(src))
+    (tools / "current").symlink_to(host)
+    monkeypatch.setattr(sys, "prefix", str(host))
+
+    assert _run_self_install(dry_run=True, add_extras=("Local",)) is None
+
+    out = capsys.readouterr().out
+    assert "--extras local" in out, out
+    assert "Local" not in out, out
+
+
 def test_extras_flag_refuses_junk_names(bed, monkeypatch) -> None:
     """A bad name must fail HERE with its own message, not as an opaque uv
     resolution error deep inside the generation build."""
@@ -218,6 +234,11 @@ def test_extras_flag_refuses_off_a_generation(bed, monkeypatch, tmp_path) -> Non
         perform_self_install(add_extras=("local",))
     message = str(exc.value)
     assert "--extras applies to a generation install" in message, message
+    # Round-2 review [23834]: the branch intercepts THREE non-generation
+    # shapes; the message must name the right next step for each, not just
+    # the legacy-converge one.
+    assert "reinstall-tool.sh" in message, message
+    assert "uv takeover" in message, message
 
 
 @pytest.mark.parametrize("source_kind,source", [
