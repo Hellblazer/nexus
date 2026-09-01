@@ -1116,3 +1116,38 @@ stratum falls short. Pinned before Phase 1 runs, as this RDR requires.
   explicitly; `nexus-zekpl` cited as closed with the caveat's residual
   scope stated; jargon glosses (ALB, conductus, Fable, `.p2d`,
   `njrcn-relay`, RC-n labels, h33x8.6).
+- 2026-09-01 — Phase 1c SHIPPED (nexus-4e75w.5), go-live checklist
+  closed and `_CONTINUATION_GO_LIVE` flipped True: (1) the SQL-fast-path
+  probe (`continuation_envelope._sql_fast_path_would_hit`) calls the
+  REAL `try_filter`/`try_groupby`/`try_aggregate` gate before building
+  Shape B's LLM prompt, falling back to headless on a hit; (2)
+  `plan_run` gained `continuation_cut_at_step` (0-based, same convention
+  as `ContinuationCut.cut_at_step`) — checked at the same pre-segment
+  point as `deadline`/`budget_usd_remaining`, it stops dispatch before
+  the cut fires, recording `PlanResult.continuation_cut_applied`; (3)
+  `nx_answer` runs `plan_run` ONCE with the cut threaded in, assembles
+  the envelope from the resulting prefix-only output, and on a
+  successful assembly writes the handoff row (via the same
+  `_nx_answer_record_run` helper Step 6 uses) BEFORE returning the
+  envelope — R2's ordering rule proven by a dedicated ordering test, not
+  assumed from code order alone; on `assemble_continuation_envelope`
+  returning `None` (a SQL-would-hit, an oversized prompt, or a
+  reconstruction failure), `nx_answer` re-runs `plan_run` a SECOND time
+  WITHOUT the cut to complete the plan headlessly — the accepted cost of
+  a rare fallback, and the only way to give a caller a normal answer
+  once the prefix-only run already withheld the suffix; (4)
+  `answer_runs.py`'s three-way split is renamed `_split_four_way`,
+  keyed on `NX_ANSWER_CONTINUATION_MARKER_PREFIX` (`"[continuation
+  handed off"`) / `NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX`
+  (`"[continuation completed"`, both `core.py`-defined, checked BEFORE
+  the `step_count` branch so a step_count=0 handoff — an all-operator-
+  suffix plan cut at step 0 — never misclassifies as degenerate); the
+  new `nx_answer_report(continuation_id, ok, final_text_excerpt)` MCP
+  tool writes the paired report row (a second, independent append, per
+  the append-only doctrine); `_continuation_pairing_stats` computes the
+  unreported rate (`None`, never a fabricated 0%, when there are no
+  handoffs) and is surfaced in both `--json` and human output, labelled
+  *unreported*, never *abandoned*. Zero engine change throughout — no
+  schema migration, no new route, no engine tag; both markers ride the
+  existing `final_text` column exactly as the budget-exhausted marker
+  already does.

@@ -2451,6 +2451,143 @@ async def test_budget_usd_remaining_unknown_cost_steps_never_trip() -> None:
     assert all(r.cost_usd is None for r in result.step_records)
 
 
+# ── RDR-200 .p1c (nexus-4e75w.5): continuation "stop-before-cut" ──────────
+#
+# Same pre-segment placement as deadline / budget_usd_remaining above: the
+# segment at or past continuation_cut_at_step never dispatches. Proves the
+# terminal continuation suffix a caller is about to hand off never executes
+# server-side (RDR-200 R2).
+
+
+@pytest.mark.asyncio
+async def test_continuation_cut_at_step_stops_before_terminal_operator() -> None:
+    """search (step 0) runs; extract (step 1, the cut point) must NOT
+    dispatch at all -- proves zero claude_dispatch/SQL executions for a
+    suffix step once the cut applies."""
+    from unittest.mock import patch
+
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "extract", "args": {"inputs": "$step1.ids", "fields": "a"}},
+        ],
+    }
+    extract_calls: list[str] = []
+
+    async def stub_search(**kwargs):
+        return {"ids": ["a"], "tumblers": ["1.1"], "distances": [0.1], "collections": ["knowledge"]}
+
+    async def stub_extract(**kwargs):
+        extract_calls.append("extract")
+        return {"extractions": []}
+
+    from nexus.mcp import core as mcp_core
+
+    with patch.object(mcp_core, "search", stub_search), \
+         patch.object(mcp_core, "operator_extract", stub_extract):
+        result = await plan_run(
+            _match(plan), {}, continuation_cut_at_step=1, bundle_operators=False,
+        )
+
+    assert extract_calls == [], (
+        "the cut step must never dispatch -- zero executions of the "
+        "suffix operator"
+    )
+    assert len(result.steps) == 1, "only the pre-cut search step ran"
+    assert result.steps[0]["ids"] == ["a"]
+    assert result.continuation_cut_applied is True
+    assert result.step_records[0].operator == "search"
+    assert result.budget_exhausted_at_step is None, (
+        "a continuation cut is a distinct mechanism from budget "
+        "exhaustion -- it must never set the budget marker fields"
+    )
+
+
+@pytest.mark.asyncio
+async def test_continuation_cut_at_step_none_preserves_default_fields() -> None:
+    """``continuation_cut_at_step=None`` (the default) must reproduce
+    pre-.p1c behavior exactly -- every segment dispatches, unchanged."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "extract", "args": {"inputs": "$step1.ids", "fields": "a"}},
+        ],
+    }
+    from unittest.mock import patch
+
+    from nexus.mcp import core as mcp_core
+
+    async def stub_search(**kwargs):
+        return {"ids": ["a"], "tumblers": ["1.1"], "distances": [0.1], "collections": ["knowledge"]}
+
+    async def stub_extract(**kwargs):
+        return {"extractions": []}
+
+    with patch.object(mcp_core, "search", stub_search), \
+         patch.object(mcp_core, "operator_extract", stub_extract):
+        result = await plan_run(_match(plan), {}, bundle_operators=False)
+
+    assert len(result.steps) == 2
+    assert result.continuation_cut_applied is False
+
+
+@pytest.mark.asyncio
+async def test_continuation_cut_at_step_past_the_plan_never_fires() -> None:
+    """A cut index beyond the plan's last segment must let the whole
+    plan run -- ``continuation_cut_applied`` stays False (nothing was
+    withheld that would otherwise have run)."""
+    from unittest.mock import patch
+
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+
+    async def stub_search(**kwargs):
+        return {"ids": ["a"], "tumblers": ["1.1"], "distances": [0.1], "collections": ["knowledge"]}
+
+    from nexus.mcp import core as mcp_core
+
+    with patch.object(mcp_core, "search", stub_search):
+        result = await plan_run(_match(plan), {}, continuation_cut_at_step=5)
+
+    assert len(result.steps) == 1
+    assert result.continuation_cut_applied is False
+
+
+@pytest.mark.asyncio
+async def test_continuation_cut_at_step_zero_stops_before_the_first_step() -> None:
+    """A cut at the very first step (an all-operator plan) withholds
+    everything -- zero StepRecords, matching the RDR's "the terminal
+    suffix MUST NOT execute server-side" contract for the degenerate
+    all-suffix case."""
+    from unittest.mock import patch
+
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "summarize", "args": {"content": "x"}}]}
+    calls: list[str] = []
+
+    async def stub_summarize(**kwargs):
+        calls.append("summarize")
+        return {"summary": "x"}
+
+    from nexus.mcp import core as mcp_core
+
+    with patch.object(mcp_core, "operator_summarize", stub_summarize):
+        result = await plan_run(
+            _match(plan), {}, continuation_cut_at_step=0, bundle_operators=False,
+        )
+
+    assert calls == []
+    assert result.steps == []
+    assert result.step_records == []
+    assert result.continuation_cut_applied is True
+
+
 # ── StepRecord (RDR-196 .p1b, nexus-nyry9.8) ────────────────────────────────
 
 

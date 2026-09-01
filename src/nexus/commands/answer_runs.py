@@ -26,6 +26,7 @@ the default-population statement.
 from __future__ import annotations
 
 import json as _json
+import re as _re
 import statistics as _statistics
 from datetime import UTC, datetime
 from typing import Any
@@ -49,6 +50,29 @@ _log = structlog.get_logger(__name__)
 #: labels windows that reach past it. Lexicographic compare against the
 #: row's ISO created_at is sound (both are ISO-8601, zero-padded).
 COST_INSTRUMENTED_SINCE = "2026-08-22"
+
+#: RDR-200 consumer caveat (critic-F2, T2 [23952], population sweep
+#: item 6), extending the SAME "always-labeled" pattern
+#: COST_INSTRUMENTED_SINCE's own caveat established just above: this
+#: module's WHOLE-SET block (``hit_count``/``fallback_count``/``total``/
+#: ``avg_duration_ms``/``latency_buckets`` — the engine's raw
+#: aggregates, printed BEFORE this file's own four-way split and
+#: unrelated to it) has the SAME zero-visibility problem
+#: telemetry_cmd.py's figure 1 has, for the SAME reason (RDR-200 F6,
+#: zero engine change): every ``nx_answer_report`` completion row
+#: (``plan_id=None``) is misclassified server-side as an inline-planner
+#: fallback, and a paired continuation call contributes 2 physical rows
+#: for 1 logical invocation. Unconditional — this whole-set block has
+#: no per-row visibility to gate the caveat on presence/absence.
+NX_ANSWER_RUNS_WHOLE_SET_CONTINUATION_CAVEAT = (
+    "hit/fallback/total/avg_* above (the WHOLE --since-filtered set) "
+    "have ZERO visibility into RDR-200 continuation rows: every "
+    "nx_answer_report completion row is misclassified server-side as "
+    "an inline-planner fallback, and a paired continuation call "
+    "contributes 2 physical rows for 1 logical invocation — the "
+    "four-way split above (handed-off count, unreported rate) is the "
+    "marker-aware read"
+)
 
 _BUCKET_ORDER = ("under_5s", "5s_to_30s", "30s_to_2min", "2min_to_5min", "over_5min")
 _BUCKET_LABEL = {
@@ -217,25 +241,169 @@ def _row_is_failed(row: dict) -> bool:
     return False
 
 
-def _split_three_way(
-    rows: "list[dict]",
-) -> "tuple[list[dict], list[dict], dict[str, list[dict]]]":
-    """Split *rows* (a fetched PAGE, not the whole filtered set) into
-    executed-ok, executed-failed, and degenerate (``step_count == 0``,
-    itself grouped by :func:`_classify_degenerate_row`).
+#: Extracts the ``continuation_id`` embedded in either RDR-200 marker's
+#: ``final_text`` (``NX_ANSWER_CONTINUATION_MARKER_PREFIX`` /
+#: ``NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX``, both
+#: ``core.py``-defined — see ``_row_is_handed_off``/``_row_is_report_
+#: event`` for the deferred import of the actual prefix strings).
+#:
+#: Marker-collision hardening (critic-F3, T2 [23952], falsified live: a
+#: crafted row whose synthesized ``final_text`` merely STARTS WITH the
+#: marker prefix — organic or adversarial corpus content landing
+#: verbatim in a generate/summarize step's output, the same threat
+#: class R7's fence-escape hardening treats as live — was silently
+#: misclassified as a genuine handoff/report by a bare prefix match,
+#: vanishing from executed_ok/failed and permanently inflating
+#: unreported_count with an unpairable fabricated id). The id pattern
+#: is now anchored to the EXACT shape ``continuation_envelope.py``'s
+#: ``continuation_id = str(uuid.uuid4())`` always produces (8-4-4-4-12
+#: hex, case-insensitive) — reduces, but per the critique's own ruling
+#: does not eliminate, the false-positive surface: a deliberate,
+#: byte-exact reproduction of marker+valid-uuid is not distinguishable
+#: from a real one by this check alone.
+_UUID4_SHAPE = (
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_CONTINUATION_ID_RE = _re.compile(rf"continuation_id=({_UUID4_SHAPE})")
 
-    Returns ``(executed_ok, executed_failed, degenerate_by_class)``.
+
+def _continuation_id_from_text(final_text: str) -> "str | None":
+    """The ``continuation_id`` embedded in a handoff or report row's
+    ``final_text``, or ``None`` when the text carries neither marker,
+    no id, or an id that isn't uuid4-shaped."""
+    m = _CONTINUATION_ID_RE.search(final_text)
+    return m.group(1) if m else None
+
+
+def _marker_carries_parseable_id(text: str, prefix: str) -> bool:
+    """Whether *text* both starts with *prefix* AND carries a PARSEABLE
+    (uuid4-shaped) ``continuation_id=`` immediately after it — the
+    tightened classification gate (critic-F3). Anchored to the exact
+    position right after ``"{prefix} continuation_id="`` so a
+    coincidental uuid elsewhere later in caller-controlled excerpt text
+    can never satisfy this; the id must be delimited by whitespace,
+    ``]``, or end-of-string right after it — the handoff marker's
+    ``...id]`` and the report marker's ``...id ok=True]`` shapes both
+    match, nothing else does.
+    """
+    if not text.startswith(prefix):
+        return False
+    pattern = (
+        rf"^{_re.escape(prefix)} continuation_id="
+        rf"(?:{_UUID4_SHAPE})(?:[\s\]]|$)"
+    )
+    return _re.match(pattern, text) is not None
+
+
+def _row_is_handed_off(row: dict) -> bool:
+    """Whether *row* is an RDR-200 continuation HANDOFF row (nexus-4e75w.5).
+
+    Imports ``NX_ANSWER_CONTINUATION_MARKER_PREFIX`` from ``nexus.mcp.
+    core`` (the single emitter of this text) rather than retyping the
+    literal — same convention as ``_row_is_failed``'s own budget-marker
+    import, for the same reason: a hand-typed second copy silently
+    drifts the moment either side's wording changes. Requires a
+    PARSEABLE id (:func:`_marker_carries_parseable_id`), not a bare
+    prefix match — critic-F3 marker-collision hardening.
+    """
+    from nexus.mcp.core import NX_ANSWER_CONTINUATION_MARKER_PREFIX  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
+
+    return _marker_carries_parseable_id(
+        str(row.get("final_text") or ""), NX_ANSWER_CONTINUATION_MARKER_PREFIX,
+    )
+
+
+def _row_is_continuation_report(row: dict) -> bool:
+    """Whether *row* is an RDR-200 continuation REPORT EVENT (written by
+    ``nx_answer_report``), never a run. Same deferred-import and
+    parseable-id convention as :func:`_row_is_handed_off`."""
+    from nexus.mcp.core import NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
+
+    return _marker_carries_parseable_id(
+        str(row.get("final_text") or ""), NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX,
+    )
+
+
+def _split_four_way(
+    rows: "list[dict]",
+) -> "tuple[list[dict], list[dict], list[dict], dict[str, list[dict]], list[dict]]":
+    """Split *rows* (a fetched PAGE, not the whole filtered set) into
+    executed-ok, executed-failed, handed-off, and degenerate
+    (``step_count == 0``, itself grouped by
+    :func:`_classify_degenerate_row`) — RDR-200 §Telemetry's four-way
+    run split (nexus-4e75w.5). A row carrying the continuation REPORT
+    marker is a report EVENT, not a run: it is returned separately
+    (*report_events*, for :func:`_continuation_pairing_stats` to pair
+    against the handed-off rows) and never lands in any of the four run
+    buckets — it can never double-count a run or misclassify as
+    ``degenerate`` on its own ``step_count == 0``.
+
+    Marker checks run BEFORE the ``step_count`` branch precisely because
+    a handoff can legitimately carry ``step_count == 0`` (a cut at the
+    very first plan step — an all-operator-suffix plan) — without
+    checking the marker first, such a row would misclassify as
+    degenerate instead of handed-off.
+
+    Returns ``(executed_ok, executed_failed, handed_off,
+    degenerate_by_class, report_events)``.
     """
     executed_ok: list[dict] = []
     executed_failed: list[dict] = []
+    handed_off: list[dict] = []
     degenerate: dict[str, list[dict]] = {}
+    report_events: list[dict] = []
     for r in rows:
+        if _row_is_continuation_report(r):
+            report_events.append(r)
+            continue
+        if _row_is_handed_off(r):
+            handed_off.append(r)
+            continue
         if int(r.get("step_count") or 0) > 0:
             (executed_failed if _row_is_failed(r) else executed_ok).append(r)
         else:
             cls = _classify_degenerate_row(r)
             degenerate.setdefault(cls, []).append(r)
-    return executed_ok, executed_failed, degenerate
+    return executed_ok, executed_failed, handed_off, degenerate, report_events
+
+
+def _continuation_pairing_stats(
+    handed_off: "list[dict]", report_events: "list[dict]",
+) -> dict[str, Any]:
+    """Pair handoff rows to report events by ``continuation_id`` and
+    compute the **unreported rate** — RDR-200 §Telemetry's honest
+    relabelling of what this metric measures: "a handoff with no paired
+    completion is counted as unreported, not abandoned" — the mechanism
+    cannot distinguish a reduction that never happened from one that
+    happened and was never reported (the report line is a convention
+    the calling model must remember to follow).
+
+    A handoff row whose ``final_text`` carries no parseable
+    ``continuation_id`` (malformed, should not happen in practice) is
+    excluded from the denominator rather than silently counted either
+    way — ``unparseable_handoff_count`` surfaces it instead.
+    """
+    reported_ids = {
+        cid for r in report_events
+        if (cid := _continuation_id_from_text(str(r.get("final_text") or "")))
+    }
+    handoff_ids = [
+        _continuation_id_from_text(str(r.get("final_text") or ""))
+        for r in handed_off
+    ]
+    unparseable = sum(1 for cid in handoff_ids if cid is None)
+    parseable_ids = [cid for cid in handoff_ids if cid is not None]
+    total = len(parseable_ids)
+    unreported = sum(1 for cid in parseable_ids if cid not in reported_ids)
+    return {
+        "handoff_count": total,
+        "reported_count": total - unreported,
+        "unreported_count": unreported,
+        "unreported_rate": (unreported / total) if total else None,
+        "unparseable_handoff_count": unparseable,
+        "report_event_count": len(report_events),
+    }
 
 
 def _step_breakdown(rows: "list[dict]") -> dict[str, Any]:
@@ -577,7 +745,8 @@ def _emit_budget_derivation(derivation: Any, *, json_out: bool) -> None:
     click.echo(f"  rows scanned: {d.n_rows_scanned}   executed-ok: {d.n_executed_ok}")
     click.echo(
         f"  excluded: no step records {d.n_excluded_no_steps}, "
-        f"pre-flip {d.n_excluded_pre_flip}, unknown cost {d.n_excluded_unknown_cost}"
+        f"pre-flip {d.n_excluded_pre_flip}, unknown cost {d.n_excluded_unknown_cost}, "
+        f"continuation handoff/report {d.n_excluded_continuation}"
     )
     if d.flipped_step_models:
         seen = ", ".join(f"{m} ({n})" for m, n in sorted(d.flipped_step_models.items()))
@@ -607,9 +776,19 @@ def _emit_report(
     telemetry_store: Any = None,
 ) -> None:
     rows = result.get("rows") or []
-    executed_ok_rows, executed_failed_rows, degenerate_by_class = _split_three_way(rows)
+    (
+        executed_ok_rows, executed_failed_rows, handed_off_rows,
+        degenerate_by_class, report_event_rows,
+    ) = _split_four_way(rows)
     degenerate_count = sum(len(v) for v in degenerate_by_class.values())
     degenerate_breakdown = {k: len(v) for k, v in degenerate_by_class.items()}
+    # RDR-200 §Telemetry (nexus-4e75w.5): continuation runs are NEVER
+    # folded into the headless cost population — handed_off_rows is a
+    # SEPARATE bucket from executed_ok/executed_failed by construction
+    # (_split_four_way classifies the marker BEFORE the step_count
+    # branch), so breakdown_rows below already excludes them without
+    # any extra filtering here.
+    continuation_stats = _continuation_pairing_stats(handed_off_rows, report_event_rows)
 
     # RDR-196 .p1e review-fix (Important): executed-ok only by default;
     # --include-failed folds executed-failed rows in too. Never
@@ -679,6 +858,20 @@ def _emit_report(
             "degenerate_breakdown": degenerate_breakdown,
             "executed_ok_avg_duration_ms": executed_ok_avg_duration_ms,
             "executed_ok_latency_buckets": executed_ok_latency_buckets,
+            # RDR-200 §Telemetry (nexus-4e75w.5): the fourth split bucket
+            # plus the handoff/report pairing stats. handed_off_count is
+            # the same page-scoped population `_continuation_pairing_
+            # stats`'s handoff_count re-derives (kept as its own key so a
+            # caller doesn't have to reach into `continuation` for the
+            # plain count) — report_event rows are counted ONLY inside
+            # `continuation` (they are not a run bucket).
+            "handed_off_count": len(handed_off_rows),
+            "continuation": continuation_stats,
+            # critic-F2 (T2 [23952]): caveats the RAW `hit_count`/
+            # `fallback_count`/`total`/`avg_*` keys `**result` just
+            # spread above — those are unconditionally present whenever
+            # the store returned any rows, so this caveat is too.
+            "whole_set_continuation_caveat": NX_ANSWER_RUNS_WHOLE_SET_CONTINUATION_CAVEAT,
         }
         if step_data is not None:
             payload["step_breakdown"] = step_data
@@ -703,6 +896,7 @@ def _emit_report(
     click.echo(
         f"  plan-match hit: {hit}  inline-planner fallback: {fallback}"
     )
+    click.echo(f"    CAVEAT: {NX_ANSWER_RUNS_WHOLE_SET_CONTINUATION_CAVEAT}")
     # RDR-196 .p1e review-fix (S2): explicitly labeled — this is the
     # engine's WHOLE `--since`-filtered set, degenerate + executed-ok +
     # executed-failed all blended, unchanged from pre-.p1e behavior. An
@@ -741,15 +935,34 @@ def _emit_report(
             if n:
                 click.echo(f"    {_BUCKET_LABEL[key]:<10} {n}")
 
-    # RDR-196 .p1e: page-scoped three-way split — explicitly labeled by
-    # its own scope (of the N rows LISTED below), never mixed into the
-    # whole-set aggregates printed above.
+    # RDR-196 .p1e / RDR-200 §Telemetry: page-scoped FOUR-way split —
+    # explicitly labeled by its own scope (of the N rows LISTED below),
+    # never mixed into the whole-set aggregates printed above.
+    # report_event rows are a fifth, non-run population (excluded from
+    # this split entirely — RDR-200's own contract) and are surfaced
+    # separately just below, never folded into "row(s) shown".
     click.echo(
         f"  of the {len(rows)} row(s) shown: executed-ok {len(executed_ok_rows)}, "
-        f"executed-failed {len(executed_failed_rows)}, degenerate {degenerate_count}"
+        f"executed-failed {len(executed_failed_rows)}, "
+        f"handed-off {len(handed_off_rows)}, degenerate {degenerate_count}"
     )
     for cls in sorted(degenerate_breakdown):
         click.echo(f"    degenerate/{cls}: {degenerate_breakdown[cls]}")
+
+    if handed_off_rows or report_event_rows:
+        click.echo(
+            f"  continuation (RDR-200): {continuation_stats['handoff_count']} "
+            f"handoff(s), {continuation_stats['reported_count']} reported, "
+            f"{continuation_stats['unreported_count']} unreported"
+        )
+        rate = continuation_stats["unreported_rate"]
+        if rate is not None:
+            click.echo(f"    unreported rate: {rate:.1%}")
+        if continuation_stats["unparseable_handoff_count"]:
+            click.echo(
+                f"    unparseable continuation_id: "
+                f"{continuation_stats['unparseable_handoff_count']}"
+            )
 
     if executed_ok_rows:
         click.echo(

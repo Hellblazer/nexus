@@ -4117,7 +4117,20 @@ class TestContinuationParameter:
         self, continuation_value,
     ):
         """Phase 1a builds no envelope — the returned text/steps must not
-        depend on ``continuation`` at all."""
+        depend on ``continuation`` at all.
+
+        Go-live pinned False explicitly (CR-Important-3, T2 [23951],
+        code-review-expert falsified this test live): with
+        `_CONTINUATION_GO_LIVE` True by default post-nexus-4e75w.5 and
+        `plan_run` mocked to return the SAME `plan_run_result` regardless
+        of kwargs, the `True` parametrization would otherwise silently
+        take the FULL engaged+fallback path (assembly raises on the
+        missing `ids` field, caught, `plan_run` called a SECOND time,
+        Step 5 extracts "ok" from the same mock) and pass only because
+        the mock ignores call count — proving nothing about Phase 1a's
+        actual "no envelope, no behavior change" claim. Pinning the gate
+        False here restores that claim; the engaged path has its own
+        dedicated tests in TestContinuationGoLive."""
         from nexus.mcp.core import nx_answer
 
         plan_run_result = MagicMock()
@@ -4126,7 +4139,8 @@ class TestContinuationParameter:
         plan_run_result.budget_exhausted_at_step = None
 
         patches, db_stub = self._patches(plan_run_result)
-        with patches[0], patches[1], patches[2] as t2_ctx, patches[3], patches[4]:
+        with patches[0], patches[1], patches[2] as t2_ctx, patches[3], patches[4], \
+             patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", False):
             t2_ctx.return_value.__enter__.return_value = db_stub
             result = await nx_answer(
                 question="q", continuation=continuation_value,
@@ -4159,10 +4173,14 @@ class TestContinuationParameter:
         )
 
     @pytest.mark.asyncio
-    async def test_continuation_true_logs_cut_decision(self):
+    async def test_continuation_true_logs_cut_decision_when_go_live_off(self):
         """The classifier fires and logs exactly once, with the shape and
-        cut index, when the caller opts in — and the plan_run call
-        underneath is untouched (Phase 1a is cut-selection only)."""
+        cut index, when the caller opts in — and (go-live explicitly
+        pinned False here) the plan_run call underneath is untouched:
+        Phase 1a is cut-selection only. RDR-200 (nexus-4e75w.5) makes
+        this go-live-DEPENDENT — see TestContinuationGoLive below for the
+        engaged (go-live True) behaviour, which legitimately calls
+        plan_run a second time on a fallback."""
         import logging
 
         import structlog
@@ -4183,7 +4201,8 @@ class TestContinuationParameter:
 
         patches, db_stub = self._patches(plan_run_result)
         with patches[0], patches[1] as plan_run_mock, patches[2] as t2_ctx, \
-             patches[3], patches[4]:
+             patches[3], patches[4], \
+             patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", False):
             t2_ctx.return_value.__enter__.return_value = db_stub
             with capture_logs() as cap:
                 result = await nx_answer(question="q", continuation=True)
@@ -4233,3 +4252,618 @@ class TestContinuationParameter:
             assert cut_events == [], (
                 f"continuation={continuation_value!r} must not classify or log"
             )
+
+
+class TestContinuationGoLive:
+    """RDR-200 (nexus-4e75w.5) — the engaged (go-live True) path, run
+    end to end against the REAL ``plan_run`` (never mocked here) so the
+    stop-before-cut mechanism and envelope assembly interact for real,
+    not through a stand-in that would hide the interaction. Only the
+    underlying ``operator_*``/retrieval MCP tools are stubbed."""
+
+    @pytest.mark.asyncio
+    async def test_handoff_row_written_before_envelope_returns(self):
+        """The ordering rule (RDR-200 R2): the handoff row is recorded
+        BEFORE the envelope is returned, never after. Proven here by
+        capturing the telemetry write's call and cross-checking its
+        content against what the (already-returned) response carries --
+        if the write had not already happened, there would be nothing
+        to cross-check against."""
+        from nexus.mcp import core as mcp_core
+        from nexus.mcp.core import NX_ANSWER_CONTINUATION_MARKER_PREFIX, nx_answer
+
+        extract_calls: list = []
+
+        async def stub_search(**kwargs):
+            return {
+                "ids": ["a"], "tumblers": ["1.1"], "distances": [0.1],
+                "collections": ["knowledge"], "chunk_text_hash": ["h1"],
+                "chunk_collections": ["knowledge"],
+            }
+
+        async def stub_extract(**kwargs):
+            extract_calls.append(kwargs)
+            return {"extractions": []}
+
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = MagicMock(return_value=1)
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+        recorded_calls: list = []
+        db_stub.telemetry.record_nx_answer_run.side_effect = (
+            lambda **kw: recorded_calls.append(kw)
+        )
+
+        with patch("nexus.plans.matcher.plan_match",
+                    return_value=[_make_multi_step_match()]), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
+             patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True), \
+             patch.object(mcp_core, "search", stub_search), \
+             patch.object(mcp_core, "operator_extract", stub_extract):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            result = await nx_answer(question="q", continuation=True)
+
+        assert extract_calls == [], (
+            "the cut suffix (extract) must never dispatch server-side "
+            "when it is being handed off"
+        )
+        assert len(recorded_calls) == 1, (
+            "exactly ONE handoff row -- and it must already have been "
+            "written by the time nx_answer returns"
+        )
+        recorded = recorded_calls[0]
+        assert recorded["final_text"].startswith(NX_ANSWER_CONTINUATION_MARKER_PREFIX)
+        assert recorded["step_count"] == 1, (
+            "step_count covers only the server-side-executed prefix "
+            "(the search step) -- never the planned total (2)"
+        )
+        assert recorded["cost_usd"] == pytest.approx(0.0), (
+            "an all-SQL prefix is a TRUE, honest zero"
+        )
+        # Cross-check: the continuation_id embedded in the ALREADY-
+        # WRITTEN row is the SAME id the returned instruction names --
+        # both derive from the one envelope this call assembled.
+        assert isinstance(result, str)
+        assert "nx_answer_report" in result
+        cid = recorded["final_text"].split("continuation_id=")[1].rstrip("]")
+        assert cid in result
+
+    @pytest.mark.asyncio
+    async def test_structured_mode_carries_the_continuation_envelope(self):
+        from nexus.mcp import core as mcp_core
+        from nexus.mcp.core import nx_answer
+
+        async def stub_search(**kwargs):
+            return {
+                "ids": ["a"], "tumblers": ["1.1"], "distances": [0.1],
+                "collections": ["knowledge"], "chunk_text_hash": ["h1"],
+                "chunk_collections": ["knowledge"],
+            }
+
+        async def stub_extract(**kwargs):
+            return {"extractions": []}
+
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = MagicMock(return_value=1)
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+
+        with patch("nexus.plans.matcher.plan_match",
+                    return_value=[_make_multi_step_match()]), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
+             patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True), \
+             patch.object(mcp_core, "search", stub_search), \
+             patch.object(mcp_core, "operator_extract", stub_extract):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            result = await nx_answer(question="q", continuation=True, structured=True)
+
+        assert isinstance(result, dict)
+        assert result["continuation"] is not None
+        assert result["continuation"]["spec_version"] == 1
+        assert result["continuation"]["cut_at_step"] == 1
+        assert result["step_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_sql_would_hit_falls_back_to_a_normal_headless_answer(self):
+        """When the terminal operator's real dispatch would have taken
+        the SQL fast path, envelope assembly returns None -- the caller
+        must get the SAME normal answer headless always would, via the
+        fallback re-run (search dispatches twice; the operator's own
+        real SQL path never pays for a claude -p subprocess either
+        time)."""
+        from nexus.mcp import core as mcp_core
+        from nexus.mcp.core import nx_answer
+        from nexus.plans.match import Match
+
+        plan = json.dumps({
+            "steps": [
+                {"tool": "search", "args": {"query": "$intent", "corpus": "knowledge"}},
+                {"tool": "filter", "args": {
+                    "items": "[{\"id\": \"1\"}]", "criterion": "keep",
+                }},
+            ],
+        })
+        match = Match(
+            plan_id=1, name="test", description="test", confidence=0.9,
+            dimensions={}, tags="", plan_json=plan,
+            required_bindings=[], optional_bindings=[],
+            default_bindings={}, parent_dims=None,
+        )
+
+        search_calls: list = []
+
+        async def stub_search(**kwargs):
+            search_calls.append(kwargs)
+            return {
+                "ids": ["a"], "tumblers": ["1.1"], "distances": [0.1],
+                "collections": ["knowledge"], "chunk_text_hash": ["h1"],
+                "chunk_collections": ["knowledge"],
+            }
+
+        claude_dispatch_calls: list = []
+
+        async def spy_claude_dispatch(prompt, schema, **kwargs):
+            claude_dispatch_calls.append(prompt)
+            return {"items": [], "rationale": []}
+
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = MagicMock(return_value=1)
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+
+        import nexus.operators.dispatch as _dispatch_mod
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[match]), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
+             patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True), \
+             patch.object(mcp_core, "search", stub_search), \
+             patch.object(_dispatch_mod, "claude_dispatch", spy_claude_dispatch), \
+             patch("nexus.operators.aspect_sql.try_filter",
+                   lambda *a, **kw: {"items": [], "rationale": []}):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            result = await nx_answer(question="q", continuation=True, structured=True)
+
+        assert search_calls, "the prefix retrieval step must have run"
+        assert len(search_calls) == 2, (
+            "search re-runs once for the prefix probe and once for the "
+            "fallback full run -- the accepted cost of a rare fallback"
+        )
+        assert claude_dispatch_calls == [], (
+            "the SQL-would-hit path never dispatches an LLM subprocess, "
+            "in the prefix probe OR the fallback"
+        )
+        assert result["continuation"] is None, (
+            "a fallback is a normal headless answer -- no envelope"
+        )
+
+    @pytest.mark.asyncio
+    async def test_interleaved_prefix_llm_step_redispatches_on_fallback(self):
+        """CR-Important-1 / critic-F1 (T2 [23951]/[23952], both
+        reproduced live): an INTERLEAVED prefix (search->extract->search
+        ->summarize, the RDR's own worked example) whose `extract` step
+        is a REAL, already-paid LLM dispatch. Forcing the fallback path
+        (via zero-evidence retrieval) must re-dispatch that SAME extract
+        step a second time -- measured directly by counting the tool's
+        own dispatches, not assumed -- and the empty-evidence fallback
+        log event must report fallback_may_redispatch=True with the
+        correct step count, so the contamination is observable post-hoc
+        even though it is not prevented (resume-from-prefix is Phase
+        2). `extract`/`summarize` are stubbed directly (rather than at
+        the subprocess seam) so extract's own dispatch count is never
+        conflated with summarize's -- the terminal step only ever
+        dispatches on the fallback's full run, a THIRD, unrelated
+        dispatch this test must not miscount as a repeated `extract`."""
+        import logging
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        from nexus.mcp import core as mcp_core
+        from nexus.mcp.core import nx_answer
+        from nexus.operators.dispatch import DispatchUsage, _ambient_usage_sink
+        from nexus.plans.match import Match
+
+        plan = json.dumps({
+            "steps": [
+                {"tool": "search", "args": {"query": "$intent", "corpus": "knowledge"}},
+                {"tool": "extract", "args": {"inputs": "$step1.ids", "fields": "a"}},
+                {"tool": "search", "args": {"query": "y", "corpus": "knowledge"}},
+                {"tool": "summarize", "args": {"content": "analyze the results"}},
+            ],
+        })
+        match = Match(
+            plan_id=1, name="test", description="test", confidence=0.9,
+            dimensions={}, tags="", plan_json=plan,
+            required_bindings=[], optional_bindings=[],
+            default_bindings={}, parent_dims=None,
+        )
+
+        # Every search returns zero evidence -- the empty-evidence guard
+        # sums evidence ACROSS THE WHOLE PREFIX (proven by
+        # test_partial_evidence_across_multiple_retrieval_steps_is_not_
+        # flagged in test_continuation_envelope.py: one non-empty step
+        # alongside an empty one does NOT trip it), so both retrieval
+        # steps must come back empty for this test's fallback to
+        # actually fire.
+        async def stub_search(**kwargs):
+            return {"ids": [], "tumblers": [], "distances": [], "collections": []}
+
+        extract_dispatch_count = {"n": 0}
+
+        async def stub_extract(**kwargs):
+            extract_dispatch_count["n"] += 1
+            # Manually append a real DispatchUsage onto the ambient sink
+            # the runner scopes around this dispatch -- exactly what the
+            # real claude_dispatch call this stub replaces would do, so
+            # the resulting StepRecord carries a genuine non-None
+            # cost_usd/source="llm" (the signal
+            # _prefix_may_redispatch/_prefix_redispatch_step_count key
+            # on) rather than the "no usage captured" default an
+            # ordinary mock would leave.
+            sink = _ambient_usage_sink.get()
+            if sink is not None:
+                sink.append(DispatchUsage(
+                    model="claude-sonnet-5-20260101", cost_usd=0.03,
+                    input_tokens=5, output_tokens=2,
+                    cache_creation_input_tokens=0, cache_read_input_tokens=0,
+                    duration_ms=100, duration_api_ms=90, num_turns=1,
+                ))
+            return {"extractions": []}
+
+        summarize_dispatch_count = {"n": 0}
+
+        async def stub_summarize(**kwargs):
+            summarize_dispatch_count["n"] += 1
+            return {"summary": "a normal fallback answer"}
+
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = MagicMock(return_value=1)
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[match]), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
+             patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True), \
+             patch.object(mcp_core, "search", stub_search), \
+             patch.object(mcp_core, "operator_extract", stub_extract), \
+             patch.object(mcp_core, "operator_summarize", stub_summarize):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            with capture_logs() as cap:
+                result = await nx_answer(question="q", continuation=True, structured=True)
+
+        assert extract_dispatch_count["n"] == 2, (
+            "extract is a real, already-paid LLM step in the prefix -- "
+            "the fallback re-run pays for it a SECOND time; this IS the "
+            "double-cost the fold documents, not fixed here"
+        )
+        assert summarize_dispatch_count["n"] == 1, (
+            "the terminal step only ever dispatches on the fallback's "
+            "full run -- never on the prefix-only attempt (stop-before-"
+            "cut) and never twice"
+        )
+        assert result["continuation"] is None, "the fallback is a normal answer"
+
+        events = [
+            e for e in cap
+            if e.get("event") == "continuation_empty_evidence_fallback_to_headless"
+        ]
+        assert len(events) == 1
+        assert events[0]["fallback_may_redispatch"] is True, (
+            "the prefix's real extract StepRecord must be visible to "
+            "the fallback-decision event"
+        )
+        assert events[0]["fallback_redispatch_step_count"] == 1
+
+
+class TestContinuationGoLiveMidPrefixFailure:
+    """CR-Important-2 (T2 [23951]): a prefix that never finishes -- cut
+    short by budget exhaustion, deadline exhaustion, or a raised
+    exception -- must never hand off. Each of these returns BEFORE
+    nx_answer's `_continuation_engaged` block is ever reached (verified
+    by direct code tracing in the review; these tests pin that
+    ordering as a REGRESSION test rather than relying on the trace
+    alone). continuation=True and go-live True in every case -- the
+    scenario the review named as unlocked by no test."""
+
+    @pytest.mark.asyncio
+    async def test_budget_exhausted_mid_prefix_never_hands_off(self):
+        """extract (real cost 1.0) dispatches; the SECOND prefix step
+        (search, still before the cut at step index 2) must never
+        dispatch because the running spend already exceeds budget_usd
+        -- normal budget-exhausted behaviour, unchanged by continuation
+        being requested."""
+        from nexus.mcp import core as mcp_core
+        from nexus.mcp.core import (
+            NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX,
+            NX_ANSWER_CONTINUATION_MARKER_PREFIX,
+            nx_answer,
+        )
+        from nexus.operators.dispatch import DispatchUsage, _ambient_usage_sink
+        from nexus.plans.match import Match
+
+        plan = json.dumps({
+            "steps": [
+                {"tool": "extract", "args": {"inputs": "[]", "fields": "a"}},
+                {"tool": "search", "args": {"query": "y", "corpus": "knowledge"}},
+                {"tool": "summarize", "args": {"content": "analyze the results"}},
+            ],
+        })
+        match = Match(
+            plan_id=1, name="test", description="test", confidence=0.9,
+            dimensions={}, tags="", plan_json=plan,
+            required_bindings=[], optional_bindings=[],
+            default_bindings={}, parent_dims=None,
+        )
+
+        async def stub_extract(**kwargs):
+            sink = _ambient_usage_sink.get()
+            if sink is not None:
+                sink.append(DispatchUsage(
+                    model="claude-sonnet-5-20260101", cost_usd=1.0,
+                    input_tokens=5, output_tokens=2,
+                    cache_creation_input_tokens=0, cache_read_input_tokens=0,
+                    duration_ms=100, duration_api_ms=90, num_turns=1,
+                ))
+            return {"extractions": []}
+
+        search_calls: list = []
+
+        async def stub_search(**kwargs):
+            search_calls.append(kwargs)
+            return {"ids": ["a"], "tumblers": ["1.1"], "distances": [0.1], "collections": ["knowledge"]}
+
+        recorded_calls: list = []
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = MagicMock(return_value=1)
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+        db_stub.telemetry.record_nx_answer_run.side_effect = (
+            lambda **kw: recorded_calls.append(kw)
+        )
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[match]), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
+             patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True), \
+             patch.object(mcp_core, "operator_extract", stub_extract), \
+             patch.object(mcp_core, "search", stub_search):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            result = await nx_answer(
+                question="q", continuation=True, structured=True, budget_usd=0.5,
+            )
+
+        assert search_calls == [], (
+            "the second prefix step must never dispatch -- budget "
+            "exhausted before it could"
+        )
+        assert result["final_text"].startswith(NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX)
+        assert result["continuation"] is None, "a budget-exhausted prefix hands off nothing"
+        assert len(recorded_calls) == 1, "exactly one telemetry row -- the exhaustion marker"
+        assert recorded_calls[0]["final_text"].startswith(
+            NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX,
+        )
+        assert NX_ANSWER_CONTINUATION_MARKER_PREFIX not in recorded_calls[0]["final_text"]
+
+    @pytest.mark.asyncio
+    async def test_deadline_exhausted_mid_prefix_never_hands_off(self):
+        """The first prefix step's stub sleeps past a tiny
+        budget_seconds; the SECOND prefix step (still before the cut)
+        must never dispatch -- normal deadline behaviour, unchanged by
+        continuation being requested."""
+        import asyncio
+
+        from nexus.mcp import core as mcp_core
+        from nexus.mcp.core import (
+            NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX,
+            NX_ANSWER_CONTINUATION_MARKER_PREFIX,
+            nx_answer,
+        )
+        from nexus.plans.match import Match
+
+        plan = json.dumps({
+            "steps": [
+                {"tool": "search", "args": {"query": "$intent", "corpus": "knowledge"}},
+                {"tool": "search", "args": {"query": "y", "corpus": "knowledge"}},
+                {"tool": "summarize", "args": {"content": "analyze the results"}},
+            ],
+        })
+        match = Match(
+            plan_id=1, name="test", description="test", confidence=0.9,
+            dimensions={}, tags="", plan_json=plan,
+            required_bindings=[], optional_bindings=[],
+            default_bindings={}, parent_dims=None,
+        )
+
+        search_calls: list = []
+
+        async def stub_search(**kwargs):
+            search_calls.append(kwargs)
+            if len(search_calls) == 1:
+                await asyncio.sleep(0.15)
+            return {"ids": ["a"], "tumblers": ["1.1"], "distances": [0.1], "collections": ["knowledge"]}
+
+        recorded_calls: list = []
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = MagicMock(return_value=1)
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+        db_stub.telemetry.record_nx_answer_run.side_effect = (
+            lambda **kw: recorded_calls.append(kw)
+        )
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[match]), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
+             patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True), \
+             patch.object(mcp_core, "search", stub_search):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            result = await nx_answer(
+                question="q", continuation=True, structured=True, budget_seconds=0.05,
+            )
+
+        assert len(search_calls) == 1, (
+            "the second prefix step must never dispatch -- the deadline "
+            "was already past before its pre-segment check"
+        )
+        assert result["final_text"].startswith(NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX)
+        assert result["continuation"] is None, "a deadline-exhausted prefix hands off nothing"
+        assert len(recorded_calls) == 1
+        assert recorded_calls[0]["final_text"].startswith(
+            NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX,
+        )
+        assert NX_ANSWER_CONTINUATION_MARKER_PREFIX not in recorded_calls[0]["final_text"]
+
+    @pytest.mark.asyncio
+    async def test_prefix_step_raising_never_hands_off(self):
+        """A genuine (non-OperatorError) exception from a prefix step
+        must surface as the normal plan-execution error -- never a
+        handoff, never a fallback re-run (the exception propagates out
+        of the ONE plan_run call nx_answer made; there is no result to
+        assemble an envelope from)."""
+        from nexus.mcp import core as mcp_core
+        from nexus.mcp.core import NX_ANSWER_CONTINUATION_MARKER_PREFIX, nx_answer
+        from nexus.plans.match import Match
+
+        plan = json.dumps({
+            "steps": [
+                {"tool": "search", "args": {"query": "$intent", "corpus": "knowledge"}},
+                {"tool": "summarize", "args": {"content": "analyze the results"}},
+            ],
+        })
+        match = Match(
+            plan_id=1, name="test", description="test", confidence=0.9,
+            dimensions={}, tags="", plan_json=plan,
+            required_bindings=[], optional_bindings=[],
+            default_bindings={}, parent_dims=None,
+        )
+
+        async def stub_search(**kwargs):
+            raise RuntimeError("boom")
+
+        summarize_calls: list = []
+
+        async def stub_summarize(**kwargs):
+            summarize_calls.append(kwargs)
+            return {"summary": "unreachable"}
+
+        recorded_calls: list = []
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = MagicMock(return_value=1)
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+        db_stub.telemetry.record_nx_answer_run.side_effect = (
+            lambda **kw: recorded_calls.append(kw)
+        )
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[match]), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
+             patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True), \
+             patch.object(mcp_core, "search", stub_search), \
+             patch.object(mcp_core, "operator_summarize", stub_summarize):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            result = await nx_answer(question="q", continuation=True, structured=True)
+
+        assert summarize_calls == [], "the plan never reached the terminal step"
+        assert result["final_text"].startswith("Error during plan execution:")
+        assert result["continuation"] is None, "a crashed prefix hands off nothing"
+        assert len(recorded_calls) == 1
+        assert recorded_calls[0]["final_text"].startswith("Error:")
+        assert NX_ANSWER_CONTINUATION_MARKER_PREFIX not in recorded_calls[0]["final_text"]
+
+
+class TestNxAnswerReport:
+    """``nx_answer_report`` (RDR-200 §Telemetry, nexus-4e75w.5) — the
+    SECOND, independent append that closes the handoff/report pairing.
+    Zero engine change: writes through the SAME
+    ``telemetry.record_nx_answer_run`` route ``nx_answer`` itself uses."""
+
+    @pytest.mark.asyncio
+    async def test_writes_exactly_one_report_row(self):
+        from nexus.mcp.core import (
+            NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX,
+            nx_answer_report,
+        )
+
+        db_stub = MagicMock()
+        recorded: list = []
+        db_stub.telemetry.record_nx_answer_run.side_effect = (
+            lambda **kw: recorded.append(kw)
+        )
+
+        with patch("nexus.mcp.core._t2_ctx") as t2_ctx:
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            result = await nx_answer_report(
+                continuation_id="cid-abc", ok=True, final_text_excerpt="a short excerpt",
+            )
+
+        assert result == {"ok": True, "recorded": True, "continuation_id": "cid-abc"}
+        assert len(recorded) == 1
+        row = recorded[0]
+        assert row["final_text"].startswith(NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX)
+        assert "continuation_id=cid-abc" in row["final_text"]
+        assert "ok=True" in row["final_text"]
+        assert "a short excerpt" in row["final_text"]
+        assert row["step_count"] == 0, "a report event is not a run"
+        assert row["cost_usd"] is None
+        assert row["plan_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_ok_false_is_carried_in_the_marker(self):
+        from nexus.mcp.core import nx_answer_report
+
+        db_stub = MagicMock()
+        recorded: list = []
+        db_stub.telemetry.record_nx_answer_run.side_effect = (
+            lambda **kw: recorded.append(kw)
+        )
+
+        with patch("nexus.mcp.core._t2_ctx") as t2_ctx:
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer_report(continuation_id="cid-fail", ok=False)
+
+        assert "ok=False" in recorded[0]["final_text"]
+
+    @pytest.mark.asyncio
+    async def test_telemetry_failure_degrades_to_a_reported_false(self):
+        """Best-effort, matching every other telemetry write site in
+        this file: a T2 failure must never raise out to the caller."""
+        from nexus.mcp.core import nx_answer_report
+
+        db_stub = MagicMock()
+        db_stub.telemetry.record_nx_answer_run.side_effect = RuntimeError("t2 down")
+
+        with patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._warn_telemetry_drop"):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            result = await nx_answer_report(continuation_id="cid-x", ok=True)
+
+        assert result["ok"] is False
+        assert result["recorded"] is False
+        assert result["continuation_id"] == "cid-x"
+
+    @pytest.mark.asyncio
+    async def test_excerpt_is_capped(self):
+        from nexus.mcp.core import nx_answer_report
+
+        db_stub = MagicMock()
+        recorded: list = []
+        db_stub.telemetry.record_nx_answer_run.side_effect = (
+            lambda **kw: recorded.append(kw)
+        )
+
+        with patch("nexus.mcp.core._t2_ctx") as t2_ctx:
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer_report(
+                continuation_id="cid-long", ok=True,
+                final_text_excerpt="x" * 5000,
+            )
+
+        # 500-char excerpt cap, plus the marker prefix/suffix text.
+        assert len(recorded[0]["final_text"]) < 600

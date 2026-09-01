@@ -171,6 +171,34 @@ class TestPopulatedResult:
         assert "first question" in result.output
         assert "second question" in result.output
 
+    def test_whole_set_block_carries_continuation_caveat(self, monkeypatch) -> None:
+        """critic-F2 (T2 [23952], population sweep item 6): the WHOLE-
+        SET hit/fallback block has zero visibility into RDR-200
+        continuation rows -- the caveat must be present in BOTH output
+        shapes, unconditionally."""
+        from nexus.commands.answer_runs import (
+            NX_ANSWER_RUNS_WHOLE_SET_CONTINUATION_CAVEAT,
+            answer_runs_cmd,
+        )
+
+        class _FakeStore:
+            def query_nx_answer_runs(self, *, since=None, limit=20, include_steps=False):
+                return _steps_gated(_populated_result(), include_steps)
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda: _FakeStore(),
+        )
+        text_result = CliRunner().invoke(answer_runs_cmd, [])
+        assert "CAVEAT" in text_result.output
+        assert "RDR-200" in text_result.output
+
+        json_result = CliRunner().invoke(answer_runs_cmd, ["--json"])
+        payload = json.loads(json_result.stdout)
+        assert payload["whole_set_continuation_caveat"] == (
+            NX_ANSWER_RUNS_WHOLE_SET_CONTINUATION_CAVEAT
+        )
+
     def test_json_output_wraps_the_store_result_in_the_query_envelope(
         self, monkeypatch,
     ) -> None:
@@ -1383,3 +1411,354 @@ class TestSpbaySinceNormalizationAndCostCaveat:
         result = CliRunner().invoke(answer_runs_cmd, [])
         assert result.exit_code == 0, result.output
         assert "CAUTION" not in result.output
+
+
+# ── RDR-200 §Telemetry (nexus-4e75w.5): four-way split + report pairing ────
+
+#: Real uuid4-shaped continuation ids for fixtures below (marker-
+#: collision hardening, critic-F3 T2 [23952]: the classifiers now
+#: require a PARSEABLE id in the expected shape, not a bare prefix
+#: match, so a fixture using a non-uuid placeholder like "cid-1" would
+#: silently fail to classify at all post-hardening).
+_CID_0 = "00000000-0000-4000-8000-000000000000"
+_CID_1 = "11111111-1111-4111-8111-111111111111"
+_CID_2 = "22222222-2222-4222-8222-222222222222"
+
+
+def _handoff_row(*, row_id: int, continuation_id: str, step_count: int = 2) -> dict:
+    from nexus.mcp.core import NX_ANSWER_CONTINUATION_MARKER_PREFIX
+
+    return {
+        "id": row_id, "question": "q", "plan_id": 5,
+        "matched_confidence": 0.9, "step_count": step_count,
+        "final_text": f"{NX_ANSWER_CONTINUATION_MARKER_PREFIX} "
+                      f"continuation_id={continuation_id}]",
+        "cost_usd": 0.0, "duration_ms": 1_500,
+        "created_at": "2026-09-01T00:00:00Z",
+        "steps": [
+            {"step_index": 0, "operator": "search", "source": "sql",
+             "model": None, "input_tokens": 0, "output_tokens": 0,
+             "cost_usd": 0.0, "elapsed_ms": 50, "ok": True, "bundled_steps": []},
+        ] * step_count if step_count else [],
+    }
+
+
+def _report_row(*, row_id: int, continuation_id: str, ok: bool = True) -> dict:
+    from nexus.mcp.core import NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX
+
+    return {
+        "id": row_id, "question": f"nx_answer_report({continuation_id})",
+        "plan_id": None, "matched_confidence": None, "step_count": 0,
+        "final_text": f"{NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX} "
+                      f"continuation_id={continuation_id} ok={ok}] excerpt",
+        "cost_usd": None, "duration_ms": 0,
+        "created_at": "2026-09-01T00:01:00Z",
+    }
+
+
+def _ok_row(*, row_id: int) -> dict:
+    return {
+        "id": row_id, "question": "q", "plan_id": 5,
+        "matched_confidence": 0.9, "step_count": 1,
+        "final_text": "a real answer", "cost_usd": 0.02,
+        "duration_ms": 4_000, "created_at": "2026-09-01T00:02:00Z",
+        "steps": [
+            {"step_index": 0, "operator": "summarize", "source": "llm",
+             "model": "claude-sonnet-5-20260101", "input_tokens": 10,
+             "output_tokens": 5, "cost_usd": 0.02, "elapsed_ms": 400,
+             "ok": True, "bundled_steps": []},
+        ],
+    }
+
+
+class TestFourWaySplit:
+    """``_split_four_way`` — a handed-off row is its own bucket, never
+    executed-ok/failed/degenerate; a report-event row lands in NEITHER
+    of the four run buckets."""
+
+    def test_handed_off_row_is_its_own_bucket(self) -> None:
+        from nexus.commands.answer_runs import _split_four_way
+
+        rows = [_handoff_row(row_id=1, continuation_id=_CID_1), _ok_row(row_id=2)]
+        ok, failed, handed_off, degenerate, reports = _split_four_way(rows)
+        assert [r["id"] for r in handed_off] == [1]
+        assert [r["id"] for r in ok] == [2]
+        assert failed == []
+        assert degenerate == {}
+        assert reports == []
+
+    def test_zero_step_handoff_never_lands_in_degenerate(self) -> None:
+        """A cut at plan step 0 (all-operator-suffix plan) hands off
+        with step_count=0 -- the marker check must run BEFORE the
+        step_count branch, or this misclassifies as degenerate."""
+        from nexus.commands.answer_runs import _split_four_way
+
+        row = _handoff_row(row_id=1, continuation_id=_CID_0, step_count=0)
+        ok, failed, handed_off, degenerate, reports = _split_four_way([row])
+        assert [r["id"] for r in handed_off] == [1]
+        assert degenerate == {}
+
+    def test_report_event_excluded_from_every_run_bucket(self) -> None:
+        """A report row (step_count=0, its own marker) must never be
+        counted as executed/failed/handed-off/degenerate -- it is a
+        report EVENT, not a run."""
+        from nexus.commands.answer_runs import _split_four_way
+
+        row = _report_row(row_id=1, continuation_id=_CID_1)
+        ok, failed, handed_off, degenerate, reports = _split_four_way([row])
+        assert ok == [] and failed == [] and handed_off == []
+        assert degenerate == {}
+        assert [r["id"] for r in reports] == [1]
+
+    def test_report_event_never_double_counts_a_handoff(self) -> None:
+        from nexus.commands.answer_runs import _split_four_way
+
+        rows = [
+            _handoff_row(row_id=1, continuation_id=_CID_1),
+            _report_row(row_id=2, continuation_id=_CID_1),
+        ]
+        ok, failed, handed_off, degenerate, reports = _split_four_way(rows)
+        assert len(handed_off) == 1
+        assert len(reports) == 1
+
+
+class TestMarkerCollisionHardening:
+    """RDR-200 marker-collision hardening (critic-F3, T2 [23952]): a
+    row whose ``final_text`` merely STARTS WITH the marker prefix (an
+    ordinary synthesized answer, organic or adversarial corpus content
+    landing verbatim in a generate/summarize step's output -- the same
+    threat class R7's fence-escape hardening treats as live) must NOT
+    classify as a phantom handoff/report. The classifiers now require
+    the marker prefix AND a PARSEABLE continuation_id in the expected
+    uuid4 shape immediately after it, not a bare prefix match."""
+
+    def test_bare_prefix_with_no_id_at_all_is_rejected(self) -> None:
+        """A normal answer that happens to begin with the marker text
+        but never mentions continuation_id at all must classify as a
+        normal executed row, never a phantom handoff."""
+        from nexus.commands.answer_runs import _split_four_way
+        from nexus.mcp.core import NX_ANSWER_CONTINUATION_MARKER_PREFIX
+
+        row = {
+            "id": 99, "question": "q", "plan_id": 5,
+            "matched_confidence": 0.9, "step_count": 1,
+            "final_text": (
+                f"{NX_ANSWER_CONTINUATION_MARKER_PREFIX} the system prints "
+                "this exact phrase in its user-facing documentation, with "
+                "no id attached at all"
+            ),
+            "cost_usd": 0.01, "duration_ms": 100,
+            "created_at": "2026-09-01T00:00:00Z",
+            "steps": [],
+        }
+        ok, failed, handed_off, degenerate, reports = _split_four_way([row])
+        assert handed_off == [], "no id at all must never classify as a handoff"
+        assert [r["id"] for r in ok] == [99]
+
+    def test_prefix_with_garbage_id_is_rejected(self) -> None:
+        """A crafted/adversarial collision: the marker prefix followed
+        by a continuation_id= token that is NOT uuid4-shaped must be
+        rejected -- a real handoff's id is always ``str(uuid.uuid4())``
+        (continuation_envelope.py)."""
+        from nexus.commands.answer_runs import _split_four_way
+        from nexus.mcp.core import NX_ANSWER_CONTINUATION_MARKER_PREFIX
+
+        row = {
+            "id": 98, "question": "q", "plan_id": 5,
+            "matched_confidence": 0.9, "step_count": 1,
+            "final_text": (
+                f"{NX_ANSWER_CONTINUATION_MARKER_PREFIX} "
+                "continuation_id=not-a-real-uuid-at-all]"
+            ),
+            "cost_usd": 0.01, "duration_ms": 100,
+            "created_at": "2026-09-01T00:00:00Z",
+            "steps": [],
+        }
+        ok, failed, handed_off, degenerate, reports = _split_four_way([row])
+        assert handed_off == [], "a non-uuid id must never classify as a handoff"
+        assert [r["id"] for r in ok] == [98]
+
+    def test_prefix_with_garbage_id_report_side_is_rejected(self) -> None:
+        from nexus.commands.answer_runs import _split_four_way
+        from nexus.mcp.core import NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX
+
+        row = {
+            "id": 97, "question": "q", "plan_id": None,
+            "matched_confidence": None, "step_count": 0,
+            "final_text": (
+                f"{NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX} "
+                "continuation_id=short ok=True] excerpt"
+            ),
+            "cost_usd": None, "duration_ms": 0,
+            "created_at": "2026-09-01T00:00:00Z",
+        }
+        ok, failed, handed_off, degenerate, reports = _split_four_way([row])
+        assert reports == [], "a non-uuid id must never classify as a report event"
+        # step_count == 0 and no real marker matched -> degenerate, not a
+        # phantom report.
+        assert sum(len(v) for v in degenerate.values()) == 1
+
+    def test_real_handoff_row_still_classifies(self) -> None:
+        """The tightened check must not reject a REAL handoff -- same
+        marker, a genuine uuid4 id."""
+        from nexus.commands.answer_runs import _split_four_way
+
+        row = _handoff_row(row_id=1, continuation_id=_CID_1)
+        ok, failed, handed_off, degenerate, reports = _split_four_way([row])
+        assert [r["id"] for r in handed_off] == [1]
+
+    def test_real_report_row_still_classifies(self) -> None:
+        from nexus.commands.answer_runs import _split_four_way
+
+        row = _report_row(row_id=1, continuation_id=_CID_1)
+        ok, failed, handed_off, degenerate, reports = _split_four_way([row])
+        assert [r["id"] for r in reports] == [1]
+
+    def test_pairing_still_works_with_tightened_ids(self) -> None:
+        from nexus.commands.answer_runs import _continuation_pairing_stats
+
+        handed_off = [_handoff_row(row_id=1, continuation_id=_CID_1)]
+        reports = [_report_row(row_id=2, continuation_id=_CID_1)]
+        stats = _continuation_pairing_stats(handed_off, reports)
+        assert stats["handoff_count"] == 1
+        assert stats["reported_count"] == 1
+        assert stats["unreported_count"] == 0
+
+
+class TestContinuationPairingStats:
+
+    def test_paired_handoff_is_reported_not_unreported(self) -> None:
+        from nexus.commands.answer_runs import _continuation_pairing_stats
+
+        handed_off = [_handoff_row(row_id=1, continuation_id=_CID_1)]
+        reports = [_report_row(row_id=2, continuation_id=_CID_1)]
+        stats = _continuation_pairing_stats(handed_off, reports)
+        assert stats == {
+            "handoff_count": 1, "reported_count": 1, "unreported_count": 0,
+            "unreported_rate": 0.0, "unparseable_handoff_count": 0,
+            "report_event_count": 1,
+        }
+
+    def test_unpaired_handoff_counts_as_unreported(self) -> None:
+        """An unpaired handoff is counted as UNREPORTED -- never
+        rendered as 'abandoned' (RDR-200's own relabel: the mechanism
+        cannot distinguish a reduction that never happened from one
+        that happened and was never reported)."""
+        from nexus.commands.answer_runs import _continuation_pairing_stats
+
+        handed_off = [_handoff_row(row_id=1, continuation_id=_CID_1)]
+        stats = _continuation_pairing_stats(handed_off, [])
+        assert stats["handoff_count"] == 1
+        assert stats["reported_count"] == 0
+        assert stats["unreported_count"] == 1
+        assert stats["unreported_rate"] == 1.0
+
+    def test_mixed_pairing_rate(self) -> None:
+        from nexus.commands.answer_runs import _continuation_pairing_stats
+
+        handed_off = [
+            _handoff_row(row_id=1, continuation_id=_CID_1),
+            _handoff_row(row_id=2, continuation_id=_CID_2),
+        ]
+        reports = [_report_row(row_id=3, continuation_id=_CID_1)]
+        stats = _continuation_pairing_stats(handed_off, reports)
+        assert stats["handoff_count"] == 2
+        assert stats["reported_count"] == 1
+        assert stats["unreported_count"] == 1
+        assert stats["unreported_rate"] == pytest.approx(0.5)
+
+    def test_no_handoffs_reports_none_rate_not_zero(self) -> None:
+        """An empty denominator must never render as a fabricated 0%
+        unreported rate -- None (unknown/not-applicable), same
+        never-fabricate-a-known-value discipline the rest of this
+        module already applies to cost_usd."""
+        from nexus.commands.answer_runs import _continuation_pairing_stats
+
+        stats = _continuation_pairing_stats([], [])
+        assert stats["handoff_count"] == 0
+        assert stats["unreported_rate"] is None
+
+    def test_report_with_unparseable_continuation_id_is_not_a_false_pair(self) -> None:
+        from nexus.commands.answer_runs import _continuation_pairing_stats
+
+        handed_off = [_handoff_row(row_id=1, continuation_id=_CID_1)]
+        malformed_report = {
+            "id": 2, "question": "x", "plan_id": None,
+            "matched_confidence": None, "step_count": 0,
+            "final_text": "[continuation completed] no id here",
+            "cost_usd": None, "duration_ms": 0,
+            "created_at": "2026-09-01T00:01:00Z",
+        }
+        stats = _continuation_pairing_stats(handed_off, [malformed_report])
+        assert stats["unreported_count"] == 1
+
+
+class TestFourWaySplitPopulationLabelling:
+    """RDR-200 §Telemetry: continuation runs are NEVER folded into the
+    headless cost population -- the --steps breakdown must exclude a
+    handed-off row's steps even though it carries real StepRecords."""
+
+    def test_steps_breakdown_excludes_handed_off_rows(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        rows = [_handoff_row(row_id=1, continuation_id=_CID_1), _ok_row(row_id=2)]
+        result = {
+            "rows": rows, "total": 2, "oldest_created_at": "2026-09-01T00:00:00Z",
+            "hit_count": 2, "fallback_count": 0,
+            "avg_duration_ms": 2_750.0, "avg_cost_usd": 0.01,
+            "latency_buckets": {
+                "under_5s": 2, "5s_to_30s": 0, "30s_to_2min": 0,
+                "2min_to_5min": 0, "over_5min": 0,
+            },
+        }
+
+        class _FakeStore:
+            def query_nx_answer_runs(self, *, since=None, limit=20, include_steps=False):
+                return _steps_gated(result, include_steps)
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda: _FakeStore(),
+        )
+        cli_result = CliRunner().invoke(answer_runs_cmd, ["--steps", "--json"])
+        payload = json.loads(cli_result.stdout)
+        breakdown = payload["step_breakdown"]
+        assert "search" not in breakdown["by_operator"], (
+            "the handed-off row's real 'search' StepRecord must never "
+            "leak into the headless cost/step population"
+        )
+        assert breakdown["by_operator"]["summarize"]["count"] == 1
+        assert payload["handed_off_count"] == 1
+        assert payload["continuation"]["unreported_count"] == 1
+
+
+class TestAnswerRunsHumanOutputContinuation:
+
+    def test_human_output_labels_unreported_never_abandoned(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        rows = [_handoff_row(row_id=1, continuation_id=_CID_1)]
+        result = {
+            "rows": rows, "total": 1, "oldest_created_at": "2026-09-01T00:00:00Z",
+            "hit_count": 1, "fallback_count": 0,
+            "avg_duration_ms": 1_500.0, "avg_cost_usd": 0.0,
+            "latency_buckets": {
+                "under_5s": 1, "5s_to_30s": 0, "30s_to_2min": 0,
+                "2min_to_5min": 0, "over_5min": 0,
+            },
+        }
+
+        class _FakeStore:
+            def query_nx_answer_runs(self, *, since=None, limit=20, include_steps=False):
+                return _steps_gated(result, include_steps)
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda: _FakeStore(),
+        )
+        cli_result = CliRunner().invoke(answer_runs_cmd, [])
+        assert cli_result.exit_code == 0, cli_result.output
+        assert "handed-off 1" in cli_result.output
+        assert "1 unreported" in cli_result.output
+        assert "unreported rate: 100.0%" in cli_result.output
+        assert "abandoned" not in cli_result.output.lower()

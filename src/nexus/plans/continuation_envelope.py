@@ -38,19 +38,25 @@ threaded out of the runner's own single dispatch) is that
 :func:`~nexus.plans.runner.plan_run` does not currently expose the
 composed-but-not-yet-dispatched prompt for an already-executed segment.
 
-**Go-live gate.** :data:`_CONTINUATION_GO_LIVE` is ``False`` for the
-whole of Phase 1b. RDR-200 R2 requires the handoff telemetry row be
-written BEFORE the envelope ever returns to a caller — that write is
-nexus-4e75w.5's job, not this module's. Until .5 flips the gate (after
-wiring the handoff write ahead of the return path and threading a real
-``run_id`` through), :func:`assemble_continuation_envelope` still runs
-end-to-end against real production data on every ``continuation=True``
-call that reaches a successful synthesis (proving the machinery, and
-emitting ``nx_answer_continuation_envelope_ready`` as the record that it
-ran) — but ``nexus.mcp.core.nx_answer`` never surfaces its result to a
-caller. The structured envelope's own ``continuation`` key stays ``null``
-on every call for the duration of Phase 1b, per the file's
-always-present-key convention (``mcp/core.py``'s ``_result()``).
+**Go-live gate.** :data:`_CONTINUATION_GO_LIVE` was ``False`` for the
+whole of Phase 1b, per RDR-200 R2's requirement that the handoff
+telemetry row be written BEFORE the envelope ever returns to a caller.
+nexus-4e75w.5 (RDR-200 Phase 1c) satisfied the full go-live checklist —
+(1) the SQL-fast-path probe in :func:`_compose_shape_b`, (2) the
+"stop-before-cut" mechanism (``nexus.plans.runner.plan_run``'s
+``continuation_cut_at_step`` parameter), (3) the handoff row written
+BEFORE ``nexus.mcp.core.nx_answer`` ever returns the envelope, (4) the
+four-way run split + ``nx_answer_report`` tool + report-row exclusion in
+``nexus.commands.answer_runs`` — and flipped the gate to ``True``. A
+``continuation=True`` call whose plan classifies a handoff-eligible cut
+(:attr:`~nexus.plans.continuation.CutShape.SHAPE_A`/``SHAPE_B``) now
+genuinely stops ``plan_run`` before the terminal suffix, assembles the
+envelope from the real prefix-only output, and — on a successful
+assembly — returns it to the caller with the structured envelope's
+``continuation`` key populated (``null`` on every other call: continuation
+False/None, a non-handoff-eligible cut, or a fallback after a
+SQL-would-hit/oversized/failed assembly, per the file's
+always-present-key convention, ``mcp/core.py``'s ``_result()``).
 """
 from __future__ import annotations
 
@@ -97,19 +103,20 @@ __all__ = [
 #: never a best-effort parse.
 CONTINUATION_SPEC_VERSION: int = 1
 
-#: nexus-4e75w.4 sequencing constraint (orchestrator directive; RDR-200
-#: R2). ``False`` for the whole of Phase 1b — flipped by nexus-4e75w.5,
-#: and ONLY after that bead has wired the handoff telemetry write ahead
-#: of the return path and threaded a real ``run_id`` through. This
-#: module's own assembly function runs regardless of the gate's value
-#: (proving the machinery); the gate governs whether ANY caller is
-#: permitted to surface the assembled envelope instead of falling
-#: through to the headless answer. ``nexus.mcp.core.nx_answer`` reads
-#: this (indirectly, by simply never wiring the assembled envelope into
-#: its return path in Phase 1b) rather than branching on it explicitly —
-#: there is nothing to branch on yet because nothing calls the
-#: envelope's content out to a caller.
-_CONTINUATION_GO_LIVE: bool = False
+#: nexus-4e75w.5 (RDR-200 Phase 1c) flipped this to ``True`` after
+#: wiring the SQL-fast-path probe, the "stop-before-cut" mechanism, the
+#: handoff-row-before-return ordering, and the four-way split +
+#: ``nx_answer_report`` tool — the full go-live checklist from the
+#: nexus-4e75w.4 review (T2 [23947]/[23948]). ``nexus.mcp.core.nx_answer``
+#: reads this explicitly (``if _cut.shape in (SHAPE_A, SHAPE_B): ... if
+#: _continuation_go_live: _continuation_engaged = True`` — see that
+#: function's Phase 1a/1c block) to decide whether to thread
+#: ``continuation_cut_at_step`` into its ``plan_run`` call at all. A
+#: future rollback (setting this back to ``False``) reproduces the
+#: Phase 1b "classify and log only" behavior exactly — no other code
+#: needs to change, since every downstream branch is already keyed off
+#: this same value via ``_continuation_engaged``.
+_CONTINUATION_GO_LIVE: bool = True
 
 
 class ContinuationEnvelopeError(ValueError):
@@ -179,30 +186,97 @@ def _compose_shape_a(
     return compose_bundle_prompt(bundle)
 
 
+#: RDR-200 go-live precondition 1 (T2 [23947], nexus-4e75w.5): the bare
+#: verbs whose real ``operator_*`` MCP tool has a SQL fast path ahead of
+#: the LLM prompt (``nexus.operators.aspect_sql.try_filter`` /
+#: ``try_groupby`` / ``try_aggregate``). Only these three verbs can ever
+#: diverge from an unconditional LLM-path reconstruction — every other
+#: Shape B verb has no such branch in its real tool at all.
+_SQL_FAST_PATH_VERBS: frozenset[str] = frozenset({"filter", "groupby", "aggregate"})
+
+
+def _sql_fast_path_would_hit(verb: str, prepared: dict[str, Any]) -> bool:
+    """Whether the REAL isolated dispatch for *verb* would take the SQL
+    fast path for these exact (already resolved+hydrated) args.
+
+    Calls the SAME ``try_<verb>`` gate the real ``operator_<verb>`` MCP
+    tool calls (``nexus.mcp.core.operator_filter`` / ``operator_groupby``
+    / ``operator_aggregate``) — never a parallel reimplementation of the
+    prerequisite checks (identity, resolvable aspect column, source mode)
+    those functions already encode. This is a REAL SQL execution when the
+    fast path applies (there is no dry-run mode on ``try_filter`` et al.
+    to add one without touching that module too) — cheap by the RDR's own
+    framing ("the SQL path... completes in milliseconds"), and idempotent
+    (a read-only SELECT), so a hit here followed by the real dispatch
+    re-running the identical query on headless fallback costs nothing
+    beyond one extra millisecond-scale query, never a second ``claude -p``
+    subprocess.
+
+    ``source``/``aspect_field`` default to the SAME values the real MCP
+    tool signatures default to (``"auto"`` / ``""``) when the plan step's
+    args do not set them explicitly, so a plan step that never mentions
+    ``source`` probes identically to how it would really dispatch.
+
+    A hit means the real headless dispatch would have cost $0 (no
+    ``claude -p`` subprocess) — handing the caller a synthesis task for a
+    step that never actually paid for one would violate R1's byte-
+    identity claim literally (go-live precondition 1, T2 [23947]). The
+    caller (:func:`_compose_shape_b`) falls back to headless for this
+    call on a hit; this function only answers the yes/no question.
+    """
+    from nexus.operators.aspect_sql import (  # noqa: PLC0415 — rare/branch-local path; SQL fast-path import deferred to call time, matches core.py's own operator_filter/groupby/aggregate convention
+        try_aggregate,
+        try_filter,
+        try_groupby,
+    )
+
+    source = prepared.get("source", "auto")
+    aspect_field = prepared.get("aspect_field", "")
+    if verb == "filter":
+        result = try_filter(
+            prepared.get("items", ""), prepared.get("criterion", ""),
+            source=source, aspect_field=aspect_field,
+        )
+    elif verb == "groupby":
+        result = try_groupby(
+            prepared.get("items", ""), prepared.get("key", ""),
+            source=source, aspect_field=aspect_field,
+        )
+    else:  # "aggregate"
+        result = try_aggregate(
+            prepared.get("groups", ""), prepared.get("reducer", ""),
+            source=source, aspect_field=aspect_field,
+        )
+    return result is not None
+
+
 def _compose_shape_b(
     cut: "ContinuationCut",
     steps: list[dict[str, Any]],
     bindings: dict[str, Any],
     step_outputs: list[dict[str, Any]],
-) -> tuple[str, dict[str, Any]]:
+    *,
+    prefix_may_redispatch: bool = False,
+    prefix_redispatch_step_count: int = 0,
+) -> tuple[str, dict[str, Any]] | None:
     """Reconstruct Shape B's ``(prompt, schema)`` — byte-for-byte mirror
     of ``plan_run``'s own isolated-step construction
     (``nexus.plans.runner.plan_run``, the ``IsolatedStep`` branch), then
     the Phase 0 builder via the verb->builder lookup table.
 
-    NOTE (spec ambiguity, flagged not buried): ``filter`` / ``groupby`` /
-    ``aggregate`` each have a SQL fast path ahead of the LLM prompt in
-    their real ``operator_*`` MCP tool (``try_filter`` / ``try_groupby``
-    / ``try_aggregate``). This reconstruction always builds the LLM-path
-    prompt via ``VERB_TO_REQUEST_BUILDER`` — the SQL fast path is not
-    replicated here. If the headless run's isolated dispatch actually
-    took the SQL fast path for one of these three operators, the real
-    dispatch cost $0 and this envelope's ``reduction_spec`` would hand
-    a caller a synthesis task headless never actually paid for. RDR-200
-    §The envelope names the Phase 0 builder as the unconditional Shape B
-    fidelity reference with no such carve-out, so that is what this
-    implements; the SQL-fast-path interaction is left as a residual for
-    a follow-up rather than resolved speculatively here.
+    Returns ``None`` when ``filter``/``groupby``/``aggregate``'s SQL
+    fast path would actually have served this exact call
+    (:func:`_sql_fast_path_would_hit`, go-live precondition 1) — the
+    caller (:func:`assemble_continuation_envelope`) treats this exactly
+    like the oversized-prompt fallback: headless for this call, a
+    structlog event naming the reason, never a partial/wrong envelope.
+
+    ``prefix_may_redispatch``/``prefix_redispatch_step_count``
+    (CR-Important-1 / critic-F1, T2 [23951]/[23952]): pass-through,
+    observability-only — whether the caller's ALREADY-executed prefix
+    contains a real, already-paid LLM/bundle step that a fallback
+    re-run would pay for a second time. Attached to the SQL-fast-path
+    fallback log event below; this function makes no decision from it.
     """
     (bi,) = cut.plan_indices
     step = steps[bi]
@@ -219,6 +293,17 @@ def _compose_shape_b(
     resolved_tool, prepared = _hydrate_operator_args(tool, resolved)
     prepared.pop("_truncation_metadata", None)
     verb = _bare(resolved_tool)
+
+    if verb in _SQL_FAST_PATH_VERBS and _sql_fast_path_would_hit(verb, prepared):
+        _log.info(
+            "continuation_sql_fast_path_fallback_to_headless",
+            verb=verb,
+            plan_index=bi,
+            fallback_may_redispatch=prefix_may_redispatch,
+            fallback_redispatch_step_count=prefix_redispatch_step_count,
+        )
+        return None
+
     builder = VERB_TO_REQUEST_BUILDER.get(verb)
     if builder is None:
         raise ContinuationEnvelopeError(
@@ -277,6 +362,50 @@ def _harvest_hydrated_bundles(
     return bundles
 
 
+def _prefix_produced_zero_evidence(
+    step_outputs: list[dict[str, Any]], cut_at_step: int | None,
+) -> bool:
+    """Conservative "empty retrieval" guard for the continuation
+    handoff (coordinator fold, 2026-09-01): never hand off a reduction
+    task the pre-cut retrieval prefix produced zero hydratable evidence
+    for.
+
+    Mirrors ``nexus.mcp.core._nx_answer_is_empty_retrieval``'s exact
+    semantic — a separate, NOT-imported implementation, deliberately:
+    ``core.py`` is THIS module's caller (``nx_answer`` imports
+    ``assemble_continuation_envelope``), so importing ``core.py`` back
+    from here would invert the intended dependency direction
+    (``nexus.mcp.operator_requests``'s own docstring states the same
+    constraint for its sibling module — this file sits below
+    ``core.py`` in the import graph). Keep the two predicates in sync by
+    hand; a future divergence is a real defect to fix in both places.
+
+    True only when the PRE-CUT ``step_outputs`` collectively exposed at
+    least one retrieval-shaped output (an ``ids`` or ``tumblers`` list)
+    AND every one of them came back empty — summed across the WHOLE
+    prefix, not per-step, so one empty step alongside one non-empty step
+    does not trip this. A prefix with NO retrieval steps at all (a
+    context-only synthesis plan — e.g. a lone ``generate``/``summarize``
+    step whose content is a literal string) is exempt: it legitimately
+    has nothing to hydrate and nothing wrong to report.
+    """
+    limit = cut_at_step if cut_at_step is not None else len(step_outputs)
+    had_retrieval = False
+    total_evidence = 0
+    for step_out in step_outputs[:max(0, limit)]:
+        if not isinstance(step_out, dict):
+            continue
+        ids = step_out.get("ids")
+        tumblers = step_out.get("tumblers")
+        if isinstance(ids, list):
+            had_retrieval = True
+            total_evidence += len(ids)
+        if isinstance(tumblers, list):
+            had_retrieval = True
+            total_evidence += len(tumblers)
+    return had_retrieval and total_evidence == 0
+
+
 def assemble_continuation_envelope(
     *,
     cut: "ContinuationCut",
@@ -285,6 +414,8 @@ def assemble_continuation_envelope(
     step_outputs: list[dict[str, Any]],
     plan_id: int,
     run_id: int | None,
+    prefix_may_redispatch: bool = False,
+    prefix_redispatch_step_count: int = 0,
 ) -> dict[str, Any] | None:
     """Assemble the RDR-200 continuation envelope, or ``None`` when there
     is nothing to hand off.
@@ -308,23 +439,63 @@ def assemble_continuation_envelope(
         run_id: ``nx_answer_runs.id`` of the handoff row, once one
             exists (nexus-4e75w.5). ``None`` for the whole of Phase 1b —
             no handoff row is written yet.
+        prefix_may_redispatch: Observability-only (CR-Important-1 /
+            critic-F1, T2 [23951]/[23952]) — whether the caller's
+            ALREADY-executed prefix contains a real, already-paid LLM/
+            bundle ``StepRecord``. The caller (``nx_answer``) computes
+            this from ``PlanResult.step_records`` before calling here;
+            this function makes no decision from it, it only attaches
+            it to every fallback-decision structlog event below so a
+            fallback that will redispatch (and repay for) that step is
+            observable post-hoc. Defaults ``False`` — an omitting caller
+            sees the same inert default it always has.
+        prefix_redispatch_step_count: Companion count for the same
+            reason; defaults ``0``.
 
     Returns:
         The envelope dict, or ``None`` when the cut has nothing to hand
-        off (``NO_SUFFIX`` / ``MULTI_UNIT``) or the composed prompt
-        breaches :data:`~nexus.plans.bundle.MAX_CONTINUATION_PROMPT_CHARS`
-        (logged as a warning; the caller's existing headless answer is
-        already complete and unaffected — no evidence is ever truncated).
+        off (``NO_SUFFIX`` / ``MULTI_UNIT``), the SQL fast path would
+        have served a Shape B filter/groupby/aggregate for $0, the
+        retrieval prefix produced zero hydratable evidence for the
+        suffix (:func:`_prefix_produced_zero_evidence`), or the composed
+        prompt breaches
+        :data:`~nexus.plans.bundle.MAX_CONTINUATION_PROMPT_CHARS` (each
+        case logged with its own structlog event naming the reason; the
+        caller's headless fallback is unaffected either way — no
+        evidence is ever truncated or lost).
     """
     if cut.shape is CutShape.SHAPE_A:
         prompt, schema = _compose_shape_a(cut, steps, bindings, step_outputs)
     elif cut.shape is CutShape.SHAPE_B:
-        prompt, schema = _compose_shape_b(cut, steps, bindings, step_outputs)
+        composed = _compose_shape_b(
+            cut, steps, bindings, step_outputs,
+            prefix_may_redispatch=prefix_may_redispatch,
+            prefix_redispatch_step_count=prefix_redispatch_step_count,
+        )
+        if composed is None:
+            # SQL fast path would have served this call for $0 — go-live
+            # precondition 1. Already logged inside _compose_shape_b.
+            return None
+        prompt, schema = composed
     else:
         # NO_SUFFIX / MULTI_UNIT: nothing composes into a single
         # (prompt, schema) pair — RDR-200 §The continuation cut's
         # single-bundle restriction. Not an error; there is simply
         # nothing to hand off for this plan shape.
+        return None
+
+    if _prefix_produced_zero_evidence(step_outputs, cut.cut_at_step):
+        # Never hand off a reduction task the retrieval prefix produced
+        # no data behind — same fallback pattern as the oversize/
+        # SQL-would-hit cases (structlog reason, headless for this call).
+        _log.info(
+            "continuation_empty_evidence_fallback_to_headless",
+            plan_id=plan_id,
+            cut_at_step=cut.cut_at_step,
+            shape=cut.shape.value,
+            fallback_may_redispatch=prefix_may_redispatch,
+            fallback_redispatch_step_count=prefix_redispatch_step_count,
+        )
         return None
 
     prompt_chars = len(prompt)
@@ -336,6 +507,8 @@ def assemble_continuation_envelope(
             plan_id=plan_id,
             cut_at_step=cut.cut_at_step,
             shape=cut.shape.value,
+            fallback_may_redispatch=prefix_may_redispatch,
+            fallback_redispatch_step_count=prefix_redispatch_step_count,
         )
         return None
 

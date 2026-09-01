@@ -7193,6 +7193,29 @@ _NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN: int = 0
 #: too, so it is exported as a named constant instead of inlined here).
 NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX: str = "[budget exhausted"
 
+#: RDR-200 §Telemetry (nexus-4e75w.5). Handoff-row marker — the SAME
+#: "a stable prefix, followed by call-specific detail" convention as
+#: ``NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX`` above. Written by
+#: ``nx_answer`` itself, BEFORE the envelope ever returns to a caller
+#: (RDR-200 R2 — the ordering rule that keeps telemetry from going
+#: dark). Full text shape: ``f"{PREFIX} continuation_id={id}]"``.
+#: ``commands/answer_runs.py``'s four-way split imports THIS constant
+#: rather than retyping the literal, matching the budget-marker's own
+#: precedent for why (a hand-typed second copy silently drifts).
+NX_ANSWER_CONTINUATION_MARKER_PREFIX: str = "[continuation handed off"
+
+#: RDR-200 §Telemetry. Completion-REPORT marker — written by
+#: ``nx_answer_report``, a SECOND, independent append (never a mutation
+#: of the handoff row; the telemetry log is append-only by doctrine).
+#: Paired with a handoff row at READ time
+#: (``commands/answer_runs.py``) by matching the ``continuation_id``
+#: embedded in both markers' text. A report row is a REPORT EVENT, not
+#: a run — ``commands/answer_runs.py``'s four-way split excludes any row
+#: carrying this prefix entirely, never counting it as executed/failed/
+#: handed-off/degenerate. Full text shape:
+#: ``f"{PREFIX} continuation_id={id} ok={ok}] {excerpt}"``.
+NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX: str = "[continuation completed"
+
 
 @mcp.tool(
     title="Multi-Step Knowledge Answer",
@@ -7566,7 +7589,8 @@ async def nx_answer(
     def _result(text: str, *, plan_id: int = 0, step_count: int = 0,
                 chunks: "list | None" = None,
                 budget_exhausted_at_step: "int | None" = None,
-                step_records: "list | None" = None) -> "str | dict":
+                step_records: "list | None" = None,
+                continuation: "dict | None" = None) -> "str | dict":
         # RDR-196 .p3c (nexus-nyry9.21), extended round 2 / round 3:
         # single emitter for every budget WARNING, both shapes. Reads
         # the closure list `_budget_warning_entries` (declared near the
@@ -7683,14 +7707,16 @@ async def nx_answer(
             # caller reading the envelope and one tailing the log see one
             # shape.
             "plan_choice": _plan_choice_info,
-            # RDR-200 Phase 1b (nexus-4e75w.4): always present, same
+            # RDR-200 Phase 1b/1c (nexus-4e75w.4/.5): always present, same
             # "a caller relies on the key, never membership-checks it"
             # convention as budget_exhausted_at_step / truncated_chars
-            # above. ``None`` on EVERY call for the whole of Phase 1b —
-            # the key ships dark before go-live (nexus-4e75w.5 flips
-            # this to a real envelope dict only after the handoff
-            # telemetry row is written ahead of the return path).
-            "continuation": None,
+            # above. ``None`` on every call that is not a real
+            # continuation handoff (including every call for the whole of
+            # Phase 1b, and every post-go-live call whose cut fell back
+            # to headless) — a real envelope dict ONLY on the handoff
+            # path below, and ONLY after the handoff telemetry row has
+            # already been written (RDR-200 R2).
+            "continuation": continuation,
         }
 
     # nexus-h33x8.6 a4 / nexus-nyry9.2 (RDR-196 .r2): single shared
@@ -8552,21 +8578,32 @@ async def nx_answer(
     if _budget_remaining_usd is not None:
         _plan_run_kwargs["budget_usd_remaining"] = _budget_remaining_usd
 
-    # RDR-200 Phase 1a (nexus-4e75w.3): cut-selection ONLY. When the
-    # caller opted in (``continuation=True``), classify the matched/grown
-    # plan's continuation suffix and log the decision. Phase 1b
-    # (nexus-4e75w.4, below the plan_run call) additionally ASSEMBLES the
-    # continuation envelope from ``_cut`` behind a go-live gate that stays
-    # closed until nexus-4e75w.5 — every call (continuation True, False,
-    # or None) still falls through to the SAME headless ``plan_run`` call
-    # below and returns the SAME headless answer, unchanged.
-    # ``_cut``/``_continuation_steps`` default to None/[] so the Phase 1b
-    # assembly site below can check "did continuation=True actually
-    # classify a cut" without a NameError when continuation is falsy.
+    # RDR-200 Phase 1a (nexus-4e75w.3): cut-selection. When the caller
+    # opted in (``continuation=True``), classify the matched/grown plan's
+    # continuation suffix and log the decision.
+    # ``_cut``/``_continuation_steps`` default to None/[] so the
+    # Phase 1c handoff block below (right after ``_result_step_records``
+    # is computed) can check "did continuation=True actually classify a
+    # cut" without a NameError when continuation is falsy.
+    #
+    # RDR-200 Phase 1c (nexus-4e75w.5): ``_continuation_engaged`` decides
+    # whether THIS call's ``plan_run`` invocation stops before the
+    # terminal suffix (the "stop-before-cut" mechanism,
+    # ``continuation_cut_at_step`` threaded into ``_plan_run_kwargs``
+    # below) — true only when the cut is handoff-eligible (SHAPE_A/
+    # SHAPE_B, never NO_SUFFIX/MULTI_UNIT) AND go-live is armed
+    # (``nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE``).
+    # Every other call (continuation False/None, a non-handoff-eligible
+    # cut, or go-live not yet armed) leaves ``_plan_run_kwargs`` untouched
+    # and reaches the SAME headless ``plan_run`` call below, unchanged.
     _cut: "ContinuationCut | None" = None
     _continuation_steps: list[dict] = []
+    _continuation_engaged: bool = False
     if continuation:
-        from nexus.plans.continuation import classify_continuation_cut  # noqa: PLC0415 — rare/branch-local path (Phase-1 opt-in only), avoids paying this import on every call
+        from nexus.plans.continuation import (  # noqa: PLC0415 — rare/branch-local path (Phase-1 opt-in only), avoids paying this import on every call
+            CutShape as _CutShape,
+            classify_continuation_cut,
+        )
 
         try:
             _continuation_steps = json.loads(best.plan_json).get("steps") or []
@@ -8581,6 +8618,14 @@ async def nx_answer(
             operators=list(_cut.operators),
             step_count=len(_continuation_steps),
         )
+        if _cut.shape in (_CutShape.SHAPE_A, _CutShape.SHAPE_B):
+            from nexus.plans.continuation_envelope import (  # noqa: PLC0415 — rare/branch-local path
+                _CONTINUATION_GO_LIVE as _continuation_go_live,
+            )
+
+            if _continuation_go_live:
+                _continuation_engaged = True
+                _plan_run_kwargs["continuation_cut_at_step"] = _cut.cut_at_step
 
     try:
         result = await _plan_run(best, run_bindings, **_plan_run_kwargs)
@@ -8678,6 +8723,161 @@ async def nx_answer(
     _result_step_records = getattr(result, "step_records", None)
     if not isinstance(_result_step_records, list):
         _result_step_records = []
+
+    # ── RDR-200 Phase 1c (nexus-4e75w.5): continuation handoff decision ──
+    # Only reached when ``_continuation_engaged`` — Phase 1a classified a
+    # handoff-eligible cut AND go-live is armed, in which case ``result``
+    # above is PREFIX-ONLY: plan_run's "stop-before-cut" mechanism
+    # already stopped it before dispatching the cut's terminal suffix
+    # (RDR-200 R2 — "the terminal suffix MUST NOT execute server-side
+    # when it is being handed off"). Every other call (continuation
+    # False/None, a non-handoff-eligible cut, or go-live not armed) skips
+    # this block entirely and reaches Step 5 exactly as before.
+    if _continuation_engaged:
+        _continuation_envelope: "dict | None" = None
+        # CR-Important-1 / critic-F1 (T2 [23951]/[23952], both reviewers
+        # reproduced live): on ANY of the four fallback triggers below
+        # (SQL-probe hit, oversized prompt, empty evidence, or this
+        # try's own assembly exception), the second `plan_run` call a
+        # few lines down re-executes the WHOLE prefix from scratch —
+        # including any already-dispatched, already-PAID LLM operator
+        # step an interleaved plan's prefix can genuinely contain (the
+        # RDR's own worked example: search->extract->search($step.ids)
+        # ->generate — `extract` is prefix, not suffix, and pays for a
+        # real claude -p subprocess). That step's real cost is paid a
+        # SECOND time on fallback. Computed once here, BEFORE the
+        # assembly attempt, so every one of the four fallback-decision
+        # structlog events below can report it — observability, not a
+        # fix: resume-from-prefix (never re-dispatching a step that
+        # already ran) is real architecture work, explicitly deferred to
+        # Phase 2 by the critic's ruling, not built here.
+        _prefix_billable_records = [
+            r for r in _result_step_records
+            if getattr(r, "source", None) in ("llm", "bundle")
+        ]
+        _prefix_may_redispatch = bool(_prefix_billable_records)
+        _prefix_redispatch_step_count = len(_prefix_billable_records)
+        try:
+            from nexus.plans.continuation_envelope import (  # noqa: PLC0415 — rare/branch-local path
+                assemble_continuation_envelope,
+                render_continuation_text,
+            )
+            from nexus.plans.runner import merge_bindings  # noqa: PLC0415 — rare/branch-local path
+
+            _continuation_merged = merge_bindings(best.default_bindings, run_bindings)
+            _continuation_envelope = assemble_continuation_envelope(
+                cut=_cut, steps=_continuation_steps, bindings=_continuation_merged,
+                step_outputs=result.steps, plan_id=best.plan_id, run_id=None,
+                prefix_may_redispatch=_prefix_may_redispatch,
+                prefix_redispatch_step_count=_prefix_redispatch_step_count,
+            )
+        except Exception as exc:  # noqa: BLE001 — a broken reconstruction must never strand a call whose prefix already stopped short of the suffix — falls back exactly like an assembly-returns-None case
+            _log.warning(
+                "nx_answer_continuation_envelope_assembly_failed",
+                plan_id=best.plan_id, error=str(exc),
+                fallback_may_redispatch=_prefix_may_redispatch,
+                fallback_redispatch_step_count=_prefix_redispatch_step_count,
+            )
+            _continuation_envelope = None
+
+        if _continuation_envelope is not None:
+            # ── HANDOFF: the row is written BEFORE this function ever
+            # returns the envelope to the caller (RDR-200 R2 — the
+            # ordering rule that keeps telemetry from going dark).
+            # step_count/cost_usd cover ONLY the server-side-executed
+            # prefix's real StepRecords — never the planned total, never
+            # a fabricated cost for the caller-side reduction (RDR-200
+            # §Telemetry: "cost_usd is the honest server-side sum").
+            _continuation_elapsed_ms = int((time.monotonic() - start) * 1000)
+            _continuation_id = _continuation_envelope["continuation_id"]
+            _handoff_text = (
+                f"{NX_ANSWER_CONTINUATION_MARKER_PREFIX} "
+                f"continuation_id={_continuation_id}]"
+            )
+            try:
+                with _t2_ctx() as db:
+                    _nx_answer_record_run(
+                        db.telemetry, question=question, plan_id=best.plan_id,
+                        matched_confidence=best.confidence,
+                        step_count=len(result.steps),
+                        final_text=_handoff_text, step_records=_result_step_records,
+                        duration_ms=_continuation_elapsed_ms, trace=trace,
+                    )
+            except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
+                pass
+            _nx_answer_record_outcome(best.plan_id, success=True)
+            _continuation_rendered = render_continuation_text(_continuation_envelope)
+            return _result(
+                _continuation_rendered, plan_id=best.plan_id,
+                step_count=len(result.steps),
+                step_records=_result_step_records,
+                continuation=_continuation_envelope,
+            )
+
+        # ── FALLBACK: no handoff happened (SQL-fast-path would have hit,
+        # an oversized prompt, or a reconstruction failure). The
+        # prefix-only run above never dispatched the suffix, so it must
+        # run now — WITHOUT the cut — to give the caller the SAME normal
+        # answer headless always would ("the caller gets a normal
+        # answer", RDR-200 §Size discipline's own fallback framing).
+        #
+        # HONEST COST NOTE (CR-Important-1 / critic-F1, T2 [23951]/
+        # [23952] — this comment previously and INCORRECTLY claimed the
+        # re-executed prefix is "cheap, read-only retrieval": that is
+        # only true when the prefix is pure retrieval. An INTERLEAVED
+        # plan's prefix (search->extract->search($step.ids)->generate —
+        # the RDR's own worked example) can contain an already-
+        # dispatched, already-PAID LLM operator step, and this second
+        # `plan_run` call re-executes the WHOLE plan from scratch,
+        # re-dispatching that step and paying for it TWICE. Not a
+        # correctness bug in the returned answer (the caller still gets
+        # the right text) and Phase 1 leaves it unfixed — resume-from-
+        # prefix is real architecture work, deferred to Phase 2 by the
+        # critic's ruling — but every fallback trigger below shares this
+        # exact path, so `_prefix_may_redispatch`/
+        # `_prefix_redispatch_step_count` (computed above, before the
+        # assembly attempt) are threaded into the fallback-decision
+        # structlog events so a contaminated run is OBSERVABLE post-hoc,
+        # even though it is not prevented here. `budget_usd_remaining`
+        # below is the SAME value Step 4 computed for the primary call —
+        # it has no memory of what the discarded prefix-only run already
+        # spent, so a fallback call's total spend can exceed the
+        # caller's own dollar cap by up to one extra prefix-LLM-step's
+        # cost; a real budget-contract gap, also left to Phase 2.
+        _continuation_fallback_kwargs = dict(_plan_run_kwargs)
+        _continuation_fallback_kwargs.pop("continuation_cut_at_step", None)
+        try:
+            result = await _plan_run(best, run_bindings, **_continuation_fallback_kwargs)
+        except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller — mirrors the primary plan_run call's own except-arm above
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            _log.error("nx_answer_plan_run_error", plan_id=best.plan_id, error=str(exc))
+            _exc_step_records = getattr(exc, "step_records", None)
+            if not isinstance(_exc_step_records, list):
+                _exc_step_records = []
+            try:
+                with _t2_ctx() as db:
+                    _nx_answer_record_run(
+                        db.telemetry, question=question, plan_id=best.plan_id,
+                        matched_confidence=best.confidence,
+                        step_count=len(_exc_step_records),
+                        final_text=f"Error: {exc}", step_records=_exc_step_records,
+                        duration_ms=elapsed_ms, trace=trace,
+                    )
+            except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
+                pass
+            _nx_answer_record_outcome(best.plan_id, success=False)
+            return _result(
+                f"Error during plan execution: {exc}",
+                plan_id=best.plan_id,
+                step_count=len(_exc_step_records),
+                step_records=_exc_step_records,
+            )
+        _result_step_records = getattr(result, "step_records", None)
+        if not isinstance(_result_step_records, list):
+            _result_step_records = []
+        _budget_response = _budget_exhausted_response(result)
+        if _budget_response is not None:
+            return _budget_response
 
     # ── Step 5: extract final answer ─────────────────────────────────────
     elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -8884,44 +9084,12 @@ async def nx_answer(
             except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
                 _log.warning("plan_grow_save_failed", error=str(exc))
 
-    # RDR-200 Phase 1b (nexus-4e75w.4): assemble the continuation envelope
-    # behind the go-live gate (nexus.plans.continuation_envelope.
-    # _CONTINUATION_GO_LIVE, currently False — flipped by nexus-4e75w.5
-    # only after the handoff telemetry write lands ahead of the return
-    # path, per RDR-200 R2). ``result.steps`` is the REAL, already-
-    # executed headless output — the envelope reconstruction replays
-    # resolution/hydration against real upstream state, never hand-built
-    # args (nexus-4e75w.3 audit round-2 residual). ``run_id=None``: no
-    # handoff row exists yet in Phase 1b. The result is intentionally
-    # discarded — ``_result()`` always returns ``continuation: None`` for
-    # the whole of Phase 1b — this call exists to prove the machinery
-    # runs end-to-end against real production data (the
-    # ``nx_answer_continuation_envelope_ready`` structlog event is that
-    # proof) and to give nexus-4e75w.5 a call site to wire the early
-    # return onto. A failure here must NEVER affect the headless answer.
-    if continuation and _cut is not None:
-        from nexus.plans.continuation import CutShape as _CutShape  # noqa: PLC0415 — rare/branch-local path (Phase-1 opt-in only)
-
-        if _cut.shape in (_CutShape.SHAPE_A, _CutShape.SHAPE_B):
-            try:
-                from nexus.plans.continuation_envelope import assemble_continuation_envelope  # noqa: PLC0415 — rare/branch-local path
-                from nexus.plans.runner import merge_bindings  # noqa: PLC0415 — rare/branch-local path
-
-                _continuation_merged = merge_bindings(best.default_bindings, run_bindings)
-                assemble_continuation_envelope(
-                    cut=_cut,
-                    steps=_continuation_steps,
-                    bindings=_continuation_merged,
-                    step_outputs=result.steps,
-                    plan_id=best.plan_id,
-                    run_id=None,
-                )
-            except Exception as exc:  # noqa: BLE001 — best-effort proof-of-machinery; must never affect the headless answer
-                _log.warning(
-                    "nx_answer_continuation_envelope_assembly_failed",
-                    plan_id=best.plan_id,
-                    error=str(exc),
-                )
+    # RDR-200 (nexus-4e75w.5): a continuation handoff, when one applies,
+    # already returned early from the block above — Step 6 below only
+    # ever records a genuine headless run (continuation False/None, a
+    # non-handoff-eligible cut, go-live not armed, or the fallback path
+    # that completed the plan after a would-have-hit/oversized/failed
+    # assembly attempt).
 
     # ── Step 6: record run ───────────────────────────────────────────────
     try:
@@ -8942,6 +9110,76 @@ async def nx_answer(
         chunks=envelope_chunks if structured else None,
         step_records=_result_step_records,
     )
+
+
+@mcp.tool(
+    title="Report Continuation Completion",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
+)
+async def nx_answer_report(
+    continuation_id: str,
+    ok: bool,
+    final_text_excerpt: str = "",
+) -> dict:
+    """Report that an ``nx_answer`` continuation handoff (RDR-200) was
+    completed by the caller.
+
+    The handoff row (written by ``nx_answer`` itself, BEFORE the
+    envelope ever returned — RDR-200 R2) already recorded that a
+    reduction was handed off. This tool records the OTHER half: that the
+    calling model actually executed the reduction, so ``nx answer-runs``
+    can report an honest **unreported rate** rather than treating every
+    un-paired handoff as silent failure by default.
+
+    **Completion reporting is a second append, not a mutation** (RDR-200
+    §Telemetry). The ``nx_answer_runs`` log is append-only by doctrine —
+    this writes a SECOND row carrying the SAME ``continuation_id`` in its
+    own marker line (``NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX``),
+    never touches the original handoff row. ``commands/answer_runs.py``
+    pairs the two at READ time by matching the id embedded in both
+    markers' ``final_text``. This report row is classified as a REPORT
+    EVENT, not a run — excluded from the four-way run split entirely, so
+    it can never double-count a run or land in ``degenerate`` on its own
+    ``step_count = 0``.
+
+    Best-effort, zero engine change: writes through the SAME
+    ``POST /v1/telemetry/nx_answer_runs/record`` route ``nx_answer``
+    itself uses — no new column, no new table, no schema migration.
+
+    Args:
+        continuation_id: The id from the ``continuation.continuation_id``
+            field of the envelope ``nx_answer`` returned (or, in text
+            mode, the id named in the rendered instruction's final
+            line). Required — a report with no id cannot be paired.
+        ok: Whether the reduction completed successfully.
+        final_text_excerpt: Optional short excerpt of the caller's
+            reduction output, for diagnostic visibility on the report
+            row. Capped to 500 chars — this tool is a completion signal,
+            not a second copy of the caller's full answer.
+    """
+    excerpt = (final_text_excerpt or "")[:500]
+    marker = (
+        f"{NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX} "
+        f"continuation_id={continuation_id} ok={ok}]"
+    )
+    final_text = f"{marker} {excerpt}" if excerpt else marker
+    try:
+        with _t2_ctx() as db:
+            db.telemetry.record_nx_answer_run(
+                question=f"nx_answer_report({continuation_id})",
+                plan_id=None,
+                matched_confidence=None,
+                step_count=0,
+                final_text=final_text[:2000],
+                cost_usd=None,
+                duration_ms=0,
+                steps=None,
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller
+        _warn_telemetry_drop("nx_answer_runs", exc)
+        return {"ok": False, "recorded": False, "continuation_id": continuation_id, "error": str(exc)}
+    return {"ok": True, "recorded": True, "continuation_id": continuation_id}
 
 
 @mcp.tool(

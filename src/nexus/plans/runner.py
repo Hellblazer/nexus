@@ -391,6 +391,16 @@ class PlanResult:
     #: llm attribution rules. In-process only; the engine-side
     #: ``nx_answer_steps`` write is `.p1c`/`.p1d`, not this bead.
     step_records: list[StepRecord] = field(default_factory=list)
+    #: RDR-200 .p1c (nexus-4e75w.5): ``True`` when a caller-supplied
+    #: ``continuation_cut_at_step`` actually stopped this run before
+    #: dispatching the segment at/after that index — ``False`` (the
+    #: default) whenever ``continuation_cut_at_step`` was ``None``, or
+    #: the run stopped/exhausted/errored for some OTHER reason before
+    #: ever reaching the cut point. Lets a caller distinguish "the
+    #: suffix was withheld as designed" from "the suffix never got a
+    #: chance to run" without re-deriving it from ``len(steps)`` vs
+    #: ``total_planned_steps``.
+    continuation_cut_applied: bool = False
 
 
 # ── Embedding-domain mapping ────────────────────────────────────────────────
@@ -1526,6 +1536,7 @@ async def plan_run(
     bundle_operators: bool = True,
     deadline: float | None = None,
     budget_usd_remaining: float | None = None,
+    continuation_cut_at_step: int | None = None,
 ) -> PlanResult:
     """Execute the steps in *match* and return the captured outputs.
 
@@ -1586,6 +1597,35 @@ async def plan_run(
     :attr:`PlanResult.budget_exhausted_kind` (``"cost"``) are set exactly
     like the ``deadline`` trigger, sharing the same marker convention on
     the ``nx_answer`` side.
+
+    ``continuation_cut_at_step`` (RDR-200 .p1c, nexus-4e75w.5 — the
+    "stop-before-cut" mechanism): a 0-based ``plan_json.steps`` index,
+    the SAME convention as :attr:`nexus.plans.continuation.
+    ContinuationCut.cut_at_step` (the caller computes this via
+    :func:`nexus.plans.continuation.classify_continuation_cut` BEFORE
+    calling ``plan_run`` — this module never imports that classifier
+    itself, keeping the runner decoupled from continuation-mode policy,
+    per the bead's own "the runner must not import MCP-layer state"
+    constraint). ``None`` (the default) reproduces pre-.p1c behavior
+    exactly — every segment dispatches, unchanged. When set, checked at
+    the SAME pre-segment point as ``deadline``/``budget_usd_remaining``
+    above: if the segment about to start (its first plan index) is at or
+    past ``continuation_cut_at_step``, the loop stops WITHOUT dispatching
+    that segment or any segment after it — the terminal continuation
+    suffix a caller is about to hand off NEVER executes server-side, the
+    exact contract RDR-200 R2 requires ("the terminal suffix MUST NOT
+    execute server-side when it is being handed off"). Steps before the
+    cut run exactly as they would without this parameter; their
+    :class:`StepRecord` entries are real, not fabricated, and
+    ``PlanResult.step_records``/``.steps`` reflect only what actually
+    ran — the same "step_count counts steps that actually executed
+    server-side, never the planned total" contract the RDR states for
+    the handoff telemetry row this parameter exists to make possible.
+    :attr:`PlanResult.continuation_cut_applied` records whether the cut
+    actually fired (``False`` when the run stopped/errored/exhausted its
+    budget before ever reaching the cut point, or when the plan simply
+    has fewer segments than the cut index — in either case nothing was
+    withheld that would otherwise have run).
 
     **Validation is WHOLE-PLAN and PRE-DISPATCH (nexus-pucte), which
     runs BEFORE either budget check above ever executes.** Required
@@ -1711,6 +1751,11 @@ async def plan_run(
     #: segment. See StepRecord's own docstring for the source/model/cost
     #: attribution rules.
     step_records: list[StepRecord] = []
+    #: RDR-200 .p1c (nexus-4e75w.5): set True the moment the
+    #: ``continuation_cut_at_step`` pre-segment check actually stops
+    #: dispatch. See ``continuation_cut_at_step``'s own docstring
+    #: paragraph above and :attr:`PlanResult.continuation_cut_applied`.
+    continuation_cut_applied: bool = False
 
     def _step_source(tool: str, result: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         """Classify an isolated/bundle-fallback dispatch's ``source`` and
@@ -1826,6 +1871,26 @@ async def plan_run(
                         kind=budget_exhausted_kind,
                         spent_usd=_spent_so_far,
                         budget_usd_remaining=budget_usd_remaining,
+                    )
+                    break
+
+            # RDR-200 .p1c (nexus-4e75w.5): "stop-before-cut". Same
+            # pre-segment placement as the two checks above — the
+            # segment about to start does not dispatch when it is at or
+            # past the continuation cut. See continuation_cut_at_step's
+            # own docstring paragraph for the full contract.
+            if continuation_cut_at_step is not None:
+                if isinstance(seg, OperatorBundleSlice):
+                    _seg_start_index = seg.plan_indices[0]
+                else:
+                    _seg_start_index = seg.plan_index
+                if _seg_start_index >= continuation_cut_at_step:
+                    continuation_cut_applied = True
+                    _log.info(
+                        "nx_answer_continuation_cut_applied",
+                        at_step=_seg_start_index + 1,
+                        total_steps=len(steps),
+                        steps_completed=len(step_outputs),
                     )
                     break
 
@@ -2298,4 +2363,5 @@ async def plan_run(
         budget_exhausted_kind=budget_exhausted_kind,
         total_planned_steps=len(steps),
         step_records=step_records,
+        continuation_cut_applied=continuation_cut_applied,
     )

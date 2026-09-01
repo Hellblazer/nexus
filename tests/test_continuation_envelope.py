@@ -249,6 +249,233 @@ class TestShapeBIdsAutoHydrationFidelity:
         assert envelope["reduction_spec"]["response_schema"] == captured["schema"]
 
 
+# ── SQL fast-path probe (RDR-200 go-live precondition 1, T2 [23947]) ───────
+#
+# filter/groupby/aggregate each have a SQL fast path ahead of the LLM
+# prompt in their real operator_* MCP tool. When that fast path would
+# actually have served a call, the real headless dispatch would have cost
+# $0 -- handing the caller a synthesis task never actually paid for would
+# violate R1's byte-identity claim. _compose_shape_b must probe the REAL
+# try_* gate (never a heuristic copy) and fall back to headless (None)
+# on a hit.
+
+
+class TestShapeBSqlFastPathProbe:
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "verb, args, patch_target",
+        [
+            (
+                "filter",
+                {"items": "[{\"id\": \"1\"}]", "criterion": "keep"},
+                "nexus.operators.aspect_sql.try_filter",
+            ),
+            (
+                "groupby",
+                {"items": "[{\"id\": \"1\"}]", "key": "year"},
+                "nexus.operators.aspect_sql.try_groupby",
+            ),
+            (
+                "aggregate",
+                {
+                    "groups": "[{\"key_value\": \"g\", \"items\": []}]",
+                    "reducer": "count",
+                },
+                "nexus.operators.aspect_sql.try_aggregate",
+            ),
+        ],
+        ids=["filter", "groupby", "aggregate"],
+    )
+    async def test_would_hit_sql_fast_path_falls_back_to_none(
+        self, verb, args, patch_target, monkeypatch, caplog,
+    ):
+        """A plan step whose real dispatch would take the SQL fast path
+        (source left at the real tool's own default, ``"auto"``) must
+        make the envelope assembly return None -- never hand off an LLM
+        synthesis task the real dispatch would never have paid for."""
+        steps = [{"tool": verb, "args": dict(args)}]
+        cut = classify_continuation_cut(steps)
+        assert cut.shape is CutShape.SHAPE_B
+
+        # A non-None return is exactly what a REAL SQL-fast-path HIT
+        # looks like to the calling operator tool (see try_filter's own
+        # "None to signal LLM fallback" contract) -- the probe must
+        # treat this as a hit and fall back, matching the real dispatch.
+        monkeypatch.setattr(patch_target, lambda *a, **kw: {"stub": "sql-result"})
+
+        import logging
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        # conftest.py's pytest_configure pins the ambient level to
+        # WARNING; the fallback log is .info(), so raise the filtering
+        # level for this capture (same pattern test_nx_answer.py's
+        # TestContinuationParameter uses for its own .info() capture).
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+
+        with capture_logs() as cap:
+            envelope = assemble_continuation_envelope(
+                cut=cut, steps=steps, bindings={}, step_outputs=[],
+                plan_id=1, run_id=None,
+            )
+
+        assert envelope is None, f"{verb}: SQL-would-hit must fall back to None"
+        fallback_events = [
+            e for e in cap
+            if e.get("event") == "continuation_sql_fast_path_fallback_to_headless"
+        ]
+        assert len(fallback_events) == 1
+        assert fallback_events[0]["verb"] == verb
+
+    @pytest.mark.asyncio
+    async def test_source_llm_never_probes_sql_and_builds_envelope(self):
+        """``source="llm"`` short-circuits the real try_filter gate
+        itself (no SQL call at all) -- the probe must see that and let
+        the LLM-path envelope build normally, exactly as the existing
+        Shape B fidelity golden for filter already exercises."""
+        steps = [{"tool": "filter", "args": {
+            "items": "[{\"id\": \"1\"}]", "criterion": "keep", "source": "llm",
+        }}]
+        cut = classify_continuation_cut(steps)
+        envelope = assemble_continuation_envelope(
+            cut=cut, steps=steps, bindings={}, step_outputs=[],
+            plan_id=1, run_id=None,
+        )
+        assert envelope is not None
+        assert envelope["reduction_spec"]["operators"] == ["filter"]
+
+    @pytest.mark.asyncio
+    async def test_non_sql_verb_never_probes(self, monkeypatch):
+        """A verb outside {filter, groupby, aggregate} (e.g. summarize)
+        has no SQL fast path in its real tool at all -- the probe must
+        never even be consulted for it."""
+        from nexus.plans import continuation_envelope as ce_mod
+
+        called = {"hit": False}
+
+        def _spy(*a, **kw):
+            called["hit"] = True
+            return False
+
+        monkeypatch.setattr(ce_mod, "_sql_fast_path_would_hit", _spy)
+        steps = [{"tool": "summarize", "args": {"content": "hello"}}]
+        cut = classify_continuation_cut(steps)
+        envelope = assemble_continuation_envelope(
+            cut=cut, steps=steps, bindings={}, step_outputs=[],
+            plan_id=1, run_id=None,
+        )
+        assert envelope is not None
+        assert called["hit"] is False
+
+
+# ── Empty-evidence guard (coordinator fold, 2026-09-01) ─────────────────────
+#
+# Mirrors nexus.mcp.core._nx_answer_is_empty_retrieval's semantic: never
+# hand off a reduction task the retrieval prefix produced zero
+# hydratable evidence for. Conservative -- a prefix with NO retrieval
+# steps at all (a context-only synthesis plan) is exempt, matching the
+# core.py precedent exactly.
+
+
+class TestEmptyEvidenceGuard:
+
+    @pytest.mark.asyncio
+    async def test_prefix_with_zero_retrieval_results_falls_back_to_none(self):
+        steps = [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "summarize", "args": {"content": "analyze the results"}},
+        ]
+        cut = classify_continuation_cut(steps)
+        assert cut.shape is CutShape.SHAPE_B
+
+        step_outputs = [
+            {"ids": [], "tumblers": [], "distances": [], "collections": []},
+        ]
+
+        import logging
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        # conftest.py's pytest_configure pins the ambient level to
+        # WARNING; the fallback log is .info().
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+
+        with capture_logs() as cap:
+            envelope = assemble_continuation_envelope(
+                cut=cut, steps=steps, bindings={}, step_outputs=step_outputs,
+                plan_id=1, run_id=None,
+            )
+
+        assert envelope is None
+        events = [
+            e for e in cap
+            if e.get("event") == "continuation_empty_evidence_fallback_to_headless"
+        ]
+        assert len(events) == 1
+        assert events[0]["cut_at_step"] == 1
+
+    @pytest.mark.asyncio
+    async def test_prefix_with_real_evidence_is_not_flagged(self):
+        """Sanity check: a non-empty retrieval prefix must NOT trip the
+        guard -- implicitly covered by every fidelity golden, pinned
+        directly here too."""
+        steps = [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "summarize", "args": {"content": "analyze the results"}},
+        ]
+        cut = classify_continuation_cut(steps)
+        step_outputs = [
+            {"ids": ["a"], "tumblers": ["1.1"], "distances": [0.1],
+             "collections": ["knowledge"]},
+        ]
+        envelope = assemble_continuation_envelope(
+            cut=cut, steps=steps, bindings={}, step_outputs=step_outputs,
+            plan_id=1, run_id=None,
+        )
+        assert envelope is not None
+
+    @pytest.mark.asyncio
+    async def test_context_only_plan_with_no_retrieval_prefix_is_exempt(self):
+        """A lone-operator plan with NO retrieval steps at all (a
+        context-only synthesis, e.g. a literal ``content`` arg) must
+        never be treated as 'empty evidence' -- it legitimately has
+        nothing to hydrate and nothing wrong to report."""
+        steps = [{"tool": "summarize", "args": {"content": "literal text to summarize"}}]
+        cut = classify_continuation_cut(steps)
+        assert cut.cut_at_step == 0
+        envelope = assemble_continuation_envelope(
+            cut=cut, steps=steps, bindings={}, step_outputs=[],
+            plan_id=1, run_id=None,
+        )
+        assert envelope is not None
+
+    @pytest.mark.asyncio
+    async def test_partial_evidence_across_multiple_retrieval_steps_is_not_flagged(self):
+        """One empty retrieval step alongside one non-empty step must
+        NOT trip the guard -- the check sums evidence across the WHOLE
+        prefix, not per-step."""
+        steps = [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "search", "args": {"query": "y"}},
+            {"tool": "extract", "args": {"inputs": "$step2.ids", "fields": "a"}},
+        ]
+        cut = classify_continuation_cut(steps)
+        assert cut.cut_at_step == 2
+        step_outputs = [
+            {"ids": [], "tumblers": [], "distances": [], "collections": []},
+            {"ids": ["a"], "tumblers": ["1.1"], "distances": [0.1],
+             "collections": ["knowledge"]},
+        ]
+        envelope = assemble_continuation_envelope(
+            cut=cut, steps=steps, bindings={}, step_outputs=step_outputs,
+            plan_id=1, run_id=None,
+        )
+        assert envelope is not None
+
+
 # ── Non-suffix shapes: nothing to hand off ──────────────────────────────────
 
 
@@ -322,6 +549,135 @@ class TestSizeCapFallback:
             plan_id=1, run_id=None,
         )
         assert envelope is not None
+
+
+# ── Fallback cost-flag observability (coordinator fold, 2026-09-01) ────────
+#
+# CR-Important-1 / critic-F1 (T2 [23951]/[23952]): a fallback re-run
+# re-executes the WHOLE prefix, including any already-dispatched, real
+# LLM operator step an interleaved plan's prefix can contain, paying
+# for it twice. Not fixed (resume-from-prefix is Phase 2), but every
+# fallback-decision structlog event must carry `fallback_may_redispatch`
+# / `fallback_redispatch_step_count` so a contaminated run is
+# observable post-hoc.
+
+
+class TestFallbackCostFlag:
+
+    def test_sql_probe_event_carries_the_flag(self, monkeypatch):
+        steps = [{"tool": "filter", "args": {
+            "items": "[{\"id\": \"1\"}]", "criterion": "keep",
+        }}]
+        cut = classify_continuation_cut(steps)
+        monkeypatch.setattr(
+            "nexus.operators.aspect_sql.try_filter",
+            lambda *a, **kw: {"stub": "sql-result"},
+        )
+
+        import logging
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+
+        with capture_logs() as cap:
+            envelope = assemble_continuation_envelope(
+                cut=cut, steps=steps, bindings={}, step_outputs=[],
+                plan_id=1, run_id=None,
+                prefix_may_redispatch=True, prefix_redispatch_step_count=2,
+            )
+
+        assert envelope is None
+        events = [
+            e for e in cap
+            if e.get("event") == "continuation_sql_fast_path_fallback_to_headless"
+        ]
+        assert len(events) == 1
+        assert events[0]["fallback_may_redispatch"] is True
+        assert events[0]["fallback_redispatch_step_count"] == 2
+
+    def test_oversized_event_carries_the_flag(self):
+        big_content = "x" * (MAX_CONTINUATION_PROMPT_CHARS + 1000)
+        steps = [{"tool": "summarize", "args": {"content": big_content}}]
+        cut = classify_continuation_cut(steps)
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        with capture_logs() as cap:
+            envelope = assemble_continuation_envelope(
+                cut=cut, steps=steps, bindings={}, step_outputs=[],
+                plan_id=1, run_id=None,
+                prefix_may_redispatch=True, prefix_redispatch_step_count=1,
+            )
+
+        assert envelope is None
+        events = [
+            e for e in cap
+            if e.get("event") == "continuation_oversized_fallback_to_headless"
+        ]
+        assert len(events) == 1
+        assert events[0]["fallback_may_redispatch"] is True
+        assert events[0]["fallback_redispatch_step_count"] == 1
+
+    def test_empty_evidence_event_carries_the_flag(self):
+        steps = [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "summarize", "args": {"content": "analyze the results"}},
+        ]
+        cut = classify_continuation_cut(steps)
+        step_outputs = [
+            {"ids": [], "tumblers": [], "distances": [], "collections": []},
+        ]
+
+        import logging
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+
+        with capture_logs() as cap:
+            envelope = assemble_continuation_envelope(
+                cut=cut, steps=steps, bindings={}, step_outputs=step_outputs,
+                plan_id=1, run_id=None,
+                prefix_may_redispatch=False, prefix_redispatch_step_count=0,
+            )
+
+        assert envelope is None
+        events = [
+            e for e in cap
+            if e.get("event") == "continuation_empty_evidence_fallback_to_headless"
+        ]
+        assert len(events) == 1
+        assert events[0]["fallback_may_redispatch"] is False
+        assert events[0]["fallback_redispatch_step_count"] == 0
+
+    def test_default_flag_is_false_when_caller_omits_it(self):
+        """A caller that doesn't pass the new params (e.g. an older test
+        double, or a future direct caller) must see the SAME inert
+        default the parameter list documents -- no silent behavior
+        change for an existing caller."""
+        big_content = "x" * (MAX_CONTINUATION_PROMPT_CHARS + 1000)
+        steps = [{"tool": "summarize", "args": {"content": big_content}}]
+        cut = classify_continuation_cut(steps)
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        with capture_logs() as cap:
+            assemble_continuation_envelope(
+                cut=cut, steps=steps, bindings={}, step_outputs=[],
+                plan_id=1, run_id=None,
+            )
+
+        events = [
+            e for e in cap
+            if e.get("event") == "continuation_oversized_fallback_to_headless"
+        ]
+        assert events[0]["fallback_may_redispatch"] is False
+        assert events[0]["fallback_redispatch_step_count"] == 0
 
 
 # ── Versioning (loud refusal, never best-effort) ────────────────────────────
@@ -444,8 +800,13 @@ class TestRenderContinuationText:
 
 class TestGoLiveGate:
 
-    def test_go_live_is_false_in_phase_1b(self):
-        assert _CONTINUATION_GO_LIVE is False
+    def test_go_live_is_true_after_phase_1c(self):
+        """RDR-200 Phase 1c (nexus-4e75w.5) flipped this to True after
+        the full go-live checklist (SQL-fast-path probe, stop-before-
+        cut, handoff-row-before-return, four-way split + report tool)
+        landed. See the module docstring's "Go-live gate" section for
+        the checklist and the rollback contract."""
+        assert _CONTINUATION_GO_LIVE is True
 
 
 # ── Sync guard: classifier defaults vs. the runner's real bundling gate ────

@@ -139,6 +139,52 @@ class TestDerivation:
         assert d.n_executed_ok == 1  # only the pre-.p1f row with no steps list
         assert d.n_excluded_no_steps == 1
 
+    def test_continuation_handoff_and_report_rows_are_excluded(self) -> None:
+        """RDR-200 (nexus-4e75w.5 fold): a handed-off row's step_count is
+        > 0 and it is not `_row_is_failed` -- without an EXPLICIT marker
+        check it would silently pass into this derivation's population
+        and contaminate the headless cost average with a continuation
+        run's prefix-only, LLM-free cost (the RDR's own "continuation
+        runs are never folded into the headless cost average" rule). A
+        report row already has step_count==0 (so the pre-existing
+        step_count<=0 gate happens to exclude it too), but the exclusion
+        must be an explicit marker check, not an accident of that
+        field's value -- both are counted via the same
+        n_excluded_continuation counter."""
+        from nexus.mcp.core import (
+            NX_ANSWER_CONTINUATION_MARKER_PREFIX,
+            NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX,
+        )
+
+        # Marker-collision hardening (critic-F3, T2 [23952]): the
+        # classifiers now require a PARSEABLE (uuid4-shaped)
+        # continuation_id, not a bare prefix match -- a placeholder like
+        # "cid-1" would silently fail to classify post-hardening.
+        cid = "11111111-1111-4111-8111-111111111111"
+        handoff = _run(
+            [_step("search", None, 0.0, source="sql")],
+            final_text=f"{NX_ANSWER_CONTINUATION_MARKER_PREFIX} continuation_id={cid}]",
+        )
+        report = {
+            "step_count": 0, "steps": [],
+            "final_text": f"{NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX} "
+                          f"continuation_id={cid} ok=True]",
+            "plan_id": None,
+        }
+        post = [_run([_step("operator_filter", CHEAP, 0.1 * i)]) for i in range(1, 31)]
+
+        d = derive_budget_default(_store([handoff, report] + post))
+
+        assert d.n_rows_scanned == 32
+        assert d.n_excluded_continuation == 2
+        assert d.n_executed_ok == 30, (
+            "the handoff row must never be counted as executed-ok either "
+            "-- excluded before that counter, not folded in and then "
+            "filtered back out downstream"
+        )
+        assert d.n_runs == 30
+        assert d.sufficient is True
+
     def test_below_floor_names_no_value(self) -> None:
         post = [_run([_step("operator_filter", CHEAP, 0.1)]) for _ in range(MIN_DERIVATION_RUNS - 1)]
         d = derive_budget_default(_store(post))
