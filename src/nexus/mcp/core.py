@@ -94,24 +94,77 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
     branch below since the two are mutually exclusive failure shapes (a 401
     is not a connection failure) and the marker text is specific enough
     (contains "unauthorized") that ordering does not matter in practice.
+
+    nexus-fe96p: the guidance below used to assert, UNCONDITIONALLY, that a
+    401 reaching this point meant the self-heal "found no fresh token to
+    adopt" and therefore "the owner incarnation is gone or its refresh loop
+    died". Measured false on 2026-09-01 (mcp.log, session 49d1c3ab): the
+    heal DID adopt a fresh session token from the lease and the retry still
+    401'd, because the retry itself (a separate defect, now fixed) was
+    sending a stale bearer. The message now branches on the heal-outcome
+    suffix ``HttpScratchStore`` threads into the exception text, rather than
+    stating one inference as observed fact for every case.
     """
     _log.error(f"mcp_{tool}_failed", error=str(e), exc_info=True)
     text = str(e)
 
-    from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER  # noqa: PLC0415 — deferred import; only paid on the (rare) error path
+    from nexus.db.http_scratch_store import (  # noqa: PLC0415 — deferred import; only paid on the (rare) error path
+        HEAL_ADOPTED_SUFFIX,
+        HEAL_DECLINED_SUFFIX,
+        HEAL_REMINT_SUFFIX,
+        SESSION_UNAUTHORIZED_MARKER,
+    )
 
     if SESSION_UNAUTHORIZED_MARKER in text:
+        if HEAL_ADOPTED_SUFFIX in text:
+            return (
+                f"Error: {text}\n"
+                "The MCP session's T1 (scratch) session token had rotated, and "
+                "the automatic self-heal (nexus-g5hzk) DID adopt a fresh token "
+                "and retry — the retry itself still failed authorization. The "
+                "owner incarnation and its refresh loop are NOT implicated; a "
+                "session token adopted but the request still failed "
+                "authorization. Reconnect the conexus MCP/extension so the "
+                "store is rebuilt from scratch; if the same failure recurs "
+                "immediately after reconnecting, the service-side auth state "
+                "needs direct investigation."
+            )
+        if HEAL_REMINT_SUFFIX in text:
+            return (
+                f"Error: {text}\n"
+                "The session-lease self-heal (nexus-g5hzk) found nothing "
+                "fresher, but the data-token re-mint (nexus-wrwb7) DID mint a "
+                "fresh bearer and retried — the retry still failed "
+                "authorization. With the bearer freshly minted, the SESSION "
+                "token in the lease is the likely stale credential (its owner "
+                "may be gone or its refresh loop stopped — an inference, not "
+                "an observation). Reconnect the conexus MCP/extension so a "
+                "fresh session-scoped token is minted; a bare CLI self-heals "
+                "on its next invocation."
+            )
+        if HEAL_DECLINED_SUFFIX in text:
+            return (
+                f"Error: {text}\n"
+                "The MCP session's T1 (scratch) session token is no longer valid, "
+                "AND the automatic self-heal already failed: on this 401 the store "
+                "re-read the owner-republished session lease and found no fresh "
+                "token to adopt (nexus-g5hzk — no lease, expired, or unchanged). "
+                "That means the token's owner incarnation is gone or its refresh "
+                "loop died — reconnect the conexus MCP/extension so a fresh "
+                "session-scoped token is minted. A bare CLI self-heals on its "
+                "next invocation; a live MCP session can adopt a rotated token "
+                "from the lease but cannot MINT one mid-conversation."
+            )
+        # No heal-outcome suffix present (an older/hand-built exception
+        # string) — fall back to the stage-agnostic guidance rather than
+        # guessing which case applies.
         return (
             f"Error: {text}\n"
-            "The MCP session's T1 (scratch) session token is no longer valid, "
-            "AND the automatic self-heal already failed: on this 401 the store "
-            "re-read the owner-republished session lease and found no fresh "
-            "token to adopt (nexus-g5hzk — no lease, expired, or unchanged). "
-            "That means the token's owner incarnation is gone or its refresh "
-            "loop died — reconnect the conexus MCP/extension so a fresh "
-            "session-scoped token is minted. A bare CLI self-heals on its "
-            "next invocation; a live MCP session can adopt a rotated token "
-            "from the lease but cannot MINT one mid-conversation."
+            "The MCP session's T1 (scratch) session token is no longer valid. "
+            "Reconnect the conexus MCP/extension so a fresh session-scoped "
+            "token is minted. A bare CLI self-heals on its next invocation; a "
+            "live MCP session can adopt a rotated token from the lease but "
+            "cannot MINT one mid-conversation."
         )
     if isinstance(e, (ConnectionError, TimeoutError)) or any(
         m in text.lower() for m in _CONNECTION_ERROR_MARKERS
