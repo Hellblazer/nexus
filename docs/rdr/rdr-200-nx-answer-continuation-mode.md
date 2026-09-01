@@ -966,10 +966,10 @@ be pre-registered before Phase 1 runs, or it will be rationalized
 afterward. Note the metric conflates non-reduction with non-reporting;
 the pre-registered decomposition audit (telemetry section) informs the
 threshold, but a number is still a judgment call about how much silent
-non-reduction is tolerable. **Proposed: 25%** — if more than one in
-four handoffs goes unreported, telemetry is too dark to flip the
-default; the decomposition audit may revise the number *before* Phase 1
-runs, never after.
+non-reduction is tolerable. **PINNED (Sam, 2026-09-01): 25%** — if
+more than one in four handoffs goes unreported, telemetry is too dark
+to flip the default; the decomposition audit may revise the number
+*before* Phase 1 runs, never after.
 
 **OQ-3 — Does the bridge need a plan-miss path?** Engine-side plan-miss
 is impossible (the inline planner is a `claude -p` dispatch). Is
@@ -995,16 +995,16 @@ crowding, blind rubric judging, ties against continuation), but the
 judge model's identity — it must not be the caller-arm's model — and
 whether "strictly better" demands more than a simple majority are
 pre-registration decisions that need a call before Phase 1 runs.
-**Proposed:** an Opus-tier judge (distinct from the Fable caller arm),
-blinded arm labels, simple majority with ties against continuation.
+**PINNED (Sam, 2026-09-01):** an Opus-tier judge (distinct from the
+Fable caller arm), blinded arm labels, simple majority with ties
+against continuation.
 
 **OQ-7 — Pin the stratification values.** Crowding is operationally
 defined in the gate mechanics: the judge-labelled irrelevant fraction
 of each question's flat-search top-10, computed and frozen with the
-set before any arm runs. **Proposed:** crowded = score ≥ 0.5; minimum
-stratum size 8, extending the set if either stratum falls short.
-Confirm or replace the numbers — like OQ-2 and OQ-6, they must be
-pinned before Phase 1 runs, never after.
+set before any arm runs. **PINNED (Sam, 2026-09-01):** crowded =
+score ≥ 0.5; minimum stratum size 8, extending the set if either
+stratum falls short. Pinned before Phase 1 runs, as this RDR requires.
 
 ## References
 
@@ -1049,6 +1049,10 @@ pinned before Phase 1 runs, never after.
   (5); Phase 1 gate mechanics specified, judge/margin split out as
   OQ-6 (6); programmatic-caller migration note on the flip bead (7);
   A2 marginal-cost sketch (8).
+- 2026-09-01 — OQ-2/OQ-6/OQ-7 PINNED by Sam at the proposed values
+  (25% unreported threshold; Opus-tier blinded judge, simple majority,
+  ties against continuation; crowded ≥ 0.5 with minimum stratum 8).
+  Phase 1's pre-registration is complete ahead of any run.
 - 2026-09-01 — OQ-1 DECIDED by Sam: build. The entropy/scale argument
   added to the Problem Statement and R6 (flat search swamps in
   adjacent facts as the corpus grows; composed retrieval holds
