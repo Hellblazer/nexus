@@ -48,14 +48,13 @@
 # question itself, now serves that shape too.
 
 name: hybrid-factual-lookup
+# Disambiguation vs abstract-themes (restored per review, as a comment): THIS
+# template answers single-fact questions extracted from the best-matching
+# document; use abstract-themes for theme/overview/summary questions.
 description: >-
-  What is the value / which paper / who reported / what does X say
-  about Y. Answers factual questions where the answer should be a
-  concrete claim, named entity, or specific data point. Fuses vector
-  recall over the catalog with citation- and relation-graph traversal
-  from the vector seeds, then ranks the merged stream against the
-  question. Use abstract-themes for theme / overview questions, and
-  citation-traversal for "what cites this paper" walks.
+  What is the specific value, number, or setting? Which paper reported this result? Who
+  introduced this method? What does a named source say about a topic? When was this
+  added? Single-fact answers extracted from the best-matching document.
 dimensions:
   verb: lookup
   scope: global

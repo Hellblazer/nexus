@@ -1,12 +1,12 @@
 name: citation-traversal
+# Rationale (restored per critique — was description prose pre-mmfag): resolves
+# the seed by title, then walks the reference graph both inward (what cites
+# this) and outward (what this cites); the seed resolution is why the plan
+# requires a document title binding rather than free text.
 description: >-
-  Trace the citation chain surrounding a document. Resolve the seed by
-  title, walk the reference graph both inward (what cites this) and
-  outward (what this cites), hydrate the matched corpora, and summarise
-  the evidence so a downstream agent can characterise the document's
-  intellectual lineage. Uses the reference-chain purpose, which bundles
-  citation and quotation link types, so the traversal keeps pace as new
-  edge kinds enter the catalog.
+  What does this paper cite? What cites this document? Trace the citation chain around a
+  source. Which works build on this one? What is the reference neighborhood of a
+  document? Walks the citation graph inward and outward from a seed document.
 dimensions:
   verb: research
   scope: global

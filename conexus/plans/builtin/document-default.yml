@@ -1,8 +1,9 @@
 name: default
-description: Documentation authoring or audit. Gather existing prose and code that touches the
-  area, walk documentation-for edges so anything that should already be documented surfaces,
-  hydrate both corpora's content, and compare the current docs against the code inventory to
-  flag coverage gaps. Downstream agents use the compare output to file issues or draft new docs.
+description: >-
+  Write or audit documentation for an area. What documentation exists for this feature?
+  Is the documentation up to date with the code? What should the docs say about this
+  module? Gathers the prose and code that touch an area and checks documentation-for
+  links.
 dimensions:
   verb: document
   scope: global

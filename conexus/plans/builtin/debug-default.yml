@@ -7,11 +7,15 @@
 # context around a failure is), so it is gone rather than defaulted: the
 # symptom text is what a debug question actually carries.
 name: default
-description: "Dev / debug against a failing code path. Intentionally flat: dev work starts from\
-  \ a concrete failure and the primary link walk is the catalog's per-file lookup (not multi-hop\
-  \ graph traversal \u2014 Serena handles symbol- level navigation separately). Surface the\
-  \ RDRs that authored or touched the failing path, hydrate their content, then summarise the\
-  \ design context so the debug loop starts from \"what did we decide about this code\"."
+# Rationale (restored per critique — was description prose pre-mmfag):
+# intentionally FLAT — dev work starts from a concrete failure, and the primary
+# link walk is from the failing code file to its tests/docs, not a deep
+# citation traversal.
+description: >-
+  Why is this failing? What causes this error or crash? Debug a failing test or code
+  path. Why does the process hang or spin? Where does this exception come from? What
+  changed to break this behavior? Starts from a concrete failure and walks the
+  implicated code.
 dimensions:
   verb: debug
   scope: global

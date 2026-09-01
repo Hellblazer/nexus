@@ -29,11 +29,10 @@
 
 name: document-discovery
 description: >-
-  Which documents discuss this? Which papers discuss this? Which RDRs
-  mention this? Find documents about a topic. Find papers about a
-  topic. List documents covering a topic. What documents exist on this
-  subject. Document discovery: find the documents, papers, or RDRs that
-  touch a given topic.
+  Which documents discuss this topic? Which papers discuss this subject? Find the papers
+  about a subject. List the documents that mention a term. Which notes or RDRs mention
+  this? Do we have any docs covering this area? Finds the specific documents about a
+  topic.
 dimensions:
   verb: research
   scope: global

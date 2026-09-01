@@ -1,7 +1,9 @@
 name: default
-description: Analysis and synthesis of a research area across prose and code corpora. Gather
-  from both sides, walk reference chains to find supporting work, hydrate the candidates' content,
-  rank against the caller's criterion, then summarise the top-ranked evidence.
+description: >-
+  Compare and synthesize a research area across papers and code. What tradeoffs do the
+  papers report? How do different approaches compare? What is the evidence for this
+  technique? Which findings support or contradict each other? Gathers prose and code,
+  walks reference chains, and synthesizes with citations.
 dimensions:
   verb: analyze
   scope: global

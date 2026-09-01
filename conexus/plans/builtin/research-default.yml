@@ -1,8 +1,11 @@
 name: default
-description: Design / architecture / planning. Walk from a concept into the prose corpus (RDRs,
-  docs, knowledge), traverse to the modules that implement it, then surface concrete code context.
-  Hydrate the candidates' actual content and summarise with citations so downstream agents can
-  verify the chain.
+description: >-
+  How does this part of the system work? What is the architecture behind a feature? How
+  does a concept travel from design into the code that implements it? Which modules
+  implement this idea? By what mechanism does the system choose among competing
+  candidates? What internally determines the result that gets produced? Where is this
+  design decision recorded? Walks from a concept through the RDRs and docs into the
+  implementing code, with cited context.
 dimensions:
   verb: research
   scope: global

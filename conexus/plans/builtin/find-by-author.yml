@@ -1,12 +1,8 @@
 name: find-by-author
 description: >-
-  Find documents attributed to a specific author. Routes through the
-  combined metadata-scoped query (RDR-156 P4): one statement joins the
-  vector chunks to the catalog and filters by author, ranking by relevance
-  to the author's contribution surface, then summarises so a downstream
-  agent can characterise what the author has written. Useful for "who is X"
-  and "what has X published" lookups where the caller has an author name
-  but not a specific title.
+  Find documents written by a specific author. What has this author written? Show
+  everything by this person in the collection. Which papers are attributed to this
+  researcher? An author-scoped lookup joined with a topical query.
 dimensions:
   verb: research
   scope: global
