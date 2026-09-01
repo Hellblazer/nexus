@@ -7213,6 +7213,7 @@ async def nx_answer(
     min_confidence: float | None = None,
     force_dynamic: bool = False,
     bindings: dict[str, Any] | None = None,
+    continuation: bool | None = None,
 ) -> "str | dict":
     """Answer a knowledge question using plan-match-first retrieval. RDR-080 P1.
 
@@ -7434,6 +7435,20 @@ async def nx_answer(
             generation from the matched-plan path on collection-scoped
             questions where ``scope`` would otherwise act as a forced-
             miss proxy.
+        continuation: RDR-200 Phase 1a (nexus-4e75w.3). ``None`` (the
+            default) means the policy default — OFF for Phase 1, so
+            omitting this parameter is byte-identical to today.
+            ``False`` explicitly forces the headless ``claude -p``
+            reduction path (the reference implementation). ``True``
+            requests continuation mode; in Phase 1a this classifies the
+            plan's continuation cut (see
+            :mod:`nexus.plans.continuation`) and logs the decision via
+            structlog, but the continuation envelope itself is not yet
+            built — every call still falls through to the headless path
+            unchanged, so ``True`` is currently also byte-identical to
+            ``None``/``False`` in this call's return value. The envelope
+            (nexus-4e75w.4) and handoff telemetry (nexus-4e75w.5) are
+            what make ``True`` behave differently.
 
     Returns:
         The final step's output — a string by default, or the envelope
@@ -7877,6 +7892,14 @@ async def nx_answer(
     if min_confidence is not None and not (0.0 <= min_confidence <= 1.0):
         return _result(
             f"min_confidence must be in [0.0, 1.0], got {min_confidence!r}"
+        )
+    # RDR-200 Phase 1a (nexus-4e75w.3): bounds-check the same way
+    # min_confidence is checked immediately above — a degenerate value
+    # fails loudly before any dispatch rather than being silently
+    # coerced by a bare truthy check further down.
+    if continuation is not None and not isinstance(continuation, bool):
+        return _result(
+            f"continuation must be a bool or None, got {continuation!r}"
         )
     effective_min_confidence = (
         min_confidence if min_confidence is not None
@@ -8520,6 +8543,30 @@ async def nx_answer(
     # sees byte-identical behavior.
     if _budget_remaining_usd is not None:
         _plan_run_kwargs["budget_usd_remaining"] = _budget_remaining_usd
+
+    # RDR-200 Phase 1a (nexus-4e75w.3): cut-selection ONLY. When the
+    # caller opted in (``continuation=True``), classify the matched/grown
+    # plan's continuation suffix and log the decision — but do NOT act on
+    # it yet. The continuation envelope (nexus-4e75w.4) is what makes this
+    # branch's classification observable in the RETURN value; until it
+    # lands, every call (continuation True, False, or None) falls through
+    # to the SAME headless ``plan_run`` call below, unchanged.
+    if continuation:
+        from nexus.plans.continuation import classify_continuation_cut  # noqa: PLC0415 — rare/branch-local path (Phase-1a opt-in only), avoids paying this import on every call
+
+        try:
+            _continuation_steps = json.loads(best.plan_json).get("steps") or []
+        except (json.JSONDecodeError, TypeError):
+            _continuation_steps = []
+        _cut = classify_continuation_cut(_continuation_steps)
+        _log.info(
+            "nx_answer_continuation_cut",
+            plan_id=best.plan_id,
+            shape=_cut.shape.value,
+            cut_at_step=_cut.cut_at_step,
+            operators=list(_cut.operators),
+            step_count=len(_continuation_steps),
+        )
 
     try:
         result = await _plan_run(best, run_bindings, **_plan_run_kwargs)

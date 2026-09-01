@@ -1613,7 +1613,7 @@ async def plan_run(
         compose_bundle_prompt,
         dispatch_bundle,
         is_operator_tool,
-        segment_steps,
+        resolve_dispatch_segments,
     )
 
     def _extract_tool(step: dict[str, Any]) -> str:
@@ -1762,22 +1762,19 @@ async def plan_run(
         ))
 
     # One authoritative segmentation. When bundling is off or the caller
-    # supplied a dispatcher that doesn't opt into bundling, flatten the
-    # slices back into isolated steps so the per-step path handles
-    # everything. Gate is attribute-based so decorator wrappers survive.
-    segments: list = segment_steps(steps)
-    use_bundle_path = bundle_operators and getattr(
-        dispatch, _SUPPORTS_BUNDLING_ATTR, False,
+    # supplied a dispatcher that doesn't opt into bundling,
+    # ``resolve_dispatch_segments`` flattens the slices back into
+    # isolated steps so the per-step path handles everything. Gate is
+    # attribute-based so decorator wrappers survive. Extracted to
+    # ``bundle.resolve_dispatch_segments`` (nexus-4e75w.3) so RDR-200's
+    # continuation cut classifier reads the same real dispatch-shape
+    # resolution this call site uses, rather than a second
+    # reimplementation of this gate that could drift from it.
+    segments: list = resolve_dispatch_segments(
+        steps,
+        bundle_operators=bundle_operators,
+        supports_bundling=getattr(dispatch, _SUPPORTS_BUNDLING_ATTR, False),
     )
-    if not use_bundle_path:
-        flat: list = []
-        for seg in segments:
-            if isinstance(seg, OperatorBundleSlice):
-                for pi in seg.plan_indices:
-                    flat.append(IsolatedStep(plan_index=pi, step=steps[pi]))
-            else:
-                flat.append(seg)
-        segments = flat
 
     try:
         for seg in segments:

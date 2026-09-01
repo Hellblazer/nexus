@@ -4083,3 +4083,153 @@ class TestNxAnswerLatencyDocstringPinned:
                 "(executed-only rows) and update both the docstring and "
                 "this pin together"
             )
+
+
+# ── RDR-200 Phase 1a: continuation parameter (nexus-4e75w.3) ────────────────
+
+
+class TestContinuationParameter:
+    """``continuation: bool | None`` is threaded and validated, but in
+    Phase 1a it changes NOTHING about the return value: None/False/True
+    all fall through to the SAME headless plan_run call. True additionally
+    classifies the continuation cut and logs the decision via structlog —
+    a side effect, never a behaviour change (nexus-4e75w.3 acceptance
+    criteria)."""
+
+    @staticmethod
+    def _patches(plan_run_result):
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = MagicMock(return_value=1)
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 1})
+        return (
+            patch("nexus.plans.matcher.plan_match",
+                  return_value=[_make_multi_step_match()]),
+            patch("nexus.plans.runner.plan_run",
+                  AsyncMock(return_value=plan_run_result)),
+            patch("nexus.mcp.core._t2_ctx"),
+            patch("nexus.mcp.core.scratch", return_value="ok"),
+            patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None),
+        ), db_stub
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("continuation_value", [None, False, True])
+    async def test_return_value_byte_identical_across_continuation_values(
+        self, continuation_value,
+    ):
+        """Phase 1a builds no envelope — the returned text/steps must not
+        depend on ``continuation`` at all."""
+        from nexus.mcp.core import nx_answer
+
+        plan_run_result = MagicMock()
+        plan_run_result.steps = [{"text": "ok"}]
+        plan_run_result.step_records = []
+        plan_run_result.budget_exhausted_at_step = None
+
+        patches, db_stub = self._patches(plan_run_result)
+        with patches[0], patches[1], patches[2] as t2_ctx, patches[3], patches[4]:
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            result = await nx_answer(
+                question="q", continuation=continuation_value,
+            )
+
+        assert result == "ok"
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_bool_continuation(self):
+        """Same fail-loud-before-dispatch discipline as min_confidence's
+        bounds check immediately above it."""
+        from nexus.mcp.core import nx_answer
+
+        match_called = MagicMock()
+
+        def fake_match(question, **kwargs):
+            match_called()
+            return []
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = MagicMock()
+            result = await nx_answer(question="q", continuation="yes")  # type: ignore[arg-type]
+
+        assert "continuation must be a bool or None" in result
+        assert not match_called.called, (
+            "plan_match must never be reached with an invalid continuation value"
+        )
+
+    @pytest.mark.asyncio
+    async def test_continuation_true_logs_cut_decision(self):
+        """The classifier fires and logs exactly once, with the shape and
+        cut index, when the caller opts in — and the plan_run call
+        underneath is untouched (Phase 1a is cut-selection only)."""
+        import logging
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        from nexus.mcp.core import nx_answer
+
+        plan_run_result = MagicMock()
+        plan_run_result.steps = [{"text": "ok"}]
+        plan_run_result.step_records = []
+        plan_run_result.budget_exhausted_at_step = None
+
+        # conftest.py's pytest_configure pins the ambient level to
+        # WARNING; the decision log is .info(), so raise the filtering
+        # level for this capture the same way
+        # test_nx_answer_plan_choice.py's established wiring test does.
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+
+        patches, db_stub = self._patches(plan_run_result)
+        with patches[0], patches[1] as plan_run_mock, patches[2] as t2_ctx, \
+             patches[3], patches[4]:
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            with capture_logs() as cap:
+                result = await nx_answer(question="q", continuation=True)
+
+        assert result == "ok"
+        assert plan_run_mock.await_count == 1, (
+            "Phase 1a must still call plan_run exactly once — no envelope, "
+            "no short-circuit"
+        )
+        cut_events = [e for e in cap if e.get("event") == "nx_answer_continuation_cut"]
+        assert len(cut_events) == 1
+        # _make_multi_step_match(): search -> extract($step1.ids) — a
+        # single trailing operator, Shape B.
+        assert cut_events[0]["shape"] == "shape_b"
+        assert cut_events[0]["cut_at_step"] == 1
+        assert cut_events[0]["operators"] == ["extract"]
+
+    @pytest.mark.asyncio
+    async def test_continuation_false_and_none_do_not_log_cut_decision(self):
+        """No side effect at all when the caller has not opted in —
+        None (policy default) and False (explicit force-headless) are
+        indistinguishable in Phase 1a."""
+        import logging
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        from nexus.mcp.core import nx_answer
+
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+
+        for continuation_value in (None, False):
+            plan_run_result = MagicMock()
+            plan_run_result.steps = [{"text": "ok"}]
+            plan_run_result.step_records = []
+            plan_run_result.budget_exhausted_at_step = None
+
+            patches, db_stub = self._patches(plan_run_result)
+            with patches[0], patches[1], patches[2] as t2_ctx, patches[3], patches[4]:
+                t2_ctx.return_value.__enter__.return_value = db_stub
+                with capture_logs() as cap:
+                    await nx_answer(question="q", continuation=continuation_value)
+
+            cut_events = [
+                e for e in cap if e.get("event") == "nx_answer_continuation_cut"
+            ]
+            assert cut_events == [], (
+                f"continuation={continuation_value!r} must not classify or log"
+            )
