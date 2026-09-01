@@ -38,7 +38,9 @@ def _synthesize_match_text(
     (nexus-w98c). Precision on "cannot drift" (code-review,
     2026-08-31): T2's stored ``match_text`` column is a SAVE-TIME
     snapshot, so after an edit to this function pre-existing rows
-    lag until re-saved while T1 re-derives fresh at every populate.
+    lag until re-saved — and since nexus-93cc6 the T1 cache PREFERS the
+    stored bytes too (re-synthesis is only the blank-match_text
+    fallback), so both tiers serve the save-time snapshot together.
     Harmless for the punctuation change shipped with nexus-7g0rg —
     Postgres ``to_tsvector('english', ...)`` tokenizes the differing
     punctuation away and nothing else reads raw match_text bytes —

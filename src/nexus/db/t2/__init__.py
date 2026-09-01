@@ -597,6 +597,7 @@ class T2Database:
         default_bindings: str | None = None,
         parent_dims: str | None = None,
         scope_tags: str | None = None,
+        match_description: str | None = None,
     ) -> int:
         return self.plans.save_plan(
             query=query,
@@ -612,6 +613,7 @@ class T2Database:
             default_bindings=default_bindings,
             parent_dims=parent_dims,
             scope_tags=scope_tags,
+            match_description=match_description,
         )
 
     def search_plans(
@@ -619,8 +621,12 @@ class T2Database:
         query: str,
         limit: int = 5,
         project: str = "",
+        *,
+        any_lexeme: bool = False,
     ) -> list[dict[str, Any]]:
-        return self.plans.search_plans(query, limit=limit, project=project)
+        return self.plans.search_plans(
+            query, limit=limit, project=project, any_lexeme=any_lexeme,
+        )
 
     def list_plans(self, limit: int = 20, project: str = "") -> list[dict[str, Any]]:
         return self.plans.list_plans(limit=limit, project=project)

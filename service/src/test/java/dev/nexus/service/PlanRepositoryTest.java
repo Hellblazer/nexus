@@ -416,6 +416,86 @@ class PlanRepositoryTest {
     }
 
     @Test
+    @Order(6)
+    void searchPlans_anyLexemeFallback_rescuesAndMiss() {
+        // nexus-vi8fp: plainto_tsquery ANDs the question's tokens, so one
+        // extra unmatched word missed a match_text literally containing the
+        // discriminating jargon. The any-lexeme fallback (fired only on an
+        // empty AND result) must return the row, ranked by ts_rank.
+        repo.savePlan(TENANT_A, "vi8fp-proj", "chash identity plan",
+                      "{\"steps\":[]}", "success", "ad-hoc,grown",
+                      null, "chash-identity", "research", "personal",
+                      "{\"verb\":\"research\",\"strategy\":\"chash-identity\"}", null, null, "knowledge",
+                      "Describes content-addressed chash identity for stored"
+                      + " chunks. research chash-identity scope personal");
+
+        // Full question: 'derived'/'exactly' have no counterpart lexemes in
+        // the match_text, so the AND query matches nothing.
+        //
+        // Decision C (Sam, 2026-08-31, T2 [23891]): the fallback is OPT-IN.
+        // The default (4-arg) shape — what plan_match calls — must stay
+        // AND-only and return NOTHING here: auto-admitting any-lexeme rows
+        // let 9/10 unrelated probe questions run a junk plan.
+        var andOnly = repo.searchPlans(
+            TENANT_A, "What is a chash and how is it derived exactly?",
+            "vi8fp-proj", 10);
+        assertThat(andOnly)
+            .as("the default AND-only path must NOT rescue — the fallback is opt-in")
+            .isEmpty();
+
+        var rescued = repo.searchPlans(
+            TENANT_A, "What is a chash and how is it derived exactly?",
+            "vi8fp-proj", 10, true);
+        assertThat(rescued)
+            .as("any_lexeme=true must rescue the AND-miss on 'chash'")
+            .isNotEmpty();
+        assertThat(rescued.get(0).getName()).isEqualTo("chash-identity");
+    }
+
+    @Test
+    @Order(6)
+    void searchPlans_anyLexemeFallback_neverPadsAWorkingAndResult() {
+        // Precision guard: when the AND query matches, the fallback must not
+        // fire — a row sharing only ONE token must not ride along.
+        repo.savePlan(TENANT_A, "vi8fp-prec", "replay projector plan",
+                      "{\"steps\":[]}", "success", "",
+                      null, "replay-projector", "research", "global",
+                      "{\"verb\":\"research\",\"strategy\":\"replay-projector\"}", null, null, "",
+                      "Explains projector replay ordering for events."
+                      + " research replay-projector scope global");
+        repo.savePlan(TENANT_A, "vi8fp-prec", "unrelated events plan",
+                      "{\"steps\":[]}", "success", "",
+                      null, "unrelated-events", "research", "global",
+                      "{\"verb\":\"research\",\"strategy\":\"unrelated-events\"}", null, null, "",
+                      "Counts calendar events per project quarter."
+                      + " research unrelated-events scope global");
+
+        // The query DELIBERATELY shares the 'events' lexeme with the
+        // distractor (critic finding 4: a zero-shared-lexeme distractor
+        // only pinned the early-return short-circuit) — the AND hit on
+        // row 1 must still suppress the fallback entirely.
+        var results = repo.searchPlans(
+            TENANT_A, "projector replay ordering for events", "vi8fp-prec", 10, true);
+        assertThat(results)
+            .as("AND query must match the replay plan")
+            .isNotEmpty();
+        assertThat(results)
+            .as("a one-shared-token row ('events') must NOT pad an AND result")
+            .allMatch(r -> r.getName().equals("replay-projector"));
+    }
+
+    @Test
+    @Order(6)
+    void searchPlans_allStopwordQuery_isEmptyNotAnError() {
+        // NULLIF guard: a query whose every token is an english stop-word
+        // yields an empty lexeme set — to_tsquery(NULL) must be null-false,
+        // never a tsquery syntax error.
+        var results = repo.searchPlans(
+            TENANT_A, "what is it and how does", "vi8fp-none", 10, true);
+        assertThat(results).isEmpty();
+    }
+
+    @Test
     @Order(7)
     void incrementMatchMetrics_countersUpdate() {
         long id = repo.savePlan(TENANT_A, "proj-metrics", "Metrics test plan",

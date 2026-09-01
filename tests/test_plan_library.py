@@ -885,3 +885,49 @@ def test_set_scope_tags_missing_plan_returns_false(plan_db: T2Database) -> None:
     """set_scope_tags returns False for a non-existent plan_id (#1073)."""
     result = plan_db.plans.set_scope_tags(99999, "canon-chat")
     assert result is False
+
+
+# ── nexus-93cc6 D3: match_description prefers into the stored match_text ─────
+
+
+def test_save_plan_match_description_replaces_query_in_match_text(
+    plan_db: T2Database,
+) -> None:
+    """The generalized description becomes the prose half of the STORED
+    match_text (what the engine's generated fts_vector indexes and the T1
+    cache embeds); the query column keeps the verbatim question — it keys
+    the matcher's verbatim-repeat bypass (T2 [23880] coupling)."""
+    generalized = (
+        "Explains the chunk identity convention for T3: content-addressed "
+        "chash. How are chunks identified? What is a chash?"
+    )
+    row_id = plan_db.save_plan(
+        query="What is the chunk identity convention used for T3 chunks?",
+        plan_json='{"steps":[{"tool":"search","args":{"corpus":"knowledge"}}]}',
+        verb="research",
+        name="chunk-identity",
+        scope="personal",
+        match_description=generalized,
+    )
+    row = plan_db.plans.get_plan(row_id)
+    assert row["match_text"].startswith(
+        "Explains the chunk identity convention"
+    )
+    assert "What is the chunk identity convention" not in row["match_text"]
+    assert row["query"] == (
+        "What is the chunk identity convention used for T3 chunks?"
+    )
+
+
+def test_save_plan_without_match_description_keeps_query_prose(
+    plan_db: T2Database,
+) -> None:
+    row_id = plan_db.save_plan(
+        query="how does projection replay work",
+        plan_json='{"steps":[]}',
+        verb="research",
+        name="projection-replay",
+        scope="personal",
+    )
+    row = plan_db.plans.get_plan(row_id)
+    assert row["match_text"].startswith("how does projection replay work")

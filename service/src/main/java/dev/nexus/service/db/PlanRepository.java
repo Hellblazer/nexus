@@ -281,6 +281,30 @@ public final class PlanRepository {
      * Mirrors {@code PlanLibrary.search_plans}.
      */
     public List<PlansRecord> searchPlans(String tenant, String query, String project, int limit) {
+        // AND-semantics only — the shape every pre-nexus-vi8fp caller had,
+        // and the shape plan_match MUST keep (see the anyLexeme overload).
+        return searchPlans(tenant, query, project, limit, false);
+    }
+
+    /**
+     * {@code anyLexeme} overload (nexus-vi8fp, decision C 2026-08-31):
+     * when {@code true} AND the AND-semantics query matched nothing, retry
+     * with an any-lexeme OR of the same PG-extracted lexemes, ranked by
+     * ts_rank. OPT-IN for HUMAN browsing surfaces only ({@code
+     * POST /v1/plans/search} with {@code "any_lexeme": true} — the
+     * plan_search MCP tool; no CLI surface passes it today): measured 2026-08-31
+     * (T2 [23891]), auto-admitting these rows into plan_match let 9/10
+     * UNRELATED probe questions run a junk plan via one shared common
+     * word (confidence=None auto-admit, and a wrong-but-runnable plan
+     * records SUCCESS so nothing retires it), against 4/5 genuine
+     * vocabulary-gap rescues; a min-2-lexeme bar measured 3/5 - 5/10 and
+     * was rejected. Sam chose C: recall widening goes where a human
+     * judges the list; the matcher keeps AND-only and pays the inline
+     * planner for vocabulary-gap questions — correct answers over plan
+     * reuse.
+     */
+    public List<PlansRecord> searchPlans(String tenant, String query, String project, int limit,
+                                          boolean anyLexeme) {
         return tenantScope.withTenant(tenant, ctx -> {
             // nexus-sbl4m: expiry measures DISUSE, not age.
             //
@@ -308,10 +332,43 @@ public final class PlanRepository {
             if (project != null && !project.isBlank()) {
                 cond = cond.and(PLANS.PROJECT.eq(project));
             }
-            return ctx.selectFrom(PLANS)
+            var andHits = ctx.selectFrom(PLANS)
                       .where(cond)
                       .orderBy(field(
                           "ts_rank(fts_vector, plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))",
+                          Double.class, val(query)).desc())
+                      .limit(limit)
+                      .fetch();
+            if (!andHits.isEmpty() || !anyLexeme) {
+                return andHits;
+            }
+            // nexus-vi8fp: ANY-LEXEME recall fallback — reached only with
+            // anyLexeme=true (see the overload javadoc for the measured
+            // decision record) and only when the AND-semantics query above
+            // matched nothing. plainto_tsquery ANDs its tokens, so one
+            // extra unmatched word in the question missed a match_text
+            // literally containing the discriminating jargon ('What is a
+            // chash and how is it derived?' found NOTHING against a
+            // match_text carrying 'chash' — T2 [23881]). The fallback
+            // OR-joins the SAME lexemes Postgres's own 'english' config
+            // extracts (its stemming and stop-word machinery — no
+            // hand-rolled token heuristics), ranks by ts_rank, and never
+            // mixes into a working AND result. NULLIF guards the
+            // all-stop-words case (to_tsquery(NULL) is NULL; '@@ NULL' is
+            // null-false, no rows, no tsquery syntax error).
+            Condition ftsAny = condition(
+                "fts_vector @@ to_tsquery('english', NULLIF(array_to_string("
+                + "tsvector_to_array(to_tsvector('english', {0})), ' | '), ''))",
+                val(query));
+            Condition condAny = ftsAny.and(expiry).and(active);
+            if (project != null && !project.isBlank()) {
+                condAny = condAny.and(PLANS.PROJECT.eq(project));
+            }
+            return ctx.selectFrom(PLANS)
+                      .where(condAny)
+                      .orderBy(field(
+                          "ts_rank(fts_vector, to_tsquery('english', NULLIF(array_to_string("
+                          + "tsvector_to_array(to_tsvector('english', {0})), ' | '), '')))",
                           Double.class, val(query)).desc())
                       .limit(limit)
                       .fetch();

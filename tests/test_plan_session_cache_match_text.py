@@ -255,3 +255,50 @@ class TestSynthesizerParityWithPlanLibrary:
             f"synthesiser drift on row={row!r}: "
             f"session_cache→{cache_out!r}, plan_library→{lib_out!r}"
         )
+
+
+# ── nexus-93cc6: the cache embeds the STORED match_text when present ─────────
+
+
+class TestUpsertPrefersStoredMatchText:
+    def test_stored_match_text_wins_over_resynthesis(
+        self, cache: PlanSessionCache,
+    ) -> None:
+        """A grown row whose stored match_text carries a GENERALIZED
+        description (the grow-time generalizer) must embed those bytes —
+        re-synthesis from the row's own columns cannot reproduce them."""
+        cache.upsert({
+            "id": 7,
+            "query": "What is the chunk identity convention used for T3 chunks?",
+            "verb": "research",
+            "name": "chunk-identity",
+            "scope": "personal",
+            "tags": "ad-hoc,grown",
+            "project": "nexus",
+            "match_text": (
+                "Explains content-addressed chash identity for stored chunks. "
+                "research chunk-identity scope personal"
+            ),
+        })
+        hits = cache.query("content-addressed chash identity", n=3)
+        assert hits and hits[0][0] == 7, (
+            "the stored (generalized) match_text must be what got embedded"
+        )
+
+    def test_empty_stored_match_text_falls_back_to_synthesis(
+        self, cache: PlanSessionCache,
+    ) -> None:
+        cache.upsert({
+            "id": 8,
+            "query": "how does the projector replay events",
+            "verb": "research",
+            "name": "projector-replay",
+            "scope": "personal",
+            "tags": "",
+            "project": "",
+            "match_text": "   ",
+        })
+        hits = cache.query("research projector-replay", n=3)
+        assert hits and hits[0][0] == 8, (
+            "blank stored match_text must fall back to synthesis"
+        )

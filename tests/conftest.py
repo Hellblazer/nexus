@@ -1896,6 +1896,33 @@ def _isolate_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.fixture(autouse=True)
+def _stub_plan_grow_generalizer(request, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the grow-time match-text generalizer (nexus-93cc6 D2).
+
+    nx_answer's plan-grow path now awaits ``_generalize_grown_match_description``
+    — a real ``claude -p`` dispatch (60s timeout, billed) — before saving a
+    grown plan. Its fail-soft contract returns ``None`` on any failure, so
+    stubbing it to ``None`` is EXACTLY the pre-generalizer behavior; without
+    this stub every unit test that drives nx_answer to an ad-hoc success
+    (test_rdr_084_plan_grow, test_nx_answer, test_force_dynamic, ...) would
+    spawn a live subprocess. Same isolation class as ``_isolate_config_dir``
+    above (the nexus-mrmq incident family).
+
+    Tests of the generalizer itself opt out with
+    ``@pytest.mark.plan_grow_generalizer`` — they patch ``claude_dispatch``
+    directly and never reach a real subprocess either.
+    """
+    if request.node.get_closest_marker("plan_grow_generalizer"):
+        return
+    from unittest.mock import AsyncMock  # noqa: PLC0415 — test-only import
+
+    monkeypatch.setattr(
+        "nexus.mcp.core._generalize_grown_match_description",
+        AsyncMock(return_value=None),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect NEXUS_CATALOG_PATH so tests never pollute the real user catalog.
 

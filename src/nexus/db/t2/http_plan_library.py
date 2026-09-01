@@ -93,8 +93,21 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         default_bindings: str | None = None,
         parent_dims: str | None = None,
         scope_tags: str | None = None,
+        match_description: str | None = None,
     ) -> int:
         """Upsert a plan. Returns the row id (BIGSERIAL, always positive).
+
+        ``match_description`` (nexus-93cc6): an optional GENERALIZED
+        description — what the plan answers plus paraphrase exemplars,
+        typically produced by the grow-time generalizer — used INSTEAD of
+        ``query`` as the prose half of the synthesized ``match_text`` (the
+        string the T1 cosine cache embeds and the engine's generated
+        ``fts_vector`` indexes). The ``query`` column itself is stored
+        UNTOUCHED either way: it is the verbatim originating question and
+        keys the matcher's verbatim-repeat bypass (coupling measured in
+        T2 [23880]). ``None`` = today's behavior (query is the prose).
+        Client-side only — the engine already stores and returns
+        ``match_text`` verbatim, so no wire or schema change is involved.
 
         Matches the PlanLibrary.save_plan signature exactly.
         The ``match_text`` synthesis and ``scope_tags`` normalization that
@@ -136,7 +149,8 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         )
 
         match_text = _synthesize_match_text(
-            description=query, verb=verb, name=name, scope=scope,
+            description=match_description or query,
+            verb=verb, name=name, scope=scope,
         )
 
         # Scope-tag normalization mirrors PlanLibrary.save_plan exactly.
@@ -418,9 +432,22 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         query: str,
         limit: int = 5,
         project: str = "",
+        *,
+        any_lexeme: bool = False,
     ) -> list[dict[str, Any]]:
-        """FTS search over plans. Returns plans ordered by ts_rank relevance."""
+        """FTS search over plans. Returns plans ordered by ts_rank relevance.
+
+        ``any_lexeme`` (nexus-vi8fp, decision C): opt-in any-lexeme recall
+        fallback when the AND-semantics query matches nothing — for HUMAN
+        browsing surfaces only (the plan_search MCP tool). plan_match MUST
+        NOT pass it: measured (T2 [23891]), auto-admitting these rows let
+        9/10 unrelated questions run a junk plan. Default False keeps the
+        wire byte-identical (the field is omitted, so an old engine sees
+        exactly today's request).
+        """
         payload: dict[str, Any] = {"query": query, "limit": limit}
+        if any_lexeme:
+            payload["any_lexeme"] = True
         if project:
             payload["project"] = project
         resp = self._post("/v1/plans/search", payload)

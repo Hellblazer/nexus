@@ -5136,8 +5136,13 @@ def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) 
     """
     try:
         with _t2_ctx() as db:
-            # Over-fetch by 1 to detect if there are more
-            results = db.search_plans(query, limit=limit + 1, project=project)
+            # Over-fetch by 1 to detect if there are more.
+            # any_lexeme=True (nexus-vi8fp decision C): this is a HUMAN
+            # browsing surface — a person judges the list — so it gets the
+            # any-lexeme recall fallback plan_match deliberately does not.
+            results = db.search_plans(
+                query, limit=limit + 1, project=project, any_lexeme=True,
+            )
         if offset:
             results = results[offset:]
         has_more = len(results) > limit
@@ -6521,6 +6526,110 @@ def _infer_grown_plan_name(
     content = [t for t in tokens if t not in _GROWN_PLAN_NAME_STOP_WORDS]
     take = content[:max_words] if content else tokens[:max_words]
     return "-".join(take) or "grown-plan"
+
+
+#: nexus-93cc6 D2: bounds on the generalizer's output. Shorter than a
+#: sentence is degenerate; longer than this is prompt-injection-shaped or
+#: runaway prose — either way the fail-soft contract says drop it and keep
+#: today's verbatim-question match text.
+_GROWN_MATCH_DESCRIPTION_MIN_CHARS: int = 40
+#: v2 (pipeline measurement, 2026-08-31): v1's 1200 admitted 700-1000-char
+#: abstract essays that scored BELOW the verbatim baseline at the 0.55
+#: floor (14/24 vs 15/24) — verbose prose dilutes cosine. The winning
+#: hand-written shape is ~300 chars, mostly example questions; 600 is the
+#: hard quality gate, the prompt asks for 400.
+_GROWN_MATCH_DESCRIPTION_MAX_CHARS: int = 600
+
+_GROWN_MATCH_DESCRIPTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"description": {"type": "string"}},
+    "required": ["description"],
+}
+
+
+async def _generalize_grown_match_description(
+    *, question: str, plan_json: str,
+) -> "str | None":
+    """Generalized match-text description for a grown plan (nexus-93cc6 D2).
+
+    One tool-free, cheap-tier ``claude_dispatch`` producing the shape the
+    93cc6 spike validated (T2 [23880]): a 2-3 sentence statement of what
+    the plan ANSWERS, followed by 4-6 short paraphrase exemplars — the
+    builtin-template match-text shape, which measured +17pp paraphrase
+    recall at the grown floor with zero precision cost against the
+    verbatim-question baseline.
+
+    FAIL-SOFT BY CONTRACT: every failure path — dispatch error, timeout,
+    empty or out-of-bounds output — returns ``None``, which downstream
+    means "synthesize match_text from the verbatim question", exactly
+    today's behavior. The generalizer can only ever ADD recall; it must
+    never block or delay-fail a grow (the grow itself is already
+    best-effort), and it never touches the ``query`` column (the
+    verbatim-repeat bypass keys on it).
+    """
+    try:
+        from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — deferred: heavy import, grow path only
+
+        steps_hint = plan_json[:1500]
+        # Prompt v2 (measured, 2026-08-31): v1 asked for "2-3 sentences ...
+        # then examples" and haiku wrote abstract essays that scored BELOW
+        # the verbatim baseline; the compact exemplar-dense register is
+        # what the spike validated. The examples ARE the match surface.
+        prompt = (
+            "Write a match-text description for a saved retrieval plan.\n\n"
+            "The plan was grown from this question:\n"
+            f"  {question}\n\n"
+            "Its retrieval steps (JSON, truncated):\n"
+            f"  {steps_hint}\n\n"
+            "Produce ONE plain-text paragraph of AT MOST 400 characters: "
+            "one short sentence stating what the plan answers, then 5-7 "
+            "short paraphrased example questions users might ask, separated "
+            "by question marks — the example questions must make up most of "
+            "the text. Use concrete domain words from the question and "
+            "steps; never abstract phrasing like 'best practices' or "
+            "'guidance'. No markdown, no preamble, and do not repeat the "
+            "original question verbatim."
+        )
+        result = await claude_dispatch(
+            prompt,
+            _GROWN_MATCH_DESCRIPTION_SCHEMA,
+            # 45s, measured (2026-09-01): 20s killed all six live probe
+            # dispatches mid-generation (claude -p subprocess startup +
+            # generation wall, not bare API latency); 60s succeeded 6/6 and
+            # 45s itself measured 5/6 with the sixth degrading fail-soft —
+            # the accepted trade for a tighter wall bound.
+            # This timeout IS the wall-time bound the reviewers asked to
+            # see accounted: it extends a plan-miss SUCCESS run (already
+            # 80-100s) by the dispatch wall, once per NOVEL question, and
+            # only when a plan is actually being grown. Fire-and-forget
+            # was considered and rejected (the no-fire-and-forget
+            # directive; a detached task dies silently with the process).
+            timeout=45.0,
+            # Cheap alias on purpose: this is a bounded reformulation task,
+            # the same tier the check/verify operators default to
+            # (nexus-3mea3 precedent).
+            model="haiku",
+            operator="plan_grow_generalize",
+        )
+        description = str(result.get("description") or "").strip()
+        if not (
+            _GROWN_MATCH_DESCRIPTION_MIN_CHARS
+            <= len(description)
+            <= _GROWN_MATCH_DESCRIPTION_MAX_CHARS
+        ):
+            _log.info(
+                "plan_grow_generalize_out_of_bounds",
+                length=len(description),
+            )
+            return None
+        _log.info(
+            "plan_grow_generalize_ok",
+            length=len(description),
+        )
+        return description
+    except Exception:  # noqa: BLE001 — fail-soft by contract; the grow proceeds with the verbatim question
+        _log.info("plan_grow_generalize_failed", exc_info=True)
+        return None
 
 
 def _nx_answer_classify_plan(match: Any) -> str:
@@ -8821,6 +8930,15 @@ async def nx_answer(
                     "scope": "personal",
                     "strategy": grown_name,
                 })
+                # nexus-93cc6 D2: generalize the match text BEFORE the save —
+                # a grown plan whose match_text is only its verbatim question
+                # matches paraphrases at 62.5%; a generalized description +
+                # exemplars measured +17pp with zero precision cost (T2
+                # [23880]/[23881]). Fail-soft by contract: any generalizer
+                # failure yields None and the save proceeds exactly as today.
+                grown_match_description = await _generalize_grown_match_description(
+                    question=question, plan_json=best.plan_json,
+                )
                 # nexus-j5geq: route through daemon (eliminates second WAL writer).
                 _grow_scope_tags = scope or None
                 _grow_plan_json = best.plan_json
@@ -8838,6 +8956,7 @@ async def nx_answer(
                         verb=grown_verb,
                         name=grown_name,
                         dimensions=grown_dimensions,
+                        match_description=grown_match_description,
                     )
                     # Feed the new plan into the T1 cosine cache so the next
                     # paraphrase can match without a SessionStart re-populate.
