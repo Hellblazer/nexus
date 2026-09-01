@@ -533,6 +533,21 @@ def test_save_plan_omitted_scope_tags_infers(plan_db: T2Database) -> None:
     assert row["scope_tags"] == "rdr__arcaneum"
 
 
+def test_save_plan_empty_string_scope_tags_infers_like_none(plan_db: T2Database) -> None:
+    """nexus-7g0rg critic finding 3: an explicit ``scope_tags=''`` used to be
+    stored verbatim, SKIPPING inference — the unanchored-grown
+    reintroduction path (no production caller passes '' today; this pins
+    the door shut). '' now infers exactly like None; explicit agnosticism
+    stays expressible via the 'all' sentinel."""
+    row_id = plan_db.save_plan(
+        query="q",
+        plan_json='{"steps":[{"tool":"search","args":{"corpus":"rdr__arcaneum"}}]}',
+        scope_tags="",
+    )
+    row = plan_db.plans.get_plan(row_id)
+    assert row["scope_tags"] == "rdr__arcaneum"
+
+
 def test_save_plan_omitted_scope_tags_traverse_only(plan_db: T2Database) -> None:
     """Traverse-only plans save with empty scope_tags (agnostic)."""
     row_id = plan_db.save_plan(

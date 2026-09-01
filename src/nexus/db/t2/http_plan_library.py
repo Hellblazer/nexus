@@ -142,16 +142,20 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         # Scope-tag normalization mirrors PlanLibrary.save_plan exactly.
         if scope_tags:
             stored_scope_tags = normalize_scope_tags(scope_tags)
-        elif scope_tags is None:
-            stored_scope_tags = _infer_scope_tags(plan_json)
-            # No project-column fallback here either — see PlanLibrary.save_plan
-            # for the measurement (nexus-89uc4). This twin mirrored #1069
-            # verbatim, which is why deleting only the SQLite copy would have
-            # read as a fix and changed nothing: service mode constructs THIS
-            # class (db/t2/__init__.py), and after nexus-i711w it is the only
-            # save path there is.
         else:
-            stored_scope_tags = ""
+            # None AND '' both infer (nexus-7g0rg critic finding 3, 2026-08-31):
+            # the old `elif scope_tags is None` shape stored a bare '' verbatim,
+            # skipping inference — the exact unanchored-grown reintroduction
+            # path the run-382 incident came from. A caller-site census found
+            # no production caller passing '' today (all coerce to None or
+            # omit), so this closes a door rather than changes behavior;
+            # explicit agnosticism stays expressible via the 'all' sentinel
+            # (normalize_scope_tags drops it to ''), and a plan whose steps
+            # name no literal corpus still infers '' legitimately.
+            #
+            # No project-column fallback here either — see the nexus-89uc4
+            # measurement. After nexus-i711w this is the only save path.
+            stored_scope_tags = _infer_scope_tags(plan_json)
 
         payload: dict[str, Any] = {
             "query":            query,
