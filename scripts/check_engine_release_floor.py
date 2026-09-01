@@ -565,13 +565,17 @@ def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
     rather than relying on someone having read the ledger prose.
 
     A non-empty ``## Unshipped`` section blocks paired-deploy UNLESS every
-    entry's bead is named via ``--ack-client-lag <bead-id>`` -- an explicit
+    entry is either named via ``--ack-client-lag <bead-id>`` -- an explicit
     "yes, I know this client half is not out yet, deploy anyway" rather than
-    a silent pass. ``ack_beads=None`` behaves like an empty list: no
-    acknowledgment offered.
+    a silent pass -- or carries the leading ``[additive]`` direction-safety
+    token (nexus-1emxn choreography (a): old client + new engine is safe, so
+    the engine may deploy ahead of the client tag). The token is interpreted
+    by ``check_wire_contract_pairing.classify_unshipped``, shared with
+    ``check_client_release_precondition.py`` (nexus-hcdk3). ``ack_beads=None``
+    behaves like an empty list: no acknowledgment offered.
 
-    Returns ``0`` (ledger empty, or every entry acknowledged) or ``1``
-    (unacknowledged entries present -- named in the message).
+    Returns ``0`` (ledger empty, or every entry acknowledged or additive)
+    or ``1`` (blocking entries present -- named in the message).
     """
     ledger = _wire_ledger.parse_ledger(_wire_ledger.DEFAULT_LEDGER_PATH)
     if not ledger.unshipped:

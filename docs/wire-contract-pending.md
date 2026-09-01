@@ -41,9 +41,13 @@ carries no method signature for a contract change to reconcile against) is a
 - **Direction-safety token** (nexus-1emxn choreography (a)): an Unshipped
   entry whose note BEGINS with the literal `[additive]` asserts OLD client
   + NEW engine is safe -- the engine half may deploy BEFORE the client
-  tag, so `check_client_release_precondition.py` treats an all-`[additive]`
-  Unshipped section as authorization for the unpaired deploy instead of a
-  block (no refusal window can open for such entries). `[not-additive]`
+  tag, so BOTH gates above treat an all-`[additive]` Unshipped section as
+  authorization instead of a block (no refusal window can open for such
+  entries). One shared classifier,
+  `check_wire_contract_pairing.classify_unshipped`, interprets the token
+  for both; before nexus-hcdk3 (2026-09-01) only the precondition gate
+  honored it, and the floor gate's `--ledger-only` leg red-gated every PR
+  to `main` on entries the precondition gate certified safe. `[not-additive]`
   (or NO leading token -- the fail-safe default for every pre-token entry)
   keeps the blocking behaviour. The token must LEAD the note (a
   mid-sentence mention is prose, not a statement -- the parser is anchored)
