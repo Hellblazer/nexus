@@ -265,10 +265,11 @@ before it runs server-side exactly as today.
 
 **F3 — The residual cost is concentrated in four operators.** The
 cheap-tier flip already covers the mechanical operators;
-`aggregate`/`summarize`/`compare`/`generate` are pinned strong with the
-cheap arms measured and refuted. Those four are overwhelmingly the
-*terminal* steps of composed plans, so F2's suffix and F3's cost centre
-coincide.
+`aggregate`/`summarize`/`compare`/`generate` are pinned strong — cheap
+arms measured, three refuted outright, aggregate's sonnet arm
+no-signal at n=6 (see Background for the exact verdicts). Those four
+are overwhelmingly the *terminal* steps of composed plans, so F2's
+suffix and F3's cost centre coincide.
 
 **F4 — Continuation mode dissolves mt9p8's blocking constraint rather
 than satisfying it.** The reason a composed route could not be
