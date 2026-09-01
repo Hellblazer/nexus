@@ -296,6 +296,28 @@ One table format, one checker, three tables.
 
 ### Technical Design
 
+**Status domain (Sam, 2026-09-01).** Six values, the lifecycle table's
+`status` dimension:
+
+| Status | Meaning | Terminal |
+| --- | --- | --- |
+| `draft` | entry state; under research or revision | no |
+| `accepted` | gate passed; implementation may start | no |
+| `deferred` | parked; resumes to `draft` only, never directly to `accepted` | no |
+| `closed` | implemented and shipped; the close reason lives in T2 and the postmortem | yes |
+| `superseded` | replaced by a named successor; the transition is guarded on `superseded_by` being present in frontmatter and refuses without it | yes |
+| `abandoned` | not going to happen, whether before or after acceptance; the timing lives in T2 | yes |
+
+Decisions folded in: `scrapped` and `abandoned` were two names for one
+terminal state and are merged (the seven `scrapped` files migrate to
+`abandoned` in Phase 1, with `scrapped` recorded in T2). `implemented`,
+`reverted`, `proposed`, `locked`, `open`, `final` and `revised` are retired
+from `_KNOWN_STATUSES`: nothing writes them and no file carries them.
+The five out-of-vocabulary values in the wild (`companion-note`, `frozen`,
+`frozen-pending-question-set`, `complete`, `revised-after-implementation`)
+are not statuses; those documents get `kind: companion` in frontmatter and
+no lifecycle status, and the audit skips them.
+
 **Table format.** TOML, one file per table, with three sections:
 
 ```toml
@@ -304,11 +326,13 @@ id = "rdr-lifecycle"
 kind = "state-machine"          # or "decision-table"
 
 [dimensions.status]             # every dimension is a declared enum
-domain = ["draft", "accepted", "closed", "superseded", "scrapped", "deferred", "abandoned"]
+domain = ["draft", "accepted", "deferred", "closed", "superseded", "abandoned"]
 [dimensions.event]
-domain = ["gate-pass", "accept", "close", "supersede", "scrap", "defer", "resume"]
+domain = ["accept", "close", "supersede", "abandon", "defer", "resume"]
 [dimensions.gate]
 domain = ["passed", "blocked", "none"]
+[dimensions.successor]            # superseded_by present in frontmatter?
+domain = ["named", "absent"]
 
 [[row]]
 id = "accept"
@@ -324,9 +348,26 @@ refuse = "gate-not-passed"
 
 [[row]]
 id = "accept-otherwise"
-match = { status = ["accepted", "closed", "superseded", "scrapped", "deferred", "abandoned"], event = "accept" }
+match = { status = ["accepted", "deferred", "closed", "superseded", "abandoned"], event = "accept" }
 escape = true
 refuse = "illegal-transition"
+
+[[row]]
+id = "supersede"
+match = { status = ["draft", "accepted", "deferred", "closed"], event = "supersede" }
+guard = { successor = "named" }
+to = { status = "superseded" }
+
+[[row]]
+id = "supersede-unnamed"
+match = { status = ["draft", "accepted", "deferred", "closed"], event = "supersede" }
+guard = { successor = "absent" }
+refuse = "successor-not-named"
+
+[[row]]
+id = "resume"
+match = { status = "deferred", event = "resume" }
+to = { status = "draft" }
 ```
 
 `match` scopes a group (the rows sharing one match assignment); `guard`
@@ -434,11 +475,11 @@ shrink. `nx rdr set-status` gains a refusal path.
   Phase 2 keeps the old decision path behind the new one and asserts
   identical verdicts over all 101 enumerated cells before the old path is
   deleted (Finding 2's cell table is the fixture).
-- Migrating the status vocabulary retires `implemented`, `reverted`,
-  `proposed`, `locked` (never written) and rejects five out-of-vocabulary
-  values in the wild. Mitigation: the three companion notes and RDR-200's
-  sub-documents get an explicit `kind: companion` frontmatter key the
-  audit skips, rather than a lifecycle status.
+- Migrating the status vocabulary retires seven never-written values,
+  merges `scrapped` into `abandoned` across seven files, and rejects five
+  out-of-vocabulary values in the wild. Mitigation: the migration is one
+  scripted sweep in Phase 1 with a before/after census committed alongside
+  it; the companion documents get `kind: companion` rather than a status.
 
 ### Failure Modes
 
@@ -456,8 +497,8 @@ shrink. `nx rdr set-status` gains a refusal path.
 
 - nexus-hcdk3 closed (done 2026-09-01), so Phase 2 starts from two gates
   that already agree.
-- Sam's ruling on the status vocabulary's final domain (Finding 1 lists
-  the candidates; the draft table above is a proposal).
+- The status domain ruling, given 2026-09-01 and recorded in the
+  Technical Design.
 
 ### Minimum Viable Validation
 
@@ -473,8 +514,11 @@ The lifecycle table lints clean in CI; `nx rdr set-status <id> closed` on a
 2. Author `docs/tables/rdr-lifecycle.toml`; lint it in the lint bucket.
 3. Rewire `set-status`, `rdr_hook.py`'s ranking, and the tripwire test's
    status words to the table's domain; delete the three literals.
-4. Sweep `docs/rdr` for out-of-vocabulary statuses; convert companions to
-   `kind: companion`; hand-fix the one `revised-after-implementation`.
+4. Scripted sweep of `docs/rdr`: `scrapped` to `abandoned` (seven files,
+   T2 keeps `scrapped`); companions and RDR-200 sub-documents to
+   `kind: companion`; the one `revised-after-implementation` to `closed`
+   plus `kind: companion`; README index rows updated by the same script;
+   before/after census committed with it.
 
 ### Phase 2: Release choreography
 
@@ -579,4 +623,5 @@ class this RDR names was found and fixed during its own research.
 
 - 2026-09-01: Created (draft).
 - 2026-09-01: Research findings 1-4 recorded; Alternative 1 refuted; incident classification corrected (event dimension); nexus-hcdk3 filed from Finding 2.
+- 2026-09-01: Status domain ruled by Sam: six values, scrapped merged into abandoned, deferred resumes to draft only, supersede guarded on superseded_by. Recorded in Technical Design.
 - 2026-09-01: Gate critique [23988], 4 significant: RDR-024 relabelled Precedent (the hard accept guard came with set-status, not RDR-024); RDR-149 added as the shared-primitive precedent; match-key shape rule added to the Technical Design; the 101-cell figure marked as an estimate with its 96-cell coverage sum reconciled to Phase 2.
