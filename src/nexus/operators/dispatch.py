@@ -15,6 +15,7 @@ import contextvars
 import json
 import math
 import os
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -759,20 +760,74 @@ def _parse_dispatch_usage(final_result: dict[str, Any] | None) -> DispatchUsage:
     )
 
 
-async def _feed_stdin(proc: "asyncio.subprocess.Process", prompt: str) -> None:
-    """Write *prompt* to stdin and close it.
+def _write_prompt_file(prompt: str) -> Path:
+    """Write *prompt* to a fresh, fully-flushed temp file (nexus-vzy2v).
 
-    Mirrors ``asyncio.subprocess.Process._feed_stdin``'s tolerance of the
-    child closing its end early (e.g. an immediate arg-parse/auth
-    failure) -- BrokenPipeError/ConnectionResetError on drain are
-    expected there too, not fatal.
+    Delivering the prompt to the ``claude -p`` child via a stdin PIPE
+    written AFTER spawn (the prior ``_feed_stdin`` -- now deleted --
+    scheduled via ``asyncio.gather`` alongside the stdout/stderr drains)
+    races the Claude Code CLI's 3s stdin-wait: under event-loop/system
+    load, the write can land after the CLI gives up and proceeds without
+    input ("Warning: no stdin data received in 3s, proceeding without
+    it" / "Error: Input must be provided either through stdin or as a
+    prompt argument when using --print", exit 1). Measured live
+    2026-09-01: 6/12 gate-arm ``nx_answer`` dispatches degenerated this
+    way under load.
+
+    Writing the prompt to disk BEFORE spawn and redirecting the child's
+    stdin from that file removes the writer entirely: the data is
+    already on disk the instant the child execs, so there is nothing
+    left to race regardless of parent event-loop scheduling delay. NOT
+    argv -- prompts run up to ~200k chars, well past ARG_MAX on a
+    loaded system.
+
+    Returns the file's path. The caller (``claude_dispatch``) opens it
+    read-only for the subprocess's stdin redirect via
+    :func:`_spawn_with_prompt_file` and unlinks it once the subprocess
+    has exited -- on every path: success, harness failure, timeout, or
+    even a spawn failure -- mirroring the minted-T1-session cleanup its
+    own ``finally`` already performs.
     """
-    proc.stdin.write(prompt.encode())
+    fd, path_str = tempfile.mkstemp(prefix="nx-dispatch-prompt-", suffix=".txt")
     try:
-        await proc.stdin.drain()
-    except (BrokenPipeError, ConnectionResetError):
-        pass
-    proc.stdin.close()
+        with os.fdopen(fd, "wb") as f:
+            f.write(prompt.encode())
+    except BaseException:
+        # The write itself failed -- nothing to redirect stdin from, and
+        # no caller will ever see this path to clean it up later, so
+        # this is the one case that DOES delete its own partial file.
+        try:
+            os.unlink(path_str)
+        except OSError:
+            pass
+        raise
+    return Path(path_str)
+
+
+async def _spawn_with_prompt_file(
+    argv: list[str], prompt_path: Path, **popen_kwargs: Any,
+) -> "asyncio.subprocess.Process":
+    """Spawn *argv* with the child's stdin redirected from *prompt_path*
+    (nexus-vzy2v) -- see :func:`_write_prompt_file` for why.
+
+    Kept as its own async function, separate from the temp-file WRITE
+    (which ``claude_dispatch`` performs itself, into a variable its
+    ``finally`` can always see, even when this function raises), so the
+    race-free spawn mechanism is independently testable against a real
+    subprocess and a real slow-reading script, without needing to fake
+    the ``claude`` binary ``claude_dispatch`` hardcodes into ``argv[0]``.
+
+    The file object opened here is closed as soon as
+    ``create_subprocess_exec`` returns -- once the child has execed it
+    holds its own duplicated file descriptor via the kernel's fd
+    inheritance, entirely independent of the parent's copy, so closing
+    the parent's handle immediately is safe and does not affect the
+    child's ability to read the file.
+    """
+    with open(prompt_path, "rb") as prompt_file:
+        return await asyncio.create_subprocess_exec(
+            *argv, stdin=prompt_file, **popen_kwargs,
+        )
 
 
 async def _drain_stream(pipe: "asyncio.StreamReader", sink: list[bytes]) -> None:
@@ -1203,10 +1258,18 @@ async def claude_dispatch(
     # A mint immediately followed by a spawn failure (fork/exec error,
     # resource exhaustion) previously leaked both the scratch rows and the
     # session token with nothing to close.
+    # nexus-vzy2v: write the prompt to disk BEFORE spawning, in a variable
+    # the outer `finally` below can always see -- including when the spawn
+    # attempt itself raises (fork/exec error, resource exhaustion). This is
+    # what makes stdin delivery race-free: the data is on disk, and the
+    # child's stdin is redirected from that file at exec time, not written
+    # into a pipe afterward.
+    prompt_path: Path | None = None
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdin=asyncio.subprocess.PIPE,
+        prompt_path = _write_prompt_file(prompt)
+        proc = await _spawn_with_prompt_file(
+            argv,
+            prompt_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
@@ -1236,8 +1299,11 @@ async def claude_dispatch(
             # firing -- a real deadlock, not merely a slow path (verified:
             # a fake proc whose streams EOF immediately but whose wait()
             # never returns hung the caller indefinitely pre-fix).
+            # nexus-vzy2v: stdin is no longer fed here -- the prompt was
+            # already written to disk and redirected into the child's
+            # stdin at spawn time (_spawn_with_prompt_file), so there is
+            # no writer left to run concurrently with the drains.
             await asyncio.gather(
-                _feed_stdin(proc, prompt),
                 _drain_stream(proc.stdout, stdout_chunks),
                 _drain_stream(proc.stderr, stderr_chunks),
             )
@@ -1541,3 +1607,17 @@ async def claude_dispatch(
         # now that the subprocess that owned it is gone. No-op when this
         # dispatch never minted (tool-free, or a failed mint).
         _close_dispatch_session(_minted_session_id, _minted_session_token)
+        # nexus-vzy2v: delete the temp prompt file on every path -- success,
+        # harness failure, timeout-kill, or a spawn failure that raised
+        # before any of the above ran. Best-effort: an already-completed
+        # (or already-failed) dispatch must not additionally fail because
+        # its scratch file could not be removed.
+        if prompt_path is not None:
+            try:
+                prompt_path.unlink(missing_ok=True)
+            except OSError as exc:
+                _log.warning(
+                    "operator_dispatch_prompt_file_cleanup_failed",
+                    path=str(prompt_path),
+                    error=str(exc),
+                )

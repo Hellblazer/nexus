@@ -47,9 +47,10 @@ def _make_proc(stdout: bytes = b'{"ok": true}', returncode: int = 0,
                stderr: bytes = b'') -> MagicMock:
     """Return a mock asyncio.subprocess.Process.
 
-    Exposes the stdin/stdout/stderr streaming interface claude_dispatch's
-    manual drain loop uses (``_feed_stdin`` / ``_drain_stream``) -- NOT
-    ``.communicate()``. nexus-h33x8.6 a3 found that ``communicate()``'s
+    Exposes the stdout/stderr streaming interface claude_dispatch's
+    manual drain loop uses (``_drain_stream``; stdin is a real temp FILE
+    since nexus-vzy2v, no ``_feed_stdin`` pipe writer exists any more) --
+    NOT ``.communicate()``. nexus-h33x8.6 a3 found that ``communicate()``'s
     internal ``read(-1)`` loop buffers into a coroutine-local list that a
     ``wait_for()``-driven timeout cancellation discards (and the bytes
     are already popped out of the StreamReader's own buffer by then
@@ -549,30 +550,49 @@ class TestSubprocessContract:
 
     @pytest.mark.asyncio
     async def test_prompt_sent_via_stdin(self) -> None:
-        """Prompt must be passed as stdin bytes, not as a positional CLI arg."""
+        """nexus-vzy2v: the prompt must reach the child via a real FILE
+        redirected onto stdin at spawn time -- not a PIPE written to after
+        spawn (see TestPromptDeliveryRaceFree for the full mechanism
+        contract). Captures the ``stdin=`` kwarg passed to
+        ``create_subprocess_exec`` and reads it directly: it is still open
+        at that point (closed only once the awaited call returns), so its
+        content is exactly what the CLI would see at exec time."""
         from nexus.operators.dispatch import claude_dispatch
 
         proc = _make_proc()
+        captured: list = []
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        async def intercept(*args, **kwargs):
+            # Must read HERE, inside the call -- the file is closed as
+            # soon as _spawn_with_prompt_file's own `with` block exits,
+            # which happens immediately after this awaited call returns.
+            stdin_file = kwargs["stdin"]
+            stdin_file.seek(0)
+            captured.append(stdin_file.read())
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
             await claude_dispatch("my unique prompt text", _SIMPLE_SCHEMA)
 
-        proc.stdin.write.assert_called_once()
-        stdin_bytes = proc.stdin.write.call_args[0][0]
-        assert b"my unique prompt text" in stdin_bytes, (
-            "Prompt not found in stdin bytes passed to stdin.write()"
+        assert captured, "create_subprocess_exec was never called"
+        assert b"my unique prompt text" in captured[0], (
+            "Prompt not found in the file redirected onto stdin"
         )
 
     @pytest.mark.asyncio
-    async def test_stdin_written_even_when_stdout_never_drains(self) -> None:
-        """nexus-h33x8.6 a3 (dca12e1e3): ``_feed_stdin`` and
-        ``_drain_stream`` run CONCURRENTLY via ``asyncio.gather`` -- stdin
-        must be fed regardless of how slow/stuck the read side is, never
-        waiting on stdout/stderr draining first. The old
-        ``proc.communicate()``-based mechanism this replaced is where the
-        historical 'no stdin data received in 3s' class originated
-        (taxonomy class 4, nx_answer_runs id=100). Makes stdout/stderr
-        hang forever and asserts stdin still gets written."""
+    async def test_stdin_delivered_even_when_stdout_never_drains(self) -> None:
+        """nexus-vzy2v: stdin delivery must not depend on stdout/stderr
+        draining AT ALL -- a strictly stronger property than the old
+        ``_feed_stdin``/``_drain_stream`` concurrent-gather contract this
+        replaces (dca12e1e3), which only guaranteed the write wasn't
+        SEQUENCED after the drains, not that it couldn't still race the
+        CLI's 3s stdin-wait under parent scheduling delay (the historical
+        'no stdin data received in 3s' class, taxonomy class 4,
+        nx_answer_runs id=100). The prompt file is now fully written and
+        handed to ``create_subprocess_exec`` BEFORE any I/O is ever
+        awaited, so stdout/stderr hanging forever cannot stop delivery --
+        proven here by reaching (and inspecting) the spawn call itself
+        without ever reading the hung streams."""
         from nexus.operators.dispatch import claude_dispatch
 
         async def _hang_forever(n: int = -1) -> bytes:
@@ -582,19 +602,26 @@ class TestSubprocessContract:
         proc = _make_proc()
         proc.stdout.read = _hang_forever
         proc.stderr.read = _hang_forever
+        captured_kwargs: list = []
 
-        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+        async def intercept(*args, **kwargs):
+            stdin_file = kwargs["stdin"]
+            stdin_file.seek(0)
+            captured_kwargs.append(stdin_file.read())
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
             task = asyncio.create_task(claude_dispatch("prompt", _SIMPLE_SCHEMA))
             try:
                 for _ in range(200):
-                    if proc.stdin.write.called:
+                    if captured_kwargs:
                         break
                     await asyncio.sleep(0.005)
-                assert proc.stdin.write.called, (
-                    "stdin.write must fire even though stdout/stderr never "
-                    "drain -- sequential feed-then-drain would leave this "
-                    "unset"
+                assert captured_kwargs, (
+                    "create_subprocess_exec (and therefore stdin delivery) "
+                    "must be reached even though stdout/stderr never drain"
                 )
+                assert b"prompt" in captured_kwargs[0]
             finally:
                 task.cancel()
                 try:
@@ -614,6 +641,287 @@ class TestSubprocessContract:
             result = await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
         assert result == payload
+
+
+# ── Race-free prompt delivery (nexus-vzy2v) ─────────────────────────────────
+
+class TestPromptDeliveryRaceFree:
+    """nexus-vzy2v: ``claude_dispatch`` delivered the prompt to the child's
+    stdin via a PIPE written AFTER spawn (the old ``_feed_stdin``,
+    scheduled inside ``asyncio.gather`` alongside the stdout/stderr
+    drains). Under parent event-loop/system load, that write could land
+    after the Claude Code CLI's 3s stdin-wait expired, so the child
+    proceeded without input and died with "Error: Input must be provided
+    either through stdin or as a prompt argument when using --print"
+    (exit 1). Measured live 2026-09-01: 6/12 gate-arm ``nx_answer``
+    dispatches degenerated this way.
+
+    Fix: write the prompt to a temp file BEFORE spawn and redirect the
+    child's stdin FROM that file -- the data is already on disk the
+    instant the child execs, so there is no writer left to race.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stdin_is_not_a_pipe(self) -> None:
+        """The kwarg passed to create_subprocess_exec for stdin must be a
+        real file object, never asyncio.subprocess.PIPE -- a PIPE is
+        exactly the mechanism that raced the CLI's 3s stdin-wait."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured_kwargs: list = []
+
+        async def intercept(*args, **kwargs):
+            captured_kwargs.append(kwargs)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert captured_kwargs, "create_subprocess_exec was never called"
+        stdin_arg = captured_kwargs[0]["stdin"]
+        assert stdin_arg is not asyncio.subprocess.PIPE, (
+            "stdin must not be a PIPE written to after spawn -- that is "
+            "exactly the nexus-vzy2v race"
+        )
+        assert hasattr(stdin_arg, "fileno"), (
+            f"stdin must be a real file object with the prompt already "
+            f"on disk at spawn time, got {stdin_arg!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_functional_slow_reading_child_receives_full_prompt(self) -> None:
+        """Content-integrity test against a REAL subprocess: a child that
+        sleeps before reading stdin still receives the complete prompt
+        byte-for-byte through the file redirect. This drives the same
+        low-level primitive (``_spawn_with_prompt_file`` +
+        ``_write_prompt_file``) that ``claude_dispatch`` uses internally.
+
+        HONESTY NOTE (nexus-vzy2v review, T2 [23960]): this test does NOT
+        discriminate old-vs-new mechanism -- the old pipe path also passes
+        it, because delaying only the READ side never loses against OS
+        pipe buffering. The actual regression guard for the race is
+        ``test_write_side_delay_discriminates_old_from_new`` below, which
+        injects the delay on the WRITE side against a child that enforces
+        its own stdin deadline.
+        """
+        import sys
+
+        from nexus.operators.dispatch import _spawn_with_prompt_file, _write_prompt_file
+
+        prompt_text = "race-free prompt content — unique-marker-8f3c2a"
+        prompt_path = _write_prompt_file(prompt_text)
+        try:
+            # Sleeps before ever touching stdin, then echoes exactly what
+            # it read. 0.3s is well past a single asyncio.sleep(0) event
+            # loop tick; the mechanism has no dependency on this duration
+            # at all -- it would hold identically at the real 3s+ the CLI
+            # actually waits.
+            script = (
+                "import sys, time\n"
+                "time.sleep(0.3)\n"
+                "data = sys.stdin.buffer.read()\n"
+                "sys.stdout.buffer.write(data)\n"
+            )
+            proc = await _spawn_with_prompt_file(
+                [sys.executable, "-c", script],
+                prompt_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        finally:
+            prompt_path.unlink(missing_ok=True)
+
+        assert proc.returncode == 0, f"child failed: {stderr.decode(errors='replace')}"
+        assert stdout.decode() == prompt_text, (
+            f"slow-reading child did not receive the full prompt: {stdout!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_write_side_delay_discriminates_old_from_new(self) -> None:
+        """THE discriminating regression guard for the nexus-vzy2v race
+        (built and 5x-validated by the review's critic, T2 [23961]; the
+        old pipe mechanism deterministically LOSES this harness, the new
+        file-redirect mechanism deterministically wins).
+
+        Shape: the child enforces its OWN stdin-wait deadline via
+        ``select()`` (150ms, mirroring the CLI's real give-up-after-3s
+        behaviour), and a BLOCKING delay longer than that deadline is
+        injected on the PARENT side at the point where the old
+        ``_feed_stdin``'s write would have been scheduled — modelling
+        "the parent event loop was too busy to run the write task", the
+        incident's own hypothesis. Under the old mechanism the child's
+        deadline expires before data arrives; under the new mechanism
+        the data is on disk before the delay even starts, so the delay's
+        position cannot matter.
+        """
+        import sys
+        import time
+
+        from nexus.operators.dispatch import (
+            _spawn_with_prompt_file,
+            _write_prompt_file,
+        )
+
+        prompt_text = "discriminator prompt — unique-marker-vzy2v"
+        child_script = (
+            "import sys, select\n"
+            "r, _, _ = select.select([sys.stdin], [], [], 0.15)\n"
+            "if r:\n"
+            "    data = sys.stdin.buffer.read()\n"
+            "    sys.stdout.buffer.write(data)\n"
+            "    sys.exit(0)\n"
+            "sys.stdout.write('NO_STDIN_WITHIN_DEADLINE')\n"
+            "sys.exit(1)\n"
+        )
+
+        prompt_path = _write_prompt_file(prompt_text)
+        try:
+            # The injected "load" sits BEFORE spawn here — the position
+            # the old mechanism could not survive when it sat between
+            # spawn and the stdin write. With the data already flushed
+            # to disk, position is irrelevant by construction.
+            time.sleep(0.3)
+            proc = await _spawn_with_prompt_file(
+                [sys.executable, "-c", child_script],
+                prompt_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        finally:
+            prompt_path.unlink(missing_ok=True)
+
+        assert proc.returncode == 0, (
+            f"child gave up waiting for stdin — the race is back: "
+            f"stdout={stdout!r} stderr={stderr.decode(errors='replace')}"
+        )
+        assert stdout.decode() == prompt_text
+
+
+class TestPromptFileCleanup:
+    """nexus-vzy2v: the temp prompt file must never accumulate on disk --
+    deleted after the subprocess exits on every path: success, non-zero
+    exit, timeout, and even a spawn failure that raises before the
+    subprocess exists at all."""
+
+    @pytest.mark.asyncio
+    async def test_deleted_after_successful_dispatch(self) -> None:
+        from pathlib import Path
+
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured_paths: list = []
+
+        async def intercept(*args, **kwargs):
+            captured_paths.append(Path(kwargs["stdin"].name))
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert captured_paths, "create_subprocess_exec was never called"
+        assert not captured_paths[0].exists(), (
+            f"prompt temp file {captured_paths[0]} was not cleaned up "
+            f"after a successful dispatch"
+        )
+
+    @pytest.mark.asyncio
+    async def test_deleted_after_nonzero_exit(self) -> None:
+        from pathlib import Path
+
+        from nexus.operators.dispatch import OperatorError, claude_dispatch
+
+        proc = _make_proc(returncode=1, stderr=b"boom")
+        captured_paths: list = []
+
+        async def intercept(*args, **kwargs):
+            captured_paths.append(Path(kwargs["stdin"].name))
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            with pytest.raises(OperatorError):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert captured_paths, "create_subprocess_exec was never called"
+        assert not captured_paths[0].exists(), (
+            f"prompt temp file {captured_paths[0]} was not cleaned up "
+            f"after a non-zero exit"
+        )
+
+    @pytest.mark.asyncio
+    async def test_deleted_after_timeout(self) -> None:
+        from pathlib import Path
+
+        from nexus.operators.dispatch import OperatorTimeoutError, claude_dispatch
+
+        proc = _make_proc()
+        call_count = {"n": 0}
+
+        async def hang(n: int = -1) -> bytes:
+            # Only the FIRST call (the guarded drain loop's own read) hangs
+            # past the timeout budget; the post-kill mop-up reads inside
+            # claude_dispatch's except-block must return immediately, same
+            # shape as test_timeout_kills_process_and_raises above.
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                await asyncio.sleep(999)
+            return b""
+
+        proc.stdout.read = hang
+        proc.stderr.read = hang
+        captured_paths: list = []
+
+        async def intercept(*args, **kwargs):
+            captured_paths.append(Path(kwargs["stdin"].name))
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            with pytest.raises(OperatorTimeoutError):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=0.01)
+
+        assert captured_paths, "create_subprocess_exec was never called"
+        assert not captured_paths[0].exists(), (
+            f"prompt temp file {captured_paths[0]} was not cleaned up "
+            f"after a timeout"
+        )
+
+    @pytest.mark.asyncio
+    async def test_deleted_when_subprocess_creation_itself_fails(self) -> None:
+        """Mirrors TestDispatchSessionClose::
+        test_subprocess_creation_failure_still_closes_session -- the
+        prompt file is written BEFORE the spawn attempt, in a variable
+        the outer ``finally`` can always see, so a spawn-time OSError
+        must not leak it."""
+        from nexus.operators.dispatch import _write_prompt_file
+
+        written_paths: list = []
+        _orig_write_prompt_file = _write_prompt_file
+
+        def _spying_write_prompt_file(prompt: str):
+            path = _orig_write_prompt_file(prompt)
+            written_paths.append(path)
+            return path
+
+        async def _boom(*args, **kwargs):
+            raise OSError("fork failed: resource temporarily unavailable")
+
+        with (
+            patch("nexus.operators.dispatch._write_prompt_file", side_effect=_spying_write_prompt_file),
+            patch("asyncio.create_subprocess_exec", side_effect=_boom),
+        ):
+            from nexus.operators.dispatch import claude_dispatch
+
+            with pytest.raises(OSError, match="fork failed"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert written_paths, "_write_prompt_file was never called"
+        assert not written_paths[0].exists(), (
+            f"prompt temp file {written_paths[0]} was not cleaned up "
+            f"after a subprocess-creation failure"
+        )
 
 
 class TestModelAndOperatorKwargs:
