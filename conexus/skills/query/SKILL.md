@@ -45,6 +45,29 @@ That's it. One tool call. `nx_answer` enforces plan-match-first:
 
 No agent spawns. No T1 scratch relay. All coordination is in-process.
 
+## Return shape (RDR-200 continuation mode, landing with Phase 1 go-live)
+
+`nx_answer` has two return shapes, chosen by the `continuation` flag —
+still `False`/unset by default as of this writing (RDR-200 Phase 1a/1b
+are opt-in, and the caller-visible envelope itself has not gone live
+yet: `nx_answer(continuation=True)` classifies the plan's continuation
+cut but the RETURN value is unchanged headless prose/JSON until
+nexus-4e75w.5 ships). **Headless** (the default, and the only live shape
+today) runs plan-match, retrieval, and the terminal synthesis
+server-side via a `claude -p` subprocess, returning a finished answer —
+this is what every skill and agent uses today, no client change needed.
+**Continuation** (opt-in, not yet live) stops after retrieval instead of
+dispatching the terminal synthesis: it returns a `continuation` envelope
+carrying the exact prompt/schema the headless synthesis would have used
+plus provenance for the hydrated evidence, and the calling session
+performs the reduction in its own context instead of paying a second
+`claude -p` subprocess's cost and latency. When live, text-mode
+(`structured=False`, what this skill's one call above uses) makes the
+returned value the reduction instruction itself — no new client
+machinery to build. Neither shape changes plan-match, retrieval,
+bundling, or the routing decision of when to call `nx_answer` at all
+(the `nexus-h33x8.6` narrowing below is unaffected).
+
 ## Why not direct `search`?
 
 `search` returns top-K chunks. Analytical questions need composition

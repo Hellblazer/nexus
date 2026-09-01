@@ -48,6 +48,7 @@ __all__ = [
     "BUNDLED_INTERMEDIATE",
     "DEFERRED_REF_KEY",
     "MAX_BUNDLE_PROMPT_CHARS",
+    "MAX_CONTINUATION_PROMPT_CHARS",
     "is_operator_tool",
     "segment_steps",
     "resolve_dispatch_segments",
@@ -73,6 +74,23 @@ DEFERRED_REF_KEY: str = "__nexus_deferred_step_ref__"
 #: on plans that are clearly within capacity; lower if bundles are
 #: producing truncated/degenerate output. (substantive-critic Obs B)
 MAX_BUNDLE_PROMPT_CHARS: int = 200_000
+
+
+#: RDR-200 §Size discipline (nexus-4e75w.4, R3). A separate, SMALLER cap
+#: than :data:`MAX_BUNDLE_PROMPT_CHARS` for the continuation-mode
+#: envelope's ``reduction_spec.prompt``. ``MAX_BUNDLE_PROMPT_CHARS`` is
+#: sized for a dedicated ``claude -p`` subprocess; a continuation prompt
+#: instead lands in the CALLING session's own working context, alongside
+#: whatever else that session is already holding — a materially smaller
+#: budget. 60,000 chars (~15k tokens) is an explicit STARTING VALUE with
+#: NO measurement behind it yet; RDR-200 Phase 1's measured fallback rate
+#: is what tunes it. On breach the continuation envelope is not built for
+#: that call and the caller falls back to the headless path for the whole
+#: answer — the same "no silent truncation of evidence" contract
+#: ``bundle_oversized_fallback_to_per_step`` already established, applied
+#: at the coarser (whole-reduction, not per-step) granularity a
+#: continuation cut operates at.
+MAX_CONTINUATION_PROMPT_CHARS: int = 60_000
 
 
 #: Operators eligible for bundling into a single ``claude -p`` subprocess

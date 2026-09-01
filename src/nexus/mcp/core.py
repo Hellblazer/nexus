@@ -7683,6 +7683,14 @@ async def nx_answer(
             # caller reading the envelope and one tailing the log see one
             # shape.
             "plan_choice": _plan_choice_info,
+            # RDR-200 Phase 1b (nexus-4e75w.4): always present, same
+            # "a caller relies on the key, never membership-checks it"
+            # convention as budget_exhausted_at_step / truncated_chars
+            # above. ``None`` on EVERY call for the whole of Phase 1b —
+            # the key ships dark before go-live (nexus-4e75w.5 flips
+            # this to a real envelope dict only after the handoff
+            # telemetry row is written ahead of the return path).
+            "continuation": None,
         }
 
     # nexus-h33x8.6 a4 / nexus-nyry9.2 (RDR-196 .r2): single shared
@@ -8546,13 +8554,19 @@ async def nx_answer(
 
     # RDR-200 Phase 1a (nexus-4e75w.3): cut-selection ONLY. When the
     # caller opted in (``continuation=True``), classify the matched/grown
-    # plan's continuation suffix and log the decision — but do NOT act on
-    # it yet. The continuation envelope (nexus-4e75w.4) is what makes this
-    # branch's classification observable in the RETURN value; until it
-    # lands, every call (continuation True, False, or None) falls through
-    # to the SAME headless ``plan_run`` call below, unchanged.
+    # plan's continuation suffix and log the decision. Phase 1b
+    # (nexus-4e75w.4, below the plan_run call) additionally ASSEMBLES the
+    # continuation envelope from ``_cut`` behind a go-live gate that stays
+    # closed until nexus-4e75w.5 — every call (continuation True, False,
+    # or None) still falls through to the SAME headless ``plan_run`` call
+    # below and returns the SAME headless answer, unchanged.
+    # ``_cut``/``_continuation_steps`` default to None/[] so the Phase 1b
+    # assembly site below can check "did continuation=True actually
+    # classify a cut" without a NameError when continuation is falsy.
+    _cut: "ContinuationCut | None" = None
+    _continuation_steps: list[dict] = []
     if continuation:
-        from nexus.plans.continuation import classify_continuation_cut  # noqa: PLC0415 — rare/branch-local path (Phase-1a opt-in only), avoids paying this import on every call
+        from nexus.plans.continuation import classify_continuation_cut  # noqa: PLC0415 — rare/branch-local path (Phase-1 opt-in only), avoids paying this import on every call
 
         try:
             _continuation_steps = json.loads(best.plan_json).get("steps") or []
@@ -8869,6 +8883,45 @@ async def nx_answer(
                 )
             except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
                 _log.warning("plan_grow_save_failed", error=str(exc))
+
+    # RDR-200 Phase 1b (nexus-4e75w.4): assemble the continuation envelope
+    # behind the go-live gate (nexus.plans.continuation_envelope.
+    # _CONTINUATION_GO_LIVE, currently False — flipped by nexus-4e75w.5
+    # only after the handoff telemetry write lands ahead of the return
+    # path, per RDR-200 R2). ``result.steps`` is the REAL, already-
+    # executed headless output — the envelope reconstruction replays
+    # resolution/hydration against real upstream state, never hand-built
+    # args (nexus-4e75w.3 audit round-2 residual). ``run_id=None``: no
+    # handoff row exists yet in Phase 1b. The result is intentionally
+    # discarded — ``_result()`` always returns ``continuation: None`` for
+    # the whole of Phase 1b — this call exists to prove the machinery
+    # runs end-to-end against real production data (the
+    # ``nx_answer_continuation_envelope_ready`` structlog event is that
+    # proof) and to give nexus-4e75w.5 a call site to wire the early
+    # return onto. A failure here must NEVER affect the headless answer.
+    if continuation and _cut is not None:
+        from nexus.plans.continuation import CutShape as _CutShape  # noqa: PLC0415 — rare/branch-local path (Phase-1 opt-in only)
+
+        if _cut.shape in (_CutShape.SHAPE_A, _CutShape.SHAPE_B):
+            try:
+                from nexus.plans.continuation_envelope import assemble_continuation_envelope  # noqa: PLC0415 — rare/branch-local path
+                from nexus.plans.runner import merge_bindings  # noqa: PLC0415 — rare/branch-local path
+
+                _continuation_merged = merge_bindings(best.default_bindings, run_bindings)
+                assemble_continuation_envelope(
+                    cut=_cut,
+                    steps=_continuation_steps,
+                    bindings=_continuation_merged,
+                    step_outputs=result.steps,
+                    plan_id=best.plan_id,
+                    run_id=None,
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort proof-of-machinery; must never affect the headless answer
+                _log.warning(
+                    "nx_answer_continuation_envelope_assembly_failed",
+                    plan_id=best.plan_id,
+                    error=str(exc),
+                )
 
     # ── Step 6: record run ───────────────────────────────────────────────
     try:

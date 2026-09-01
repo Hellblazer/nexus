@@ -54,6 +54,8 @@ Do NOT use it for: file:line answers (Serena/Grep), anything already in a local 
 
 **Measured cost (n=142 executed runs, 2026-04..2026-08; T2 `nexus/nx-answer-capability-analysis-2026-08-19`):** p50 80s, p95 217s, max 371s; 0.7% finish under 5s. 35% miss the plan gate and pay ~53s more (p50) for an inline planner. A call can hit its 300s timeout and return nothing. Budget minutes, not seconds. The trade is worth it when the alternative is twenty minutes of reading — not when it is one grep.
 
+**Two return shapes (RDR-200, landing with Phase 1 go-live — headless is the only LIVE shape as of this writing).** Headless (default, `continuation` unset/`False`) runs the terminal synthesis server-side in a `claude -p` subprocess and returns a finished answer — the above cost figures describe this shape and nothing here changes it. Continuation (opt-in `continuation=True`, not yet live — nexus-4e75w.4 built and tested the assembly behind a closed go-live gate; nexus-4e75w.5 wires the return path) stops after server-side retrieval and returns an envelope carrying the exact prompt/schema the synthesis would have dispatched plus evidence provenance, so the calling session performs the reduction in its own context instead of paying a second subprocess. **This does not change when to call `nx_answer` at all** — the routing decision below (reduce-from-many-documents vs. `search`/`query`) is unaffected; `nexus-h33x8.6`'s narrowing stands.
+
 - Reduce-from-many-documents questions ("what approaches to X appear in…", "tradeoffs across…", "compare… across the corpus") → `/conexus:query`
 - Design walks from concept to code → `/conexus:research`
 - Critique a change set → `/conexus:review`

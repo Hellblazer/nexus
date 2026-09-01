@@ -379,7 +379,7 @@ always-present convention (`null` when the call was not a continuation):
 "continuation": {
   "spec_version": 1,              // caller MUST refuse loudly on unknown
   "continuation_id": "…",         // server-generated; correlates the report
-  "run_id": 12345,                // nx_answer_runs.id of the handoff row
+  "run_id": null,                 // null in spec v1 — see below
   "cut_at_step": 2,               // 0-based plan index of the suffix start
   "plan_id": 357,
   "reduction_spec": {
@@ -395,6 +395,18 @@ always-present convention (`null` when the call was not a continuation):
   }
 }
 ```
+
+**`run_id` is `null` in spec version 1** (amended 2026-09-01, the .4
+critique's Critical 2b). The record route's response is a bare
+`{"ok": true}` — the engine computes the inserted row's id and
+discards it (`TelemetryRepository.java:977`) — and surfacing it would
+be an engine change, which Phases 0-2 exclude by their own constraint.
+Correlation therefore rides **`continuation_id`**, which the handoff
+row carries in its marker line and the `nx_answer_report` paired row
+repeats; `answer-runs` pairs on it at read time exactly as the
+telemetry section already specifies. `run_id` upgrades to the real id
+if an additive engine enhancement later returns it from the record
+route — optional, required by no phase.
 
 **`reduction_spec.prompt` is not newly authored prose.** It is the
 byte-identical string `dispatch_bundle` would have handed
@@ -1071,6 +1083,15 @@ stratum falls short. Pinned before Phase 1 runs, as this RDR requires.
   default tiering at both dispatch sites; no step-author model
   overrides in the frozen set; same-model constraint scoped to the
   continuation/caller-only pair. Implementation start authorized.
+- 2026-09-01 — Phase 1b critique folds (T2 [23948]): the text
+  renderer's fence is now dynamic (longest interior backtick run + 1;
+  a fixed ``` fence was live-falsified as escapable by
+  instruction-shaped evidence — R7); `run_id` amended to `null` in
+  spec v1 with correlation on `continuation_id` (the record route
+  returns no row id and Phases 0-2 exclude engine changes); the
+  stop-before-cut mechanism in `plan_run` — unowned by any bead until
+  this fold — is assigned to the go-live bead alongside the
+  SQL-fast-path probe from the code review.
 - 2026-09-01 — OQ-1 DECIDED by Sam: build. The entropy/scale argument
   added to the Problem Statement and R6 (flat search swamps in
   adjacent facts as the corpus grows; composed retrieval holds

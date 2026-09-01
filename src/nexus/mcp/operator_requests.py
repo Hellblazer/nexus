@@ -40,6 +40,8 @@ path only.
 """
 from __future__ import annotations
 
+from typing import Any, Callable
+
 #: Shared evidence-item schema for ``operator_check`` and (via a deferred
 #: import) ``nexus.plans.bundle._terminal_schema("check")`` — one
 #: authoritative definition so a role-enum or required-key change lands
@@ -356,3 +358,96 @@ def build_aggregate_request(groups: str, reducer: str) -> tuple[str, dict]:
         },
     }
     return prompt, schema
+
+
+# ── Verb → builder lookup table (RDR-200 Phase 1b, nexus-4e75w.4) ──────────
+#
+# The continuation envelope's Shape B path (a lone trailing operator —
+# nexus.plans.continuation.CutShape.SHAPE_B) needs to go from a bare
+# operator verb ("extract", "summarize", ...) to the matching
+# ``build_<op>_request`` builder above WITHOUT constructing the builder's
+# name as a string and looking it up via ``getattr`` (nexus-4e75w.3
+# critic observation 1, T2 [23942]) — a getattr-by-string-name approach
+# would silently resolve to nothing (or the wrong thing) on a typo/rename
+# instead of failing at import time the way a plain dict literal does.
+#
+# Each adapter takes the REAL hydrated args dict for that operator (the
+# ``prepared_args`` ``_hydrate_operator_args`` in ``nexus.plans.runner``
+# already produces for the real isolated dispatch — see
+# ``nexus.plans.continuation_envelope``, which is the sole caller) and
+# maps it onto the builder's actual positional/keyword signature. Keys
+# are read with ``args[...]`` (required) or ``args.get(..., <default>)``
+# (optional) exactly mirroring each ``operator_*`` MCP tool's own
+# signature defaults in ``nexus.mcp.core`` — this table's only job is
+# argument-shape translation, never new defaulting behaviour.
+#
+# Keyed on the BARE verb (``_bare(tool)`` strips any ``operator_``
+# prefix) — the same bare-verb shape ``ContinuationCut.operators`` and
+# ``nexus.plans.bundle._bare`` already use, so a caller with either a
+# bare or ``operator_*``-prefixed tool name needs only one normalization
+# step before indexing this table.
+def _extract_request_from_args(args: dict[str, Any]) -> tuple[str, dict]:
+    return build_extract_request(args["inputs"], args["fields"])
+
+
+def _rank_request_from_args(args: dict[str, Any]) -> tuple[str, dict]:
+    return build_rank_request(args["items"], args["criterion"])
+
+
+def _compare_request_from_args(args: dict[str, Any]) -> tuple[str, dict]:
+    return build_compare_request(
+        args.get("items", ""), args.get("focus", ""),
+        items_a=args.get("items_a", ""), items_b=args.get("items_b", ""),
+        label_a=args.get("label_a", "A"), label_b=args.get("label_b", "B"),
+    )
+
+
+def _summarize_request_from_args(args: dict[str, Any]) -> tuple[str, dict]:
+    return build_summarize_request(args["content"], args.get("cited", False))
+
+
+def _generate_request_from_args(args: dict[str, Any]) -> tuple[str, dict]:
+    return build_generate_request(
+        args["template"], args["context"], args.get("cited", False),
+    )
+
+
+def _filter_request_from_args(args: dict[str, Any]) -> tuple[str, dict]:
+    return build_filter_request(args["items"], args["criterion"])
+
+
+def _check_request_from_args(args: dict[str, Any]) -> tuple[str, dict]:
+    return build_check_request(args["items"], args["check_instruction"])
+
+
+def _verify_request_from_args(args: dict[str, Any]) -> tuple[str, dict]:
+    return build_verify_request(args["claim"], args["evidence"])
+
+
+def _groupby_request_from_args(args: dict[str, Any]) -> tuple[str, dict]:
+    return build_groupby_request(args["items"], args["key"])
+
+
+def _aggregate_request_from_args(args: dict[str, Any]) -> tuple[str, dict]:
+    return build_aggregate_request(args["groups"], args["reducer"])
+
+
+#: Bare operator verb -> adapter that maps a real hydrated-args dict onto
+#: the matching ``build_<op>_request`` builder's actual call signature.
+#: Covers all ten shipped operators (the P0 docstring's own inventory:
+#: extract / rank / compare / summarize / generate / filter / check /
+#: verify / groupby / aggregate) — a KeyError on lookup names a genuinely
+#: unrecognised verb rather than a silent no-op, matching this codebase's
+#: fail-loud convention for a malformed/unsupported plan step.
+VERB_TO_REQUEST_BUILDER: dict[str, Callable[[dict[str, Any]], tuple[str, dict]]] = {
+    "extract": _extract_request_from_args,
+    "rank": _rank_request_from_args,
+    "compare": _compare_request_from_args,
+    "summarize": _summarize_request_from_args,
+    "generate": _generate_request_from_args,
+    "filter": _filter_request_from_args,
+    "check": _check_request_from_args,
+    "verify": _verify_request_from_args,
+    "groupby": _groupby_request_from_args,
+    "aggregate": _aggregate_request_from_args,
+}
