@@ -88,9 +88,9 @@ MAX_BUNDLE_PROMPT_CHARS: int = 200_000
 #:    Don't bundle an operator whose failure must be retried in
 #:    isolation.
 #:
-#: Today the eight AgenticScholar operators (extract / rank / compare /
-#: summarize / generate / filter / check / verify) all satisfy (1),
-#: (2), and (3). Bare and resolved forms are both accepted because
+#: Today all ten operators (extract / rank / compare / summarize /
+#: generate / filter / check / verify / groupby / aggregate) satisfy
+#: (1), (2), and (3). Bare and resolved forms are both accepted because
 #: plan YAMLs use either.
 BUNDLEABLE_OPERATORS: frozenset[str] = frozenset({
     "extract", "rank", "compare", "summarize", "generate",

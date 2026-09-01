@@ -50,6 +50,26 @@ from nexus.mcp_infra import (
     t2_ctx as _t2_ctx,
     t2_index_write as _t2_index_write,
 )
+# RDR-200 Phase 0 (nexus-5mft0.1): pure (prompt, schema) builders hoisted
+# out of the operator_* tools below, callable by both the tool and (RDR-200
+# Phase 1) the continuation path. operator_requests.py is a leaf module
+# (no nexus-internal imports) so this import carries no cycle risk.
+# _CHECK_EVIDENCE_ITEM_SCHEMA is re-exported at this module's scope so
+# nexus.plans.bundle's existing `from nexus.mcp.core import
+# _CHECK_EVIDENCE_ITEM_SCHEMA` keeps resolving unchanged.
+from nexus.mcp.operator_requests import (
+    _CHECK_EVIDENCE_ITEM_SCHEMA,
+    build_aggregate_request,
+    build_check_request,
+    build_compare_request,
+    build_extract_request,
+    build_filter_request,
+    build_generate_request,
+    build_groupby_request,
+    build_rank_request,
+    build_summarize_request,
+    build_verify_request,
+)
 from nexus.ttl import parse_ttl
 
 #: Module logger for MCP tool handlers (nexus-yttqr). Read-path handlers return a
@@ -5446,20 +5466,7 @@ async def operator_extract(
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
-    prompt = (
-        f"Extract the following fields from each item: {fields}\n\n"
-        f"Items:\n{inputs}"
-    )
-    schema = {
-        "type": "object",
-        "required": ["extractions"],
-        "properties": {
-            "extractions": {
-                "type": "array",
-                "items": {"type": "object"},
-            }
-        },
-    }
+    prompt, schema = build_extract_request(inputs, fields)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_extract",
@@ -5486,18 +5493,7 @@ async def operator_rank(
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
-    prompt = (
-        f"Rank the following items by {criterion}.\n"
-        f"Return them in ranked order, best first.\n\n"
-        f"Items:\n{items}"
-    )
-    schema = {
-        "type": "object",
-        "required": ["ranked"],
-        "properties": {
-            "ranked": {"type": "array", "items": {"type": "string"}},
-        },
-    }
+    prompt, schema = build_rank_request(items, criterion)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_rank",
@@ -5551,47 +5547,12 @@ async def operator_compare(
         label_a: Human-readable label for side A (default "A").
         label_b: Human-readable label for side B (default "B").
     """
-    import json as _json  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
-
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
-    def _fmt(v) -> str:
-        if isinstance(v, (list, dict)):
-            return _json.dumps(v, indent=2, default=str)
-        return v if isinstance(v, str) else str(v)
-
-    focus_clause = f" Focus on: {focus}." if focus else ""
-    if items_a and items_b:
-        a_text = _fmt(items_a)
-        b_text = _fmt(items_b)
-        prompt = (
-            f"Compare two sets of items across corpora.{focus_clause}\n\n"
-            f"Set {label_a}:\n{a_text}\n\n"
-            f"Set {label_b}:\n{b_text}\n\n"
-            "Name:\n"
-            f"  * **Shared axes**: concerns both {label_a} and {label_b} "
-            "address with comparable intent (even if mechanism differs).\n"
-            f"  * **Divergent decisions**: places where {label_a} and {label_b} "
-            "take different approaches on the same question; attribute each "
-            "choice to its side.\n"
-            f"  * **Side-only axes**: concerns that appear in {label_a} or "
-            f"{label_b} but not both.\n"
-            "  * **Philosophy difference**: one or two sentences on the "
-            "underlying stance difference, if one emerges from the evidence."
-        )
-    else:
-        items_text = _fmt(items)
-        prompt = (
-            f"Compare the following items.{focus_clause}\n\n"
-            f"Items:\n{items_text}"
-        )
-    schema = {
-        "type": "object",
-        "required": ["comparison"],
-        "properties": {
-            "comparison": {"type": "string"},
-        },
-    }
+    prompt, schema = build_compare_request(
+        items, focus, items_a=items_a, items_b=items_b,
+        label_a=label_a, label_b=label_b,
+    )
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_compare",
@@ -5618,16 +5579,7 @@ async def operator_summarize(
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
-    cite_clause = " Include citations as a list of source references." if cited else ""
-    prompt = f"Summarize the following content concisely.{cite_clause}\n\n{content}"
-    schema: dict = {
-        "type": "object",
-        "required": ["summary"],
-        "properties": {
-            "summary": {"type": "string"},
-            "citations": {"type": "array", "items": {"type": "string"}},
-        },
-    }
+    prompt, schema = build_summarize_request(content, cited)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_summarize",
@@ -5656,41 +5608,11 @@ async def operator_generate(
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
-    cite_clause = " Include citations as a list of source references." if cited else ""
-    prompt = (
-        f"Generate a {template}.{cite_clause}\n\n"
-        f"Context:\n{context}"
-    )
-    schema: dict = {
-        "type": "object",
-        "required": ["output"],
-        "properties": {
-            "output": {"type": "string"},
-            "citations": {"type": "array", "items": {"type": "string"}},
-        },
-    }
+    prompt, schema = build_generate_request(template, context, cited)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_generate",
     )
-
-
-#: Shared evidence-item schema for ``operator_check`` (RDR-088 Phase 2).
-#: Each entry is a citation-like record grounding the verdict across a
-#: multi-item consistency probe. ``role`` is enum-restricted so downstream
-#: plan steps can branch on the trichotomy without parsing free text.
-_CHECK_EVIDENCE_ITEM_SCHEMA: dict = {
-    "type": "object",
-    "required": ["item_id", "quote", "role"],
-    "properties": {
-        "item_id": {"type": "string"},
-        "quote": {"type": "string"},
-        "role": {
-            "type": "string",
-            "enum": ["supports", "contradicts", "neutral"],
-        },
-    },
-}
 
 
 @mcp.tool(
@@ -5773,36 +5695,7 @@ async def operator_filter(
         # override.
         return {**sql_result, "_dispatch_source": "sql"}
 
-    prompt = (
-        f"Filter the following items by this criterion: {criterion}\n"
-        f"Return only the items that satisfy the criterion in the 'items' "
-        f"array. Populate 'rationale' with one entry per input item, "
-        f"keyed by the item's id, giving the reason each item was kept "
-        f"or rejected. The output 'items' array must be a subset of the "
-        f"input; never add synthetic items.\n\n"
-        f"Items:\n{items}"
-    )
-    schema: dict = {
-        "type": "object",
-        "required": ["items", "rationale"],
-        "properties": {
-            "items": {
-                "type": "array",
-                "items": {"type": "object"},
-            },
-            "rationale": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "required": ["id", "reason"],
-                    "properties": {
-                        "id": {"type": "string"},
-                        "reason": {"type": "string"},
-                    },
-                },
-            },
-        },
-    }
+    prompt, schema = build_filter_request(items, criterion)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_filter",
@@ -5849,27 +5742,7 @@ async def operator_check(
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
-    prompt = (
-        f"Check whether the following items are consistent with this "
-        f"claim or question: {check_instruction}\n"
-        f"Set ok=true when every item supports the claim, false when at "
-        f"least one item contradicts it. Populate 'evidence' with a "
-        f"record per item containing a short grounding 'quote' and a "
-        f"'role' of 'supports', 'contradicts', or 'neutral'. Keep quotes "
-        f"short enough to be verifiable against the source item.\n\n"
-        f"Items:\n{items}"
-    )
-    schema: dict = {
-        "type": "object",
-        "required": ["ok", "evidence"],
-        "properties": {
-            "ok": {"type": "boolean"},
-            "evidence": {
-                "type": "array",
-                "items": _CHECK_EVIDENCE_ITEM_SCHEMA,
-            },
-        },
-    }
+    prompt, schema = build_check_request(items, check_instruction)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_check",
@@ -5910,29 +5783,7 @@ async def operator_verify(
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
-    prompt = (
-        f"Verify whether the following claim is grounded in the evidence "
-        f"provided.\n\n"
-        f"Claim: {claim}\n\n"
-        f"Evidence:\n{evidence}\n\n"
-        f"Set verified=true only when the claim is directly supported by "
-        f"the evidence. Provide a concise 'reason' explaining the "
-        f"verdict. Populate 'citations' with locators (section, page, "
-        f"table, or quoted span snippets) that pinpoint the supporting "
-        f"or contradicting passages."
-    )
-    schema: dict = {
-        "type": "object",
-        "required": ["verified", "reason", "citations"],
-        "properties": {
-            "verified": {"type": "boolean"},
-            "reason": {"type": "string"},
-            "citations": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-        },
-    }
+    prompt, schema = build_verify_request(claim, evidence)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_verify",
@@ -6028,40 +5879,7 @@ async def operator_groupby(
         # override.
         return {**sql_result, "_dispatch_source": "sql"}
 
-    prompt = (
-        f"Partition the following items by this key: {key}\n"
-        f"Output a list of groups. Each group has a string `key_value` "
-        f"(the partition label, e.g. a year, a fault model, a system "
-        f"property) and an `items` array carrying each item's full "
-        f"content INLINE — preserve the original `id` field and any "
-        f"other fields verbatim. Every input item appears in exactly "
-        f"one group's `items`. Items the partition cannot confidently "
-        f"assign go in a group with `key_value` of \"unassigned\".\n\n"
-        f"Do not reference items by id-only — carry the full item "
-        f"dicts in each group's `items` array so downstream operators "
-        f"see the content without a separate lookup.\n\n"
-        f"Items:\n{items}"
-    )
-    schema: dict = {
-        "type": "object",
-        "required": ["groups"],
-        "properties": {
-            "groups": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "required": ["key_value", "items"],
-                    "properties": {
-                        "key_value": {"type": "string"},
-                        "items": {
-                            "type": "array",
-                            "items": {"type": "object"},
-                        },
-                    },
-                },
-            },
-        },
-    }
+    prompt, schema = build_groupby_request(items, key)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_groupby",
@@ -6142,34 +5960,7 @@ async def operator_aggregate(
         # override.
         return {**sql_result, "_dispatch_source": "sql"}
 
-    prompt = (
-        f"Reduce each group of items into a per-group summary using "
-        f"this reducer instruction: {reducer}\n\n"
-        f"Output one aggregate per input group, preserving the group's "
-        f"`key_value` verbatim. Each `summary` MUST reference only the "
-        f"items in that group's `items` array. Do NOT pull content "
-        f"from items in other groups, even when vocabulary overlaps "
-        f"across groups. The summary is a short paragraph answering "
-        f"the reducer instruction USING ONLY this group's items.\n\n"
-        f"Groups:\n{groups}"
-    )
-    schema: dict = {
-        "type": "object",
-        "required": ["aggregates"],
-        "properties": {
-            "aggregates": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "required": ["key_value", "summary"],
-                    "properties": {
-                        "key_value": {"type": "string"},
-                        "summary": {"type": "string"},
-                    },
-                },
-            },
-        },
-    }
+    prompt, schema = build_aggregate_request(groups, reducer)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_aggregate",
