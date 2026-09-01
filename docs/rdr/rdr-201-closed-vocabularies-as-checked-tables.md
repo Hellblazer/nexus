@@ -89,7 +89,8 @@ audit. Overlaps:
 | --- | --- | --- |
 | RDR-001 RDR Process Validation | **Origin** | P5 defined the six-status model because "one gate returned 'Conditional Accept', a status not in the lifecycle model". That rationale still holds and is exactly Gap 1: the model was defined once, in prose, and the vocabulary has since grown to twelve values with no check. This RDR moves the model from prose to a checked table. |
 | RDR-002 T2 Status Synchronization | **Precedent** | Reached the diagnosis that status drifts when it lives in two places (file and T2), and shipped a write-order fix plus self-healing. It fixed *consistency* between two copies; it did not define *legality* of a transition. Gap 1 is the legality half. |
-| RDR-024 RDR Process Guardrails | **Origin** | Added the accept-before-implement guard, the one guarded edge. Its regex-scan design is deliberately passive. This RDR generalises the guard from one edge to the whole table. |
+| RDR-024 RDR Process Guardrails | **Precedent** | Added soft, regex-detected warnings at three workflow points so implementation does not start on an unaccepted record. Deliberately advisory ("soft warnings are the ceiling", Finding 4). The hard guard on the accept edge itself, the status tuple in `rdr.py:985`, arrived later with `set-status` and nexus-qsryj (2026-07-22), not from this RDR. Precedent for guarding the lifecycle; this RDR replaces both the soft warnings' and the hard tuple's hand-written status lists with one table. |
+| RDR-149 Unified Leased Service-Registry Substrate | **Precedent** | Established, for daemon lifecycle, the rule that a fix lands in one shared primitive plus a conformance suite, never in one tier's copy, and made it mechanically enforced and an `AGENTS.md` hot rule. Gap 2 is the same doctrine applied to the two release gates: nexus-hcdk3 was exactly a fix landing in one script's copy. |
 | RDR-065 / RDR-067 Close-time funnel; cross-project audit loop | **Precedent** | Diagnosed silent scope reduction as invisible within one record and visible only across records. Gap 3 is the same shape, one level up: invalidation invisible within one record, visible only across the dependency graph. |
 | RDR-081 Stale-Reference Validator | **Precedent** | Shipped a validator that reports prose drift against the live system without rewriting it. The same posture (report, do not auto-fix) is adopted here; bead nexus-tpuct extends that validator to commit, bead and record citations independently of this RDR. |
 | RDR-121 Hook-Enforced Tool Routing | **Precedent** | Established that soft guidance gets a mechanical backstop. Gap 1's enforcement point is the same hook family. |
@@ -174,9 +175,13 @@ dimensions that each reduce to a finite comparison outcome (below / equal /
 above / unreachable and the like), and two that do not reduce: the
 gate-report directory contents (delegated to `deploy_tracker.py:249-296`)
 and the free-text `--no-record-deploy` reason. The nominal product is about
-17,900 cells; the reachable guard-chain leaves number 101 (floor 88,
-precondition 13). Of those, 86 are fully tested, 7 have no test at any
-layer, 2 are tested only at the library layer, 1 partially.
+17,900 cells; the reachable guard-chain leaves number about 101 (floor
+88, precondition 13), an estimate from reading the guard chains rather than
+a mechanical enumeration. The coverage breakdown the analysis gives (86
+fully tested, 7 with no test at any layer, 2 library-layer only, 1
+partial) sums to 96, so five leaves were counted without a coverage
+verdict. Phase 2's first step is the mechanical enumeration that settles
+both numbers; the sizing below does not depend on the exact figure.
 
 Three overlaps, one of them live on this tree:
 
@@ -319,14 +324,22 @@ refuse = "gate-not-passed"
 
 [[row]]
 id = "accept-otherwise"
-match = { event = "accept" }
+match = { status = ["accepted", "closed", "superseded", "scrapped", "deferred", "abandoned"], event = "accept" }
 escape = true
 refuse = "illegal-transition"
 ```
 
 `match` scopes a group (the rows sharing one match assignment); `guard`
 atoms are the dimensions coverage is proved over, per group, as the
-cross-product of their declared domains. A row carries exactly one of
+cross-product of their declared domains. Every row in a table must name
+the same set of match keys; a list value expands into one row per member,
+exactly as intrastate's `in` does, so `accept-otherwise` above is six rows
+in six groups, each closing its group's remainder. A row that names fewer
+match keys than its siblings is refused at load (`match-keys-mismatch`),
+which is what keeps a broad "otherwise" from silently overlapping a narrow
+group: the checker never has to decide whether `{event=accept}` and
+`{status=draft, event=accept}` are the same group, because the shape
+forbids the question. A row carries exactly one of
 `to` (a state machine's write), `emit` (a decision table's answer), or
 `refuse` (a typed refusal code). At most one `escape = true` row per group
 closes the group's remainder and takes the `closed-by-escape` advisory.
@@ -465,8 +478,9 @@ The lifecycle table lints clean in CI; `nx rdr set-status <id> closed` on a
 
 ### Phase 2: Release choreography
 
-1. Enumerate the 101 cells from Finding 2 as a fixture with today's
-   verdicts.
+1. Enumerate the reachable cells mechanically (Finding 2 estimates about
+   101) as a fixture with today's verdicts; this is also where the five
+   leaves Finding 2 left without a coverage verdict are settled.
 2. Author `docs/tables/release-choreography.toml` with the event column;
    lint clean, no escape rows on blocking groups.
 3. Route both scripts through `resolve()`; run old and new paths side by
@@ -565,3 +579,4 @@ class this RDR names was found and fixed during its own research.
 
 - 2026-09-01: Created (draft).
 - 2026-09-01: Research findings 1-4 recorded; Alternative 1 refuted; incident classification corrected (event dimension); nexus-hcdk3 filed from Finding 2.
+- 2026-09-01: Gate critique [23988], 4 significant: RDR-024 relabelled Precedent (the hard accept guard came with set-status, not RDR-024); RDR-149 added as the shared-primitive precedent; match-key shape rule added to the Technical Design; the 101-cell figure marked as an estimate with its 96-cell coverage sum reconciled to Phase 2.
