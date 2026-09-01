@@ -2,11 +2,12 @@
 title: "Closed Vocabularies as Checked Tables"
 id: RDR-201
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Sam
 created: 2026-09-01
-accepted_date:
+accepted_date: 2026-09-01
+reviewed-by: self
 related_issues: [nexus-tpuct, nexus-jh86x, nexus-1c7oq, nexus-7mudt]
 ---
 
