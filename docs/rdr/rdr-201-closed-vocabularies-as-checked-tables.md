@@ -289,12 +289,96 @@ One table format, one checker, three tables.
    - `release-choreography`: the paired-release decision table with an explicit event column (pre-tag, tag-push, deploy, post-deploy verify), consumed by both scripts, which become thin evaluators over one table and so cannot disagree (Finding 2, O1).
    - `rdr-dependencies`: not a transition table but the edge list Gap 3 needs; a status change on a record marks every dependent's verdict `needs-reexamination`, surfaced by `rdr-audit`.
 
+### Technical Design
+
+**Table format.** TOML, one file per table, with three sections:
+
+```toml
+[table]
+id = "rdr-lifecycle"
+kind = "state-machine"          # or "decision-table"
+
+[dimensions.status]             # every dimension is a declared enum
+domain = ["draft", "accepted", "closed", "superseded", "scrapped", "deferred", "abandoned"]
+[dimensions.event]
+domain = ["gate-pass", "accept", "close", "supersede", "scrap", "defer", "resume"]
+[dimensions.gate]
+domain = ["passed", "blocked", "none"]
+
+[[row]]
+id = "accept"
+match = { status = "draft", event = "accept" }
+guard = { gate = "passed" }
+to = { status = "accepted" }
+
+[[row]]
+id = "accept-blocked"
+match = { status = "draft", event = "accept" }
+guard = { gate = ["blocked", "none"] }
+refuse = "gate-not-passed"
+
+[[row]]
+id = "accept-otherwise"
+match = { event = "accept" }
+escape = true
+refuse = "illegal-transition"
+```
+
+`match` scopes a group (the rows sharing one match assignment); `guard`
+atoms are the dimensions coverage is proved over, per group, as the
+cross-product of their declared domains. A row carries exactly one of
+`to` (a state machine's write), `emit` (a decision table's answer), or
+`refuse` (a typed refusal code). At most one `escape = true` row per group
+closes the group's remainder and takes the `closed-by-escape` advisory.
+
+**Checker.** `src/nexus/tables/check.py` (name provisional), stdlib only,
+the prototype from Finding 3 productionised: load, validate every literal
+against its declared domain, group rows by match assignment, prove
+coverage and overlap per group, emit typed findings as JSON
+(`coverage-gap`, `overlap`, `closed-by-escape`, `unprovable-coverage`,
+`unknown-literal`). Exit 1 on any blocking finding, 0 with advisories
+listed. A lint-bucket test runs it over every table under `docs/tables/`
+and asserts, non-vacuously, that a planted gap and a planted overlap are
+reported.
+
+**Evaluator.** `src/nexus/tables/resolve.py`: given a table and an
+assignment of every declared dimension, return the single matching row or
+a typed refusal (`no-match`, `ambiguous-match`, `unknown-value`). The
+evaluator never breaks a tie; ambiguity at runtime is a defect the checker
+should have caught, and it is reported as such.
+
+**Three consumers.**
+
+| Table | Consumer | What changes |
+| --- | --- | --- |
+| `docs/tables/rdr-lifecycle.toml` | `nx rdr set-status` (`src/nexus/commands/rdr.py:413`) | Replaces `_KNOWN_STATUSES` membership with a `resolve()` over (current status, requested status as event); an illegal edge refuses with the row's `refuse` code. `rdr_hook.py`'s `_STATUS_ORDER` and the test's `_README_STATUS_WORDS` are derived from the table's `status` domain, ending the three-way disagreement in Finding 1. `rdr-audit` reports any file status outside the domain. |
+| `docs/tables/release-choreography.toml` | `check_engine_release_floor.py`, `check_client_release_precondition.py` | The scripts keep their sensors (git, gh, HTTP) and reduce each to its finite outcome, then call `resolve()` on one table with an explicit `event` dimension (`pre-tag`, `tag-push`, `deploy`, `post-deploy-verify`). Messages move to a catalog keyed by row id. O1 becomes impossible by construction; O2 becomes a visible row pair the author must either keep or merge. |
+| `docs/tables/rdr-dependencies.toml` | RDR indexer, `set-status`, `rdr-audit` | Not a transition table: an edge list `(from, relation, to)` seeded at index time from the existing `supersedes`, `superseded_by`, `parent_rdr`, `related_rdrs` frontmatter (Finding 4) into catalog links, after a canonical-tumbler rule. `set-status` on a record marks each dependent's T2 entry `needs-reexamination: <from> <old>-><new>`; `rdr-audit` lists them. |
+
+### Existing Infrastructure Audit
+
+- `scripts/check_wire_contract_pairing.py` already holds one shared ledger
+  parser and, since nexus-hcdk3, one shared classifier; the release table
+  extends that pattern from one dimension to all of them.
+- `tests/scripts/conftest.py` already isolates gate tests onto fixture
+  ledgers; the table fixtures reuse the same mechanism.
+- `nx rdr set-status` already exists as the single writer of record status
+  (Finding 1); the table replaces its membership check, not its role.
+- The catalog's `link`, `traverse` and `search_graph_hop` already implement
+  typed edges and BFS (Finding 4); Gap 3 adds edges, not machinery.
+- `tests/test_docs_citation_rot.py` and RDR-081's validator establish the
+  report-only lint posture the checker follows.
+- Nothing in the repo evaluates a data-driven decision table today; the
+  evaluator is new code, sized by the prototype at under 150 lines.
+
 ### Decision Rationale
 
 The alternative is to keep patching prose and branches. Both production
-incidents and the twelve-status drift are the measured cost of that. A table
-is the smallest artifact that can be proved complete, and the checker is small
-because the domains are enums.
+incidents, the twelve-status drift, and the live O1 overlap found during
+this RDR's research are the measured cost of that. A table is the smallest
+artifact that can be proved complete, the checker is small because the
+domains are enums, and one table consumed by two scripts is the only design
+under which they cannot disagree.
 
 ## Alternatives Considered
 
@@ -333,12 +417,142 @@ shrink. `nx rdr set-status` gains a refusal path.
   fixtures that must be reported.
 - Over-formalising vocabularies that are in fact open. Mitigation: the checker
   refuses to claim coverage over a non-enum dimension rather than pretending.
+- The release rewrite touches the scripts that gate releases. Mitigation:
+  Phase 2 keeps the old decision path behind the new one and asserts
+  identical verdicts over all 101 enumerated cells before the old path is
+  deleted (Finding 2's cell table is the fixture).
+- Migrating the status vocabulary retires `implemented`, `reverted`,
+  `proposed`, `locked` (never written) and rejects five out-of-vocabulary
+  values in the wild. Mitigation: the three companion notes and RDR-200's
+  sub-documents get an explicit `kind: companion` frontmatter key the
+  audit skips, rather than a lifecycle status.
+
+### Failure Modes
+
+| Failure | Detection | Consequence |
+| --- | --- | --- |
+| Checker has a bug and passes a gap | Planted-defect tests in the lint bucket (non-vacuity) | Same exposure as today, not worse |
+| A sensor reduces an open value to the wrong outcome | Phase 2 parity assertion over the 101-cell fixture | Wrong verdict from a right table; caught before the old path is deleted |
+| Two rows disagree at runtime (`ambiguous-match`) | Evaluator refuses with the row ids | Release or status change halts loudly; the checker should have caught it, so this is also a checker defect |
+| A record cites a dependency the catalog cannot resolve to one tumbler | Index-time warning naming both candidates | Edge not created; audit shows the record as unlinked |
+| Table file missing or unparsable | Consumer refuses to run, exit 2 | No silent fallback to the old imperative path |
 
 ## Implementation Plan
 
-_Phased plan to be produced after acceptance. Expected shape: Phase 1 table
-format and checker with the lifecycle table; Phase 2 release choreography;
-Phase 3 dependency edges and re-examination marking._
+### Prerequisites
+
+- nexus-hcdk3 closed (done 2026-09-01), so Phase 2 starts from two gates
+  that already agree.
+- Sam's ruling on the status vocabulary's final domain (Finding 1 lists
+  the candidates; the draft table above is a proposal).
+
+### Minimum Viable Validation
+
+The lifecycle table lints clean in CI; `nx rdr set-status <id> closed` on a
+`draft` record refuses with `illegal-transition`; the same command on an
+`accepted` record succeeds; a planted second `accept` row makes CI red with
+`overlap`. All four run in one test module.
+
+### Phase 1: Table format, checker, evaluator, lifecycle table
+
+1. Land `src/nexus/tables/` (check, resolve, TOML loader) with the
+   prototype's 17 tests ported and the non-vacuity pair.
+2. Author `docs/tables/rdr-lifecycle.toml`; lint it in the lint bucket.
+3. Rewire `set-status`, `rdr_hook.py`'s ranking, and the tripwire test's
+   status words to the table's domain; delete the three literals.
+4. Sweep `docs/rdr` for out-of-vocabulary statuses; convert companions to
+   `kind: companion`; hand-fix the one `revised-after-implementation`.
+
+### Phase 2: Release choreography
+
+1. Enumerate the 101 cells from Finding 2 as a fixture with today's
+   verdicts.
+2. Author `docs/tables/release-choreography.toml` with the event column;
+   lint clean, no escape rows on blocking groups.
+3. Route both scripts through `resolve()`; run old and new paths side by
+   side over the fixture; assert identical verdicts; delete the old path.
+4. Decide O2 (paired vs paired-auto order asymmetry) as a row pair, with
+   Sam's ruling recorded in the table comment.
+
+### Phase 3: Dependency edges
+
+1. Canonical-tumbler rule for RDR documents; collapse the ~10 owner ids.
+2. Seed edges from existing frontmatter at index time.
+3. `set-status` marks dependents `needs-reexamination`; `rdr-audit` lists
+   them; the first run's list is the measured backlog.
+
+### Day 2 Operations
+
+Adding a status or a release mode is one row plus its domain member; CI
+refuses the change until every affected group is covered again. Nothing to
+run by hand.
+
+### New Dependencies
+
+None. `tomllib` is standard library on 3.12.
+
+## Test Plan
+
+- Unit: the ported prototype suite (17), plus loader rejection of unknown
+  literals and duplicate row ids.
+- Lint bucket: every table under `docs/tables/` lints clean; a planted gap
+  and a planted overlap in a fixture copy are reported (non-vacuity).
+- Phase 2 parity: 101-cell fixture, old path vs new path, identical
+  verdicts; then the old path is deleted and the fixture pins the table.
+- `tests/scripts/test_ledger_gate_parity.py` (already landed) stays as the
+  standing agreement test between the two release gates.
+- Phase 3: an index of `docs/rdr` produces at least the 23 `supersedes`
+  edges the frontmatter already declares (non-vacuity floor).
+
+## Validation
+
+### Testing Strategy
+
+Every table change is exercised by the checker in CI before any consumer
+sees it. Consumers are tested against fixtures, never the live ledger,
+except the one `real_ledger` agreement test that exists precisely because
+fixture isolation hid O1.
+
+### Performance Expectations
+
+Tables have under 200 rows and under six dimensions; the product bound is
+in the low thousands. Checker and evaluator run in milliseconds; no
+performance work is expected or planned.
+
+## Finalization Gate
+
+### Contradiction Check
+
+The problem statement originally called both release incidents "an overlap
+and a coverage gap"; Finding 2 corrected that, and the Approach now carries
+the event column the correction requires. No other internal contradiction
+found on re-read.
+
+### Assumption Verification
+
+All four Critical Assumptions carry Verified or Refuted labels backed by a
+T2 research entry with file:line evidence.
+
+### Scope Verification
+
+In scope: three tables, one checker, one evaluator, the three named
+consumers. Out of scope: the upgrade ladder (RDR-185), the plan-selection
+policy (open domain), any wire-level refusal vocabulary for MCP tools.
+
+### Cross-Cutting Concerns
+
+- `docs/tables/` is a new directory; `AGENTS.md` gains one line pointing to
+  it under Hot rules once Phase 1 lands.
+- The four beads filed with this RDR (nexus-tpuct, jh86x, 1c7oq, 7mudt) are
+  independent; nexus-1c7oq's advisory format is what `closed-by-escape`
+  should print.
+
+### Proportionality
+
+Net code is roughly neutral (Finding 2: about 120 lines saved on the
+release scripts, about 340 added for the checker). The gain is that three
+hand-maintained vocabularies become provable, and one live overlap of the
+class this RDR names was found and fixed during its own research.
 
 ## References
 
