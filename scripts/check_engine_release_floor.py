@@ -581,16 +581,21 @@ def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
         )
         return 0
 
-    acked = set(ack_beads or [])
-    missing = [e for e in ledger.unshipped.values() if e.bead not in acked]
-    if missing:
+    # nexus-hcdk3: the [additive] token is interpreted in ONE place shared
+    # with check_client_release_precondition.py. Before this, that gate
+    # honored the token and this one did not, so the checked-in ledger got
+    # exit 0 there and exit 1 here, and --ledger-only red-gated every PR to
+    # main on entries the sibling gate certified safe.
+    verdict = _wire_ledger.classify_unshipped(ledger, ack_beads)
+    if verdict.blocking:
         print(
-            f"PAIRED DEPLOY BLOCKED: {len(missing)} both-halves commit(s) in "
-            f"{_wire_ledger.DEFAULT_LEDGER_PATH} have an unshipped client half "
+            f"PAIRED DEPLOY BLOCKED: {len(verdict.blocking)} both-halves "
+            f"commit(s) in {_wire_ledger.DEFAULT_LEDGER_PATH} have an "
+            "unshipped client half, no [additive] direction-safety token, "
             "and no acknowledgment:",
             file=sys.stderr,
         )
-        for e in missing:
+        for e in verdict.blocking:
             print(
                 f"  {e.sha}  bead {e.bead}  engine tag {e.engine_tag}  ({e.note})",
                 file=sys.stderr,
@@ -605,10 +610,29 @@ def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
         )
         return 1
 
+    acked_beads = sorted(e.bead for e in verdict.acked)
+    if verdict.additive:
+        acked_suffix = (
+            f" ({len(acked_beads)} further entr"
+            f"{'y' if len(acked_beads) == 1 else 'ies'} acknowledged via "
+            "--ack-client-lag)"
+            if acked_beads else ""
+        )
+        print(
+            f"client-lag ledger: {len(verdict.additive)} unacknowledged "
+            "unshipped both-halves commit(s), all marked [additive] (old "
+            "client + new engine safe) — deploy authorized ahead of the "
+            "client tag (nexus-1emxn choreography (a)); pairing completes "
+            "when the client release carrying "
+            f"{', '.join(sorted(e.bead for e in verdict.additive))} bumps "
+            f"the floor.{acked_suffix}"
+        )
+        return 0
+
     print(
         f"client-lag ledger: {len(ledger.unshipped)} unshipped both-halves "
         f"commit(s), all explicitly acknowledged via --ack-client-lag: "
-        f"{', '.join(sorted(acked & {e.bead for e in ledger.unshipped.values()}))}"
+        f"{', '.join(acked_beads)}"
     )
     return 0
 

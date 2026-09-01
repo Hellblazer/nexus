@@ -1917,3 +1917,51 @@ def test_tag_commit_resolves_via_git_and_degrades_to_unrecorded(
     with patch.object(gate.subprocess, "run", side_effect=subprocess.CalledProcessError(128, "git")):
         assert gate._tag_commit("engine-service-v0.1.88") == ""
     assert "<commit unrecorded>" in capsys.readouterr().err
+
+
+# ── nexus-hcdk3: the [additive] token is interpreted in ONE shared place ──
+# Before the fix this gate ignored the token the precondition gate honored,
+# so the checked-in ledger got opposite verdicts and --ledger-only red-gated
+# every PR to main. These mirror the precondition suite's trio one-for-one.
+
+_ADDITIVE_ENTRY = (
+    "- `cafebabecafebabecafebabecafebabecafebabe` -- bead nexus-addv -- "
+    "engine tag `engine-service-v9.9.9` -- [additive] env-var contract, "
+    "old client + new engine safe\n"
+)
+_NOT_ADDITIVE_ENTRY = (
+    "- `feedfacefeedfacefeedfacefeedfacefeedface` -- bead nexus-notad -- "
+    "engine tag `engine-service-v9.9.9` -- [not-additive] NOT NULL at "
+    "the store, deploy must be armed\n"
+)
+
+
+def test_client_lag_ledger_all_additive_authorizes(
+    capsys: pytest.CaptureFixture[str], tmp_path
+) -> None:
+    ledger = _write_ledger(tmp_path, _ADDITIVE_ENTRY)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        rc = gate.check_client_lag_ledger()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "[additive]" in out
+    assert "nexus-addv" in out
+    assert "nexus-1emxn" in out
+
+
+def test_client_lag_ledger_mixed_blocks_and_names_only_non_additive(
+    capsys: pytest.CaptureFixture[str], tmp_path
+) -> None:
+    ledger = _write_ledger(tmp_path, _ADDITIVE_ENTRY + _NOT_ADDITIVE_ENTRY)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        rc = gate.check_client_lag_ledger()
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "nexus-notad" in err
+    assert "nexus-addv" not in err
+
+
+def test_client_lag_ledger_tokenless_entry_stays_blocking(tmp_path) -> None:
+    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        assert gate.check_client_lag_ledger() == 1

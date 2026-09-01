@@ -123,15 +123,13 @@ def check_wire_contract_ledger(ack_beads: list[str] | None = None) -> tuple[int,
         )
         return 0, True
 
-    acked = set(ack_beads or [])
-    missing = [e for e in ledger.unshipped.values() if e.bead not in acked]
-    # nexus-1emxn choreography (a): an entry whose note carries the
-    # [additive] direction-safety token asserts OLD client + NEW engine is
-    # safe — deploying the engine AHEAD of the client tag cannot open a
-    # refusal window for that entry, so it authorizes rather than blocks
-    # the unpaired path. Absent/[not-additive] entries keep blocking
-    # exactly as before (additive is None is fail-safe not-additive).
-    blocking = [e for e in missing if e.additive is not True]
+    # nexus-1emxn choreography (a), classified by the ONE shared interpreter
+    # of the [additive] token (nexus-hcdk3) so this gate and the floor gate
+    # cannot return opposite verdicts on the same ledger.
+    verdict = _wire_ledger.classify_unshipped(ledger, ack_beads)
+    acked = {e.bead for e in verdict.acked}
+    missing = list(verdict.blocking) + list(verdict.additive)
+    blocking = list(verdict.blocking)
     if blocking:
         print(
             f"BLOCKED: {len(blocking)} both-halves commit(s) in "
