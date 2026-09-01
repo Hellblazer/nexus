@@ -600,8 +600,13 @@ policy (open domain), any wire-level refusal vocabulary for MCP tools.
 
 ### Cross-Cutting Concerns
 
-- `docs/tables/` is a new directory; `AGENTS.md` gains one line pointing to
-  it under Hot rules once Phase 1 lands.
+- The lifecycle table ships inside the package at
+  `src/nexus/tables/rdr-lifecycle.toml` (only `src/nexus` reaches the wheel,
+  and `nx rdr set-status` runs in any repo), with a byte-identical copy under
+  `conexus/resources/tables/` for the SessionStart hook, which runs under
+  bare system Python. The release table stays repo-only under
+  `docs/tables/`; its consumers are scripts that never ship. `AGENTS.md`
+  gains one line pointing at both once Phase 1 lands.
 - The four beads filed with this RDR (nexus-tpuct, jh86x, 1c7oq, 7mudt) are
   independent; nexus-1c7oq's advisory format is what `closed-by-escape`
   should print.
@@ -624,4 +629,5 @@ class this RDR names was found and fixed during its own research.
 - 2026-09-01: Created (draft).
 - 2026-09-01: Research findings 1-4 recorded; Alternative 1 refuted; incident classification corrected (event dimension); nexus-hcdk3 filed from Finding 2.
 - 2026-09-01: Status domain ruled by Sam: six values, scrapped merged into abandoned, deferred resumes to draft only, supersede guarded on superseded_by. Recorded in Technical Design.
+- 2026-09-01: Accepted; planning chain run (epic nexus-j9z30, T2 [23998], audit residuals [23999], enrichment deltas T2 nexus/plan-rdr-201-enrichment-deltas). Path correction: the lifecycle table lives in the package, not `docs/tables/`; the release table stays in `docs/tables/`.
 - 2026-09-01: Gate critique [23988], 4 significant: RDR-024 relabelled Precedent (the hard accept guard came with set-status, not RDR-024); RDR-149 added as the shared-primitive precedent; match-key shape rule added to the Technical Design; the 101-cell figure marked as an estimate with its 96-cell coverage sum reconciled to Phase 2.
