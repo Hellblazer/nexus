@@ -2,20 +2,19 @@
 title: "nx_answer Continuation Mode and the Composed-Retrieval Bridge Route"
 id: RDR-200
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
 reviewed-by: substantive-critic (T2 [23900], 2026-09-01)
 created: 2026-09-01
-accepted_date: # YYYY-MM-DD, set by /rdr-accept
+accepted_date: 2026-09-01
 related_issues: ["nexus-4e75w", "nexus-mt9p8"]
 ---
 
 # RDR-200: nx_answer Continuation Mode and the Composed-Retrieval Bridge Route
 
-> Status: draft — numbered, critic-reviewed (T2 [23900]), gate PASSED
-> 2026-09-01 (critique + re-verification T2 [23912]); awaiting
-> `/conexus:rdr-accept`.
+> Status: accepted 2026-09-01 — critic-reviewed (T2 [23900]), gate
+> PASSED same day (critique + re-verification T2 [23912]).
 > This RDR covers two beads as ONE surface: `nexus-4e75w` (continuation
 > mode) and `nexus-mt9p8` (the RDR-152 bridge composed-retrieval route).
 > They are one surface because the continuation envelope is what the
