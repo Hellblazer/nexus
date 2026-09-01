@@ -524,6 +524,18 @@ def baseline_cmd(since: str | None, json_out: bool) -> None:
     reported as a fabricated zero. Every figure carries its own window
     (``--since``-scoped or all-time) — see ``--since``'s own help text.
     """
+    # nexus-spbay (code-review Important #1): validate/normalize --since
+    # BEFORE any store call — a bad value must fail as a usage error
+    # naming the value, never surface through a reader's UNAVAILABLE arm
+    # as a phantom service failure (and never reach an old engine, whose
+    # parser turned any unparseable since into `since now()` = zeros).
+    if since:
+        from nexus.db.t2.http_telemetry_store import normalize_since_filter  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
+
+        try:
+            since = normalize_since_filter(since)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="--since") from exc
     data = _capture_baseline(since)
     if json_out:
         click.echo(_json.dumps(data, indent=2))

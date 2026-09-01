@@ -51,6 +51,7 @@ Route mapping (matches TelemetryHandler Java):
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 import structlog
@@ -58,6 +59,33 @@ import structlog
 from nexus.db.limits import QUOTAS
 
 _log = structlog.get_logger(__name__)
+
+
+def normalize_since_filter(since: str) -> str:
+    """Normalize a caller-supplied ``since`` filter to full UTC ISO-8601.
+
+    nexus-spbay: the engine's historical ``since`` parser (``parseTs``)
+    fell back to ``now()`` on any form ``OffsetDateTime.parse`` cannot
+    read — a bare date like ``2026-08-01`` silently became "since right
+    now", so every date-filtered telemetry read returned a confirmatory
+    zero (measured against 214 nx_answer_runs rows, T2 [23879]). Engines
+    carrying the paired fix (``parseSinceFilter``) accept date-only and
+    naive forms and 400 on garbage; THIS normalization is the client half
+    of the [additive] pairing — it makes those forms work against every
+    engine ALREADY deployed. Unrecognizable values raise ``ValueError``
+    here: fail loud client-side rather than let an old engine manufacture
+    an empty set.
+    """
+    try:
+        dt = datetime.fromisoformat(since.strip())
+    except ValueError as exc:
+        raise ValueError(
+            f"since is not a recognizable ISO-8601 date or datetime: {since!r}"
+            " (accepted: 2026-08-01, 2026-08-01T12:00:00, 2026-08-01T12:00:00Z)"
+        ) from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 #: Default tenant matching TenantConstants.DEFAULT_TENANT in the Java service.
 DEFAULT_TENANT: str = "default"
@@ -172,7 +200,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         elif session_id:
             params["session_id"] = session_id
         elif since:
-            params["since"] = since
+            params["since"] = normalize_since_filter(since)
         data = self._get("/v1/telemetry/tier_writes/query", params=params)
         return self._map_tier_write_rows(data)
 
@@ -223,7 +251,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         elif session_id:
             params["session_id"] = session_id
         elif since:
-            params["since"] = since
+            params["since"] = normalize_since_filter(since)
         resp = self._get("/v1/telemetry/tier_writes/list", params=params)
         if not isinstance(resp, dict):  # defensive: a stripped proxy response
             return {"rows": [], "total": 0}
@@ -557,7 +585,8 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         params: dict[str, Any] = {"limit": limit}
         if since:
-            params["since"] = since
+            # nexus-spbay: normalize BEFORE the wire — see normalize_since_filter.
+            params["since"] = normalize_since_filter(since)
         if include_steps:
             params["include_steps"] = "true"
         resp = self._get("/v1/telemetry/nx_answer_runs/query", params=params)

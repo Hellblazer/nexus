@@ -38,6 +38,18 @@ _log = structlog.get_logger(__name__)
 #: Fixed latency bucket order for human-table rendering — matches the
 #: TelemetryRepository.queryNxAnswerRuns bucket keys exactly (never
 #: re-derived; see that method's docstring for the edges).
+#: nexus-spbay: the first FULL day of real cost recording. The client half
+#: (cc61d4c31) landed 2026-08-21 04:08 UTC and its paired engine
+#: (engine-service-v0.1.85 / v7.14.0) deployed 2026-08-21 11:15 UTC —
+#: cost_usd was a hardcoded 0.0 before that (critic finding: an earlier
+#: 08-20 value under-warned for the 08-20..08-21T11:15 window; 08-22 is
+#: the conservative first clean day, over-warning slightly for windows
+#: touching 08-21 rather than ever under-warning). Rows older than this
+#: dilute any cost average with structurally-fake zeros; the human report
+#: labels windows that reach past it. Lexicographic compare against the
+#: row's ISO created_at is sound (both are ISO-8601, zero-padded).
+COST_INSTRUMENTED_SINCE = "2026-08-22"
+
 _BUCKET_ORDER = ("under_5s", "5s_to_30s", "30s_to_2min", "2min_to_5min", "over_5min")
 _BUCKET_LABEL = {
     "under_5s":    "<5s",
@@ -510,6 +522,18 @@ def answer_runs_cmd(
     normal run cost/take". Pass ``--include-failed`` to fold
     executed-failed rows into the ``--steps`` breakdown too.
     """
+    # nexus-spbay: validate/normalize --since BEFORE the service try-block —
+    # a bad value must fail as a usage error naming the value, never fall
+    # into the except arm below and masquerade as a service-read failure
+    # (and never reach an old engine, whose parser silently turned any
+    # unparseable since into `since now()` = a guaranteed "(no runs)").
+    if since:
+        from nexus.db.t2.http_telemetry_store import normalize_since_filter  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
+
+        try:
+            since = normalize_since_filter(since)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="--since") from exc
     try:
         from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
 
@@ -692,6 +716,19 @@ def _emit_report(
         )
     if avg_cost is not None:
         click.echo(f"  avg cost_usd: {avg_cost:.6f}")
+        # nexus-spbay folded finding (disuse analysis, T2 [23879]):
+        # cost_usd was hardcoded 0.0 until RDR-196 Phase 0/1 landed
+        # (~2026-08-20), so any window reaching back past that dilutes
+        # the average with structurally-fake zeros — the all-time figure
+        # read ~6.5x low ($0.098 vs a real ~$0.64-1.05/call). Label it
+        # whenever the filtered set can contain pre-instrumentation rows.
+        if str(oldest) < COST_INSTRUMENTED_SINCE:
+            click.echo(
+                f"    (CAUTION: window includes rows before "
+                f"{COST_INSTRUMENTED_SINCE}, when cost_usd was recorded as "
+                f"a hardcoded 0.0 — the average is diluted; pass "
+                f"--since {COST_INSTRUMENTED_SINCE} for instrumented-era cost)"
+            )
 
     buckets = result.get("latency_buckets") or {}
     if buckets:

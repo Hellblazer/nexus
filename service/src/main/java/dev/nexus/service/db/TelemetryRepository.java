@@ -81,6 +81,47 @@ public final class TelemetryRepository {
     }
 
     /**
+     * Parse a QUERY-FILTER timestamp (nexus-spbay). Strict counterpart of
+     * {@link #parseTs} for READ paths: parseTs's malformed-input fallback
+     * is {@code now()} — correct for a live-WRITE stamp, catastrophic for
+     * a filter, where it silently turns {@code since <unparseable>} into
+     * {@code since right now} and manufactures a confirmatory zero.
+     * Measured (T2 [23879], 2026-08-31): {@code nx answer-runs --since
+     * 2026-08-01} returned "(no runs)" against 214 rows for EVERY date
+     * tested — {@code OffsetDateTime.parse} cannot read a bare date, so
+     * the natural "has usage moved since X?" command always answered
+     * zero. Accepts the three shapes callers actually mean — full offset
+     * ISO ({@code Z} or {@code +00:00}), naive datetime (assumed UTC),
+     * bare date (midnight UTC) — and THROWS on everything else so the
+     * handler's global {@link IllegalArgumentException} arm answers 400,
+     * never a silent empty set.
+     */
+    public static OffsetDateTime parseSinceFilter(String s) {
+        if (s == null || s.isBlank()) {
+            throw new IllegalArgumentException(
+                "since filter must not be blank (omit the parameter for no bound)");
+        }
+        String v = s.trim();
+        try {
+            return OffsetDateTime.parse(v.endsWith("Z") ? v.replace("Z", "+00:00") : v);
+        } catch (DateTimeParseException e) {
+            // fall through — try the naive/date-only shapes
+        }
+        try {
+            return java.time.LocalDateTime.parse(v).atOffset(ZoneOffset.UTC);
+        } catch (DateTimeParseException e) {
+            // fall through
+        }
+        try {
+            return java.time.LocalDate.parse(v).atStartOfDay().atOffset(ZoneOffset.UTC);
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException(
+                "since is not a recognizable ISO-8601 date or datetime: \"" + s
+                + "\" (accepted: 2026-08-01, 2026-08-01T12:00:00, 2026-08-01T12:00:00Z)", e);
+        }
+    }
+
+    /**
      * Parse an ISO-8601 text timestamp (ETL import strict path).
      * Accepts both "...Z" and "...+00:00" forms.
      * <strong>Throws {@link IllegalArgumentException}</strong> on null/blank/malformed
@@ -698,7 +739,7 @@ public final class TelemetryRepository {
             } else if (sessionId != null && !sessionId.isEmpty()) {
                 cond = TIER_WRITES.SESSION_ID.eq(sessionId);
             } else if (sinceIso != null && !sinceIso.isEmpty()) {
-                cond = TIER_WRITES.TS.ge(parseTs(sinceIso));
+                cond = TIER_WRITES.TS.ge(parseSinceFilter(sinceIso));
             }
             return ctx.select(
                     TIER_WRITES.TOOL,
@@ -770,7 +811,7 @@ public final class TelemetryRepository {
             } else if (sessionId != null && !sessionId.isEmpty()) {
                 cond = TIER_WRITES.SESSION_ID.eq(sessionId);
             } else if (sinceIso != null && !sinceIso.isEmpty()) {
-                cond = TIER_WRITES.TS.ge(parseTs(sinceIso));
+                cond = TIER_WRITES.TS.ge(parseSinceFilter(sinceIso));
             }
 
             int total = ctx.fetchCount(TIER_WRITES, cond);
@@ -1080,7 +1121,7 @@ public final class TelemetryRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             var cond = noCondition();
             if (sinceIso != null && !sinceIso.isBlank()) {
-                cond = cond.and(NX_ANSWER_RUNS.CREATED_AT.ge(parseTs(sinceIso)));
+                cond = cond.and(NX_ANSWER_RUNS.CREATED_AT.ge(parseSinceFilter(sinceIso)));
             }
 
             var agg = ctx.select(

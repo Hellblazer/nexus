@@ -1309,3 +1309,77 @@ class TestPredictedCostColumn:
         _add_predicted_costs(by_plan, _NoHistoryStore())
         assert by_plan["999"]["predicted_cost_usd"] is None
         assert by_plan["999"]["predicted_basis"] == "plan-not-found"
+
+
+class TestSpbaySinceNormalizationAndCostCaveat:
+    """nexus-spbay: date-only --since normalizes before the wire; garbage
+    fails as a usage error (never masquerading as a service failure); the
+    pre-instrumentation cost dilution is labeled (critic finding: the
+    caveat feature shipped untested)."""
+
+    @staticmethod
+    def _result(*, oldest: str, total: int = 3) -> dict:
+        return {
+            "rows": [],
+            "total": total,
+            "oldest_created_at": oldest,
+            "hit_count": 1,
+            "fallback_count": 2,
+            "avg_duration_ms": 2_000.0,
+            "avg_cost_usd": 0.25,
+            "latency_buckets": {
+                "under_5s": 3, "5s_to_30s": 0, "30s_to_2min": 0,
+                "2min_to_5min": 0, "over_5min": 0,
+            },
+        }
+
+    def _install(self, monkeypatch, result: dict, captured: dict | None = None):
+        class _Store:
+            def query_nx_answer_runs(self, *, since=None, limit=20, include_steps=False):
+                if captured is not None:
+                    captured["since"] = since
+                return _steps_gated(dict(result), include_steps)
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda: _Store(),
+        )
+
+    def test_date_only_since_normalizes_before_the_store(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        captured: dict = {}
+        self._install(monkeypatch, self._result(oldest="2026-08-25T00:00:00Z"), captured)
+        result = CliRunner().invoke(answer_runs_cmd, ["--since", "2026-08-01"])
+        assert result.exit_code == 0, result.output
+        assert captured["since"] == "2026-08-01T00:00:00Z"
+
+    def test_garbage_since_is_a_usage_error_not_a_service_failure(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        captured: dict = {}
+        self._install(monkeypatch, self._result(oldest="2026-08-25T00:00:00Z"), captured)
+        result = CliRunner().invoke(answer_runs_cmd, ["--since", "not-a-date"])
+        assert result.exit_code != 0
+        assert "not a recognizable ISO-8601" in result.output
+        # The store must never be reached — a bad value must not fall into
+        # the broad except and print the service-unreachable message.
+        assert "since" not in captured
+        assert "service" not in result.output.lower()
+
+    def test_cost_caveat_fires_when_window_predates_instrumentation(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import COST_INSTRUMENTED_SINCE, answer_runs_cmd
+
+        self._install(monkeypatch, self._result(oldest="2026-08-05T00:00:00Z"))
+        result = CliRunner().invoke(answer_runs_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert "CAUTION" in result.output
+        assert COST_INSTRUMENTED_SINCE in result.output
+
+    def test_cost_caveat_absent_for_instrumented_era_window(self, monkeypatch) -> None:
+        from nexus.commands.answer_runs import answer_runs_cmd
+
+        self._install(monkeypatch, self._result(oldest="2026-08-25T00:00:00Z"))
+        result = CliRunner().invoke(answer_runs_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert "CAUTION" not in result.output
