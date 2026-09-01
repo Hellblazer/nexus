@@ -476,6 +476,238 @@ class TestEmptyEvidenceGuard:
         assert envelope is not None
 
 
+# ── Payload-aware empty-evidence guard (nexus-1lfk8) ────────────────────────
+#
+# Live defect, RDR-200 Phase 1 gate q12: the guard above asks whether the
+# retrieval prefix produced NO evidence (arity). The real failure shape
+# preserves ARITY and loses PAYLOAD -- a hydrated operator step's items
+# array arrives as N EMPTY STRINGS. Count > 0, so the old guard passed
+# and the envelope shipped a well-formed reduction task over nothing.
+# These tests drive the guard from the CUT STEP'S OWN hydrated args
+# (post-_hydrate_operator_args), never from step_outputs arity alone --
+# ``compare``/``verify`` are used because neither has a SQL fast path
+# (nothing in these tests touches a real DB).
+
+
+class TestEvidencePredicateFolds:
+    """Review folds on the payload predicate (nexus-1lfk8): the two ways
+    it could still misread a field — prose that decodes as JSON ``null``
+    (code review: read as ABSENT, over-refusal), and invisible Unicode
+    format characters surviving ``str.strip()`` (critic: read as
+    PRESENT, the dangerous direction this bead exists to close)."""
+
+    def test_prose_reading_null_is_content_not_absence(self) -> None:
+        from nexus.plans.continuation_envelope import _has_nonwhitespace_content
+
+        # json.loads("null") is None, but a whole hydrated evidence field
+        # whose text is these four characters is prose. Over-refusing
+        # would silently convert a good handoff into a headless fallback.
+        assert _has_nonwhitespace_content("null") is True
+        assert _has_nonwhitespace_content("  null  ") is True
+
+    def test_invisible_format_characters_are_not_content(self) -> None:
+        from nexus.plans.continuation_envelope import _has_nonwhitespace_content
+
+        for invisible in (
+            "​",          # zero-width space
+            "‌‍",    # ZWNJ + ZWJ
+            "﻿",          # BOM / zero-width no-break space
+            "⁠",          # word joiner
+            "­",          # soft hyphen
+            " ​ ﻿ ", # mixed with ordinary whitespace
+        ):
+            assert _has_nonwhitespace_content(invisible) is False, (
+                f"invisible-only field read as content: {invisible!r}"
+            )
+
+    def test_invisible_chars_do_not_mask_real_content(self) -> None:
+        from nexus.plans.continuation_envelope import _has_nonwhitespace_content
+
+        assert _has_nonwhitespace_content("​real evidence﻿") is True
+
+    def test_list_of_invisible_only_items_falls_back(self) -> None:
+        from nexus.plans.continuation_envelope import _has_nonwhitespace_content
+
+        # The gate's live shape, one step nastier: arity intact, every
+        # element invisible rather than empty.
+        assert _has_nonwhitespace_content(json.dumps(["​"] * 10)) is False
+        assert _has_nonwhitespace_content(json.dumps(["​"] * 9 + ["real"])) is True
+
+
+class TestPayloadAwareEmptyEvidenceGuard:
+
+    @pytest.mark.asyncio
+    async def test_all_empty_string_items_falls_back_to_none(self):
+        """(a) An items array of all-empty-strings must fall back, even
+        though the array's arity (count) is nonzero."""
+        steps = [{"tool": "compare", "args": {
+            "items": json.dumps([""] * 10), "focus": "consistency",
+        }}]
+        cut = classify_continuation_cut(steps)
+        assert cut.shape is CutShape.SHAPE_B
+
+        envelope = assemble_continuation_envelope(
+            cut=cut, steps=steps, bindings={}, step_outputs=[],
+            plan_id=1, run_id=None,
+        )
+        assert envelope is None
+
+    @pytest.mark.asyncio
+    async def test_mixed_empty_and_real_items_still_hands_off(self):
+        """(b) MIXED: some items empty, some real content -- partial
+        evidence is legitimate. Must NOT over-refuse."""
+        steps = [{"tool": "compare", "args": {
+            "items": json.dumps(["", "real content here", "", "   "]),
+            "focus": "consistency",
+        }}]
+        cut = classify_continuation_cut(steps)
+        envelope = assemble_continuation_envelope(
+            cut=cut, steps=steps, bindings={}, step_outputs=[],
+            plan_id=1, run_id=None,
+        )
+        assert envelope is not None
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only_items_are_treated_as_empty(self):
+        """(c) '', '   ', '\\n' are ALL whitespace-only -- none of them
+        count as real content."""
+        steps = [{"tool": "compare", "args": {
+            "items": json.dumps(["", "   ", "\n"]),
+            "focus": "consistency",
+        }}]
+        cut = classify_continuation_cut(steps)
+        envelope = assemble_continuation_envelope(
+            cut=cut, steps=steps, bindings={}, step_outputs=[],
+            plan_id=1, run_id=None,
+        )
+        assert envelope is None
+
+    @pytest.mark.asyncio
+    async def test_structured_dict_payload_with_real_content_hands_off(self):
+        """(d) A structured (dict-shaped) evidence payload -- not a
+        plain string list -- with real content inside still hands off.
+        Exercises compare's items_a/items_b two-sided shape."""
+        steps = [{"tool": "compare", "args": {
+            "items_a": json.dumps([{"id": "1", "content": "real content"}]),
+            "items_b": json.dumps([{"id": "2", "content": ""}]),
+            "focus": "consistency",
+        }}]
+        cut = classify_continuation_cut(steps)
+        envelope = assemble_continuation_envelope(
+            cut=cut, steps=steps, bindings={}, step_outputs=[],
+            plan_id=1, run_id=None,
+        )
+        assert envelope is not None
+
+    @pytest.mark.asyncio
+    async def test_structured_dict_payload_all_empty_falls_back(self):
+        """Companion to (d): a structured dict-shaped payload whose every
+        leaf scalar is empty/whitespace must still trip the guard."""
+        steps = [{"tool": "compare", "args": {
+            "items_a": json.dumps([{"id": "", "content": ""}]),
+            "items_b": json.dumps([{"id": "", "content": "   "}]),
+            "focus": "consistency",
+        }}]
+        cut = classify_continuation_cut(steps)
+        envelope = assemble_continuation_envelope(
+            cut=cut, steps=steps, bindings={}, step_outputs=[],
+            plan_id=1, run_id=None,
+        )
+        assert envelope is None
+
+    @pytest.mark.asyncio
+    async def test_zero_items_case_still_reports_no_items_reason(self):
+        """(e) companion: the original arity-zero case (unchanged
+        behaviour) now also carries the new distinguishing ``reason``
+        field so the two failure classes are separable in telemetry."""
+        steps = [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "summarize", "args": {"content": "analyze the results"}},
+        ]
+        cut = classify_continuation_cut(steps)
+        step_outputs = [
+            {"ids": [], "tumblers": [], "distances": [], "collections": []},
+        ]
+
+        import logging
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+
+        with capture_logs() as cap:
+            envelope = assemble_continuation_envelope(
+                cut=cut, steps=steps, bindings={}, step_outputs=step_outputs,
+                plan_id=1, run_id=None,
+            )
+
+        assert envelope is None
+        events = [
+            e for e in cap
+            if e.get("event") == "continuation_empty_evidence_fallback_to_headless"
+        ]
+        assert len(events) == 1
+        assert events[0]["reason"] == "no_items"
+
+    @pytest.mark.asyncio
+    async def test_all_empty_payload_reports_distinguishing_reason(self):
+        """The NEW failure class (arity nonzero, payload empty) must
+        report a DIFFERENT ``reason`` value than the original arity-zero
+        case, so the two are separable in telemetry."""
+        steps = [{"tool": "compare", "args": {
+            "items": json.dumps([""] * 10), "focus": "consistency",
+        }}]
+        cut = classify_continuation_cut(steps)
+
+        import logging
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+
+        with capture_logs() as cap:
+            envelope = assemble_continuation_envelope(
+                cut=cut, steps=steps, bindings={}, step_outputs=[],
+                plan_id=1, run_id=None,
+            )
+
+        assert envelope is None
+        events = [
+            e for e in cap
+            if e.get("event") == "continuation_empty_evidence_fallback_to_headless"
+        ]
+        assert len(events) == 1
+        assert events[0]["reason"] == "items_present_all_empty"
+
+    @pytest.mark.asyncio
+    async def test_gate_q12_compare_ten_empty_string_items_regression(self):
+        """Regression, pinned by name (nexus-1lfk8): the EXACT shape the
+        RDR-200 Phase 1 gate's continuation arm saw live and refused on
+        twice (gate-arms/continuation/q12.json) -- a compare step whose
+        hydrated items array is ten empty strings. Deterministic; must
+        never again reach the caller as a well-formed reduction task
+        over nothing."""
+        steps = [{"tool": "compare", "args": {
+            "items": json.dumps([""] * 10),
+            "focus": "whether the sources agree",
+        }}]
+        cut = classify_continuation_cut(steps)
+        assert cut.shape is CutShape.SHAPE_B
+        assert cut.operators == ("compare",)
+
+        envelope = assemble_continuation_envelope(
+            cut=cut, steps=steps, bindings={}, step_outputs=[],
+            plan_id=1, run_id=None,
+        )
+        assert envelope is None, (
+            "arity (10 items) must no longer be enough to pass the "
+            "guard when every item is an empty string -- this IS the "
+            "arity hole nexus-1lfk8 closes"
+        )
+
+
 # ── Non-suffix shapes: nothing to hand off ──────────────────────────────────
 
 

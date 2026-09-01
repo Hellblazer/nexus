@@ -60,7 +60,10 @@ always-present-key convention, ``mcp/core.py``'s ``_result()``).
 """
 from __future__ import annotations
 
+import json
+import unicodedata
 import uuid
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -158,10 +161,17 @@ def _compose_shape_a(
     steps: list[dict[str, Any]],
     bindings: dict[str, Any],
     step_outputs: list[dict[str, Any]],
-) -> tuple[str, dict[str, Any]]:
+) -> tuple[str, dict[str, Any], tuple[OperatorBundleStep, ...]]:
     """Reconstruct Shape A's ``(prompt, schema)`` — byte-for-byte mirror
     of ``plan_run``'s own bundle-segment construction
     (``nexus.plans.runner.plan_run``, the ``OperatorBundleSlice`` branch).
+
+    Also returns the bundle's resolved+hydrated
+    :class:`~nexus.plans.bundle.OperatorBundleStep` tuple (nexus-1lfk8)
+    so the caller can run the payload-aware empty-evidence check
+    (:func:`_prefix_produced_zero_evidence`) against the SAME hydrated
+    args that were just composed into the prompt — never a second,
+    re-derived copy of them.
     """
     deferred_indices = set(cut.plan_indices)
     bundle_steps: list[OperatorBundleStep] = []
@@ -183,7 +193,8 @@ def _compose_shape_a(
             source_collections=source_collections,
         ))
     bundle = OperatorBundle(steps=tuple(bundle_steps))
-    return compose_bundle_prompt(bundle)
+    prompt, schema = compose_bundle_prompt(bundle)
+    return prompt, schema, bundle.steps
 
 
 #: RDR-200 go-live precondition 1 (T2 [23947], nexus-4e75w.5): the bare
@@ -258,11 +269,16 @@ def _compose_shape_b(
     *,
     prefix_may_redispatch: bool = False,
     prefix_redispatch_step_count: int = 0,
-) -> tuple[str, dict[str, Any]] | None:
+) -> tuple[str, dict[str, Any], str, dict[str, Any]] | None:
     """Reconstruct Shape B's ``(prompt, schema)`` — byte-for-byte mirror
     of ``plan_run``'s own isolated-step construction
     (``nexus.plans.runner.plan_run``, the ``IsolatedStep`` branch), then
     the Phase 0 builder via the verb->builder lookup table.
+
+    Also returns the resolved bare ``verb`` and its hydrated ``prepared``
+    args dict (nexus-1lfk8) — the SAME values fed to the builder, so the
+    caller can run the payload-aware empty-evidence check
+    (:func:`_prefix_produced_zero_evidence`) against them directly.
 
     Returns ``None`` when ``filter``/``groupby``/``aggregate``'s SQL
     fast path would actually have served this exact call
@@ -310,7 +326,8 @@ def _compose_shape_b(
             f"no continuation request builder registered for operator "
             f"{verb!r} (resolved_tool={resolved_tool!r})"
         )
-    return builder(prepared)
+    prompt, schema = builder(prepared)
+    return prompt, schema, verb, prepared
 
 
 def _harvest_hydrated_bundles(
@@ -362,32 +379,175 @@ def _harvest_hydrated_bundles(
     return bundles
 
 
-def _prefix_produced_zero_evidence(
-    step_outputs: list[dict[str, Any]], cut_at_step: int | None,
+#: Bare verb -> the arg field name(s) that carry HYDRATED EVIDENCE
+#: content for that operator, mirrored 1:1 from each ``build_<op>_
+#: request`` builder's own positional signature in
+#: ``nexus.mcp.operator_requests`` (nexus-1lfk8). Instruction-only
+#: params (``criterion``/``key``/``reducer``/``focus``/
+#: ``check_instruction``/``fields``/``template``/``cited``/``claim``)
+#: are deliberately excluded — they are literal, caller-authored
+#: operation parameters, never auto-hydrated content, and checking them
+#: would never distinguish "real evidence" from "empty evidence" (they
+#: are always non-empty). ``verify``'s ``claim`` is the assertion being
+#: checked, not the hydrated payload — ``evidence`` is.
+_EVIDENCE_ARG_FIELDS: dict[str, tuple[str, ...]] = {
+    "extract": ("inputs",),
+    "rank": ("items",),
+    "compare": ("items", "items_a", "items_b"),
+    "summarize": ("content",),
+    "generate": ("context",),
+    "filter": ("items",),
+    "check": ("items",),
+    "verify": ("evidence",),
+    "groupby": ("items",),
+    "aggregate": ("groups",),
+}
+
+
+def _visible_only(text: str) -> str:
+    """*text* with whitespace AND invisible Unicode format characters
+    (category ``Cf``: ZWSP, ZWNJ, ZWJ, BOM, word joiner) plus the soft
+    hyphen removed.
+
+    A bare ``str.strip()`` leaves those intact, so a field containing
+    nothing but extraction noise reads as real content — the same
+    dangerous direction as the empty-string hole this guard closes, via
+    invisible characters instead (nexus-1lfk8 critic finding; plausible
+    provenance is PDF/OCR extraction through the MinerU pipeline)."""
+    return "".join(
+        ch for ch in text
+        if not (ch.isspace() or unicodedata.category(ch) == "Cf" or ch == "­")
+    )
+
+
+def _has_nonwhitespace_content(value: Any) -> bool:
+    """True when *value* — a hydrated operator-arg value, or something
+    nested inside one — carries at least one non-whitespace scalar
+    (nexus-1lfk8).
+
+    A hydrated evidence field arrives in one of three shapes: a
+    JSON-encoded string (``items``/``inputs``/``groups`` are
+    ``json.dumps``-ed lists/dicts by both
+    ``nexus.plans.runner._hydrate_operator_args``'s auto-hydration
+    branch and its nexus-yis0 pre-hydrated-passthrough branch), a
+    literal joined string (``content``/``context``), or an
+    already-Python list/dict (a structured retrieval result that never
+    got re-serialized — e.g. ``groups`` chained straight from a prior
+    ``groupby`` step's output). A JSON string is parsed and recursed
+    into: checking ``value.strip()`` on the OUTER string alone is
+    exactly the arity hole this function closes — ``'["", "", ""]'`` is
+    a non-empty STRING even though every element it encodes is empty.
+
+    A non-string, non-container scalar (int/float/bool) counts as
+    present outright — only strings can be whitespace-only empty.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        stripped = _visible_only(value)
+        if not stripped:
+            return False
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return True  # plain non-JSON text with real content
+        if isinstance(parsed, (list, dict)):
+            return _has_nonwhitespace_content(parsed)
+        if isinstance(parsed, str):
+            return _has_nonwhitespace_content(parsed)
+        # A bare JSON scalar decoded from a raw string (number/bool/null).
+        # ``null`` decodes to ``None``, but the SOURCE here is a whole
+        # hydrated evidence field whose text is the four characters
+        # "null" — realistically prose, not a JSON-null payload, and the
+        # guard must not over-refuse (a false "absent" silently converts
+        # a good handoff into a headless fallback). Treat it as content
+        # (code-review finding, nexus-1lfk8).
+        return True
+    if isinstance(value, list):
+        return any(_has_nonwhitespace_content(v) for v in value)
+    if isinstance(value, dict):
+        return any(_has_nonwhitespace_content(v) for v in value.values())
+    return True  # non-string, non-container scalar: presence is evidence
+
+
+def _cut_payload_has_evidence(
+    cut_step_payloads: Sequence[tuple[str, dict[str, Any]]],
 ) -> bool:
-    """Conservative "empty retrieval" guard for the continuation
-    handoff (coordinator fold, 2026-09-01): never hand off a reduction
-    task the pre-cut retrieval prefix produced zero hydratable evidence
-    for.
+    """True when ANY of the cut's own operator step(s) carry a
+    non-whitespace evidence value in ANY of their evidence-bearing arg
+    fields (nexus-1lfk8).
+
+    Deliberately ANY-across-all-steps-and-fields, matching
+    :func:`_prefix_produced_zero_evidence`'s existing "sum across the
+    whole prefix, never per-step" bias against over-refusal — RDR-200's
+    guard exists to catch total emptiness, not to demand every field of
+    every step carry content; partial evidence is legitimate.
+    """
+    for verb, args in cut_step_payloads:
+        fields = _EVIDENCE_ARG_FIELDS.get(verb)
+        if fields is None:
+            # An operator verb outside the ten known build_<op>_request
+            # builders should never reach a continuation cut in the
+            # first place (classify_continuation_cut only ever names
+            # BUNDLEABLE_OPERATORS / VERB_TO_REQUEST_BUILDER verbs) —
+            # an unrecognised verb here cannot be confidently
+            # classified either way, so err toward NOT over-refusing
+            # rather than silently guessing it is empty.
+            return True
+        for field in fields:
+            if _has_nonwhitespace_content(args.get(field)):
+                return True
+    return False
+
+
+def _prefix_produced_zero_evidence(
+    step_outputs: list[dict[str, Any]],
+    cut_at_step: int | None,
+    cut_step_payloads: Sequence[tuple[str, dict[str, Any]]] = (),
+) -> str | None:
+    """Conservative "empty evidence" guard for the continuation handoff
+    (coordinator fold, 2026-09-01; extended payload-aware nexus-1lfk8):
+    never hand off a reduction task with nothing real behind it.
 
     Mirrors ``nexus.mcp.core._nx_answer_is_empty_retrieval``'s exact
-    semantic — a separate, NOT-imported implementation, deliberately:
-    ``core.py`` is THIS module's caller (``nx_answer`` imports
-    ``assemble_continuation_envelope``), so importing ``core.py`` back
-    from here would invert the intended dependency direction
-    (``nexus.mcp.operator_requests``'s own docstring states the same
-    constraint for its sibling module — this file sits below
-    ``core.py`` in the import graph). Keep the two predicates in sync by
-    hand; a future divergence is a real defect to fix in both places.
+    arity semantic for the FIRST check below — a separate, NOT-imported
+    implementation, deliberately: ``core.py`` is THIS module's caller
+    (``nx_answer`` imports ``assemble_continuation_envelope``), so
+    importing ``core.py`` back from here would invert the intended
+    dependency direction (``nexus.mcp.operator_requests``'s own
+    docstring states the same constraint for its sibling module — this
+    file sits below ``core.py`` in the import graph). Keep the two
+    predicates in sync by hand; a future divergence is a real defect to
+    fix in both places.
 
-    True only when the PRE-CUT ``step_outputs`` collectively exposed at
-    least one retrieval-shaped output (an ``ids`` or ``tumblers`` list)
-    AND every one of them came back empty — summed across the WHOLE
-    prefix, not per-step, so one empty step alongside one non-empty step
-    does not trip this. A prefix with NO retrieval steps at all (a
-    context-only synthesis plan — e.g. a lone ``generate``/``summarize``
-    step whose content is a literal string) is exempt: it legitimately
-    has nothing to hydrate and nothing wrong to report.
+    Two independent failure classes, checked in order, each with its
+    own ``reason`` so they are separable in telemetry:
+
+    1. ``"no_items"`` (arity — the ORIGINAL check): the PRE-CUT
+       ``step_outputs`` collectively exposed at least one
+       retrieval-shaped output (an ``ids`` or ``tumblers`` list) AND
+       every one of them came back empty — summed across the WHOLE
+       prefix, not per-step, so one empty step alongside one non-empty
+       step does not trip this.
+    2. ``"items_present_all_empty"`` (payload — nexus-1lfk8): arity was
+       nonzero (or there was no pre-cut retrieval to check at all), but
+       none of the hydrated values the CUT'S OWN step(s) actually carry
+       — ``cut_step_payloads``, the real ``(verb, prepared_args)`` pairs
+       :func:`_compose_shape_a`/:func:`_compose_shape_b` just hydrated
+       to build the prompt — contain any non-whitespace content. This is
+       the live defect: a hydration failure can preserve ARITY (ten
+       items) while losing PAYLOAD (ten empty strings), and arity alone
+       is not evidence.
+
+    A prefix with NO retrieval steps at all (a context-only synthesis
+    plan — e.g. a lone ``generate``/``summarize`` step whose content is
+    a literal, non-empty string) is exempt from check 1: it legitimately
+    has nothing to hydrate and nothing wrong to report. It still passes
+    through check 2 against its own (literal) payload.
+
+    Returns ``None`` when real evidence is present (or
+    ``cut_step_payloads`` was not supplied — an omitting caller keeps
+    the original arity-only behaviour).
     """
     limit = cut_at_step if cut_at_step is not None else len(step_outputs)
     had_retrieval = False
@@ -403,7 +563,14 @@ def _prefix_produced_zero_evidence(
         if isinstance(tumblers, list):
             had_retrieval = True
             total_evidence += len(tumblers)
-    return had_retrieval and total_evidence == 0
+
+    if had_retrieval and total_evidence == 0:
+        return "no_items"
+
+    if cut_step_payloads and not _cut_payload_has_evidence(cut_step_payloads):
+        return "items_present_all_empty"
+
+    return None
 
 
 def assemble_continuation_envelope(
@@ -457,15 +624,19 @@ def assemble_continuation_envelope(
         off (``NO_SUFFIX`` / ``MULTI_UNIT``), the SQL fast path would
         have served a Shape B filter/groupby/aggregate for $0, the
         retrieval prefix produced zero hydratable evidence for the
-        suffix (:func:`_prefix_produced_zero_evidence`), or the composed
-        prompt breaches
+        suffix or the cut's own hydrated payload carries no
+        non-whitespace content despite nonzero arity
+        (:func:`_prefix_produced_zero_evidence`, nexus-1lfk8), or the
+        composed prompt breaches
         :data:`~nexus.plans.bundle.MAX_CONTINUATION_PROMPT_CHARS` (each
         case logged with its own structlog event naming the reason; the
         caller's headless fallback is unaffected either way — no
         evidence is ever truncated or lost).
     """
+    cut_step_payloads: list[tuple[str, dict[str, Any]]]
     if cut.shape is CutShape.SHAPE_A:
-        prompt, schema = _compose_shape_a(cut, steps, bindings, step_outputs)
+        prompt, schema, bundle_steps = _compose_shape_a(cut, steps, bindings, step_outputs)
+        cut_step_payloads = [(_bare(s.tool), s.args) for s in bundle_steps]
     elif cut.shape is CutShape.SHAPE_B:
         composed = _compose_shape_b(
             cut, steps, bindings, step_outputs,
@@ -476,7 +647,8 @@ def assemble_continuation_envelope(
             # SQL fast path would have served this call for $0 — go-live
             # precondition 1. Already logged inside _compose_shape_b.
             return None
-        prompt, schema = composed
+        prompt, schema, verb, prepared = composed
+        cut_step_payloads = [(verb, prepared)]
     else:
         # NO_SUFFIX / MULTI_UNIT: nothing composes into a single
         # (prompt, schema) pair — RDR-200 §The continuation cut's
@@ -484,15 +656,22 @@ def assemble_continuation_envelope(
         # nothing to hand off for this plan shape.
         return None
 
-    if _prefix_produced_zero_evidence(step_outputs, cut.cut_at_step):
-        # Never hand off a reduction task the retrieval prefix produced
-        # no data behind — same fallback pattern as the oversize/
-        # SQL-would-hit cases (structlog reason, headless for this call).
+    empty_reason = _prefix_produced_zero_evidence(
+        step_outputs, cut.cut_at_step, cut_step_payloads,
+    )
+    if empty_reason is not None:
+        # Never hand off a reduction task with nothing real behind it —
+        # same fallback pattern as the oversize/SQL-would-hit cases
+        # (structlog reason, headless for this call). ``reason``
+        # separates the arity-zero case ("no_items") from the
+        # payload-empty case ("items_present_all_empty", nexus-1lfk8)
+        # in telemetry.
         _log.info(
             "continuation_empty_evidence_fallback_to_headless",
             plan_id=plan_id,
             cut_at_step=cut.cut_at_step,
             shape=cut.shape.value,
+            reason=empty_reason,
             fallback_may_redispatch=prefix_may_redispatch,
             fallback_redispatch_step_count=prefix_redispatch_step_count,
         )
