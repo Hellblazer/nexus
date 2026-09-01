@@ -36,7 +36,7 @@ and a coverage gap, and a table would have reported both before either
 shipped.
 
 This came into view through a comparison with `cwensel/intrastate`
-(2026-09-01, artifact `7e86ba27`), a Go kernel whose whole purpose is to hold
+(2026-09-01), a Go kernel whose whole purpose is to hold
 such vocabularies as linted data: a TOML model of tags, rules, guards and
 writes, proved complete and unambiguous before it runs, refusing at runtime
 rather than guessing. Its first customer is its author's own record
@@ -615,7 +615,6 @@ class this RDR names was found and fixed during its own research.
 
 ## References
 
-- Comparison artifact, 2026-09-01: https://claude.ai/code/artifact/7e86ba27-3818-443a-ba02-b3ecfbd5526a
 - `cwensel/intrastate` at `bc9f2a0`; `models/rdr.toml`; `docs/model-authoring.md` (references Mealy 1955, Dijkstra 1975, King 1968, OMG DMN 1.5).
 - T3: `analysis-codebase-intrastate-runtime-kernel-2026-09-01`, `analysis-deep-intrastate-rdr-apparatus-2026-09-01`; T2 `nexus/critique-intrastate-nexus-comparison-2026-09-01` [23971].
 - Beads filed from the same comparison: nexus-tpuct, nexus-jh86x, nexus-1c7oq, nexus-7mudt.
