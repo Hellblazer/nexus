@@ -31,5 +31,16 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.26.0)
 
-Nothing pending. v7.26.0 advanced the pin; no plugin-surface changes
-landed between v7.25.0 and v7.26.0.
+- `conexus/skills/query/SKILL.md` — bead: nexus-4e75w.4 — describes
+  `nx_answer`'s two possible return shapes now that continuation mode
+  exists (composed answer, or a reduction instruction the calling
+  session executes in-context). No routing change; the nexus-h33x8.6
+  narrowing stands. RDR-200 Phase 1b.
+- `conexus/skills/using-nx-skills/SKILL.md` — bead: nexus-4e75w.4 —
+  same one-paragraph description in the routing table's `nx_answer`
+  entry. RDR-200 Phase 1b.
+
+Both are INERT until the next release or plugin cut: sessions load the
+plugin from the pinned tag, so continuation mode is live in the CLIENT
+(shipped 85c79761e) while these two descriptions of it are not yet
+loaded by any session.

@@ -39,6 +39,10 @@ def test_core_registered_tools():
         "operator_filter", "operator_check", "operator_verify",
         "operator_groupby", "operator_aggregate",
         "nx_answer", "nx_tidy", "nx_enrich_beads", "nx_plan_audit",
+        # RDR-200 P1c (nexus-4e75w.5): the continuation handoff's
+        # completion-report half — a SECOND append pairing on
+        # continuation_id, never a mutation of the handoff row.
+        "nx_answer_report",
         "daemon_uninstall",
         # RDR-156 P4 combined-query primitives (nexus-joesk, nexus-houg9)
         "search_metadata_scoped", "search_topic_scoped", "search_graph_hop",
