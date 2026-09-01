@@ -282,3 +282,16 @@ Reported alongside the blind-judging result, not traded off against it:
   procedure, stratum minimums, pass/fail rule, no-signal protocol,
   unreported-rate decomposition target) is frozen at this file's
   initial commit.
+
+## Revision History
+
+- 2026-09-01 (before any arm ran) — **Arm session-model id recorded**:
+  the continuation-arm reducer and the caller-only-arm reasoner both
+  run on **`claude-fable-5`** (the orchestrating session's model — the
+  session model the default flip would serve, satisfying §3's
+  same-model constraint). Judge confirmed at set-freeze as
+  **`claude-opus-5`** (measured from every labeling envelope, distinct
+  from the caller arm per OQ-6). Question set frozen at
+  `docs/rdr/rdr-200-phase1-questions.md` (24 questions, 12 crowded /
+  12 clean); model_tiers.py verified unchanged at assembly. No other
+  value changed.
