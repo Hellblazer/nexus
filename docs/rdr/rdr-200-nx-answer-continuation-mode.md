@@ -869,6 +869,19 @@ exactly the variable the gate isolates. That model is the session
 model the default flip would serve (Fable-class at time of writing),
 named in the pre-registration.
 
+*Tiering pin (Sam, 2026-09-01):* the headless arm runs the
+**production default** tiering — `NX_OPERATOR_MODEL_TIERING` unset,
+the default branch, at **both** dispatch sites (the isolated-operator
+branch and the bundle-path pin; the two can select differently under
+the same nominal setting, so both are named) — because
+headless-as-it-actually-runs is the incumbent this design must beat; a
+laboratory-matched headless arm would measure a configuration nobody
+runs. The frozen question set's plans must carry **no step-author
+`model` overrides** (an explicit override always wins and would
+silently unpin the arm); the pre-registration artifact records the
+resolved model identity per operator at freeze time. The same-model
+constraint above binds the continuation and caller-only arms only.
+
 *No-signal protocol (pre-registered):* a stratum below its minimum
 size, or a win-rate statistically indistinguishable from a tie, yields
 **INCONCLUSIVE — which is not a pass**. The `nexus-rv9xp` precedent
@@ -1053,6 +1066,11 @@ stratum falls short. Pinned before Phase 1 runs, as this RDR requires.
   (25% unreported threshold; Opus-tier blinded judge, simple majority,
   ties against continuation; crowded ≥ 0.5 with minimum stratum 8).
   Phase 1's pre-registration is complete ahead of any run.
+- 2026-09-01 — Tiering pin (Sam): the gate parameter the execution
+  plan's audit surfaced as uncovered — headless arm runs production
+  default tiering at both dispatch sites; no step-author model
+  overrides in the frozen set; same-model constraint scoped to the
+  continuation/caller-only pair. Implementation start authorized.
 - 2026-09-01 — OQ-1 DECIDED by Sam: build. The entropy/scale argument
   added to the Problem Statement and R6 (flat search swamps in
   adjacent facts as the corpus grows; composed retrieval holds
