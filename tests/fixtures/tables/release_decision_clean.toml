@@ -1,0 +1,65 @@
+# Fixture: release-floor decision table (decision-table kind), CLEAN.
+# cloud_vs_floor(4) x mode(3) x ledger(3) = 36 cells, one group ("decide"),
+# fully enumerated -- no escape row needed, coverage proved by the rows
+# themselves. Converted from the enumcheck prototype's
+# models/release_decision.toml onto the production
+# [table]/[dimensions]/[[row]] schema (match={decision="decide"} replaces
+# the prototype's implicit outcome="decide").
+
+[table]
+id = "release-floor-decision-fixture"
+kind = "decision-table"
+
+[dimensions.decision]
+domain = ["decide"]
+
+[dimensions.cloud_vs_floor]
+domain = ["below", "equal", "above", "unreachable"]
+
+[dimensions.mode]
+domain = ["bare", "paired", "paired-auto"]
+
+[dimensions.ledger]
+domain = ["all-additive", "non-additive", "none"]
+
+# cloud already at or above the floor: pass regardless of mode/ledger (18 cells)
+[[row]]
+id = "at-or-above-floor"
+match = { decision = "decide" }
+guard = { cloud_vs_floor = ["equal", "above"] }
+emit = { verdict = "pass" }
+
+# cloud verification unreachable: block regardless (9 cells)
+[[row]]
+id = "unreachable"
+match = { decision = "decide" }
+guard = { cloud_vs_floor = "unreachable" }
+emit = { verdict = "block" }
+
+# below floor, bare mode: no pairing story, always block (3 cells)
+[[row]]
+id = "below-bare"
+match = { decision = "decide" }
+guard = { cloud_vs_floor = "below", mode = "bare" }
+emit = { verdict = "block" }
+
+# below floor, paired mode: human confirmed the exact tag, accept regardless of ledger (3 cells)
+[[row]]
+id = "below-paired"
+match = { decision = "decide" }
+guard = { cloud_vs_floor = "below", mode = "paired" }
+emit = { verdict = "pass" }
+
+# below floor, paired-auto, all-additive ledger: safe to deploy engine-first (1 cell)
+[[row]]
+id = "below-paired-auto-additive"
+match = { decision = "decide" }
+guard = { cloud_vs_floor = "below", mode = "paired-auto", ledger = "all-additive" }
+emit = { verdict = "pass" }
+
+# below floor, paired-auto, non-additive-or-empty ledger: unarmed pairing, block (2 cells)
+[[row]]
+id = "below-paired-auto-non-additive"
+match = { decision = "decide" }
+guard = { cloud_vs_floor = "below", mode = "paired-auto", ledger = ["non-additive", "none"] }
+emit = { verdict = "block" }

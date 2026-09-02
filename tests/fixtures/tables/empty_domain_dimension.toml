@@ -1,0 +1,18 @@
+# Loads fine (an empty domain is not validated against at load time --
+# there is nothing to check a literal against); check_table refuses to
+# claim coverage over `tier` (unprovable-coverage, reason=dimension-not-finite).
+[table]
+id = "not-finite-dim"
+kind = "decision-table"
+
+[dimensions.decision]
+domain = ["decide"]
+
+[dimensions.tier]
+domain = []
+
+[[row]]
+id = "r1"
+match = { decision = "decide" }
+guard = { tier = "free" }
+emit = { verdict = "ok" }

@@ -1,0 +1,17 @@
+# Loads fine; check_table refuses to claim coverage over the undeclared
+# `region` guard dimension (unprovable-coverage, reason=undeclared-dimension).
+[table]
+id = "undeclared-dim"
+kind = "decision-table"
+
+[dimensions.decision]
+domain = ["decide"]
+
+[dimensions.tier]
+domain = ["free", "paid"]
+
+[[row]]
+id = "r1"
+match = { decision = "decide" }
+guard = { tier = "free", region = "eu" }
+emit = { verdict = "ok" }

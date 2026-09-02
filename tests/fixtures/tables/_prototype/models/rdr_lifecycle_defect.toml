@@ -1,0 +1,127 @@
+# RDR lifecycle transition table, DEFECT variant: plants one graph-overlap
+# (close-open vs close-extra both fire over state=accepted, and neither
+# row's accepted set subsumes the other's -- genuine overlap, not
+# redundancy) and one graph-coverage-gap (the scrap event's escape row is
+# missing, so 6 of the 7 states go unrescued).
+
+# RDR lifecycle transition table (state-machine class), CLEAN.
+# 7 states x 9 events. Every event that guards on `state` closes coverage
+# either by enumerating every state value or by a bare escape row rescuing
+# the states the event does not admit. `create` guards nothing (a fresh RDR
+# has no prior state) — legitimate for a state-machine, silent, no finding.
+
+[model]
+id = "rdr-lifecycle"
+class = "state-machine"
+
+[tags.state]
+domain = ["draft", "accepted", "closed", "superseded", "scrapped", "deferred", "abandoned"]
+
+# --- create: no state precondition ---------------------------------------
+
+[[rows]]
+id = "create"
+outcome = "create"
+
+# --- gate-pass / gate-block: only meaningful from draft -------------------
+
+[[rows]]
+id = "gate-pass-draft"
+outcome = "gate-pass"
+[rows.guard_all]
+state = "draft"
+
+[[rows]]
+id = "gate-pass-otherwise"
+outcome = "gate-pass"
+escape = true
+
+[[rows]]
+id = "gate-block-draft"
+outcome = "gate-block"
+[rows.guard_all]
+state = "draft"
+
+[[rows]]
+id = "gate-block-otherwise"
+outcome = "gate-block"
+escape = true
+
+# --- accept: draft -> accepted --------------------------------------------
+
+[[rows]]
+id = "accept-draft"
+outcome = "accept"
+[rows.guard_all]
+state = "draft"
+
+[[rows]]
+id = "accept-otherwise"
+outcome = "accept"
+escape = true
+
+# --- close: draft, accepted, or deferred can be closed ---------------------
+
+[[rows]]
+id = "close-open"
+outcome = "close"
+[rows.guard_all]
+state = ["draft", "accepted", "deferred"]
+
+[[rows]]
+id = "close-extra"
+outcome = "close"
+[rows.guard_all]
+state = ["accepted", "closed"]
+
+[[rows]]
+id = "close-otherwise"
+outcome = "close"
+escape = true
+
+# --- supersede: accepted or closed can be superseded -----------------------
+
+[[rows]]
+id = "supersede-settled"
+outcome = "supersede"
+[rows.guard_all]
+state = ["accepted", "closed"]
+
+[[rows]]
+id = "supersede-otherwise"
+outcome = "supersede"
+escape = true
+
+# --- scrap: only a draft can be scrapped -----------------------------------
+
+[[rows]]
+id = "scrap-draft"
+outcome = "scrap"
+[rows.guard_all]
+state = "draft"
+
+# --- defer: only a draft can be deferred -----------------------------------
+
+[[rows]]
+id = "defer-draft"
+outcome = "defer"
+[rows.guard_all]
+state = "draft"
+
+[[rows]]
+id = "defer-otherwise"
+outcome = "defer"
+escape = true
+
+# --- resume: only a deferred RDR can resume ---------------------------------
+
+[[rows]]
+id = "resume-deferred"
+outcome = "resume"
+[rows.guard_all]
+state = "deferred"
+
+[[rows]]
+id = "resume-otherwise"
+outcome = "resume"
+escape = true

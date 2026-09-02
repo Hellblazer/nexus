@@ -1,0 +1,133 @@
+# Fixture: RDR lifecycle transition table, DEFECT variant. Plants one
+# overlap (close-open vs close-extra both fire over state=accepted, and
+# neither row's accepted set subsumes the other's -- genuine overlap, not
+# redundancy) and one coverage-gap (the scrap event's escape row is
+# missing, so 6 of the 7 states go unrescued). Converted from the enumcheck
+# prototype's models/rdr_lifecycle_defect.toml.
+
+[table]
+id = "rdr-lifecycle-fixture"
+kind = "state-machine"
+
+[dimensions.event]
+domain = ["create", "gate-pass", "gate-block", "accept", "close", "supersede", "scrap", "defer", "resume"]
+
+[dimensions.state]
+domain = ["draft", "accepted", "closed", "superseded", "scrapped", "deferred", "abandoned"]
+
+# --- create: no state precondition ---------------------------------------
+
+[[row]]
+id = "create"
+match = { event = "create" }
+to = { state = "draft" }
+
+# --- gate-pass / gate-block: only meaningful from draft -------------------
+
+[[row]]
+id = "gate-pass-draft"
+match = { event = "gate-pass" }
+guard = { state = "draft" }
+to = { state = "draft" }
+
+[[row]]
+id = "gate-pass-otherwise"
+match = { event = "gate-pass" }
+escape = true
+refuse = "illegal-transition"
+
+[[row]]
+id = "gate-block-draft"
+match = { event = "gate-block" }
+guard = { state = "draft" }
+to = { state = "draft" }
+
+[[row]]
+id = "gate-block-otherwise"
+match = { event = "gate-block" }
+escape = true
+refuse = "illegal-transition"
+
+# --- accept: draft -> accepted --------------------------------------------
+
+[[row]]
+id = "accept-draft"
+match = { event = "accept" }
+guard = { state = "draft" }
+to = { state = "accepted" }
+
+[[row]]
+id = "accept-otherwise"
+match = { event = "accept" }
+escape = true
+refuse = "illegal-transition"
+
+# --- close: PLANTED OVERLAP (close-open and close-extra both accept accepted) --
+
+[[row]]
+id = "close-open"
+match = { event = "close" }
+guard = { state = ["draft", "accepted", "deferred"] }
+to = { state = "closed" }
+
+[[row]]
+id = "close-extra"
+match = { event = "close" }
+guard = { state = ["accepted", "closed"] }
+to = { state = "closed" }
+
+[[row]]
+id = "close-otherwise"
+match = { event = "close" }
+escape = true
+refuse = "illegal-transition"
+
+# --- supersede: accepted or closed can be superseded -----------------------
+
+[[row]]
+id = "supersede-settled"
+match = { event = "supersede" }
+guard = { state = ["accepted", "closed"] }
+to = { state = "superseded" }
+
+[[row]]
+id = "supersede-otherwise"
+match = { event = "supersede" }
+escape = true
+refuse = "illegal-transition"
+
+# --- scrap: PLANTED GAP (escape row deleted -- only draft is rescued) ------
+
+[[row]]
+id = "scrap-draft"
+match = { event = "scrap" }
+guard = { state = "draft" }
+to = { state = "scrapped" }
+
+# --- defer: only a draft can be deferred -----------------------------------
+
+[[row]]
+id = "defer-draft"
+match = { event = "defer" }
+guard = { state = "draft" }
+to = { state = "deferred" }
+
+[[row]]
+id = "defer-otherwise"
+match = { event = "defer" }
+escape = true
+refuse = "illegal-transition"
+
+# --- resume: only a deferred RDR can resume ---------------------------------
+
+[[row]]
+id = "resume-deferred"
+match = { event = "resume" }
+guard = { state = "deferred" }
+to = { state = "draft" }
+
+[[row]]
+id = "resume-otherwise"
+match = { event = "resume" }
+escape = true
+refuse = "illegal-transition"

@@ -1,0 +1,22 @@
+# r2 names fewer match keys ({event}) than r1 ({status, event}): refused at
+# load time (MatchKeysMismatchError) -- a broad "otherwise" must not
+# silently overlap a narrower group by naming a different match-key shape.
+[table]
+id = "mismatch"
+kind = "decision-table"
+
+[dimensions.status]
+domain = ["draft", "accepted"]
+
+[dimensions.event]
+domain = ["accept"]
+
+[[row]]
+id = "r1"
+match = { status = "draft", event = "accept" }
+emit = { verdict = "ok" }
+
+[[row]]
+id = "r2"
+match = { event = "accept" }
+emit = { verdict = "fallback" }

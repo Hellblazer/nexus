@@ -290,6 +290,12 @@ override-dependencies = [
 # justified per-line `# noqa: <code> — reason`, so a NEW violation fails CI.
 target-version = "py312"
 src = ["src"]
+extend-exclude = [
+    # RDR-201 P1.1 (nexus-j9z30.1): a read-only archived snapshot of the
+    # enumcheck research prototype, kept byte-identical for porting
+    # fidelity ("port; do not rewrite") — not production code, not linted.
+    "tests/fixtures/tables/_prototype",
+]
 
 [tool.ruff.lint]
 # T20  flake8-print        — no print() in library code (CLAUDE.md hot rule;
