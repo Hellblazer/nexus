@@ -21,15 +21,20 @@ modeling (``test_committed_fixture_is_not_stale_relative_to_a_fresh_
 enumeration``, which compares ``erc.build_fixture()`` -- pure and
 deterministic -- against the committed file).
 
-Role 2 (``test_real_function_fills_every_catalog_placeholder``) drives the
-real function capturing its full printed TEXT and asserts no
-``release_messages.py`` placeholder is left unfilled in it. The old inline
-prints were f-strings and could not leave a hole; the catalog can, at any
-call site that forgets a substitution key -- and the classifiers that
-reduce text to a ``message_key`` would not notice. This is what remains
-of the P2.4 fix round's byte-for-byte text comparison once its old-path
-oracle is gone: the words the operator reads still get checked, for the
-one defect class the catalog design introduced.
+Role 2 pins the WORDS. ``test_real_function_text_matches_frozen_oracle``
+drives the real function capturing stdout and stderr SEPARATELY and
+byte-compares each, after normalizing the run-dependent substrings
+(``enumerate_release_cells.text_normalizers``), against
+``tests/scripts/fixtures/release_cell_texts.json`` -- the text every cell
+printed at the P2.6 cutover, when it was proven byte-identical on both
+streams to the deleted inline branches (the per-stream probe, independently
+re-derived by the .18 code review). That is the P2.4 fix round's byte-for-
+byte comparison (which found 23 mismatches, six of them real bugs) kept
+alive against a frozen oracle instead of a live one; regeneration is a
+deliberate act in the same commit as a message change (see
+``build_text_fixture``). ``test_real_function_fills_every_catalog_
+placeholder`` is the cheaper companion: no catalog placeholder left
+unfilled, the one defect class the catalog design introduced.
 
 Role 3 (``test_table_row_matches_fixture_by_direct_resolve``) resolves the
 table directly for every cell's assignment and pins the row's own verdict
@@ -94,7 +99,6 @@ import enumerate_release_cells as erc
 import release_choreography as _choreo
 import release_messages
 from nexus.tables.load import Table
-from nexus.tables.resolve import resolve
 
 _FIXTURE_PATH = (
     pathlib.Path(__file__).resolve().parent / "fixtures" / "release_cells.json"
@@ -120,35 +124,11 @@ _CHOREOGRAPHY_TABLE_PATH = _choreo.CHOREOGRAPHY_TABLE_PATH
 #: key at all.
 _NOT_APPLICABLE = "n/a"
 
-#: A placeholder domain value for every declared dimension the cell's own
-#: function-group never examines -- every OTHER function's own
-#: function-prefixed dimensions. ``resolve()`` demands a value for every
-#: declared dimension, and no row outside the cell's own match group ever
-#: reads these, so any in-domain value resolves identically; the first
-#: declared domain member is used deterministically.
-_UNUSED_DIM_PLACEHOLDER_INDEX = 0
 
 
-#: ``Cell.function`` (as written by ``enumerate_release_cells.build_fixture()``)
-#: -> the enumerator's own driver for that function. Every key here is one of
-#: the 12 functions ``build_fixture()`` enumerates
-#: (``erc._all_chains()`` + ``erc._all_orchestrator_results()``); a 13th
-#: function appearing in the fixture with no driver here is a real gap,
-#: caught loudly by ``_drive``'s ``KeyError`` -- never silently skipped.
-_DRIVERS: dict[str, Callable[[erc.Cell], tuple[int, str]]] = {
-    "check_pin_currency": erc.drive_pin_currency,
-    "check_source_ancestry": erc.drive_source_ancestry,
-    "check_client_lag_ledger": erc.drive_client_lag_ledger,
-    "check_wire_contract_ledger": erc.drive_wire_contract_ledger,
-    "check_paired_preconditions": erc.drive_paired_preconditions,
-    "record_deploy_from_gate_report_leg": erc.drive_tracker_outcome,
-    "check_floor_bare": erc.drive_check_floor_bare,
-    "check_floor_paired": erc.drive_check_floor_paired_explicit,
-    "check_floor_auto_paired": erc.drive_check_floor_auto_paired,
-    "main_dispatch": erc.drive_main_dispatch,
-    "check_composite": erc.drive_check_composite,
-    "precond_main_dispatch": erc.drive_precond_main_dispatch,
-}
+#: The per-function drivers live in the enumerator (``erc.DRIVERS``) -- one
+#: map, shared with the text-oracle writer -- never a copy here.
+_DRIVERS = erc.DRIVERS
 
 #: Which of the two gated scripts each cell-producing function belongs to.
 #: ``erc.event_mode_matrix()`` is keyed by (script, mode) -- there is no
@@ -175,42 +155,21 @@ _CORRUPTION_SAMPLE_SIZE = 3
 
 
 def _cell_from_fixture(cell_dict: dict[str, Any]) -> erc.Cell:
-    return erc.Cell(
-        function=cell_dict["function"],
-        inputs=cell_dict["inputs"],
-        exit_code=cell_dict["exit_code"],
-        message_key=cell_dict["message_key"],
-        note=cell_dict.get("note", ""),
-    )
+    return erc.cell_from_dict(cell_dict)
 
 
 def _drive(cell: erc.Cell) -> tuple[int, str]:
-    """Drive the real gated function for one cell, by dispatching to the
-    enumerator's own driver for ``cell.function``. Never reimplements a
-    driver; a function the fixture names with no entry in ``_DRIVERS``
-    fails loudly (``KeyError``), not silently."""
+    """Drive the real gated function for one cell through the enumerator's
+    own driver for ``cell.function`` -- never reimplemented here; a function
+    the fixture names with no driver fails loudly (``KeyError``)."""
     return _DRIVERS[cell.function](cell)
 
 
 def _drive_capturing_text(cell: erc.Cell) -> tuple[tuple[int, str], str]:
-    """``_drive``, also returning the full combined stdout+stderr TEXT the
-    real call produced. Every driver reduces a call to ``(exit_code,
-    message_key)`` via the enumerator's marker-substring classifiers, never
-    the printed prose; this spies on ``enumerate_release_cells._capture``
-    -- the SINGLE choke point every ``drive_*`` function funnels its real
-    call through -- to record the raw text alongside, without
-    reimplementing any driver's own sensor-patching."""
-    original_capture = erc._capture
-    chunks: list[str] = []
-
-    def _spy_capture(fn: Callable[..., int], *args: Any, **kwargs: Any) -> tuple[int, str, str]:
-        rc, out, err = original_capture(fn, *args, **kwargs)
-        chunks.append(out + err)
-        return rc, out, err
-
-    with patch.object(erc, "_capture", side_effect=_spy_capture):
-        verdict = _drive(cell)
-    return verdict, "".join(chunks)
+    """``_drive`` plus the combined printed text (stdout then stderr); the
+    per-stream form is ``erc.drive_cell_streams``, which this wraps."""
+    verdict, out, err = erc.drive_cell_streams(cell)
+    return verdict, out + err
 
 
 def _precond_main_dispatch_wiring_case(inputs: dict[str, str]) -> str:
@@ -239,7 +198,7 @@ def _precond_main_dispatch_wiring_case(inputs: dict[str, str]) -> str:
 
 #: Function -> transform from the fixture's raw ``cell.inputs`` to the
 #: table's own guard-dimension assignment (keyed WITHOUT the function
-#: prefix; ``_assignment_for`` below applies it). Only functions whose
+#: prefix; ``_guard_for`` below applies it). Only functions whose
 #: table dimensions are NOT a direct 1:1 rename of the fixture's own
 #: input keys need an entry here -- seven of the twelve table groups
 #: reuse the fixture's input key names verbatim (e.g.
@@ -252,35 +211,20 @@ _SYNTHETIC_GUARD_TRANSFORMS: dict[str, Callable[[dict[str, str]], dict[str, str]
 }
 
 
-def _assignment_for(table: Table, cell_dict: dict[str, Any]) -> dict[str, str]:
-    """Build a full ``resolve()`` assignment for ``cell_dict``.
-
-    ``resolve()`` requires a value for EVERY declared table dimension
-    (``nexus.tables.resolve._validate``), not just the ones ``cell_dict``'s
-    own function-group guards on -- so this binds, in order: the ``function``
-    match key; ``cell_dict["inputs"]`` transcribed onto the table's
-    function-prefixed dimension names (``"<function>.<key>"``, dropping any
-    ``"n/a"`` sentinel -- see ``_NOT_APPLICABLE`` above -- and routed through
-    ``_SYNTHETIC_GUARD_TRANSFORMS`` for the one function whose table
-    dimension is not a direct rename of its fixture input keys); and, for
-    every OTHER declared dimension (every other function's own), a
-    deterministic placeholder from that dimension's own domain -- harmless
-    by construction, since no row outside the cell's own match group ever
-    examines them (RDR-201 P2.3 design, see the table's file header).
-    Mirrors ``release_choreography.resolve_choreography_row`` for the
-    non-test call sites."""
+def _guard_for(cell_dict: dict[str, Any]) -> dict[str, str]:
+    """The guard a real call site would pass to
+    ``release_choreography.resolve_choreography_row`` for ``cell_dict``:
+    the fixture's inputs, routed through ``_SYNTHETIC_GUARD_TRANSFORMS`` for
+    the one function whose table dimension is not a rename of its input
+    keys, with the enumerator's ``"n/a"`` sentinel dropped (see
+    ``_NOT_APPLICABLE``). Nothing else -- the function-prefixing and the
+    fill-every-other-dimension rule are production's, in
+    ``resolve_choreography_row``, and this harness must not carry a second
+    copy of them (the .18 critique found exactly that copy here)."""
     function = cell_dict["function"]
-    assignment: dict[str, str] = {"function": function}
     transform = _SYNTHETIC_GUARD_TRANSFORMS.get(function)
     raw_inputs = transform(cell_dict["inputs"]) if transform else cell_dict["inputs"]
-    for key, value in raw_inputs.items():
-        if value == _NOT_APPLICABLE:
-            continue
-        assignment[f"{function}.{key}"] = value
-    for name, dim in table.dimensions.items():
-        if name not in assignment:
-            assignment[name] = dim.domain[_UNUSED_DIM_PLACEHOLDER_INDEX]
-    return assignment
+    return {key: value for key, value in raw_inputs.items() if value != _NOT_APPLICABLE}
 
 
 def _assert_real_function_matches_fixture(cell_dict: dict[str, Any]) -> None:
@@ -381,7 +325,7 @@ def test_real_function_matches_fixture(cell_dict: dict[str, Any]) -> None:
 #: ledger messages). Anything else of the shape ``[name]`` in a catalog
 #: entry is a hole a call site must fill.
 _LITERAL_BRACKET_TOKENS = frozenset({"[additive]"})
-_BRACKET_TOKEN = re.compile(r"\[[a-z_.]+\]")
+_BRACKET_TOKEN = re.compile(r"\[[A-Za-z0-9_.]+\]")
 
 
 def _catalog_placeholders() -> frozenset[str]:
@@ -394,8 +338,8 @@ def _catalog_placeholders() -> frozenset[str]:
 _CATALOG_PLACEHOLDERS = _catalog_placeholders()
 
 
-def _unfilled_placeholders(text: str) -> list[str]:
-    return sorted(p for p in _CATALOG_PLACEHOLDERS if p in text)
+def _unfilled_placeholders(text: str, placeholders: frozenset[str] = _CATALOG_PLACEHOLDERS) -> list[str]:
+    return sorted(p for p in placeholders if p in text)
 
 
 def test_catalog_declares_placeholders() -> None:
@@ -428,7 +372,48 @@ def test_placeholder_check_catches_an_unfilled_placeholder() -> None:
         _, text = _drive_capturing_text(_cell_from_fixture(cell_dict))
         planted_placeholders = _catalog_placeholders()
     assert "[probe_hole]" in text, (row_id, text)
-    assert "[probe_hole]" in sorted(p for p in planted_placeholders if p in text)
+    assert "[probe_hole]" in _unfilled_placeholders(text, planted_placeholders), "the predicate itself must report the planted hole"
+
+
+_TEXT_FIXTURE_PATH = _FIXTURE_PATH.with_name("release_cell_texts.json")
+_TEXT_FIXTURE: dict[str, dict[str, str]] = json.loads(_TEXT_FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+def test_text_oracle_covers_every_cell_and_is_not_empty() -> None:
+    assert set(_TEXT_FIXTURE) == set(_FIXTURE_CELL_IDS), (
+        "release_cell_texts.json is out of step with release_cells.json -- regenerate "
+        "both together (enumerate_release_cells.py --out ... --texts-out ...)"
+    )
+    non_empty = sum(1 for t in _TEXT_FIXTURE.values() if t["out"] or t["err"])
+    assert non_empty >= 80, non_empty
+    literals = [lit for lit, _tok in erc.text_normalizers()]
+    for cell_id, streams in _TEXT_FIXTURE.items():
+        for literal in literals:
+            assert literal not in streams["out"] + streams["err"], (cell_id, literal, "un-normalized run-dependent value in the oracle")
+    assert any("<FLOOR>" in t["out"] + t["err"] for t in _TEXT_FIXTURE.values())
+
+
+@pytest.mark.parametrize("cell_dict", _FIXTURE_CELLS, ids=_FIXTURE_CELL_IDS)
+def test_real_function_text_matches_frozen_oracle(cell_dict: dict[str, Any]) -> None:
+    """Role 2, the words -- see the module docstring. stdout and stderr
+    compared separately. A red here is either a regression in the catalog
+    or a call site's substitutions (fix the code), or a deliberate message
+    change (regenerate the oracle in the same commit and review its diff);
+    never a reason to loosen this comparison."""
+    verdict, out, err = erc.drive_cell_streams(_cell_from_fixture(cell_dict))
+    assert verdict == (cell_dict["exit_code"], cell_dict["message_key"]), (cell_dict["cell_id"], verdict)
+    observed = {"out": erc.normalize_text(out), "err": erc.normalize_text(err)}
+    assert observed == _TEXT_FIXTURE[cell_dict["cell_id"]], cell_dict["cell_id"]
+
+
+def test_choreography_table_declares_no_event_or_mode_dimension() -> None:
+    """Ruling nexus-j9z30.26 (Sam, 2026-09-02): the choreography is
+    event-invariant; the table-wide event/mode columns P2.3 declared were
+    removed at P2.6. The checker's unused-dimension finding is a
+    non-blocking advisory, so this is the mechanical half of the table
+    header's "do not re-add" paragraph."""
+    declared = set(_choreo.choreography_table().dimensions)
+    assert not declared & {"event", "mode"}, sorted(declared & {"event", "mode"})
 
 
 # ---------------------------------------------------------------------------
@@ -437,23 +422,23 @@ def test_placeholder_check_catches_an_unfilled_placeholder() -> None:
 
 @pytest.mark.parametrize("cell_dict", _FIXTURE_CELLS, ids=_FIXTURE_CELL_IDS)
 def test_table_row_matches_fixture_by_direct_resolve(cell_dict: dict[str, Any]) -> None:
-    """Resolve the table directly for ``cell_dict``'s own assignment and
-    pin the row it hits -- id, exit code, message key -- to the fixture.
-    See the module docstring's Role 3: this is the only place a DELEGATING
-    row's verdict is checked at all, since no real function ever emits
-    one. A refusal on a cell the fixture enumerated as reachable is a
-    table-authoring defect and fails loudly with the assignment named."""
-    table = _choreo.choreography_table()
-    assignment = _assignment_for(table, cell_dict)
-    resolution = resolve(table, assignment)
-    assert resolution.refusal is None, (
-        f"{cell_dict['cell_id']}: table refused a cell the fixture enumerated "
-        f"as reachable -- {resolution.refusal} {dict(resolution.detail)} "
-        f"(assignment={assignment})"
-    )
-    outcome = resolution.row.outcome
-    assert isinstance(outcome, dict), (cell_dict["cell_id"], resolution.row.id, outcome)
-    assert resolution.row.id == cell_dict["cell_id"]
+    """Resolve the table through PRODUCTION's own resolver
+    (``release_choreography.resolve_choreography_row``, fed the guard a real
+    call site would pass) and pin the row it hits -- id, exit code, message
+    key -- to the fixture. See the module docstring's Role 3: the only
+    place a DELEGATING row's declared verdict is checked (no real function
+    reads it), and the only check on the seven ``record_deploy`` cells whose
+    driver classifier is a label lookup. A refusal on a cell the fixture
+    enumerated as reachable is a table-authoring defect and fails loudly."""
+    function = cell_dict["function"]
+    guard = _guard_for(cell_dict)
+    try:
+        row = _choreo.resolve_choreography_row(function, guard)
+    except _choreo.TableDefect as exc:
+        raise AssertionError(f"{cell_dict['cell_id']}: {exc}") from exc
+    outcome = row.outcome
+    assert isinstance(outcome, dict), (cell_dict["cell_id"], row.id, outcome)
+    assert row.id == cell_dict["cell_id"]
     assert (int(outcome["exit_code"]), outcome["message_key"]) == (
         cell_dict["exit_code"], cell_dict["message_key"],
     )
@@ -541,8 +526,8 @@ def test_message_catalog_entries_are_nonempty_strings() -> None:
 #: nexus/code-review-nexus-j9z30-13-2026-09-01 [24062]): every one of
 #: these seven branches prints a FIXED constant string (a "remedy" or
 #: "tracker not recorded" paragraph) with no run-specific interpolation
-#: inside the constant itself -- unlike ``_probe_unverifiable_message()``
-#: / ``_print_paired_ack()``, which BUILD their text per call from
+#: inside the constant itself -- unlike the per-call message builders the
+#: old path had (deleted at P2.6; their text lives only in the catalog now), which BUILT their text per call from
 #: dynamic arguments and so have no fixed constant to check against.
 #: Deliberately imports the constants rather than re-typing them: a
 #: hand-transcribed copy is exactly how this drifted the first time

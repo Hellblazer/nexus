@@ -732,53 +732,6 @@ def _classify_probe_failure(exc: ManagedServiceError) -> tuple[bool, str]:
     return (deployed is not None, deployed or "")
 
 
-def _probe_unverifiable_message(base: str, floor: str, detail: str) -> str:
-    """Shared stderr text for a probe result paired mode refuses to accept
-    as "deploy pending" -- an endpoint error or a malformed/unparseable
-    response, as distinct from a genuine parseable below-floor version
-    (see :func:`_classify_probe_failure`).
-    """
-    return (
-        f"ENGINE FLOOR CHECK UNVERIFIABLE (required v{floor}): managed "
-        f"service at {base} {detail}. Paired mode only ever accepts a "
-        "GENUINE, parseable below-floor version report as 'deploy pending' "
-        "-- an endpoint error or a malformed/unparseable response is never "
-        "folded into that acceptance, paired or not. Treat as a failed "
-        "gate, not a pass."
-    )
-
-
-def _print_paired_ack(deployed: str, floor: str, auto: bool = False) -> None:
-    """Explicit acknowledgment for an accepted paired-mode cloud-behind result.
-
-    Names both versions (never a bare "OK") and states the POST-TAG VERIFY
-    obligation up front -- a paired acceptance is a deferred check, not a
-    closed one, and the caller must re-run without ``--paired-deploy`` once
-    the deploy lands to confirm the pairing actually converged.
-
-    ``auto=True`` (nexus-gc9ir): the pairing was DERIVED from
-    ``REQUIRED_ENGINE_VERSION`` by ``--paired-deploy-auto``, not named by a
-    human via ``--paired-deploy`` -- the acknowledgment says so explicitly so
-    a reader of CI logs can tell the two modes apart.
-    """
-    origin = (
-        "AUTO-derived from REQUIRED_ENGINE_VERSION (--paired-deploy-auto, "
-        "nexus-gc9ir) -- no explicit --paired-deploy given."
-        if auto
-        else "named via --paired-deploy."
-    )
-    print(
-        f"PAIRED MODE: cloud reports release_version {deployed!r}, behind floor "
-        f"v{floor}. Expected pre-deploy under the paired-release choreography -- "
-        "the deploy fires at client-tag push (AGENTS.md § Cutting a "
-        f"release, step 0), not before this tag exists. Pairing {origin}\n"
-        "POST-TAG VERIFY REQUIRED: re-run this script WITHOUT --paired-deploy "
-        "once the deploy lands, to confirm the cloud engine actually converged "
-        "-- escalate loudly (never silently re-accept) if it is still behind at "
-        "that point."
-    )
-
-
 def _run_paired_precondition_battery(
     tag: str,
     newest: object,
@@ -819,8 +772,9 @@ def _paired_below_floor_path(
     Runs :func:`_run_paired_precondition_battery` -- the IDENTICAL local
     battery :func:`check_floor` runs for an explicit ``--paired-deploy`` --
     on the tag AUTO-derived from ``REQUIRED_ENGINE_VERSION``. On success,
-    prints the paired acknowledgment with ``auto=True`` and returns 0; any
-    precondition miss returns its own named-reason code unchanged.
+    emits the auto-paired acknowledgment row (``check_floor_auto_paired::
+    auto_*_ack``) and returns 0; any precondition miss returns its own
+    named-reason code unchanged.
 
     ``probe`` (RDR-201 P2.4): which ``check_floor_auto_paired.probe`` value
     the caller reduced its probe result to (``"ms_error_below_floor"`` or
@@ -1092,12 +1046,11 @@ def _tag_commit(tag: str, repo_root: pathlib.Path | None = None) -> str:
     return out.stdout.strip()
 
 
-#: The OLD code's single ``except deploy_tracker.DeployTrackerError`` does not
-#: discriminate which of the 6 subclasses fired -- this classification IS
-#: new information (a reduction of the caught exception's own TYPE to a
-#: finite outcome), not a duplicate of the sensor. A subclass this dict does
-#: not know about (defensive only -- the 6 below are exhaustive today) falls
-#: through to the old, undifferentiated print rather than misclassifying.
+#: Reduces the caught DeployTrackerError's TYPE to one of the table's six
+#: tracker outcomes. The six entries are exhaustive over
+#: ``DeployTrackerError.__subclasses__()`` today and a test pins that; a
+#: seventh subclass with no entry is a TableDefect (exit 2 via
+#: release_choreography.run_gate), never folded into another row's verdict.
 _TRACKER_ERROR_OUTCOMES: dict[type[Exception], str] = {
     deploy_tracker.GateReportDirectoryError: "directory_error",
     deploy_tracker.GateReportSchemaError: "schema_error",
@@ -1128,11 +1081,7 @@ def record_deploy_from_gate_report_leg(
     except deploy_tracker.DeployTrackerError as exc:
         outcome = _TRACKER_ERROR_OUTCOMES.get(type(exc))
         if outcome is None:
-            # The table's six tracker rows partition DeployTrackerError's
-            # subclasses exactly; a seventh subclass with no row is a
-            # table-authoring defect (RDR-201), not a runtime condition to
-            # fold into some other row's verdict.
-            raise RuntimeError(
+            raise _choreo.TableDefect(
                 f"record_deploy_from_gate_report_leg: {type(exc).__name__} has no "
                 "outcome in _TRACKER_ERROR_OUTCOMES / no row in "
                 "docs/tables/release-choreography.toml -- add both."
@@ -1326,4 +1275,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_choreo.run_gate(main))

@@ -1265,7 +1265,7 @@
       "mode": "bare",
       "event": "post-deploy-verify",
       "reachable": true,
-      "citation": "check_floor's _print_paired_ack: 'POST-TAG VERIFY REQUIRED: re-run this script WITHOUT --paired-deploy once the deploy lands'."
+      "citation": "release_messages.py's paired-ack entries: 'POST-TAG VERIFY REQUIRED: re-run this script WITHOUT --paired-deploy once the deploy lands'."
     },
     {
       "script": "check_engine_release_floor",

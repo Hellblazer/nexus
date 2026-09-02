@@ -2059,7 +2059,11 @@ def test_choreography_check_floor_bare_current(capsys: pytest.CaptureFixture[str
         rc = gate.check_floor(url=_TEST_URL, newest=_PIN_CURRENT)
     assert rc == 0
     out = capsys.readouterr().out
-    assert "cloud engine is current" in out
+    assert out == (
+        f"engine pin is current: REQUIRED_ENGINE_VERSION v{_floor_str()} == newest published tag\n"
+        f"cloud engine is current: {_TEST_URL} release_version="
+        f"{_floor_str()} (floor v{_floor_str()})\n"
+    )
 
 
 def test_choreography_check_floor_auto_paired_current_is_byte_for_byte_bare(capsys: pytest.CaptureFixture[str]) -> None:
@@ -2098,18 +2102,36 @@ def test_choreography_record_deploy_classifies_exception_subclass(capsys: pytest
 
 def test_choreography_record_deploy_refuses_an_unmapped_tracker_subclass() -> None:
     """RDR-201 P2.6 (nexus-j9z30.16): the table's six tracker rows partition
-    DeployTrackerError's subclasses exactly. A subclass with no row must
-    fail loudly naming the fix, never fold into another row's verdict --
-    the generic "TRACKER NOT RECORDED" fallback that used to catch it went
-    with the old path."""
+    DeployTrackerError's subclasses exactly. A subclass with no row is a
+    TableDefect -- exit 2 through release_choreography.run_gate, distinct
+    from BLOCKED (1) and tracker-not-recorded (3) -- never folded into
+    another row's verdict; the generic "TRACKER NOT RECORDED" fallback that
+    used to catch it went with the old path."""
 
     class _Unmapped(gate.deploy_tracker.DeployTrackerError):
         pass
 
     with patch.object(
         gate.deploy_tracker, "record_deploy_from_gate_report", side_effect=_Unmapped("simulated"),
-    ), pytest.raises(RuntimeError, match="_Unmapped has no outcome"):
+    ), pytest.raises(_choreo.TableDefect, match="_Unmapped has no outcome"):
         gate.record_deploy_from_gate_report_leg(_pathlib.Path("/fake/dir"), url=None)
+
+
+def test_tracker_error_outcomes_cover_every_deploy_tracker_subclass() -> None:
+    """The unmapped-subclass branch above is dead today and must stay dead
+    by construction: a seventh DeployTrackerError subclass added to
+    deploy_tracker.py reds HERE, in the unit suite, not as an exit-2
+    refusal from a live release gate."""
+    # Only the subclasses deploy_tracker itself declares: a test-local
+    # subclass (the _Unmapped above) is also a live __subclasses__() entry
+    # until collected, and must not turn this census into an ordering race.
+    declared = {
+        c for c in gate.deploy_tracker.DeployTrackerError.__subclasses__()
+        if c.__module__ == gate.deploy_tracker.__name__
+    }
+    assert declared == set(gate._TRACKER_ERROR_OUTCOMES), (
+        sorted(c.__name__ for c in declared ^ set(gate._TRACKER_ERROR_OUTCOMES))
+    )
 
 
 def test_choreography_main_tracker_opt_out(capsys: pytest.CaptureFixture[str]) -> None:

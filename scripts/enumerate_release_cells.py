@@ -104,7 +104,9 @@ import datetime
 import io
 import itertools
 import json
+import os
 import pathlib
+from collections.abc import Callable
 from typing import Any
 from unittest.mock import patch
 
@@ -886,7 +888,7 @@ def drive_check_floor_paired_explicit(cell: Cell) -> tuple[int, str]:
 #: (probe label -> (expected exit code, message key, a text marker to sanity
 #: check the classification against, so a real drift in the source's printed
 #: messages still fails the driver loudly). "ack_via_exception" and
-#: "ack_via_success" print IDENTICAL text (_print_paired_ack does not
+#: "ack_via_success" print IDENTICAL text (the paired-ack catalog entries do not
 #: distinguish which code path reached it) -- classified from the INPUT
 #: that produced them, not from that shared text, matching
 #: check_pin_currency's at_floor/below_floor collapse above.
@@ -1460,7 +1462,7 @@ _EVENT_CITATIONS: dict[tuple[str, str], str] = {
         "AGENTS.md § Cutting a release step 0: human bare invocation before "
         "the tag is cut.",
     ("check_engine_release_floor", "bare", "post-deploy-verify"):
-        "check_floor's _print_paired_ack: 'POST-TAG VERIFY REQUIRED: re-run "
+        "release_messages.py's paired-ack entries: 'POST-TAG VERIFY REQUIRED: re-run "
         "this script WITHOUT --paired-deploy once the deploy lands'.",
     ("check_engine_release_floor", "--paired-deploy", "pre-tag"):
         "module docstring: the human names the tag BEFORE cutting the "
@@ -1541,6 +1543,105 @@ def _all_orchestrator_results() -> list[EnumerationResult]:
 
 def _all_results() -> list[EnumerationResult]:
     return [enumerate_chain(c) for c in _all_chains()] + _all_orchestrator_results()
+
+
+#: ``Cell.function`` -> the driver that runs the REAL gated function for one
+#: cell of that function. Every key is one of the 12 functions
+#: ``build_fixture`` enumerates; the parity harness dispatches through this
+#: map and a 13th function appearing in the fixture with no driver here
+#: fails loudly (``KeyError``), never silently.
+DRIVERS: dict[str, Callable[[Cell], tuple[int, str]]] = {
+    "check_pin_currency": drive_pin_currency,
+    "check_source_ancestry": drive_source_ancestry,
+    "check_client_lag_ledger": drive_client_lag_ledger,
+    "check_wire_contract_ledger": drive_wire_contract_ledger,
+    "check_paired_preconditions": drive_paired_preconditions,
+    "record_deploy_from_gate_report_leg": drive_tracker_outcome,
+    "check_floor_bare": drive_check_floor_bare,
+    "check_floor_paired": drive_check_floor_paired_explicit,
+    "check_floor_auto_paired": drive_check_floor_auto_paired,
+    "main_dispatch": drive_main_dispatch,
+    "check_composite": drive_check_composite,
+    "precond_main_dispatch": drive_precond_main_dispatch,
+}
+
+
+def cell_from_dict(cell_dict: dict[str, Any]) -> Cell:
+    return Cell(
+        function=cell_dict["function"], inputs=cell_dict["inputs"],
+        exit_code=cell_dict["exit_code"], message_key=cell_dict["message_key"],
+        note=cell_dict.get("note", ""),
+    )
+
+
+def drive_cell_streams(cell: Cell) -> tuple[tuple[int, str], str, str]:
+    """Drive ``cell``'s real gated function and return ``(verdict, stdout,
+    stderr)`` -- the two streams captured SEPARATELY (a stream move is
+    invisible to a concatenated comparison; RDR-201 P2.6 found one). Spies
+    on :func:`_capture`, the single choke point every driver funnels its
+    real call through, so no driver's sensor-patching is reimplemented."""
+    original_capture = _capture
+    outs: list[str] = []
+    errs: list[str] = []
+
+    def _spy(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> tuple[Any, str, str]:
+        rc, out, err = original_capture(fn, *args, **kwargs)
+        outs.append(out)
+        errs.append(err)
+        return rc, out, err
+
+    with patch(f"{__name__}._capture", side_effect=_spy):
+        verdict = DRIVERS[cell.function](cell)
+    return verdict, "".join(outs), "".join(errs)
+
+
+def text_normalizers() -> list[tuple[str, str]]:
+    """The run-dependent substrings a captured message can carry, and the
+    token each is replaced with so the frozen text oracle
+    (``tests/scripts/fixtures/release_cell_texts.json``) survives a floor
+    bump and a relocated checkout: the floor version, the one-above /
+    one-below versions the drivers derive from it, and the wire-contract
+    ledger path. Longest first, so a version that is a substring of
+    another is never clipped."""
+    floor = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
+    above = ".".join(str(p) for p in _a_greater_version(REQUIRED_ENGINE_VERSION))
+    below = ".".join(str(p) for p in _BELOW_FLOOR)
+    pairs = [
+        (str(wire_ledger.DEFAULT_LEDGER_PATH), "<LEDGER_PATH>"),
+        (above, "<FLOOR+1>"), (below, "<FLOOR-1>"), (floor, "<FLOOR>"),
+    ]
+    return sorted(pairs, key=lambda pair: -len(pair[0]))
+
+
+def normalize_text(text: str) -> str:
+    for literal, token in text_normalizers():
+        text = text.replace(literal, token)
+    return text
+
+
+def build_text_fixture(cells: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
+    """``cell_id -> {"out", "err"}``: every cell's real printed text, per
+    stream, normalized. The frozen oracle RDR-201 P2.6's cutover left in
+    place of the deleted old-path comparison: the words the operator reads,
+    pinned. Regenerate ONLY for a deliberate message change, in the same
+    commit, with ``uv run python scripts/enumerate_release_cells.py
+    --texts-out tests/scripts/fixtures/release_cell_texts.json`` -- the
+    diff of the fixture is the review surface for the change."""
+    texts: dict[str, dict[str, str]] = {}
+    with patch.dict(os.environ):
+        # nexus-nx3l5: an operator box sets NX_GATE_REPORT_DIR globally; the
+        # test suite scrubs it (tests/scripts/conftest.py) and so must this.
+        os.environ.pop("NX_GATE_REPORT_DIR", None)
+        for cell_dict in cells:
+            _verdict, out, err = drive_cell_streams(cell_from_dict(cell_dict))
+            texts[cell_dict["cell_id"]] = {"out": normalize_text(out), "err": normalize_text(err)}
+    return texts
+
+
+def write_text_fixture(out: pathlib.Path, cells: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
+    texts = build_text_fixture(cells)
+    out.write_text(json.dumps(texts, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return texts
 
 
 def build_fixture() -> dict[str, Any]:
@@ -1641,8 +1742,16 @@ def write_fixture(out: pathlib.Path = _DEFAULT_OUT) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=pathlib.Path, default=_DEFAULT_OUT)
+    parser.add_argument(
+        "--texts-out", type=pathlib.Path, default=None,
+        help="also (re)write the per-cell stdout/stderr text oracle here -- "
+             "only for a deliberate message change, in the same commit",
+    )
     args = parser.parse_args(argv)
     fixture = write_fixture(args.out)
+    if args.texts_out is not None:
+        texts = write_text_fixture(args.texts_out, fixture["cells"])
+        print(f"enumerate_release_cells: {len(texts)} cell texts written to {args.texts_out}")  # noqa: T201
     header = fixture["header"]
     # CLI summary line -- sanctioned stdout output for a script entrypoint,
     # the same convention scripts/check_engine_release_floor.py's own `main`

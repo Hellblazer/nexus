@@ -45,9 +45,34 @@ from __future__ import annotations
 import functools
 import pathlib
 import sys
+from collections.abc import Callable
 
 from nexus.tables.load import Row, Table, load_table
 from nexus.tables.resolve import resolve as _resolve_table
+
+#: The keys a row's ``emit`` table may carry. ``nexus.tables.load`` validates
+#: only that ``emit`` is a table; a misspelt key (``strem = "stderr"``) would
+#: otherwise be ignored silently and the exit-code default would apply.
+EMIT_KEYS = frozenset({"exit_code", "message_key", "stream"})
+
+
+class TableDefect(RuntimeError):
+    """The table, the catalog, or a call site's guard is wrong -- a defect in
+    the authored decision data, never a runtime condition for a gate to
+    handle. RDR-201 § Failure Modes: the consumer refuses to run, exit 2
+    (:func:`run_gate`) -- distinct from exit 1 (BLOCKED) and exit 3 (the
+    floor script's tracker-not-recorded), so a crash can never be misread
+    as a legitimate refusal."""
+
+
+def run_gate(main: "Callable[[], int]") -> int:
+    """Entry-point wrapper for both gated scripts: a :class:`TableDefect`
+    raised anywhere under ``main`` is printed and exits 2."""
+    try:
+        return main()
+    except TableDefect as exc:
+        print(f"TABLE DEFECT (exit 2): {exc}", file=sys.stderr)
+        return 2
 
 CHOREOGRAPHY_TABLE_PATH = (
     pathlib.Path(__file__).resolve().parent.parent / "docs" / "tables" / "release-choreography.toml"
@@ -69,14 +94,16 @@ def choreography_table() -> Table:
 def resolve_choreography_row(function: str, guard: dict[str, str]) -> Row:
     """Resolve one row of the choreography table for ``function``'s match
     group. ``guard`` names only the dimensions THIS call site has actually
-    reduced a sensor value to; every other declared dimension (including the
-    table-wide, still guard-unreferenced ``event``/``mode``, and every OTHER
-    function's own dimensions) is filled with its domain's first member --
-    harmless by construction, since no row outside ``function``'s own match
-    group ever examines them, and no row within it guards on a dimension
-    this call omits (RDR-201 P2.3's short-circuit-by-omission table
-    construction). Mirrors tests/scripts/test_release_table_parity.py's
-    ``_assignment_for`` for the real, non-test call sites.
+    reduced a sensor value to; every OTHER declared dimension (every other
+    function's own) is filled with its domain's first member -- harmless by
+    construction, since no row outside ``function``'s own match group ever
+    examines them, and no row within it guards on a dimension this call
+    omits (RDR-201 P2.3's short-circuit-by-omission table construction).
+    The ONE place that completion rule lives: the parity harness resolves
+    through this function too, never through a copy of it.
+
+    A refusal (no-match / ambiguous-match / unknown-value) is a
+    :class:`TableDefect`.
     """
     table = choreography_table()
     assignment: dict[str, str] = {"function": function}
@@ -86,7 +113,7 @@ def resolve_choreography_row(function: str, guard: dict[str, str]) -> Row:
         assignment.setdefault(name, dim.domain[0])
     resolution = _resolve_table(table, assignment)
     if resolution.refusal is not None:
-        raise RuntimeError(
+        raise TableDefect(
             f"{function}: docs/tables/release-choreography.toml refused "
             f"assignment {assignment!r} -- {resolution.refusal} "
             f"{dict(resolution.detail)}. This is a table-authoring defect "
@@ -109,6 +136,9 @@ def emit_choreography(
     row = resolve_choreography_row(function, guard)
     outcome = row.outcome
     assert isinstance(outcome, dict), (function, row.id, outcome)
+    unknown_keys = set(outcome) - EMIT_KEYS
+    if unknown_keys:
+        raise TableDefect(f"row {row.id!r}: unknown emit key(s) {sorted(unknown_keys)}; allowed: {sorted(EMIT_KEYS)}")
     exit_code = int(outcome["exit_code"])
     message = _release_messages.get(row.id)
     for key, value in (substitutions or {}).items():
@@ -119,6 +149,7 @@ def emit_choreography(
     # probe over all 89 cells found that one divergence, and the P2.4/P2.5
     # full-text parity could not, because it compared stdout+stderr as one.
     stream = outcome.get("stream", "stderr" if exit_code != 0 else "stdout")
-    assert stream in ("stdout", "stderr"), (function, row.id, stream)
+    if stream not in ("stdout", "stderr"):
+        raise TableDefect(f"row {row.id!r}: emit.stream must be stdout or stderr, got {stream!r}")
     print(message, file=sys.stderr if stream == "stderr" else sys.stdout)
     return exit_code

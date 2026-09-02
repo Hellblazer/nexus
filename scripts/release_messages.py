@@ -209,7 +209,7 @@ RELEASE_MESSAGES: dict[str, str] = {
         "git to confirm no newer tag exists."
     ),
     "check_paired_preconditions::battery_newest_none": (
-        "PAIRED MODE REJECTED: newest published engine tag is vnone, not "
+        "PAIRED MODE REJECTED: newest published engine tag is v[newest], not "
         "v[tag] -- a newer engine tag exists than the one this release "
         "pairs with; unaccounted engine work. Keep the pin-currency red "
         "until it is pinned or explained."
