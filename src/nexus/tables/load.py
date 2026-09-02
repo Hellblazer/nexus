@@ -30,6 +30,16 @@ different) keys than its siblings is refused at load
 row from silently overlapping a narrower group.
 
 stdlib only.
+
+``unknown-literal`` is raised ONLY at load time (:class:`UnknownLiteralError`)
+— it is never a :func:`nexus.tables.check.check_table` finding. By the time
+a :class:`Table` exists every match/guard literal has already been proven
+to lie within its declared domain, so there is nothing left for
+``check_table`` to detect. This is a deliberate reading of RDR-201's
+Technical Design text, which lists ``unknown-literal`` among the five
+finding codes; the vocabulary is shared for documentation purposes, but the
+code path that can actually raise it is this module's loader, not the
+checker.
 """
 
 from __future__ import annotations
@@ -37,6 +47,7 @@ from __future__ import annotations
 import importlib.resources
 import itertools
 import tomllib
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -50,6 +61,50 @@ OutcomeKind = Literal["to", "emit", "refuse"]
 
 _VALID_KINDS: tuple[TableKind, ...] = ("state-machine", "decision-table")
 _OUTCOME_FIELDS: tuple[OutcomeKind, ...] = ("to", "emit", "refuse")
+
+
+class FrozenMapping(Mapping):
+    """An immutable, hashable string-keyed mapping.
+
+    :class:`Row`'s ``match``/``guard`` fields (and, in
+    :mod:`nexus.tables.check`, ``Group.match`` / ``Finding.group``) are
+    frozen into this rather than a plain ``dict`` so those frozen
+    dataclasses are genuinely hashable — RDR-201 P1.2's ``resolve()`` wants
+    to key lookups on a row's match/guard assignment — while staying
+    drop-in comparable to a plain dict literal everywhere a caller or test
+    already writes one: ``FrozenMapping({"event": "accept"}) == {"event":
+    "accept"}`` is ``True``.
+    """
+
+    __slots__ = ("_pairs",)
+
+    def __init__(self, data: Mapping[str, object]) -> None:
+        self._pairs: tuple[tuple[str, object], ...] = tuple(sorted(data.items()))
+
+    def __getitem__(self, key: str) -> object:
+        for k, v in self._pairs:
+            if k == key:
+                return v
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return (k for k, _ in self._pairs)
+
+    def __len__(self) -> int:
+        return len(self._pairs)
+
+    def __hash__(self) -> int:
+        return hash(self._pairs)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, FrozenMapping):
+            return self._pairs == other._pairs
+        if isinstance(other, dict):
+            return dict(self._pairs) == other
+        return NotImplemented
+
+    def __repr__(self) -> str:
+        return f"FrozenMapping({dict(self._pairs)!r})"
 
 
 class TableLoadError(Exception):
@@ -95,14 +150,34 @@ class Dimension:
 
 @dataclass(frozen=True)
 class Row:
-    """One row of a table, fully resolved (list-valued match keys expanded)."""
+    """One row of a table, fully resolved (list-valued match keys expanded).
+
+    ``match``/``guard`` are coerced to :class:`FrozenMapping` in
+    ``__post_init__`` regardless of what is passed in (a plain ``dict`` from
+    the loader, or one handed to the constructor directly, e.g. in a test),
+    so every ``Row`` is hashable by construction, not by caller discipline.
+    ``__hash__`` deliberately excludes ``outcome`` — the one field that can
+    still be a plain (unhashable) ``dict`` for a ``to``/``emit`` row — since
+    hash/eq consistency only requires the hash to be a function of a subset
+    of the fields ``__eq__`` compares, and row ids are unique per table
+    (enforced at load time), so two unequal rows never collide on it.
+    """
 
     id: str
-    match: dict[str, str]
-    guard: dict[str, tuple[str, ...]]
+    match: FrozenMapping
+    guard: FrozenMapping
     outcome_kind: OutcomeKind
     outcome: dict[str, str] | str
     escape: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.match, FrozenMapping):
+            object.__setattr__(self, "match", FrozenMapping(self.match))
+        if not isinstance(self.guard, FrozenMapping):
+            object.__setattr__(self, "guard", FrozenMapping(self.guard))
+
+    def __hash__(self) -> int:
+        return hash((self.id, self.match, self.guard, self.outcome_kind, self.escape))
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,14 @@
+# A trivial, valid table shipped INSIDE an importable package
+# (tests/fixtures/tables/_pkg_fixture/), used only to exercise
+# load_packaged_table's importlib.resources.files/joinpath/read_bytes path.
+[table]
+id = "packaged-sample"
+kind = "state-machine"
+
+[dimensions.event]
+domain = ["create"]
+
+[[row]]
+id = "create"
+match = { event = "create" }
+to = { state = "draft" }

@@ -1,0 +1,54 @@
+# CRITICAL 2 (nexus-akmum) repro fixture, both directions:
+#
+# - "overlap-case" group: a non-bare escape row's guard (status=draft)
+#   DUPLICATES the ordinary row's guard (status=draft) exactly. A non-bare
+#   escape is a narrowed rescue, not a catch-all -- it must be held to the
+#   same non-overlap standard as an ordinary row, so two rows both
+#   unconditionally accepting status=draft must be flagged as OVERLAP.
+#   (Kept as an exact duplicate rather than a strict superset/subset
+#   relationship deliberately -- a strict superset/subset pairing is the
+#   codebase's existing, intentional "broad rule + narrower override"
+#   layered-precedence pattern, e.g. release_decision's at-or-above-floor,
+#   which stays a non-finding; this fixture isolates the actually-fixed
+#   defect: two rows making the IDENTICAL, unconditional claim.)
+# - "clean-case" group: a non-bare escape row (guard={status=[accepted,
+#   closed]}) is DISJOINT from the ordinary row's guard (status=draft) and
+#   together they close the full 3-value domain. This must produce NO
+#   finding at all -- not an overlap (disjoint), and not closed-by-escape
+#   (the escape isn't bare) -- proving the overlap fix does not over-flag
+#   a legitimate non-bare-escape rescue.
+[table]
+id = "escape-overlap-fixture"
+kind = "state-machine"
+
+[dimensions.event]
+domain = ["overlap-case", "clean-case"]
+
+[dimensions.status]
+domain = ["draft", "accepted", "closed"]
+
+[[row]]
+id = "overlap-ordinary"
+match = { event = "overlap-case" }
+guard = { status = "draft" }
+to = { status = "accepted" }
+
+[[row]]
+id = "overlap-escape"
+match = { event = "overlap-case" }
+guard = { status = "draft" }
+escape = true
+refuse = "illegal-transition"
+
+[[row]]
+id = "clean-ordinary"
+match = { event = "clean-case" }
+guard = { status = "draft" }
+to = { status = "accepted" }
+
+[[row]]
+id = "clean-escape"
+match = { event = "clean-case" }
+guard = { status = ["accepted", "closed"] }
+escape = true
+refuse = "illegal-transition"

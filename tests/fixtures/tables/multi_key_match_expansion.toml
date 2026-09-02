@@ -1,0 +1,24 @@
+# Pins the Cartesian-product semantics when MORE THAN ONE match key is
+# list-valued on the same row: r1's match = { status = ["draft",
+# "accepted"], event = ["accept", "supersede"] } expands into the full
+# cross product (4 rows), each row id suffixed "#<event-value>,<status-value>"
+# in expand-key sorted order (event, status -- alphabetical). No RDR-201
+# table exercises this path today; this fixture pins the choice so it does
+# not silently change later. kind=state-machine: each expanded row lands
+# in its own singleton, zero-guard-dimension group (every match key
+# varies), which is legitimate and silent for a state machine -- this
+# fixture is only pinning expansion shape, not exercising coverage.
+[table]
+id = "multi-key-match-expansion"
+kind = "state-machine"
+
+[dimensions.status]
+domain = ["draft", "accepted"]
+
+[dimensions.event]
+domain = ["accept", "supersede"]
+
+[[row]]
+id = "r1"
+match = { status = ["draft", "accepted"], event = ["accept", "supersede"] }
+to = { verdict = "ok" }

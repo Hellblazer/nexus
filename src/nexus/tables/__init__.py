@@ -30,6 +30,7 @@ from nexus.tables.check import (
 from nexus.tables.load import (
     Dimension,
     DuplicateRowIdError,
+    FrozenMapping,
     MatchKeysMismatchError,
     MultipleEscapesInGroupError,
     MultipleOutcomesError,
@@ -47,6 +48,7 @@ __all__ = [
     "COVERAGE_GAP",
     "Dimension",
     "DuplicateRowIdError",
+    "FrozenMapping",
     "Finding",
     "Group",
     "MatchKeysMismatchError",

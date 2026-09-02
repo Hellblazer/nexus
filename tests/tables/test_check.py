@@ -33,6 +33,7 @@ from nexus.tables.check import (
 )
 from nexus.tables.load import (
     DuplicateRowIdError,
+    FrozenMapping,
     MatchKeysMismatchError,
     MultipleEscapesInGroupError,
     MultipleOutcomesError,
@@ -40,6 +41,7 @@ from nexus.tables.load import (
     Table,
     TableLoadError,
     UnknownLiteralError,
+    load_packaged_table,
     load_table,
 )
 
@@ -319,10 +321,140 @@ def test_exit_code_one_when_blocking_finding_present():
     assert exit_code(check_table(table)) == 1
 
 
-def test_table_is_frozen_dataclass_and_row_ids_are_hashable():
-    """Table/Row are immutable value objects -- resolve.py (RDR-201 P1.2)
-    depends on being able to dataclasses.replace() and hash rows freely."""
+def test_table_is_frozen_dataclass():
+    """Table is an immutable value object -- resolve.py (RDR-201 P1.2)
+    depends on being able to dataclasses.replace() it."""
     table = load_table(FIXTURES / "rdr_lifecycle_clean.toml")
     assert isinstance(table, Table)
     with pytest.raises(dataclasses.FrozenInstanceError):
         table.id = "mutated"  # type: ignore[misc]
+
+
+def test_row_and_finding_are_actually_hashable():
+    """RDR-201 P1.2's resolve() wants to hash rows freely -- this must call
+    hash(), not merely assert FrozenInstanceError (review finding: an
+    earlier version of this test claimed hashability in its docstring
+    without ever calling hash(), and Row.match/guard/Finding.group were
+    plain dicts at the time, so the claim was false)."""
+    table = load_table(FIXTURES / "rdr_lifecycle_clean.toml")
+    row = next(r for r in table.rows if r.id == "create")
+    assert hash(row) == hash(row)  # does not raise
+    assert len({row, row}) == 1  # usable as a set member / dict key
+
+    # A Row constructed directly (not via the loader) is hashable too --
+    # __post_init__ coerces match/guard regardless of what the caller passes.
+    direct = Row(
+        id="direct",
+        match={"event": "create"},
+        guard={},
+        outcome_kind="to",
+        outcome={"state": "draft"},
+        escape=False,
+    )
+    assert isinstance(direct.match, FrozenMapping)
+    assert hash(direct) == hash(direct)
+    assert direct.match == {"event": "create"}  # still dict-comparable
+
+    findings = check_table(table)
+    assert findings, "expected at least one advisory finding to hash"
+    for finding in findings:
+        assert hash(finding) == hash(finding)  # does not raise
+        assert isinstance(finding.group, FrozenMapping)
+
+
+# --------------------------------------------------------------------------
+# CRITICAL 1 (nexus-akmum): overlap must be checked even when a group has
+# zero guard dimensions -- the empty product still has exactly one
+# assignment, and two rows accepting it is a real overlap.
+
+
+def test_overlap_detected_when_group_has_no_guard_dimensions():
+    table = load_table(FIXTURES / "overlap_no_guard.toml")
+    findings = check_table(table)
+    overlap_findings = [f for f in findings if f.code == OVERLAP]
+    assert len(overlap_findings) == 1
+    overlap = overlap_findings[0]
+    assert {overlap.detail["row_a"], overlap.detail["row_b"]} == {"accept-a", "accept-b"}
+    assert overlap.detail["intersection_count"] == 1  # the single empty-tuple assignment
+    assert exit_code(findings) == 1
+
+
+# --------------------------------------------------------------------------
+# CRITICAL 2 (nexus-akmum): a non-bare escape row (one with a guard) must
+# participate in overlap detection like any ordinary row; only a BARE
+# escape (no guard at all) is exempt.
+
+
+def test_non_bare_escape_overlapping_ordinary_row_is_flagged():
+    table = load_table(FIXTURES / "escape_overlap.toml")
+    findings = check_table(table)
+
+    overlap_group_findings = [f for f in findings if f.group == {"event": "overlap-case"}]
+    overlaps = [f for f in overlap_group_findings if f.code == OVERLAP]
+    assert len(overlaps) == 1
+    overlap = overlaps[0]
+    assert {overlap.detail["row_a"], overlap.detail["row_b"]} == {"overlap-ordinary", "overlap-escape"}
+    assert overlap.detail["intersection_count"] == 1  # status=draft only
+    # A non-bare escape that overlaps is not also credited with closing
+    # coverage cleanly.
+    assert CLOSED_BY_ESCAPE not in {f.code for f in overlap_group_findings}
+
+
+def test_non_bare_escape_disjoint_from_ordinary_row_is_clean():
+    """The other direction: a non-bare escape whose guard is DISJOINT from
+    the ordinary row's guard, and which together close the full domain,
+    produces NO finding at all -- proving the overlap fix does not
+    over-flag a legitimate non-bare-escape rescue, and that closed-by-escape
+    correctly stays reserved for a BARE escape row."""
+    table = load_table(FIXTURES / "escape_overlap.toml")
+    findings = check_table(table)
+    clean_group_findings = [f for f in findings if f.group == {"event": "clean-case"}]
+    assert clean_group_findings == []
+
+
+# --------------------------------------------------------------------------
+# load_packaged_table (review IMPORTANT (a)): happy path + missing-resource
+# error path, using a small importable fixture package.
+
+
+def test_load_packaged_table_happy_path(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.syspath_prepend(str(FIXTURES))
+    table = load_packaged_table("sample_table.toml", package="_pkg_fixture")
+    assert table.id == "packaged-sample"
+    assert table.kind == "state-machine"
+    assert len(table.rows) == 1
+    assert table.rows[0].id == "create"
+    assert check_table(table) == []
+
+
+def test_load_packaged_table_missing_resource_raises(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.syspath_prepend(str(FIXTURES))
+    with pytest.raises(FileNotFoundError):
+        load_packaged_table("does-not-exist.toml", package="_pkg_fixture")
+
+
+# --------------------------------------------------------------------------
+# Multi-key match expansion (review Suggestion): pin the Cartesian-product
+# semantics and the comma-joined suffix format when more than one match key
+# is list-valued on a single row.
+
+
+def test_multi_key_match_expansion_is_cartesian_product():
+    table = load_table(FIXTURES / "multi_key_match_expansion.toml")
+    assert len(table.rows) == 4
+    ids = {r.id for r in table.rows}
+    assert ids == {
+        "r1#accept,draft",
+        "r1#accept,accepted",
+        "r1#supersede,draft",
+        "r1#supersede,accepted",
+    }
+    matches = {(r.match["event"], r.match["status"]) for r in table.rows}
+    assert matches == {
+        ("accept", "draft"),
+        ("accept", "accepted"),
+        ("supersede", "draft"),
+        ("supersede", "accepted"),
+    }
+    findings = check_table(table)
+    assert blocking(findings) == []

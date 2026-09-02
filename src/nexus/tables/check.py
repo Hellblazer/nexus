@@ -11,6 +11,12 @@ accepting one assignment in common — only the schema it operates on has
 moved from the prototype's ``outcome``/``guard_all`` to the production
 ``match``/``guard``.
 
+RDR-201's Technical Design lists ``unknown-literal`` as one of five typed
+finding codes. Recorded decision (not to be re-litigated at each read): it
+is raised at LOAD, never emitted by ``check_table`` here — see
+:mod:`nexus.tables.load`'s module docstring and the ``UNKNOWN_LITERAL``
+comment below.
+
 stdlib only.
 """
 
@@ -21,7 +27,7 @@ from dataclasses import dataclass
 
 import structlog
 
-from nexus.tables.load import Dimension, Row, Table
+from nexus.tables.load import Dimension, FrozenMapping, Row, Table
 
 logger = structlog.get_logger(__name__)
 
@@ -55,18 +61,37 @@ class ProductTooLargeError(Exception):
 
 @dataclass(frozen=True)
 class Finding:
+    """``group`` is coerced to :class:`FrozenMapping` in ``__post_init__``
+    (same discipline as :class:`nexus.tables.load.Row`), so ``group`` is
+    always hashable. ``detail`` stays a plain, heterogeneous ``dict`` (it
+    can hold nested lists, e.g. ``missing_sample``) and is deliberately
+    excluded from ``__hash__`` — hash/eq consistency only requires the
+    hash to be a function of a subset of the fields ``__eq__`` compares.
+    """
+
     code: str
-    group: dict[str, str]
+    group: FrozenMapping
     detail: dict
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.group, FrozenMapping):
+            object.__setattr__(self, "group", FrozenMapping(self.group))
+
+    def __hash__(self) -> int:
+        return hash((self.code, self.group))
+
     def to_json(self) -> dict:
-        return {"code": self.code, "group": self.group, **self.detail}
+        return {"code": self.code, "group": dict(self.group), **self.detail}
 
 
 @dataclass(frozen=True)
 class Group:
-    match: dict[str, str]
+    match: FrozenMapping
     rows: tuple[Row, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.match, FrozenMapping):
+            object.__setattr__(self, "match", FrozenMapping(self.match))
 
 
 def groups_of(table: Table) -> list[Group]:
@@ -80,7 +105,7 @@ def groups_of(table: Table) -> list[Group]:
 def dimensions_of(group: Group) -> list[str]:
     dims: set[str] = set()
     for row in group.rows:
-        dims |= row.guard.keys()
+        dims |= set(row.guard.keys())
     return sorted(dims)
 
 
@@ -144,6 +169,16 @@ def _check_group(table: Table, group: Group) -> list[Finding]:
     dims = dimensions_of(group)
 
     if not dims:
+        # A zero-guard-dimension group still has exactly one assignment --
+        # the empty tuple. Overlap must be checked over it regardless of
+        # table kind: two non-escape (or non-bare-escape) rows sharing a
+        # bare match both accept that single assignment, which is a real
+        # overlap (CRITICAL 1 / nexus-akmum), not something the
+        # no-participating-dimension advisory below can substitute for --
+        # that advisory is a COVERAGE statement (decision tables only), it
+        # says nothing about two rows conflicting on the one assignment
+        # that exists.
+        findings.extend(_check_overlap(group, dims, table.dimensions))
         if table.kind == "decision-table":
             findings.append(
                 Finding(
@@ -159,7 +194,7 @@ def _check_group(table: Table, group: Group) -> list[Finding]:
                     },
                 )
             )
-        # state-machine: zero-dim group is legitimate and silent.
+        # state-machine: zero-dim group is legitimate and silent ON COVERAGE.
         return findings
 
     reasons = {d: dimension_reason(table, d) for d in dims}
@@ -189,17 +224,41 @@ def _check_group(table: Table, group: Group) -> list[Finding]:
     return findings
 
 
+def _overlap_participants(group: Group) -> list[Row]:
+    """Rows that must be mutually non-overlapping (CRITICAL 2 / nexus-akmum).
+
+    Every ordinary row participates. An escape row participates too UNLESS
+    it is BARE (``escape = true`` with no guard atoms at all) -- a bare
+    escape is the group's designated catch-all for whatever the ordinary
+    rows don't cover, and it is EXPECTED to accept assignments other rows
+    also accept (that's the point of a catch-all; ``closed-by-escape``
+    already reports when one fires). A non-bare escape row is a NARROWED
+    rescue -- it makes the same coverage/overlap claim an ordinary row
+    would over the assignments its own guard names, so it must be held to
+    the same non-overlap standard. At most one escape row exists per group
+    (load.py's ``_check_escape_multiplicity``), so this is never an
+    escape-vs-escape question.
+    """
+    return [r for r in group.rows if not (r.escape and not r.guard)]
+
+
 def _check_overlap(group: Group, dims: list[str], dimensions: dict[str, Dimension]) -> list[Finding]:
     findings: list[Finding] = []
-    ordinary = [r for r in group.rows if not r.escape]
-    accepted = {r.id: accepted_assignments(r, dims, dimensions) for r in ordinary}
+    participants = _overlap_participants(group)
+    accepted = {r.id: accepted_assignments(r, dims, dimensions) for r in participants}
     for a, b in itertools.combinations(sorted(accepted), 2):
         left, right = accepted[a], accepted[b]
         inter = left & right
         if not inter:
             continue
-        if left <= right or right <= left:
-            continue  # subsumption is a different (non-overlap) advisory; out of scope here
+        if left != right and (left <= right or right <= left):
+            continue  # STRICT subsumption (a broader row + a narrower row) is
+            # a different, non-overlap advisory, out of scope here. Two rows
+            # accepting the EXACT SAME assignment set (left == right) is not
+            # subsumption -- it is unconditional duplicate coverage, and IS
+            # an overlap (CRITICAL 1 / nexus-akmum: this is what let two
+            # rows sharing one bare match, or a non-bare escape mirroring an
+            # ordinary row's guard, pass silently).
         findings.append(
             Finding(
                 code=OVERLAP,
