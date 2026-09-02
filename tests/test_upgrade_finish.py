@@ -203,7 +203,20 @@ class TestRestartStale:
                 patch("nexus.upgrade_finish.subprocess.run", return_value=probe):
             actions = restart_stale(self._report())
         assert calls[0] == (200, signal.SIGTERM)
-        assert any("restarted aspect-worker" in a and "drained" in a for a in actions)
+        # Wording changed when the branch started actually restarting the
+        # worker instead of only draining it (see
+        # TestAspectWorkerIsRestartedNotJustStopped). This fixture does not
+        # stub ensure_aspect_worker_daemon, so the respawn raises and the
+        # branch must say so rather than claim a restart -- which is the
+        # behaviour that matters here: never report success it did not
+        # observe.
+        assert any(
+            "aspect-worker" in a and ("cycled" in a or "NEEDS HUMAN" in a)
+            for a in actions
+        ), actions
+        assert not any("restarted aspect-worker" in a for a in actions), (
+            "must not claim a restart while starting nothing"
+        )
         # MCP hosts are NEVER killed — a live Claude session owns them.
         assert any("pid 100" in a and "NEEDS HUMAN" in a for a in actions)
 
@@ -3120,3 +3133,80 @@ class TestCheckVersionTransitionPreview:
 
         kill.assert_not_called()
         assert "would restart aspect-worker (pid 200)" in line
+
+
+class TestAspectWorkerIsRestartedNotJustStopped:
+    """restart_stale must leave the worker RUNNING, not merely drained.
+
+    Observed on this box 2026-09-02 by a sibling session: after a
+    reinstall + `nx daemon restart-stale`, the aspect-worker stopped
+    cleanly and stayed down ~35 minutes until a human noticed. The branch
+    sent SIGTERM, polled for exit, and reported "restarted ... respawns on
+    demand" -- but nothing restarted it. The ONLY on-demand respawn is
+    inside the enqueue path (aspect_worker.py calls
+    ensure_aspect_worker_daemon when work is enqueued), so with no
+    enqueue traffic the worker simply stays down. Its mineru sibling in
+    the same loop does an explicit stop AND start; this one did not.
+
+    "Cycle" has to mean stop and start, or the safe-to-cycle allowlist
+    that puts aspect-worker in scope is promising something it does not
+    deliver.
+    """
+
+    def _run_with_dead_pid(self, monkeypatch, ensure_calls: list):
+        import nexus.upgrade_finish as uf
+
+        monkeypatch.setattr(uf, "process_command", lambda pid: "nx daemon aspect-worker start")
+        monkeypatch.setattr(uf, "_process_markers", lambda: ["nx"])
+
+        def _fake_kill(pid, sig):
+            return None
+
+        monkeypatch.setattr(uf.os, "kill", _fake_kill)
+        # The pid is gone on the first poll: the drain succeeded.
+        calls = {"n": 0}
+
+        def _kill_probe(pid, sig):
+            calls["n"] += 1
+            if sig == 0:
+                raise ProcessLookupError
+            return None
+
+        monkeypatch.setattr(uf.os, "kill", _kill_probe)
+
+        import nexus.daemon.aspect_worker_daemon as awd
+
+        monkeypatch.setattr(
+            awd, "ensure_aspect_worker_daemon",
+            lambda **kw: ensure_calls.append(kw) or 12345,
+        )
+
+        report = uf.SkewReport(
+            installed_version="9.9.9",
+            stale=[uf.StaleProcess(pid=200, kind="aspect-worker", command="w", age_s=99)],
+        )
+        return uf.restart_stale(report)
+
+    def test_a_drained_worker_is_started_again(self, monkeypatch) -> None:
+        ensure_calls: list = []
+        self._run_with_dead_pid(monkeypatch, ensure_calls)
+        assert ensure_calls, (
+            "restart_stale drained the aspect-worker and never started one; "
+            "nothing else will, because the only respawn path is the enqueue flow"
+        )
+
+    def test_the_action_line_does_not_claim_a_restart_it_did_not_do(
+        self, monkeypatch
+    ) -> None:
+        """Honest reporting: 'restarted' must mean a process is running.
+
+        The old line said 'restarted ... respawns on demand' after doing
+        only a stop, which reads as success in an upgrade summary.
+        """
+        ensure_calls: list = []
+        actions = self._run_with_dead_pid(monkeypatch, ensure_calls)
+        joined = " ".join(actions)
+        if not ensure_calls:
+            assert "restarted" not in joined.lower(), (
+                "claimed a restart while starting nothing"
+            )
