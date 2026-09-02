@@ -175,6 +175,42 @@ class TestNothingVanishesFromThePlan:
         assert [r.rdr_key for r in rows] == ["rdr-174-unified-nx-init-service-lifecycle"]
         assert rows[0].canonical == entry.tumbler, "admitted via the owner branch, not dropped"
 
+    def test_unattributable_row_stays_in_this_repos_unresolvable_list(self) -> None:
+        """A candidate with no source_uri under a foreign owner belongs to
+        nobody: it cannot be filed under another repo, so it stays where
+        someone has to look at it. Live instance: rdr-125, owner 1.23,
+        content_type=prose, empty source_uri."""
+        entry = _entry("1.23.2", content_type="prose", file_path="docs/rdr/rdr-125.md")
+        rows = build_plan([entry], CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
+        assert rows[0].canonical is None
+        assert not rows[0].is_foreign(CURRENT_OWNER, THIS_REPO_PREFIX)
+        report = format_plan(
+            rows, current_owner=CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX,
+        )
+        assert "1 unresolvable" in report
+        assert "0 other repos'" in report
+
+    def test_owner_admitted_row_is_not_filed_under_another_repo(self) -> None:
+        """Round-3 critique: is_foreign tested the path alone while the
+        admission gate tests owner-OR-path, so a record admitted via the
+        OWNER branch (current owner, source_uri outside this prefix) was
+        resolved correctly and then displayed under another repo. The
+        report and the rule must agree."""
+        entry = _entry(
+            "1.1.2771",
+            file_path="docs/rdr/rdr-175-os-init-single-process-watchdog.md",
+            source_uri="chroma://collection/doc-id",
+        )
+        rows = build_plan([entry], CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
+        assert rows[0].canonical == entry.tumbler
+        assert not rows[0].is_foreign(CURRENT_OWNER, THIS_REPO_PREFIX)
+        report = format_plan(
+            rows, current_owner=CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX,
+        )
+        assert "1 resolved" in report
+        assert "0 other repos'" in report
+        assert "rdr-175-os-init-single-process-watchdog: canonical=1.1.2771" in report
+
     def test_current_owner_entry_with_non_file_scheme_reaches_the_plan(self) -> None:
         entry = _entry(
             "1.1.2771",
@@ -212,7 +248,11 @@ class TestNothingVanishesFromThePlan:
         rows = build_plan(entries, CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
         expected_keys = set(group_rdr_candidates(entries))
         assert {r.rdr_key for r in rows} == expected_keys
-        assert len(rows) == sum(1 for r in rows if r.canonical is not None) + sum(
-            1 for r in rows if r.canonical is None
-        )
+        # The reconciliation that matters is against the three DISPLAY
+        # categories, not canonical-is-None (that partition is a tautology).
+        foreign = [r for r in rows if r.is_foreign(CURRENT_OWNER, THIS_REPO_PREFIX)]
+        mine = [r for r in rows if r not in foreign]
+        resolved = [r for r in mine if r.canonical is not None]
+        unresolvable = [r for r in mine if r.canonical is None]
+        assert len(rows) == len(resolved) + len(unresolvable) + len(foreign)
         assert expected_keys, "vacuous: no RDR keys in the fixture set"

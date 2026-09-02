@@ -156,10 +156,16 @@ def group_rdr_candidates(
     return dict(groups)
 
 
-def _is_in_repo(
+def is_in_repo(
     entry: CatalogEntry, current_owner: Tumbler, repo_source_prefix: str,
 ) -> bool:
     """True when *entry* is trustworthy as THIS repo's own registration.
+
+    PUBLIC on purpose: every caller that needs to ask "is this ours?" must
+    ask HERE. Three separate rounds of this bead's review found a second,
+    narrower copy of this test drifting from it — a pre-filter in
+    ``build_plan`` that dropped records silently, then an ``is_foreign``
+    display check that misfiled them. One gate, one answer.
 
     Either signal suffices: the CURRENT owner (today's registrations, by
     definition trustworthy — see :func:`current_rdr_owner`) or a
@@ -205,7 +211,7 @@ def resolve_canonical_tumbler(
     # THIS repo at all (unconditionally, singleton included -- the CRITICAL
     # fix). A candidate that fails both checks never becomes a winner no
     # matter how few other candidates exist.
-    plausible = [c for c in pool if _is_in_repo(c, current_owner, repo_source_prefix)]
+    plausible = [c for c in pool if is_in_repo(c, current_owner, repo_source_prefix)]
 
     # Stage 2 -- winner selection among the admitted candidates: the
     # CURRENT owner's registration wins whenever it is unique (rule step

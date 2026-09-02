@@ -22,7 +22,7 @@ RDR registrations under other owners (measured live: ``ART``, ``Kramer``,
 ``Luciferase``, ``arcaneum`` and others), so an unscoped rule could
 resolve THIS repo's RDR to a DIFFERENT repo's tumbler when basenames
 collide. The gate is
-:func:`nexus.catalog.rdr_canonical._is_in_repo` — owner-match OR a
+:func:`nexus.catalog.rdr_canonical.is_in_repo` — owner-match OR a
 ``source_uri`` under this repo's own ``docs/rdr/`` — applied per candidate
 inside the resolution rule. ``build_plan`` deliberately does NOT pre-filter
 on top of it: a second, cruder gate is how a real record went missing from
@@ -54,6 +54,7 @@ from nexus.catalog.catalog_protocol import CatalogReader, CatalogWriter
 from nexus.catalog.rdr_canonical import (
     current_rdr_owner,
     group_rdr_candidates,
+    is_in_repo,
     rdr_source_prefix,
     resolve_all,
 )
@@ -80,7 +81,7 @@ class RdrPlanRow:
             return []
         return [c.tumbler for c in self.candidates if c.tumbler != self.canonical]
 
-    def is_foreign(self, repo_source_prefix: str) -> bool:
+    def is_foreign(self, current_owner: Tumbler, repo_source_prefix: str) -> bool:
         """True when EVERY candidate is another repo's document.
 
         The catalog is shared: the live fetch returns RDRs from ART,
@@ -91,6 +92,17 @@ class RdrPlanRow:
         disappears is the failure this bead's round-2 critique caught; a
         row that is classified is not.
 
+        The test is :func:`nexus.catalog.rdr_canonical.is_in_repo`, the
+        SAME gate that admits a candidate for resolution — owner-match OR
+        path. An earlier revision tested the path alone, so a record
+        admitted via the OWNER branch (current owner, ``source_uri`` not
+        under this prefix: a ``chroma://`` scheme, a different mount, a
+        symlinked root) resolved correctly and was then filed under
+        another repo in the printed report (round-3 critique, T2
+        ``nexus/critique-nexus-j9z30-20-round3-2026-09-01``). That is the
+        third appearance of one narrow gate beside the real one in this
+        bead's history; there is now only the real one.
+
         A candidate with an EMPTY ``source_uri`` is never foreign: it
         cannot be attributed to any repo, so it stays in this repo's
         unresolvable list where someone has to look at it (live instance:
@@ -100,7 +112,7 @@ class RdrPlanRow:
         if not repo_source_prefix or not self.candidates:
             return False
         return all(
-            c.source_uri and not c.source_uri.startswith(repo_source_prefix)
+            c.source_uri and not is_in_repo(c, current_owner, repo_source_prefix)
             for c in self.candidates
         )
 
@@ -114,7 +126,7 @@ def build_plan(
     """Scope, group, and resolve *entries* into a per-RDR collapse plan.
 
     ONE admission gate, not two. Scoping is
-    :func:`nexus.catalog.rdr_canonical._is_in_repo`, applied per candidate
+    :func:`nexus.catalog.rdr_canonical.is_in_repo`, applied per candidate
     inside :func:`~nexus.catalog.rdr_canonical.resolve_canonical_tumbler`;
     this function does not pre-filter.
 
@@ -159,7 +171,7 @@ def format_plan(
     The counts reconcile against ``len(rows)`` on the header line, so a row
     can never go missing without the arithmetic saying so.
     """
-    foreign = [r for r in rows if r.is_foreign(repo_source_prefix)]
+    foreign = [r for r in rows if r.is_foreign(current_owner, repo_source_prefix)]
     mine = [r for r in rows if r not in foreign]
     lines = [f"RDR canonical-tumbler collapse plan — current owner {current_owner}"]
     resolved = sum(1 for r in mine if r.canonical is not None)
