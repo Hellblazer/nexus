@@ -190,6 +190,7 @@ for the live version; or the report schema moved).
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import pathlib
@@ -206,6 +207,8 @@ from nexus.db.managed_endpoint import (
     resolve_managed_endpoint,
 )
 from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
+from nexus.tables.load import Row, Table, load_table
+from nexus.tables.resolve import resolve as _resolve_table
 
 _REMEDY = (
     "Remedy: cut + deploy + cloud-gate a fresh engine-service via the "
@@ -221,6 +224,108 @@ _UNPINNED_REMEDY = (
     "deploy it FIRST -- bumping ahead of the deploy makes cloud clients refuse "
     "the managed service as below-identity (GH #1402 inverted)."
 )
+
+# ---------------------------------------------------------------------------
+# RDR-201 P2.4 (nexus-j9z30.14): the routed decision path.
+#
+# The ~315 lines of sensors above/below (subprocess git/gh calls, the HTTP
+# probe) stay imperative -- unchanged either way. What this section adds is
+# an alternative DECISION step: instead of the pre-existing inline
+# print()+return branches, resolve docs/tables/release-choreography.toml
+# (RDR-201 P2.3, nexus-j9z30.13) for the sensor's already-reduced outcome and
+# emit that row's exit code + the matching entry from release_messages.py's
+# row-id-keyed catalog.
+#
+# DECISION_PATH is the explicit switch (module-level flag, not an env var):
+# "old" (the default) leaves every branch below byte-for-byte unchanged;
+# "table" routes through resolve(). tests/scripts/test_release_table_parity
+# .py's _new_path flips it around one call for the floor-script's own nine
+# cell-producing functions (check_pin_currency, check_source_ancestry,
+# check_client_lag_ledger, check_paired_preconditions,
+# record_deploy_from_gate_report_leg, check_floor's bare/paired branches,
+# _check_floor_auto_paired, main) -- see that file's _new_path for the
+# harness side. check_client_release_precondition.py's own three
+# cell-producing functions are untouched by this bead (nexus-j9z30.15).
+#
+# P2.6 (nexus-j9z30.16) deletes the "old" branches below once parity is
+# proven green over every (cell, event) pair and DECISION_PATH's default is
+# flipped for good.
+DECISION_PATH: str = "old"
+
+#: A DELEGATING branch (this function just returns a sub-call's own return
+#: value, printing nothing itself) is left untouched in BOTH paths below --
+#: the switch cascades automatically, since every sub-function consults the
+#: SAME module-level DECISION_PATH. Only a branch that itself prints and
+#: decides an exit code gets an explicit `if _use_table_path(): ...` arm.
+
+
+def _use_table_path() -> bool:
+    return DECISION_PATH == "table"
+
+
+_CHOREOGRAPHY_TABLE_PATH = (
+    pathlib.Path(__file__).resolve().parent.parent / "docs" / "tables" / "release-choreography.toml"
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _choreography_table() -> Table:
+    """Loaded once per process -- the table is immutable for the run's life."""
+    return load_table(_CHOREOGRAPHY_TABLE_PATH)
+
+
+def _resolve_choreography_row(function: str, guard: dict[str, str]) -> Row:
+    """Resolve one row of the choreography table for ``function``'s match
+    group. ``guard`` names only the dimensions THIS call site has actually
+    reduced a sensor value to; every other declared dimension (including the
+    table-wide, still guard-unreferenced ``event``/``mode``, and every OTHER
+    function's own dimensions) is filled with its domain's first member --
+    harmless by construction, since no row outside ``function``'s own match
+    group ever examines them, and no row within it guards on a dimension
+    this call omits (RDR-201 P2.3's short-circuit-by-omission table
+    construction). Mirrors tests/scripts/test_release_table_parity.py's
+    ``_assignment_for`` for the real, non-test call sites.
+    """
+    table = _choreography_table()
+    assignment: dict[str, str] = {"function": function}
+    for key, value in guard.items():
+        assignment[f"{function}.{key}"] = value
+    for name, dim in table.dimensions.items():
+        assignment.setdefault(name, dim.domain[0])
+    resolution = _resolve_table(table, assignment)
+    if resolution.refusal is not None:
+        raise RuntimeError(
+            f"{function}: docs/tables/release-choreography.toml refused "
+            f"assignment {assignment!r} -- {resolution.refusal} "
+            f"{dict(resolution.detail)}. This is a table-authoring defect "
+            "(RDR-201), not a runtime condition for this script to handle."
+        )
+    return resolution.row
+
+
+def _emit_choreography(
+    function: str, guard: dict[str, str], substitutions: dict[str, str] | None = None,
+) -> int:
+    """Resolve ``function``'s row for ``guard``, print the catalog message
+    (bracket placeholders filled from ``substitutions`` where the caller has
+    a real value in hand; unfilled brackets are left verbatim -- P2.4 wires
+    the DECISION, not a production-grade renderer, see release_messages.py's
+    own docstring), and return the row's exit code. ``release_messages`` is
+    imported lazily here (not at module top) -- it imports THIS module
+    eagerly at ITS top to build the seven static-remedy-constant catalog
+    entries, so an eager import here would be circular.
+    """
+    import release_messages as _release_messages  # noqa: PLC0415 — deferred: release_messages imports THIS module eagerly at its own top; an eager import here would be circular
+
+    row = _resolve_choreography_row(function, guard)
+    outcome = row.outcome
+    assert isinstance(outcome, dict), (function, row.id, outcome)
+    exit_code = int(outcome["exit_code"])
+    message = _release_messages.get(row.id)
+    for key, value in (substitutions or {}).items():
+        message = message.replace(f"[{key}]", value)
+    print(message, file=sys.stderr if exit_code != 0 else sys.stdout)
+    return exit_code
 
 #: Sentinel for "the tag list could not be read". Distinct from "no tags", which
 #: is itself a failure -- a repo with zero engine tags cannot be release-gated.
@@ -279,6 +384,8 @@ def check_pin_currency(newest: object) -> int:
     """
     floor = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
     if newest is _TAGS_UNAVAILABLE:
+        if _use_table_path():
+            return _emit_choreography("check_pin_currency", {"newest": "unavailable"})
         print(
             "ENGINE PIN CHECK FAILED: could not read engine-service tags from git. "
             "Cannot verify that every gated engine tag is pinned -- treat as a "
@@ -287,6 +394,8 @@ def check_pin_currency(newest: object) -> int:
         )
         return 2
     if newest is None:
+        if _use_table_path():
+            return _emit_choreography("check_pin_currency", {"newest": "none"})
         print(
             "ENGINE PIN CHECK FAILED: zero engine-service-v* tags visible. Either "
             "the checkout has no tags (CI: set `fetch-tags: true`) or the tag "
@@ -296,6 +405,11 @@ def check_pin_currency(newest: object) -> int:
         return 2
     if newest > REQUIRED_ENGINE_VERSION:
         newest_s = ".".join(str(p) for p in newest)
+        if _use_table_path():
+            return _emit_choreography(
+                "check_pin_currency", {"newest": "above_floor"},
+                {"newest": newest_s, "floor": floor},
+            )
         print(
             f"ENGINE PIN CHECK FAILED: engine-service-v{newest_s} is published but this "
             f"release pins v{floor}. Local-mode installs receive ONLY the pinned "
@@ -304,6 +418,9 @@ def check_pin_currency(newest: object) -> int:
             file=sys.stderr,
         )
         return 1
+    if _use_table_path():
+        guard_value = "at_floor" if newest == REQUIRED_ENGINE_VERSION else "below_floor"
+        return _emit_choreography("check_pin_currency", {"newest": guard_value}, {"floor": floor})
     print(f"engine pin is current: REQUIRED_ENGINE_VERSION v{floor} == newest published tag")
     return 0
 
@@ -499,6 +616,10 @@ def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None
     root = repo_root or pathlib.Path(__file__).resolve().parent.parent
     exists = _tag_exists_in_git(pinned_tag, repo_root=root)
     if exists is _TAGS_UNAVAILABLE:
+        if _use_table_path():
+            return _emit_choreography(
+                "check_source_ancestry", {"tag_exists": "unavailable"}, {"pinned_tag": pinned_tag},
+            )
         print(
             f"ENGINE SOURCE-ANCESTRY CHECK UNVERIFIABLE: could not confirm "
             f"{pinned_tag} exists in git. Cannot compare source trees -- "
@@ -508,6 +629,10 @@ def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None
         )
         return 2
     if not exists:
+        if _use_table_path():
+            return _emit_choreography(
+                "check_source_ancestry", {"tag_exists": "false"}, {"pinned_tag": pinned_tag},
+            )
         print(
             f"ENGINE SOURCE-ANCESTRY CHECK UNVERIFIABLE: {pinned_tag} does not "
             "exist in this checkout's git history. Cannot compare source "
@@ -521,6 +646,11 @@ def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None
             cwd=root, capture_output=True, text=True, timeout=30, check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
+        if _use_table_path():
+            return _emit_choreography(
+                "check_source_ancestry", {"tag_exists": "true", "diff_result": "exception"},
+                {"exc": str(exc)},
+            )
         print(
             f"ENGINE SOURCE-ANCESTRY CHECK UNVERIFIABLE: git diff failed ({exc}). "
             "Cannot compare source trees -- treat as a failed gate, not a pass.",
@@ -528,6 +658,14 @@ def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None
         )
         return 2
     if out.returncode != 0:
+        if _use_table_path():
+            return _emit_choreography(
+                "check_source_ancestry", {"tag_exists": "true", "diff_result": "nonzero"},
+                {
+                    "pinned_tag": pinned_tag, "scope": _ANCESTRY_SCOPE,
+                    "returncode": str(out.returncode), "stderr": out.stderr.strip(),
+                },
+            )
         print(
             f"ENGINE SOURCE-ANCESTRY CHECK UNVERIFIABLE: "
             f"`git diff {pinned_tag} HEAD -- {_ANCESTRY_SCOPE}` exited "
@@ -537,6 +675,11 @@ def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None
         return 2
     diff = out.stdout.strip()
     if diff:
+        if _use_table_path():
+            return _emit_choreography(
+                "check_source_ancestry", {"tag_exists": "true", "diff_result": "drift"},
+                {"scope": _ANCESTRY_SCOPE, "pinned_tag": pinned_tag, "diff": diff},
+            )
         print(
             f"ENGINE SOURCE-ANCESTRY CHECK FAILED: this release ships "
             f"{_ANCESTRY_SCOPE} source that its pinned engine tag "
@@ -550,6 +693,11 @@ def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None
             file=sys.stderr,
         )
         return 1
+    if _use_table_path():
+        return _emit_choreography(
+            "check_source_ancestry", {"tag_exists": "true", "diff_result": "clean"},
+            {"scope": _ANCESTRY_SCOPE, "pinned_tag": pinned_tag},
+        )
     print(
         f"engine source is current: no {_ANCESTRY_SCOPE} drift between "
         f"{pinned_tag} and HEAD"
@@ -579,6 +727,8 @@ def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
     """
     ledger = _wire_ledger.parse_ledger(_wire_ledger.DEFAULT_LEDGER_PATH)
     if not ledger.unshipped:
+        if _use_table_path():
+            return _emit_choreography("check_client_lag_ledger", {"ledger": "empty"})
         print(
             f"client-lag ledger clean: 0 unshipped both-halves commits in "
             f"{_wire_ledger.DEFAULT_LEDGER_PATH}"
@@ -592,6 +742,15 @@ def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
     # main on entries the sibling gate certified safe.
     verdict = _wire_ledger.classify_unshipped(ledger, ack_beads)
     if verdict.blocking:
+        if _use_table_path():
+            entries = "; ".join(
+                f"{e.sha} bead {e.bead} engine tag {e.engine_tag} ({e.note})"
+                for e in verdict.blocking
+            )
+            return _emit_choreography(
+                "check_client_lag_ledger", {"ledger": "blocking"},
+                {"n": str(len(verdict.blocking)), "entries": entries},
+            )
         print(
             f"PAIRED DEPLOY BLOCKED: {len(verdict.blocking)} both-halves "
             f"commit(s) in {_wire_ledger.DEFAULT_LEDGER_PATH} have an "
@@ -616,6 +775,12 @@ def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
 
     acked_beads = sorted(e.bead for e in verdict.acked)
     if verdict.additive:
+        if _use_table_path():
+            beads = ", ".join(sorted(e.bead for e in verdict.additive))
+            return _emit_choreography(
+                "check_client_lag_ledger", {"ledger": "additive"},
+                {"n": str(len(verdict.additive)), "beads": beads},
+            )
         acked_suffix = (
             f" ({len(acked_beads)} further entr"
             f"{'y' if len(acked_beads) == 1 else 'ies'} acknowledged via "
@@ -633,6 +798,11 @@ def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
         )
         return 0
 
+    if _use_table_path():
+        return _emit_choreography(
+            "check_client_lag_ledger", {"ledger": "acked_only"},
+            {"n": str(len(ledger.unshipped)), "beads": ", ".join(acked_beads)},
+        )
     print(
         f"client-lag ledger: {len(ledger.unshipped)} unshipped both-halves "
         f"commit(s), all explicitly acknowledged via --ack-client-lag: "
@@ -669,25 +839,40 @@ def check_paired_preconditions(
     (draft / missing asset / wrong tag shape / wrong version / stale pairing
     / too old).
     """
+    guard: dict[str, str] = {}
     prefix = "engine-service-"
     if not tag.startswith(prefix):
+        if _use_table_path():
+            return _emit_choreography(
+                "check_paired_preconditions", {"tag_shape": "invalid_prefix"}, {"tag": repr(tag)},
+            )
         print(
             f"PAIRED MODE REJECTED: --paired-deploy {tag!r} is not an "
             "engine-service-v* tag.",
             file=sys.stderr,
         )
         return 1
+    guard["tag_shape"] = "valid_prefix"
     parsed_tag = parse_engine_version(tag[len(prefix):])
     if parsed_tag is None:
+        if _use_table_path():
+            return _emit_choreography(
+                "check_paired_preconditions", {**guard, "tag_parse": "unparseable"}, {"tag": repr(tag)},
+            )
         print(
             f"PAIRED MODE REJECTED: --paired-deploy {tag!r} does not parse as a "
             "version.",
             file=sys.stderr,
         )
         return 1
+    guard["tag_parse"] = "parseable"
 
     exists = _tag_exists_in_git(tag)
     if exists is _TAGS_UNAVAILABLE:
+        if _use_table_path():
+            return _emit_choreography(
+                "check_paired_preconditions", {**guard, "tag_exists": "unavailable"}, {"tag": tag},
+            )
         print(
             f"PAIRED MODE UNVERIFIABLE: could not read git tags to confirm {tag} "
             "exists. Cannot verify the pairing -- treat as a failed gate, not a "
@@ -696,15 +881,24 @@ def check_paired_preconditions(
         )
         return 2
     if not exists:
+        if _use_table_path():
+            return _emit_choreography(
+                "check_paired_preconditions", {**guard, "tag_exists": "false"}, {"tag": tag},
+            )
         print(
             f"PAIRED MODE REJECTED: {tag} does not exist in git. --paired-deploy "
             "must name a tag that has actually been pushed.",
             file=sys.stderr,
         )
         return 1
+    guard["tag_exists"] = "true"
 
     published, reason = _paired_tag_published(tag)
     if published is _TAGS_UNAVAILABLE:
+        if _use_table_path():
+            return _emit_choreography(
+                "check_paired_preconditions", {**guard, "tag_published": "unavailable"}, {"reason": reason},
+            )
         print(
             f"PAIRED MODE UNVERIFIABLE: {reason}. Cannot verify publication -- "
             "treat as a failed gate, not a pass.",
@@ -712,12 +906,22 @@ def check_paired_preconditions(
         )
         return 2
     if not published:
+        if _use_table_path():
+            return _emit_choreography(
+                "check_paired_preconditions", {**guard, "tag_published": "false"}, {"reason": reason},
+            )
         print(f"PAIRED MODE REJECTED: {reason}.", file=sys.stderr)
         return 1
+    guard["tag_published"] = "true"
 
     floor = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
     tag_s = ".".join(str(p) for p in parsed_tag)
     if parsed_tag != REQUIRED_ENGINE_VERSION:
+        if _use_table_path():
+            return _emit_choreography(
+                "check_paired_preconditions", {**guard, "version_match": "mismatch"},
+                {"tag": tag_s, "floor": floor},
+            )
         print(
             f"PAIRED MODE REJECTED: --paired-deploy names v{tag_s} but "
             f"REQUIRED_ENGINE_VERSION is v{floor} -- wrong pairing. The flag must "
@@ -725,8 +929,11 @@ def check_paired_preconditions(
             file=sys.stderr,
         )
         return 1
+    guard["version_match"] = "match"
 
     if newest is _TAGS_UNAVAILABLE:
+        if _use_table_path():
+            return _emit_choreography("check_paired_preconditions", {**guard, "newest_state": "unavailable"})
         print(
             "PAIRED MODE UNVERIFIABLE: could not read engine-service tags from "
             "git to confirm no newer tag exists.",
@@ -735,6 +942,12 @@ def check_paired_preconditions(
         return 2
     if newest is None or newest != parsed_tag:
         newest_s = ".".join(str(p) for p in newest) if newest is not None else "none"
+        if _use_table_path():
+            newest_state = "none" if newest is None else "mismatch"
+            return _emit_choreography(
+                "check_paired_preconditions", {**guard, "newest_state": newest_state},
+                {"newest": newest_s, "tag": tag_s},
+            )
         print(
             f"PAIRED MODE REJECTED: newest published engine tag is v{newest_s}, "
             f"not v{tag_s} -- a newer engine tag exists than the one this release "
@@ -743,9 +956,14 @@ def check_paired_preconditions(
             file=sys.stderr,
         )
         return 1
+    guard["newest_state"] = "match"
 
     age_hours = _tag_age_hours(tag)
     if age_hours is _TAGS_UNAVAILABLE:
+        if _use_table_path():
+            return _emit_choreography(
+                "check_paired_preconditions", {**guard, "age_state": "unavailable"}, {"tag": tag},
+            )
         print(
             f"PAIRED MODE UNVERIFIABLE: could not determine {tag}'s commit age "
             "from git. Cannot verify the pairing is fresh -- treat as a failed "
@@ -754,6 +972,11 @@ def check_paired_preconditions(
         )
         return 2
     if age_hours > max_age_hours:
+        if _use_table_path():
+            return _emit_choreography(
+                "check_paired_preconditions", {**guard, "age_state": "too_old"},
+                {"tag": tag, "age": f"{age_hours:.1f}", "max_age": f"{max_age_hours:.1f}"},
+            )
         print(
             f"PAIRED MODE REJECTED: {tag} is {age_hours:.1f}h old, past the "
             f"{max_age_hours:.1f}h paired-tag freshness window. Deploy fires AT "
@@ -765,7 +988,13 @@ def check_paired_preconditions(
             file=sys.stderr,
         )
         return 1
+    guard["age_state"] = "fresh"
 
+    if _use_table_path():
+        return _emit_choreography(
+            "check_paired_preconditions", guard,
+            {"tag": tag, "age": f"{age_hours:.1f}", "max_age": f"{max_age_hours:.1f}"},
+        )
     print(
         f"paired mode ARMED: {tag} verified published, pinned to "
         f"REQUIRED_ENGINE_VERSION, newest published engine tag, and "
@@ -880,6 +1109,8 @@ def _paired_below_floor_path(
     newest: object,
     paired_tag_max_age_hours: float,
     ack_client_lag: list[str] | None,
+    *,
+    probe: str,
 ) -> int:
     """Shared tail of auto-paired mode once the cloud is confirmed below floor.
 
@@ -888,6 +1119,12 @@ def _paired_below_floor_path(
     on the tag AUTO-derived from ``REQUIRED_ENGINE_VERSION``. On success,
     prints the paired acknowledgment with ``auto=True`` and returns 0; any
     precondition miss returns its own named-reason code unchanged.
+
+    ``probe`` (RDR-201 P2.4): which ``check_floor_auto_paired.probe`` value
+    the caller reduced its probe result to (``"ms_error_below_floor"`` or
+    ``"success_below_floor"``) -- this shared tail cannot tell the two apart
+    on its own, and the choreography table declares them as DISTINCT rows
+    despite sharing this same exit code and ack text.
     """
     tag = _pinned_engine_tag()
     paired_rc = _run_paired_precondition_battery(
@@ -896,6 +1133,11 @@ def _paired_below_floor_path(
     if paired_rc != 0:
         return paired_rc
     floor = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
+    if _use_table_path():
+        return _emit_choreography(
+            "check_floor_auto_paired", {"probe": probe, "battery": "passes"},
+            {"deployed": deployed_version, "floor": floor},
+        )
     _print_paired_ack(deployed_version, floor, auto=True)
     return 0
 
@@ -928,6 +1170,10 @@ def _check_floor_auto_paired(
     try:
         caps = probe_managed_service(base_url=base)
     except ManagedServiceUnreachable as exc:
+        if _use_table_path():
+            return _emit_choreography(
+                "check_floor_auto_paired", {"probe": "unreachable"}, {"base": base, "exc": str(exc)},
+            )
         print(
             f"ENGINE FLOOR CHECK FAILED: managed service at {base} is unreachable "
             f"({exc}). Cannot verify the cloud engine version -- treat this as a "
@@ -943,6 +1189,11 @@ def _check_floor_auto_paired(
         # _classify_probe_failure).
         is_below_floor, deployed = _classify_probe_failure(exc)
         if not is_below_floor:
+            if _use_table_path():
+                return _emit_choreography(
+                    "check_floor_auto_paired", {"probe": "ms_error_not_below_floor"},
+                    {"base": base, "floor": floor, "exc": str(exc)},
+                )
             print(
                 _probe_unverifiable_message(
                     base, floor,
@@ -951,7 +1202,9 @@ def _check_floor_auto_paired(
                 file=sys.stderr,
             )
             return 2
-        return _paired_below_floor_path(deployed, newest, paired_tag_max_age_hours, ack_client_lag)
+        return _paired_below_floor_path(
+            deployed, newest, paired_tag_max_age_hours, ack_client_lag, probe="ms_error_below_floor",
+        )
 
     parsed = parse_engine_version(caps.release_version)
     if parsed is not None and parsed >= REQUIRED_ENGINE_VERSION:
@@ -959,6 +1212,11 @@ def _check_floor_auto_paired(
         pin_rc = check_pin_currency(newest)
         if pin_rc != 0:
             return pin_rc
+        if _use_table_path():
+            return _emit_choreography(
+                "check_floor_auto_paired", {"probe": "success_at_or_above_floor", "pin_currency": "passes"},
+                {"base_url": caps.base_url, "release_version": caps.release_version, "floor": floor},
+            )
         print(
             f"cloud engine is current: {caps.base_url} release_version="
             f"{caps.release_version} (floor v{floor})"
@@ -972,6 +1230,11 @@ def _check_floor_auto_paired(
         # for defense in depth this must not silently fold into paired
         # acceptance either -- same "genuine below-floor only" rule as the
         # exception branch above.
+        if _use_table_path():
+            return _emit_choreography(
+                "check_floor_auto_paired", {"probe": "success_unparseable"},
+                {"base": base, "floor": floor, "release_version": repr(caps.release_version)},
+            )
         print(
             _probe_unverifiable_message(
                 base, floor,
@@ -983,7 +1246,7 @@ def _check_floor_auto_paired(
 
     # Reachable, with a genuine parseable release_version below the floor.
     return _paired_below_floor_path(
-        caps.release_version, newest, paired_tag_max_age_hours, ack_client_lag
+        caps.release_version, newest, paired_tag_max_age_hours, ack_client_lag, probe="success_below_floor",
     )
 
 
@@ -1053,12 +1316,19 @@ def check_floor(
 
     base = url or resolve_managed_endpoint(require_token=False)[0]
     floor = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
+    table_function = "check_floor_paired" if paired_deploy is not None else "check_floor_bare"
+    delegate_key = "battery" if paired_deploy is not None else "pin_currency"
 
     try:
         caps = probe_managed_service(base_url=base)
     except ManagedServiceUnreachable as exc:
         # Unreachable stays a hard failure regardless of pairing -- "could not
         # verify" is never treated as "must be fine", paired or not.
+        if _use_table_path():
+            return _emit_choreography(
+                table_function, {delegate_key: "passes", "probe": "unreachable"},
+                {"base": base, "exc": str(exc)},
+            )
         print(
             f"ENGINE FLOOR CHECK FAILED: managed service at {base} is unreachable "
             f"({exc}). Cannot verify the cloud engine version -- treat this as a "
@@ -1084,6 +1354,11 @@ def check_floor(
             # post-probe comparison below, which only patched tests reach).
             is_below_floor, deployed = _classify_probe_failure(exc)
             if not is_below_floor:
+                if _use_table_path():
+                    return _emit_choreography(
+                        table_function, {delegate_key: "passes", "probe": "ms_error_not_below_floor"},
+                        {"base": base, "floor": floor, "exc": str(exc)},
+                    )
                 print(
                     _probe_unverifiable_message(
                         base, floor,
@@ -1092,8 +1367,17 @@ def check_floor(
                     file=sys.stderr,
                 )
                 return 2
+            if _use_table_path():
+                return _emit_choreography(
+                    table_function, {delegate_key: "passes", "probe": "ms_error_below_floor"},
+                    {"deployed": deployed, "floor": floor},
+                )
             _print_paired_ack(deployed, floor)
             return 0
+        if _use_table_path():
+            return _emit_choreography(
+                table_function, {delegate_key: "passes", "probe": "ms_error"}, {"floor": floor, "exc": str(exc)},
+            )
         print(
             f"ENGINE FLOOR CHECK FAILED (required v{floor}): {exc}\n{_REMEDY}",
             file=sys.stderr,
@@ -1108,6 +1392,11 @@ def check_floor(
                 # reachable via the REAL probe (see probe_managed_service's
                 # docstring), but for defense in depth this must not
                 # silently fold into paired acceptance either.
+                if _use_table_path():
+                    return _emit_choreography(
+                        table_function, {delegate_key: "passes", "probe": "success_unparseable"},
+                        {"base": base, "floor": floor, "release_version": repr(caps.release_version)},
+                    )
                 print(
                     _probe_unverifiable_message(
                         base, floor,
@@ -1116,8 +1405,18 @@ def check_floor(
                     file=sys.stderr,
                 )
                 return 2
+            if _use_table_path():
+                return _emit_choreography(
+                    table_function, {delegate_key: "passes", "probe": "success_below_floor"},
+                    {"deployed": caps.release_version, "floor": floor},
+                )
             _print_paired_ack(caps.release_version, floor)
             return 0
+        if _use_table_path():
+            return _emit_choreography(
+                table_function, {delegate_key: "passes", "probe": "success_stale"},
+                {"base_url": caps.base_url, "release_version": repr(caps.release_version), "floor": floor},
+            )
         print(
             f"ENGINE FLOOR CHECK FAILED: deployed engine at {caps.base_url} reports "
             f"release_version {caps.release_version!r}, required floor is v{floor}.\n"
@@ -1126,6 +1425,12 @@ def check_floor(
         )
         return 1
 
+    if _use_table_path():
+        probe_value = "success_at_or_above_floor" if paired_deploy is not None else "success_current"
+        return _emit_choreography(
+            table_function, {delegate_key: "passes", "probe": probe_value},
+            {"base_url": caps.base_url, "release_version": caps.release_version, "floor": floor},
+        )
     print(
         f"cloud engine is current: {caps.base_url} release_version="
         f"{caps.release_version} (floor v{floor})"
@@ -1172,6 +1477,22 @@ def _tag_commit(tag: str, repo_root: pathlib.Path | None = None) -> str:
     return out.stdout.strip()
 
 
+#: The OLD code's single ``except deploy_tracker.DeployTrackerError`` does not
+#: discriminate which of the 6 subclasses fired -- this classification IS
+#: new information (a reduction of the caught exception's own TYPE to a
+#: finite outcome), not a duplicate of the sensor. A subclass this dict does
+#: not know about (defensive only -- the 6 below are exhaustive today) falls
+#: through to the old, undifferentiated print rather than misclassifying.
+_TRACKER_ERROR_OUTCOMES: dict[type[Exception], str] = {
+    deploy_tracker.GateReportDirectoryError: "directory_error",
+    deploy_tracker.GateReportSchemaError: "schema_error",
+    deploy_tracker.NoGateReportForVersion: "no_report_for_version",
+    deploy_tracker.GateReportRed: "gate_red",
+    deploy_tracker.GateReportVersionMismatch: "version_mismatch",
+    deploy_tracker.LiveVersionMismatch: "live_version_mismatch",
+}
+
+
 def record_deploy_from_gate_report_leg(
     report_dir: pathlib.Path, *, url: str | None, repo_root: pathlib.Path | None = None
 ) -> int:
@@ -1190,9 +1511,19 @@ def record_deploy_from_gate_report_leg(
             commit_resolver=lambda live: _tag_commit(f"engine-service-v{live}", repo_root),
         )
     except deploy_tracker.DeployTrackerError as exc:
+        if _use_table_path():
+            outcome = _TRACKER_ERROR_OUTCOMES.get(type(exc))
+            if outcome is not None:
+                return _emit_choreography(
+                    "record_deploy_from_gate_report_leg", {"outcome": outcome}, {"exc": str(exc)},
+                )
         print(f"TRACKER NOT RECORDED (exit 3): {exc}", file=sys.stderr)
         return 3
     except ManagedServiceError as exc:
+        if _use_table_path():
+            return _emit_choreography(
+                "record_deploy_from_gate_report_leg", {"outcome": "managed_service_error"}, {"exc": str(exc)},
+            )
         print(
             f"TRACKER NOT RECORDED (exit 3): the live /version re-read failed ({exc})",
             file=sys.stderr,
@@ -1200,6 +1531,11 @@ def record_deploy_from_gate_report_leg(
         return 3
     for advisory in result.report.advisories:
         print(f"  STEP-6 advisory ({result.report.basename}): {deploy_tracker.format_advisory(advisory)}")
+    if _use_table_path():
+        return _emit_choreography(
+            "record_deploy_from_gate_report_leg", {"outcome": "ok"},
+            {"report.basename": result.report.basename, "content": result.content},
+        )
     print(f"deployed-engine-version recorded from {result.report.basename}: {result.content}")
     return 0
 
@@ -1365,8 +1701,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if report_dir is None:
         if args.no_record_deploy is not None:
+            if _use_table_path():
+                return _emit_choreography(
+                    "main_dispatch",
+                    {"mode": "bare", "check_floor": "passes", "ancestry": "passes", "tracker": "opt_out"},
+                    {"reason": args.no_record_deploy.strip()},
+                )
             print(f"{_TRACKER_OPT_OUT_NOTE} Reason given: {args.no_record_deploy.strip()}", file=sys.stderr)
             return 0
+        if _use_table_path():
+            return _emit_choreography(
+                "main_dispatch",
+                {"mode": "bare", "check_floor": "passes", "ancestry": "passes", "tracker": "refusal"},
+            )
         print(_TRACKER_REFUSAL, file=sys.stderr)
         return 3
     return record_deploy_from_gate_report_leg(pathlib.Path(report_dir), url=args.url)

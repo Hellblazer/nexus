@@ -1965,3 +1965,196 @@ def test_client_lag_ledger_tokenless_entry_stays_blocking(tmp_path) -> None:
     ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
     with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
         assert gate.check_client_lag_ledger() == 1
+
+
+# ---------------------------------------------------------------------------
+# RDR-201 P2.4 (nexus-j9z30.14): the routed decision path
+# ---------------------------------------------------------------------------
+#
+# Exhaustive (cell, event) coverage lives in
+# tests/scripts/test_release_table_parity.py's Role 2 (all reachable pairs,
+# both decision paths, via the enumerator's own drivers). These tests are
+# the FOCUSED proof for the switch mechanism itself: the module-level flag
+# defaults to "old" and leaves every pre-existing test in this file (all
+# written against the default) passing untouched; flipping it to "table"
+# routes a representative branch of each of the floor script's nine
+# cell-producing functions through nexus.tables.resolve() and
+# release_messages.py's catalog instead.
+
+import pathlib as _pathlib
+
+import release_messages as _release_messages
+
+
+def test_decision_path_defaults_to_old() -> None:
+    """The switch itself: every pre-existing test above (and every default
+    call site in production) gets the pre-RDR-201 imperative branches
+    unless something explicitly opts into "table"."""
+    assert gate.DECISION_PATH == "old"
+
+
+def test_table_path_check_pin_currency_unavailable_matches_table(capsys: pytest.CaptureFixture[str]) -> None:
+    gate.DECISION_PATH = "table"
+    try:
+        rc = gate.check_pin_currency(gate._TAGS_UNAVAILABLE)
+    finally:
+        gate.DECISION_PATH = "old"
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert err.strip() == _release_messages.get(
+        "check_pin_currency::pin_currency_tags_unavailable"
+    ).strip()
+
+
+def test_table_path_check_pin_currency_stale_pin_fills_dynamic_values(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    above = (REQUIRED_ENGINE_VERSION[0], REQUIRED_ENGINE_VERSION[1], REQUIRED_ENGINE_VERSION[2] + 1)
+    gate.DECISION_PATH = "table"
+    try:
+        rc = gate.check_pin_currency(above)
+    finally:
+        gate.DECISION_PATH = "old"
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert ".".join(str(p) for p in above) in err
+    assert "[newest]" not in err and "[floor]" not in err
+
+
+def test_table_path_check_source_ancestry_clean(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate.subprocess, "run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
+        gate.DECISION_PATH = "table"
+        try:
+            rc = gate.check_source_ancestry("engine-service-vTEST")
+        finally:
+            gate.DECISION_PATH = "old"
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "engine source is current" in out
+
+
+def test_table_path_check_client_lag_ledger_blocking(tmp_path) -> None:
+    ledger = _write_ledger(tmp_path, _FAKE_ENTRY)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        gate.DECISION_PATH = "table"
+        try:
+            rc = gate.check_client_lag_ledger()
+        finally:
+            gate.DECISION_PATH = "old"
+    assert rc == 1
+
+
+def test_table_path_check_paired_preconditions_not_published_fills_real_reason(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The one row (``battery_not_published``) whose catalog template's
+    ``[reason]`` placeholder must be filled with the REAL reason string for
+    correctness -- see the module's ``_emit_choreography`` call site."""
+    tag = gate._pinned_engine_tag()
+    with patch.object(gate, "_tag_exists_in_git", return_value=True), \
+         patch.object(gate, "_paired_tag_published", return_value=(False, "not published")):
+        gate.DECISION_PATH = "table"
+        try:
+            rc = gate.check_paired_preconditions(tag, None)
+        finally:
+            gate.DECISION_PATH = "old"
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "not published" in err
+    assert "[reason]" not in err
+
+
+def test_table_path_check_floor_bare_current(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())):
+        gate.DECISION_PATH = "table"
+        try:
+            rc = gate.check_floor(url=_TEST_URL, newest=_PIN_CURRENT)
+        finally:
+            gate.DECISION_PATH = "old"
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "cloud engine is current" in out
+
+
+def test_table_path_check_floor_auto_paired_current_is_byte_for_byte_bare(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())):
+        gate.DECISION_PATH = "table"
+        try:
+            rc = gate.check_floor(url=_TEST_URL, newest=_PIN_CURRENT, paired_deploy_auto=True)
+        finally:
+            gate.DECISION_PATH = "old"
+    assert rc == 0
+
+
+def test_table_path_record_deploy_classifies_exception_subclass(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The OLD code's single ``except DeployTrackerError`` never
+    discriminates subclasses -- the table path must, to route to the
+    right one of six distinct rows."""
+    with patch.object(
+        gate.deploy_tracker, "record_deploy_from_gate_report",
+        side_effect=gate.deploy_tracker.GateReportRed("simulated"),
+    ):
+        gate.DECISION_PATH = "table"
+        try:
+            rc = gate.record_deploy_from_gate_report_leg(_pathlib.Path("/fake/dir"), url=None)
+        finally:
+            gate.DECISION_PATH = "old"
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "TRACKER NOT RECORDED" in err
+
+
+def test_table_path_main_tracker_opt_out(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "check_floor", return_value=0), \
+         patch.object(gate, "check_source_ancestry", return_value=0):
+        gate.DECISION_PATH = "table"
+        try:
+            rc = gate.main(["--url", _TEST_URL, "--no-record-deploy", "a representative reason"])
+        finally:
+            gate.DECISION_PATH = "old"
+    assert rc == 0
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "a representative reason" in combined
+    assert "NOTE (--no-record-deploy)" in combined
+
+
+def test_table_path_main_tracker_refusal(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(gate, "check_floor", return_value=0), \
+         patch.object(gate, "check_source_ancestry", return_value=0):
+        gate.DECISION_PATH = "table"
+        try:
+            rc = gate.main(["--url", _TEST_URL])
+        finally:
+            gate.DECISION_PATH = "old"
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "TRACKER NOT RECORDED" in err
+
+
+def test_table_path_leaves_default_path_untouched(capsys: pytest.CaptureFixture[str]) -> None:
+    """After exercising the table path above, the default (module-level
+    flag never flipped by a caller) still reproduces the byte-for-byte OLD
+    message -- proof the two paths are genuinely independent, not the new
+    path silently having become the only one."""
+    assert gate.DECISION_PATH == "old"
+    with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())):
+        rc = gate.check_floor(url=_TEST_URL, newest=_PIN_CURRENT)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert (
+        f"cloud engine is current: {_TEST_URL} release_version="
+        f"{_floor_str()} (floor v{_floor_str()})"
+    ) in out
+
+
+def test_resolve_choreography_row_refuses_out_of_domain_value() -> None:
+    """A table-authoring / classification defect (a guard value outside
+    the declared domain) must fail loudly, not silently misroute."""
+    with pytest.raises(RuntimeError):
+        gate._resolve_choreography_row("check_pin_currency", {"newest": "not-a-real-value"})

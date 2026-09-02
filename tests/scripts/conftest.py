@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+import check_engine_release_floor as _floor
 import check_wire_contract_pairing as _wire_ledger
 
 _EMPTY_LEDGER = "## Unshipped\n\n(none)\n\n## Shipped\n"
@@ -58,3 +59,17 @@ def _scrub_gate_report_env(monkeypatch: pytest.MonkeyPatch) -> None:
     the test suite that global must never turn a ``main(["--url", ...])`` call
     into a tracker write; every test that wants the env sets it itself."""
     monkeypatch.delenv("NX_GATE_REPORT_DIR", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_decision_path() -> None:
+    """RDR-201 P2.4 (nexus-j9z30.14): ``check_engine_release_floor
+    .DECISION_PATH`` is a module-level switch a test can flip (directly,
+    or via ``test_release_table_parity.py``'s ``_new_path``, which already
+    restores it in a ``finally``). This is defense-in-depth against a test
+    that flips it and errors before restoring -- every test in this
+    directory starts AND ends on the default "old" path, never leaking
+    "table" into an unrelated test."""
+    _floor.DECISION_PATH = "old"
+    yield
+    _floor.DECISION_PATH = "old"
