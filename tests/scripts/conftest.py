@@ -64,30 +64,6 @@ def _scrub_gate_report_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NX_GATE_REPORT_DIR", raising=False)
 
 
-@pytest.fixture(autouse=True)
-def _reset_decision_path() -> None:
-    """RDR-201 P2.4 (nexus-j9z30.14): ``release_choreography.DECISION_PATH``
-    -- the ONE switch both gated scripts consult (nexus-w2x5x) -- is a
-    module-level flag a test can flip (directly, or via
-    ``test_release_table_parity.py``'s ``_new_path``, which already
-    restores it in a ``finally``). This is defense-in-depth against a test
-    that flips it and errors before restoring -- every test in this
-    directory starts AND ends on the default "old" path, never leaking
-    "table" into an unrelated test."""
-    _choreo.DECISION_PATH = "old"
-    yield
-    _choreo.DECISION_PATH = "old"
-
-
-@pytest.fixture
-def table_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Route the gated scripts through the choreography table for one test.
-    ``monkeypatch.setattr`` (raising on a missing attribute) rather than a
-    bare assignment: a flip written onto a module that no longer owns the
-    switch must fail loudly, not silently drive the old path and pass."""
-    monkeypatch.setattr(_choreo, "DECISION_PATH", "table")
-
-
 @pytest.fixture
 def mutate_choreography_row() -> Callable[[str, int], Table]:
     """Factory: a copy of the REAL choreography table with ONE row's

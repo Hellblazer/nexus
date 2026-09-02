@@ -14,30 +14,25 @@ for it, and emit that row's exit code plus the matching entry from
 ``release_messages.py``'s row-id-keyed catalog.
 
 One module, not a copy per script, is the point (nexus-j9z30.15: "route
-through the SAME table"): one table cache, one switch, one resolver. A
-test that wants BOTH real gated scripts to resolve against an in-memory
-corrupted table patches exactly one name here --
-``choreography_table`` -- which is how
-``tests/scripts/test_release_table_parity.py``'s mutation canary proves
-Role 2 can catch a wrong row on the real-function path of either script
+through the SAME table"): one table cache, one resolver, one emit. A test
+that wants BOTH real gated scripts to resolve against an in-memory
+corrupted table patches exactly one name here -- ``choreography_table`` --
+which is how ``tests/scripts/test_release_table_parity.py``'s mutation
+canary proves the production wiring of either script reads the table
 (nexus-w2x5x).
 
-``DECISION_PATH`` is the explicit switch (module-level flag, not an env
-var): ``"old"`` (the default) leaves every pre-existing inline
-print()+return branch in both scripts byte-for-byte unchanged; ``"table"``
-routes through :func:`nexus.tables.resolve.resolve`. The parity harness
-flips it around one call at a time. P2.6 (nexus-j9z30.16) deletes the
-``"old"`` branches from both scripts and this switch with them once parity
-is proven green over every (cell, event) pair.
+Which branches call :func:`emit_choreography`: every branch that decides
+an exit code. A DELEGATING branch (one that just returns a sub-call's own
+return value) emits nothing itself -- the sub-function's row is the
+decision. The table still carries a row for each delegating cell (the
+fixture enumerates it), and the catalog carries a matching entry that
+DESCRIBES the delegation; neither is ever printed.
 
-Which branches get an arm: only a branch that itself PRINTS and DECIDES an
-exit code gets an explicit ``if use_table_path(): return
-emit_choreography(...)`` arm. A DELEGATING branch (one that just returns a
-sub-call's own return value, printing nothing itself) is left untouched
-in both paths -- the switch cascades automatically, since every
-sub-function consults this same flag. The table still carries a row for
-each delegating cell (the fixture enumerates it), and the catalog carries
-a matching entry that DESCRIBES the delegation; neither is ever printed.
+History: P2.4/P2.5 (nexus-j9z30.14/.15) landed this alongside the
+pre-table inline print()+return branches behind a ``DECISION_PATH``
+switch, proved old == new over every enumerated cell of both scripts
+(verdict and full text), and P2.6 (nexus-j9z30.16) deleted the old
+branches and the switch. The fixture pins the table now.
 
 stdlib + nexus.tables only; ``release_messages`` is imported lazily inside
 :func:`emit_choreography` because that module imports BOTH gated scripts
@@ -53,13 +48,6 @@ import sys
 
 from nexus.tables.load import Row, Table, load_table
 from nexus.tables.resolve import resolve as _resolve_table
-
-DECISION_PATH: str = "old"
-
-
-def use_table_path() -> bool:
-    return DECISION_PATH == "table"
-
 
 CHOREOGRAPHY_TABLE_PATH = (
     pathlib.Path(__file__).resolve().parent.parent / "docs" / "tables" / "release-choreography.toml"
@@ -112,9 +100,9 @@ def emit_choreography(
 ) -> int:
     """Resolve ``function``'s row for ``guard``, print the catalog message
     (bracket placeholders filled from ``substitutions`` where the caller has
-    a real value in hand; unfilled brackets are left verbatim -- P2.4 wires
-    the DECISION, not a production-grade renderer, see release_messages.py's
-    own docstring), and return the row's exit code.
+    a real value in hand; an unfilled bracket is left verbatim, and
+    tests/scripts/test_release_table_parity.py's Role 2 reds on one) on the
+    row's stream, and return the row's exit code.
     """
     import release_messages as _release_messages  # noqa: PLC0415 — deferred: release_messages imports both gated scripts eagerly at its own top, and they import this module; an eager import here would be circular
 
@@ -125,5 +113,12 @@ def emit_choreography(
     message = _release_messages.get(row.id)
     for key, value in (substitutions or {}).items():
         message = message.replace(f"[{key}]", value)
-    print(message, file=sys.stderr if exit_code != 0 else sys.stdout)
+    # Stream: stderr for a refusal, stdout for a pass -- unless the row says
+    # otherwise. Exactly one row does (main_dispatch::main_bare_tracker_opt_out,
+    # an exit-0 NOTE the pre-table code sent to stderr): the P2.6 per-stream
+    # probe over all 89 cells found that one divergence, and the P2.4/P2.5
+    # full-text parity could not, because it compared stdout+stderr as one.
+    stream = outcome.get("stream", "stderr" if exit_code != 0 else "stdout")
+    assert stream in ("stdout", "stderr"), (function, row.id, stream)
+    print(message, file=sys.stderr if stream == "stderr" else sys.stdout)
     return exit_code

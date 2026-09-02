@@ -67,32 +67,20 @@
 # combination (real probe values never co-occur with pin_currency=
 # blocks) that check_table would wrongly flag as a coverage-gap.
 #
-# EVENT / MODE. Both are declared TABLE-WIDE dimensions (RDR-201 P2.3's
-# stated requirement, Finding 2's incident correction: the 7.1.0/v0.1.62
-# failure was an UN-ENCODED event dimension) but referenced by NO row's
-# guard in THIS version of the table: this model captures only
-# (exit_code, message_key) per cell, and the 7.1.0/v0.1.62 incident's
-# own fix (commit 79fff05a9) changed a REMEDY STRING plus prose, not any
-# guard/exit-code/message_key -- so, VERIFIED against that one incident,
-# every cell's verdict IS event- and mode-invariant today, and the
-# bead's own constraint ("the row must give the SAME verdict for every
-# event in that cell's reachable set") holds for every row as authored.
-#
-# WHETHER THE CHOREOGRAPHY *SHOULD* BE EVENT-SENSITIVE IS A SEPARATE,
-# OPEN QUESTION -- NOT SETTLED BY THE ABOVE, and not this bead's (P2.3)
-# to decide unilaterally: Finding 2 classifies the 7.1.0/v0.1.62
-# incident itself as an un-encoded event dimension in the STATE SPACE,
-# independent of what the eventual fix's diff happened to touch, and
-# check_floor's bare mode is reachable at both pre-tag and
-# post-deploy-verify -- two real moments a future incident of the same
-# shape could legitimately need to distinguish. That question is owned
-# by nexus-j9z30.26 (must be answered before nexus-j9z30.16 deletes the
-# old, event-blind decision path -- after that there is no live
-# comparison point left to notice a silently-wrong event-invariant
-# reduction against), the same Sam-gated posture as nexus-j9z30.17's O2
-# ruling below. check_table reports "event"/"mode" as "unused-dimension"
-# advisories (non-blocking) for exactly this reason -- an honest
-# statement of today's shape, not a claim that the shape is correct.
+# NO EVENT COLUMN -- BY RULING, NOT OVERSIGHT (nexus-j9z30.26, Sam,
+# 2026-09-02). RDR-201 Finding 2 classified the 7.1.0/v0.1.62 incident as
+# an un-encoded event dimension (pre-tag / tag-push / deploy /
+# post-deploy-verify), and P2.3 authored this table with table-wide
+# "event" and "mode" dimensions no row ever guarded on. The ruling: the
+# fix for that incident (commit 79fff05a9) changed a remedy STRING and
+# prose, no decision logic. The event-sensitivity is real but lives in
+# the release / engine-release SKILL choreography -- which moment a human
+# runs which gate -- which scripts/enumerate_release_cells.py's
+# event_mode_matrix() records as skill citations. A table over the two
+# scripts' own inputs is event-invariant by construction, so the columns
+# came out at P2.6 (nexus-j9z30.16). Do not re-derive the question from
+# the incident write-up and re-add them: a declared dimension no row reads
+# is exactly what the checker's unused-dimension advisory exists to flag.
 #
 # O2 ORDER-ASYMMETRY (nexus-j9z30.17): {cloud >= floor, ledger dirty}
 # exits 1 under --paired-deploy (battery-before-probe: the
@@ -141,26 +129,6 @@ domain = [
   "check_composite",
   "precond_main_dispatch",
 ]
-
-# Event-invariant in TODAY's table (verified against 79fff05a9, the
-# 7.1.0/v0.1.62 fix -- see the EVENT / MODE section above); whether the
-# choreography SHOULD be event-sensitive is UNDECIDED and owned by
-# nexus-j9z30.26, not this bead.
-[dimensions.event]
-domain = ["pre-tag", "tag-push", "deploy", "post-deploy-verify"]
-
-# Same open-question posture as [dimensions.event] above -- see
-# nexus-j9z30.26. Note (code review, T2 nexus/code-review-nexus-j9z30-13
-# -2026-09-01 [24062]): this table-wide "mode" dimension is never
-# referenced by any row's guard either -- "main_dispatch.mode" (a
-# SEPARATE, function-prefixed dimension declared in main_dispatch's own
-# section below) is what actually carries mode semantics for the one
-# function whose verdict genuinely varies by mode today. Left declared
-# regardless: the resulting "unused-dimension" advisory is doing exactly
-# its job (an honest signal that this axis carries no coverage claim),
-# not a defect to silently work around by deleting the dimension.
-[dimensions.mode]
-domain = ["bare", "paired_explicit", "paired_auto", "ledger_only"]
 
 # --------------------------------------------------------------------
 # check_pin_currency (GuardChain, 1 dim, 5 leaves -- 1:1 with its domain)
@@ -681,11 +649,18 @@ match = { function = "main_dispatch" }
 guard = { "main_dispatch.mode" = "bare", "main_dispatch.check_floor" = "passes", "main_dispatch.ancestry" = "passes", "main_dispatch.tracker" = "resolved" }
 emit = { exit_code = "0", message_key = "main_bare_tracker_delegates" }
 
+# stream = "stderr" on an exit-0 row: the --no-record-deploy NOTE is a
+# warning the pre-table code deliberately sent to stderr (nexus-nx3l5, "the
+# explicit VISIBLE opt-out"), and release_choreography.emit_choreography
+# otherwise routes exit 0 to stdout. The only row that needs it: the P2.6
+# per-stream probe (nexus-j9z30.16) found 88 of 89 cells byte-identical on
+# both streams and this one moved. Keep the field; a future full-text
+# comparison must compare stdout and stderr SEPARATELY, not concatenated.
 [[row]]
 id = "main_dispatch::main_bare_tracker_opt_out"
 match = { function = "main_dispatch" }
 guard = { "main_dispatch.mode" = "bare", "main_dispatch.check_floor" = "passes", "main_dispatch.ancestry" = "passes", "main_dispatch.tracker" = "opt_out" }
-emit = { exit_code = "0", message_key = "main_bare_tracker_opt_out" }
+emit = { exit_code = "0", message_key = "main_bare_tracker_opt_out", stream = "stderr" }
 
 [[row]]
 id = "main_dispatch::main_bare_tracker_refusal"

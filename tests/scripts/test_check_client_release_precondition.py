@@ -428,22 +428,22 @@ class TestWiring:
 
 
 # ---------------------------------------------------------------------------
-# RDR-201 P2.5 (nexus-j9z30.15): the routed decision path
+# RDR-201 P2.5/P2.6 (nexus-j9z30.15/.16): the decision path
 # ---------------------------------------------------------------------------
 #
-# Exhaustive (cell, event) coverage lives in
-# tests/scripts/test_release_table_parity.py's Role 2 (all reachable pairs,
-# both decision paths, via the enumerator's own drivers). These are the
-# FOCUSED proof that this script's three cell-producing functions genuinely
-# resolve docs/tables/release-choreography.toml through the SAME
+# Exhaustive per-cell coverage lives in
+# tests/scripts/test_release_table_parity.py (every enumerated cell of both
+# scripts, via the enumerator's own drivers). These are the FOCUSED proof
+# that this script's three cell-producing functions genuinely resolve
+# docs/tables/release-choreography.toml through the SAME
 # release_choreography module the floor script uses -- by steering the real
 # function onto an in-memory table with one row's exit code changed and
 # watching the verdict follow the table. Output text alone cannot prove
-# that: the table path is byte-identical to the old path by construction,
-# so a test that only reads the printed message passes on either.
+# that: a branch that still printed its own verdict would print the same
+# words.
 
 
-class TestTablePath:
+class TestChoreographyPath:
     _ENTRY = (
         "- `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` -- bead nexus-fake -- "
         "engine tag `engine-service-v9.9.9` -- test fixture\n"
@@ -460,7 +460,7 @@ class TestTablePath:
         return ledger
 
     def test_wire_contract_ledger_clean_follows_the_table(
-        self, table_path, mutate_choreography_row, tmp_path, monkeypatch,
+        self, mutate_choreography_row, tmp_path, monkeypatch,
     ):
         monkeypatch.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", self._write_ledger(tmp_path))
         mutated = mutate_choreography_row("check_wire_contract_ledger::ledger_clean", 7)
@@ -469,7 +469,7 @@ class TestTablePath:
         assert (rc, is_vacuous) == (7, True)
 
     def test_wire_contract_ledger_blocked_follows_the_table_and_fills_entries(
-        self, table_path, mutate_choreography_row, tmp_path, monkeypatch, capsys,
+        self, mutate_choreography_row, tmp_path, monkeypatch, capsys,
     ):
         monkeypatch.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", self._write_ledger(tmp_path, self._ENTRY))
         mutated = mutate_choreography_row("check_wire_contract_ledger::ledger_blocked", 7)
@@ -484,7 +484,7 @@ class TestTablePath:
         assert "[additive] direction-safety token" in err, "the literal token in the prose must survive substitution"
 
     def test_wire_contract_ledger_additive_keeps_the_acked_suffix(
-        self, table_path, tmp_path, monkeypatch, capsys,
+        self, tmp_path, monkeypatch, capsys,
     ):
         """A mixed ledger -- one [additive] entry, one acknowledged entry --
         prints the acknowledged count as a suffix on the old path; the
@@ -501,7 +501,7 @@ class TestTablePath:
         assert "[acked_suffix]" not in out
 
     def test_check_both_vacuous_follows_the_table_and_fills_ledger_path(
-        self, table_path, mutate_choreography_row, tmp_path, monkeypatch, capsys,
+        self, mutate_choreography_row, tmp_path, monkeypatch, capsys,
     ):
         ledger = self._write_ledger(tmp_path)
         monkeypatch.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
@@ -515,7 +515,7 @@ class TestTablePath:
         assert "[engine_tag]" not in err and "[ledger_path]" not in err
 
     def test_check_latest_release_tag_error_follows_the_table_and_fills_exc(
-        self, table_path, mutate_choreography_row, monkeypatch, capsys,
+        self, mutate_choreography_row, monkeypatch, capsys,
     ):
         monkeypatch.setattr(gate, "latest_release_tag", lambda: (_ for _ in ()).throw(RuntimeError("git exploded")))
         mutated = mutate_choreography_row("check_composite::composite_latest_release_tag_error", 7)
@@ -526,7 +526,7 @@ class TestTablePath:
         assert capsys.readouterr().err == "CANNOT VERIFY: git exploded\n"
 
     def test_check_is_ancestor_error_follows_the_table_and_fills_commit(
-        self, table_path, mutate_choreography_row, monkeypatch, capsys,
+        self, mutate_choreography_row, monkeypatch, capsys,
     ):
         monkeypatch.setattr(gate, "latest_release_tag", lambda: "v0.0.1")
 
@@ -542,7 +542,7 @@ class TestTablePath:
         assert capsys.readouterr().err == "CANNOT VERIFY deadbeef: git exploded\n"
 
     def test_check_missing_commit_follows_the_table_and_lists_commits(
-        self, table_path, mutate_choreography_row, monkeypatch, capsys,
+        self, mutate_choreography_row, monkeypatch, capsys,
     ):
         monkeypatch.setattr(gate, "latest_release_tag", lambda: "v0.0.1")
         monkeypatch.setattr(gate, "is_ancestor", lambda commit, tag: False)
@@ -558,7 +558,7 @@ class TestTablePath:
             assert unfilled not in err, unfilled
 
     def test_delegating_branches_emit_only_the_delegate_row(
-        self, table_path, mutate_choreography_row, tmp_path, monkeypatch, capsys,
+        self, mutate_choreography_row, tmp_path, monkeypatch, capsys,
     ):
         """``check()``'s vacuous-table + non-empty-ledger cells DELEGATE:
         the ledger function's own row is the whole decision, and the
@@ -573,14 +573,3 @@ class TestTablePath:
             rc = gate.check("engine-service-vTEST")
         assert rc == 1
         assert capsys.readouterr().err.count("BLOCKED:") == 1
-
-    def test_default_path_is_untouched(self, tmp_path, monkeypatch, capsys):
-        """With the switch never flipped, the pre-RDR-201 inline branch
-        prints its byte-for-byte message -- the two paths are genuinely
-        independent, not the new one silently the only one."""
-        assert _choreo.DECISION_PATH == "old"
-        ledger = self._write_ledger(tmp_path)
-        monkeypatch.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
-        rc, is_vacuous = gate.check_wire_contract_ledger()
-        assert (rc, is_vacuous) == (0, True)
-        assert capsys.readouterr().out == f"wire-contract ledger: 0 unshipped entries in {ledger}\n"

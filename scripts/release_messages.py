@@ -25,15 +25,16 @@ variable span with a bracketed placeholder (e.g. ``[reason]``,
 ``[tag]``) rather than inventing a fake concrete value.
 
 Consumed by BOTH gated scripts through ``release_choreography
-.emit_choreography`` (RDR-201 P2.4/P2.5, nexus-j9z30.14/.15) whenever
-``release_choreography.DECISION_PATH`` is ``"table"``; the placeholders
-are filled from the values each call site has in hand. ``tests/scripts/
+.emit_choreography`` (RDR-201 P2.4/P2.5/P2.6, nexus-j9z30.14/.15/.16);
+the placeholders are filled from the values each call site has in hand.
+This catalog IS the operator-facing text now -- the inline prints it was
+transcribed from were deleted at P2.6 after byte-for-byte parity was
+proven over every enumerated cell of both scripts. ``tests/scripts/
 test_release_table_parity.py`` asserts catalog<->table row-id parity and,
-for every enumerated cell, byte-for-byte parity between the text the old
-inline branch prints and the text this catalog renders -- a placeholder
-this catalog lacks (the ``[acked_suffix]`` the two ``ledger_additive_
-authorized`` entries carry, added at P2.5) is a fact the operator stops
-seeing, not a cosmetic gap.
+for every cell, that the real function leaves no placeholder unfilled --
+a placeholder this catalog lacks (the ``[acked_suffix]`` the two
+``ledger_additive_authorized`` entries carry, added at P2.5) is a fact
+the operator stops seeing, not a cosmetic gap.
 
 Where the real branch prints an exception's text, the entry carries a
 bare ``[exc]`` placeholder -- never a paraphrase of what the exception

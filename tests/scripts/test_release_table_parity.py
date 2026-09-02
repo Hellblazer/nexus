@@ -1,72 +1,62 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Side-by-side parity harness over the enumerated release-decision cells
-(RDR-201 P2.2, nexus-j9z30.12).
+"""Parity harness over the enumerated release-decision cells (RDR-201
+P2.2 -> P2.6, nexus-j9z30.12/.13/.14/.15/.16).
 
 Loads ``tests/scripts/fixtures/release_cells.json`` (built by
 ``scripts/enumerate_release_cells.py``, RDR-201 P2.1 / nexus-j9z30.11) and,
-for EVERY cell, drives the CURRENT decision path -- the real gated function,
-via the enumerator's own monkeypatched drivers, never reimplemented here --
-and asserts the observed verdict (exit code + message key) matches the
-fixture's frozen expected column.
+for EVERY cell of both gated scripts, pins three things to each other:
 
-Three roles
------------
+Role 1 (``test_real_function_matches_fixture``) drives the REAL gated
+function -- via the enumerator's own monkeypatched drivers, never
+reimplemented here -- and asserts the observed ``(exit_code, message_key)``
+matches the fixture's frozen expected column. Since P2.6 deleted the
+pre-table inline branches, the real function IS the table path, so this is
+the old-vs-new parity claim P2.4/P2.5 proved cell by cell (verdict and full
+printed text, both scripts) now resting on the fixture alone: the fixture
+pins the table. Two independent failure modes: (a) a real gated script's
+logic drifting from what the fixture recorded, and (b) the checked-in
+fixture going STALE relative to ``enumerate_release_cells.py``'s own
+modeling (``test_committed_fixture_is_not_stale_relative_to_a_fresh_
+enumeration``, which compares ``erc.build_fixture()`` -- pure and
+deterministic -- against the committed file).
 
-Role 1 (``test_old_path_matches_fixture``) is a CHANGE DETECTOR for the
-enumeration itself, with two independent
-failure modes: (a) a real gated script's branch logic drifting from what
-the fixture recorded (each cell's driver re-executes the real function),
-and (b) the checked-in fixture going STALE relative to
-``enumerate_release_cells.py``'s own modeling -- e.g. someone edits a cell
-table in the enumerator but forgets to regenerate the JSON
-(``test_committed_fixture_is_not_stale_relative_to_a_fresh_enumeration``
-below, which compares ``erc.build_fixture()`` -- a pure, deterministic
-function -- against the committed file directly).
-
-Role 2 (``test_new_path_matches_old_path_cell_by_cell``) drives the REAL
-gated function twice per cell -- ``release_choreography.DECISION_PATH``
-"old", then "table" -- and asserts the classified verdict AND the full
-printed text agree. Since RDR-201 P2.5 (nexus-j9z30.15) that covers BOTH
-scripts' twelve cell-producing functions; no cell resolves the table in
-isolation any more.
+Role 2 (``test_real_function_fills_every_catalog_placeholder``) drives the
+real function capturing its full printed TEXT and asserts no
+``release_messages.py`` placeholder is left unfilled in it. The old inline
+prints were f-strings and could not leave a hole; the catalog can, at any
+call site that forgets a substitution key -- and the classifiers that
+reduce text to a ``message_key`` would not notice. This is what remains
+of the P2.4 fix round's byte-for-byte text comparison once its old-path
+oracle is gone: the words the operator reads still get checked, for the
+one defect class the catalog design introduced.
 
 Role 3 (``test_table_row_matches_fixture_by_direct_resolve``) resolves the
 table directly for every cell's assignment and pins the row's own verdict
 (and row id) to the fixture. It is the ONLY coverage the DELEGATING rows
-get: a composite/dispatch cell whose real function prints nothing itself
-and returns a sub-call's verdict (``main_dispatch::main_ledger_only_*``,
+get: a composite/dispatch cell whose real function returns a sub-call's
+verdict (``main_dispatch::main_ledger_only_*``,
 ``check_composite::composite_vacuous_table_ledger_*``,
-``precond_main_dispatch::*``) never emits its own row under the table
-path -- the sub-function's row is the decision -- so Role 2 cannot see a
-wrong exit code on it. Not a second copy of Role 2: Role 2 proves the
-wiring, Role 3 proves the rows.
+``precond_main_dispatch::*``) never emits its own row -- the sub-function's
+row is the decision -- so Roles 1 and 2 cannot see a wrong exit code on it.
+Not a second copy of Role 1: Role 1 proves the wiring, Role 3 proves the
+rows.
 
-Once P2.4/P2.5 land ``docs/tables/release-choreography.toml`` and rewire the
-two scripts onto ``table.resolve()``, ``_new_path`` starts returning a real
-verdict. At that point Role 2 is a claim per **(cell, event)** pair, not per
-cell alone: the OLD path -- a bare call into a gated function -- has no way
-to branch on the EVENT dimension (pre-tag / tag-push / deploy /
-post-deploy-verify) at all, while the new table's ``event`` column means the
-SAME cell reached at two different events is not guaranteed to resolve to
-the same new-path verdict. ``_new_path`` therefore already takes
-``(cell, event)`` today, and the Role-2 test is already parametrized over
-every reachable ``(cell, event)`` pair. RDR-201 P2.3 (nexus-j9z30.13) has
-now landed the table and wired ``_new_path`` for real, so Role 2 no longer
-skips -- every pair below asserts ``old == new``. The (cell -> reachable
-events) mapping used here is STILL the P2.2-time CONSERVATIVE
-over-approximation -- see ``_cell_reachable_events`` below -- P2.3 did NOT
-deliver the exact per-mode/per-cell join this docstring used to promise:
-what it actually delivered is a table whose verdicts are event/mode-
-INVARIANT (every row's guard omits ``event``/``mode`` entirely, verified
-against commit 79fff05a9, the actual 7.1.0/v0.1.62 fix). Whether the
-choreography SHOULD instead be event-sensitive -- which would make the
-per-mode/per-cell precision this mapping was coarser than actually
-matter -- is an OPEN, Sam-gated question owned by nexus-j9z30.26, not
-settled by this reduction. The conservative mapping stays exactly because
-that question is open: it is the safe direction (more (cell, event)
-cases than a precise join would produce, never fewer), so nothing is
-silently excluded from a future event-sensitive table's coverage either.
+No event dimension
+------------------
+
+RDR-201 P2.3 declared table-wide ``event`` / ``mode`` dimensions and this
+harness parametrized Role 2 over every reachable (cell, event) pair,
+because Finding 2 had classified the 7.1.0/v0.1.62 incident as an
+un-encoded event dimension. Sam's ruling (nexus-j9z30.26, 2026-09-02):
+event-invariance is CORRECT. The fix for that incident (79fff05a9)
+changed a remedy string and prose, no decision logic; the event-
+sensitivity is real but lives in the release / engine-release SKILL
+choreography (which moment a human runs which gate), which
+``enumerate_release_cells.event_mode_matrix()`` records as citations. A
+table over the scripts' own inputs is event-invariant by construction, so
+the columns are gone from the table and the pairs are gone from here.
+Do not re-derive the question from the incident write-up.
 
 Isolation
 ---------
@@ -92,6 +82,7 @@ import copy
 import json
 import pathlib
 import random
+import re
 from typing import Any, Callable
 from unittest.mock import patch
 
@@ -129,15 +120,12 @@ _CHOREOGRAPHY_TABLE_PATH = _choreo.CHOREOGRAPHY_TABLE_PATH
 #: key at all.
 _NOT_APPLICABLE = "n/a"
 
-#: A placeholder domain value for a declared dimension no row in the
-#: cell's own function-group examines (RDR-201 P2.3 design: "event" and
-#: "mode" are declared table-wide per the bead's spec but referenced by
-#: no row's guard in TODAY's table -- see the table's own file header).
-#: Whether the choreography SHOULD be event-sensitive is an open,
-#: Sam-gated question (nexus-j9z30.26); this placeholder is a mechanical
-#: consequence of today's table shape, not a claim that the question is
-#: settled. Any in-domain value resolves identically against today's
-#: table; the first declared domain member is used deterministically.
+#: A placeholder domain value for every declared dimension the cell's own
+#: function-group never examines -- every OTHER function's own
+#: function-prefixed dimensions. ``resolve()`` demands a value for every
+#: declared dimension, and no row outside the cell's own match group ever
+#: reads these, so any in-domain value resolves identically; the first
+#: declared domain member is used deterministically.
 _UNUSED_DIM_PLACEHOLDER_INDEX = 0
 
 
@@ -146,9 +134,8 @@ _UNUSED_DIM_PLACEHOLDER_INDEX = 0
 #: the 12 functions ``build_fixture()`` enumerates
 #: (``erc._all_chains()`` + ``erc._all_orchestrator_results()``); a 13th
 #: function appearing in the fixture with no driver here is a real gap,
-#: caught loudly by ``_drive_old_path``'s ``KeyError`` -- never silently
-#: skipped.
-_OLD_PATH_DRIVERS: dict[str, Callable[[erc.Cell], tuple[int, str]]] = {
+#: caught loudly by ``_drive``'s ``KeyError`` -- never silently skipped.
+_DRIVERS: dict[str, Callable[[erc.Cell], tuple[int, str]]] = {
     "check_pin_currency": erc.drive_pin_currency,
     "check_source_ancestry": erc.drive_source_ancestry,
     "check_client_lag_ledger": erc.drive_client_lag_ledger,
@@ -183,48 +170,6 @@ _FUNCTION_SCRIPT: dict[str, str] = {
 }
 
 
-def _script_reachable_events() -> dict[str, tuple[str, ...]]:
-    """The union of events reachable by ANY mode of each script, per
-    ``erc.event_mode_matrix()`` (the static mode -> event citations table)."""
-    by_script: dict[str, set[str]] = {}
-    for row in erc.event_mode_matrix():
-        if row["reachable"]:
-            by_script.setdefault(row["script"], set()).add(row["event"])
-    return {script: tuple(sorted(events)) for script, events in by_script.items()}
-
-
-_SCRIPT_REACHABLE_EVENTS = _script_reachable_events()
-
-
-def _cell_reachable_events(cell_dict: dict[str, Any]) -> tuple[str, ...]:
-    """P2.2 conservative mapping: a cell's reachable events = the UNION of
-    reachable events across every MODE its script exposes (e.g.
-    ``check_pin_currency`` is reached by three of the floor script's four
-    modes, at different event sets each) -- coarser than a precise
-    per-mode/per-cell attribution would be. RDR-201 P2.3 (nexus-j9z30.13)
-    did NOT narrow this to that precise join: the table it authored makes
-    every cell's verdict event/mode-invariant instead (no row's guard
-    examines ``event``/``mode`` at all), so there is currently no per-mode
-    event set to join against here. Whether a future, event-sensitive
-    table should replace this coarse mapping with a precise one is part of
-    the open question nexus-j9z30.26 owns. This mapping stays conservative
-    in the SAFE direction regardless of how that question resolves: it can
-    only add MORE (cell, event) parametrized cases than a precise join
-    would, never fewer, so nothing is silently excluded from Role 2's
-    coverage either way."""
-    script = _FUNCTION_SCRIPT[cell_dict["function"]]
-    return _SCRIPT_REACHABLE_EVENTS[script]
-
-
-_CELL_EVENT_PAIRS: list[tuple[dict[str, Any], str]] = [
-    (cell_dict, event)
-    for cell_dict in _FIXTURE_CELLS
-    for event in _cell_reachable_events(cell_dict)
-]
-_CELL_EVENT_IDS: list[str] = [
-    f"{cell_dict['cell_id']}@{event}" for cell_dict, event in _CELL_EVENT_PAIRS
-]
-
 _CORRUPTION_SAMPLE_SEED = 20260902
 _CORRUPTION_SAMPLE_SIZE = 3
 
@@ -239,34 +184,22 @@ def _cell_from_fixture(cell_dict: dict[str, Any]) -> erc.Cell:
     )
 
 
-def _drive_old_path(cell: erc.Cell) -> tuple[int, str]:
-    """Drive the CURRENT decision path -- the real gated function -- for one
-    cell, by dispatching to the enumerator's own driver for ``cell.function``.
-    Never reimplements a driver; a function the fixture names with no entry
-    in ``_OLD_PATH_DRIVERS`` fails loudly (``KeyError``), not silently."""
-    return _OLD_PATH_DRIVERS[cell.function](cell)
+def _drive(cell: erc.Cell) -> tuple[int, str]:
+    """Drive the real gated function for one cell, by dispatching to the
+    enumerator's own driver for ``cell.function``. Never reimplements a
+    driver; a function the fixture names with no entry in ``_DRIVERS``
+    fails loudly (``KeyError``), not silently."""
+    return _DRIVERS[cell.function](cell)
 
 
-def _drive_capturing_full_text(function: str, cell: erc.Cell, decision_path: str) -> tuple[tuple[int, str], str]:
-    """RDR-201 P2.4 fix round (critique T2 nexus/critique-nexus-j9z30-14
-    -2026-09-02 [24073] finding (a)): drive ``function``'s real gated call
-    for ``cell`` with ``release_choreography.DECISION_PATH`` set to
-    ``decision_path`` ("old" or "table"), returning BOTH the classified
-    ``(exit_code, message_key)`` verdict AND the full, combined stdout+stderr
-    TEXT the call produced.
-
-    Every existing comparison in this file (Role 1, Role 2, the fixture
-    itself) reduces a driven call to ``(exit_code, message_key)`` via
-    ``enumerate_release_cells.py``'s own marker-substring classifiers --
-    never the actual printed prose. A content-level regression in
-    ``release_messages.py`` (a dropped caveat, a wrong remedy pointer, a
-    hollowed-out placeholder) that happens to preserve both the exit code
-    and whatever substring a classifier keys on is invisible to all of
-    that. This spies on ``enumerate_release_cells._capture`` -- the SINGLE
-    choke point every ``drive_*`` function funnels its real call through --
-    to record the raw text alongside the classified result, without
-    reimplementing any driver's own sensor-patching.
-    """
+def _drive_capturing_text(cell: erc.Cell) -> tuple[tuple[int, str], str]:
+    """``_drive``, also returning the full combined stdout+stderr TEXT the
+    real call produced. Every driver reduces a call to ``(exit_code,
+    message_key)`` via the enumerator's marker-substring classifiers, never
+    the printed prose; this spies on ``enumerate_release_cells._capture``
+    -- the SINGLE choke point every ``drive_*`` function funnels its real
+    call through -- to record the raw text alongside, without
+    reimplementing any driver's own sensor-patching."""
     original_capture = erc._capture
     chunks: list[str] = []
 
@@ -275,13 +208,8 @@ def _drive_capturing_full_text(function: str, cell: erc.Cell, decision_path: str
         chunks.append(out + err)
         return rc, out, err
 
-    original_path = _choreo.DECISION_PATH
-    _choreo.DECISION_PATH = decision_path
-    try:
-        with patch.object(erc, "_capture", side_effect=_spy_capture):
-            verdict = _OLD_PATH_DRIVERS[function](cell)
-    finally:
-        _choreo.DECISION_PATH = original_path
+    with patch.object(erc, "_capture", side_effect=_spy_capture):
+        verdict = _drive(cell)
     return verdict, "".join(chunks)
 
 
@@ -324,8 +252,8 @@ _SYNTHETIC_GUARD_TRANSFORMS: dict[str, Callable[[dict[str, str]], dict[str, str]
 }
 
 
-def _assignment_for(table: Table, cell_dict: dict[str, Any], event: str) -> dict[str, str]:
-    """Build a full ``resolve()`` assignment for ``cell_dict`` at ``event``.
+def _assignment_for(table: Table, cell_dict: dict[str, Any]) -> dict[str, str]:
+    """Build a full ``resolve()`` assignment for ``cell_dict``.
 
     ``resolve()`` requires a value for EVERY declared table dimension
     (``nexus.tables.resolve._validate``), not just the ones ``cell_dict``'s
@@ -334,16 +262,15 @@ def _assignment_for(table: Table, cell_dict: dict[str, Any], event: str) -> dict
     function-prefixed dimension names (``"<function>.<key>"``, dropping any
     ``"n/a"`` sentinel -- see ``_NOT_APPLICABLE`` above -- and routed through
     ``_SYNTHETIC_GUARD_TRANSFORMS`` for the one function whose table
-    dimension is not a direct rename of its fixture input keys); ``event``
-    itself; and, for every OTHER declared dimension the cell's own inputs
-    never touch (including the intentionally-guard-unreferenced
-    ``event``/``mode`` when not already set, and every OTHER function's own
-    dimensions), a deterministic placeholder from that dimension's own
-    domain -- harmless by construction, since no row outside the cell's own
-    match group ever examines them (RDR-201 P2.3 design, see the table's
-    file header)."""
+    dimension is not a direct rename of its fixture input keys); and, for
+    every OTHER declared dimension (every other function's own), a
+    deterministic placeholder from that dimension's own domain -- harmless
+    by construction, since no row outside the cell's own match group ever
+    examines them (RDR-201 P2.3 design, see the table's file header).
+    Mirrors ``release_choreography.resolve_choreography_row`` for the
+    non-test call sites."""
     function = cell_dict["function"]
-    assignment: dict[str, str] = {"function": function, "event": event}
+    assignment: dict[str, str] = {"function": function}
     transform = _SYNTHETIC_GUARD_TRANSFORMS.get(function)
     raw_inputs = transform(cell_dict["inputs"]) if transform else cell_dict["inputs"]
     for key, value in raw_inputs.items():
@@ -356,34 +283,9 @@ def _assignment_for(table: Table, cell_dict: dict[str, Any], event: str) -> dict
     return assignment
 
 
-def _new_path(cell: dict[str, Any], event: str) -> tuple[int, str]:
-    """RDR-201 P2.4/P2.5 (nexus-j9z30.14/.15): drive the REAL gated
-    function for ``cell`` with ``release_choreography.DECISION_PATH``
-    flipped to ``"table"`` -- exercising the ACTUAL production wiring
-    (``release_choreography.emit_choreography()`` as called from inside
-    whichever of the two scripts owns ``cell["function"]``), never the
-    table in isolation. Reuses ``_OLD_PATH_DRIVERS[function]`` unchanged:
-    the same driver monkeypatches the sensors and invokes the real gated
-    function either way, so which decision path fires depends only on the
-    flag. The table is read through ``release_choreography
-    .choreography_table()`` -- the ONE accessor -- so a test that patches
-    that name steers the real function (nexus-w2x5x).
-
-    ``event`` is carried for parity with the (cell, event) parametrization
-    Role 2 still runs under (see the module docstring); the real function
-    has no event input, so nothing here consults it."""
-    driven_cell = _cell_from_fixture(cell)
-    original_path = _choreo.DECISION_PATH
-    _choreo.DECISION_PATH = "table"
-    try:
-        return _OLD_PATH_DRIVERS[cell["function"]](driven_cell)
-    finally:
-        _choreo.DECISION_PATH = original_path
-
-
-def _assert_old_path_matches_fixture(cell_dict: dict[str, Any]) -> None:
+def _assert_real_function_matches_fixture(cell_dict: dict[str, Any]) -> None:
     cell = _cell_from_fixture(cell_dict)
-    observed = _drive_old_path(cell)
+    observed = _drive(cell)
     assert erc.verify_cell(cell, observed), (
         cell_dict["cell_id"], observed, (cell.exit_code, cell.message_key),
     )
@@ -407,7 +309,7 @@ def test_function_script_map_covers_every_fixture_function() -> None:
     """``_FUNCTION_SCRIPT`` is hand-maintained (there is no machine-readable
     function -> script mapping to read from the enumerator). If a 13th
     cell-producing function ever appears in the fixture with no entry here,
-    ``_cell_reachable_events`` would ``KeyError`` deep inside test
+    ``_first_cell_per_script`` would ``KeyError`` deep inside test
     collection with a confusing traceback -- this test fails loudly and
     specifically instead, at the actual point of drift."""
     fixture_functions = {c["function"] for c in _FIXTURE_CELLS}
@@ -465,75 +367,68 @@ def test_committed_fixture_is_not_stale_relative_to_a_fresh_enumeration() -> Non
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("cell_dict", _FIXTURE_CELLS, ids=_FIXTURE_CELL_IDS)
-def test_old_path_matches_fixture(cell_dict: dict[str, Any]) -> None:
-    """Drive the CURRENT decision path for every enumerated cell and assert
-    its verdict matches the fixture's frozen expected column. This is the
-    parity harness's role while no table exists: a change detector on the
-    real gated functions and on the enumeration that describes them."""
-    _assert_old_path_matches_fixture(cell_dict)
+def test_real_function_matches_fixture(cell_dict: dict[str, Any]) -> None:
+    """Role 1 -- see the module docstring."""
+    _assert_real_function_matches_fixture(cell_dict)
 
 
 # ---------------------------------------------------------------------------
-# Role 2 (P2.4/P2.5): old-path-vs-new-path parity, per (cell, event) pair
+# Role 2: the real function fills every catalog placeholder it prints
 # ---------------------------------------------------------------------------
 
-#: RDR-201 P2.4 fix round (critique T2 nexus/critique-nexus-j9z30-14
-#: -2026-09-02 [24073] finding (a); code-review T2
-#: nexus/code-review-nexus-j9z30-14-2026-09-02 [24074] Important 1):
-#: cell_id -> reason, for a cell whose OLD-path and NEW-path
-#: printed TEXT is legitimately, permanently unequal even though their
-#: (exit_code, message_key) verdict agrees. As of this fix round: EMPTY --
-#: release_messages.py's catalog entries were corrected (ledger-path
-#: placeholders, the newline-joined blocked-entries layout, the six
-#: tracker_* entries' hardcoded exception paraphrase replaced with the real
-#: [exc] placeholder, the two auto-paired UNVERIFIABLE messages' dropped
-#: caveat clause, and the four PAIRED MODE ack messages' missing POST-TAG
-#: VERIFY paragraph) until every floor-script cell in the fixture produced
-#: byte-identical text on both paths. A future addition here must name the
-#: specific cell_id and the reason full parity is impossible for it, never
-#: widen silently (e.g. via a blanket skip on a whole function).
-_FULL_TEXT_NAMED_EXCEPTIONS: dict[str, str] = {}
+#: Bracketed tokens in release_messages.py that are PROSE, not placeholders
+#: (the ``[additive]`` direction-safety token is quoted verbatim in four
+#: ledger messages). Anything else of the shape ``[name]`` in a catalog
+#: entry is a hole a call site must fill.
+_LITERAL_BRACKET_TOKENS = frozenset({"[additive]"})
+_BRACKET_TOKEN = re.compile(r"\[[a-z_.]+\]")
 
 
-@pytest.mark.parametrize("cell_dict,event", _CELL_EVENT_PAIRS, ids=_CELL_EVENT_IDS)
-def test_new_path_matches_old_path_cell_by_cell(
-    cell_dict: dict[str, Any], event: str,
-) -> None:
-    """RDR-201 P2.3 (nexus-j9z30.13): ``_new_path`` now resolves
-    ``docs/tables/release-choreography.toml`` for real, so this asserts
-    ``old == new`` for every reachable (cell, event) pair -- see the
-    module docstring for why event is part of the comparison, not folded
-    away. Today's table happens to make every row's verdict event/mode-
-    invariant, but whether the CHOREOGRAPHY *should* be event-sensitive is
-    an OPEN, Sam-gated question (nexus-j9z30.26, critique T2
-    nexus/critique-nexus-j9z30-13-2026-09-01 [24060]) -- the same posture
-    as the O2 order-asymmetry (nexus-j9z30.17). A mismatch here must stay
-    LOUD and UNDECIDED: it is real signal (either a mistranscribed guard,
-    or evidence bearing on nexus-j9z30.26's question), never something
-    this test resolves for itself by declaring one interpretation correct.
+def _catalog_placeholders() -> frozenset[str]:
+    tokens: set[str] = set()
+    for text in release_messages.RELEASE_MESSAGES.values():
+        tokens.update(_BRACKET_TOKEN.findall(text))
+    return frozenset(tokens - _LITERAL_BRACKET_TOKENS)
 
-    RDR-201 P2.4 fix round (critique T2 nexus/critique-nexus-j9z30-14
-    -2026-09-02 [24073] finding (a)): ALSO drive both paths a second time
-    capturing the full printed TEXT (not just the classified verdict) and
-    assert byte equality -- closing the blind spot where a content-level
-    regression in release_messages.py's prose could preserve the exit code
-    and whatever substring a classifier keys on while still being wrong.
-    Since RDR-201 P2.5 (nexus-j9z30.15) this covers every cell of BOTH
-    scripts -- the precondition script's three cell-producing functions
-    drive real printed output through the same switch now."""
-    new = _new_path(cell_dict, event)
+
+_CATALOG_PLACEHOLDERS = _catalog_placeholders()
+
+
+def _unfilled_placeholders(text: str) -> list[str]:
+    return sorted(p for p in _CATALOG_PLACEHOLDERS if p in text)
+
+
+def test_catalog_declares_placeholders() -> None:
+    """Non-vacuity for Role 2: a catalog with no placeholders would make
+    every case below pass without checking anything."""
+    assert len(_CATALOG_PLACEHOLDERS) >= 20, sorted(_CATALOG_PLACEHOLDERS)
+
+
+@pytest.mark.parametrize("cell_dict", _FIXTURE_CELLS, ids=_FIXTURE_CELL_IDS)
+def test_real_function_fills_every_catalog_placeholder(cell_dict: dict[str, Any]) -> None:
+    """Role 2 -- see the module docstring. Checked against the union of
+    every catalog entry's placeholders, not just the cell's own row's: a
+    delegating cell prints its DELEGATE's entry, and that is the text
+    whose holes matter."""
     cell = _cell_from_fixture(cell_dict)
-    old = _drive_old_path(cell)
-    assert new == old, (cell_dict["cell_id"], event, old, new)
+    verdict, text = _drive_capturing_text(cell)
+    assert verdict == (cell.exit_code, cell.message_key), (cell_dict["cell_id"], verdict)
+    unfilled = _unfilled_placeholders(text)
+    assert not unfilled, (cell_dict["cell_id"], unfilled, text)
 
-    function = cell_dict["function"]
-    old_verdict, old_text = _drive_capturing_full_text(function, cell, "old")
-    new_verdict, new_text = _drive_capturing_full_text(function, cell, "table")
-    assert old_verdict == new_verdict, (cell_dict["cell_id"], event, old_verdict, new_verdict)
-    cell_id = cell_dict["cell_id"]
-    if cell_id in _FULL_TEXT_NAMED_EXCEPTIONS:
-        pytest.skip(_FULL_TEXT_NAMED_EXCEPTIONS[cell_id])
-    assert old_text == new_text, (cell_id, event, old_text, new_text)
+
+def test_placeholder_check_catches_an_unfilled_placeholder() -> None:
+    """Proof Role 2 CAN fail: plant an extra placeholder in one real cell's
+    catalog entry -- nothing at the call site knows to fill it -- and
+    confirm the check reports it."""
+    cell_dict = _FIXTURE_CELLS[0]
+    row_id = cell_dict["cell_id"]
+    planted = release_messages.RELEASE_MESSAGES[row_id] + " [probe_hole]"
+    with patch.dict(release_messages.RELEASE_MESSAGES, {row_id: planted}):
+        _, text = _drive_capturing_text(_cell_from_fixture(cell_dict))
+        planted_placeholders = _catalog_placeholders()
+    assert "[probe_hole]" in text, (row_id, text)
+    assert "[probe_hole]" in sorted(p for p in planted_placeholders if p in text)
 
 
 # ---------------------------------------------------------------------------
@@ -546,12 +441,10 @@ def test_table_row_matches_fixture_by_direct_resolve(cell_dict: dict[str, Any]) 
     pin the row it hits -- id, exit code, message key -- to the fixture.
     See the module docstring's Role 3: this is the only place a DELEGATING
     row's verdict is checked at all, since no real function ever emits
-    one. Event-invariant by ruling (nexus-j9z30.26), so one event per cell
-    suffices; a refusal on a cell the fixture enumerated as reachable is a
+    one. A refusal on a cell the fixture enumerated as reachable is a
     table-authoring defect and fails loudly with the assignment named."""
     table = _choreo.choreography_table()
-    event = _cell_reachable_events(cell_dict)[0]
-    assignment = _assignment_for(table, cell_dict, event)
+    assignment = _assignment_for(table, cell_dict)
     resolution = resolve(table, assignment)
     assert resolution.refusal is None, (
         f"{cell_dict['cell_id']}: table refused a cell the fixture enumerated "
@@ -597,7 +490,7 @@ def test_a_corrupted_expected_verdict_reds_the_harness(
     corrupted = copy.deepcopy(original)
     corrupted["exit_code"] = _a_wrong_exit_code(original["exit_code"])
     with pytest.raises(AssertionError):
-        _assert_old_path_matches_fixture(corrupted)
+        _assert_real_function_matches_fixture(corrupted)
 
 
 def _a_wrong_exit_code(exit_code: int) -> int:
@@ -732,69 +625,61 @@ def test_battery_published_unavailable_catalog_reason_placeholder_drives_the_cla
 
 
 # ---------------------------------------------------------------------------
-# Role 2 harness integrity: a corrupted table row must red the harness
+# Harness integrity: the real function must FOLLOW the table
 # ---------------------------------------------------------------------------
 #
 # Mirrors Role 1's ``test_a_corrupted_expected_verdict_reds_the_harness``
 # above (code-review IMPORTANT #4, T2 nexus/code-review-nexus-j9z30-13
-# -2026-09-01 [24062]): Role 2 catches a mistranscribed table row BY
-# CONSTRUCTION today (a wrong ``emit.exit_code`` makes ``new != old``), but
-# nothing proved that until now -- a Role-2 suite that always passes
-# because every authored row happens to already agree with the real
-# scripts would look identical to one that is silently incapable of
-# catching a wrong row at all.
+# -2026-09-01 [24062]): a suite that always passes because every authored
+# row happens to already agree with the real scripts would look identical
+# to one where the scripts silently stopped reading the table at all.
 
 
-def _first_cell_event_pair_per_script() -> list[tuple[str, dict[str, Any], str]]:
-    """One (script, cell, event) sample per gated script -- the first
-    reachable pair of each in fixture order. Both scripts must be
-    represented: a canary that only ever samples one script cannot tell
-    that the OTHER script's table path silently ignores the table (e.g. a
-    switch flipped on a module that no longer owns it)."""
-    seen: dict[str, tuple[dict[str, Any], str]] = {}
-    for cell_dict, event in _CELL_EVENT_PAIRS:
-        seen.setdefault(_FUNCTION_SCRIPT[cell_dict["function"]], (cell_dict, event))
+def _first_cell_per_script() -> list[tuple[str, dict[str, Any]]]:
+    """One (script, cell) sample per gated script -- the first cell of each
+    in fixture order. Both scripts must be represented: a canary that only
+    ever samples one script cannot tell that the OTHER script's decision
+    path silently ignores the table (an emit reading some other cache, a
+    branch that still prints its own verdict)."""
+    seen: dict[str, dict[str, Any]] = {}
+    for cell_dict in _FIXTURE_CELLS:
+        seen.setdefault(_FUNCTION_SCRIPT[cell_dict["function"]], cell_dict)
     scripts = sorted(set(_FUNCTION_SCRIPT.values()))
     missing = [name for name in scripts if name not in seen]
     assert not missing, f"no fixture cell for {missing} -- the canary cannot cover that script"
-    return [(name, *seen[name]) for name in scripts]
+    return [(name, seen[name]) for name in scripts]
 
 
-_MUTATION_CANARY_SAMPLES = _first_cell_event_pair_per_script()
+_MUTATION_CANARY_SAMPLES = _first_cell_per_script()
 
 
 @pytest.mark.parametrize(
-    "script,cell_dict,event", _MUTATION_CANARY_SAMPLES,
-    ids=[f"{script}:{cell_dict['cell_id']}@{event}" for script, cell_dict, event in _MUTATION_CANARY_SAMPLES],
+    "script,cell_dict", _MUTATION_CANARY_SAMPLES,
+    ids=[f"{script}:{cell_dict['cell_id']}" for script, cell_dict in _MUTATION_CANARY_SAMPLES],
 )
-def test_a_mutated_table_row_reds_role_2(
-    script: str, cell_dict: dict[str, Any], event: str, mutate_choreography_row: Callable[[str, int], Table],
+def test_a_mutated_table_row_changes_the_real_verdict(
+    script: str, cell_dict: dict[str, Any], mutate_choreography_row: Callable[[str, int], Table],
 ) -> None:
     """Flip one row's ``exit_code`` in an in-memory copy of the real table,
     steer the REAL gated function onto that copy by patching
     ``release_choreography.choreography_table`` -- the ONE accessor every
-    table-path emit in either script resolves through (nexus-w2x5x) -- and
-    confirm Role 2's own comparison (``_new_path`` vs ``_drive_old_path``)
-    actually disagrees. Proof this harness CAN catch a wrong table row on
-    the production wiring itself, not just a suite that always passes
-    because the table happens to already agree with the real scripts.
+    emit in either script resolves through (nexus-w2x5x) -- and confirm the
+    observed verdict follows the mutation. Proof the production wiring
+    reads the table, not just a suite that agrees with it by coincidence.
 
-    Parametrized over one cell per gated script. A script whose table path
-    is not genuinely live (its switch stale, its emit reading some other
-    cache) ignores the mutation, returns the old verdict, and REDS here --
-    which is the whole reason this samples both scripts, not just one.
-    The file on disk and the real cached table are never touched: the
-    mutated copy (``mutate_choreography_row``, tests/scripts/conftest.py)
-    is built BEFORE the patch, from the real accessor, and the patch is
-    scoped to the one ``_new_path`` call."""
-    mutated = mutate_choreography_row(cell_dict["cell_id"], _a_wrong_exit_code(cell_dict["exit_code"]))
-    with patch.object(_choreo, "choreography_table", return_value=mutated):
-        new = _new_path(cell_dict, event)
+    Parametrized over one cell per gated script. The file on disk and the
+    real cached table are never touched: the mutated copy
+    (``mutate_choreography_row``, tests/scripts/conftest.py) is built
+    BEFORE the patch, from the real accessor, and the patch is scoped to
+    the one driven call."""
     cell = _cell_from_fixture(cell_dict)
-    old = _drive_old_path(cell)
-    assert new != old, (
-        "the mutated table's flipped exit_code did not change the "
-        "resolved verdict -- Role 2's comparison cannot catch a wrong "
-        "table row on this script's table path",
-        script, cell_dict["cell_id"], event, old, new,
+    expected = (cell.exit_code, cell.message_key)
+    mutated = mutate_choreography_row(cell_dict["cell_id"], _a_wrong_exit_code(cell.exit_code))
+    with patch.object(_choreo, "choreography_table", return_value=mutated):
+        observed = _drive(cell)
+    assert observed != expected, (
+        "the mutated table's flipped exit_code did not change the real "
+        "function's verdict -- this script's decision path is not reading "
+        "the table",
+        script, cell_dict["cell_id"], expected, observed,
     )
