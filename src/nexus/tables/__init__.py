@@ -4,9 +4,8 @@ decision tables (RDR-201).
 Load a TOML table with :func:`load_table` (explicit path) or
 :func:`load_packaged_table` (``importlib.resources``, for a table shipped
 inside a package), then prove its coverage and overlap with
-:func:`check_table`. A table evaluator that resolves a single row for a
-concrete assignment lands in a later phase (RDR-201 P1.2,
-``nexus.tables.resolve``).
+:func:`check_table`. :func:`resolve` (RDR-201 P1.2) evaluates a single row
+for a concrete assignment of every declared dimension.
 """
 
 from __future__ import annotations
@@ -41,8 +40,17 @@ from nexus.tables.load import (
     load_packaged_table,
     load_table,
 )
+from nexus.tables.resolve import (
+    AMBIGUOUS_MATCH,
+    NO_MATCH,
+    REFUSAL_CODES,
+    UNKNOWN_VALUE,
+    Resolution,
+    resolve,
+)
 
 __all__ = [
+    "AMBIGUOUS_MATCH",
     "BLOCKING_CODES",
     "CLOSED_BY_ESCAPE",
     "COVERAGE_GAP",
@@ -54,13 +62,17 @@ __all__ = [
     "MatchKeysMismatchError",
     "MultipleEscapesInGroupError",
     "MultipleOutcomesError",
+    "NO_MATCH",
     "OVERLAP",
     "PRODUCT_BOUND",
     "ProductTooLargeError",
+    "REFUSAL_CODES",
+    "Resolution",
     "Row",
     "Table",
     "TableLoadError",
     "UNKNOWN_LITERAL",
+    "UNKNOWN_VALUE",
     "UNPROVABLE_COVERAGE",
     "UnknownLiteralError",
     "check_table",
@@ -69,4 +81,5 @@ __all__ = [
     "groups_of",
     "load_packaged_table",
     "load_table",
+    "resolve",
 ]
