@@ -282,11 +282,11 @@ Renamed documents do not automatically gain `category="rdr_postmortem"` on their
 1. Prompt for superseding RDR ID
 2. **Write `superseded_by` into the OLD RDR's YAML frontmatter FIRST.** `nx rdr set-status ... superseded`'s `successor` guard reads this key from the file AT CALL TIME and refuses `successor-not-named` if it is absent — the frontmatter edit must happen BEFORE the CLI call in step 3, never after. Edit the old RDR's frontmatter block to add (or set) the key:
    ```
-   superseded_by: "NNN"
+   superseded_by: "RDR-NNN"
    ```
    (NNN = the superseding RDR's numeric ID.)
 3. **Flip the old RDR's file status + README via the CLI:** run `nx rdr set-status MMM superseded` (code-enforced; do NOT hand-edit the `status:` line itself — the frontmatter edit in step 2 is the only direct edit, and it comes first). The README index cell is written as "Superseded by RDR-NNN" automatically, reading the `superseded_by` key from step 2. Then cross-link both RDRs (bidirectional):
-   - **Old RDR**: In T2, set `superseded_by: "NNN"` (the T2 record; separate from the frontmatter key already written in step 2). In markdown BODY (below the frontmatter fence), add a "Superseded by RDR-NNN" note.
+   - **Old RDR**: In T2, set `superseded_by: "RDR-NNN"` (the T2 record; separate from the frontmatter key already written in step 2). In markdown BODY (below the frontmatter fence), add a "Superseded by RDR-NNN" note.
    - **New RDR**: In T2, set `supersedes: "MMM"`. In markdown, add "Supersedes RDR-MMM" note
 4. **Scoped reindex** — this flow typically DOES warrant a reindex because the markdown notes added in step 3 live in the RDR body. Run the single-file form: `nx index rdr docs/rdr/rdr-NNN-<slug>.md` on the OLD RDR, and separately on the NEW RDR. Two files → two single-file invocations. Do NOT run the whole-corpus form.
 5. **Catalog link** (if catalog initialized): Create `supersedes` link in the catalog so the graph reflects the relationship:
