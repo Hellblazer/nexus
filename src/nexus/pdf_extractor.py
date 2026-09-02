@@ -1416,13 +1416,56 @@ class PDFExtractor:
         explicit URL it is a transient-recovery re-probe of the same
         endpoint. This is deliberate: honoring "operator intent wins" (Gap 1)
         precludes a pid file silently redirecting an explicitly-pinned URL.
+
+        nexus-eti1v: a KNOWN version skew on the registered server is a
+        third outcome from ``get_mineru_server_url()`` — ``None`` — and is
+        NOT "no live server". The registered pid already holds this box's
+        only local server, so neither dialling the built-in default port
+        nor autostart's health wait can ever succeed; both were tried
+        anyway before this fix, at a measured cost of ~2.5 minutes (63
+        repeated skew warnings, a refused dial of the default, a
+        "rediscovery" of that same refused default, then a full
+        ``mineru_ensure_health_timeout`` wait) for a foregone conclusion.
+        On skew, skip straight to subprocess with one loud, reasoned log.
         """
         if self._mineru_server_checked:
             return self._mineru_server_up
 
-        from nexus.config import get_mineru_server_url  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.config import get_mineru_server_url, get_mineru_skew_info  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         first_url = get_mineru_server_url()
+        if first_url is None:
+            self._mineru_server_up = False
+            self._mineru_server_checked = True
+            skew = get_mineru_skew_info()
+            remedy = "nx mineru restart  (or set pdf.mineru_server_url explicitly)"
+            if skew is not None:
+                _log.info(
+                    "mineru_skew_subprocess_fallback",
+                    registered_version=skew.registered_version,
+                    our_version=skew.our_version,
+                    pid=skew.pid,
+                    port=skew.port,
+                    remedy=remedy,
+                )
+                _progress(
+                    f"  MinerU server registered under mineru {skew.registered_version}, "
+                    f"this environment pins {skew.our_version} — skipping straight to "
+                    f"in-process subprocess (run `nx mineru restart` to pick this "
+                    f"environment's version back up, or set pdf.mineru_server_url "
+                    f"explicitly)."
+                )
+            else:
+                # Defensive: the pid file changed state between the two
+                # reads above (e.g. `nx mineru stop` mid-check). No skew
+                # detail to report, but None still means "nothing to dial".
+                _log.info("mineru_skew_subprocess_fallback", remedy=remedy)
+                _progress(
+                    "  MinerU server registration changed during startup check — "
+                    "falling back to in-process subprocess."
+                )
+            return self._mineru_server_up
+
         ok, first_reason = self._probe_mineru_health(first_url)
         if ok:
             self._mineru_server_up = True
@@ -1491,7 +1534,30 @@ class PDFExtractor:
         """Extract via MinerU HTTP server (POST /file_parse)."""
         from nexus.config import get_mineru_server_url, get_mineru_table_enable  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-        url = f"{get_mineru_server_url()}/file_parse"
+        # nexus-eti1v code-review (substantive-critic, T2 critique-index-path
+        # -four-beads-2026-09-02): get_mineru_server_url() can now return
+        # None (skew sentinel) — a possibility that did not exist before
+        # eti1v's fix. This method re-resolves the URL FRESH on every call
+        # (unlike the once-per-instance cache in _mineru_server_available),
+        # so a skew that appears mid-extraction (another process runs `nx
+        # mineru restart` onto a differently-versioned server between this
+        # instance's initial availability check and this page's dispatch)
+        # can hit this call after _mineru_server_available already cached
+        # True. An unguarded f-string turned that into the literal URL
+        # "None/file_parse", which httpx refuses with UnsupportedProtocol —
+        # NOT one of the exception types _mineru_run_isolated's caller
+        # catches (ConnectError/TimeoutException/RemoteProtocolError/
+        # HTTPStatusError), so it propagated uncaught instead of triggering
+        # the existing "server crashed — invalidate cache, try restart,
+        # fall back to subprocess" recovery path. Raising ConnectError here
+        # routes a fresh None into that SAME existing recovery machinery.
+        resolved_url = get_mineru_server_url()
+        if resolved_url is None:
+            raise httpx.ConnectError(
+                "mineru server url resolved to None mid-extraction "
+                "(version skew or deregistration since the last check)",
+            )
+        url = f"{resolved_url}/file_parse"
         with pdf_path.open("rb") as f:
             resp = httpx.post(
                 url,

@@ -101,6 +101,119 @@ class TestPdfCatalogHook:
         assert rows[0] == "docs__v2"
 
 
+class TestPdfCatalogHookPhysicalCollectionRepointLogging:
+    """nexus-t952k half 2: the tail reconcile branch above already stamps
+    ``physical_collection`` unconditionally on every re-index — it must
+    also LOG a real repoint (distinct from a no-op re-index into the same
+    collection) so an operator/doctor pass can see it happened, instead of
+    the AgenticScholar incident's silent drift (T2 nexus/index-
+    agenticscholar-paper-2026-09-02: the row's physical_collection stayed
+    stamped to a run's stale value with no trace)."""
+
+    def test_reindex_into_different_collection_logs_repoint(self, tmp_path, monkeypatch):
+        from structlog.testing import capture_logs
+
+        from nexus.pipeline_stages import _catalog_pdf_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        _catalog_pdf_hook(
+            pdf_path=Path("/data/t952k-repoint.pdf"),
+            collection_name="docs__v1",
+            title="Paper",
+        )
+        with capture_logs() as cap:
+            _catalog_pdf_hook(
+                pdf_path=Path("/data/t952k-repoint.pdf"),
+                collection_name="docs__v2",
+                title="Paper",
+            )
+
+        events = [
+            e for e in cap
+            if e.get("event") == "catalog_physical_collection_repointed"
+        ]
+        assert len(events) == 1, f"expected exactly one repoint log, got {cap}"
+        assert events[0]["old_collection"] == "docs__v1"
+        assert events[0]["new_collection"] == "docs__v2"
+        assert events[0]["tumbler"] == str(only_document().tumbler)
+
+    def test_failed_write_does_not_claim_a_repoint(self, tmp_path, monkeypatch):
+        """critique [24114] S1: the log used to fire BEFORE the write, so a
+        refused update left a 'repointed' claim in the log for a move that
+        never happened. The log now follows the write."""
+        from unittest.mock import patch
+
+        from structlog.testing import capture_logs
+
+        from nexus.pipeline_stages import _catalog_pdf_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        _catalog_pdf_hook(
+            pdf_path=Path("/data/t952k-failed-write.pdf"),
+            collection_name="docs__v1",
+            title="Paper",
+        )
+        from nexus.catalog import factory as _factory
+
+        real_writer = _factory.make_catalog_writer()
+
+        class _RefusingWriter:
+            def __getattr__(self, name):
+                return getattr(real_writer, name)
+
+            def update(self, *_a, **_kw):
+                raise RuntimeError("engine refused the write")
+
+        with capture_logs() as cap, patch.object(
+            _factory, "make_catalog_writer", return_value=_RefusingWriter(),
+        ):
+            # The hook records catalog failures rather than propagating
+            # them (record_catalog_hook_failure), so no raise is expected —
+            # what must not happen is a 'repointed' claim for a row that
+            # never moved.
+            _catalog_pdf_hook(
+                pdf_path=Path("/data/t952k-failed-write.pdf"),
+                collection_name="docs__v2",
+                title="Paper",
+            )
+
+        assert not [
+            e for e in cap
+            if e.get("event") == "catalog_physical_collection_repointed"
+        ], "a failed write must not claim the row was repointed"
+        assert only_document().physical_collection == "docs__v1"
+
+    def test_reindex_into_same_collection_logs_nothing(self, tmp_path, monkeypatch):
+        from structlog.testing import capture_logs
+
+        from nexus.pipeline_stages import _catalog_pdf_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        _catalog_pdf_hook(
+            pdf_path=Path("/data/t952k-nop.pdf"),
+            collection_name="docs__v1",
+            title="Paper",
+        )
+        with capture_logs() as cap:
+            _catalog_pdf_hook(
+                pdf_path=Path("/data/t952k-nop.pdf"),
+                collection_name="docs__v1",
+                title="Paper",
+            )
+
+        events = [
+            e for e in cap
+            if e.get("event") == "catalog_physical_collection_repointed"
+        ]
+        assert events == [], f"same-collection re-index must log nothing, got {cap}"
+
+
 class TestPdfCatalogHookTitleBackfill:
     """Mirror of nexus-ivzw8 for PDFs (papers/2512.11001.pdf, 2026-08-19).
 

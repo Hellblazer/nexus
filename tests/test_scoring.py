@@ -164,12 +164,12 @@ def test_new_scoring_fixes_the_vlzz0_ranking_the_old_formula_got_wrong():
 # round, found it mints a fake winner out of each corpus's own local best
 # regardless of whether that candidate is actually a good match).
 
-def test_calibration_factor_for_model_baseline_and_scaling():
+def test_calibration_factor_for_model_baseline_and_scaling(cloud_mode) -> None:  # RDR-109: names voyage-* collections
     assert _calibration_factor_for_model("voyage-code-3") == pytest.approx(1.0)
     assert _calibration_factor_for_model("voyage-context-3") == pytest.approx(0.45 / 0.65)
 
 
-def test_calibration_factor_for_unrecognized_model_gets_default():
+def test_calibration_factor_for_unrecognized_model_gets_default(cloud_mode) -> None:  # RDR-109: names voyage-* collections
     """An embedding model this table doesn't know (e.g. a local embedder
     token, or any future model) falls to the same "default" bucket
     `search_engine._threshold_for_collection` already uses for an
@@ -211,7 +211,7 @@ def test_identical_distance_stays_identical_score_in_single_embedder_mode():
     assert scored[0].hybrid_score == pytest.approx(scored[1].hybrid_score, abs=1e-9)
 
 
-def test_resolve_calibration_factors_activates_for_genuine_multi_model_set():
+def test_resolve_calibration_factors_activates_for_genuine_multi_model_set(cloud_mode) -> None:  # RDR-109: names voyage-* collections
     """Counterpart to the no-op pin: legacy 2-segment names (no embedded
     model token) fall back to the prefix-based Voyage heuristic
     (nexus.corpus.voyage_model_for_collection) -- code__ and rdr__
@@ -226,7 +226,7 @@ def test_resolve_calibration_factors_activates_for_genuine_multi_model_set():
     assert factors["rdr__proj"] == pytest.approx(0.45 / 0.65)
 
 
-def test_calibration_thresholds_match_config_defaults():
+def test_calibration_thresholds_match_config_defaults(cloud_mode) -> None:  # RDR-109: names voyage-* collections
     """DRIFT GUARD (code review Significant-1): _CALIBRATION_THRESHOLDS_BY_MODEL
     is a hardcoded literal copy of config.py's search.distance_threshold
     defaults, with zero runtime coupling -- chosen over threading live

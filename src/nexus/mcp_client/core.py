@@ -61,6 +61,21 @@ class MCPEndpoint:
     timeout_s: float = 30.0
 
 
+@dataclass(frozen=True)
+class StdioEndpoint:
+    """Connection coordinates for an MCP server spawned over stdio (nexus-fdk1x).
+
+    ``command`` is the executable to spawn (an absolute path — no ``$PATH``
+    lookup is assumed); ``args`` are its argv (e.g. ``("--stdio",)``); ``env``/
+    ``cwd`` override the child's environment/working directory when set.
+    """
+
+    command: str
+    args: tuple[str, ...] = ()
+    env: Mapping[str, str] | None = None
+    cwd: str | None = None
+
+
 def describe_exception(exc: BaseException) -> str:
     """Render *exc* for logging, unwrapping (possibly nested) ``ExceptionGroup``s.
 
@@ -175,3 +190,31 @@ async def open_session(endpoint: MCPEndpoint) -> AsyncIterator[Any]:
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
                 yield session
+
+
+@asynccontextmanager
+async def open_stdio_session(endpoint: StdioEndpoint) -> AsyncIterator[Any]:
+    """Spawn *endpoint*'s command over stdio and yield an initialized session.
+
+    Mirrors :func:`open_session`'s shape (deferred imports, initialize-then-
+    yield, teardown on exit) for the stdio transport (nexus-fdk1x): the
+    DEVONthink 4 built-in MCP server can also be run as a spawned subprocess
+    (``DEVONthink MCP --stdio``, the same binary the desktop app's LoginItems
+    launches at login) when the HTTP listener is unreachable. Lifecycle
+    policy stays with the caller exactly as :func:`open_session` documents —
+    this function decides nothing about whether to open one session per call
+    or hold one open across calls.
+    """
+    from mcp import ClientSession  # noqa: PLC0415 — deferred heavy dep; only loaded when a connection opens
+    from mcp.client.stdio import StdioServerParameters, stdio_client  # noqa: PLC0415 — deferred heavy dep
+
+    params = StdioServerParameters(
+        command=endpoint.command,
+        args=list(endpoint.args),
+        env=dict(endpoint.env) if endpoint.env else None,
+        cwd=endpoint.cwd,
+    )
+    async with stdio_client(params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            yield session

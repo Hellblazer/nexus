@@ -283,7 +283,7 @@ def test_planner_tool_reference_shows_named_collection_and_default_corpus():
     assert "`corpus` must be \"all\"" not in ref
 
 
-def test_collection_hint_samples_every_prefix_family():
+def test_collection_hint_samples_every_prefix_family(cloud_mode) -> None:  # RDR-109: names voyage-* collections
     """nexus-rl59s (critique [24066] S1): alphabetical truncation starved
     knowledge__/rdr__ out of the planner's hint on real installs."""
     from nexus.mcp.core import _sample_collection_names_by_prefix

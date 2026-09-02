@@ -8,7 +8,8 @@ and calls ``extract_aspects`` directly — bypassing the
 already extracted at ingest. AspectRecords are upserted to T2
 ``document_aspects``; an optional ``--validate-sample N%`` runs
 ``operator_verify`` on a random sample and writes disagreements to
-``./validation_failures.jsonl``.
+``<nexus config dir>/aspect_validation_failures.jsonl`` (override via
+``--validation-out``).
 
 Phase 1 supports ``knowledge__*`` collections only; other prefixes
 short-circuit at the ``select_config`` step.
@@ -823,6 +824,8 @@ class TestValidateSample:
             "nexus.mcp.core.operator_verify", disagree,
         )
 
+        from nexus.config import nexus_config_dir
+
         runner = CliRunner()
         with runner.isolated_filesystem():
             result = runner.invoke(enrich, [
@@ -832,9 +835,12 @@ class TestValidateSample:
             assert result.exit_code == 0, result.output
             assert "Validating" in result.output
             assert "disagreement" in result.output
-            failures_path = Path("validation_failures.jsonl")
-            assert failures_path.exists()
-            lines = failures_path.read_text().strip().splitlines()
+            # nexus-xwvwx: the failures log must NEVER land in the CWD.
+            assert not Path("validation_failures.jsonl").exists()
+        failures_path = nexus_config_dir() / "aspect_validation_failures.jsonl"
+        assert str(failures_path) in result.output
+        assert failures_path.exists()
+        lines = failures_path.read_text().strip().splitlines()
         assert len(lines) == 2
         for line in lines:
             row = json.loads(line)
@@ -842,6 +848,8 @@ class TestValidateSample:
             assert row["citations"] == ["page 3"]
             assert "extracted_aspects" in row
             assert "timestamp" in row
+            assert row["evidence_truncated"] is False
+            assert row["evidence_chars"] == row["document_chars"]
         # The verifier saw the indexed chunk text, never the raw file bytes.
         assert seen_evidence
         assert all(e == "reassembled OCR prose from T3 chunks" for e in seen_evidence)
@@ -901,6 +909,266 @@ class TestValidateSample:
         belong in the default-rate decision."""
         from nexus.commands.enrich import _DEFAULT_VALIDATE_SAMPLE_PCT
         assert _DEFAULT_VALIDATE_SAMPLE_PCT == 5
+
+    def test_validate_sample_never_writes_to_cwd(
+        self,
+        env,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-xwvwx: with no --validation-out, the failures log defaults
+        under nexus_config_dir() -- never the CWD, even when every sample
+        verifies (the all-verified branch must still name the path)."""
+        from nexus.config import nexus_config_dir
+
+        _, _, cat = env
+        src1 = tmp_path / "p1.txt"
+        src1.write_text("paper content 1")
+        _register_entries(cat, [str(src1)])
+
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.extract_aspects",
+            lambda content, source_path, collection, **_kw: _make_record(
+                source_path=source_path,
+            ),
+        )
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.read_indexed_text",
+            lambda **_kw: "reassembled prose",
+        )
+
+        async def agree(claim, evidence, timeout=60.0):
+            return {"verified": True, "reason": "", "citations": []}
+
+        monkeypatch.setattr("nexus.mcp.core.operator_verify", agree)
+
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            result = runner.invoke(enrich, [
+                "aspects", "knowledge__delos", "--validate-sample", "100",
+            ])
+            assert result.exit_code == 0, result.output
+            assert not Path("validation_failures.jsonl").exists()
+        expected_path = nexus_config_dir() / "aspect_validation_failures.jsonl"
+        assert str(expected_path) in result.output
+
+    def test_validate_sample_validation_out_override(
+        self,
+        env,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--validation-out PATH overrides the default config-dir location."""
+        _, _, cat = env
+        src1 = tmp_path / "p1.txt"
+        src1.write_text("paper content 1")
+        _register_entries(cat, [str(src1)])
+
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.extract_aspects",
+            lambda content, source_path, collection, **_kw: _make_record(
+                source_path=source_path,
+            ),
+        )
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.read_indexed_text",
+            lambda **_kw: "reassembled prose",
+        )
+
+        async def disagree(claim, evidence, timeout=60.0):
+            return {"verified": False, "reason": "nope", "citations": []}
+
+        monkeypatch.setattr("nexus.mcp.core.operator_verify", disagree)
+
+        custom_out = tmp_path / "custom" / "failures.jsonl"
+        runner = CliRunner()
+        result = runner.invoke(enrich, [
+            "aspects", "knowledge__delos", "--validate-sample", "100",
+            "--validation-out", str(custom_out),
+        ])
+        assert result.exit_code == 0, result.output
+        assert str(custom_out) in result.output
+        assert custom_out.exists()
+        row = json.loads(custom_out.read_text().strip().splitlines()[0])
+        assert row["evidence_truncated"] is False
+
+    def test_validate_sample_full_hydration_beyond_prior_truncation_point(
+        self,
+        env,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-xwvwx: the evidence handed to operator_verify must be the
+        FULL indexed document text, not the prior hardcoded first-50000-char
+        slice. A marker placed past char 50000 must reach the verifier."""
+        _, _, cat = env
+        src1 = tmp_path / "p1.txt"
+        src1.write_text("paper content 1")
+        _register_entries(cat, [str(src1)])
+
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.extract_aspects",
+            lambda content, source_path, collection, **_kw: _make_record(
+                source_path=source_path,
+            ),
+        )
+
+        # 60,000 chars total -- past the OLD hardcoded 50,000-char slice --
+        # with a marker at the very end, well under the defensive cap.
+        full_text = ("x" * 59_990) + "END-OF-DOCUMENT-MARKER"
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.read_indexed_text",
+            lambda **_kw: full_text,
+        )
+
+        seen_evidence: list[str] = []
+
+        async def agree(claim, evidence, timeout=60.0):
+            seen_evidence.append(evidence)
+            return {"verified": True, "reason": "", "citations": []}
+
+        monkeypatch.setattr("nexus.mcp.core.operator_verify", agree)
+
+        runner = CliRunner()
+        result = runner.invoke(enrich, [
+            "aspects", "knowledge__delos", "--validate-sample", "100",
+        ])
+        assert result.exit_code == 0, result.output
+        assert seen_evidence == [full_text]
+        assert "END-OF-DOCUMENT-MARKER" in seen_evidence[0]
+
+    def test_validate_sample_truncated_evidence_is_unverifiable_not_disagreement(
+        self,
+        env,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-xwvwx: when the document exceeds the defensive evidence
+        cap and operator_verify reports non-verified against the truncated
+        window, the row is classified 'unverifiable' (partial evidence),
+        never counted as a 'disagreement' -- and carries the truncation
+        metadata."""
+        from nexus.commands.enrich import _VALIDATION_EVIDENCE_CHAR_CAP
+
+        _, _, cat = env
+        src1 = tmp_path / "p1.txt"
+        src1.write_text("paper content 1")
+        _register_entries(cat, [str(src1)])
+
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.extract_aspects",
+            lambda content, source_path, collection, **_kw: _make_record(
+                source_path=source_path,
+            ),
+        )
+
+        full_text = "y" * (_VALIDATION_EVIDENCE_CHAR_CAP + 12_345)
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.read_indexed_text",
+            lambda **_kw: full_text,
+        )
+
+        seen_evidence: list[str] = []
+
+        async def disagree(claim, evidence, timeout=60.0):
+            seen_evidence.append(evidence)
+            return {
+                "verified": False,
+                "reason": "claim references content outside the sampled window",
+                "citations": [],
+            }
+
+        monkeypatch.setattr("nexus.mcp.core.operator_verify", disagree)
+
+        runner = CliRunner()
+        result = runner.invoke(enrich, [
+            "aspects", "knowledge__delos", "--validate-sample", "100",
+        ])
+        assert result.exit_code == 0, result.output
+        # The evidence handed to the verifier is bounded by the cap, not
+        # the full 500,012-char document.
+        assert len(seen_evidence[0]) == _VALIDATION_EVIDENCE_CHAR_CAP
+        # Never counted as a disagreement.
+        assert "0 disagreement(s)" in result.output
+        assert "1 unverifiable (evidence truncated)" in result.output
+
+        from nexus.config import nexus_config_dir
+        failures_path = nexus_config_dir() / "aspect_validation_failures.jsonl"
+        row = json.loads(failures_path.read_text().strip().splitlines()[0])
+        assert row["evidence_truncated"] is True
+        assert row["evidence_chars"] == _VALIDATION_EVIDENCE_CHAR_CAP
+        assert row["document_chars"] == len(full_text)
+
+
+# ── operator_verify timeout scaling (code-review T2 [24110] xwvwx finding) ──
+
+
+class TestScaledVerifyTimeout:
+    """``_scaled_verify_timeout``: 60s base + 1s per 5k evidence chars,
+    capped at 300s. A flat 60s under-serves the large-paper validation
+    samples the evidence-cap removal (nexus-xwvwx) specifically targets --
+    a timeout land silently in 'errored' instead of 'disagreement' /
+    'unverifiable', undermining that fix's own goal."""
+
+    def test_zero_evidence_is_the_base(self) -> None:
+        from nexus.commands.enrich import _scaled_verify_timeout
+
+        assert _scaled_verify_timeout(0) == 60.0
+
+    def test_scales_one_second_per_five_thousand_chars(self) -> None:
+        from nexus.commands.enrich import _scaled_verify_timeout
+
+        assert _scaled_verify_timeout(5_000) == 62.5
+        assert _scaled_verify_timeout(25_000) == 72.5
+
+    def test_at_the_evidence_char_cap_ceiling(self) -> None:
+        from nexus.commands.enrich import (
+            _VALIDATION_EVIDENCE_CHAR_CAP,
+            _scaled_verify_timeout,
+        )
+
+        # 500_000 chars -> 60 + 250 = 310s, under the 600s cap (rate doubled
+        # after critique [24114] S2 measured near-zero margin at 160s).
+        assert _scaled_verify_timeout(_VALIDATION_EVIDENCE_CHAR_CAP) == 310.0
+
+    def test_capped_at_six_hundred_seconds(self) -> None:
+        from nexus.commands.enrich import _scaled_verify_timeout
+
+        assert _scaled_verify_timeout(10_000_000) == 600.0
+
+    def test_negative_evidence_length_does_not_go_below_base(self) -> None:
+        # Defensive: len() never returns negative, but the helper must not
+        # produce a timeout below its own base on a malformed input.
+        from nexus.commands.enrich import _scaled_verify_timeout
+
+        assert _scaled_verify_timeout(-100) == 60.0
+
+
+class TestVerifyUsesScaledTimeout:
+    """``_verify()`` (the async wrapper ``nx enrich aspects
+    --validate-sample`` calls per sample) must pass the SCALED timeout to
+    operator_verify, not the old flat 60.0 -- proven end to end through
+    the real ``_verify`` coroutine, not just the pure helper above."""
+
+    def test_verify_passes_scaled_timeout_to_operator_verify(self) -> None:
+        import asyncio
+
+        from nexus.commands.enrich import _scaled_verify_timeout, _verify
+
+        captured: dict = {}
+
+        async def _fake_operator_verify(*, claim, evidence, timeout):
+            captured["timeout"] = timeout
+            captured["evidence_len"] = len(evidence)
+            return {"verified": True, "reason": "", "citations": []}
+
+        with patch("nexus.mcp.core.operator_verify", _fake_operator_verify):
+            evidence = "x" * 200_000
+            asyncio.run(_verify('{"claim": "x"}', evidence))
+
+        assert captured["evidence_len"] == 200_000
+        assert captured["timeout"] == _scaled_verify_timeout(200_000)
+        assert captured["timeout"] > 60.0  # proves it actually scaled, not the old flat value
 
 
 # ── Group structure ─────────────────────────────────────────────────────────

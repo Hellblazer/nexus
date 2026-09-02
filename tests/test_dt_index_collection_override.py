@@ -7,6 +7,11 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
+#: RDR-109 Phase 1: both tests assert conformant voyage-* collection names.
+pytestmark = pytest.mark.usefixtures("cloud_mode")
+
 from nexus.commands.dt import _resolve_dt_collection
 
 
