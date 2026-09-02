@@ -728,7 +728,10 @@ def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
     ledger = _wire_ledger.parse_ledger(_wire_ledger.DEFAULT_LEDGER_PATH)
     if not ledger.unshipped:
         if _use_table_path():
-            return _emit_choreography("check_client_lag_ledger", {"ledger": "empty"})
+            return _emit_choreography(
+                "check_client_lag_ledger", {"ledger": "empty"},
+                {"ledger_path": str(_wire_ledger.DEFAULT_LEDGER_PATH)},
+            )
         print(
             f"client-lag ledger clean: 0 unshipped both-halves commits in "
             f"{_wire_ledger.DEFAULT_LEDGER_PATH}"
@@ -743,13 +746,16 @@ def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
     verdict = _wire_ledger.classify_unshipped(ledger, ack_beads)
     if verdict.blocking:
         if _use_table_path():
-            entries = "; ".join(
-                f"{e.sha} bead {e.bead} engine tag {e.engine_tag} ({e.note})"
+            entries = "\n".join(
+                f"  {e.sha}  bead {e.bead}  engine tag {e.engine_tag}  ({e.note})"
                 for e in verdict.blocking
             )
             return _emit_choreography(
                 "check_client_lag_ledger", {"ledger": "blocking"},
-                {"n": str(len(verdict.blocking)), "entries": entries},
+                {
+                    "n": str(len(verdict.blocking)), "entries": entries,
+                    "ledger_path": str(_wire_ledger.DEFAULT_LEDGER_PATH),
+                },
             )
         print(
             f"PAIRED DEPLOY BLOCKED: {len(verdict.blocking)} both-halves "
@@ -1136,7 +1142,7 @@ def _paired_below_floor_path(
     if _use_table_path():
         return _emit_choreography(
             "check_floor_auto_paired", {"probe": probe, "battery": "passes"},
-            {"deployed": deployed_version, "floor": floor},
+            {"deployed": repr(deployed_version), "floor": floor},
         )
     _print_paired_ack(deployed_version, floor, auto=True)
     return 0
@@ -1370,7 +1376,7 @@ def check_floor(
             if _use_table_path():
                 return _emit_choreography(
                     table_function, {delegate_key: "passes", "probe": "ms_error_below_floor"},
-                    {"deployed": deployed, "floor": floor},
+                    {"deployed": repr(deployed), "floor": floor},
                 )
             _print_paired_ack(deployed, floor)
             return 0
@@ -1408,7 +1414,7 @@ def check_floor(
             if _use_table_path():
                 return _emit_choreography(
                     table_function, {delegate_key: "passes", "probe": "success_below_floor"},
-                    {"deployed": caps.release_version, "floor": floor},
+                    {"deployed": repr(caps.release_version), "floor": floor},
                 )
             _print_paired_ack(caps.release_version, floor)
             return 0

@@ -654,6 +654,20 @@ def drive_paired_preconditions(cell: Cell) -> tuple[int, str]:
 
 
 def _classify_paired_preconditions(rc: int, text: str) -> str:
+    # COUPLING (RDR-201 P2.4 fix round, critique T2 nexus/critique-nexus
+    # -j9z30-14-2026-09-02 [24073] finding (c)): the "could not be
+    # consulted" / "verify publication" markers (battery_published_
+    # unavailable) and "not published" (battery_not_published) are NOT
+    # literal prose from release_messages.py's catalog -- those two catalog
+    # entries carry only a bare "[reason]" placeholder. The actual text
+    # this greps comes from check_engine_release_floor._paired_tag_published
+    # ()'s own reason strings, substituted into that placeholder at the
+    # check_paired_preconditions call site. Rewording either
+    # _paired_tag_published's reason strings OR this markers dict without
+    # the other reclassifies (or breaks) those two cells; see
+    # release_messages.py's own COUPLING comment on those entries, and
+    # tests/scripts/test_release_table_parity.py's test_battery_*_catalog_
+    # reason_placeholder_drives_the_classifier.
     markers = {
         "is not an engine-service-v* tag": "battery_bad_prefix",
         "does not parse as a version": "battery_unparseable_tag",

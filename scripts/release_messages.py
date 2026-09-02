@@ -108,12 +108,12 @@ RELEASE_MESSAGES: dict[str, str] = {
     # -- check_client_lag_ledger (check_engine_release_floor.py) -----------
     "check_client_lag_ledger::ledger_clean": (
         "client-lag ledger clean: 0 unshipped both-halves commits in "
-        "docs/wire-contract-pending.md"
+        "[ledger_path]"
     ),
     "check_client_lag_ledger::ledger_blocked": (
         "PAIRED DEPLOY BLOCKED: [n] both-halves commit(s) in "
-        "docs/wire-contract-pending.md have an unshipped client half, no "
-        "[additive] direction-safety token, and no acknowledgment: "
+        "[ledger_path] have an unshipped client half, no "
+        "[additive] direction-safety token, and no acknowledgment:\n"
         "[entries]\n\nThis engine tag cannot deploy without an explicit "
         "paired-client acknowledgment (nexus-1vogq). Either pair this "
         "deploy with the client release carrying the listed commit(s), or "
@@ -134,12 +134,12 @@ RELEASE_MESSAGES: dict[str, str] = {
     # -- check_wire_contract_ledger (check_client_release_precondition.py) -
     "check_wire_contract_ledger::ledger_clean": (
         "wire-contract ledger: 0 unshipped entries in "
-        "docs/wire-contract-pending.md"
+        "[ledger_path]"
     ),
     "check_wire_contract_ledger::ledger_blocked": (
-        "BLOCKED: [n] both-halves commit(s) in docs/wire-contract-pending.md "
+        "BLOCKED: [n] both-halves commit(s) in [ledger_path] "
         "have an unshipped client half, no [additive] direction-safety "
-        "token, and no acknowledgment: [entries]\n\n" + _precond._LEDGER_REMEDY
+        "token, and no acknowledgment:\n[entries]\n\n" + _precond._LEDGER_REMEDY
     ),
     "check_wire_contract_ledger::ledger_additive_authorized": (
         "wire-contract ledger: [n] unacknowledged unshipped both-halves "
@@ -170,6 +170,18 @@ RELEASE_MESSAGES: dict[str, str] = {
         "PAIRED MODE REJECTED: [tag] does not exist in git. --paired-deploy "
         "must name a tag that has actually been pushed."
     ),
+    # COUPLING (RDR-201 P2.4 fix round, critique T2 nexus/critique-nexus
+    # -j9z30-14-2026-09-02 [24073] finding (c)): these two entries carry NO
+    # fixed marker text of their own -- their [reason] placeholder is filled
+    # at the check_paired_preconditions call site (check_engine_release_floor
+    # .py) with _paired_tag_published()'s own reason string, which
+    # enumerate_release_cells.py's _classify_paired_preconditions greps the
+    # SUBSTITUTED text for a literal substring ("verify publication" /
+    # "not published" respectively). If this [reason] placeholder is ever
+    # removed, the classifier finds nothing to grep and raises loudly --
+    # never a silent misroute -- but see that function's own COUPLING
+    # comment, and tests/scripts/test_release_table_parity.py's
+    # test_battery_*_catalog_reason_placeholder_drives_the_classifier.
     "check_paired_preconditions::battery_published_unavailable": (
         "PAIRED MODE UNVERIFIABLE: [reason]. Cannot verify publication -- "
         "treat as a failed gate, not a pass."
@@ -218,28 +230,22 @@ RELEASE_MESSAGES: dict[str, str] = {
     ),
     # -- record_deploy_from_gate_report_leg (check_engine_release_floor.py)
     "record_deploy_from_gate_report_leg::tracker_directory_error": (
-        "TRACKER NOT RECORDED (exit 3): [DeployTrackerError: gate-report "
-        "directory could not be read]"
+        "TRACKER NOT RECORDED (exit 3): [exc]"
     ),
     "record_deploy_from_gate_report_leg::tracker_schema_error": (
-        "TRACKER NOT RECORDED (exit 3): [DeployTrackerError: gate-report "
-        "schema mismatch]"
+        "TRACKER NOT RECORDED (exit 3): [exc]"
     ),
     "record_deploy_from_gate_report_leg::tracker_no_report_for_version": (
-        "TRACKER NOT RECORDED (exit 3): [DeployTrackerError: no report "
-        "gated the live release_version]"
+        "TRACKER NOT RECORDED (exit 3): [exc]"
     ),
     "record_deploy_from_gate_report_leg::tracker_gate_red": (
-        "TRACKER NOT RECORDED (exit 3): [DeployTrackerError: the latest "
-        "report is red]"
+        "TRACKER NOT RECORDED (exit 3): [exc]"
     ),
     "record_deploy_from_gate_report_leg::tracker_version_mismatch": (
-        "TRACKER NOT RECORDED (exit 3): [DeployTrackerError: report "
-        "release_version mismatch]"
+        "TRACKER NOT RECORDED (exit 3): [exc]"
     ),
     "record_deploy_from_gate_report_leg::tracker_live_version_mismatch": (
-        "TRACKER NOT RECORDED (exit 3): [DeployTrackerError: live version "
-        "no longer matches the report at write time]"
+        "TRACKER NOT RECORDED (exit 3): [exc]"
     ),
     "record_deploy_from_gate_report_leg::tracker_managed_service_error": (
         "TRACKER NOT RECORDED (exit 3): the live /version re-read failed "
@@ -299,6 +305,10 @@ RELEASE_MESSAGES: dict[str, str] = {
         "choreography -- the deploy fires at client-tag push (AGENTS.md "
         "§ Cutting a release, step 0), not before this tag exists. "
         "Pairing named via --paired-deploy."
+        "\nPOST-TAG VERIFY REQUIRED: re-run this script WITHOUT "
+        "--paired-deploy once the deploy lands, to confirm the cloud "
+        "engine actually converged -- escalate loudly (never silently "
+        "re-accept) if it is still behind at that point."
     ),
     "check_floor_paired::paired_probe_unverifiable_success": (
         "ENGINE FLOOR CHECK UNVERIFIABLE (required v[floor]): managed "
@@ -315,6 +325,10 @@ RELEASE_MESSAGES: dict[str, str] = {
         "choreography -- the deploy fires at client-tag push (AGENTS.md "
         "§ Cutting a release, step 0), not before this tag exists. "
         "Pairing named via --paired-deploy."
+        "\nPOST-TAG VERIFY REQUIRED: re-run this script WITHOUT "
+        "--paired-deploy once the deploy lands, to confirm the cloud "
+        "engine actually converged -- escalate loudly (never silently "
+        "re-accept) if it is still behind at that point."
     ),
     "check_floor_paired::paired_probe_current": (
         "cloud engine is current: [base_url] release_version="
@@ -331,7 +345,9 @@ RELEASE_MESSAGES: dict[str, str] = {
         "service at [base] probe failed without a genuine below-floor "
         "version reading ([exc]). Paired mode only ever accepts a "
         "GENUINE, parseable below-floor version report as 'deploy "
-        "pending'. Treat as a failed gate, not a pass."
+        "pending' -- an endpoint error or a malformed/unparseable "
+        "response is never folded into that acceptance, paired or not. "
+        "Treat as a failed gate, not a pass."
     ),
     "check_floor_auto_paired::auto_below_via_exception_battery_blocks": (
         "delegates to _paired_below_floor_path -> the paired-precondition "
@@ -340,9 +356,16 @@ RELEASE_MESSAGES: dict[str, str] = {
     ),
     "check_floor_auto_paired::auto_below_via_exception_ack": (
         "PAIRED MODE: cloud reports release_version [deployed], behind "
-        "floor v[floor]. Pairing AUTO-derived from REQUIRED_ENGINE_VERSION "
+        "floor v[floor]. Expected pre-deploy under the paired-release "
+        "choreography -- the deploy fires at client-tag push (AGENTS.md "
+        "§ Cutting a release, step 0), not before this tag exists. "
+        "Pairing AUTO-derived from REQUIRED_ENGINE_VERSION "
         "(--paired-deploy-auto, nexus-gc9ir) -- no explicit --paired-deploy "
         "given."
+        "\nPOST-TAG VERIFY REQUIRED: re-run this script WITHOUT "
+        "--paired-deploy once the deploy lands, to confirm the cloud "
+        "engine actually converged -- escalate loudly (never silently "
+        "re-accept) if it is still behind at that point."
     ),
     "check_floor_auto_paired::auto_current_pin_blocks": (
         "delegates to check_pin_currency -- see the check_pin_currency::* "
@@ -355,7 +378,11 @@ RELEASE_MESSAGES: dict[str, str] = {
     "check_floor_auto_paired::auto_probe_unverifiable_success": (
         "ENGINE FLOOR CHECK UNVERIFIABLE (required v[floor]): managed "
         "service at [base] reported an unparseable release_version "
-        "[release_version]. Treat as a failed gate, not a pass."
+        "[release_version]. Paired mode only ever accepts a GENUINE, "
+        "parseable below-floor version report as 'deploy pending' -- an "
+        "endpoint error or a malformed/unparseable response is never "
+        "folded into that acceptance, paired or not. Treat as a failed "
+        "gate, not a pass."
     ),
     "check_floor_auto_paired::auto_below_via_success_battery_blocks": (
         "delegates to _paired_below_floor_path -> the paired-precondition "
@@ -364,9 +391,16 @@ RELEASE_MESSAGES: dict[str, str] = {
     ),
     "check_floor_auto_paired::auto_below_via_success_ack": (
         "PAIRED MODE: cloud reports release_version [deployed], behind "
-        "floor v[floor]. Pairing AUTO-derived from REQUIRED_ENGINE_VERSION "
+        "floor v[floor]. Expected pre-deploy under the paired-release "
+        "choreography -- the deploy fires at client-tag push (AGENTS.md "
+        "§ Cutting a release, step 0), not before this tag exists. "
+        "Pairing AUTO-derived from REQUIRED_ENGINE_VERSION "
         "(--paired-deploy-auto, nexus-gc9ir) -- no explicit --paired-deploy "
         "given."
+        "\nPOST-TAG VERIFY REQUIRED: re-run this script WITHOUT "
+        "--paired-deploy once the deploy lands, to confirm the cloud "
+        "engine actually converged -- escalate loudly (never silently "
+        "re-accept) if it is still behind at that point."
     ),
     # -- main_dispatch (check_engine_release_floor.py, main()) -------------
     "main_dispatch::main_bare_check_floor_blocks": (

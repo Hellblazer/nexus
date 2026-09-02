@@ -2080,13 +2080,27 @@ def test_table_path_check_floor_bare_current(capsys: pytest.CaptureFixture[str])
 def test_table_path_check_floor_auto_paired_current_is_byte_for_byte_bare(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """RDR-201 P2.4 fix round (critique T2 nexus/critique-nexus-j9z30-14
+    -2026-09-02 [24073] finding (e); code-review T2 nexus/code-review-nexus
+    -j9z30-14-2026-09-02 [24074]): this test's NAME claims byte-for-byte
+    equality with the ordinary bare invocation -- auto mode's own contract
+    (check_floor's module docstring: "when the cloud already meets the
+    floor this MUST be a byte-for-byte bare-invocation pass"). The original
+    version only asserted ``rc == 0``, which does not distinguish "byte-for
+    -byte identical" from merely "also exits 0" -- fixed to actually
+    compare the two invocations' captured stdout/stderr."""
     with patch.object(gate, "probe_managed_service", return_value=_caps(_floor_str())):
         gate.DECISION_PATH = "table"
         try:
-            rc = gate.check_floor(url=_TEST_URL, newest=_PIN_CURRENT, paired_deploy_auto=True)
+            bare_rc = gate.check_floor(url=_TEST_URL, newest=_PIN_CURRENT)
+            bare_captured = capsys.readouterr()
+            auto_rc = gate.check_floor(url=_TEST_URL, newest=_PIN_CURRENT, paired_deploy_auto=True)
+            auto_captured = capsys.readouterr()
         finally:
             gate.DECISION_PATH = "old"
-    assert rc == 0
+    assert bare_rc == auto_rc == 0
+    assert bare_captured.out == auto_captured.out
+    assert bare_captured.err == auto_captured.err
 
 
 def test_table_path_record_deploy_classifies_exception_subclass(

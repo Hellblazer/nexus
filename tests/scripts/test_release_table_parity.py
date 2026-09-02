@@ -81,6 +81,7 @@ import json
 import pathlib
 import random
 from typing import Any, Callable
+from unittest.mock import patch
 
 import pytest
 
@@ -237,6 +238,44 @@ def _drive_old_path(cell: erc.Cell) -> tuple[int, str]:
     Never reimplements a driver; a function the fixture names with no entry
     in ``_OLD_PATH_DRIVERS`` fails loudly (``KeyError``), not silently."""
     return _OLD_PATH_DRIVERS[cell.function](cell)
+
+
+def _drive_capturing_full_text(function: str, cell: erc.Cell, decision_path: str) -> tuple[tuple[int, str], str]:
+    """RDR-201 P2.4 fix round (critique T2 nexus/critique-nexus-j9z30-14
+    -2026-09-02 [24073] finding (a)): drive ``function``'s real gated call
+    for ``cell`` with ``check_engine_release_floor.DECISION_PATH`` set to
+    ``decision_path`` ("old" or "table"), returning BOTH the classified
+    ``(exit_code, message_key)`` verdict AND the full, combined stdout+stderr
+    TEXT the call produced.
+
+    Every existing comparison in this file (Role 1, Role 2, the fixture
+    itself) reduces a driven call to ``(exit_code, message_key)`` via
+    ``enumerate_release_cells.py``'s own marker-substring classifiers --
+    never the actual printed prose. A content-level regression in
+    ``release_messages.py`` (a dropped caveat, a wrong remedy pointer, a
+    hollowed-out placeholder) that happens to preserve both the exit code
+    and whatever substring a classifier keys on is invisible to all of
+    that. This spies on ``enumerate_release_cells._capture`` -- the SINGLE
+    choke point every ``drive_*`` function funnels its real call through --
+    to record the raw text alongside the classified result, without
+    reimplementing any driver's own sensor-patching.
+    """
+    original_capture = erc._capture
+    chunks: list[str] = []
+
+    def _spy_capture(fn: Callable[..., int], *args: Any, **kwargs: Any) -> tuple[int, str, str]:
+        rc, out, err = original_capture(fn, *args, **kwargs)
+        chunks.append(out + err)
+        return rc, out, err
+
+    original_path = _floor.DECISION_PATH
+    _floor.DECISION_PATH = decision_path
+    try:
+        with patch.object(erc, "_capture", side_effect=_spy_capture):
+            verdict = _OLD_PATH_DRIVERS[function](cell)
+    finally:
+        _floor.DECISION_PATH = original_path
+    return verdict, "".join(chunks)
 
 
 def _precond_main_dispatch_wiring_case(inputs: dict[str, str]) -> str:
@@ -463,6 +502,24 @@ def test_old_path_matches_fixture(cell_dict: dict[str, Any]) -> None:
 # Role 2 (P2.4/P2.5): old-path-vs-new-path parity, per (cell, event) pair
 # ---------------------------------------------------------------------------
 
+#: RDR-201 P2.4 fix round (critique T2 nexus/critique-nexus-j9z30-14
+#: -2026-09-02 [24073] finding (a); code-review T2
+#: nexus/code-review-nexus-j9z30-14-2026-09-02 [24074] Important 1):
+#: cell_id -> reason, for a floor-script cell whose OLD-path and NEW-path
+#: printed TEXT is legitimately, permanently unequal even though their
+#: (exit_code, message_key) verdict agrees. As of this fix round: EMPTY --
+#: release_messages.py's catalog entries were corrected (ledger-path
+#: placeholders, the newline-joined blocked-entries layout, the six
+#: tracker_* entries' hardcoded exception paraphrase replaced with the real
+#: [exc] placeholder, the two auto-paired UNVERIFIABLE messages' dropped
+#: caveat clause, and the four PAIRED MODE ack messages' missing POST-TAG
+#: VERIFY paragraph) until every floor-script cell in the fixture produced
+#: byte-identical text on both paths. A future addition here must name the
+#: specific cell_id and the reason full parity is impossible for it, never
+#: widen silently (e.g. via a blanket skip on a whole function).
+_FULL_TEXT_NAMED_EXCEPTIONS: dict[str, str] = {}
+
+
 @pytest.mark.parametrize("cell_dict,event", _CELL_EVENT_PAIRS, ids=_CELL_EVENT_IDS)
 def test_new_path_matches_old_path_cell_by_cell(
     cell_dict: dict[str, Any], event: str,
@@ -478,13 +535,36 @@ def test_new_path_matches_old_path_cell_by_cell(
     as the O2 order-asymmetry (nexus-j9z30.17). A mismatch here must stay
     LOUD and UNDECIDED: it is real signal (either a mistranscribed guard,
     or evidence bearing on nexus-j9z30.26's question), never something
-    this test resolves for itself by declaring one interpretation correct."""
+    this test resolves for itself by declaring one interpretation correct.
+
+    RDR-201 P2.4 fix round (critique T2 nexus/critique-nexus-j9z30-14
+    -2026-09-02 [24073] finding (a)): for a FLOOR-script cell, ALSO drive
+    both paths a second time capturing the full printed TEXT (not just the
+    classified verdict) and assert byte equality -- closing the blind spot
+    where a content-level regression in release_messages.py's prose could
+    preserve the exit code and whatever substring a classifier keys on
+    while still being wrong. Scoped to floor-script cells only: a
+    precondition-script cell's ``_new_path`` still resolves the table
+    directly (nexus-j9z30.15's job) rather than driving real printed
+    output, so there is no NEW-path text to compare against for those --
+    named here explicitly, not globbed away."""
     new = _new_path(cell_dict, event)
     if new is NotImplemented:
         pytest.skip("new path (table resolve()) not wired yet -- RDR-201 P2.4/P2.5")
     cell = _cell_from_fixture(cell_dict)
     old = _drive_old_path(cell)
     assert new == old, (cell_dict["cell_id"], event, old, new)
+
+    function = cell_dict["function"]
+    if function not in _FLOOR_SCRIPT_FUNCTIONS:
+        return
+    old_verdict, old_text = _drive_capturing_full_text(function, cell, "old")
+    new_verdict, new_text = _drive_capturing_full_text(function, cell, "table")
+    assert old_verdict == new_verdict, (cell_dict["cell_id"], event, old_verdict, new_verdict)
+    cell_id = cell_dict["cell_id"]
+    if cell_id in _FULL_TEXT_NAMED_EXCEPTIONS:
+        pytest.skip(_FULL_TEXT_NAMED_EXCEPTIONS[cell_id])
+    assert old_text == new_text, (cell_id, event, old_text, new_text)
 
 
 # ---------------------------------------------------------------------------
@@ -644,6 +724,40 @@ def test_message_catalog_contains_static_remedy_constants_verbatim(
     assert constant_text in release_messages.RELEASE_MESSAGES[row_id], (
         row_id, constant_text, release_messages.RELEASE_MESSAGES[row_id],
     )
+
+
+# ---------------------------------------------------------------------------
+# Catalog <-> classifier coupling (RDR-201 P2.4 fix round, critique T2
+# nexus/critique-nexus-j9z30-14-2026-09-02 [24073] finding (c))
+# ---------------------------------------------------------------------------
+#
+# release_messages.py's battery_not_published / battery_published_unavailable
+# entries carry no fixed marker text of their own -- see the COUPLING
+# comments on both ends (release_messages.py's two entries,
+# enumerate_release_cells._classify_paired_preconditions). These tests pin
+# the coupling DIRECTLY against the real classifier function (never a
+# hand-retyped duplicate of its marker strings, which would just move the
+# drift risk into the test itself): fill each catalog TEMPLATE's [reason]
+# placeholder with a representative reason and confirm the REAL classifier
+# still recognizes it. A future edit that removes the placeholder, or
+# rewords _classify_paired_preconditions's markers out of step with
+# check_engine_release_floor._paired_tag_published()'s own reason strings,
+# fails HERE -- precisely and locally -- rather than as a cryptic
+# AssertionError deep inside the 200-case parametrized Role-2 suite.
+
+
+def test_battery_not_published_catalog_reason_placeholder_drives_the_classifier() -> None:
+    template = release_messages.RELEASE_MESSAGES["check_paired_preconditions::battery_not_published"]
+    assert "[reason]" in template, "the substitution point itself must survive"
+    filled = template.replace("[reason]", "release engine-service-vTEST is still a DRAFT -- not published")
+    assert erc._classify_paired_preconditions(1, filled) == "battery_not_published"
+
+
+def test_battery_published_unavailable_catalog_reason_placeholder_drives_the_classifier() -> None:
+    template = release_messages.RELEASE_MESSAGES["check_paired_preconditions::battery_published_unavailable"]
+    assert "[reason]" in template, "the substitution point itself must survive"
+    filled = template.replace("[reason]", "gh unavailable")
+    assert erc._classify_paired_preconditions(2, filled) == "battery_published_unavailable"
 
 
 # ---------------------------------------------------------------------------
