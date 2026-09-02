@@ -18,7 +18,7 @@ from pathlib import Path
 import click
 import yaml
 
-from nexus.tables.load import TableLoadError, load_packaged_table
+from nexus.tables.load import Table, TableLoadError, load_packaged_table
 from nexus.tables.resolve import resolve
 
 
@@ -332,6 +332,60 @@ _TARGET_STATUS_TO_EVENT: dict[str, str] = {
     "abandoned": "abandon",
     "deferred": "defer",
 }
+
+#: ``open`` is retired from the rdr-lifecycle table's ``status`` domain but
+#: remains a live, READ-TIME-ONLY pre-accept synonym for ``draft`` in the
+#: rdr-accept preamble (GH #1409, nexus-qsryj) -- a project whose RDR
+#: convention never uses ``draft`` (open -> accepted) can still accept.
+#: Named once here so the two preamble sites that need it (RDR-201 P1.5)
+#: don't each carry their own literal.
+_OPEN_STATUS_ALIAS = "open"
+
+
+def _from_statuses_for_event(table: Table, event: str) -> frozenset[str]:
+    """Every status the table's non-escape *event* rows transition FROM.
+
+    Queries the loaded rows directly instead of a hand-maintained status
+    literal (RDR-201 P1.5, T2 nexus/plan-rdr-201-audit-round-3-residuals
+    [23999] item 2 / nexus/plan-rdr-201-enrichment-deltas [24001]) -- a
+    preamble guard built this way tracks the table by construction; one
+    hardcoded independently is exactly the three-way disagreement RDR-201
+    Finding 1 exists to end. Escape/``refuse`` rows are excluded: they are
+    the table's own record of statuses *event* is illegal from, so they
+    must never contribute to the "eligible" set.
+    """
+    return frozenset(
+        str(row.match["status"])
+        for row in table.rows
+        if row.match.get("event") == event
+        and not row.escape
+        and row.outcome_kind == "to"
+    )
+
+
+def _to_status_for_event(table: Table, event: str) -> str:
+    """The single status the table's non-escape *event* rows transition TO.
+
+    Refuses loudly (:class:`TableLoadError`) if *event*'s non-escape rows
+    don't converge on exactly one target. The rdr-accept preamble's
+    idempotency check ("already accepted RDRs are allowed through") assumes
+    a single "the status past this event" value to compare against; a table
+    edit that broke that assumption should surface here, not produce a
+    silently-wrong guard.
+    """
+    targets = frozenset(
+        str(row.outcome["status"])
+        for row in table.rows
+        if row.match.get("event") == event
+        and not row.escape
+        and row.outcome_kind == "to"
+    )
+    if len(targets) != 1:
+        raise TableLoadError(
+            f"rdr-lifecycle table: event {event!r} has {len(targets)} distinct "
+            f"non-escape 'to' targets ({sorted(targets)}), expected exactly 1"
+        )
+    return next(iter(targets))
 
 
 def _rewrite_frontmatter_status(text: str, new_status: str, date: str) -> str:
@@ -1183,6 +1237,19 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         print(f"> No RDRs found — `{rdr_dir}` does not exist in this repo.")
         return
 
+    try:
+        table = load_packaged_table("rdr-lifecycle.toml")
+    except (OSError, TableLoadError, tomllib.TOMLDecodeError) as exc:
+        print(f"> **ERROR**: cannot load the RDR lifecycle table: {type(exc).__name__}: {exc}")
+        return
+    # RDR-201 P1.5: derived from the table's `accept` event rows, not a
+    # hand-maintained ("draft", "open") literal (T2
+    # nexus/plan-rdr-201-audit-round-3-residuals [23999] item 2). `open` is
+    # retired from the table's domain but stays a live pre-accept synonym for
+    # `draft` here (GH #1409, nexus-qsryj).
+    pre_accept_statuses = _from_statuses_for_event(table, "accept") | {_OPEN_STATUS_ALIAS}
+    accept_target_status = _to_status_for_event(table, "accept")
+
     id_match = re.search(r"\d+", args_str)
 
     if not id_match:
@@ -1192,7 +1259,7 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         # GH #1409 (nexus-qsryj): `open` is an accepted pre-accept synonym for
         # `draft` — some projects' RDR conventions (open -> accepted) never use
         # draft at all; the rdr-gate PASSED check is the real acceptance guard.
-        draft_rdrs = [r for r in rdrs if r["status"].lower() in ("draft", "open")]
+        draft_rdrs = [r for r in rdrs if r["status"].lower() in pre_accept_statuses]
         print("### Draft RDRs (eligible for acceptance)")
         print()
         if draft_rdrs:
@@ -1226,7 +1293,9 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
     # Accepted status is allowed — agent handles idempotency. `open` is a
     # pre-accept synonym for `draft` (GH #1409, nexus-qsryj): the rdr-gate
     # PASSED lookup below is the real acceptance guard, not the status word.
-    if current_status.lower() not in ("draft", "open", "accepted"):
+    # RDR-201 P1.5: derived from the table (pre-accept statuses plus the
+    # `accept` event's own target status), not a hand-maintained literal.
+    if current_status.lower() not in pre_accept_statuses | {accept_target_status}:
         print(
             f"> **BLOCKED**: RDR status is `{current_status}`. "
             "Only pre-accept (draft or open) RDRs can be accepted."
@@ -1402,18 +1471,28 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
         print(f"**Force Implemented (audit):** {force_implemented_reason}")
     print()
 
-    # Hard-block: refuse to close unless status is accepted or final
-    if current_status.lower() not in ("accepted", "final"):
+    # Hard-block: refuse to close unless status is a table close-source
+    # (RDR-201 P1.5: derived from the table's `close` event rows, not a
+    # hand-maintained ("accepted", "final") literal — `final` is retired
+    # from the table's domain, RDR-201 Revision History).
+    try:
+        close_table = load_packaged_table("rdr-lifecycle.toml")
+    except (OSError, TableLoadError, tomllib.TOMLDecodeError) as exc:
+        print(f"> **ERROR**: cannot load the RDR lifecycle table: {type(exc).__name__}: {exc}")
+        return
+    close_source_statuses = _from_statuses_for_event(close_table, "close")
+    close_source_label = " or ".join(f"`{s}`" for s in sorted(close_source_statuses))
+    if current_status.lower() not in close_source_statuses:
         if force:
             print(
-                f"> **Override**: RDR status is `{current_status}` (not accepted/final). "
+                f"> **Override**: RDR status is `{current_status}` (not {close_source_label}). "
                 "Proceeding with `--force`."
             )
             print()
         else:
             print(
                 f"> **BLOCKED**: RDR status is `{current_status}`. "
-                "Close requires status `accepted` or `final`."
+                f"Close requires status {close_source_label}."
             )
             print("> Run `nx rdr preamble rdr-gate` to validate, or use `--force` to override.")
             print()

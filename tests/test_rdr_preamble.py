@@ -666,6 +666,13 @@ class TestRdrClose:
         )
 
 
+# RDR-201 P1.5 (nexus-j9z30.5) derivation-proof coverage for the
+# accept/close preamble guards moved to tests/test_rdr_set_status.py — that
+# module is hermetic (no T2Database/service substrate), matching this
+# bead's instructed test surface; this file's ``rdr_env`` fixture
+# constructs a live T2Database and is out of scope here.
+
+
 # ---------------------------------------------------------------------------
 # rdr-research  (no-arg + with-id)
 # ---------------------------------------------------------------------------

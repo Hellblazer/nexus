@@ -47,8 +47,14 @@ import pytest
 from click.testing import CliRunner
 
 import nexus.commands.rdr as rdr_mod
-from nexus.commands.rdr import _gate_repo_name, _rewrite_frontmatter_status, rdr
-from nexus.tables.load import TableLoadError
+from nexus.commands.rdr import (
+    _from_statuses_for_event,
+    _gate_repo_name,
+    _rewrite_frontmatter_status,
+    _to_status_for_event,
+    rdr,
+)
+from nexus.tables.load import TableLoadError, load_packaged_table
 
 
 def _runner() -> CliRunner:
@@ -667,6 +673,278 @@ def test_rewrite_frontmatter_status_idempotent_does_not_overwrite_date():
     assert "2026-06-24" not in new_text
     assert new_text.count("status:") == 1
     assert new_text.count("accepted_date:") == 1
+
+
+
+# ---------------------------------------------------------------------------
+# RDR-201 P1.5: table-derived status-list helpers used by the accept/close
+# preambles (nexus-j9z30.5). These query the loaded table's rows directly —
+# not a hand-maintained literal — so a table change is reflected automatically.
+# ---------------------------------------------------------------------------
+
+
+def test_from_statuses_for_event_returns_accept_source():
+    table = load_packaged_table("rdr-lifecycle.toml")
+    assert _from_statuses_for_event(table, "accept") == frozenset({"draft"})
+
+
+def test_from_statuses_for_event_returns_close_source():
+    table = load_packaged_table("rdr-lifecycle.toml")
+    assert _from_statuses_for_event(table, "close") == frozenset({"accepted"})
+
+
+def test_from_statuses_for_event_returns_multiple_sources_for_supersede():
+    table = load_packaged_table("rdr-lifecycle.toml")
+    assert _from_statuses_for_event(table, "supersede") == frozenset(
+        {"draft", "accepted", "deferred", "closed"}
+    )
+
+
+def test_from_statuses_for_event_unknown_event_is_empty():
+    table = load_packaged_table("rdr-lifecycle.toml")
+    assert _from_statuses_for_event(table, "no-such-event") == frozenset()
+
+
+def test_to_status_for_event_returns_accept_target():
+    table = load_packaged_table("rdr-lifecycle.toml")
+    assert _to_status_for_event(table, "accept") == "accepted"
+
+
+def test_to_status_for_event_returns_close_target():
+    table = load_packaged_table("rdr-lifecycle.toml")
+    assert _to_status_for_event(table, "close") == "closed"
+
+
+def test_to_status_for_event_refuses_when_no_single_target(tmp_path: Path):
+    """supersede has ONE target (superseded) but FOUR sources -- to_status is
+    still well-defined there. Construct a table where an event's non-escape
+    rows genuinely disagree on target to prove the ambiguity refusal fires,
+    rather than asserting on a table that happens not to exercise it."""
+    from nexus.tables.load import load_table
+
+    bad = tmp_path / "bad-lifecycle.toml"
+    bad.write_text(
+        """
+[table]
+id = "bad"
+kind = "state-machine"
+
+[dimensions.status]
+domain = ["a", "b", "c"]
+[dimensions.event]
+domain = ["mix"]
+
+[[row]]
+id = "mix-a"
+match = { status = "a", event = "mix" }
+to = { status = "b" }
+
+[[row]]
+id = "mix-c"
+match = { status = "c", event = "mix" }
+to = { status = "a" }
+"""
+    )
+    table = load_table(bad)
+    with pytest.raises(TableLoadError):
+        _to_status_for_event(table, "mix")
+
+
+# ---------------------------------------------------------------------------
+# RDR-201 P1.5: the rdr-accept / rdr-close preambles' eligible-status
+# guards derive from these helpers against the LOADED table, not an
+# independently hand-typed literal (nexus-j9z30.5). A table swapped in via
+# monkeypatch with a DIFFERENT accept/close source status proves the
+# binding: a test that only exercised the real table would pass even
+# against a hardcoded ("draft", "open") / ("accepted", "final") literal
+# that happened to still agree with it.
+#
+# No ``rdr_env``/T2Database fixture here (that module's fixture needs a
+# live T2 service substrate, out of this bead's instructed test scope) --
+# ``_preamble_resolve_repo()`` falls back to ``Path.cwd()`` when ``git
+# rev-parse`` fails, so a bare ``monkeypatch.chdir(tmp_path)`` is enough.
+# ---------------------------------------------------------------------------
+
+
+def _write_fake_lifecycle_table(tmp_path: Path):
+    """A minimal, loadable rdr-lifecycle-shaped table whose accept/close
+    source statuses are NOT ``draft``/``accepted``."""
+    from nexus.tables.load import load_table
+
+    path = tmp_path / "fake-lifecycle.toml"
+    path.write_text(
+        """
+[table]
+id = "fake-lifecycle"
+kind = "state-machine"
+
+[dimensions.status]
+domain = ["backlog", "greenlit", "shipped"]
+[dimensions.event]
+domain = ["accept", "close"]
+[dimensions.gate]
+domain = ["passed", "blocked", "none"]
+[dimensions.successor]
+domain = ["named", "absent"]
+
+[[row]]
+id = "accept"
+match = { status = "backlog", event = "accept" }
+guard = { gate = "passed" }
+to = { status = "greenlit" }
+
+[[row]]
+id = "accept-blocked"
+match = { status = "backlog", event = "accept" }
+guard = { gate = ["blocked", "none"] }
+refuse = "gate-not-passed"
+
+[[row]]
+id = "accept-otherwise"
+match = { status = ["greenlit", "shipped"], event = "accept" }
+escape = true
+refuse = "illegal-transition"
+
+[[row]]
+id = "close"
+match = { status = "greenlit", event = "close" }
+to = { status = "shipped" }
+
+[[row]]
+id = "close-otherwise"
+match = { status = ["backlog", "shipped"], event = "close" }
+escape = true
+refuse = "illegal-transition"
+"""
+    )
+    return load_table(path)
+
+
+def _preamble_rdr_dir_for(tmp_path: Path) -> Path:
+    d = tmp_path / "docs" / "rdr"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _write_preamble_rdr(rdr_dir: Path, num: int, status: str, title: str) -> Path:
+    p = rdr_dir / f"rdr-{num:03d}-example.md"
+    p.write_text(
+        "---\n"
+        f'title: "{title}"\n'
+        "type: Architecture\n"
+        f"status: {status}\n"
+        "priority: high\n"
+        "---\n\n## Problem Statement\n\nProblem.\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+class TestAcceptCloseGuardsDeriveFromTable:
+    """Proves the accept/close preamble guards and listings are bound to
+    the loaded table's rows, not an independently hand-typed literal."""
+
+    def test_accept_listing_follows_table_accept_source(self, tmp_path, monkeypatch):
+        rdr_dir = _preamble_rdr_dir_for(tmp_path)
+        fake_table = _write_fake_lifecycle_table(tmp_path)
+        monkeypatch.setattr(rdr_mod, "load_packaged_table", lambda *a, **k: fake_table)
+        monkeypatch.chdir(tmp_path)
+        _write_preamble_rdr(rdr_dir, 1, "backlog", "Backlog One")
+
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept"])
+        assert result.exit_code == 0, result.output
+        assert "Backlog One" in result.output
+
+    def test_accept_listing_excludes_real_table_draft_when_table_differs(
+        self, tmp_path, monkeypatch
+    ):
+        rdr_dir = _preamble_rdr_dir_for(tmp_path)
+        fake_table = _write_fake_lifecycle_table(tmp_path)
+        monkeypatch.setattr(rdr_mod, "load_packaged_table", lambda *a, **k: fake_table)
+        monkeypatch.chdir(tmp_path)
+        _write_preamble_rdr(rdr_dir, 1, "draft", "Still Draft")
+
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept"])
+        assert result.exit_code == 0, result.output
+        assert "Still Draft" not in result.output
+
+    def test_accept_guard_follows_table_accept_source(self, tmp_path, monkeypatch):
+        rdr_dir = _preamble_rdr_dir_for(tmp_path)
+        fake_table = _write_fake_lifecycle_table(tmp_path)
+        monkeypatch.setattr(rdr_mod, "load_packaged_table", lambda *a, **k: fake_table)
+        monkeypatch.chdir(tmp_path)
+        _write_preamble_rdr(rdr_dir, 1, "backlog", "Backlog")
+
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "BLOCKED" not in result.output
+
+    def test_accept_guard_blocks_real_table_draft_when_table_differs(
+        self, tmp_path, monkeypatch
+    ):
+        rdr_dir = _preamble_rdr_dir_for(tmp_path)
+        fake_table = _write_fake_lifecycle_table(tmp_path)
+        monkeypatch.setattr(rdr_mod, "load_packaged_table", lambda *a, **k: fake_table)
+        monkeypatch.chdir(tmp_path)
+        _write_preamble_rdr(rdr_dir, 1, "draft", "Draft")
+
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "BLOCKED" in result.output
+
+    def test_accept_guard_allows_table_accept_target_idempotently(
+        self, tmp_path, monkeypatch
+    ):
+        """The already-accepted allowance follows the table's accept TARGET
+        (``greenlit`` here), not the real table's ``accepted``."""
+        rdr_dir = _preamble_rdr_dir_for(tmp_path)
+        fake_table = _write_fake_lifecycle_table(tmp_path)
+        monkeypatch.setattr(rdr_mod, "load_packaged_table", lambda *a, **k: fake_table)
+        monkeypatch.chdir(tmp_path)
+        _write_preamble_rdr(rdr_dir, 1, "greenlit", "Greenlit")
+
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "BLOCKED" not in result.output
+
+    def test_close_guard_follows_table_close_source(self, tmp_path, monkeypatch):
+        rdr_dir = _preamble_rdr_dir_for(tmp_path)
+        fake_table = _write_fake_lifecycle_table(tmp_path)
+        monkeypatch.setattr(rdr_mod, "load_packaged_table", lambda *a, **k: fake_table)
+        monkeypatch.chdir(tmp_path)
+        _write_preamble_rdr(rdr_dir, 1, "greenlit", "Greenlit")
+
+        result = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "BLOCKED" not in result.output
+
+    def test_close_guard_blocks_real_table_accepted_when_table_differs(
+        self, tmp_path, monkeypatch
+    ):
+        rdr_dir = _preamble_rdr_dir_for(tmp_path)
+        fake_table = _write_fake_lifecycle_table(tmp_path)
+        monkeypatch.setattr(rdr_mod, "load_packaged_table", lambda *a, **k: fake_table)
+        monkeypatch.chdir(tmp_path)
+        _write_preamble_rdr(rdr_dir, 1, "accepted", "Accepted")
+
+        result = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "BLOCKED" in result.output
+
+    def test_close_message_no_longer_names_retired_final_status(
+        self, tmp_path, monkeypatch
+    ):
+        """``final`` is retired from the table's domain (RDR-201 Revision
+        History); the close-preamble BLOCKED message must not advertise it
+        as an acceptable close-source status any more."""
+        rdr_dir = _preamble_rdr_dir_for(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        _write_preamble_rdr(rdr_dir, 1, "draft", "Hello World")
+
+        result = _runner().invoke(rdr, ["preamble", "rdr-close", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "BLOCKED" in result.output
+        assert "final" not in result.output.lower()
 
 
 if __name__ == "__main__":

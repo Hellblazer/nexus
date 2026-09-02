@@ -51,8 +51,21 @@ mechanize, it matters enough to ship.
   frontmatter BEFORE calling `set-status ... superseded`, matching the
   table's `successor` guard, which reads that key from the file at call
   time and refuses `successor-not-named` otherwise.
+- `conexus/hooks/scripts/rdr_hook.py` + `conexus/resources/tables/rdr-lifecycle.toml`
+  (new file) — bead: nexus-j9z30.5 — the SessionStart hook's
+  `_STATUS_ORDER`/`_TERMINAL` are now DERIVED from a plugin-shipped copy of
+  the rdr-lifecycle table (read via stdlib `tomllib` — the hook runs under
+  bare system python, `import nexus` fails there) instead of a
+  hand-maintained literal that had drifted from the table's domain
+  (dropped `implemented`/`reverted`, words the table's closed vocabulary
+  never declared). `_EXCLUDE_FILES` now also excludes `agents.md`. RDR-201
+  Phase 1. The hook's file-glob regex (`re.match(r"\d+", p.stem)`) still
+  never matches any `rdr-NNN-*.md` file, so this reconcile logic remains
+  dead code on this repo — that defect (nexus-e19sa) is out of scope here
+  and awaits Sam's ruling separately.
 
-All three are INERT until the next release or plugin cut: sessions load the
+All four are INERT until the next release or plugin cut: sessions load the
 plugin from the pinned tag, so continuation mode is live in the CLIENT
-(shipped 85c79761e) while these descriptions and the auto-approve entry are not yet
-loaded by any session.
+(shipped 85c79761e) while these descriptions, the auto-approve entry, and
+the rdr_hook.py/rdr-lifecycle.toml changes are not yet loaded by any
+session.

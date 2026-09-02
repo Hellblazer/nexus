@@ -167,3 +167,120 @@ def test_reconcile_open_file_still_advances_to_accepted_t2(
 
     assert reconciled == 1
     assert file_writes == [(f, "accepted")]
+
+
+# ── RDR-201 P1.5 (nexus-j9z30.5): _STATUS_ORDER/_TERMINAL derive from the
+# packaged lifecycle table, not a hand-maintained literal ─────────────────
+
+PACKAGE_TABLE_PATH = REPO_ROOT / "src" / "nexus" / "tables" / "rdr-lifecycle.toml"
+PLUGIN_TABLE_PATH = REPO_ROOT / "conexus" / "resources" / "tables" / "rdr-lifecycle.toml"
+
+
+def test_plugin_lifecycle_table_byte_identical_to_package_copy():
+    """The hook runs under bare system python (no ``nexus`` import — see
+    ``rdr_hook.py``'s module docstring / bead nexus-j9z30.5), so it cannot
+    reach ``nexus.tables.load.load_packaged_table``. It reads its OWN copy
+    shipped at ``conexus/resources/tables/``; this byte-identity check is
+    the drift tripwire, same pattern as
+    ``TestPluginWiring::test_shellib_parity_with_reference`` in
+    ``tests/hooks/test_subagent_stop_hook.py``."""
+    assert PACKAGE_TABLE_PATH.exists(), "package lifecycle table missing"
+    assert PLUGIN_TABLE_PATH.exists(), "plugin copy of rdr-lifecycle.toml missing"
+    assert PLUGIN_TABLE_PATH.read_bytes() == PACKAGE_TABLE_PATH.read_bytes(), (
+        "conexus/resources/tables/rdr-lifecycle.toml has drifted from "
+        "src/nexus/tables/rdr-lifecycle.toml — edit the package copy, then "
+        "copy it over"
+    )
+
+
+def test_exclude_files_covers_agents_md(rdr_hook_module) -> None:
+    assert "agents.md" in rdr_hook_module._EXCLUDE_FILES
+
+
+_FAKE_LIFECYCLE_DOC = {
+    "dimensions": {"status": {"domain": ["a", "b", "c", "d"]}},
+    "row": [
+        # a -[advance]-> b : non-terminal outgoing from a
+        {"id": "advance", "match": {"status": "a", "event": "advance"}, "to": {"status": "b"}},
+        # b -[advance]-> c : non-terminal outgoing from b
+        {"id": "advance2", "match": {"status": "b", "event": "advance"}, "to": {"status": "c"}},
+        # c's ONLY non-refuse outgoing row is a 'supersede' event -> excluded
+        # from the non-terminal computation -> c is terminal.
+        {"id": "supersede", "match": {"status": "c", "event": "supersede"}, "to": {"status": "d"}},
+        # d has no outgoing 'to' row at all -> terminal.
+    ],
+}
+
+
+def test_derive_status_order_and_terminal_ranks_non_terminal_in_domain_order(
+    rdr_hook_module,
+) -> None:
+    order, terminal = rdr_hook_module._derive_status_order_and_terminal(_FAKE_LIFECYCLE_DOC)
+    assert order["a"] == 0
+    assert order["b"] == 1
+    assert terminal == {"c", "d"}
+    assert order["c"] == order["d"] == 2
+
+
+def test_derive_status_order_and_terminal_ranks_open_with_draft(rdr_hook_module) -> None:
+    doc = {
+        "dimensions": {"status": {"domain": ["draft", "accepted"]}},
+        "row": [
+            {"id": "accept", "match": {"status": "draft", "event": "accept"},
+             "to": {"status": "accepted"}},
+        ],
+    }
+    order, terminal = rdr_hook_module._derive_status_order_and_terminal(doc)
+    assert order["draft"] == 0
+    assert order["open"] == order["draft"]
+    assert terminal == {"accepted"}
+
+
+def test_derive_status_order_and_terminal_excludes_supersede_outgoing(rdr_hook_module) -> None:
+    """A status whose ONLY non-refuse outgoing row is a ``supersede`` event
+    is still terminal -- 'can still be superseded' does not make a status
+    non-terminal (matches the real table's closed/superseded/abandoned)."""
+    doc = {
+        "dimensions": {"status": {"domain": ["draft", "closed"]}},
+        "row": [
+            {"id": "accept", "match": {"status": "draft", "event": "accept"},
+             "to": {"status": "closed"}},
+            {"id": "supersede", "match": {"status": "closed", "event": "supersede"},
+             "to": {"status": "closed"}},
+        ],
+    }
+    order, terminal = rdr_hook_module._derive_status_order_and_terminal(doc)
+    assert terminal == {"closed"}
+
+
+def test_derive_status_order_and_terminal_on_real_table_matches_established_ranks(
+    rdr_hook_module,
+) -> None:
+    """The real rdr-lifecycle table's derived order/terminal set must
+    preserve the pre-P1.5 behavior this hook's own reconcile tests above
+    depend on: open ranks with draft (rank 0), accepted advances past it,
+    and closed/superseded/abandoned are all terminal."""
+    import tomllib
+
+    doc = tomllib.loads(PLUGIN_TABLE_PATH.read_text(encoding="utf-8"))
+    order, terminal = rdr_hook_module._derive_status_order_and_terminal(doc)
+    assert order["draft"] == 0
+    assert order["open"] == 0
+    assert order["accepted"] == 1
+    assert order["deferred"] == 2
+    assert terminal == {"closed", "superseded", "abandoned"}
+    terminal_rank = order["closed"]
+    assert order["superseded"] == terminal_rank
+    assert order["abandoned"] == terminal_rank
+    assert terminal_rank > order["deferred"] > order["accepted"] > order["draft"]
+
+
+def test_module_level_status_order_and_terminal_loaded_from_plugin_table(
+    rdr_hook_module,
+) -> None:
+    """The module-level ``_STATUS_ORDER``/``_TERMINAL`` the hook actually
+    uses at runtime are populated from the real plugin table, not left at
+    an empty defensive-fallback default."""
+    assert rdr_hook_module._STATUS_ORDER["draft"] == 0
+    assert rdr_hook_module._STATUS_ORDER["open"] == 0
+    assert rdr_hook_module._TERMINAL == {"closed", "superseded", "abandoned"}

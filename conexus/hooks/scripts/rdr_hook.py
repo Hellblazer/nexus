@@ -14,29 +14,109 @@ if sys.version_info < (3, 12):
 
 import re
 import subprocess
+import tomllib
 from collections import Counter
 from pathlib import Path
 
+# RDR-201 P1.5 (nexus-j9z30.5): this hook runs under BARE SYSTEM PYTHON
+# (conexus/hooks/hooks.json -> _run_python_hook.sh execs `python3.x`
+# directly, never this repo's venv), so `import nexus` fails here and
+# `nexus.tables.load.load_packaged_table` is unreachable. The status
+# vocabulary is instead read with stdlib `tomllib` from a PLUGIN-SHIPPED
+# copy of the table (conexus/resources/tables/rdr-lifecycle.toml) — a
+# byte-identity lint test (tests/hooks/test_rdr_hook.py) keeps it in step
+# with the package copy (src/nexus/tables/rdr-lifecycle.toml), the same
+# two-copies-kept-identical pattern already used for
+# conexus/hooks/scripts/expectations.sh.
+_LIFECYCLE_TABLE_PATH = Path(__file__).resolve().parents[2] / "resources" / "tables" / "rdr-lifecycle.toml"
 
-# Monotonic status ordering (higher index = more advanced)
 # "open" ranks WITH "draft" (nexus-e2sim / GH #1409): it is the accepted
 # pre-accept synonym in rdr.py's accept flow, and rdr-create always seeds
 # T2 at "draft" — an unranked "open" here made this hook silently rewrite
-# every open-status file back to draft on session start.
-_STATUS_ORDER = {
-    "draft": 0,
-    "open": 0,
-    "accepted": 1,
-    "implemented": 2,
-    "closed": 3,
-    "reverted": 4,
-    "abandoned": 4,
-    "superseded": 4,
-}
-_TERMINAL = {"closed", "reverted", "abandoned", "superseded"}
+# every open-status file back to draft on session start. `open` is retired
+# from the table's own domain, so it is added onto the derived order below
+# rather than appearing as a table row.
+_OPEN_STATUS_ALIAS = "open"
+
+
+def _status_membership(value: object) -> set[str]:
+    """Normalize a raw TOML ``match.status`` value (bare string or list) to
+    a set of member literals."""
+    if isinstance(value, list):
+        return set(value)
+    if value is None:
+        return set()
+    return {str(value)}
+
+
+def _derive_status_order_and_terminal(doc: dict) -> tuple[dict[str, int], set[str]]:
+    """Derive a monotonic status rank + terminal set from a raw parsed
+    rdr-lifecycle TOML document (RDR-201 P1.5, T2
+    nexus/plan-rdr-201-audit-round-3-residuals [23999] item 2).
+
+    No ``[lifecycle] order = [...]`` section was needed: the table's own
+    rows are enough. A status is TERMINAL when none of its non-escape
+    outgoing rows carry an event other than ``supersede`` (every status can
+    always be superseded; that alone doesn't make it non-terminal — matches
+    the real table's ``closed``/``superseded``/``abandoned``, whose only
+    other-than-supersede outgoing rows are all illegal-transition escapes).
+    Non-terminal statuses rank by their position in the declared
+    ``status`` domain; ALL terminal statuses share the next rank after the
+    highest non-terminal one -- the reconcile logic below only ever
+    compares "both terminal" (short-circuited to a warning, ranks unused)
+    or "one terminal vs one not" (any terminal rank beats any non-terminal
+    one), so terminal statuses never need to be ordered against each other.
+    ``open`` is folded in at ``draft``'s rank (or rank 0 if ``draft`` is
+    somehow absent from the domain), per the historical alias above.
+    """
+    domain = list(doc.get("dimensions", {}).get("status", {}).get("domain", []))
+    rows = doc.get("row", [])
+
+    non_terminal_outgoing: set[str] = set()
+    for row in rows:
+        if "to" not in row:
+            continue
+        match = row.get("match", {})
+        if match.get("event") == "supersede":
+            continue
+        non_terminal_outgoing |= _status_membership(match.get("status"))
+
+    non_terminal_in_order = [s for s in domain if s in non_terminal_outgoing]
+    terminal = {s for s in domain if s not in non_terminal_outgoing}
+
+    order = {status: i for i, status in enumerate(non_terminal_in_order)}
+    terminal_rank = len(non_terminal_in_order)
+    for status in terminal:
+        order[status] = terminal_rank
+
+    order[_OPEN_STATUS_ALIAS] = order.get("draft", 0)
+    return order, terminal
+
+
+def _load_status_order_and_terminal() -> tuple[dict[str, int], set[str]]:
+    """Load the plugin's lifecycle table and derive rank/terminal from it.
+
+    A SessionStart hook must never crash a session: a missing or malformed
+    table degrades to an EMPTY order/terminal (the reconcile below then
+    treats every status as equally-ranked and never fires) with a loud
+    stderr note, rather than raising past ``main()``.
+    """
+    try:
+        with _LIFECYCLE_TABLE_PATH.open("rb") as fh:
+            doc = tomllib.load(fh)
+        return _derive_status_order_and_terminal(doc)
+    except Exception as exc:  # noqa: BLE001 — defensive: see docstring
+        sys.stderr.write(
+            f"rdr_hook: cannot load lifecycle table ({_LIFECYCLE_TABLE_PATH}), "
+            f"status reconcile disabled: {type(exc).__name__}: {exc}\n"
+        )
+        return {}, set()
+
+
+_STATUS_ORDER, _TERMINAL = _load_status_order_and_terminal()
 _EXCLUDE_FILES = {
     "readme.md", "template.md", "index.md", "overview.md",
-    "workflow.md", "templates.md",
+    "workflow.md", "templates.md", "agents.md",
 }
 
 
