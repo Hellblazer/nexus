@@ -269,7 +269,39 @@ def _check_group(table: Table, group: Group) -> list[Finding]:
                     },
                 )
             )
-        # state-machine: zero-dim group is legitimate and silent ON COVERAGE.
+            return findings
+        # state-machine: the group's single (empty-tuple) assignment is
+        # trivially "accepted" by every row here (dims=[] means no guard
+        # key is even being examined) -- so "only a bare escape row
+        # accepts it" reduces to "the group has no ordinary (non-escape)
+        # row at all". When that holds, the bare escape row is what
+        # closes this group, exactly as _check_coverage flags below for
+        # guarded groups (RDR-201 Sec Technical Design's no-bare-green
+        # principle: a group closed only by its catch-all still earns the
+        # advisory). This is the real packaged rdr-lifecycle.toml's own
+        # shape: a list-valued match key's "-otherwise" escape row expands
+        # into one bare-escape row per remaining status, each alone in its
+        # own zero-dim group (code review, T2 nexus/code-review-
+        # nexus-j9z30-6-2026-09-02 [24038]). A group proved by an ordinary
+        # row (with or without a co-located escape row) stays silent, same
+        # as before.
+        ordinary = [r for r in group.rows if not r.escape]
+        bare_escapes = sorted(r.id for r in group.rows if r.escape and not r.guard)
+        if not ordinary and bare_escapes:
+            findings.append(
+                Finding(
+                    code=CLOSED_BY_ESCAPE,
+                    group=group.match,
+                    detail={
+                        "escape_row": bare_escapes[0],
+                        "message": (
+                            f"coverage of group {group.match!r} is closed by the bare "
+                            f"escape row {bare_escapes[0]!r} rather than proved over its "
+                            "declared domains"
+                        ),
+                    },
+                )
+            )
         return findings
 
     reasons = {d: dimension_reason(table, d) for d in dims}

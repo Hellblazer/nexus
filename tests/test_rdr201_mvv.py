@@ -16,24 +16,20 @@ RDR-201's Minimum Viable Validation section names, end to end, so the RDR's
 own acceptance bar has one place that proves it, independent of either
 component suite drifting.
 
-Deviation from the literal MVV phrasing, recorded here rather than left
-silent: leg 1 does not assert a "closed-by-escape" advisory. Measured
-directly (``check_table(load_packaged_table("rdr-lifecycle.toml"))``): the
-real packaged table currently produces ZERO findings of any kind, blocking
-or advisory. This is correct given the checker's own design — the table is
-``kind = "state-machine"``, and every one of its bare ``escape = true``
-rows lands in a zero-guard-dimension group; ``check.py``'s
-``_check_group`` deliberately treats a zero-dimension group as "legitimate
-and silent ON COVERAGE" for a state machine (only a ``decision-table``
-gets the ``no-participating-dimension`` advisory there), and
-``closed-by-escape`` itself only ever fires from within ``_check_coverage``,
-which a zero-dimension group never reaches. So today's table has no group
-where an escape row closes a gap left by ordinary rows — asserting one
-would be a false claim about the real table, not a stricter test. Leg 1
-instead asserts the two things RDR-201's MVV text actually states ("lints
-clean") plus a non-vacuity floor on the table's own structure, so a
-checker that trivially no-ops on an empty/near-empty table cannot pass this
-leg by accident.
+Leg 1's non-vacuity floor (code review, T2 nexus/code-review-
+nexus-j9z30-6-2026-09-02 [24038]): "lints clean" means zero BLOCKING
+findings, not zero findings — the checker also emits advisories, and
+``check_table``'s own no-bare-green principle (RDR-201 Sec Technical
+Design) means every one of the packaged table's ``*-otherwise`` escape
+rows, each alone in its own zero-guard-dimension group after list-valued
+match expansion, earns a ``closed-by-escape`` advisory: a group closed
+only by its catch-all still gets flagged, exactly as a guarded group does.
+Leg 1 asserts the packaged table's exact advisory count (24, the number of
+escape-only groups: 6 events' explicit-status complements — see
+``rdr-lifecycle.toml``'s own header comment for the per-event enumeration)
+rather than merely "at least one", so a regression that silently drops or
+duplicates an ``-otherwise`` row's expansion is caught, not just a
+regression that drops the advisory path entirely.
 
 Leg 5 (below) is the module's own non-vacuity guard: it re-runs all four
 legs' assertion bodies directly, in one test, in one process. ``-n auto``
@@ -55,7 +51,7 @@ from pathlib import Path
 from click.testing import CliRunner
 
 from nexus.commands.rdr import rdr
-from nexus.tables.check import BLOCKING_CODES, OVERLAP, check_table, exit_code, groups_of
+from nexus.tables.check import BLOCKING_CODES, CLOSED_BY_ESCAPE, OVERLAP, check_table, exit_code, groups_of
 from nexus.tables.load import load_packaged_table, load_table
 
 _RDR_BODY = """## Problem Statement
@@ -112,9 +108,23 @@ def _leg1_lifecycle_table_lints_clean() -> None:
 
     findings = check_table(table)
 
-    assert findings == [], f"packaged rdr-lifecycle table is not clean: {[f.to_json() for f in findings]}"
-    assert exit_code(findings) == 0
+    # "Lints clean" == zero BLOCKING findings, never zero findings: the
+    # checker's no-bare-green principle means every escape-only group
+    # earns a closed-by-escape advisory (non-blocking) rather than passing
+    # silently. Assert the exact count, not merely "at least one" -- a
+    # regression that silently drops or duplicates a "*-otherwise" row's
+    # per-status expansion changes this number.
+    assert exit_code(findings) == 0, f"packaged rdr-lifecycle table has blocking findings: {[f.to_json() for f in findings]}"
     assert not (BLOCKING_CODES & {f.code for f in findings})
+
+    closed_by_escape = [f for f in findings if f.code == CLOSED_BY_ESCAPE]
+    assert len(closed_by_escape) == 24, (
+        f"expected exactly 24 closed-by-escape advisories (one per escape-only "
+        f"group), got {len(closed_by_escape)}: {[f.to_json() for f in closed_by_escape]}"
+    )
+    assert {f.code for f in findings} == {CLOSED_BY_ESCAPE}, (
+        f"unexpected finding code(s) on the packaged table: {[f.to_json() for f in findings]}"
+    )
 
 
 def test_leg1_lifecycle_table_lints_clean() -> None:

@@ -452,6 +452,30 @@ def test_overlap_detected_when_group_has_no_guard_dimensions():
     assert exit_code(findings) == 1
 
 
+def test_zero_dim_group_closed_only_by_bare_escape_gets_advisory():
+    """RDR-201 Sec Technical Design's no-bare-green principle (code review,
+    T2 nexus/code-review-nexus-j9z30-6-2026-09-02 [24038]): a zero-guard-
+    dimension group whose ONLY row accepting the single (empty-tuple)
+    assignment is a bare escape row must get CLOSED_BY_ESCAPE, exactly as
+    _check_coverage already does for guarded groups. Mirrors the real
+    packaged rdr-lifecycle.toml's own `*-otherwise` shape: a list-valued
+    match key expands into one bare-escape row per remaining status, each
+    alone in its own zero-dim group."""
+    table = load_table(FIXTURES / "zero_dim_closed_by_escape.toml")
+    findings = check_table(table)
+
+    escape_group_findings = [f for f in findings if f.group == {"status": "accepted", "event": "accept"}]
+    assert codes_of(escape_group_findings) == [CLOSED_BY_ESCAPE]
+    assert escape_group_findings[0].detail["escape_row"] == "accept-otherwise#accepted"
+
+    # Regression: a zero-dim group proved by an ORDINARY row alone stays
+    # silent -- the fix must not turn every zero-dim group into an advisory.
+    draft_group_findings = [f for f in findings if f.group == {"status": "draft", "event": "accept"}]
+    assert draft_group_findings == []
+
+    assert exit_code(findings) == 0  # advisory only, never blocking
+
+
 # --------------------------------------------------------------------------
 # CRITICAL 2 (nexus-akmum): a non-bare escape row (one with a guard) must
 # participate in overlap detection like any ordinary row; only a BARE

@@ -1,0 +1,32 @@
+# Fixture: a zero-guard-dimension group whose ONLY row is a bare escape
+# row must earn CLOSED_BY_ESCAPE -- RDR-201 Sec Technical Design's
+# no-bare-green principle: a group closed only by its catch-all still
+# gets the advisory, exactly as a guarded group does via _check_coverage.
+# Mirrors the real packaged rdr-lifecycle.toml's own shape: a list-valued
+# match key's "-otherwise" escape row expands into one bare-escape row per
+# remaining status, each alone in its own zero-dim group (code review, T2
+# nexus/code-review-nexus-j9z30-6-2026-09-02 [24038]).
+#
+# The "draft" group is proved by an ordinary row alone and stays silent --
+# a regression pin proving the fix does not turn every zero-dim group into
+# an advisory.
+
+[table]
+id = "zero-dim-closed-by-escape-fixture"
+kind = "state-machine"
+
+[dimensions.status]
+domain = ["draft", "accepted"]
+[dimensions.event]
+domain = ["accept"]
+
+[[row]]
+id = "accept-draft"
+match = { status = "draft", event = "accept" }
+to = { status = "accepted" }
+
+[[row]]
+id = "accept-otherwise"
+match = { status = ["accepted"], event = "accept" }
+escape = true
+refuse = "illegal-transition"
