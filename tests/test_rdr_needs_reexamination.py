@@ -317,3 +317,83 @@ def test_audit_preamble_prints_the_marker_section(monkeypatch, capsys):
     assert result.exit_code == 0, result.output
     assert "**Needs re-examination (T2 `nexus_rdr` markers):**" in result.output
     assert "- `159`: needs-reexamination: RDR-185 accepted->closed" in result.output
+
+
+# ---------------------------------------------------------------------------
+# .23 code review (T2 [24088]) I1-I3: attribution kept, unmappable neighbours
+# named, one failing entry never hides the others
+# ---------------------------------------------------------------------------
+
+
+def test_marker_put_passes_the_entry_agent_and_session_back(tmp_path, monkeypatch):
+    """The engine upserts and re-stamps agent/session from the payload; the
+    facade fills them from the FLIPPING process's env. Passing the entry's
+    own values back is the only way a marker does not re-attribute the
+    record."""
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 14, "accepted")
+    _write_rdr(rdr_dir, 15, "accepted")
+    cat = _FakeCatalog(
+        entries=[_entry(tmp_path, 14, 1), _entry(tmp_path, 15, 2)],
+        links=[_link("1.7.2", "1.7.1", "supersedes")],
+    )
+    project = _project(tmp_path)
+
+    class _AttributingT2(_FakeT2Client):
+        def put(self, project, title, content, tags="", ttl=30, **kw):
+            self.puts.append({"project": project, "title": title, "tags": tags, "ttl": ttl, **kw})
+            return 1
+
+    t2 = _AttributingT2({(project, "15"): {"content": "status: accepted\n", "tags": "rdr", "agent": "architect-planner", "session": "sess-1"}})
+    _install(monkeypatch, tmp_path, cat, t2)
+    assert _flip(tmp_path, 14, "closed").exit_code == 0
+    assert t2.puts == [{"project": project, "title": "15", "tags": "rdr", "ttl": None, "agent": "architect-planner", "session": "sess-1"}]
+
+
+def test_unmappable_supersedes_neighbour_is_named_not_dropped(tmp_path, monkeypatch, capsys):
+    """A neighbour tumbler the numeric index cannot map back to an RDR
+    number (RDR-040 / RDR-079 on the real tree: colliding registrations, no
+    unique id: self-declaration) gets a note naming the tumbler, never a
+    silent omission."""
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 14, "accepted")
+    orphan = _entry(tmp_path, 99, 9)
+    cat = _FakeCatalog(
+        entries=[_entry(tmp_path, 14, 1)],  # 1.7.9 is linked but never listed -> unmappable
+        links=[_link("1.7.9", "1.7.1", "supersedes")],
+    )
+    del orphan
+    t2 = _FakeT2Client({})
+    _install(monkeypatch, tmp_path, cat, t2)
+    result = _flip(tmp_path, 14, "closed")
+    assert result.exit_code == 0, result.output
+    assert t2.puts == []
+    assert "supersedes neighbour 1.7.9 could not be mapped" in result.output
+
+
+def test_one_failing_entry_does_not_hide_the_marks_already_written(tmp_path, monkeypatch):
+    rdr_dir = _rdr_dir(tmp_path)
+    for n in (14, 15, 16):
+        _write_rdr(rdr_dir, n, "accepted")
+    cat = _FakeCatalog(
+        entries=[_entry(tmp_path, 14, 1), _entry(tmp_path, 15, 2), _entry(tmp_path, 16, 3)],
+        links=[_link("1.7.2", "1.7.1", "supersedes"), _link("1.7.3", "1.7.1", "supersedes")],
+    )
+    project = _project(tmp_path)
+
+    class _FlakyT2(_FakeT2Client):
+        def put(self, project, title, content, tags="", ttl=30, **kw):
+            if title == "16":
+                raise ConnectionError("T2 hiccup on 16")
+            return super().put(project, title, content, tags=tags, ttl=ttl, **kw)
+
+    t2 = _FlakyT2({
+        (project, "15"): {"content": "status: accepted\n", "tags": ""},
+        (project, "16"): {"content": "status: accepted\n", "tags": ""},
+    })
+    _install(monkeypatch, tmp_path, cat, t2)
+    result = _flip(tmp_path, 14, "closed")
+    assert result.exit_code == 0, result.output
+    assert [p["title"] for p in t2.puts] == ["15"]
+    assert f"marked {project}/15 needs-reexamination" in result.output
+    assert "dependents not marked: RDR 16: ConnectionError: T2 hiccup on 16" in result.output

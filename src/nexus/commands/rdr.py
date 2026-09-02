@@ -575,7 +575,9 @@ def _rdr_repo_scope(cat: object, repo_root: str) -> tuple[object | None, str]:
     return current_rdr_owner(cat, repo_root), rdr_source_prefix(repo_root)
 
 
-def _supersedes_neighbours(cat: object, repo_root: str, rdr_num: int) -> tuple[list[int], str | None]:
+def _supersedes_neighbours(
+    cat: object, repo_root: str, rdr_num: int,
+) -> tuple[list[int], list[str], str | None]:
     """RDR numbers joined to *rdr_num* by a ``supersedes`` catalog edge in
     EITHER direction, resolved through the same canonical-tumbler chain the
     dependency generator used to create those edges
@@ -583,20 +585,25 @@ def _supersedes_neighbours(cat: object, repo_root: str, rdr_num: int) -> tuple[l
     admission, one resolution; never a second copy here). Both directions:
     a successor abandoned leaves its predecessor's ``superseded`` stale, a
     predecessor revived leaves its successor's premise stale. Returns
-    ``(numbers, note)``; a non-empty *note* names why nothing could be
-    walked (repo never indexed, the flipped RDR itself unresolvable)."""
+    ``(numbers, unmapped_tumblers, note)``: *unmapped* are neighbour
+    tumblers the numeric index could not map back to an RDR number (a
+    number whose registrations collide with no unique ``id:``
+    self-declaration -- RDR-040 and RDR-079 on this repo today), named so
+    the caller reports them instead of dropping them; a non-empty *note*
+    names why nothing could be walked at all (repo never indexed, the
+    flipped RDR itself unresolvable)."""
     from nexus.catalog.link_generator import rdr_resolution  # noqa: PLC0415 — deferred import, see _default_catalog_reader
 
     owner, prefix = _rdr_repo_scope(cat, repo_root)
     if owner is None:
-        return [], "no catalog owner registered for this repo (never indexed)"
+        return [], [], "no catalog owner registered for this repo (never indexed)"
     resolved, number_index = rdr_resolution(cat, owner, repo_source_prefix=prefix)
     number_to_tumbler = {
         n: resolved[key] for n, key in number_index.items() if resolved.get(key) is not None
     }
     me = number_to_tumbler.get(rdr_num)
     if me is None:
-        return [], f"RDR {rdr_num} has no canonical catalog tumbler (unindexed or ambiguous)"
+        return [], [], f"RDR {rdr_num} has no canonical catalog tumbler (unindexed or ambiguous)"
     tumbler_to_number = {str(t): n for n, t in number_to_tumbler.items()}
     neighbours: set[str] = set()
     for link in cat.links_from(me, link_type=_MARKER_LINK_TYPE):  # type: ignore[attr-defined]
@@ -606,7 +613,8 @@ def _supersedes_neighbours(cat: object, repo_root: str, rdr_num: int) -> tuple[l
     numbers = sorted(
         n for t in neighbours if (n := tumbler_to_number.get(t)) is not None and n != rdr_num
     )
-    return numbers, None
+    unmapped = sorted(t for t in neighbours if t not in tumbler_to_number)
+    return numbers, unmapped, None
 
 
 def _append_marker_to_t2(client: object, project: str, number: int, marker: str) -> str | None:
@@ -614,9 +622,13 @@ def _append_marker_to_t2(client: object, project: str, number: int, marker: str)
     whichever title shape the record uses (``"42"`` or ``"RDR-42"``, the two
     shapes :func:`_t2_rdr_status_census` counts). Returns the title written,
     or ``None`` when no entry exists -- an absent record is named by the
-    caller, never invented here. ``ttl=None`` and the entry's own tags are
-    passed explicitly: the facade's ``put`` defaults to a 30-day TTL and
-    empty tags, either of which would silently damage a permanent record."""
+    caller, never invented here. The engine upserts on (project, title) and
+    re-stamps every column from the payload: ``ttl=None`` and the entry's
+    own ``tags``/``agent``/``session`` are passed back explicitly so the
+    facade's defaults (30-day TTL, empty tags, THIS process's agent and
+    session) cannot expire, strip or re-attribute a permanent record. The
+    row's ``timestamp`` becomes now() regardless -- the engine owns it --
+    and ``access_count`` is preserved server-side."""
     for title in (str(number), f"RDR-{number}"):
         entry = client.get(project=project, title=title)  # type: ignore[attr-defined]
         if not entry:
@@ -625,9 +637,13 @@ def _append_marker_to_t2(client: object, project: str, number: int, marker: str)
         tags = entry.get("tags", "")
         if isinstance(tags, (list, tuple)):
             tags = ",".join(str(t) for t in tags)
+        keep = {
+            k: entry[k] for k in ("agent", "session")
+            if isinstance(entry.get(k), str) and entry[k]
+        }
         client.put(  # type: ignore[attr-defined]
             project=project, title=title, content=f"{content}\n{marker}\n",
-            tags=str(tags or ""), ttl=None,
+            tags=str(tags or ""), ttl=None, **keep,
         )
         return title
     return None
@@ -638,28 +654,46 @@ def _mark_dependents_needs_reexamination(
 ) -> tuple[list[str], list[int], str | None]:
     """Walk the flipped record's ``supersedes`` neighbours and mark each
     one's T2 entry ``needs-reexamination: RDR-<from> <old>-><new>``.
-    Returns ``(titles marked, numbers with no T2 entry, note)``. Never
-    raises -- a catalog or T2 failure becomes *note*; the flip that
+    Returns ``(titles marked, numbers with no T2 entry, notes)``. Never
+    raises -- a catalog failure, an unmappable neighbour tumbler, or a T2
+    failure on one entry each become a note, and a failure on entry N
+    never discards what was already marked for 1..N-1; the flip that
     triggered this has already been written and stands regardless."""
     marker = f"{NEEDS_REEXAMINATION_FIELD}: RDR-{rdr_num} {old_status}->{new_status}"
     project = f"{repo_name}_rdr"
+    notes: list[str] = []
     try:
         cat = _catalog_reader_factory()
-        numbers, note = _supersedes_neighbours(cat, repo_root, rdr_num)
-        if note is not None or not numbers:
-            return [], [], note
-        marked: list[str] = []
-        missing: list[int] = []
-        with _t2_client_factory() as client:
-            for number in numbers:
+        numbers, unmapped, note = _supersedes_neighbours(cat, repo_root, rdr_num)
+    except Exception as exc:  # noqa: BLE001 — report-only leg: the flip already happened; a catalog failure is named on its own line, never allowed to fail the command
+        return [], [], [f"{type(exc).__name__}: {exc}"]
+    if note is not None:
+        notes.append(note)
+    for tumbler in unmapped:
+        notes.append(
+            f"supersedes neighbour {tumbler} could not be mapped to an RDR number "
+            "(colliding registrations with no unique id: self-declaration) -- not marked"
+        )
+    if not numbers:
+        return [], [], notes
+    marked: list[str] = []
+    missing: list[int] = []
+    try:
+        client_cm = _t2_client_factory()
+    except Exception as exc:  # noqa: BLE001 — same report-only posture
+        return [], [], notes + [f"{type(exc).__name__}: {exc}"]
+    with client_cm as client:
+        for number in numbers:
+            try:
                 title = _append_marker_to_t2(client, project, number, marker)
-                if title is None:
-                    missing.append(number)
-                else:
-                    marked.append(title)
-        return marked, missing, None
-    except Exception as exc:  # noqa: BLE001 — report-only leg: the flip already happened; a catalog/T2 failure is named on its own line, never allowed to fail the command
-        return [], [], f"{type(exc).__name__}: {exc}"
+            except Exception as exc:  # noqa: BLE001 — one entry's failure is named; the loop continues so earlier marks are still reported
+                notes.append(f"RDR {number}: {type(exc).__name__}: {exc}")
+                continue
+            if title is None:
+                missing.append(number)
+            else:
+                marked.append(title)
+    return marked, missing, notes
 
 
 def _gate_outcome_for(rdr_num: str, repo_name: str) -> tuple[str, str | None]:
@@ -920,7 +954,7 @@ def set_status(
     flipped_num_match = re.search(r"\d+", rdr_file.stem)
     if flipped_num_match:
         repo_name = _gate_repo_name(repo_root)
-        marked, missing, note = _mark_dependents_needs_reexamination(
+        marked, missing, notes = _mark_dependents_needs_reexamination(
             int(flipped_num_match.group(0)), current_status, new_status, repo_root, repo_name,
         )
         for title in marked:
@@ -930,7 +964,7 @@ def set_status(
                 f"dependent RDR {number} has no T2 entry in {repo_name}_rdr -- not marked",
                 err=True,
             )
-        if note:
+        for note in notes:
             click.echo(f"dependents not marked: {note}", err=True)
 
 

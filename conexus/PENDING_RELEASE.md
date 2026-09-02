@@ -31,8 +31,7 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.26.0)
 
-- `conexus/hooks/scripts/rdr_hook.py` + `conexus/resources/tables/rdr-lifecycle.toml`
-  (DELETED) — bead: nexus-e19sa — Sam's ruling 2026-09-02. The SessionStart
+- `conexus/hooks/scripts/rdr_hook.py` — bead: nexus-e19sa — Sam's ruling 2026-09-02. The SessionStart
   hook's file filter (`re.match(r"\d+", p.stem)`) matched zero of this
   repo's `rdr-NNN-*.md` files, so the hook exited before any logic on every
   session since it was written. The file<->T2 status RECONCILE half
@@ -44,7 +43,9 @@ mechanize, it matters enough to ship.
   summary stays and the filter is fixed (`rdr-NNN-*`, `rdrNNN-*`, `NNN-*`
   stems; `docs/rdr/*.md` non-recursive; `_EXCLUDE_FILES` kept), so the
   `RDR: N documents (...)` line prints for the first time. The
-  plugin-shipped table copy had no reader left and is removed; the
+  plugin-shipped table copy (added by the nexus-j9z30.5 entry below, so
+  never in any tag -- net drift zero, not listed) had no reader left and is
+  removed; the
   `[lifecycle] terminal_preserving_events` section that fed the deleted
   derivation is gone from the packaged table too. Inert for installed
   users until this ships.
@@ -74,9 +75,11 @@ mechanize, it matters enough to ship.
   frontmatter BEFORE calling `set-status ... superseded`, matching the
   table's `successor` guard, which reads that key from the file at call
   time and refuses `successor-not-named` otherwise.
-- `conexus/hooks/scripts/rdr_hook.py` + `conexus/resources/tables/rdr-lifecycle.toml`
-  (new file) — bead: nexus-j9z30.5 — the SessionStart hook's
-  `_STATUS_ORDER`/`_TERMINAL` are now DERIVED from a plugin-shipped copy of
+- `conexus/hooks/scripts/rdr_hook.py` — bead: nexus-j9z30.5 — (SUPERSEDED by
+  the nexus-e19sa entry above: the derivation, the plugin table copy and the
+  `[lifecycle]` section it describes were all deleted before any tag carried
+  them; kept as the record of the intermediate state.) The SessionStart hook's
+  `_STATUS_ORDER`/`_TERMINAL` were DERIVED from a plugin-shipped copy of
   the rdr-lifecycle table (read via stdlib `tomllib` — the hook runs under
   bare system python, `import nexus` fails there) instead of a
   hand-maintained literal that had drifted from the table's domain

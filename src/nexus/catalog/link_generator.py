@@ -492,10 +492,15 @@ def _numeric_id_index(
     return result
 
 
-#: Above this many new tumblers the per-tumbler seed lookup costs more
-#: round trips than the one full RDR listing it exists to avoid, so the
-#: generator falls through to the listing instead.
-_RDR_SEED_LOOKUP_CAP = 32
+#: Above this many new tumblers the generator lists instead of probing.
+#: The listing is len(RDR_CONTENT_TYPES) == 2 round trips carrying ~530 rows
+#: on this repo; each probe is one single-row round trip, serialized under
+#: the service catalog lock. The crossover is NOT measured (this box is a
+#: production install and cannot be timed from a dev session): 4 keeps the
+#: one-to-few-file `nx index md` case -- the reported regression -- at
+#: fewer round trips than the listing, and anything larger takes the
+#: listing as before. Measure before moving it.
+_RDR_SEED_LOOKUP_CAP = 4
 
 
 def _any_new_tumbler_is_rdr_keyed(cat: CatalogReader, new_tumblers: list[Tumbler]) -> bool:
