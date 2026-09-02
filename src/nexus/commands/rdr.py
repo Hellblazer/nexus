@@ -457,7 +457,7 @@ def _default_t2_client() -> object:
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    return T2Database(default_db_path())
+    return T2Database(default_db_path())  # boundary-allow: same short-lived preamble facade as :222, gate read for the accept event only
 
 
 #: Injection seam for :func:`_gate_outcome_for` — production code never
