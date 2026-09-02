@@ -420,6 +420,52 @@ def test_t2_leg_clears_status_for_companion_outcome_records(mod, rdr_tree: Path)
     assert "status:" not in call["content"]
 
 
+def test_t2_leg_clears_status_for_already_migrated_companion_file(mod, tmp_path: Path) -> None:
+    """T2 [24037] round-2 CRITICAL-class fix: a file leg 1 has ALREADY
+    migrated to kind: companion (no status line left AT ALL) must still be
+    recognized as a companion by leg 2 -- outcome.kind alone can't see this
+    on a fresh scan (outcome is None with no status line to re-derive from),
+    so this must come from FileResult.kind, read directly off the file's
+    own frontmatter. Uses a number ("055") that collides with nothing, so
+    the companion branch (not the ambiguity check) is what's exercised."""
+    rdr_dir = tmp_path / "docs" / "rdr"
+    rdr_dir.mkdir(parents=True)
+    (rdr_dir / "rdr-055-already-companion.md").write_text(
+        "---\ntitle: \"RDR-055\"\nkind: companion\n---\n\n# Body\n",
+        encoding="utf-8",
+    )
+    file_results = mod.compute_file_results(rdr_dir, apply=False)
+    r = next(x for x in file_results if x.path.name == "rdr-055-already-companion.md")
+    assert r.kind == "companion"
+    assert r.outcome is None  # no status line left -- outcome alone would miss this
+
+    client = FakeT2Client({"055": {"content": "status: frozen\n", "tags": "rdr", "ttl": None}})
+    report = mod.run_t2_leg(client, "nexus_rdr", file_results, apply=True)
+
+    assert len(report.diffs) == 1
+    assert report.diffs[0].reason == "clear-companion"
+    assert report.diffs[0].old_status == "frozen"
+    assert report.diffs[0].new_status is None
+    assert report.ambiguous == {}
+    call = client.put_calls[0]
+    assert call["title"] == "055"
+    assert "status:" not in call["content"]
+
+
+def test_t2_leg_already_migrated_companion_with_no_t2_status_proposes_nothing(mod, tmp_path: Path) -> None:
+    rdr_dir = tmp_path / "docs" / "rdr"
+    rdr_dir.mkdir(parents=True)
+    (rdr_dir / "rdr-055-already-companion.md").write_text(
+        "---\ntitle: \"RDR-055\"\nkind: companion\n---\n\n# Body\n",
+        encoding="utf-8",
+    )
+    file_results = mod.compute_file_results(rdr_dir, apply=False)
+    client = FakeT2Client({"055": {"content": "title: x\nno status here\n", "tags": "rdr", "ttl": None}})
+    report = mod.run_t2_leg(client, "nexus_rdr", file_results, apply=True)
+    assert report.diffs == []
+    assert client.put_calls == []
+
+
 def test_t2_leg_reports_disk_only_and_t2_only(mod, rdr_tree: Path) -> None:
     file_results = mod.compute_file_results(rdr_tree, apply=False)
     # "001" has a disk file (draft) but no T2 record; "999" has a T2 record

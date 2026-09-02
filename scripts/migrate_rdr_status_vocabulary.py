@@ -161,6 +161,20 @@ def extract_status(block: str) -> str | None:
     return None
 
 
+def extract_kind(block: str) -> str | None:
+    """Return the ``kind:`` value from a frontmatter block, or None.
+
+    Independent of ``status:`` -- a file that already carries no status line
+    at all (a companion post-leg-1) is exactly the case this must still
+    read correctly."""
+    for line in block.splitlines():
+        m = _KIND_LINE_RE.match(line)
+        if m:
+            val = m.group(2).strip().strip('"').strip("'")
+            return val or None
+    return None
+
+
 def _rewrite_frontmatter_lines(lines: list[str], outcome: StatusOutcome) -> list[str]:
     """Single-pass line transform: replace or remove the ``status:`` line per
     *outcome*, and (re)insert a ``kind:`` line at the position the status
@@ -229,6 +243,14 @@ class FileResult:
     old_status: str | None  # None: no frontmatter / no status field at all
     outcome: StatusOutcome | None  # None: status present but unmapped
     changed: bool
+    #: The file's OWN `kind:` frontmatter value, read directly and
+    #: independent of `status:` (T2 [24037] round-2 fix). Ground truth for
+    #: "is this file a companion" even when leg 1 has ALREADY removed its
+    #: status line -- outcome.kind cannot answer that on a re-scan, since a
+    #: companion file with no status line has outcome=None, and the
+    #: revised-after-implementation shape (status: closed + kind: companion)
+    #: re-derives outcome.kind=None (plain "closed") from status alone.
+    kind: str | None
 
 
 def iter_rdr_files(rdr_dir: Path) -> list[Path]:
@@ -242,21 +264,23 @@ def process_file(path: Path, *, apply: bool) -> FileResult:
     text = path.read_text(encoding="utf-8")
     number = extract_rdr_number(path) or ""
     if not text.startswith("---"):
-        return FileResult(path, number, None, None, False)
+        return FileResult(path, number, None, None, False, None)
     parts = text.split("---", 2)
     if len(parts) < 3:
-        return FileResult(path, number, None, None, False)
-    old_status = extract_status(parts[1])
+        return FileResult(path, number, None, None, False, None)
+    block = parts[1]
+    kind = extract_kind(block)
+    old_status = extract_status(block)
     if old_status is None:
-        return FileResult(path, number, None, None, False)
+        return FileResult(path, number, None, None, False, kind)
     outcome = STATUS_TRANSITIONS.get(old_status.lower())
     if outcome is None:
-        return FileResult(path, number, old_status, None, False)
+        return FileResult(path, number, old_status, None, False, kind)
     new_text = rewrite_file_text(text, outcome)
     changed = new_text != text
     if changed and apply:
         path.write_text(new_text, encoding="utf-8")
-    return FileResult(path, number, old_status, outcome, changed)
+    return FileResult(path, number, old_status, outcome, changed, kind)
 
 
 def compute_file_results(rdr_dir: Path, *, apply: bool) -> list[FileResult]:
@@ -548,7 +572,14 @@ def run_t2_leg(
 ) -> T2Report:
     disk_by_number: dict[str, list[FileResult]] = {}
     for r in file_results:
-        if r.outcome is None or not r.number:
+        if not r.number:
+            continue
+        # Include a file if it has a mappable status OR its OWN `kind:` line
+        # says companion -- the latter case is why this is not just
+        # `r.outcome is None`: a post-leg-1 companion file has NO status
+        # line at all (outcome=None) but must still be considered here
+        # (T2 [24037] round-2 fix).
+        if r.outcome is None and r.kind != "companion":
             continue
         disk_by_number.setdefault(r.number, []).append(r)
 
@@ -584,11 +615,18 @@ def run_t2_leg(
         content = entry.get("content", "") or ""
         old_t2_status = extract_status_from_content(content)
         outcome = file_result.outcome
-        assert outcome is not None  # disk_by_number excludes unmapped outcomes
+        # Ground truth: the file's OWN `kind:` line, independent of whether
+        # a status line still exists to re-derive outcome.kind from. Covers
+        # BOTH run orders -- leg 2 before leg 1 (outcome.kind == "companion"
+        # from a fresh STATUS_TRANSITIONS lookup) and leg 2 after leg 1 has
+        # already applied (file_result.kind == "companion" read directly;
+        # outcome is None or, for revised-after-implementation, a plain
+        # closed->closed identity that no longer says companion at all).
+        is_companion = file_result.kind == "companion" or (outcome is not None and outcome.kind == "companion")
 
-        if outcome.kind == "companion":
+        if is_companion:
             # The bead's OWN, independent T2 rule -- not derived from
-            # STATUS_TRANSITIONS at all: a file that becomes kind: companion
+            # STATUS_TRANSITIONS at all: a file that IS kind: companion
             # gets its T2 status CLEARED regardless of what T2's own text
             # says and regardless of what leg 1 kept on disk
             # (revised-after-implementation keeps status: closed on the
@@ -600,6 +638,7 @@ def run_t2_leg(
                 T2Diff(title=title, old_status=old_t2_status, new_status=None, reason="clear-companion")
             )
         else:
+            assert outcome is not None  # disk_by_number's filter guarantees this when not a companion
             # "Map by the same rules as leg 1": translate T2's OWN status
             # through STATUS_TRANSITIONS -- NOT the file's target status.
             # Only a T2 value that itself changes under the table (today:
