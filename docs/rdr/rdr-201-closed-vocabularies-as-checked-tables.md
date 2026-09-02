@@ -304,7 +304,7 @@ One table format, one checker, three tables.
 | --- | --- | --- |
 | `draft` | entry state; under research or revision | no |
 | `accepted` | gate passed; implementation may start | no |
-| `deferred` | parked; resumes to `draft` only, never directly to `accepted` | no |
+| `deferred` | parked, from `draft` or `accepted`; resumes to `draft` only, never directly to `accepted`, so deferred work re-gates | no |
 | `closed` | implemented and shipped; the close reason lives in T2 and the postmortem | yes |
 | `superseded` | replaced by a named successor; the transition is guarded on `superseded_by` being present in frontmatter and refuses without it | yes |
 | `abandoned` | not going to happen, whether before or after acceptance; the timing lives in T2 | yes |
@@ -630,4 +630,5 @@ class this RDR names was found and fixed during its own research.
 - 2026-09-01: Research findings 1-4 recorded; Alternative 1 refuted; incident classification corrected (event dimension); nexus-hcdk3 filed from Finding 2.
 - 2026-09-01: Status domain ruled by Sam: six values, scrapped merged into abandoned, deferred resumes to draft only, supersede guarded on superseded_by. Recorded in Technical Design.
 - 2026-09-01: Accepted; planning chain run (epic nexus-j9z30, T2 [23998], audit residuals [23999], enrichment deltas T2 nexus/plan-rdr-201-enrichment-deltas). Path correction: the lifecycle table lives in the package, not `docs/tables/`; the release table stays in `docs/tables/`.
+- 2026-09-01: Sam ruled defer is legal from `accepted` as well as `draft` (P1.3 open question).
 - 2026-09-01: Gate critique [23988], 4 significant: RDR-024 relabelled Precedent (the hard accept guard came with set-status, not RDR-024); RDR-149 added as the shared-primitive precedent; match-key shape rule added to the Technical Design; the 101-cell figure marked as an estimate with its 96-cell coverage sum reconciled to Phase 2.
