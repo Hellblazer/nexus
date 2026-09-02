@@ -288,9 +288,9 @@ until a canonical tumbler per record is resolved.
 
 One table format, one checker, three tables.
 
-1. A table format for enum-typed transition and decision tables, authored as data (TOML or YAML), with declared states, events, guards over declared enum domains, and rows.
-2. A checker that proves coverage and overlap over the declared domains, refuses to claim coverage over any undeclared or non-enum dimension, and reports a bare-green-by-default advisory when a row is a declared catch-all (the intrastate escape-row idea; bead nexus-1c7oq carries the advisory format).
-3. Three tables under `docs/` or `conexus/`, each linted in CI:
+1. **Table format**: enum-typed transition and decision tables authored as data (TOML), with declared states, events, guards over declared enum domains, and rows.
+2. **Checker**: proves coverage and overlap over the declared domains, refuses to claim coverage over any undeclared or non-enum dimension, and reports a bare-green-by-default advisory when a row is a declared catch-all (the intrastate escape-row idea; bead nexus-1c7oq carries the advisory format).
+3. **Three tables**, each linted in CI (the lifecycle table ships in the package, the release table under `docs/tables/`, see Revision History):
    - `rdr-lifecycle`: the record status machine, consumed by `nx rdr set-status` so an illegal transition is refused with a typed reason, and by `rdr-audit` so an out-of-vocabulary status is a finding.
    - `release-choreography`: the paired-release decision table with an explicit event column (pre-tag, tag-push, deploy, post-deploy verify), consumed by both scripts, which become thin evaluators over one table and so cannot disagree (Finding 2, O1).
    - `rdr-dependencies`: not a transition table but the edge list Gap 3 needs; a status change on a record marks every dependent's verdict `needs-reexamination`, surfaced by `rdr-audit`.
@@ -631,4 +631,5 @@ class this RDR names was found and fixed during its own research.
 - 2026-09-01: Status domain ruled by Sam: six values, scrapped merged into abandoned, deferred resumes to draft only, supersede guarded on superseded_by. Recorded in Technical Design.
 - 2026-09-01: Accepted; planning chain run (epic nexus-j9z30, T2 [23998], audit residuals [23999], enrichment deltas T2 nexus/plan-rdr-201-enrichment-deltas). Path correction: the lifecycle table lives in the package, not `docs/tables/`; the release table stays in `docs/tables/`.
 - 2026-09-01: Sam ruled defer is legal from `accepted` as well as `draft` (P1.3 open question).
+- 2026-09-01: Phase 1 complete on develop (epic nexus-j9z30 beads .1-.10): table format, loader, checker (with unmatched-assignment, unused-dimension and zero-dim closed-by-escape added by review), evaluator, packaged lifecycle table with the six-value ruling, set-status and every status list derived from it, docs/rdr swept to the domain, rdr-audit vocabulary findings. Approach item 3 lands one of its three tables in this phase; the release table is Phase 2 (.13), the dependency edges Phase 3. Phase gate: Item1=.1, Item2=.2, Item3=.3.
 - 2026-09-01: Gate critique [23988], 4 significant: RDR-024 relabelled Precedent (the hard accept guard came with set-status, not RDR-024); RDR-149 added as the shared-primitive precedent; match-key shape rule added to the Technical Design; the 101-cell figure marked as an estimate with its 96-cell coverage sum reconciled to Phase 2.
