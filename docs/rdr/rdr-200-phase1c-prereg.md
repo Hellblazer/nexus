@@ -104,4 +104,11 @@ pass.
 
 ## Revision History
 
-(none; frozen at initial commit, before any arm ran)
+- 2026-09-02 (before any arm ran) — **Plan library reseeded.** The two
+  widened builtin templates are shipped as files but served from the T2
+  plan library; `nx plan reseed` reconciled 2 drifted rows (471
+  document-discovery, 468 corpus-coverage-check) so the live library
+  matches `28d47fdb3`. Verified by a smoke probe: the Phase 1b q19 shape
+  now fans out over 58 collections and returns RDR-070 and the
+  search_engine/scoring sources; before the reseed it hit 11
+  knowledge__ collections only. No other value changed.
