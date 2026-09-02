@@ -3709,7 +3709,7 @@ RDR (Research-Design-Review) authoring helpers.
 | Subcommand | Description |
 |------------|-------------|
 | `lint` | Lint RDR frontmatter/structure; reports findings per file |
-| `set-status STATUS` | Flip an RDR's `status:` frontmatter field |
+| `set-status STATUS` | Flip an RDR's `status:` frontmatter field and README row (refused unless the lifecycle table allows the transition); then append `needs-reexamination` to the T2 entry of every RDR joined to it by a `supersedes` edge (RDR-201 P3.3) |
 | `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-close`, `rdr-research`) |
 
 Run `nx rdr --help` / `nx rdr preamble --help` for the full subcommand list. The `preamble` subcommands are primarily invoked by the conexus RDR-lifecycle skills.

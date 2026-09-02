@@ -10,14 +10,16 @@ the terminal-rank derivation feeding them). It never ran once: the file
 filter was ``re.match(r"\\d+", p.stem)`` against stems shaped
 ``rdr-201-...``, so it matched zero files and the hook exited before any
 logic, on every session since it was written. That killed both halves.
-The writer half is DELETED rather than switched on: ``nx rdr set-status``
-now writes the file and T2 together through the checked lifecycle table
-(RDR-201 Phase 1), so the drift class the reconcile existed for is
-designed out at the source, and a never-watched two-way writer whose first
-live run would have resolved nine known file/T2 disagreements by a ranking
-rule nobody had seen work was the risky thing here, not the missing
-feature. The read-only summary is kept and the filter fixed so it finally
-prints. The nine drift rows are a separate, hand-fixed follow-up.
+The writer half is DELETED rather than switched on: a never-watched
+two-way writer whose first live run would have resolved nine known file/T2
+disagreements by a ranking rule nobody had seen work was the risky thing
+here, not the missing feature. (The ruling's other ground -- that ``nx rdr
+set-status`` now writes file and T2 together -- is not so: set-status
+writes the file and README, the lifecycle skills write T2. The drift class
+therefore still exists and is DETECTED, not reconciled: ``nx rdr preamble
+rdr-audit`` prints a ``DRIFT:`` line per disagreement for a human to
+settle.) The read-only summary is kept and the filter fixed so it finally
+prints. The nine known drift rows are bead nexus-nxn5g.
 """
 from __future__ import annotations
 

@@ -151,7 +151,7 @@ def test_supersedes_dependent_is_marked_and_relates_dependent_is_not(tmp_path, m
     result = _flip(tmp_path, 14, "closed")
     assert result.exit_code == 0, result.output
     assert [p["title"] for p in t2.puts] == ["15"]
-    assert t2.puts[0]["content"].endswith("needs-reexamination: RDR-14 accepted->closed\n")
+    assert t2.puts[0]["content"].endswith("needs-reexamination: RDR-14 accepted->closed (RDR-15 supersedes RDR-14)\n")
     assert t2.puts[0]["content"].startswith("status: accepted\ntitle: Fifteen\n")
     assert f"marked {project}/15 needs-reexamination" in result.output
 
@@ -177,8 +177,9 @@ def test_both_directions_of_a_supersedes_edge_are_marked(tmp_path, monkeypatch):
     result = _flip(tmp_path, 15, "abandoned")
     assert result.exit_code == 0, result.output
     assert sorted(p["title"] for p in t2.puts) == ["14", "RDR-16"]
-    for put in t2.puts:
-        assert put["content"].endswith("needs-reexamination: RDR-15 accepted->abandoned\n")
+    by_title = {p["title"]: p["content"] for p in t2.puts}
+    assert by_title["14"].endswith("needs-reexamination: RDR-15 accepted->abandoned (RDR-15 supersedes RDR-14)\n")
+    assert by_title["RDR-16"].endswith("needs-reexamination: RDR-15 accepted->abandoned (RDR-16 supersedes RDR-15)\n")
 
 
 def test_marker_put_keeps_the_entry_permanent_and_keeps_its_tags(tmp_path, monkeypatch):
@@ -199,7 +200,7 @@ def test_marker_put_keeps_the_entry_permanent_and_keeps_its_tags(tmp_path, monke
     assert _flip(tmp_path, 14, "closed").exit_code == 0
     assert t2.puts == [{
         "project": project, "title": "15", "tags": "rdr,architecture", "ttl": None,
-        "content": "status: accepted\nneeds-reexamination: RDR-14 accepted->closed\n",
+        "content": "status: accepted\nneeds-reexamination: RDR-14 accepted->closed (RDR-15 supersedes RDR-14)\n",
     }]
 
 
@@ -397,3 +398,69 @@ def test_one_failing_entry_does_not_hide_the_marks_already_written(tmp_path, mon
     assert [p["title"] for p in t2.puts] == ["15"]
     assert f"marked {project}/15 needs-reexamination" in result.output
     assert "dependents not marked: RDR 16: ConnectionError: T2 hiccup on 16" in result.output
+
+
+def test_repeating_a_flip_does_not_stack_a_duplicate_marker(tmp_path, monkeypatch):
+    """critique [24089] S3: markers accumulate on permanent entries; the same
+    marker written twice (a status flipped there and back and there again,
+    or a re-run) must not duplicate the line."""
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 14, "accepted")
+    _write_rdr(rdr_dir, 15, "accepted")
+    cat = _FakeCatalog(
+        entries=[_entry(tmp_path, 14, 1), _entry(tmp_path, 15, 2)],
+        links=[_link("1.7.2", "1.7.1", "supersedes")],
+    )
+    project = _project(tmp_path)
+    t2 = _FakeT2Client({(project, "15"): {"content": "status: accepted\n", "tags": ""}})
+    _install(monkeypatch, tmp_path, cat, t2)
+    assert _flip(tmp_path, 14, "closed").exit_code == 0
+    assert len(t2.puts) == 1
+    # simulate the file being flipped back by hand, then closed again
+    _write_rdr(rdr_dir, 14, "accepted")
+    result = _flip(tmp_path, 14, "closed")
+    assert result.exit_code == 0, result.output
+    assert len(t2.puts) == 1, "the identical marker must not be appended twice"
+    assert f"marked {project}/15 needs-reexamination" in result.output
+
+
+# ---------------------------------------------------------------------------
+# rdr-audit's file-vs-T2 drift detector (critique [24089] Critical: the
+# reconciler is gone, so the drift class needs a detector, not a writer)
+# ---------------------------------------------------------------------------
+
+
+def test_file_vs_t2_drift_reports_only_disagreements_on_both_surfaces():
+    drift = rdr_mod._file_vs_t2_status_drift(
+        {"14": "closed", "15": "accepted", "16": "open", "17": "draft", "18": "closed"},
+        {"14": "superseded", "15": "accepted", "16": "draft", "18": "Closed", "99": "closed"},
+    )
+    assert drift == [("14", "closed", "superseded")]
+
+
+def test_rdr_file_statuses_reads_this_shape_and_skips_companions(tmp_path):
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 14, "closed")
+    (rdr_dir / "rdr-014-phase1-prereg.md").write_text("---\nkind: companion\nstatus: frozen\n---\n")
+    (rdr_dir / "rdr137-legacy.md").write_text("---\nstatus: accepted\n---\n")
+    (rdr_dir / "README.md").write_text("---\nstatus: draft\n---\n")
+    assert rdr_mod._rdr_file_statuses(rdr_dir) == {"14": "closed", "137": "accepted"}
+
+
+def test_audit_preamble_prints_drift_lines(monkeypatch, tmp_path, capsys):
+    root = tmp_path / "nexus"
+    rdr_dir = root / "docs" / "rdr"
+    rdr_dir.mkdir(parents=True)
+    _write_rdr(rdr_dir, 159, "closed")
+    _write_rdr(rdr_dir, 160, "accepted")
+    project = "nexus_rdr"
+    t2 = _FakeT2Client({
+        (project, "159"): {"content": "status: superseded\n", "tags": ""},
+        (project, "160"): {"content": "status: accepted\n", "tags": ""},
+    })
+    monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: t2)
+    monkeypatch.setenv("NEXUS_PROJECT_ROOTS", str(tmp_path))
+    result = CliRunner().invoke(rdr, ["preamble", "rdr-audit", "nexus"])
+    assert result.exit_code == 0, result.output
+    assert "- DRIFT: RDR-159 file=`closed` T2=`superseded`" in result.output
+    assert "1 file-vs-T2 status disagreement(s)" in result.output

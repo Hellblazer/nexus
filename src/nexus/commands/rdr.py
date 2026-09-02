@@ -577,15 +577,15 @@ def _rdr_repo_scope(cat: object, repo_root: str) -> tuple[object | None, str]:
 
 def _supersedes_neighbours(
     cat: object, repo_root: str, rdr_num: int,
-) -> tuple[list[int], list[str], str | None]:
-    """RDR numbers joined to *rdr_num* by a ``supersedes`` catalog edge in
+) -> tuple[list[tuple[int, str]], list[str], str | None]:
+    """``(RDR number, edge text)`` pairs for every record joined to *rdr_num* by a ``supersedes`` catalog edge in
     EITHER direction, resolved through the same canonical-tumbler chain the
     dependency generator used to create those edges
     (:func:`nexus.catalog.link_generator.rdr_resolution` -- one listing, one
     admission, one resolution; never a second copy here). Both directions:
     a successor abandoned leaves its predecessor's ``superseded`` stale, a
     predecessor revived leaves its successor's premise stale. Returns
-    ``(numbers, unmapped_tumblers, note)``: *unmapped* are neighbour
+    ``(neighbours, unmapped_tumblers, note)``: *unmapped* are neighbour
     tumblers the numeric index could not map back to an RDR number (a
     number whose registrations collide with no unique ``id:``
     self-declaration -- RDR-040 and RDR-079 on this repo today), named so
@@ -605,15 +605,19 @@ def _supersedes_neighbours(
     if me is None:
         return [], [], f"RDR {rdr_num} has no canonical catalog tumbler (unindexed or ambiguous)"
     tumbler_to_number = {str(t): n for n, t in number_to_tumbler.items()}
-    neighbours: set[str] = set()
+    # neighbour tumbler -> the edge as "RDR-<from> supersedes RDR-<to>", so
+    # the marker records WHICH way the edge runs (critique [24089] S3).
+    edges: dict[str, str] = {}
     for link in cat.links_from(me, link_type=_MARKER_LINK_TYPE):  # type: ignore[attr-defined]
-        neighbours.add(str(link.to_tumbler))
+        other = str(link.to_tumbler)
+        edges[other] = f"RDR-{rdr_num} supersedes RDR-{tumbler_to_number.get(other, '?')}"
     for link in cat.links_to(me, link_type=_MARKER_LINK_TYPE):  # type: ignore[attr-defined]
-        neighbours.add(str(link.from_tumbler))
+        other = str(link.from_tumbler)
+        edges[other] = f"RDR-{tumbler_to_number.get(other, '?')} supersedes RDR-{rdr_num}"
     numbers = sorted(
-        n for t in neighbours if (n := tumbler_to_number.get(t)) is not None and n != rdr_num
+        (n, edges[t]) for t in edges if (n := tumbler_to_number.get(t)) is not None and n != rdr_num
     )
-    unmapped = sorted(t for t in neighbours if t not in tumbler_to_number)
+    unmapped = sorted(t for t in edges if t not in tumbler_to_number)
     return numbers, unmapped, None
 
 
@@ -622,7 +626,9 @@ def _append_marker_to_t2(client: object, project: str, number: int, marker: str)
     whichever title shape the record uses (``"42"`` or ``"RDR-42"``, the two
     shapes :func:`_t2_rdr_status_census` counts). Returns the title written,
     or ``None`` when no entry exists -- an absent record is named by the
-    caller, never invented here. The engine upserts on (project, title) and
+    caller, never invented here. An entry already carrying this exact marker
+    line is left untouched (a repeated flip does not stack duplicates). The
+    engine upserts on (project, title) and
     re-stamps every column from the payload: ``ttl=None`` and the entry's
     own ``tags``/``agent``/``session`` are passed back explicitly so the
     facade's defaults (30-day TTL, empty tags, THIS process's agent and
@@ -634,6 +640,8 @@ def _append_marker_to_t2(client: object, project: str, number: int, marker: str)
         if not entry:
             continue
         content = str(entry.get("content", "")).rstrip("\n")
+        if marker in {line.strip() for line in content.splitlines()}:
+            return title  # already carries this exact marker: idempotent, no re-put
         tags = entry.get("tags", "")
         if isinstance(tags, (list, tuple)):
             tags = ",".join(str(t) for t in tags)
@@ -651,15 +659,16 @@ def _append_marker_to_t2(client: object, project: str, number: int, marker: str)
 
 def _mark_dependents_needs_reexamination(
     rdr_num: int, old_status: str, new_status: str, repo_root: str, repo_name: str,
-) -> tuple[list[str], list[int], str | None]:
+) -> tuple[list[str], list[int], list[str]]:
     """Walk the flipped record's ``supersedes`` neighbours and mark each
     one's T2 entry ``needs-reexamination: RDR-<from> <old>-><new>``.
-    Returns ``(titles marked, numbers with no T2 entry, notes)``. Never
+    Returns ``(titles marked, numbers with no T2 entry, notes)``. The marker
+    line is ``needs-reexamination: RDR-<from> <old>-><new> (RDR-a supersedes
+    RDR-b)`` -- the edge named so the reader knows which way it runs. Never
     raises -- a catalog failure, an unmappable neighbour tumbler, or a T2
     failure on one entry each become a note, and a failure on entry N
     never discards what was already marked for 1..N-1; the flip that
     triggered this has already been written and stands regardless."""
-    marker = f"{NEEDS_REEXAMINATION_FIELD}: RDR-{rdr_num} {old_status}->{new_status}"
     project = f"{repo_name}_rdr"
     notes: list[str] = []
     try:
@@ -683,7 +692,8 @@ def _mark_dependents_needs_reexamination(
     except Exception as exc:  # noqa: BLE001 — same report-only posture
         return [], [], notes + [f"{type(exc).__name__}: {exc}"]
     with client_cm as client:
-        for number in numbers:
+        for number, edge in numbers:
+            marker = f"{NEEDS_REEXAMINATION_FIELD}: RDR-{rdr_num} {old_status}->{new_status} ({edge})"
             try:
                 title = _append_marker_to_t2(client, project, number, marker)
             except Exception as exc:  # noqa: BLE001 — one entry's failure is named; the loop continues so earlier marks are still reported
@@ -2014,7 +2024,7 @@ def _rdr_audit_status_findings(
 
 def _t2_rdr_status_census(
     repo_name: str,
-) -> tuple[Counter[str], list[str], str | None]:
+) -> tuple[Counter[str], list[str], str | None, dict[str, str]]:
     """Read T2 project ``<repo_name>_rdr`` and count entries by their
     ``status:`` field, through the same injectable ``_t2_client_factory``
     seam :func:`_gate_outcome_for` already uses (RDR-201 P1.8 task
@@ -2022,11 +2032,13 @@ def _t2_rdr_status_census(
     tests").
 
     This is a SEPARATE, clearly labelled census line — never merged into
-    :func:`_rdr_audit_status_findings`'s file findings. The T2 reconcile
-    hook that would keep the two surfaces in sync never runs in this repo
-    (nexus-e19sa: ``rdr_hook.py``'s stem regex never matches, so it exits
-    at the top every time), so merging the two would report ~200 live T2
-    records as perpetually stale.
+    :func:`_rdr_audit_status_findings`'s file findings. Nothing keeps the
+    two surfaces in sync automatically (the reconcile hook that claimed to
+    never ran and was deleted, nexus-e19sa; ``set-status`` writes the file,
+    the lifecycle skills write T2), so the fourth return value — ``{number:
+    status}`` for every unambiguous record — feeds
+    :func:`_file_vs_t2_status_drift`, the DETECTOR the audit prints so a
+    disagreement is a finding a human sees rather than a writer's guess.
 
     Title shapes: T2 RDR records are titled either the bare number
     (``"42"``) or ``"RDR-42"`` — both are counted, matched via
@@ -2043,18 +2055,19 @@ def _t2_rdr_status_census(
     THIS LINE and never allowed to fail the audit — returns an empty
     ``Counter`` plus a named reason string instead of raising.
 
-    Returns ``(counts, ambiguous, error)`` — *ambiguous* is a sorted list
-    of human-readable ``"<number> (<title>=<status>, <title>=<status>)"``
-    notes, empty when there is nothing to report.
+    Returns ``(counts, ambiguous, error, statuses_by_number)`` — *ambiguous*
+    is a sorted list of human-readable ``"<number> (<title>=<status>,
+    <title>=<status>)"`` notes, empty when there is nothing to report.
     """
     project = f"{repo_name}_rdr"
     counts: Counter[str] = Counter()
     ambiguous: list[str] = []
+    statuses_by_number: dict[str, str] = {}
     try:
         with _t2_client_factory() as client:
             entries = client.get_all(project=project)
     except Exception as exc:  # noqa: BLE001 — T2 unreachable is an expected, named failure mode; reported on the census line, never allowed to fail the audit
-        return counts, ambiguous, f"T2 unreachable: {type(exc).__name__}: {exc}"
+        return counts, ambiguous, f"T2 unreachable: {type(exc).__name__}: {exc}", statuses_by_number
 
     by_number: dict[str, dict[str, str]] = {}
     for entry in entries:
@@ -2073,9 +2086,51 @@ def _t2_rdr_status_census(
             detail = ", ".join(f"{t}={s}" for t, s in sorted(shapes.items()))
             ambiguous.append(f"{number} ({detail})")
             continue
-        counts[next(iter(statuses))] += 1
+        status = next(iter(statuses))
+        counts[status] += 1
+        statuses_by_number[number] = status
 
-    return counts, sorted(ambiguous), None
+    return counts, sorted(ambiguous), None, statuses_by_number
+
+
+def _rdr_file_statuses(rdr_dir: Path) -> dict[str, str]:
+    """``{number: status}`` from ``docs/rdr/*.md`` frontmatter, non-recursive,
+    same scope and companion rule as :func:`_rdr_audit_status_findings`
+    (a ``kind: companion`` file carries no lifecycle status and is skipped).
+    Numbers are the leading digits of the filename, unpadded, matching the
+    T2 title shapes the census counts."""
+    statuses: dict[str, str] = {}
+    for path in sorted(rdr_dir.glob("*.md")):
+        if path.name.lower() in _RDR_AUDIT_EXCLUDED_FILENAMES:
+            continue
+        m = re.match(r"(?:rdr-?)?(\d+)", path.stem, re.IGNORECASE)
+        if not m:
+            continue
+        fm, _text = _preamble_parse_frontmatter(path)
+        if fm.get("kind") == "companion" or fm.get("status") is None:
+            continue
+        statuses[str(int(m.group(1)))] = str(fm["status"]).strip().lower()
+    return statuses
+
+
+def _file_vs_t2_status_drift(
+    file_statuses: dict[str, str], t2_statuses: dict[str, str],
+) -> list[tuple[str, str, str]]:
+    """Every RDR number present on BOTH surfaces whose statuses disagree, as
+    sorted ``(number, file_status, t2_status)`` — the detector for the
+    drift class nexus-e19sa's deleted reconciler used to arbitrate silently
+    (critique [24089] Critical). Numbers on one side only are not drift
+    (an unregistered file, a T2-only research note); ``open`` is read as
+    ``draft`` on the file side, the pre-accept synonym set-status itself
+    honours."""
+    drift: list[tuple[str, str, str]] = []
+    for number in sorted(set(file_statuses) & set(t2_statuses), key=int):
+        file_status = file_statuses[number]
+        if file_status == _OPEN_STATUS_ALIAS:
+            file_status = "draft"
+        if file_status != t2_statuses[number].lower():
+            drift.append((number, file_statuses[number], t2_statuses[number]))
+    return drift
 
 
 def _t2_needs_reexamination_markers(
@@ -2257,7 +2312,7 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
         else:
             print("> No local worktree found for the target project — nothing to scan.")
 
-        t2_counts, t2_ambiguous, t2_error = _t2_rdr_status_census(target)
+        t2_counts, t2_ambiguous, t2_error, t2_by_number = _t2_rdr_status_census(target)
         if t2_error:
             print(f"**T2 `{target}_rdr` status census:** {t2_error}")
         else:
@@ -2268,6 +2323,15 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
             if t2_ambiguous:
                 census_str += "; ambiguous: " + "; ".join(t2_ambiguous)
             print(f"**T2 `{target}_rdr` status census:** {census_str}")
+            scan_dir = (found_path / "docs" / "rdr") if found_path else None
+            if scan_dir is not None and scan_dir.is_dir():
+                drift = _file_vs_t2_status_drift(_rdr_file_statuses(scan_dir), t2_by_number)
+                for number, file_status, t2_status in drift:
+                    print(f"- DRIFT: RDR-{number} file=`{file_status}` T2=`{t2_status}`")
+                print(
+                    f"> {len(drift)} file-vs-T2 status disagreement(s) (nexus-e19sa: nothing "
+                    "reconciles these automatically; fix by hand, see nexus-nxn5g)."
+                )
         marker_rows, marker_error = _t2_needs_reexamination_markers(target)
         print(f"**Needs re-examination (T2 `{target}_rdr` markers):**", end="")
         if marker_error:

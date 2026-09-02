@@ -36,10 +36,12 @@ mechanize, it matters enough to ship.
   repo's `rdr-NNN-*.md` files, so the hook exited before any logic on every
   session since it was written. The file<->T2 status RECONCILE half
   (`_reconcile`, `_update_file_status`, `_update_t2_status`, the
-  `_STATUS_ORDER`/`_TERMINAL` derivation) is deleted, not switched on:
-  `nx rdr set-status` writes file + T2 through the checked table now, and a
+  `_STATUS_ORDER`/`_TERMINAL` derivation) is deleted, not switched on: a
   never-watched two-way writer would have resolved nine known file/T2
-  disagreements by a ranking rule nobody had seen run. The read-only
+  disagreements by a ranking rule nobody had seen run. (`nx rdr set-status`
+  does NOT write T2 -- the lifecycle skills do -- so the drift class still
+  exists; `nx rdr preamble rdr-audit` now prints a `DRIFT:` line per
+  file-vs-T2 disagreement instead of anything reconciling it.) The read-only
   summary stays and the filter is fixed (`rdr-NNN-*`, `rdrNNN-*`, `NNN-*`
   stems; `docs/rdr/*.md` non-recursive; `_EXCLUDE_FILES` kept), so the
   `RDR: N documents (...)` line prints for the first time. The
