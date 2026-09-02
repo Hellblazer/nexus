@@ -402,9 +402,15 @@ _README_CELL_LEADING_WORD = re.compile(r"[\*_]*([A-Za-z][A-Za-z-]*)")
 
 
 def _update_readme_status_row(
-    readme: Path, rdr_filename: str, new_status: str, status_domain: frozenset[str]
+    readme: Path, rdr_filename: str, label: str, status_domain: frozenset[str]
 ) -> bool:
     """Update the README index-row status cell for *rdr_filename*.
+
+    *label* is the exact cell text to write — the caller decorates it
+    (e.g. ``"Superseded by RDR-108"`` rather than the bare ``"Superseded"``
+    for a supersede transition, since the successor id is otherwise not
+    recorded anywhere on disk; code review, T2
+    nexus/critique-nexus-j9z30-4-2026-09-01 [24034] finding 9).
 
     Returns True if a row was found and rewritten. Matches the row by the RDR
     filename link and replaces the first cell whose LEADING WORD (case-
@@ -416,7 +422,7 @@ def _update_readme_status_row(
     if not readme.exists():
         return False
     lines = readme.read_text(encoding="utf-8").splitlines(keepends=True)
-    target_cell = new_status.capitalize()
+    target_cell = label
     changed = False
     for idx, line in enumerate(lines):
         if rdr_filename not in line or "|" not in line:
@@ -503,6 +509,27 @@ def _gate_outcome_for(rdr_num: str, repo_name: str) -> tuple[str, str | None]:
     return "none", f"gate record {title!r} outcome is {outcome!r} (expected PASSED or BLOCKED)"
 
 
+def _gate_repo_name(repo_root: str) -> str:
+    """Worktree-stable repo basename for the T2 gate project (``<repo>_rdr``).
+
+    Plain ``Path(repo_root).name`` returns the WORKTREE directory's own
+    basename (e.g. ``agent-a9b6e48835b938551``) when *repo_root* is a
+    Claude Code agent worktree, not the main checkout's name every other
+    T2 write under this project already uses — resolving the gate lookup
+    that way would silently address a per-agent T2 project no gate result
+    was ever written to (code review, T2
+    nexus/critique-nexus-j9z30-4-2026-09-01 [24034] finding 8).
+    ``nexus.repo_identity._resolve_main_repo`` walks
+    ``git rev-parse --git-common-dir`` to the main checkout even from a
+    worktree path; a *repo_root* that is not a git repo at all (e.g. a
+    bare ``tmp_path`` in a unit test) falls back to its own basename
+    unchanged, matching the pre-existing non-worktree behavior.
+    """
+    from nexus.repo_identity import _resolve_main_repo  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
+    return _resolve_main_repo(Path(repo_root)).name
+
+
 @rdr.command("set-status")
 @click.argument("rdr_id")
 @click.argument("new_status")
@@ -539,11 +566,24 @@ def set_status(
     status, not only ``draft`` — ``rdr-accept``'s self-heal and repeated
     ``rdr-close`` runs depend on this command being idempotent.
 
+    ``open`` is a retired status word, but ``nx rdr preamble rdr-accept``
+    still advertises it as a live pre-accept synonym for ``draft``
+    (nexus-qsryj). A file whose current status is ``open`` is read as
+    ``draft`` for the purpose of this resolution (never written back —
+    only the requested *new_status* is ever written to the file); one
+    line notes the alias so it is visible, not silent.
+
     ``gate`` is read from T2 (project ``<repo>_rdr``, title
-    ``<id>-gate-latest``) ONLY for the ``accept`` event — see
-    :func:`_gate_outcome_for`. T2 unreachable, or no gate record yet,
-    both reduce to ``gate="none"``, which the table refuses as
-    ``gate-not-passed`` (never a silent pass).
+    ``<id>-gate-latest``, using the WORKTREE-STABLE repo basename — see
+    :func:`_gate_repo_name`) ONLY when the resolved event is ``accept``
+    AND the (possibly alias-normalized) current status is ``draft`` —
+    every other (status, event) pair that maps to ``accept`` is already
+    illegal by the table's ``accept-otherwise`` escape row regardless of
+    ``gate``, so no T2 round-trip happens for those, and no
+    T2-unreachable/no-record note is ever appended to a refusal that
+    never consulted T2. See :func:`_gate_outcome_for`. T2 unreachable, or
+    no gate record yet, both reduce to ``gate="none"``, which the table
+    refuses as ``gate-not-passed`` (never a silent pass).
     """
     new_status = new_status.strip().lower()
 
@@ -567,9 +607,8 @@ def set_status(
 
     if root is not None:
         repo_root = str(root)
-        repo_name = Path(repo_root).name
     else:
-        repo_root, repo_name = _preamble_resolve_repo()
+        repo_root, _ = _preamble_resolve_repo()
     rdr_dir = _preamble_rdr_dir(repo_root)
     rdr_path = Path(repo_root) / rdr_dir
 
@@ -580,6 +619,14 @@ def set_status(
 
     meta, _ = _preamble_parse_frontmatter(rdr_file)
     current_status = str(meta.get("status") or "").strip().lower()
+
+    # `open` is retired from the table's domain but still a live pre-accept
+    # synonym for `draft` elsewhere in this file (rdr-accept preamble,
+    # nexus-qsryj). Normalize for resolution only — new_status (what gets
+    # WRITTEN) is never touched here. Named explicitly, not silently.
+    if current_status == "open":
+        click.echo(f"{rdr_file.name}: treating current status 'open' as 'draft' (pre-accept synonym)")
+        current_status = "draft"
 
     # Re-requesting the status the record already carries is a no-op for
     # EVERY status (not only draft) — rdr-accept's self-heal and repeated
@@ -593,13 +640,19 @@ def set_status(
 
     superseded_by = str(meta.get("superseded_by") or "").strip()
 
+    # Only `accept` FROM `draft` ever consults the table's `gate` guard
+    # (accept's other match rows are all escape/illegal-transition and
+    # never reference `gate`) — consulting T2 for any other (status,
+    # event) would cost a live round-trip for a refusal it can't affect,
+    # and would attach a misleading "T2 unreachable" tail to an
+    # illegal-transition refusal that never touched T2 (code review, T2
+    # nexus/code-review-nexus-j9z30-4-2026-09-01 [24033] finding 3).
+    gate_value = "none"
     gate_note: str | None = None
-    if event == "accept":
+    if event == "accept" and current_status == "draft":
         rdr_num_match = re.search(r"\d+", rdr_file.stem)
         rdr_num = rdr_num_match.group(0) if rdr_num_match else rdr_file.stem
-        gate_value, gate_note = _gate_outcome_for(rdr_num, repo_name)
-    else:
-        gate_value = "none"
+        gate_value, gate_note = _gate_outcome_for(rdr_num, _gate_repo_name(repo_root))
 
     assignment = {
         "status": current_status,
@@ -645,14 +698,25 @@ def set_status(
     if new_text != text:
         rdr_file.write_text(new_text, encoding="utf-8")
 
+    # A supersede transition's ONLY on-disk record of the successor is
+    # this README cell (the frontmatter's own `superseded_by` lives in the
+    # FILE, not the index) — decorate it rather than writing a bare
+    # "Superseded" (code review, T2
+    # nexus/critique-nexus-j9z30-4-2026-09-01 [24034] finding 9).
+    # `superseded_by` is guaranteed non-empty here: a supersede transition
+    # with it empty would already have refused successor-not-named above.
+    readme_label = (
+        f"Superseded by {superseded_by}" if new_status == "superseded" else new_status.capitalize()
+    )
+
     readme = rdr_path / "README.md"
     readme_updated = _update_readme_status_row(
-        readme, rdr_file.name, new_status, status_domain
+        readme, rdr_file.name, readme_label, status_domain
     )
 
     click.echo(f"set {rdr_file.name} status -> {new_status}")
     if readme_updated:
-        click.echo(f"updated README index row -> {new_status.capitalize()}")
+        click.echo(f"updated README index row -> {readme_label}")
     else:
         click.echo("README index row not found (skipped)", err=True)
 

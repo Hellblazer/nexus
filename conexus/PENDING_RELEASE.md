@@ -43,6 +43,14 @@ mechanize, it matters enough to ship.
   adds `nx_answer_report` to the auto-approve list so the new completion-
   report tool does not prompt on every call while every sibling nx_* tool
   auto-approves. RDR-200 Phase 1c.
+- `conexus/skills/rdr-close/SKILL.md` — bead: nexus-j9z30.4 — the
+  Reverted-or-Abandoned flow now runs `nx rdr set-status NNN abandoned`
+  (not `reverted`, retired from the rdr-lifecycle table's status domain
+  — RDR-201 Phase 1); the "reverted" reason is recorded in T2/post-mortem
+  only. The Superseded flow now writes `superseded_by` into the old RDR's
+  frontmatter BEFORE calling `set-status ... superseded`, matching the
+  table's `successor` guard, which reads that key from the file at call
+  time and refuses `successor-not-named` otherwise.
 
 All three are INERT until the next release or plugin cut: sessions load the
 plugin from the pinned tag, so continuation mode is live in the CLIENT

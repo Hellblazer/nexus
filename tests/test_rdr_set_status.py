@@ -39,6 +39,7 @@ self-heal path and repeated ``rdr-close`` runs depend on this (Sam,
 """
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +47,7 @@ import pytest
 from click.testing import CliRunner
 
 import nexus.commands.rdr as rdr_mod
-from nexus.commands.rdr import _rewrite_frontmatter_status, rdr
+from nexus.commands.rdr import _gate_repo_name, _rewrite_frontmatter_status, rdr
 from nexus.tables.load import TableLoadError
 
 
@@ -122,6 +123,10 @@ class _FakeT2Client:
 
     Satisfies the same minimal contract the real ``T2Database`` facade does:
     a context manager exposing ``get(project=..., title=...) -> dict | None``.
+    Tracks ``get_call_count`` so a test can assert T2 was NEVER consulted
+    (rather than asserting on a swallowed-exception side effect — code
+    review, T2 nexus/code-review-nexus-j9z30-4-2026-09-01 [24033]
+    finding 4).
     """
 
     def __init__(
@@ -132,6 +137,7 @@ class _FakeT2Client:
     ) -> None:
         self._entries = entries or {}
         self._raise_on_get = raise_on_get
+        self.get_call_count = 0
 
     def __enter__(self) -> "_FakeT2Client":
         return self
@@ -142,6 +148,7 @@ class _FakeT2Client:
     def get(
         self, project: str | None = None, title: str | None = None, id: int | None = None
     ) -> dict[str, Any] | None:
+        self.get_call_count += 1
         if self._raise_on_get is not None:
             raise self._raise_on_get
         return self._entries.get((project, title))
@@ -257,12 +264,81 @@ def test_accepted_to_deferred_succeeds(tmp_path):
 def test_supersede_with_successor_named_succeeds(tmp_path):
     rdr_dir = _rdr_dir(tmp_path)
     f = _write_rdr(rdr_dir, 222, "accepted", extra_fm="superseded_by: RDR-999\n")
-    _write_readme(rdr_dir, 222, "Accepted")
+    readme = _write_readme(rdr_dir, 222, "Accepted")
 
     res = _invoke(rdr_dir, "222", "superseded", "--date", "2026-06-24")
     assert res.exit_code == 0, res.output
     text = f.read_text()
     assert "status: superseded" in text
+
+    # The README cell is decorated with the successor id — the frontmatter
+    # `superseded_by` key is on the OLD file, not the index, so a bare
+    # "Superseded" cell would be the only place that link is lost (code
+    # review, T2 nexus/critique-nexus-j9z30-4-2026-09-01 [24034] finding 9).
+    row = [ln for ln in readme.read_text().splitlines() if "RDR-222" in ln][0]
+    assert "Superseded by RDR-999" in row
+
+
+def test_draft_to_abandoned_succeeds(tmp_path):
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(rdr_dir, 233, "draft")
+    _write_readme(rdr_dir, 233, "Draft")
+
+    res = _invoke(rdr_dir, "233", "abandoned", "--date", "2026-06-24")
+    assert res.exit_code == 0, res.output
+    assert "status: abandoned" in f.read_text()
+
+
+def test_accepted_to_abandoned_succeeds(tmp_path):
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(rdr_dir, 234, "accepted", extra_fm="accepted_date: 2026-06-22\n")
+    _write_readme(rdr_dir, 234, "Accepted")
+
+    res = _invoke(rdr_dir, "234", "abandoned", "--date", "2026-06-24")
+    assert res.exit_code == 0, res.output
+    assert "status: abandoned" in f.read_text()
+
+
+def test_deferred_to_abandoned_succeeds(tmp_path):
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(rdr_dir, 235, "deferred")
+    _write_readme(rdr_dir, 235, "Deferred")
+
+    res = _invoke(rdr_dir, "235", "abandoned", "--date", "2026-06-24")
+    assert res.exit_code == 0, res.output
+    assert "status: abandoned" in f.read_text()
+
+
+def test_open_to_accepted_with_gate_passed_succeeds(tmp_path, monkeypatch):
+    """`open` is a retired status word still advertised by the rdr-accept
+    preamble as a live pre-accept synonym for `draft` (nexus-qsryj). It
+    must resolve as draft (including consulting the gate) without ever
+    being written back to the file."""
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(rdr_dir, 236, "open")
+    _write_readme(rdr_dir, 236, "Draft")
+    project, title = _gate_coords(tmp_path, 236)
+    _install_fake_t2(monkeypatch, entries={(project, title): _gate_record("PASSED")})
+
+    res = _invoke(rdr_dir, "236", "accepted", "--date", "2026-06-24")
+    assert res.exit_code == 0, res.output
+    text = f.read_text()
+    assert "status: accepted" in text
+    assert "status: open" not in text
+    assert "alias" in res.output.lower() or "open" in res.output.lower()
+
+
+def test_open_to_closed_refuses_illegal_transition(tmp_path):
+    """open == draft for resolution purposes; draft -> closed is illegal
+    (only accepted -> closed is a legal `close` edge)."""
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(rdr_dir, 237, "open")
+    before = f.read_text()
+
+    res = _invoke(rdr_dir, "237", "closed", "--date", "2026-06-24")
+    assert res.exit_code != 0
+    assert "illegal-transition" in res.output
+    assert f.read_text() == before  # untouched, including status: open preserved
 
 
 def test_draft_to_draft_is_noop(tmp_path):
@@ -352,23 +428,39 @@ def test_draft_to_closed_refuses_illegal_transition(tmp_path):
     assert f.read_text() == before  # untouched
 
 
+def test_closed_to_abandoned_refuses_illegal_transition(tmp_path):
+    """closed is terminal — abandon is only legal from draft/accepted/deferred."""
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(rdr_dir, 238, "closed", extra_fm="accepted_date: 2026-06-20\nclosed_date: 2026-06-22\n")
+    before = f.read_text()
+
+    res = _invoke(rdr_dir, "238", "abandoned", "--date", "2026-06-24")
+    assert res.exit_code != 0
+    assert "illegal-transition" in res.output
+    assert f.read_text() == before  # untouched
+
+
 def test_deferred_to_accepted_refuses(tmp_path, monkeypatch):
     """The ruling's sharpest edge: deferred resumes to draft only, never
-    directly to accepted. Illegal by (status, event) alone — the table
-    refuses before the gate is even consulted, so no T2 read happens
-    (accept-otherwise's match includes `deferred`, an escape row)."""
+    directly to accepted. gate is only ever consulted for event=='accept'
+    AND current_status=='draft' — deferred is not draft, so this must
+    refuse WITHOUT touching T2 at all. Asserted on the fake's call count,
+    not on an exception surfacing (code review, T2
+    nexus/code-review-nexus-j9z30-4-2026-09-01 [24033] finding 4: a prior
+    version of this test used ``raise_on_get`` as a sentinel, but
+    ``_gate_outcome_for``'s broad ``except Exception`` silently swallowed
+    it into a misleading gate_note, so the test passed whether or not T2
+    was actually consulted)."""
     rdr_dir = _rdr_dir(tmp_path)
     f = _write_rdr(rdr_dir, 225, "deferred")
     before = f.read_text()
-    # No fake installed AND no monkeypatch of _t2_client_factory: if this
-    # transition incorrectly consulted T2, it would hang/error against the
-    # unpatched real client rather than refusing cleanly — proving the
-    # illegal-transition path never reaches the gate read.
-    _install_fake_t2(monkeypatch, raise_on_get=AssertionError("T2 must not be consulted"))
+    fake = _install_fake_t2(monkeypatch, entries={})
 
     res = _invoke(rdr_dir, "225", "accepted", "--date", "2026-06-24")
     assert res.exit_code != 0
     assert "illegal-transition" in res.output
+    assert "T2 unreachable" not in res.output
+    assert fake.get_call_count == 0
     assert f.read_text() == before  # untouched
 
 
@@ -426,6 +518,44 @@ def test_draft_to_accepted_t2_unreachable_refuses_and_says_so(tmp_path, monkeypa
     assert "gate-not-passed" in res.output
     assert "T2 unreachable" in res.output
     assert f.read_text() == before  # untouched
+
+
+def test_gate_repo_name_resolves_worktree_to_main_repo_name(tmp_path: Path) -> None:
+    """The T2 gate project must key off the MAIN checkout's basename, not
+    the WORKTREE directory's own basename — plain ``Path(repo_root).name``
+    would resolve a Claude Code agent worktree (e.g.
+    ``agent-a9b6e48835b938551``) to a per-agent T2 project no gate result
+    was ever written to (code review, T2
+    nexus/critique-nexus-j9z30-4-2026-09-01 [24034] finding 8). Same git
+    idiom as ``tests/test_repo_identity_stability.py``'s worktree test."""
+    main = tmp_path / "mainrepo"
+    main.mkdir()
+    subprocess.run(["git", "init", "--quiet"], cwd=main, check=True, capture_output=True)
+    (main / "seed.txt").write_text("seed")
+    subprocess.run(["git", "add", "seed.txt"], cwd=main, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "seed", "--quiet"],
+        cwd=main, check=True, capture_output=True,
+    )
+    worktree = tmp_path / "worktrees" / "agent-a9b6e48835b938551"
+    worktree.parent.mkdir()
+    subprocess.run(
+        ["git", "worktree", "add", "--quiet", str(worktree), "-b", "feature"],
+        cwd=main, check=True, capture_output=True,
+    )
+
+    assert _gate_repo_name(str(main)) == "mainrepo"
+    assert _gate_repo_name(str(worktree)) == "mainrepo"
+
+
+def test_gate_repo_name_falls_back_to_basename_when_not_a_git_repo(tmp_path: Path) -> None:
+    """A *repo_root* that is not a git repo at all (e.g. a bare tmp_path in
+    every other test in this module) falls back to its own basename
+    unchanged — matching every existing test's ``_gate_coords`` assumption
+    (``tmp_path.name``)."""
+    not_a_repo = tmp_path / "not-a-git-repo"
+    not_a_repo.mkdir()
+    assert _gate_repo_name(str(not_a_repo)) == "not-a-git-repo"
 
 
 # ---------------------------------------------------------------------------
