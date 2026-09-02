@@ -395,7 +395,18 @@ from __future__ import annotations
 #: new_changesets/reexecuted_changesets/pending_at_start; applied_changesets
 #: deliberately gone). Zero Liquibase changesets in the delta — no fork walk;
 #: the [additive] ledger entry authorizes deploying BEFORE the client tag.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 93)
+#: ->(0,1,94) 2026-09-02 for 7.27.0 (paired, all-[additive]); succeeds the
+#: (0,1,93) pin that shipped with 7.26.0. Payload: VoyageRetryLoop
+#: consolidation carrying the nexus-4ktfm ef_search floor and nexus-99r7y
+#: request-scoped 429 budget semantics (nexus-1vpal), telemetry `since`
+#: strict parsing — a malformed filter now 400s instead of degrading to a
+#: silent `since now()` empty set (nexus-spbay), and the engine half of the
+#: opt-in any-lexeme plan-search fallback (nexus-vi8fp). Zero Liquibase
+#: changesets in the delta, so no PITR fork walk; both wire-ledger entries
+#: lead with [additive], so the engine was tagged, deployed and cloud-gated
+#: GREEN before this client tag (nexus-1emxn choreography (a)) — no refusal
+#: window can open.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 94)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

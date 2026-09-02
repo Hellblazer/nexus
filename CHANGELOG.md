@@ -6,6 +6,125 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.27.0] - 2026-09-02
+
+Paired release with `engine-service-v0.1.94` (tagged on `13c5b2c31`;
+`REQUIRED_ENGINE_VERSION` bumped in this release). Zero Liquibase changesets
+in the engine delta and an all-`[additive]` wire ledger, so the engine was
+tagged, deployed and cloud-gated GREEN *before* this release's tag
+(nexus-1emxn choreography (a)) — no refusal window can open.
+
+### Added
+
+- **`nx rdr set-status` is gated by a checked lifecycle table (RDR-201).**
+  It refuses a transition the table does not allow, naming the reason
+  (`illegal-transition`, `gate-not-passed`, `successor-not-named`), instead
+  of writing whatever it was asked for. The status vocabulary is six values:
+  `draft`, `accepted`, `deferred`, `closed`, `superseded`, `abandoned`.
+  `scrapped` is retired and maps to `abandoned`.
+- **`nx rdr set-status` mirrors the flip onto the record's T2 entry.**
+  Previously the lifecycle skills wrote T2 separately in prose, which is how
+  nine records drifted between file and T2.
+- **`nx rdr preamble rdr-audit` reports two new things:** any on-disk status
+  outside the vocabulary as a `FINDING:` line, and any file-vs-T2 status
+  disagreement as a `DRIFT:` line.
+- **Superseding an RDR marks the records it supersedes `needs-reexamination`
+  in T2**, and `rdr-audit` lists them. Report-only, cleared by hand.
+- **`nx_answer` continuation mode and the `nx_answer_report` tool — opt-in,
+  default OFF (RDR-200 Phase 1).** `nx_answer` gains a `continuation`
+  parameter; when engaged it stops before the terminal reduction and returns
+  an instruction the calling session executes in-context instead of composing
+  the answer server-side, and `nx_answer_report` records that the caller
+  completed it (so `nx answer-runs` can report an honest unreported rate
+  rather than treating every handoff as silent failure). Handoffs with no
+  evidence payload, an oversized prompt, or an unsupported shape fall back to
+  the headless path rather than shipping an empty reduction. **The Phase 1
+  ship gate did not clear** — three pre-registered arms all failed against
+  the caller-only comparison — so the mechanism ships live-but-off and the
+  decision on Alternative 4 is open; the default path is unchanged.
+
+### Changed
+
+- **Distances are calibrated across embedding models before the merge
+  (nexus-tox2m).** Keyed on the resolved embedding model, so a prose corpus
+  is no longer starved by `voyage-code-3`'s tighter distance scale when
+  results from both are ranked together.
+- **RDR-006's file-size penalty is removed from scoring; domination control
+  is now a render-layer diversity cap (nexus-0bmhd, closes nexus-vlzz0).**
+  At most two chunks per file lead a page. `structured=True` consumers see
+  the uncapped ranked order. `tuning.scoring.file_size_threshold` is accepted
+  and ignored.
+- **Plan retrieval steps default to `knowledge,code,docs,rdr`** and the
+  inline planner scopes one retrieval step per named artifact with
+  content-shaped queries (nexus-rl59s). The single-step reroute and the
+  builtin plan templates are widened to match, so a document-discovery plan
+  can reach `rdr__` collections.
+- **Builtin plan seed descriptions rewritten to an exemplar-dense shape
+  (nexus-mmfag).** Measured: probes clearing the 0.40 match floor go 3/21 →
+  7/21 and correct-template-ranked-first goes 7/21 → 12/21. Existing installs
+  pick this up through seed reconcile on drift.
+- **Grown plans store a generalized match surface, not their verbatim
+  question (nexus-93cc6).** `save_plan` gains `match_description`; the
+  `query` column stays verbatim, keying the verbatim-repeat bypass. Measured
+  +17pp paraphrase recall at the grown floor with no precision cost.
+- **`plan_search` browsing falls back to any-lexeme matching (nexus-vi8fp).**
+  `plainto_tsquery` ANDs a question's tokens, so a vocabulary-gap question
+  missed plans containing its own jargon. The OR fallback fires only on an
+  empty AND result and is reachable **only** from the human-facing
+  `plan_search` tool — `plan_match` structurally cannot reach it, because
+  unfloored auto-admission measured 9/10 junk-plan runs on unrelated
+  questions.
+
+### Fixed
+
+- **`nx dt index --collection` normalises like `nx index pdf`
+  (nexus-t952k).** A refused write no longer leaves a live-looking catalog
+  row behind.
+- **`nx enrich aspects` writes its validation log under the config dir
+  (nexus-xwvwx)**, `--validation-out` overrides. It verifies against the full
+  document and reports a truncated window as *unverifiable* rather than as a
+  disagreement.
+- **A known MinerU version skew goes straight to the subprocess extractor
+  (nexus-eti1v)** instead of dialling and waiting out a server it has already
+  refused.
+- **`nx dt index`'s link / writeback / highlights layers reach DEVONthink
+  over stdio when the HTTP endpoint is absent (nexus-fdk1x)**, and exit 2
+  loudly when DEVONthink is unreachable.
+- **Telemetry `since` filters parse strictly (nexus-spbay).** A malformed
+  `since` used to degrade silently to `since now()` — a guaranteed empty
+  result set presented as a successful read. Date-only and naive datetime
+  forms are normalised to UTC before the wire; the engine half (v0.1.94)
+  answers a malformed filter with a 400.
+- **T1 self-heal retries resolve the bearer fresh (nexus-fe96p).** The
+  post-401 heal retried with the client's construction-time token, so on an
+  RDR-005-armed box the retry 401'd on the stale bearer even after the heal
+  adopted a good lease — indistinguishable from owner death for the rest of
+  the MCP process's life. The 401 guidance now names the heal outcome
+  (adopted / re-minted / declined) instead of asserting owner death
+  unconditionally.
+- **`claude -p` operator prompts are delivered race-free (nexus-vzy2v).**
+  The prompt was written to the child's stdin *after* exec; under load the
+  child hit its 3s stdin wait first and died with "Input must be
+  provided" — measured live when six concurrent agents degenerated 6/12
+  answers to a bare budget-warning line. The prompt is now a temp file
+  redirected in at `exec`, readable by construction.
+- **The continuation empty-evidence guard checks payload, not arity
+  (nexus-1lfk8).** A well-formed instruction whose ten evidence items were
+  all empty strings passed the count-based guard and shipped; the guard now
+  inspects the hydrated evidence fields.
+- **Grown plan match text no longer carries a trailing punctuation wart, and
+  `scope_tags=""` infers like `None` (nexus-7g0rg)** instead of being stored
+  verbatim — the path by which unanchored rows were reintroduced.
+- **Engine v0.1.94: the three Voyage retry loops are consolidated into one
+  `VoyageRetryLoop` (nexus-1vpal)**, carrying the v0.1.93 `hnsw.ef_search`
+  floor (nexus-4ktfm) and request-scoped 429 budget semantics (nexus-99r7y)
+  uniformly across all three call sites.
+- **Contributor-facing: the `[additive]` wire-ledger token is interpreted in
+  one shared place (nexus-hcdk3).** `check_engine_release_floor.py
+  --ledger-only` and `check_client_release_precondition.py` disagreed on the
+  checked-in ledger — and the former is merge-blocking on every PR to `main`,
+  so main-bound PRs were red on entries the sibling gate certified safe.
+
 ## [7.26.0] - 2026-08-31
 
 Paired release with `engine-service-v0.1.93` (tagged on `9edad9ea6`;

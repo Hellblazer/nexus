@@ -580,6 +580,7 @@ nx enrich aspects knowledge__delos                     # gap-fill: only uncovere
 nx enrich aspects knowledge__delos --all               # re-extract everything (pre-7.18.0 default)
 nx enrich aspects knowledge__delos --dry-run
 nx enrich aspects knowledge__delos --validate-sample 10
+nx enrich aspects knowledge__delos --validate-sample 10 --validation-out /tmp/aspects.jsonl
 nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku-4-5-20251001
 ```
 
@@ -588,7 +589,8 @@ nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku
 | `COLLECTION` (positional) | Must be a `knowledge__*` collection (Phase 1 scope). Other prefixes return a "no extractor config" error |
 | `--all` | Re-extract EVERY document, including ones that already have an aspect row. The pre-7.18.0 default; now opt-in because it re-spends on the whole corpus. Without it, only documents with NO aspect row are processed |
 | `--dry-run` | Report document count + cost estimate (Haiku-class). No API calls, no T2 writes. The read-side skip prediction samples the first 25 entries (one vector-service round-trip each) and projects the skip rate onto the rest (7.21.0, nexus-bocft: one round-trip per entry ran a 407-entry cloud dry-run past five minutes with nothing printed); the exact per-entry verdicts come from the real run |
-| `--validate-sample N` | Validate N% of newly-extracted aspects via `operator_verify` against the document text. Disagreements append to `./validation_failures.jsonl`. Pass 0 to skip. Default 5 |
+| `--validate-sample N` | Validate N% of newly-extracted aspects via `operator_verify` against the full document text. Disagreements append to `<nexus config dir>/aspect_validation_failures.jsonl` (nexus-xwvwx: never the current working directory). A document whose text is truncated before the check is reported as **unverifiable**, not as a disagreement. Pass 0 to skip. Default 5 |
+| `--validation-out PATH` | Override the validation-failures JSONL path (nexus-xwvwx) |
 | `--re-extract` | Re-run only on rows whose `model_version` is strictly less than `--extractor-version` (and rows that are missing entirely) |
 | `--extractor-version v` | Threshold for `--re-extract` (lexicographic STRICT-less-than) |
 
