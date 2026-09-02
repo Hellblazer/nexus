@@ -54,30 +54,39 @@ def _derive_status_order_and_terminal(doc: dict) -> tuple[dict[str, int], set[st
     rdr-lifecycle TOML document (RDR-201 P1.5, T2
     nexus/plan-rdr-201-audit-round-3-residuals [23999] item 2).
 
-    No ``[lifecycle] order = [...]`` section was needed: the table's own
-    rows are enough. A status is TERMINAL when none of its non-escape
-    outgoing rows carry an event other than ``supersede`` (every status can
-    always be superseded; that alone doesn't make it non-terminal — matches
-    the real table's ``closed``/``superseded``/``abandoned``, whose only
-    other-than-supersede outgoing rows are all illegal-transition escapes).
-    Non-terminal statuses rank by their position in the declared
-    ``status`` domain; ALL terminal statuses share the next rank after the
-    highest non-terminal one -- the reconcile logic below only ever
-    compares "both terminal" (short-circuited to a warning, ranks unused)
-    or "one terminal vs one not" (any terminal rank beats any non-terminal
-    one), so terminal statuses never need to be ordered against each other.
-    ``open`` is folded in at ``draft``'s rank (or rank 0 if ``draft`` is
-    somehow absent from the domain), per the historical alias above.
+    No ``[lifecycle] order = [...]`` section was needed for RANKING: the
+    table's own rows are enough. A status is TERMINAL when none of its
+    non-escape outgoing rows carry an event named in the table's own
+    ``[lifecycle] terminal_preserving_events`` list (RDR-201 P1.5 fix
+    round, T2 nexus/critique-nexus-j9z30-5-2026-09-01 [24042] finding 3 --
+    the event name, today just ``supersede``, is data the table declares
+    about ITSELF, not a literal this hook may hardcode; see the table's
+    own header comment for the downstream-reader contract this encodes).
+    An ABSENT ``[lifecycle]`` section is an explicit, documented empty set
+    -- never a silent fallback to ``supersede`` -- so a table that forgets
+    to declare the section simply treats every outgoing row as
+    non-terminal-preserving. Non-terminal statuses rank by their position
+    in the declared ``status`` domain; ALL terminal statuses share the
+    next rank after the highest non-terminal one -- the reconcile logic
+    below only ever compares "both terminal" (short-circuited to a
+    warning, ranks unused) or "one terminal vs one not" (any terminal rank
+    beats any non-terminal one), so terminal statuses never need to be
+    ordered against each other. ``open`` is folded in at ``draft``'s rank
+    (or rank 0 if ``draft`` is somehow absent from the domain), per the
+    historical alias above.
     """
     domain = list(doc.get("dimensions", {}).get("status", {}).get("domain", []))
     rows = doc.get("row", [])
+    terminal_preserving_events = set(
+        doc.get("lifecycle", {}).get("terminal_preserving_events", [])
+    )
 
     non_terminal_outgoing: set[str] = set()
     for row in rows:
         if "to" not in row:
             continue
         match = row.get("match", {})
-        if match.get("event") == "supersede":
+        if match.get("event") in terminal_preserving_events:
             continue
         non_terminal_outgoing |= _status_membership(match.get("status"))
 
@@ -100,10 +109,24 @@ def _load_status_order_and_terminal() -> tuple[dict[str, int], set[str]]:
     table degrades to an EMPTY order/terminal (the reconcile below then
     treats every status as equally-ranked and never fires) with a loud
     stderr note, rather than raising past ``main()``.
+
+    A successful load logs the loaded table's ``id``/``version`` on stderr
+    (RDR-201 P1.5 fix round, T2 nexus/critique-nexus-j9z30-5-2026-09-01
+    [24042] finding 4). This plugin copy and the package copy
+    (``src/nexus/tables/rdr-lifecycle.toml``) are kept byte-identical by a
+    lint test on develop, but a USER's package upgrade and their Claude
+    Code plugin update are independent channels (RDR-143's problem
+    statement) -- there is no lockstep mechanism here, only this line
+    making the skew DETECTABLE after the fact.
     """
     try:
         with _LIFECYCLE_TABLE_PATH.open("rb") as fh:
             doc = tomllib.load(fh)
+        table_meta = doc.get("table", {})
+        sys.stderr.write(
+            f"rdr_hook: loaded lifecycle table id={table_meta.get('id')!r} "
+            f"version={table_meta.get('version')!r}\n"
+        )
         return _derive_status_order_and_terminal(doc)
     except Exception as exc:  # noqa: BLE001 — defensive: see docstring
         sys.stderr.write(

@@ -58,11 +58,26 @@ mechanize, it matters enough to ship.
   bare system python, `import nexus` fails there) instead of a
   hand-maintained literal that had drifted from the table's domain
   (dropped `implemented`/`reverted`, words the table's closed vocabulary
-  never declared). `_EXCLUDE_FILES` now also excludes `agents.md`. RDR-201
-  Phase 1. The hook's file-glob regex (`re.match(r"\d+", p.stem)`) still
-  never matches any `rdr-NNN-*.md` file, so this reconcile logic remains
-  dead code on this repo — that defect (nexus-e19sa) is out of scope here
-  and awaits Sam's ruling separately.
+  never declared). The terminal-status rule (which events don't break
+  terminality, e.g. `supersede`) is likewise read from the table's own new
+  `[lifecycle] terminal_preserving_events` list, not hardcoded in the
+  hook. `_EXCLUDE_FILES` now also excludes `agents.md`. RDR-201 Phase 1.
+  The hook's file-glob regex (`re.match(r"\d+", p.stem)`) still never
+  matches any `rdr-NNN-*.md` file, so this reconcile logic remains dead
+  code on this repo — that defect (nexus-e19sa) is out of scope here and
+  awaits Sam's ruling separately.
+  **Skew detection (fix round, T2 nexus/critique-nexus-j9z30-5-2026-09-01
+  [24042] finding 1/4):** the table now carries `version = 1` under
+  `[table]`, and every hook run logs `rdr_hook: loaded lifecycle table
+  id=... version=...` on stderr. This is a DETECTABILITY line, not a
+  lockstep mechanism — a user's `conexus` package upgrade and their Claude
+  Code plugin update are independent channels (RDR-143's problem
+  statement), so the plugin-pinned table copy can genuinely run behind (or
+  ahead of) the installed package's copy between a package upgrade and the
+  next plugin update; this line is how that skew becomes visible in a
+  session transcript rather than silently producing a stale-but-uncomplained-about
+  reconcile order. No lockstep enforcement is introduced here — that
+  remains RDR-143's scope.
 
 All four are INERT until the next release or plugin cut: sessions load the
 plugin from the pinned tag, so continuation mode is live in the CLIENT

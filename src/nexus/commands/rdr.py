@@ -320,19 +320,6 @@ _STATUS_DATE_KEY: dict[str, str] = {
     "closed": "closed_date",
 }
 
-#: Requested target status -> the rdr-lifecycle table's ``event`` dimension.
-#: ``draft`` is deliberately absent: it is ambiguous on its own (resume from
-#: ``deferred`` vs. a no-op from ``draft`` itself) and is resolved from
-#: (current, target) in :func:`set_status` instead (RDR-201 P1.4 audit
-#: residual, T2 nexus/plan-rdr-201-audit-round-3-residuals [23999] item 1).
-_TARGET_STATUS_TO_EVENT: dict[str, str] = {
-    "accepted": "accept",
-    "closed": "close",
-    "superseded": "supersede",
-    "abandoned": "abandon",
-    "deferred": "defer",
-}
-
 #: ``open`` is retired from the rdr-lifecycle table's ``status`` domain but
 #: remains a live, READ-TIME-ONLY pre-accept synonym for ``draft`` in the
 #: rdr-accept preamble (GH #1409, nexus-qsryj) -- a project whose RDR
@@ -386,6 +373,26 @@ def _to_status_for_event(table: Table, event: str) -> str:
             f"non-escape 'to' targets ({sorted(targets)}), expected exactly 1"
         )
     return next(iter(targets))
+
+
+def _target_status_to_event(table: Table) -> dict[str, str]:
+    """Derive the requested-target-status -> table ``event`` mapping.
+
+    RDR-201 P1.5 fix round (T2 nexus/critique-nexus-j9z30-5-2026-09-01
+    [24042] finding 4): mechanically reproduces the old hand-maintained
+    ``_TARGET_STATUS_TO_EVENT`` literal by calling :func:`_to_status_for_event`
+    for every event in the table's ``event`` domain except ``resume`` --
+    ``resume``'s target, ``draft``, is ambiguous on its own (resume from
+    ``deferred`` vs. a no-op from ``draft`` itself) and stays resolved from
+    (current, target) in :func:`set_status` instead (RDR-201 P1.4 audit
+    residual, T2 nexus/plan-rdr-201-audit-round-3-residuals [23999] item 1)
+    -- that is the one Python-side rule this derivation does not absorb.
+    """
+    return {
+        _to_status_for_event(table, event): event
+        for event in table.dimensions["event"].domain
+        if event != "resume"
+    }
 
 
 def _rewrite_frontmatter_status(text: str, new_status: str, date: str) -> str:
@@ -609,10 +616,10 @@ def set_status(
     (RDR-165 / RDR-166).
 
     RDR-201 P1.4: the requested *new_status* is resolved to the packaged
-    ``rdr-lifecycle`` state-machine table's ``event`` dimension (a small
-    explicit (current, target) -> event mapping, see
-    ``_TARGET_STATUS_TO_EVENT``); the file's current frontmatter status
-    binds ``status``. An illegal edge REFUSES with the table row's typed
+    ``rdr-lifecycle`` state-machine table's ``event`` dimension (derived
+    from the table itself, see :func:`_target_status_to_event`, RDR-201
+    P1.5); the file's current frontmatter status binds ``status``. An
+    illegal edge REFUSES with the table row's typed
     reason (``illegal-transition`` / ``gate-not-passed`` /
     ``successor-not-named``) instead of the old unconditional flip. The
     table is missing or unparsable -> exit 2, no fallback to a hardcoded
@@ -678,7 +685,7 @@ def set_status(
     # synonym for `draft` elsewhere in this file (rdr-accept preamble,
     # nexus-qsryj). Normalize for resolution only — new_status (what gets
     # WRITTEN) is never touched here. Named explicitly, not silently.
-    if current_status == "open":
+    if current_status == _OPEN_STATUS_ALIAS:
         click.echo(f"{rdr_file.name}: treating current status 'open' as 'draft' (pre-accept synonym)")
         current_status = "draft"
 
@@ -690,7 +697,8 @@ def set_status(
     if new_status == current_status:
         click.echo(f"{rdr_file.name} is already {new_status} (no-op)")
         return
-    event = "resume" if new_status == "draft" else _TARGET_STATUS_TO_EVENT[new_status]
+    target_status_to_event = _target_status_to_event(table)
+    event = "resume" if new_status == "draft" else target_status_to_event[new_status]
 
     superseded_by = str(meta.get("superseded_by") or "").strip()
 

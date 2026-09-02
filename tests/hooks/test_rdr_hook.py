@@ -198,6 +198,7 @@ def test_exclude_files_covers_agents_md(rdr_hook_module) -> None:
 
 
 _FAKE_LIFECYCLE_DOC = {
+    "lifecycle": {"terminal_preserving_events": ["supersede"]},
     "dimensions": {"status": {"domain": ["a", "b", "c", "d"]}},
     "row": [
         # a -[advance]-> b : non-terminal outgoing from a
@@ -241,6 +242,7 @@ def test_derive_status_order_and_terminal_excludes_supersede_outgoing(rdr_hook_m
     is still terminal -- 'can still be superseded' does not make a status
     non-terminal (matches the real table's closed/superseded/abandoned)."""
     doc = {
+        "lifecycle": {"terminal_preserving_events": ["supersede"]},
         "dimensions": {"status": {"domain": ["draft", "closed"]}},
         "row": [
             {"id": "accept", "match": {"status": "draft", "event": "accept"},
@@ -251,6 +253,51 @@ def test_derive_status_order_and_terminal_excludes_supersede_outgoing(rdr_hook_m
     }
     order, terminal = rdr_hook_module._derive_status_order_and_terminal(doc)
     assert terminal == {"closed"}
+
+
+def test_derive_status_order_and_terminal_reads_configured_event_name_not_hardcoded(
+    rdr_hook_module,
+) -> None:
+    """RDR-201 P1.5 fix round (T2 nexus/critique-nexus-j9z30-5-2026-09-01
+    [24042] finding 3): the terminal-preserving event set comes from the
+    table's own ``[lifecycle] terminal_preserving_events`` list, not a
+    hardcoded ``== "supersede"`` in this hook. An event named ``retire``
+    (never ``supersede``) declared as terminal-preserving must behave
+    identically to the supersede case above -- proving the rule is
+    data-driven, not a literal string match."""
+    doc = {
+        "lifecycle": {"terminal_preserving_events": ["retire"]},
+        "dimensions": {"status": {"domain": ["draft", "closed"]}},
+        "row": [
+            {"id": "accept", "match": {"status": "draft", "event": "accept"},
+             "to": {"status": "closed"}},
+            {"id": "retire", "match": {"status": "closed", "event": "retire"},
+             "to": {"status": "closed"}},
+        ],
+    }
+    order, terminal = rdr_hook_module._derive_status_order_and_terminal(doc)
+    assert terminal == {"closed"}
+
+
+def test_derive_status_order_and_terminal_no_lifecycle_section_excludes_nothing(
+    rdr_hook_module,
+) -> None:
+    """No ``[lifecycle]`` section -> an empty terminal-preserving-events
+    set (explicit, documented default), NOT a silent fallback to
+    ``supersede``. A status whose only outgoing row is a ``supersede``
+    event is therefore NON-terminal here, unlike the two tests above where
+    the table explicitly declares the event."""
+    doc = {
+        "dimensions": {"status": {"domain": ["draft", "closed"]}},
+        "row": [
+            {"id": "accept", "match": {"status": "draft", "event": "accept"},
+             "to": {"status": "closed"}},
+            {"id": "supersede", "match": {"status": "closed", "event": "supersede"},
+             "to": {"status": "closed"}},
+        ],
+    }
+    order, terminal = rdr_hook_module._derive_status_order_and_terminal(doc)
+    assert terminal == set()
 
 
 def test_derive_status_order_and_terminal_on_real_table_matches_established_ranks(
@@ -284,3 +331,54 @@ def test_module_level_status_order_and_terminal_loaded_from_plugin_table(
     assert rdr_hook_module._STATUS_ORDER["draft"] == 0
     assert rdr_hook_module._STATUS_ORDER["open"] == 0
     assert rdr_hook_module._TERMINAL == {"closed", "superseded", "abandoned"}
+
+
+def test_real_table_declares_terminal_preserving_events_section():
+    """The package table (and, by the byte-identity test above, the plugin
+    copy) must carry the ``[lifecycle] terminal_preserving_events`` section
+    the hook now reads instead of hardcoding ``"supersede"``."""
+    import tomllib
+
+    doc = tomllib.loads(PACKAGE_TABLE_PATH.read_text(encoding="utf-8"))
+    assert doc.get("lifecycle", {}).get("terminal_preserving_events") == ["supersede"]
+
+
+def test_real_table_header_states_the_terminal_rule():
+    """RDR-201 P1.5 fix round (T2 nexus/critique-nexus-j9z30-5-2026-09-01
+    [24042] finding 2): the downstream terminal-derivation assumption is
+    named in the table's own header comment, not only in rdr_hook.py --
+    a future table author adding a second such event has somewhere to
+    read the rule from."""
+    header = PACKAGE_TABLE_PATH.read_text(encoding="utf-8").split("[table]")[0]
+    assert "terminal" in header.lower()
+    assert "terminal_preserving_events" in header
+
+
+def test_real_table_declares_a_version():
+    import tomllib
+
+    doc = tomllib.loads(PACKAGE_TABLE_PATH.read_text(encoding="utf-8"))
+    assert isinstance(doc["table"].get("version"), int)
+
+
+def test_load_status_order_and_terminal_logs_table_id_and_version(
+    rdr_hook_module, tmp_path, monkeypatch, capsys
+) -> None:
+    """RDR-201 P1.5 fix round (T2 nexus/critique-nexus-j9z30-5-2026-09-01
+    [24042] finding 4): a successful load logs the loaded table's id +
+    version on stderr, so plugin/package table skew (a client upgraded
+    ahead of the pinned plugin, or vice versa -- RDR-143's problem
+    statement) is at least DETECTABLE from this line. No lockstep
+    mechanism is introduced here -- that is RDR-143's scope."""
+    fake_table_path = tmp_path / "versioned-lifecycle.toml"
+    fake_table_path.write_text(
+        '[table]\nid = "rdr-lifecycle"\nkind = "state-machine"\nversion = 7\n\n'
+        '[dimensions.status]\ndomain = ["draft"]\n'
+    )
+    monkeypatch.setattr(rdr_hook_module, "_LIFECYCLE_TABLE_PATH", fake_table_path)
+
+    rdr_hook_module._load_status_order_and_terminal()
+
+    captured = capsys.readouterr()
+    assert "rdr-lifecycle" in captured.err
+    assert "7" in captured.err

@@ -947,5 +947,103 @@ class TestAcceptCloseGuardsDeriveFromTable:
         assert "final" not in result.output.lower()
 
 
+# ---------------------------------------------------------------------------
+# RDR-201 P1.5 fix round (T2 nexus/critique-nexus-j9z30-5-2026-09-01 [24042]
+# finding 4): _target_status_to_event derives the old hand-maintained
+# _TARGET_STATUS_TO_EVENT literal from the table instead of carrying it
+# forward as a survivor.
+# ---------------------------------------------------------------------------
+
+
+def test_target_status_to_event_matches_real_table():
+    table = load_packaged_table("rdr-lifecycle.toml")
+    assert rdr_mod._target_status_to_event(table) == {
+        "accepted": "accept",
+        "closed": "close",
+        "superseded": "supersede",
+        "abandoned": "abandon",
+        "deferred": "defer",
+    }
+
+
+def test_target_status_to_event_excludes_resume():
+    """``resume``'s target is ``draft``, ambiguous on its own -- it must
+    never appear in the derived mapping (set_status resolves it separately
+    from (current, target))."""
+    table = load_packaged_table("rdr-lifecycle.toml")
+    mapping = rdr_mod._target_status_to_event(table)
+    assert "draft" not in mapping
+    assert "resume" not in mapping.values()
+
+
+def test_set_status_event_resolution_follows_table_not_hardcoded_literal(
+    tmp_path, monkeypatch
+):
+    """CLI-level derivation proof: a fake table whose `close` event targets
+    a status NAMED DIFFERENTLY from the real table's `closed` must still
+    resolve and succeed through `_target_status_to_event`. Against the old
+    hardcoded `_TARGET_STATUS_TO_EVENT` dict (whose keys are the real
+    table's target names) this would KeyError instead of succeeding."""
+    from nexus.tables.load import load_table
+
+    fake_path = tmp_path / "fake-target-lifecycle.toml"
+    fake_path.write_text(
+        """
+[table]
+id = "fake-target-lifecycle"
+kind = "state-machine"
+
+[dimensions.status]
+domain = ["draft", "accepted", "wrapped"]
+[dimensions.event]
+domain = ["accept", "close"]
+[dimensions.gate]
+domain = ["passed", "blocked", "none"]
+[dimensions.successor]
+domain = ["named", "absent"]
+
+[[row]]
+id = "accept"
+match = { status = "draft", event = "accept" }
+guard = { gate = "passed" }
+to = { status = "accepted" }
+
+[[row]]
+id = "accept-blocked"
+match = { status = "draft", event = "accept" }
+guard = { gate = ["blocked", "none"] }
+refuse = "gate-not-passed"
+
+[[row]]
+id = "accept-otherwise"
+match = { status = ["accepted", "wrapped"], event = "accept" }
+escape = true
+refuse = "illegal-transition"
+
+[[row]]
+id = "close"
+match = { status = "accepted", event = "close" }
+to = { status = "wrapped" }
+
+[[row]]
+id = "close-otherwise"
+match = { status = ["draft", "wrapped"], event = "close" }
+escape = true
+refuse = "illegal-transition"
+"""
+    )
+    fake_table = load_table(fake_path)
+    monkeypatch.setattr(rdr_mod, "load_packaged_table", lambda *a, **k: fake_table)
+
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 900, "accepted")
+
+    res = _invoke(rdr_dir, "900", "wrapped")
+
+    assert res.exit_code == 0, res.output
+    text = (rdr_dir / "rdr-900-example-title.md").read_text()
+    assert "status: wrapped" in text
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

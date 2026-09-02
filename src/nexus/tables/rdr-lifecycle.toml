@@ -35,10 +35,25 @@
 # The `defer` event is legal from `draft` and from `accepted` (Sam,
 # 2026-09-01, RDR-201 Revision History). A deferred record resumes to
 # `draft` only, so deferred-then-resumed work re-gates.
+#
+# DOWNSTREAM ASSUMPTION (RDR-201 P1.5 fix round, T2
+# nexus/critique-nexus-j9z30-5-2026-09-01 [24042] finding 2):
+# conexus/hooks/scripts/rdr_hook.py derives a terminal/non-terminal status
+# rank from this table's rows alone (it cannot `import nexus`, see its own
+# header). Its rule: a status is TERMINAL when its only non-escape outgoing
+# rows carry an event named in `[lifecycle] terminal_preserving_events`
+# below -- today just `supersede`, since every status can always be
+# superseded without that alone making it non-terminal. Adding a SECOND
+# such universal/self-loop-like event to this table must also add its name
+# to `terminal_preserving_events`, or the hook's terminal derivation will
+# silently flip currently-terminal statuses to non-terminal. There is no
+# coverage-checker enforcement of this -- it is a downstream reader
+# contract, recorded here because the hook cannot see this file's history.
 
 [table]
 id = "rdr-lifecycle"
 kind = "state-machine"
+version = 1
 
 [dimensions.status]
 domain = ["draft", "accepted", "deferred", "closed", "superseded", "abandoned"]
@@ -48,6 +63,13 @@ domain = ["accept", "close", "supersede", "abandon", "defer", "resume"]
 domain = ["passed", "blocked", "none"]
 [dimensions.successor]                    # superseded_by present in frontmatter?
 domain = ["named", "absent"]
+
+# Read by conexus/hooks/scripts/rdr_hook.py only (see the DOWNSTREAM
+# ASSUMPTION note above) -- not part of the state-machine schema itself,
+# so nexus.tables.load ignores this section entirely (unrecognised
+# top-level keys are not validated against any dimension).
+[lifecycle]
+terminal_preserving_events = ["supersede"]
 
 # --- accept: draft -> accepted, gated on RDR finalization ------------------
 
