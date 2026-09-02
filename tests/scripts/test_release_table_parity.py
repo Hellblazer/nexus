@@ -65,6 +65,7 @@ non-empty, ``[additive]``-entry-bearing ledger state.
 from __future__ import annotations
 
 import copy
+import functools
 import json
 import pathlib
 import random
@@ -73,6 +74,9 @@ from typing import Any, Callable
 import pytest
 
 import enumerate_release_cells as erc
+import release_messages
+from nexus.tables.load import Table, load_table
+from nexus.tables.resolve import resolve
 
 _FIXTURE_PATH = (
     pathlib.Path(__file__).resolve().parent / "fixtures" / "release_cells.json"
@@ -81,11 +85,37 @@ _FIXTURE: dict[str, Any] = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
 _FIXTURE_CELLS: list[dict[str, Any]] = _FIXTURE["cells"]
 _FIXTURE_CELL_IDS: list[str] = [c["cell_id"] for c in _FIXTURE_CELLS]
 
-#: The choreography table P2.4/P2.5 will author. Does not exist yet.
+#: The choreography table (RDR-201 P2.3, nexus-j9z30.13).
 _CHOREOGRAPHY_TABLE_PATH = (
     pathlib.Path(__file__).resolve().parents[2] / "docs" / "tables"
     / "release-choreography.toml"
 )
+
+#: The sentinel enumerate_release_cells.py's hand-enumerated orchestrator
+#: cells use for "this axis is not examined on this branch" (e.g.
+#: check_floor_bare's pin_currency=blocks cell carries probe="n/a"). The
+#: choreography table drops it from every affected dimension's domain
+#: entirely (see the table's own file header) -- a resolve() assignment
+#: must never carry it, or _validate would refuse the whole call as
+#: out-of-domain even though the winning row's guard never examines that
+#: key at all.
+_NOT_APPLICABLE = "n/a"
+
+#: A placeholder domain value for a declared dimension no row in the
+#: cell's own function-group examines (RDR-201 P2.3 design: "event" and
+#: "mode" are declared table-wide per the bead's spec but referenced by
+#: no row's guard, since this reduction's verdict is event/mode-invariant
+#: -- see the table's own file header). Any in-domain value resolves
+#: identically; the first declared domain member is used deterministically.
+_UNUSED_DIM_PLACEHOLDER_INDEX = 0
+
+
+@functools.lru_cache(maxsize=1)
+def _load_choreography_table() -> Table:
+    """Loaded once, not per (cell, event) case -- the table is immutable
+    for the life of the test process and Role 2 resolves it hundreds of
+    times."""
+    return load_table(_CHOREOGRAPHY_TABLE_PATH)
 
 #: ``Cell.function`` (as written by ``enumerate_release_cells.build_fixture()``)
 #: -> the enumerator's own driver for that function. Every key here is one of
@@ -186,21 +216,102 @@ def _drive_old_path(cell: erc.Cell) -> tuple[int, str]:
     return _OLD_PATH_DRIVERS[cell.function](cell)
 
 
+def _precond_main_dispatch_wiring_case(inputs: dict[str, str]) -> str:
+    """``precond_main_dispatch``'s table guard uses ONE synthetic
+    ``wiring_case`` dimension (2 values) rather than the raw
+    ``engine_tag``/``ack`` input keys, deliberately: the fixture's own 2
+    cells are two REPRESENTATIVE wiring scenarios, not a real 2x2
+    cross-product (the other two combinations are never enumerated at
+    all -- see the table's own comment on this group), so declaring
+    ``engine_tag``/``ack`` as two independent guard dimensions would make
+    the checker demand coverage for combinations the fixture never
+    claims to have verified. This derives the synthetic value from the
+    cell's real inputs; an input pair outside the fixture's own two
+    combinations is a fixture change this transform has not kept up
+    with, so it fails loudly rather than guessing."""
+    if inputs == {"engine_tag": "explicit", "ack": "given"}:
+        return "engine_tag_explicit_ack_given"
+    if inputs == {"engine_tag": "default", "ack": "absent"}:
+        return "engine_tag_default_ack_absent"
+    raise AssertionError(
+        f"precond_main_dispatch: unrecognised inputs {inputs!r} -- the "
+        "table's wiring_case dimension only covers the fixture's own two "
+        "representative combinations"
+    )
+
+
+#: Function -> transform from the fixture's raw ``cell.inputs`` to the
+#: table's own guard-dimension assignment (keyed WITHOUT the function
+#: prefix; ``_assignment_for`` below applies it). Only functions whose
+#: table dimensions are NOT a direct 1:1 rename of the fixture's own
+#: input keys need an entry here -- seven of the twelve table groups
+#: reuse the fixture's input key names verbatim (e.g.
+#: ``check_pin_currency.newest`` <- ``inputs["newest"]``) and need no
+#: transform at all.
+_SYNTHETIC_GUARD_TRANSFORMS: dict[str, Callable[[dict[str, str]], dict[str, str]]] = {
+    "precond_main_dispatch": lambda inputs: {
+        "wiring_case": _precond_main_dispatch_wiring_case(inputs)
+    },
+}
+
+
+def _assignment_for(table: Table, cell_dict: dict[str, Any], event: str) -> dict[str, str]:
+    """Build a full ``resolve()`` assignment for ``cell_dict`` at ``event``.
+
+    ``resolve()`` requires a value for EVERY declared table dimension
+    (``nexus.tables.resolve._validate``), not just the ones ``cell_dict``'s
+    own function-group guards on -- so this binds, in order: the ``function``
+    match key; ``cell_dict["inputs"]`` transcribed onto the table's
+    function-prefixed dimension names (``"<function>.<key>"``, dropping any
+    ``"n/a"`` sentinel -- see ``_NOT_APPLICABLE`` above -- and routed through
+    ``_SYNTHETIC_GUARD_TRANSFORMS`` for the one function whose table
+    dimension is not a direct rename of its fixture input keys); ``event``
+    itself; and, for every OTHER declared dimension the cell's own inputs
+    never touch (including the intentionally-guard-unreferenced
+    ``event``/``mode`` when not already set, and every OTHER function's own
+    dimensions), a deterministic placeholder from that dimension's own
+    domain -- harmless by construction, since no row outside the cell's own
+    match group ever examines them (RDR-201 P2.3 design, see the table's
+    file header)."""
+    function = cell_dict["function"]
+    assignment: dict[str, str] = {"function": function, "event": event}
+    transform = _SYNTHETIC_GUARD_TRANSFORMS.get(function)
+    raw_inputs = transform(cell_dict["inputs"]) if transform else cell_dict["inputs"]
+    for key, value in raw_inputs.items():
+        if value == _NOT_APPLICABLE:
+            continue
+        assignment[f"{function}.{key}"] = value
+    for name, dim in table.dimensions.items():
+        if name not in assignment:
+            assignment[name] = dim.domain[_UNUSED_DIM_PLACEHOLDER_INDEX]
+    return assignment
+
+
 def _new_path(cell: dict[str, Any], event: str) -> tuple[int, str] | Any:
-    """P2.4/P2.5 hook: once ``docs/tables/release-choreography.toml`` exists
-    and the two gated scripts are rewired onto ``table.resolve()``, this
-    drives THAT path for the same ``(cell, event)`` pair and returns its
-    verdict. ``event`` is part of the signature from the start (RDR-201
-    P2.2 critique, T2 nexus/critique-nexus-j9z30-12-2026-09-01): the OLD
-    path cannot branch on event at all, but the new table's ``event``
-    column means the same cell can resolve differently across events, so
-    Role 2 parity has to be checked per (cell, event), not per cell alone.
-    Until the table exists there is nothing to resolve against, so this
-    returns ``NotImplemented`` and the parity test below treats every
-    (cell, event) pair as "not yet comparable" (an explicit skip) rather
-    than asserting anything."""
-    del cell, event  # unused until P2.4/P2.5 wire a real resolve() call here
-    return NotImplemented
+    """RDR-201 P2.3 (nexus-j9z30.13): resolve ``(cell, event)`` against the
+    real ``docs/tables/release-choreography.toml`` and return its verdict
+    as an ``(exit_code, message_key)`` pair, matching :func:`_drive_old_path`'s
+    own return shape exactly so ``test_new_path_matches_old_path_cell_by_cell``
+    can compare them directly.
+
+    A resolve() REFUSAL (no-match / ambiguous-match / unknown-value) on a
+    cell the fixture itself enumerated as reachable is a table-authoring
+    defect, not a legitimate outcome -- raised loudly here rather than
+    folded into the tuple return, so it fails the specific (cell, event)
+    test case with a clear cause instead of a confusing tuple-shape
+    mismatch against ``_drive_old_path``'s output."""
+    table = _load_choreography_table()
+    assignment = _assignment_for(table, cell, event)
+    resolution = resolve(table, assignment)
+    if resolution.refusal is not None:
+        raise AssertionError(
+            f"{cell['cell_id']}@{event}: table refused a cell the fixture "
+            f"enumerated as reachable -- {resolution.refusal} {dict(resolution.detail)} "
+            f"(assignment={assignment})"
+        )
+    outcome = resolution.row.outcome
+    assert isinstance(outcome, dict), (cell["cell_id"], resolution.row.id, outcome)
+    return int(outcome["exit_code"]), outcome["message_key"]
 
 
 def _assert_old_path_matches_fixture(cell_dict: dict[str, Any]) -> None:
@@ -303,14 +414,15 @@ def test_old_path_matches_fixture(cell_dict: dict[str, Any]) -> None:
 def test_new_path_matches_old_path_cell_by_cell(
     cell_dict: dict[str, Any], event: str,
 ) -> None:
-    """Once P2.4/P2.5 rewire the scripts onto ``docs/tables/release-
-    choreography.toml`` + ``resolve()``, ``_new_path`` starts returning a
-    real verdict and this test starts asserting ``old == new`` for every
-    reachable (cell, event) pair -- see the module docstring for why event
-    is part of the comparison, not folded away. Until then ``_new_path``
-    returns ``NotImplemented`` and every case skips -- explicitly, not
-    silently: a skip here is visible in the run summary, never reported as
-    a pass."""
+    """RDR-201 P2.3 (nexus-j9z30.13): ``_new_path`` now resolves
+    ``docs/tables/release-choreography.toml`` for real, so this asserts
+    ``old == new`` for every reachable (cell, event) pair -- see the
+    module docstring for why event is part of the comparison, not folded
+    away. The table's own design keeps every row's verdict event/mode-
+    invariant (see the table's file header), so a genuine mismatch here
+    is a table-authoring defect (a mistranscribed guard), not evidence
+    that event ought to matter -- fix the table, per this bead's own
+    instruction, rather than the harness."""
     new = _new_path(cell_dict, event)
     if new is NotImplemented:
         pytest.skip("new path (table resolve()) not wired yet -- RDR-201 P2.4/P2.5")
@@ -327,12 +439,12 @@ def test_wiring_completeness_canary_for_new_path() -> None:
     """code-review finding (T2 nexus/code-review-nexus-j9z30-12-2026-09-01
     §5): if ``docs/tables/release-choreography.toml`` exists on disk,
     ``_new_path`` must not still return ``NotImplemented`` -- that would
-    mean P2.4/P2.5 landed the table without anyone flipping this file's
-    hook, and the entire Role-2 suite would go on silently skipping
-    forever. Today the file does not exist, so this canary passes
-    correctly (there is nothing to be loud about yet); it becomes a real,
-    failing tripwire the moment the table is authored, until ``_new_path``
-    is actually rewired."""
+    mean the table landed without anyone flipping this file's hook, and
+    the entire Role-2 suite would go on silently skipping forever. The
+    table now exists (RDR-201 P2.3, nexus-j9z30.13) and ``_new_path`` is
+    wired, so this is a real, live tripwire from here on -- the
+    ``skip`` branch below stays only for a checkout that predates this
+    bead."""
     if not _CHOREOGRAPHY_TABLE_PATH.is_file():
         pytest.skip(
             "docs/tables/release-choreography.toml does not exist yet -- "
@@ -388,3 +500,37 @@ def _a_wrong_exit_code(exit_code: int) -> int:
     ``cell.exit_code`` itself -- so the real observed exit code is always
     the un-corrupted one, and any distinct value corrupts the comparison."""
     return exit_code + 1
+
+
+# ---------------------------------------------------------------------------
+# Message catalog <-> table row-id parity (RDR-201 P2.3, nexus-j9z30.13)
+# ---------------------------------------------------------------------------
+#
+# scripts/release_messages.py's RELEASE_MESSAGES is keyed by the SAME row
+# id the choreography table uses (f"{function}::{message_key}",
+# erc.cell_id's own format) -- this is the "a test asserts every table row
+# id has a catalog entry and vice versa" requirement from the bead spec.
+# Neither direction is allowed to drift silently: an orphan table row
+# (no catalog entry) would ship a release-gate decision with no operator-
+# facing prose behind it; an orphan catalog entry (no table row) is dead
+# weight nobody's resolve() call can ever reach.
+
+
+def test_message_catalog_matches_table_row_ids_exactly() -> None:
+    table = _load_choreography_table()
+    table_ids = {row.id for row in table.rows}
+    catalog_ids = set(release_messages.RELEASE_MESSAGES)
+    assert table_ids, "the choreography table has zero rows -- nothing to check"
+    assert table_ids == catalog_ids, (
+        "table rows with no catalog entry: "
+        f"{sorted(table_ids - catalog_ids)}; "
+        "catalog entries with no table row: "
+        f"{sorted(catalog_ids - table_ids)}"
+    )
+
+
+def test_message_catalog_entries_are_nonempty_strings() -> None:
+    """Non-vacuity: a catalog whose values are all ``""`` would satisfy the
+    id-parity test above while carrying no actual message text."""
+    for row_id, text in release_messages.RELEASE_MESSAGES.items():
+        assert isinstance(text, str) and text.strip(), row_id

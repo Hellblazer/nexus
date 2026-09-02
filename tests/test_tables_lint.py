@@ -92,6 +92,19 @@ def test_lifecycle_table_is_discovered_by_the_sweep():
     assert "rdr-lifecycle.toml" in tables
 
 
+def test_release_choreography_table_is_discovered_by_the_sweep():
+    """RDR-201 P2.3 (nexus-j9z30.13): the release-choreography table is
+    repo-only (``docs/tables/``, not ``src/nexus/tables/``) -- both its
+    consumers (``scripts/check_engine_release_floor.py``,
+    ``scripts/check_client_release_precondition.py``) live under
+    ``scripts/`` and never ship in the wheel, so there is no packaging
+    test to pair with this one (contrast
+    ``test_lifecycle_table_present_in_built_wheel`` above). Written FIRST
+    per the bead's TDD instruction -- red until the table exists."""
+    tables = {p.name for p in _discover_tables()}
+    assert "release-choreography.toml" in tables
+
+
 # --------------------------------------------------------------------------
 # Non-vacuity: planted defects are caught, not silently passed
 

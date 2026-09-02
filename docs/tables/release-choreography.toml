@@ -1,0 +1,817 @@
+# RDR-201 Phase 2.3 (nexus-j9z30.13): the release-choreography decision
+# table -- a mechanical transcription of the 89 reachable decision cells
+# tests/scripts/fixtures/release_cells.json enumerates (RDR-201 P2.1,
+# nexus-j9z30.11) over scripts/check_engine_release_floor.py and
+# scripts/check_client_release_precondition.py.
+#
+# Repo-only (docs/tables/, not src/nexus/tables/): both consumers live
+# under scripts/, which never ships in the wheel -- see
+# nexus-j9z30.13's DESCRIPTION and docs/tables/README.md.
+#
+# SHAPE. match = { function = "<one of 12 names>" }: one match GROUP per
+# cell-producing function the enumerator names (six exhaustively-modeled
+# GuardChain functions, six hand-enumerated orchestrator functions --
+# exactly the union of erc._all_chains() + erc._all_orchestrator_results()
+# in scripts/enumerate_release_cells.py). Every group's guard dimensions
+# are FUNCTION-PREFIXED ("<function>.<name>") to avoid collision -- two
+# different functions legitimately reuse a bare name like "ledger" or
+# "probe" for structurally unrelated axes.
+#
+# GuardChain functions (check_pin_currency, check_source_ancestry,
+# check_client_lag_ledger, check_wire_contract_ledger,
+# check_paired_preconditions, record_deploy_from_gate_report_leg) are
+# transcribed by the SAME short-circuit discipline their real GuardStep
+# chain uses (see enumerate_release_cells.py's own chain builders): a row
+# pins every dimension a STRICTLY EARLIER step examined to that step's
+# sole "continue" value(s), pins the TERMINAL dimension to the leaf's own
+# value(s), and OMITS every dimension no earlier step reached -- an
+# omitted guard key implicitly accepts its ENTIRE domain (nexus.tables
+# .check.accepted_assignments), so the omission collapses exactly the
+# unreached sub-product a short-circuit return already discards. This is
+# provably equivalent to resolve_leaf's own exhaustive partition of the
+# full cartesian product: coverage is total and rows are pairwise
+# disjoint BY CONSTRUCTION, not by hand-checked arithmetic.
+#
+# The six hand-enumerated orchestrator functions (check_floor_bare,
+# check_floor_paired, check_floor_auto_paired, main_dispatch,
+# check_composite, precond_main_dispatch) have no formally declared
+# dimensions in the fixture (erc.make_result's own docstring: they are
+# hand-traced from source, not a cartesian-product enumeration) -- their
+# guard dimensions and domains here are derived directly from the actual
+# input keys/values erc's own Cell objects carry for that function,
+# using the IDENTICAL short-circuit-by-omission discipline. The
+# enumerator's own "n/a" placeholder (a cell input value meaning "this
+# axis is not examined on this branch", e.g. check_floor_bare's
+# pin_currency=blocks cell carries probe="n/a") is dropped from the
+# domain entirely rather than declared as a real value -- the omission
+# technique already expresses "not examined" without it, and a "n/a"
+# domain member would create a phantom, permanently-uncovered
+# combination (real probe values never co-occur with pin_currency=
+# blocks) that check_table would wrongly flag as a coverage-gap.
+#
+# EVENT / MODE. Both are declared TABLE-WIDE dimensions (RDR-201 P2.3's
+# stated requirement, Finding 2's incident correction: the 7.1.0/v0.1.62
+# failure was an UN-ENCODED event dimension) but deliberately referenced
+# by NO row's guard: this model captures only (exit_code, message_key)
+# per cell, and the 7.1.0/v0.1.62 incident's own fix (commit 79fff05a9)
+# changed a REMEDY STRING plus prose, never decision logic -- so within
+# this reduction every cell's verdict is genuinely event- and
+# mode-invariant, and the bead's own constraint ("the row must give the
+# SAME verdict for every event in that cell's reachable set") holds
+# trivially rather than needing to be proven per row. No row here is
+# EVENT-SENSITIVE under this reduction; a future divergence that
+# genuinely needs an event- or mode-discriminating row is a table
+# amendment, not a silent behavior change (see nexus-j9z30.17 for the
+# analogous Sam-gated ruling on the O2 pair below). check_table reports
+# both as "unused-dimension" advisories (non-blocking) for exactly this
+# reason -- expected, not a defect.
+#
+# O2 ORDER-ASYMMETRY (nexus-j9z30.17): {cloud >= floor, ledger dirty}
+# exits 1 under --paired-deploy (battery-before-probe: the
+# check_floor_paired::paired_battery_blocks row below) and 0 under
+# --paired-deploy-auto (probe-first, ledger never read: the
+# check_floor_auto_paired::auto_current / auto_current_pin_blocks rows
+# below). Both are already separate, faithfully-encoded rows below (two
+# different functions -> two different match groups) -- nothing here
+# reconciles them; do not merge without Sam's ruling (nexus-j9z30.17).
+#
+# EXCLUDED (T2 nexus_rdr/201-research-4; scripts/enumerate_release_cells
+# .py's own header docstring): gate-report directory contents (collapsed
+# to record_deploy_from_gate_report_leg's 8 CLASSIFIED outcomes),
+# --no-record-deploy's free-text reason (modeled as present/absent
+# only), and argparse's own parser.error() flag-combination refusals
+# (CLI-shape refusals, not release decisions -- see
+# CLI_VALIDATION_REFUSAL_SITES in enumerate_release_cells.py).
+#
+# NO ESCAPE ROWS anywhere in this table (bead constraint): every group
+# below is closed by explicit, disjoint rows proven total by the
+# short-circuit-by-omission construction above, never by a catch-all
+# that would turn a coverage gap into a silent pass.
+#
+# Row ids reuse the fixture's own cell_id format verbatim
+# (f"{function}::{message_key}", erc.cell_id) so the parity harness
+# (tests/scripts/test_release_table_parity.py) and the message catalog
+# (scripts/release_messages.py) key on the SAME string as this table.
+
+[table]
+id = "release-choreography"
+kind = "decision-table"
+version = 1
+
+[dimensions.function]
+domain = [
+  "check_pin_currency",
+  "check_source_ancestry",
+  "check_client_lag_ledger",
+  "check_wire_contract_ledger",
+  "check_paired_preconditions",
+  "record_deploy_from_gate_report_leg",
+  "check_floor_bare",
+  "check_floor_paired",
+  "check_floor_auto_paired",
+  "main_dispatch",
+  "check_composite",
+  "precond_main_dispatch",
+]
+
+[dimensions.event]
+domain = ["pre-tag", "tag-push", "deploy", "post-deploy-verify"]
+
+[dimensions.mode]
+domain = ["bare", "paired_explicit", "paired_auto", "ledger_only"]
+
+# --------------------------------------------------------------------
+# check_pin_currency (GuardChain, 1 dim, 5 leaves -- 1:1 with its domain)
+# --------------------------------------------------------------------
+
+[dimensions."check_pin_currency.newest"]
+domain = ["unavailable", "none", "above_floor", "at_floor", "below_floor"]
+
+[[row]]
+id = "check_pin_currency::pin_currency_tags_unavailable"
+match = { function = "check_pin_currency" }
+guard = { "check_pin_currency.newest" = "unavailable" }
+emit = { exit_code = "2", message_key = "pin_currency_tags_unavailable" }
+
+[[row]]
+id = "check_pin_currency::pin_currency_zero_tags"
+match = { function = "check_pin_currency" }
+guard = { "check_pin_currency.newest" = "none" }
+emit = { exit_code = "2", message_key = "pin_currency_zero_tags" }
+
+[[row]]
+id = "check_pin_currency::pin_currency_stale_pin"
+match = { function = "check_pin_currency" }
+guard = { "check_pin_currency.newest" = "above_floor" }
+emit = { exit_code = "1", message_key = "pin_currency_stale_pin" }
+
+[[row]]
+id = "check_pin_currency::pin_currency_current_at_floor"
+match = { function = "check_pin_currency" }
+guard = { "check_pin_currency.newest" = "at_floor" }
+emit = { exit_code = "0", message_key = "pin_currency_current_at_floor" }
+
+[[row]]
+id = "check_pin_currency::pin_currency_current_below_floor"
+match = { function = "check_pin_currency" }
+guard = { "check_pin_currency.newest" = "below_floor" }
+emit = { exit_code = "0", message_key = "pin_currency_current_below_floor" }
+
+# --------------------------------------------------------------------
+# check_source_ancestry (GuardChain, 2 dims: tag_exists -> diff_result)
+# --------------------------------------------------------------------
+
+[dimensions."check_source_ancestry.tag_exists"]
+domain = ["unavailable", "false", "true"]
+
+[dimensions."check_source_ancestry.diff_result"]
+domain = ["exception", "nonzero", "drift", "clean"]
+
+[[row]]
+id = "check_source_ancestry::ancestry_tag_unavailable"
+match = { function = "check_source_ancestry" }
+guard = { "check_source_ancestry.tag_exists" = "unavailable" }
+emit = { exit_code = "2", message_key = "ancestry_tag_unavailable" }
+
+[[row]]
+id = "check_source_ancestry::ancestry_tag_missing"
+match = { function = "check_source_ancestry" }
+guard = { "check_source_ancestry.tag_exists" = "false" }
+emit = { exit_code = "2", message_key = "ancestry_tag_missing" }
+
+[[row]]
+id = "check_source_ancestry::ancestry_diff_exception"
+match = { function = "check_source_ancestry" }
+guard = { "check_source_ancestry.tag_exists" = "true", "check_source_ancestry.diff_result" = "exception" }
+emit = { exit_code = "2", message_key = "ancestry_diff_exception" }
+
+[[row]]
+id = "check_source_ancestry::ancestry_diff_nonzero"
+match = { function = "check_source_ancestry" }
+guard = { "check_source_ancestry.tag_exists" = "true", "check_source_ancestry.diff_result" = "nonzero" }
+emit = { exit_code = "2", message_key = "ancestry_diff_nonzero" }
+
+[[row]]
+id = "check_source_ancestry::ancestry_drift"
+match = { function = "check_source_ancestry" }
+guard = { "check_source_ancestry.tag_exists" = "true", "check_source_ancestry.diff_result" = "drift" }
+emit = { exit_code = "1", message_key = "ancestry_drift" }
+
+[[row]]
+id = "check_source_ancestry::ancestry_clean"
+match = { function = "check_source_ancestry" }
+guard = { "check_source_ancestry.tag_exists" = "true", "check_source_ancestry.diff_result" = "clean" }
+emit = { exit_code = "0", message_key = "ancestry_clean" }
+
+# --------------------------------------------------------------------
+# check_client_lag_ledger (GuardChain, 1 dim, 4 leaves)
+# --------------------------------------------------------------------
+
+[dimensions."check_client_lag_ledger.ledger"]
+domain = ["empty", "blocking", "additive", "acked_only"]
+
+[[row]]
+id = "check_client_lag_ledger::ledger_clean"
+match = { function = "check_client_lag_ledger" }
+guard = { "check_client_lag_ledger.ledger" = "empty" }
+emit = { exit_code = "0", message_key = "ledger_clean" }
+
+[[row]]
+id = "check_client_lag_ledger::ledger_blocked"
+match = { function = "check_client_lag_ledger" }
+guard = { "check_client_lag_ledger.ledger" = "blocking" }
+emit = { exit_code = "1", message_key = "ledger_blocked" }
+
+[[row]]
+id = "check_client_lag_ledger::ledger_additive_authorized"
+match = { function = "check_client_lag_ledger" }
+guard = { "check_client_lag_ledger.ledger" = "additive" }
+emit = { exit_code = "0", message_key = "ledger_additive_authorized" }
+
+[[row]]
+id = "check_client_lag_ledger::ledger_acked"
+match = { function = "check_client_lag_ledger" }
+guard = { "check_client_lag_ledger.ledger" = "acked_only" }
+emit = { exit_code = "0", message_key = "ledger_acked" }
+
+# --------------------------------------------------------------------
+# check_wire_contract_ledger (GuardChain, 1 dim, 4 leaves -- the
+# precondition script's own ledger interpreter call; same 4 verdicts as
+# check_client_lag_ledger above but a DISTINCT function/group, since the
+# two scripts print different surrounding prose for the same shared
+# classify_unshipped() verdict, nexus-hcdk3).
+# --------------------------------------------------------------------
+
+[dimensions."check_wire_contract_ledger.ledger"]
+domain = ["empty", "blocking", "additive", "acked_only"]
+
+[[row]]
+id = "check_wire_contract_ledger::ledger_clean"
+match = { function = "check_wire_contract_ledger" }
+guard = { "check_wire_contract_ledger.ledger" = "empty" }
+emit = { exit_code = "0", message_key = "ledger_clean" }
+
+[[row]]
+id = "check_wire_contract_ledger::ledger_blocked"
+match = { function = "check_wire_contract_ledger" }
+guard = { "check_wire_contract_ledger.ledger" = "blocking" }
+emit = { exit_code = "1", message_key = "ledger_blocked" }
+
+[[row]]
+id = "check_wire_contract_ledger::ledger_additive_authorized"
+match = { function = "check_wire_contract_ledger" }
+guard = { "check_wire_contract_ledger.ledger" = "additive" }
+emit = { exit_code = "0", message_key = "ledger_additive_authorized" }
+
+[[row]]
+id = "check_wire_contract_ledger::ledger_acked"
+match = { function = "check_wire_contract_ledger" }
+guard = { "check_wire_contract_ledger.ledger" = "acked_only" }
+emit = { exit_code = "0", message_key = "ledger_acked" }
+
+# --------------------------------------------------------------------
+# check_paired_preconditions (GuardChain, 7-step linear chain, 13 leaves
+# -- nexus-k1c08's guard order: shape, parse, existence, publication,
+# version-match, newest-tag-match, freshness). Each row pins every dim a
+# strictly earlier step examined to its own "continue" value and omits
+# every dim no earlier step reached -- see the file header.
+# --------------------------------------------------------------------
+
+[dimensions."check_paired_preconditions.tag_shape"]
+domain = ["invalid_prefix", "valid_prefix"]
+[dimensions."check_paired_preconditions.tag_parse"]
+domain = ["unparseable", "parseable"]
+[dimensions."check_paired_preconditions.tag_exists"]
+domain = ["unavailable", "false", "true"]
+[dimensions."check_paired_preconditions.tag_published"]
+domain = ["unavailable", "false", "true"]
+[dimensions."check_paired_preconditions.version_match"]
+domain = ["mismatch", "match"]
+[dimensions."check_paired_preconditions.newest_state"]
+domain = ["unavailable", "none", "mismatch", "match"]
+[dimensions."check_paired_preconditions.age_state"]
+domain = ["unavailable", "too_old", "fresh"]
+
+[[row]]
+id = "check_paired_preconditions::battery_bad_prefix"
+match = { function = "check_paired_preconditions" }
+guard = { "check_paired_preconditions.tag_shape" = "invalid_prefix" }
+emit = { exit_code = "1", message_key = "battery_bad_prefix" }
+
+[[row]]
+id = "check_paired_preconditions::battery_unparseable_tag"
+match = { function = "check_paired_preconditions" }
+guard = { "check_paired_preconditions.tag_shape" = "valid_prefix", "check_paired_preconditions.tag_parse" = "unparseable" }
+emit = { exit_code = "1", message_key = "battery_unparseable_tag" }
+
+[[row]]
+id = "check_paired_preconditions::battery_exists_unavailable"
+match = { function = "check_paired_preconditions" }
+guard = { "check_paired_preconditions.tag_shape" = "valid_prefix", "check_paired_preconditions.tag_parse" = "parseable", "check_paired_preconditions.tag_exists" = "unavailable" }
+emit = { exit_code = "2", message_key = "battery_exists_unavailable" }
+
+[[row]]
+id = "check_paired_preconditions::battery_tag_not_exists"
+match = { function = "check_paired_preconditions" }
+guard = { "check_paired_preconditions.tag_shape" = "valid_prefix", "check_paired_preconditions.tag_parse" = "parseable", "check_paired_preconditions.tag_exists" = "false" }
+emit = { exit_code = "1", message_key = "battery_tag_not_exists" }
+
+[[row]]
+id = "check_paired_preconditions::battery_published_unavailable"
+match = { function = "check_paired_preconditions" }
+guard = { "check_paired_preconditions.tag_shape" = "valid_prefix", "check_paired_preconditions.tag_parse" = "parseable", "check_paired_preconditions.tag_exists" = "true", "check_paired_preconditions.tag_published" = "unavailable" }
+emit = { exit_code = "2", message_key = "battery_published_unavailable" }
+
+[[row]]
+id = "check_paired_preconditions::battery_not_published"
+match = { function = "check_paired_preconditions" }
+guard = { "check_paired_preconditions.tag_shape" = "valid_prefix", "check_paired_preconditions.tag_parse" = "parseable", "check_paired_preconditions.tag_exists" = "true", "check_paired_preconditions.tag_published" = "false" }
+emit = { exit_code = "1", message_key = "battery_not_published" }
+
+[[row]]
+id = "check_paired_preconditions::battery_version_mismatch"
+match = { function = "check_paired_preconditions" }
+guard = { "check_paired_preconditions.tag_shape" = "valid_prefix", "check_paired_preconditions.tag_parse" = "parseable", "check_paired_preconditions.tag_exists" = "true", "check_paired_preconditions.tag_published" = "true", "check_paired_preconditions.version_match" = "mismatch" }
+emit = { exit_code = "1", message_key = "battery_version_mismatch" }
+
+[[row]]
+id = "check_paired_preconditions::battery_newest_unavailable"
+match = { function = "check_paired_preconditions" }
+guard = { "check_paired_preconditions.tag_shape" = "valid_prefix", "check_paired_preconditions.tag_parse" = "parseable", "check_paired_preconditions.tag_exists" = "true", "check_paired_preconditions.tag_published" = "true", "check_paired_preconditions.version_match" = "match", "check_paired_preconditions.newest_state" = "unavailable" }
+emit = { exit_code = "2", message_key = "battery_newest_unavailable" }
+
+[[row]]
+id = "check_paired_preconditions::battery_newest_none"
+match = { function = "check_paired_preconditions" }
+guard = { "check_paired_preconditions.tag_shape" = "valid_prefix", "check_paired_preconditions.tag_parse" = "parseable", "check_paired_preconditions.tag_exists" = "true", "check_paired_preconditions.tag_published" = "true", "check_paired_preconditions.version_match" = "match", "check_paired_preconditions.newest_state" = "none" }
+emit = { exit_code = "1", message_key = "battery_newest_none" }
+
+[[row]]
+id = "check_paired_preconditions::battery_newest_mismatch"
+match = { function = "check_paired_preconditions" }
+guard = { "check_paired_preconditions.tag_shape" = "valid_prefix", "check_paired_preconditions.tag_parse" = "parseable", "check_paired_preconditions.tag_exists" = "true", "check_paired_preconditions.tag_published" = "true", "check_paired_preconditions.version_match" = "match", "check_paired_preconditions.newest_state" = "mismatch" }
+emit = { exit_code = "1", message_key = "battery_newest_mismatch" }
+
+[[row]]
+id = "check_paired_preconditions::battery_age_unavailable"
+match = { function = "check_paired_preconditions" }
+guard = { "check_paired_preconditions.tag_shape" = "valid_prefix", "check_paired_preconditions.tag_parse" = "parseable", "check_paired_preconditions.tag_exists" = "true", "check_paired_preconditions.tag_published" = "true", "check_paired_preconditions.version_match" = "match", "check_paired_preconditions.newest_state" = "match", "check_paired_preconditions.age_state" = "unavailable" }
+emit = { exit_code = "2", message_key = "battery_age_unavailable" }
+
+[[row]]
+id = "check_paired_preconditions::battery_too_old"
+match = { function = "check_paired_preconditions" }
+guard = { "check_paired_preconditions.tag_shape" = "valid_prefix", "check_paired_preconditions.tag_parse" = "parseable", "check_paired_preconditions.tag_exists" = "true", "check_paired_preconditions.tag_published" = "true", "check_paired_preconditions.version_match" = "match", "check_paired_preconditions.newest_state" = "match", "check_paired_preconditions.age_state" = "too_old" }
+emit = { exit_code = "1", message_key = "battery_too_old" }
+
+[[row]]
+id = "check_paired_preconditions::battery_armed"
+match = { function = "check_paired_preconditions" }
+guard = { "check_paired_preconditions.tag_shape" = "valid_prefix", "check_paired_preconditions.tag_parse" = "parseable", "check_paired_preconditions.tag_exists" = "true", "check_paired_preconditions.tag_published" = "true", "check_paired_preconditions.version_match" = "match", "check_paired_preconditions.newest_state" = "match", "check_paired_preconditions.age_state" = "fresh" }
+emit = { exit_code = "0", message_key = "battery_armed" }
+
+# --------------------------------------------------------------------
+# record_deploy_from_gate_report_leg (GuardChain, 1 dim, 8 leaves --
+# deploy_tracker.py's own 8-way CLASSIFIED tracker outcome)
+# --------------------------------------------------------------------
+
+[dimensions."record_deploy_from_gate_report_leg.outcome"]
+domain = [
+  "directory_error", "schema_error", "no_report_for_version", "gate_red",
+  "version_mismatch", "live_version_mismatch", "managed_service_error", "ok",
+]
+
+[[row]]
+id = "record_deploy_from_gate_report_leg::tracker_directory_error"
+match = { function = "record_deploy_from_gate_report_leg" }
+guard = { "record_deploy_from_gate_report_leg.outcome" = "directory_error" }
+emit = { exit_code = "3", message_key = "tracker_directory_error" }
+
+[[row]]
+id = "record_deploy_from_gate_report_leg::tracker_schema_error"
+match = { function = "record_deploy_from_gate_report_leg" }
+guard = { "record_deploy_from_gate_report_leg.outcome" = "schema_error" }
+emit = { exit_code = "3", message_key = "tracker_schema_error" }
+
+[[row]]
+id = "record_deploy_from_gate_report_leg::tracker_no_report_for_version"
+match = { function = "record_deploy_from_gate_report_leg" }
+guard = { "record_deploy_from_gate_report_leg.outcome" = "no_report_for_version" }
+emit = { exit_code = "3", message_key = "tracker_no_report_for_version" }
+
+[[row]]
+id = "record_deploy_from_gate_report_leg::tracker_gate_red"
+match = { function = "record_deploy_from_gate_report_leg" }
+guard = { "record_deploy_from_gate_report_leg.outcome" = "gate_red" }
+emit = { exit_code = "3", message_key = "tracker_gate_red" }
+
+[[row]]
+id = "record_deploy_from_gate_report_leg::tracker_version_mismatch"
+match = { function = "record_deploy_from_gate_report_leg" }
+guard = { "record_deploy_from_gate_report_leg.outcome" = "version_mismatch" }
+emit = { exit_code = "3", message_key = "tracker_version_mismatch" }
+
+[[row]]
+id = "record_deploy_from_gate_report_leg::tracker_live_version_mismatch"
+match = { function = "record_deploy_from_gate_report_leg" }
+guard = { "record_deploy_from_gate_report_leg.outcome" = "live_version_mismatch" }
+emit = { exit_code = "3", message_key = "tracker_live_version_mismatch" }
+
+[[row]]
+id = "record_deploy_from_gate_report_leg::tracker_managed_service_error"
+match = { function = "record_deploy_from_gate_report_leg" }
+guard = { "record_deploy_from_gate_report_leg.outcome" = "managed_service_error" }
+emit = { exit_code = "3", message_key = "tracker_managed_service_error" }
+
+[[row]]
+id = "record_deploy_from_gate_report_leg::tracker_recorded"
+match = { function = "record_deploy_from_gate_report_leg" }
+guard = { "record_deploy_from_gate_report_leg.outcome" = "ok" }
+emit = { exit_code = "0", message_key = "tracker_recorded" }
+
+# --------------------------------------------------------------------
+# check_floor_bare (hand-enumerated, 5 cells): pin_currency delegate
+# (2 values) x probe (4 real values; the enumerator's "n/a" placeholder
+# for the pin_currency=blocks short-circuit is dropped, not declared --
+# see the file header).
+# --------------------------------------------------------------------
+
+[dimensions."check_floor_bare.pin_currency"]
+domain = ["blocks", "passes"]
+[dimensions."check_floor_bare.probe"]
+domain = ["unreachable", "ms_error", "success_stale", "success_current"]
+
+[[row]]
+id = "check_floor_bare::bare_pin_blocks"
+match = { function = "check_floor_bare" }
+guard = { "check_floor_bare.pin_currency" = "blocks" }
+emit = { exit_code = "2", message_key = "bare_pin_blocks" }
+
+[[row]]
+id = "check_floor_bare::bare_probe_unreachable"
+match = { function = "check_floor_bare" }
+guard = { "check_floor_bare.pin_currency" = "passes", "check_floor_bare.probe" = "unreachable" }
+emit = { exit_code = "2", message_key = "bare_probe_unreachable" }
+
+[[row]]
+id = "check_floor_bare::bare_probe_stale_via_exception"
+match = { function = "check_floor_bare" }
+guard = { "check_floor_bare.pin_currency" = "passes", "check_floor_bare.probe" = "ms_error" }
+emit = { exit_code = "1", message_key = "bare_probe_stale_via_exception" }
+
+[[row]]
+id = "check_floor_bare::bare_probe_stale_via_success"
+match = { function = "check_floor_bare" }
+guard = { "check_floor_bare.pin_currency" = "passes", "check_floor_bare.probe" = "success_stale" }
+emit = { exit_code = "1", message_key = "bare_probe_stale_via_success" }
+
+[[row]]
+id = "check_floor_bare::bare_probe_current"
+match = { function = "check_floor_bare" }
+guard = { "check_floor_bare.pin_currency" = "passes", "check_floor_bare.probe" = "success_current" }
+emit = { exit_code = "0", message_key = "bare_probe_current" }
+
+# --------------------------------------------------------------------
+# check_floor_paired (hand-enumerated, 7 cells): battery delegate
+# (2 values) x probe (6 real values, "n/a" dropped as above).
+# --------------------------------------------------------------------
+
+[dimensions."check_floor_paired.battery"]
+domain = ["blocks", "passes"]
+[dimensions."check_floor_paired.probe"]
+domain = [
+  "unreachable", "ms_error_not_below_floor", "ms_error_below_floor",
+  "success_unparseable", "success_below_floor", "success_at_or_above_floor",
+]
+
+[[row]]
+id = "check_floor_paired::paired_battery_blocks"
+match = { function = "check_floor_paired" }
+guard = { "check_floor_paired.battery" = "blocks" }
+emit = { exit_code = "1", message_key = "paired_battery_blocks" }
+
+[[row]]
+id = "check_floor_paired::paired_probe_unreachable"
+match = { function = "check_floor_paired" }
+guard = { "check_floor_paired.battery" = "passes", "check_floor_paired.probe" = "unreachable" }
+emit = { exit_code = "2", message_key = "paired_probe_unreachable" }
+
+[[row]]
+id = "check_floor_paired::paired_probe_unverifiable_exception"
+match = { function = "check_floor_paired" }
+guard = { "check_floor_paired.battery" = "passes", "check_floor_paired.probe" = "ms_error_not_below_floor" }
+emit = { exit_code = "2", message_key = "paired_probe_unverifiable_exception" }
+
+[[row]]
+id = "check_floor_paired::paired_probe_ack_via_exception"
+match = { function = "check_floor_paired" }
+guard = { "check_floor_paired.battery" = "passes", "check_floor_paired.probe" = "ms_error_below_floor" }
+emit = { exit_code = "0", message_key = "paired_probe_ack_via_exception" }
+
+[[row]]
+id = "check_floor_paired::paired_probe_unverifiable_success"
+match = { function = "check_floor_paired" }
+guard = { "check_floor_paired.battery" = "passes", "check_floor_paired.probe" = "success_unparseable" }
+emit = { exit_code = "2", message_key = "paired_probe_unverifiable_success" }
+
+[[row]]
+id = "check_floor_paired::paired_probe_ack_via_success"
+match = { function = "check_floor_paired" }
+guard = { "check_floor_paired.battery" = "passes", "check_floor_paired.probe" = "success_below_floor" }
+emit = { exit_code = "0", message_key = "paired_probe_ack_via_success" }
+
+[[row]]
+id = "check_floor_paired::paired_probe_current"
+match = { function = "check_floor_paired" }
+guard = { "check_floor_paired.battery" = "passes", "check_floor_paired.probe" = "success_at_or_above_floor" }
+emit = { exit_code = "0", message_key = "paired_probe_current" }
+
+# --------------------------------------------------------------------
+# check_floor_auto_paired (hand-enumerated, 9 cells): probe (6 real
+# values) is the outer discriminator; battery / pin_currency (each 2
+# values) only apply on the probe branches that actually consult them
+# (ms_error_below_floor / success_below_floor -> battery;
+# success_at_or_above_floor -> pin_currency) -- omitted elsewhere.
+# --------------------------------------------------------------------
+
+[dimensions."check_floor_auto_paired.probe"]
+domain = [
+  "unreachable", "ms_error_not_below_floor", "ms_error_below_floor",
+  "success_at_or_above_floor", "success_unparseable", "success_below_floor",
+]
+[dimensions."check_floor_auto_paired.battery"]
+domain = ["blocks", "passes"]
+[dimensions."check_floor_auto_paired.pin_currency"]
+domain = ["blocks", "passes"]
+
+[[row]]
+id = "check_floor_auto_paired::auto_probe_unreachable"
+match = { function = "check_floor_auto_paired" }
+guard = { "check_floor_auto_paired.probe" = "unreachable" }
+emit = { exit_code = "2", message_key = "auto_probe_unreachable" }
+
+[[row]]
+id = "check_floor_auto_paired::auto_probe_unverifiable_exception"
+match = { function = "check_floor_auto_paired" }
+guard = { "check_floor_auto_paired.probe" = "ms_error_not_below_floor" }
+emit = { exit_code = "2", message_key = "auto_probe_unverifiable_exception" }
+
+[[row]]
+id = "check_floor_auto_paired::auto_below_via_exception_battery_blocks"
+match = { function = "check_floor_auto_paired" }
+guard = { "check_floor_auto_paired.probe" = "ms_error_below_floor", "check_floor_auto_paired.battery" = "blocks" }
+emit = { exit_code = "1", message_key = "auto_below_via_exception_battery_blocks" }
+
+[[row]]
+id = "check_floor_auto_paired::auto_below_via_exception_ack"
+match = { function = "check_floor_auto_paired" }
+guard = { "check_floor_auto_paired.probe" = "ms_error_below_floor", "check_floor_auto_paired.battery" = "passes" }
+emit = { exit_code = "0", message_key = "auto_below_via_exception_ack" }
+
+[[row]]
+id = "check_floor_auto_paired::auto_current_pin_blocks"
+match = { function = "check_floor_auto_paired" }
+guard = { "check_floor_auto_paired.probe" = "success_at_or_above_floor", "check_floor_auto_paired.pin_currency" = "blocks" }
+emit = { exit_code = "2", message_key = "auto_current_pin_blocks" }
+
+[[row]]
+id = "check_floor_auto_paired::auto_current"
+match = { function = "check_floor_auto_paired" }
+guard = { "check_floor_auto_paired.probe" = "success_at_or_above_floor", "check_floor_auto_paired.pin_currency" = "passes" }
+emit = { exit_code = "0", message_key = "auto_current" }
+
+[[row]]
+id = "check_floor_auto_paired::auto_probe_unverifiable_success"
+match = { function = "check_floor_auto_paired" }
+guard = { "check_floor_auto_paired.probe" = "success_unparseable" }
+emit = { exit_code = "2", message_key = "auto_probe_unverifiable_success" }
+
+[[row]]
+id = "check_floor_auto_paired::auto_below_via_success_battery_blocks"
+match = { function = "check_floor_auto_paired" }
+guard = { "check_floor_auto_paired.probe" = "success_below_floor", "check_floor_auto_paired.battery" = "blocks" }
+emit = { exit_code = "1", message_key = "auto_below_via_success_battery_blocks" }
+
+[[row]]
+id = "check_floor_auto_paired::auto_below_via_success_ack"
+match = { function = "check_floor_auto_paired" }
+guard = { "check_floor_auto_paired.probe" = "success_below_floor", "check_floor_auto_paired.battery" = "passes" }
+emit = { exit_code = "0", message_key = "auto_below_via_success_ack" }
+
+# --------------------------------------------------------------------
+# main_dispatch (hand-enumerated, 15 cells): mode (4 values) partitions
+# the group into 4 disjoint sub-shapes -- bare's own check_floor/
+# ancestry/tracker chain, paired_explicit's and paired_auto's shorter
+# check_floor/ancestry chain (no tracker leg pre-deploy), and
+# ledger_only's standalone ledger dispatch (bypasses check_floor/
+# ancestry/tracker entirely). Each row pins mode plus every dim its own
+# branch actually examines and omits the rest, mirroring
+# main_dispatch_cells()'s own 5+3+3+4=15 breakdown in
+# enumerate_release_cells.py.
+# --------------------------------------------------------------------
+
+[dimensions."main_dispatch.mode"]
+domain = ["bare", "paired_explicit", "paired_auto", "ledger_only"]
+[dimensions."main_dispatch.check_floor"]
+domain = ["blocks", "passes"]
+[dimensions."main_dispatch.ancestry"]
+domain = ["blocks", "passes"]
+[dimensions."main_dispatch.tracker"]
+domain = ["resolved", "opt_out", "refusal"]
+[dimensions."main_dispatch.ledger"]
+domain = ["empty", "blocking", "additive", "acked_only"]
+
+[[row]]
+id = "main_dispatch::main_bare_check_floor_blocks"
+match = { function = "main_dispatch" }
+guard = { "main_dispatch.mode" = "bare", "main_dispatch.check_floor" = "blocks" }
+emit = { exit_code = "2", message_key = "main_bare_check_floor_blocks" }
+
+[[row]]
+id = "main_dispatch::main_bare_ancestry_blocks"
+match = { function = "main_dispatch" }
+guard = { "main_dispatch.mode" = "bare", "main_dispatch.check_floor" = "passes", "main_dispatch.ancestry" = "blocks" }
+emit = { exit_code = "2", message_key = "main_bare_ancestry_blocks" }
+
+[[row]]
+id = "main_dispatch::main_bare_tracker_delegates"
+match = { function = "main_dispatch" }
+guard = { "main_dispatch.mode" = "bare", "main_dispatch.check_floor" = "passes", "main_dispatch.ancestry" = "passes", "main_dispatch.tracker" = "resolved" }
+emit = { exit_code = "0", message_key = "main_bare_tracker_delegates" }
+
+[[row]]
+id = "main_dispatch::main_bare_tracker_opt_out"
+match = { function = "main_dispatch" }
+guard = { "main_dispatch.mode" = "bare", "main_dispatch.check_floor" = "passes", "main_dispatch.ancestry" = "passes", "main_dispatch.tracker" = "opt_out" }
+emit = { exit_code = "0", message_key = "main_bare_tracker_opt_out" }
+
+[[row]]
+id = "main_dispatch::main_bare_tracker_refusal"
+match = { function = "main_dispatch" }
+guard = { "main_dispatch.mode" = "bare", "main_dispatch.check_floor" = "passes", "main_dispatch.ancestry" = "passes", "main_dispatch.tracker" = "refusal" }
+emit = { exit_code = "3", message_key = "main_bare_tracker_refusal" }
+
+[[row]]
+id = "main_dispatch::main_paired_explicit_check_floor_blocks"
+match = { function = "main_dispatch" }
+guard = { "main_dispatch.mode" = "paired_explicit", "main_dispatch.check_floor" = "blocks" }
+emit = { exit_code = "2", message_key = "main_paired_explicit_check_floor_blocks" }
+
+[[row]]
+id = "main_dispatch::main_paired_explicit_ancestry_blocks"
+match = { function = "main_dispatch" }
+guard = { "main_dispatch.mode" = "paired_explicit", "main_dispatch.check_floor" = "passes", "main_dispatch.ancestry" = "blocks" }
+emit = { exit_code = "2", message_key = "main_paired_explicit_ancestry_blocks" }
+
+[[row]]
+id = "main_dispatch::main_paired_explicit_non_bare_return"
+match = { function = "main_dispatch" }
+guard = { "main_dispatch.mode" = "paired_explicit", "main_dispatch.check_floor" = "passes", "main_dispatch.ancestry" = "passes" }
+emit = { exit_code = "0", message_key = "main_paired_explicit_non_bare_return" }
+
+[[row]]
+id = "main_dispatch::main_paired_auto_check_floor_blocks"
+match = { function = "main_dispatch" }
+guard = { "main_dispatch.mode" = "paired_auto", "main_dispatch.check_floor" = "blocks" }
+emit = { exit_code = "2", message_key = "main_paired_auto_check_floor_blocks" }
+
+[[row]]
+id = "main_dispatch::main_paired_auto_ancestry_blocks"
+match = { function = "main_dispatch" }
+guard = { "main_dispatch.mode" = "paired_auto", "main_dispatch.check_floor" = "passes", "main_dispatch.ancestry" = "blocks" }
+emit = { exit_code = "2", message_key = "main_paired_auto_ancestry_blocks" }
+
+[[row]]
+id = "main_dispatch::main_paired_auto_non_bare_return"
+match = { function = "main_dispatch" }
+guard = { "main_dispatch.mode" = "paired_auto", "main_dispatch.check_floor" = "passes", "main_dispatch.ancestry" = "passes" }
+emit = { exit_code = "0", message_key = "main_paired_auto_non_bare_return" }
+
+[[row]]
+id = "main_dispatch::main_ledger_only_clean"
+match = { function = "main_dispatch" }
+guard = { "main_dispatch.mode" = "ledger_only", "main_dispatch.ledger" = "empty" }
+emit = { exit_code = "0", message_key = "main_ledger_only_clean" }
+
+[[row]]
+id = "main_dispatch::main_ledger_only_blocked"
+match = { function = "main_dispatch" }
+guard = { "main_dispatch.mode" = "ledger_only", "main_dispatch.ledger" = "blocking" }
+emit = { exit_code = "1", message_key = "main_ledger_only_blocked" }
+
+[[row]]
+id = "main_dispatch::main_ledger_only_additive"
+match = { function = "main_dispatch" }
+guard = { "main_dispatch.mode" = "ledger_only", "main_dispatch.ledger" = "additive" }
+emit = { exit_code = "0", message_key = "main_ledger_only_additive" }
+
+[[row]]
+id = "main_dispatch::main_ledger_only_acked"
+match = { function = "main_dispatch" }
+guard = { "main_dispatch.mode" = "ledger_only", "main_dispatch.ledger" = "acked_only" }
+emit = { exit_code = "0", message_key = "main_ledger_only_acked" }
+
+# --------------------------------------------------------------------
+# check_composite (hand-enumerated, 11 cells): the precondition script's
+# check() -- a 5-value hand_table outcome (3 short-circuit to a leaf
+# without ever consulting the ledger; "vacuous"/"satisfied" both fall
+# through to the wire-contract ledger, crossed with its 4 values).
+# --------------------------------------------------------------------
+
+[dimensions."check_composite.hand_table"]
+domain = ["latest_release_tag_error", "is_ancestor_error", "missing_commit", "vacuous", "satisfied"]
+[dimensions."check_composite.ledger"]
+domain = ["empty", "blocking", "additive", "acked_only"]
+
+[[row]]
+id = "check_composite::composite_latest_release_tag_error"
+match = { function = "check_composite" }
+guard = { "check_composite.hand_table" = "latest_release_tag_error" }
+emit = { exit_code = "2", message_key = "composite_latest_release_tag_error" }
+
+[[row]]
+id = "check_composite::composite_is_ancestor_error"
+match = { function = "check_composite" }
+guard = { "check_composite.hand_table" = "is_ancestor_error" }
+emit = { exit_code = "2", message_key = "composite_is_ancestor_error" }
+
+[[row]]
+id = "check_composite::composite_missing_commit"
+match = { function = "check_composite" }
+guard = { "check_composite.hand_table" = "missing_commit" }
+emit = { exit_code = "1", message_key = "composite_missing_commit" }
+
+[[row]]
+id = "check_composite::composite_both_vacuous"
+match = { function = "check_composite" }
+guard = { "check_composite.hand_table" = "vacuous", "check_composite.ledger" = "empty" }
+emit = { exit_code = "0", message_key = "composite_both_vacuous" }
+
+[[row]]
+id = "check_composite::composite_vacuous_table_ledger_blocks"
+match = { function = "check_composite" }
+guard = { "check_composite.hand_table" = "vacuous", "check_composite.ledger" = "blocking" }
+emit = { exit_code = "1", message_key = "composite_vacuous_table_ledger_blocks" }
+
+[[row]]
+id = "check_composite::composite_vacuous_table_ledger_additive"
+match = { function = "check_composite" }
+guard = { "check_composite.hand_table" = "vacuous", "check_composite.ledger" = "additive" }
+emit = { exit_code = "0", message_key = "composite_vacuous_table_ledger_additive" }
+
+[[row]]
+id = "check_composite::composite_vacuous_table_ledger_acked"
+match = { function = "check_composite" }
+guard = { "check_composite.hand_table" = "vacuous", "check_composite.ledger" = "acked_only" }
+emit = { exit_code = "0", message_key = "composite_vacuous_table_ledger_acked" }
+
+[[row]]
+id = "check_composite::composite_table_satisfied_ledger_empty"
+match = { function = "check_composite" }
+guard = { "check_composite.hand_table" = "satisfied", "check_composite.ledger" = "empty" }
+emit = { exit_code = "0", message_key = "composite_table_satisfied_ledger_empty" }
+
+[[row]]
+id = "check_composite::composite_table_satisfied_ledger_blocks"
+match = { function = "check_composite" }
+guard = { "check_composite.hand_table" = "satisfied", "check_composite.ledger" = "blocking" }
+emit = { exit_code = "1", message_key = "composite_table_satisfied_ledger_blocks" }
+
+[[row]]
+id = "check_composite::composite_table_satisfied_ledger_additive"
+match = { function = "check_composite" }
+guard = { "check_composite.hand_table" = "satisfied", "check_composite.ledger" = "additive" }
+emit = { exit_code = "0", message_key = "composite_table_satisfied_ledger_additive" }
+
+[[row]]
+id = "check_composite::composite_table_satisfied_ledger_acked"
+match = { function = "check_composite" }
+guard = { "check_composite.hand_table" = "satisfied", "check_composite.ledger" = "acked_only" }
+emit = { exit_code = "0", message_key = "composite_table_satisfied_ledger_acked" }
+
+# --------------------------------------------------------------------
+# precond_main_dispatch (hand-enumerated, 2 cells): main()'s own
+# (engine_tag, ack_client_lag) wiring into a real check() call --
+# code-review Important (T2 nexus/code-review-nexus-j9z30-12-2026-09-01):
+# only these two REPRESENTATIVE, independently-distinguishable wiring
+# scenarios are driven (not a genuine 2x2 cross-product of engine_tag x
+# ack -- the fixture never claims the other two combinations are
+# separately verified), so this is modeled as ONE synthetic "case" axis
+# with exactly the fixture's own 2 members rather than a real
+# cross-product that would assert coverage the fixture does not have.
+# --------------------------------------------------------------------
+
+[dimensions."precond_main_dispatch.wiring_case"]
+domain = ["engine_tag_explicit_ack_given", "engine_tag_default_ack_absent"]
+
+[[row]]
+id = "precond_main_dispatch::precond_main_explicit_tag_with_ack"
+match = { function = "precond_main_dispatch" }
+guard = { "precond_main_dispatch.wiring_case" = "engine_tag_explicit_ack_given" }
+emit = { exit_code = "0", message_key = "precond_main_explicit_tag_with_ack" }
+
+[[row]]
+id = "precond_main_dispatch::precond_main_default_tag_no_ack"
+match = { function = "precond_main_dispatch" }
+guard = { "precond_main_dispatch.wiring_case" = "engine_tag_default_ack_absent" }
+emit = { exit_code = "1", message_key = "precond_main_default_tag_no_ack" }
