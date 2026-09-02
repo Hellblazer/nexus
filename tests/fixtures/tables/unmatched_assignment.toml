@@ -1,0 +1,26 @@
+# Non-vacuity fixture for check_table's `unmatched-assignment` finding
+# (RDR-201 P1.2 critique, T2 nexus/critique-nexus-j9z30-2-2026-09-01
+# [24018]): three statuses declared, only two named by any row's match --
+# status=c/event=go has no group at all, so nothing about it was ever
+# checked before this finding existed. Minimal repro of the critique's own
+# counter-example. resolve() on the uncovered cell returns no-match
+# (tests/tables/test_resolve.py).
+
+[table]
+id = "unmatched-assignment-fixture"
+kind = "state-machine"
+
+[dimensions.status]
+domain = ["a", "b", "c"]
+[dimensions.event]
+domain = ["go"]
+
+[[row]]
+id = "a-to-b"
+match = { status = "a", event = "go" }
+to = { status = "b" }
+
+[[row]]
+id = "b-to-c"
+match = { status = "b", event = "go" }
+to = { status = "c" }

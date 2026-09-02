@@ -3,6 +3,9 @@
 id = "dup-id"
 kind = "decision-table"
 
+[dimensions.decision]
+domain = ["a", "b"]
+
 [[row]]
 id = "r1"
 match = { decision = "a" }

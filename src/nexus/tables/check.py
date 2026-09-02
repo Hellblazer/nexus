@@ -17,6 +17,16 @@ is raised at LOAD, never emitted by ``check_table`` here — see
 :mod:`nexus.tables.load`'s module docstring and the ``UNKNOWN_LITERAL``
 comment below.
 
+A sixth code, ``unmatched-assignment`` (RDR-201 P1.2 addendum, not in the
+original Technical Design's five), proves a SEPARATE totality claim: that
+every combination of the table's match-key dimensions is named by SOME
+row's ``match`` at all, before per-group coverage/overlap is even asked
+about. Without it, ``check_table`` only ever proved coverage within
+groups that already exist -- a value combination no row names has no
+group, and so produced no finding, while
+:func:`nexus.tables.resolve.resolve` still refuses ``no-match`` on it at
+runtime. See :func:`_check_match_totality`.
+
 stdlib only.
 """
 
@@ -38,6 +48,16 @@ COVERAGE_GAP = "coverage-gap"
 OVERLAP = "overlap"
 CLOSED_BY_ESCAPE = "closed-by-escape"
 UNPROVABLE_COVERAGE = "unprovable-coverage"
+# A value combination of the table's MATCH-KEY dimensions (e.g. every
+# (status, event) pair) that no row's `match` names at all -- there is no
+# group for it, so nothing about it was ever checked. RDR-201 P1.2 critique
+# (T2 nexus/critique-nexus-j9z30-2-2026-09-01 [24018]): coverage/overlap
+# proof was previously scoped to EXISTING match groups only, so a status
+# value no row ever names for a given event produced no finding, yet
+# nexus.tables.resolve.resolve() refuses no-match on it at runtime -- a
+# checker-clean table was not actually guaranteed total. See
+# _check_match_totality below.
+UNMATCHED_ASSIGNMENT = "unmatched-assignment"
 # unknown-literal is a LOAD-time refusal (nexus.tables.load.UnknownLiteralError),
 # never a check()-time finding: by the time a Table exists, every match/guard
 # literal has already been proven to lie within its declared domain. The
@@ -46,7 +66,7 @@ UNPROVABLE_COVERAGE = "unprovable-coverage"
 # messages has one place to look.
 UNKNOWN_LITERAL = "unknown-literal"
 
-BLOCKING_CODES = frozenset({COVERAGE_GAP, OVERLAP, UNPROVABLE_COVERAGE})
+BLOCKING_CODES = frozenset({COVERAGE_GAP, OVERLAP, UNPROVABLE_COVERAGE, UNMATCHED_ASSIGNMENT})
 
 # A cross-product larger than this is refused rather than enumerated,
 # mirroring the prototype's published ProductBound refusal. No RDR-201 table
@@ -152,8 +172,63 @@ def accepted_assignments(row: Row, dims: list[str], dimensions: dict[str, Dimens
 # Findings
 
 
+def _check_match_totality(table: Table) -> list[Finding]:
+    """Every combination of the table's MATCH-KEY dimensions must be named
+    by at least one row's ``match`` -- a combination no row names has no
+    group at all, so ``_check_group`` below never even considers it (RDR-201
+    P1.2 critique, T2 nexus/critique-nexus-j9z30-2-2026-09-01 [24018]).
+
+    ``load.py``'s ``UndeclaredDimensionError`` (RDR-201 P1.2 code review, T2
+    nexus/code-review-nexus-j9z30-2-2026-09-01) guarantees every match key
+    on a table that actually loaded IS a declared dimension, so the
+    ``unprovable`` branch below is unreachable via the normal loader path;
+    it stays as defense-in-depth for a :class:`Table` built directly
+    (bypassing :func:`nexus.tables.load.load_table`), matching
+    ``_check_group``'s own guard-dimension pattern.
+    """
+    keys = list(table.match_keys)
+    if not keys:
+        return []
+
+    reasons = {k: dimension_reason(table, k) for k in keys}
+    unprovable = {k: r for k, r in reasons.items() if r is not None}
+    if unprovable:
+        return [
+            Finding(
+                code=UNPROVABLE_COVERAGE,
+                group=FrozenMapping({}),
+                detail={
+                    "reason": reason,
+                    "dimension": k,
+                    "message": (
+                        f"match-key dimension {k!r} is unprovable ({reason}); cannot prove "
+                        "every match-key assignment is named by some row"
+                    ),
+                },
+            )
+            for k, reason in sorted(unprovable.items())
+        ]
+
+    named = {tuple(row.match[k] for k in keys) for row in table.rows}
+    missing = sorted(full_product(keys, table.dimensions) - named)
+    return [
+        Finding(
+            code=UNMATCHED_ASSIGNMENT,
+            group=FrozenMapping(dict(zip(keys, combo))),
+            detail={
+                "message": (
+                    f"no row names match assignment {dict(zip(keys, combo))!r}; "
+                    "this combination has no group at all"
+                ),
+            },
+        )
+        for combo in missing
+    ]
+
+
 def check_table(table: Table) -> list[Finding]:
     findings: list[Finding] = []
+    findings.extend(_check_match_totality(table))
     for group in groups_of(table):
         findings.extend(_check_group(table, group))
     return findings

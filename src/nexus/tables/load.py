@@ -131,6 +131,26 @@ class UnknownLiteralError(TableLoadError):
     """A match or guard literal falls outside its dimension's declared domain."""
 
 
+class UndeclaredDimensionError(TableLoadError):
+    """A match or guard key names a dimension with no ``[dimensions.<key>]``
+    section at all (RDR-201 P1.2 review finding, T2
+    nexus/code-review-nexus-j9z30-2-2026-09-01).
+
+    Refused at LOAD time, not left for :func:`nexus.tables.check.check_table`
+    to notice: an undeclared key silently opened a group over a domain
+    nobody declared, which both hid the group from
+    :func:`nexus.tables.resolve.resolve`'s "every declared dimension must be
+    present" validation (the key was never in ``table.dimensions``, so
+    nothing required the caller's assignment to carry it) and left
+    ``check_table``'s match-key-product totality proof (``unmatched-assignment``)
+    without a well-defined domain to enumerate for that key. A key naming a
+    dimension that IS declared but non-enum or empty-domain still loads fine
+    -- that is a check-time ``unprovable-coverage`` finding, not a load
+    refusal; only a key with NO ``[dimensions.<key>]`` section at all is
+    refused here.
+    """
+
+
 @dataclass(frozen=True)
 class Dimension:
     """A declared enum dimension: a name and its finite domain.
@@ -356,15 +376,23 @@ def _validate_domain(
     row_id: str,
     block_name: str,
 ) -> None:
-    """Refuse a literal outside its dimension's declared domain.
+    """Refuse a literal outside its dimension's declared domain, and refuse
+    a key that names no dimension at all.
 
-    Only checked when the key IS declared as an enum dimension with a
-    non-empty domain — an undeclared or non-enum dimension is not a load
-    error, it is a check-time ``unprovable-coverage`` finding (the checker
-    refuses to claim coverage there, it does not refuse to load).
+    A key with NO ``[dimensions.<key>]`` section is refused at load
+    (:class:`UndeclaredDimensionError`) -- silently accepting it would open
+    a match/guard group over a domain nobody declared. A key that IS
+    declared but non-enum, or declared with an empty domain, still loads
+    fine: that is a check-time ``unprovable-coverage`` finding (the checker
+    refuses to claim coverage there), not a load refusal.
     """
     dim = dimensions.get(key)
-    if dim is not None and dim.kind == "enum" and dim.domain:
+    if dim is None:
+        raise UndeclaredDimensionError(
+            f"row {row_id!r}: {block_name}.{key} references undeclared dimension {key!r} "
+            f"(add a [dimensions.{key}] section)"
+        )
+    if dim.kind == "enum" and dim.domain:
         bad = set(values) - set(dim.domain)
         if bad:
             raise UnknownLiteralError(

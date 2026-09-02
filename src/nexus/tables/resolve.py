@@ -17,6 +17,16 @@ author authored that refusal, and it is returned as ``Resolution.row``
 like any other outcome, never conflated with an ``unknown-value`` /
 ``no-match`` / ``ambiguous-match`` refusal the EVALUATOR itself produces.
 
+DISCLOSURE for callers building on this (e.g. RDR-201 P1.4's ``nx rdr
+set-status``): ``unknown-value`` reports only the FIRST violation found
+-- dimensions missing from the assignment are checked before out-of-domain
+values, both in sorted(dimension name) order -- never every problem at
+once. A single ``unknown-value`` ``Resolution`` does not mean "this was
+the only thing wrong"; a caller that wants a complete list of what is
+wrong with an assignment before reporting it must validate the assignment
+shape itself up front, rather than reading ``resolve()``'s one refusal as
+exhaustive. See :func:`_validate`.
+
 stdlib only.
 """
 
@@ -39,7 +49,17 @@ class Resolution:
     neither. A hit carries ``row`` (and ``escaped=True`` when it was
     reached only via the group's escape row); a refusal carries
     ``refusal`` (one of :data:`REFUSAL_CODES`) plus a ``detail`` payload
-    naming what went wrong.
+    naming what went wrong. For ``unknown-value`` specifically, ``detail``
+    names only the FIRST violation found (see :func:`resolve`'s module
+    docstring) -- it is not an exhaustive list of everything wrong with
+    the assignment.
+
+    ``__hash__`` deliberately excludes ``detail`` (same discipline as
+    :class:`nexus.tables.load.Row` excluding ``outcome`` and
+    :class:`nexus.tables.check.Finding` excluding its own ``detail``):
+    ``detail`` is a plain, heterogeneous ``dict`` and hash/eq consistency
+    only requires the hash to be a function of a subset of the fields
+    ``__eq__`` compares.
     """
 
     row: Row | None = None
@@ -51,8 +71,19 @@ class Resolution:
         if (self.row is None) == (self.refusal is None):
             raise ValueError("Resolution must carry exactly one of `row` or `refusal`")
 
+    def __hash__(self) -> int:
+        return hash((self.row, self.escaped, self.refusal))
+
 
 def resolve(table: Table, assignment: Mapping[str, str]) -> Resolution:
+    """Resolve ``assignment`` (every declared dimension of ``table``,
+    mapped to a value in its domain) against ``table``'s rows.
+
+    Returns a hit (``Resolution.row`` set) or a refusal (``Resolution.refusal``
+    set, one of :data:`REFUSAL_CODES`) -- never both, never neither. See the
+    module docstring's DISCLOSURE for what ``unknown-value`` does and does
+    not guarantee about assignment completeness.
+    """
     invalid = _validate(table, assignment)
     if invalid is not None:
         return invalid

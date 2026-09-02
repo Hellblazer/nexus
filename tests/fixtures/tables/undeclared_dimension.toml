@@ -1,5 +1,10 @@
-# Loads fine; check_table refuses to claim coverage over the undeclared
-# `region` guard dimension (unprovable-coverage, reason=undeclared-dimension).
+# `region` is used as a guard key but has no [dimensions.region] section:
+# refused at LOAD time (UndeclaredDimensionError, RDR-201 P1.2 code review,
+# T2 nexus/code-review-nexus-j9z30-2-2026-09-01). Previously this loaded
+# fine and check_table reported unprovable-coverage/undeclared-dimension at
+# CHECK time instead -- test_check_table_still_flags_undeclared_dimension_on_hand_built_table
+# in tests/tables/test_check.py preserves direct unit coverage of that
+# check.py branch for a Table built without going through the loader.
 [table]
 id = "undeclared-dim"
 kind = "decision-table"

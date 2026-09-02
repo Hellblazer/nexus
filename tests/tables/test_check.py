@@ -26,12 +26,14 @@ from nexus.tables.check import (
     CLOSED_BY_ESCAPE,
     COVERAGE_GAP,
     OVERLAP,
+    UNMATCHED_ASSIGNMENT,
     UNPROVABLE_COVERAGE,
     Finding,
     check_table,
     exit_code,
 )
 from nexus.tables.load import (
+    Dimension,
     DuplicateRowIdError,
     FrozenMapping,
     MatchKeysMismatchError,
@@ -40,6 +42,7 @@ from nexus.tables.load import (
     Row,
     Table,
     TableLoadError,
+    UndeclaredDimensionError,
     UnknownLiteralError,
     load_packaged_table,
     load_table,
@@ -218,13 +221,55 @@ def test_release_decision_fixed_after_removing_planted_defects():
 # non-enum dimension, and the state-machine/decision-table zero-dim split.
 
 
-def test_refuses_undeclared_dimension():
-    table = load_table(FIXTURES / "undeclared_dimension.toml")
+def test_refuses_undeclared_guard_dimension_at_load():
+    """RDR-201 P1.2 code review (T2 nexus/code-review-nexus-j9z30-2-2026-09-01):
+    an undeclared guard key is now refused at LOAD time
+    (UndeclaredDimensionError), not left for check_table to notice --
+    undeclared_dimension.toml's `region` guard key has no [dimensions.region]
+    section at all. Repurposes the fixture that used to document the OLD
+    check-time-only behavior; test_check_table_still_flags_undeclared_dimension_on_hand_built_table
+    below preserves direct unit coverage of check.py's own
+    dimension_reason("undeclared-dimension") branch for a Table built
+    without going through the loader."""
+    with pytest.raises(UndeclaredDimensionError, match="region"):
+        load_table(FIXTURES / "undeclared_dimension.toml")
+
+
+def test_refuses_undeclared_match_key_dimension_at_load():
+    """Same refusal, but for a MATCH key rather than a guard key --
+    undeclared_match_dimension.toml's `status` match key has no
+    [dimensions.status] section. This is also what makes
+    _check_match_totality's match-key product well-defined: every match
+    key on a table that loaded successfully is guaranteed declared."""
+    with pytest.raises(UndeclaredDimensionError, match="status"):
+        load_table(FIXTURES / "undeclared_match_dimension.toml")
+
+
+def test_check_table_still_flags_undeclared_dimension_on_hand_built_table():
+    """check.py's own dimension_reason("undeclared-dimension") branch is
+    now unreachable via the normal loader path (UndeclaredDimensionError
+    refuses it first), but stays live defense-in-depth for a Table
+    constructed directly, bypassing load_table -- prove it still fires."""
+    table = Table(
+        id="hand-built-undeclared",
+        kind="decision-table",
+        dimensions={"decision": Dimension(name="decision", domain=("decide",))},
+        match_keys=("decision",),
+        rows=(
+            Row(
+                id="r1",
+                match={"decision": "decide"},
+                guard={"region": ("eu",)},  # "region" never declared
+                outcome_kind="emit",
+                outcome={"verdict": "ok"},
+                escape=False,
+            ),
+        ),
+    )
     findings = check_table(table)
     unprovable = [f for f in findings if f.code == UNPROVABLE_COVERAGE]
     assert any(f.detail.get("dimension") == "region" for f in unprovable)
     assert any(f.detail.get("reason") == "undeclared-dimension" for f in unprovable)
-    # No coverage-gap should be claimed once a dimension is unprovable.
     assert COVERAGE_GAP not in {f.code for f in findings}
 
 
@@ -508,3 +553,32 @@ def test_multi_key_match_expansion_is_cartesian_product():
     }
     findings = check_table(table)
     assert blocking(findings) == []
+
+
+# --------------------------------------------------------------------------
+# unmatched-assignment (RDR-201 P1.2 critique, T2
+# nexus/critique-nexus-j9z30-2-2026-09-01 [24018]): a match-key-dimension
+# combination that no row names at all has no group -- prove check_table
+# now reports it as a blocking finding, closing the gap where a
+# checker-clean table was not actually guaranteed total.
+
+
+def test_unmatched_assignment_reported_for_unnamed_status():
+    table = load_table(FIXTURES / "unmatched_assignment.toml")
+    findings = check_table(table)
+    unmatched = [f for f in findings if f.code == UNMATCHED_ASSIGNMENT]
+    assert len(unmatched) == 1
+    assert unmatched[0].group == {"event": "go", "status": "c"}
+    assert exit_code(findings) == 1
+    assert UNMATCHED_ASSIGNMENT in BLOCKING_CODES
+
+
+def test_packaged_rdr_lifecycle_table_is_clean_including_match_totality():
+    """Non-vacuity anchor for the fix: the REAL packaged lifecycle table
+    (not a fixture copy) must still lint clean end to end -- both the
+    pre-existing per-group coverage/overlap proof and the new
+    match-key-product totality proof."""
+    table = load_packaged_table("rdr-lifecycle.toml")
+    findings = check_table(table)
+    assert UNMATCHED_ASSIGNMENT not in {f.code for f in findings}
+    assert exit_code(findings) == 0

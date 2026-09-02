@@ -176,9 +176,27 @@ def test_hit_emit_outcome_release_decision_unreachable():
 # --------------------------------------------------------------------------
 # Property: a table the checker calls clean (no blocking finding) must be
 # TOTAL over its full declared product -- resolve() can never return
-# ambiguous-match (the checker would have caught the overlap) or no-match
-# (the checker would have caught the gap) for any combination of every
-# declared dimension's domain.
+# ambiguous-match or no-match for any combination of every declared
+# dimension's domain.
+#
+# Correctly attributed (RDR-201 P1.2 critique, T2
+# nexus/critique-nexus-j9z30-2-2026-09-01 [24018]): check_table's per-group
+# coverage/overlap proof used to be scoped to EXISTING match groups only --
+# a match-key value combination no row ever named had no group at all, so
+# nothing was checked, and a checker-clean table was not actually
+# guaranteed total (counter-example in the critique: three declared
+# statuses, rows naming only two). check_table now ALSO proves every
+# match-key combination is named by some row (`unmatched-assignment`,
+# src/nexus/tables/check.py's _check_match_totality) before per-group
+# coverage is even asked about, so "checker-clean implies resolve()-total"
+# is true by construction again, not true of today's fixtures by luck.
+#
+# This test remains a genuine INDEPENDENT cross-check rather than a mere
+# restatement, because resolve.py and check.py share no acceptance-predicate
+# code (resolve.py imports only from load.py, never from check.py) -- this
+# test re-derives totality empirically via itertools.product + the real
+# resolve(), so a bug in either module's algorithm that the other's does not
+# happen to share would still be caught here.
 
 
 def _load_clean_tables() -> list[tuple[str, Table]]:
@@ -199,8 +217,12 @@ CLEAN_TABLES = _load_clean_tables()
 
 def test_clean_table_discovery_is_non_vacuous():
     """nexus-moht0 doctrine: a sweep that found nothing to check is a
-    failure, not a pass."""
+    failure, not a pass. Also pins the real production table's presence by
+    name, not just a bare count -- a silent regression that dropped
+    rdr-lifecycle.toml out of "clean" would otherwise just shrink this list
+    without failing anything."""
     assert len(CLEAN_TABLES) >= 3, "expected multiple clean fixtures/tables to exercise the property test"
+    assert "rdr-lifecycle.toml" in {name for name, _ in CLEAN_TABLES}
 
 
 @pytest.mark.parametrize("name,table", CLEAN_TABLES, ids=[name for name, _ in CLEAN_TABLES])
@@ -218,6 +240,20 @@ def test_resolve_is_total_over_clean_table_full_declared_product(name, table):
         assignment = dict(zip(dims, combo))
         res = resolve(table, assignment)
         assert res.refusal not in (AMBIGUOUS_MATCH, NO_MATCH), (name, assignment, res)
+
+
+def test_resolve_no_match_on_checker_reported_unmatched_assignment():
+    """The property's inverse: unmatched_assignment.toml is a table the
+    checker itself flags (unmatched-assignment, blocking) -- resolve() on
+    the exact cell no row names (status=c, event=go) must independently
+    refuse no-match, proving the evaluator's own behavior on an
+    unmatched-assignment cell matches what the checker warned about."""
+    table = load_table(FIXTURES / "unmatched_assignment.toml")
+    assert exit_code(check_table(table)) == 1  # non-vacuity anchor
+
+    res = resolve(table, {"status": "c", "event": "go"})
+    assert res.row is None
+    assert res.refusal == NO_MATCH
 
 
 # --------------------------------------------------------------------------
@@ -239,3 +275,18 @@ def test_resolution_requires_exactly_one_of_row_or_refusal():
             ),
             refusal=NO_MATCH,
         )
+
+
+def test_resolution_is_actually_hashable():
+    """Code review finding (T2 nexus/code-review-nexus-j9z30-2-2026-09-01):
+    Resolution must call hash(), not merely be a frozen dataclass -- a
+    frozen dataclass with a plain-dict field is NOT hashable at runtime
+    despite dataclass-generating __hash__/__eq__ by default (same trap
+    Row/Finding already guard against for outcome/detail)."""
+    hit = Resolution(
+        row=Row(id="x", match={}, guard={}, outcome_kind="to", outcome={"state": "y"}, escape=False),
+    )
+    assert hash(hit) == hash(hit)  # does not raise
+
+    refusal = Resolution(refusal=NO_MATCH, detail={"nested": ["candidates", "here"]})
+    assert hash(refusal) == hash(refusal)  # does not raise, even with a list-valued detail
