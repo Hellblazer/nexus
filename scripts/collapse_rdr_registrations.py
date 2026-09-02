@@ -16,15 +16,18 @@ to the single canonical tumbler.
 binary), invoked directly (``python scripts/collapse_rdr_registrations.py``
 or, once installed, ``uv run python scripts/...``).
 
-**Repo scoping is mandatory, not optional** (code-review/critique fix
-round, 2026-09-01): every document fetched here is filtered to THIS repo's
-own ``docs/rdr/`` tree (:func:`nexus.catalog.rdr_canonical.rdr_source_prefix`)
-before ``build_plan`` groups or resolves anything — the SAME catalog holds
-other repos' RDR registrations under other owners (measured live: ``ART``
-is registered ``content_type="rdr"`` in this catalog too), and an
-unscoped fetch can silently resolve THIS repo's RDR to a DIFFERENT repo's
-tumbler with no warning if the basenames collide. This is enforced inside
-``build_plan`` itself, not left to the caller to remember.
+**Repo scoping is mandatory, and it happens in exactly one place**
+(critique fix rounds, 2026-09-01/02). The SAME catalog holds other repos'
+RDR registrations under other owners (measured live: ``ART``, ``Kramer``,
+``Luciferase``, ``arcaneum`` and others), so an unscoped rule could
+resolve THIS repo's RDR to a DIFFERENT repo's tumbler when basenames
+collide. The gate is
+:func:`nexus.catalog.rdr_canonical._is_in_repo` — owner-match OR a
+``source_uri`` under this repo's own ``docs/rdr/`` — applied per candidate
+inside the resolution rule. ``build_plan`` deliberately does NOT pre-filter
+on top of it: a second, cruder gate is how a real record went missing from
+the census (see ``build_plan``'s own docstring). Other repos' rows are
+CLASSIFIED and summarised by :meth:`RdrPlanRow.is_foreign`, never dropped.
 
 **--dry-run is the default and does not require --apply to be absent** —
 there is no way to write without explicitly passing ``--apply``. Per bead
@@ -77,6 +80,30 @@ class RdrPlanRow:
             return []
         return [c.tumbler for c in self.candidates if c.tumbler != self.canonical]
 
+    def is_foreign(self, repo_source_prefix: str) -> bool:
+        """True when EVERY candidate is another repo's document.
+
+        The catalog is shared: the live fetch returns RDRs from ART,
+        Kramer, Luciferase, arcaneum and others alongside this repo's.
+        Those are correctly refused by the admission gate, but listing 177
+        of them beside this repo's own findings buries the signal. They
+        are counted and summarised rather than dropped — a row that
+        disappears is the failure this bead's round-2 critique caught; a
+        row that is classified is not.
+
+        A candidate with an EMPTY ``source_uri`` is never foreign: it
+        cannot be attributed to any repo, so it stays in this repo's
+        unresolvable list where someone has to look at it (live instance:
+        ``rdr-125``, owner ``1.23``, ``content_type=prose``, no
+        ``source_uri``).
+        """
+        if not repo_source_prefix or not self.candidates:
+            return False
+        return all(
+            c.source_uri and not c.source_uri.startswith(repo_source_prefix)
+            for c in self.candidates
+        )
+
 
 def build_plan(
     entries: list[CatalogEntry],
@@ -86,15 +113,27 @@ def build_plan(
 ) -> list[RdrPlanRow]:
     """Scope, group, and resolve *entries* into a per-RDR collapse plan.
 
-    *entries* is filtered to *repo_source_prefix* FIRST (an entry whose
-    ``source_uri`` does not start with it is dropped before grouping —
-    this repo's plan must never even consider another repo's registration,
-    not merely refuse to pick it). Resolution itself routes through
-    :func:`nexus.catalog.rdr_canonical.resolve_all` — the single authority
-    for the canonical-tumbler rule; this function does not re-derive it.
+    ONE admission gate, not two. Scoping is
+    :func:`nexus.catalog.rdr_canonical._is_in_repo`, applied per candidate
+    inside :func:`~nexus.catalog.rdr_canonical.resolve_canonical_tumbler`;
+    this function does not pre-filter.
+
+    An earlier revision filtered on ``source_uri`` prefix alone before
+    grouping, which was STRICTER than the rule itself (owner-match OR
+    path) and so silently DROPPED a record the rule would have admitted:
+    live proof was tumbler ``1.1.2770``,
+    ``docs/rdr/rdr-174-unified-nx-init-service-lifecycle.md``,
+    ``content_type=rdr`` under the CURRENT owner but carrying an empty
+    ``source_uri`` — neither resolved nor unresolvable, simply absent from
+    the census (round-2 critique, T2
+    ``nexus/critique-nexus-j9z30-20-round2-2026-09-01``). A record that
+    vanishes is worse than one reported UNRESOLVABLE, and RDR-201 §Failure
+    Modes forbids exactly that. Every entry this repo's fetch returns now
+    reaches the plan as resolved or unresolvable; nothing disappears.
+
     Rows are sorted by ``rdr_key`` for a stable, readable report.
     """
-    scoped = [e for e in entries if e.source_uri.startswith(repo_source_prefix)] if repo_source_prefix else list(entries)
+    scoped = list(entries)
     groups = group_rdr_candidates(scoped)
     resolved = resolve_all(scoped, current_owner, repo_source_prefix=repo_source_prefix)
     rows = [
@@ -109,14 +148,36 @@ def build_plan(
     return rows
 
 
-def format_plan(rows: list[RdrPlanRow], *, current_owner: Tumbler) -> str:
-    """Render *rows* as a human-readable report (one line per registration)."""
+def format_plan(
+    rows: list[RdrPlanRow], *, current_owner: Tumbler, repo_source_prefix: str = "",
+) -> str:
+    """Render *rows* as a human-readable report (one line per registration).
+
+    Three categories, and every fetched row lands in exactly one: resolved,
+    unresolvable (this repo's — someone has to look at these), and foreign
+    (another repo's document in the shared catalog, summarised by repo).
+    The counts reconcile against ``len(rows)`` on the header line, so a row
+    can never go missing without the arithmetic saying so.
+    """
+    foreign = [r for r in rows if r.is_foreign(repo_source_prefix)]
+    mine = [r for r in rows if r not in foreign]
     lines = [f"RDR canonical-tumbler collapse plan — current owner {current_owner}"]
-    resolved = sum(1 for r in rows if r.canonical is not None)
-    unresolvable = len(rows) - resolved
-    lines.append(f"{len(rows)} RDR(s) found: {resolved} resolved, {unresolvable} unresolvable")
+    resolved = sum(1 for r in mine if r.canonical is not None)
+    unresolvable = len(mine) - resolved
+    lines.append(
+        f"{len(rows)} RDR(s) fetched: {resolved} resolved, {unresolvable} unresolvable, "
+        f"{len(foreign)} other repos' (shared catalog)"
+    )
+    if foreign:
+        by_repo: dict[str, int] = {}
+        for row in foreign:
+            uri = row.candidates[0].source_uri
+            root = uri.rsplit("/docs/rdr/", 1)[0].rsplit("/", 1)[-1] if "/docs/rdr/" in uri else "?"
+            by_repo[root] = by_repo.get(root, 0) + 1
+        summary = ", ".join(f"{k}={v}" for k, v in sorted(by_repo.items(), key=lambda kv: -kv[1]))
+        lines.append(f"  other repos (refused, not this repo's to collapse): {summary}")
     lines.append("")
-    for row in rows:
+    for row in mine:
         if row.canonical is None:
             lines.append(f"{row.rdr_key}: UNRESOLVABLE ({len(row.candidates)} candidates, no single in-repo match)")
         else:
@@ -187,7 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         *cat.all_documents(content_type="prose"),
     ]
     rows = build_plan(entries, current_owner, repo_source_prefix=prefix)
-    print(format_plan(rows, current_owner=current_owner))
+    print(format_plan(rows, current_owner=current_owner, repo_source_prefix=prefix))
 
     if args.apply:
         from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred: only constructed when --apply is actually passed

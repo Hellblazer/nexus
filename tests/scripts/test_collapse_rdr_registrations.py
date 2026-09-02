@@ -18,6 +18,7 @@ from collapse_rdr_registrations import (
     format_plan,
 )
 
+from nexus.catalog.rdr_canonical import group_rdr_candidates
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry
 
@@ -97,35 +98,39 @@ class TestBuildPlan:
         assert by_key["rdr-078-w"].canonical == Tumbler.parse("1.10.3")
         assert by_key["rdr-078-w"].losers == []  # single candidate, nothing to collapse
 
-    def test_foreign_repo_entry_is_scoped_out_before_grouping(self) -> None:
-        """The CRITICAL fix: build_plan filters by repo_source_prefix BEFORE
-        grouping -- a foreign repo's same-basename document must not even
-        appear as a candidate, never mind be accepted as canonical."""
+    def test_foreign_repo_entry_is_reported_unresolvable_not_dropped(self) -> None:
+        """A foreign repo's same-basename document must never be accepted as
+        canonical. It is REFUSED and the refusal is reported: round 2 replaced
+        the pre-grouping drop with one admission gate, because a dropped
+        record leaves the census silently short (T2
+        nexus/critique-nexus-j9z30-20-round2-2026-09-01)."""
         rows = build_plan(_fixture_entries(), CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
         by_key = {r.rdr_key: r for r in rows}
-        assert "rdr-099-foreign" not in by_key
+        assert by_key["rdr-099-foreign"].canonical is None
 
-    def test_without_scoping_the_foreign_entry_would_be_unresolvable_not_accepted(self) -> None:
-        """Defense in depth: even if a caller passes an UNFILTERED entries
-        list (repo_source_prefix scoping happens to admit nothing), the
-        single foreign candidate is UNRESOLVABLE, never silently kept."""
+    def test_a_lone_foreign_entry_is_unresolvable_not_accepted(self) -> None:
+        """A single foreign candidate is UNRESOLVABLE, never silently kept —
+        the singleton path runs the same admission check as any other."""
         foreign_only = [
             _entry("1.2.400", content_type="rdr", file_path="docs/rdr/rdr-099-foreign.md", source_uri=FOREIGN_REPO_PREFIX + "rdr-099-foreign.md"),
         ]
         rows = build_plan(foreign_only, CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
-        assert rows == []  # scoped out before grouping -- not even a row
+        assert len(rows) == 1
+        assert rows[0].canonical is None  # refused, and the refusal is visible
 
 
 class TestFormatPlan:
     def test_dry_run_report_names_keep_and_collapse_targets(self) -> None:
         rows = build_plan(_fixture_entries(), CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
-        report = format_plan(rows, current_owner=CURRENT_OWNER)
-        assert "4 RDR(s) found: 3 resolved, 1 unresolvable" in report
+        report = format_plan(rows, current_owner=CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
+        assert "5 RDR(s) fetched: 3 resolved, 1 unresolvable, 1 other repos'" in report
         assert "rdr-201-x: canonical=1.1.1" in report
         assert "KEEP        1.1.1" in report
         assert "collapse -> 1.10.1  content_type=rdr 1.1.1" in report
         assert "rdr-110-z: UNRESOLVABLE" in report
-        assert "rdr-099-foreign" not in report
+        # The foreign row is CLASSIFIED and counted in the header, not listed
+        # among this repo's findings and not dropped (round-2 critique).
+        assert "other repos (refused, not this repo's to collapse): ART=1" in report
 
     def test_format_plan_writes_nothing(self) -> None:
         """--dry-run (the default codepath) never touches a writer at all --
@@ -149,3 +154,65 @@ class TestApplyPlan:
         writer = _StubWriter()
         assert apply_plan(writer, [row]) == 0
         assert writer.calls == []
+
+
+class TestNothingVanishesFromThePlan:
+    """Round-2 critique (T2 nexus/critique-nexus-j9z30-20-round2-2026-09-01):
+    build_plan pre-filtered on source_uri prefix alone, stricter than the
+    rule's own owner-OR-path admission, so a current-owner record with an
+    empty source_uri was dropped before grouping — neither resolved nor
+    unresolvable, absent. Live instance: tumbler 1.1.2770,
+    docs/rdr/rdr-174-unified-nx-init-service-lifecycle.md. RDR-201 §Failure
+    Modes forbids the silent disappearance; one admission gate now."""
+
+    def test_current_owner_entry_with_empty_source_uri_reaches_the_plan(self) -> None:
+        entry = _entry(
+            "1.1.2770",
+            file_path="docs/rdr/rdr-174-unified-nx-init-service-lifecycle.md",
+            source_uri="",
+        )
+        rows = build_plan([entry], CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
+        assert [r.rdr_key for r in rows] == ["rdr-174-unified-nx-init-service-lifecycle"]
+        assert rows[0].canonical == entry.tumbler, "admitted via the owner branch, not dropped"
+
+    def test_current_owner_entry_with_non_file_scheme_reaches_the_plan(self) -> None:
+        entry = _entry(
+            "1.1.2771",
+            file_path="docs/rdr/rdr-175-os-init-single-process-watchdog.md",
+            source_uri="chroma://collection/doc-id",
+        )
+        rows = build_plan([entry], CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
+        assert [r.rdr_key for r in rows] == ["rdr-175-os-init-single-process-watchdog"]
+        assert rows[0].canonical == entry.tumbler
+
+    def test_foreign_repo_entry_is_reported_unresolvable_never_absent(self) -> None:
+        """The ART shape: a same-shaped record under a different owner and a
+        different source_uri root. It must be REFUSED, and refusal is a row
+        in the plan — the census must account for it."""
+        entry = _entry(
+            "1.2.900",
+            file_path="docs/rdr/rdr-201-closed-vocabularies-as-checked-tables.md",
+            source_uri=FOREIGN_REPO_PREFIX + "rdr-201-closed-vocabularies-as-checked-tables.md",
+        )
+        rows = build_plan([entry], CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
+        assert len(rows) == 1
+        assert rows[0].canonical is None
+
+    def test_census_invariant_every_fetched_rdr_is_resolved_or_unresolvable(self) -> None:
+        """The standing guard: no entry the fetch returns may vanish. Counts
+        must reconcile, so a future pre-filter cannot silently reappear."""
+        entries = _fixture_entries() + [
+            _entry("1.1.2770", file_path="docs/rdr/rdr-174-x.md", source_uri=""),
+            _entry(
+                "1.2.900",
+                file_path="docs/rdr/rdr-199-y.md",
+                source_uri=FOREIGN_REPO_PREFIX + "rdr-199-y.md",
+            ),
+        ]
+        rows = build_plan(entries, CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
+        expected_keys = set(group_rdr_candidates(entries))
+        assert {r.rdr_key for r in rows} == expected_keys
+        assert len(rows) == sum(1 for r in rows if r.canonical is not None) + sum(
+            1 for r in rows if r.canonical is None
+        )
+        assert expected_keys, "vacuous: no RDR keys in the fixture set"
