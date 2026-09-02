@@ -6,6 +6,7 @@ supersedes_result: docs/rdr/rdr-200-phase1b-gate-result.md
 inherits_protocol: docs/rdr/rdr-200-phase1b-prereg.md
 question_set: HELD OUT (not in the repo until the arms finish; sha256 of the frozen text list below)
 created: 2026-09-02
+kind: companion
 status: frozen-before-arms
 ---
 
