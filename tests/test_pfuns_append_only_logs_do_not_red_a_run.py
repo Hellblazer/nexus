@@ -93,3 +93,50 @@ def test_an_unlisted_file_is_never_waved_through(guard):
     state, appends = guard._split_appends_from_state(["secrets.json"], before, after)
     assert state == ["secrets.json"], "only NAMED append-only logs are benign"
     assert appends == []
+
+
+# ── nexus-ist38: the split must consume what the diff actually emits ────────
+#
+# Every test above hands `_split_appends_from_state` a BARE path. The guard
+# hands it `_diff_config_dir_snapshots`'s output, which prefixes each entry
+# with "ADDED "/"MODIFIED "/"REMOVED ". For the guard's whole life the split
+# looked the whole prefixed string up as a path, matched nothing, and
+# classified every change as a state mutation -- so a growing routing_log
+# reddened real runs while these tests stayed green. The composition, not
+# either half, is the subject here.
+
+
+def test_the_split_consumes_the_diffs_own_entries(guard):
+    before = {
+        "routing_log.jsonl": (1, 100),   # append-only log, grows
+        "logs/mineru.log": (1, 10),      # ambient daemon dir
+        "backfill_state.json": (1, 50),  # production STATE, rewritten smaller
+    }
+    after = {
+        "routing_log.jsonl": (2, 200),
+        "logs/mineru.log": (2, 20),
+        "backfill_state.json": (2, 40),
+    }
+    changed = guard._diff_config_dir_snapshots(before, after)
+    assert changed, "the diff itself found nothing -- this test would be vacuous"
+    state, appends = guard._split_appends_from_state(changed, before, after)
+    assert state == ["MODIFIED backfill_state.json"]
+    assert appends == ["MODIFIED logs/mineru.log", "MODIFIED routing_log.jsonl"]
+
+
+def test_rel_path_of_diff_entry_strips_every_verb_and_passes_bare_paths(guard):
+    assert guard._rel_path_of_diff_entry("MODIFIED routing_log.jsonl") == "routing_log.jsonl"
+    assert guard._rel_path_of_diff_entry("ADDED logs/x.log") == "logs/x.log"
+    assert guard._rel_path_of_diff_entry("REMOVED a/b.lock") == "a/b.lock"
+    assert guard._rel_path_of_diff_entry("routing_log.jsonl") == "routing_log.jsonl"
+
+
+def test_a_truncated_log_still_reddens_through_the_diff(guard):
+    """The verb strip must not wave a truncation through: same entry shape,
+    opposite verdict."""
+    before = {"routing_log.jsonl": (1, 500)}
+    after = {"routing_log.jsonl": (2, 10)}
+    changed = guard._diff_config_dir_snapshots(before, after)
+    state, appends = guard._split_appends_from_state(changed, before, after)
+    assert state == ["MODIFIED routing_log.jsonl"]
+    assert appends == []

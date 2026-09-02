@@ -430,12 +430,34 @@ _APPEND_ONLY_REAL_CONFIG_LOGS = frozenset({
 _AMBIENT_DAEMON_DIRS: tuple[str, ...] = ("logs/",)
 
 
+#: The verbs :func:`_diff_config_dir_snapshots` prefixes onto each entry it
+#: returns. :func:`_split_appends_from_state` consumes those entries, so it
+#: must strip the verb before treating the remainder as a path -- it did not
+#: until 2026-09-02 (nexus-ist38), which made the whole benign-append split
+#: DEAD: every entry was looked up as ``"MODIFIED routing_log.jsonl"``, found
+#: in neither snapshot nor the append-only set, and reported as a state
+#: mutation. The two tests covering the split fed it BARE paths, so they
+#: passed while the guard they exist for failed runs over a growing log.
+_DIFF_VERBS: tuple[str, ...] = ("ADDED ", "MODIFIED ", "REMOVED ")
+
+
+def _rel_path_of_diff_entry(entry: str) -> str:
+    """The path half of a ``_diff_config_dir_snapshots`` entry (verb stripped),
+    or *entry* itself when it carries no verb."""
+    for verb in _DIFF_VERBS:
+        if entry.startswith(verb):
+            return entry[len(verb):]
+    return entry
+
+
 def _split_appends_from_state(
     changed: list[str],
     before: dict[str, tuple[int, int]],
     after: dict[str, tuple[int, int]],
 ) -> tuple[list[str], list[str]]:
-    """Split changed paths into (state_mutations, benign_appends).
+    """Split :func:`_diff_config_dir_snapshots` entries (``"<VERB> <path>"``,
+    or a bare path) into (state_mutations, benign_appends), preserving each
+    entry verbatim in whichever list it lands.
 
     Two ways to be benign. (1) The path lives under a directory a live daemon
     owns (:data:`_AMBIENT_DAEMON_DIRS`), in which case any change is ambient
@@ -448,18 +470,19 @@ def _split_appends_from_state(
     """
     state: list[str] = []
     appends: list[str] = []
-    for rel in changed:
+    for entry in changed:
+        rel = _rel_path_of_diff_entry(entry)
         b, a = before.get(rel), after.get(rel)
         name = rel.rsplit("/", 1)[-1]
         if rel.startswith(_AMBIENT_DAEMON_DIRS):
             # Ambient daemon output: exempt from the state verdict in every
             # direction (create, grow, rotate), because rotation is a create
             # plus a shrink and a daemon may do either at any moment.
-            appends.append(rel)
+            appends.append(entry)
         elif name in _APPEND_ONLY_REAL_CONFIG_LOGS and b is not None and a is not None and a[1] > b[1]:
-            appends.append(rel)
+            appends.append(entry)
         else:
-            state.append(rel)
+            state.append(entry)
     return state, appends
 
 
