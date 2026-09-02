@@ -45,9 +45,12 @@ mechanize, it matters enough to ship.
   summary stays and the filter is fixed (`rdr-NNN-*`, `rdrNNN-*`, `NNN-*`
   stems; `docs/rdr/*.md` non-recursive; `_EXCLUDE_FILES` kept), so the
   `RDR: N documents (...)` line prints for the first time. The
-  plugin-shipped table copy (added by the nexus-j9z30.5 entry below, so
-  never in any tag -- net drift zero, not listed) had no reader left and is
-  removed; the
+  plugin-shipped table copy and the `[lifecycle]` section it read (added
+  under nexus-j9z30.5 and deleted again before any tag carried them, so net
+  drift for that path is zero and it is deliberately not listed separately
+  -- that breadcrumb entry was folded into this one at release prep, on its
+  author's instruction, because at a cut boundary it describes machinery
+  the release does not contain) had no reader left and is removed; the
   `[lifecycle] terminal_preserving_events` section that fed the deleted
   derivation is gone from the packaged table too. Inert for installed
   users until this ships.
@@ -77,35 +80,6 @@ mechanize, it matters enough to ship.
   frontmatter BEFORE calling `set-status ... superseded`, matching the
   table's `successor` guard, which reads that key from the file at call
   time and refuses `successor-not-named` otherwise.
-- `conexus/hooks/scripts/rdr_hook.py` — bead: nexus-j9z30.5 — (SUPERSEDED by
-  the nexus-e19sa entry above: the derivation, the plugin table copy and the
-  `[lifecycle]` section it describes were all deleted before any tag carried
-  them; kept as the record of the intermediate state.) The SessionStart hook's
-  `_STATUS_ORDER`/`_TERMINAL` were DERIVED from a plugin-shipped copy of
-  the rdr-lifecycle table (read via stdlib `tomllib` — the hook runs under
-  bare system python, `import nexus` fails there) instead of a
-  hand-maintained literal that had drifted from the table's domain
-  (dropped `implemented`/`reverted`, words the table's closed vocabulary
-  never declared). The terminal-status rule (which events don't break
-  terminality, e.g. `supersede`) is likewise read from the table's own new
-  `[lifecycle] terminal_preserving_events` list, not hardcoded in the
-  hook. `_EXCLUDE_FILES` now also excludes `agents.md`. RDR-201 Phase 1.
-  The hook's file-glob regex (`re.match(r"\d+", p.stem)`) still never
-  matches any `rdr-NNN-*.md` file, so this reconcile logic remains dead
-  code on this repo — that defect (nexus-e19sa) is out of scope here and
-  awaits Sam's ruling separately.
-  **Skew detection (fix round, T2 nexus/critique-nexus-j9z30-5-2026-09-01
-  [24042] finding 1/4):** the table now carries `version = 1` under
-  `[table]`, and every hook run logs `rdr_hook: loaded lifecycle table
-  id=... version=...` on stderr. This is a DETECTABILITY line, not a
-  lockstep mechanism — a user's `conexus` package upgrade and their Claude
-  Code plugin update are independent channels (RDR-143's problem
-  statement), so the plugin-pinned table copy can genuinely run behind (or
-  ahead of) the installed package's copy between a package upgrade and the
-  next plugin update; this line is how that skew becomes visible in a
-  session transcript rather than silently producing a stale-but-uncomplained-about
-  reconcile order. No lockstep enforcement is introduced here — that
-  remains RDR-143's scope.
 - `conexus/commands/rdr-audit.md` — bead: nexus-j9z30.8 — documents the
   `nx rdr preamble rdr-audit` closed-vocabulary scan (RDR-201 Phase 1):
   the preamble now reports every `docs/rdr/*.md` frontmatter `status:`
