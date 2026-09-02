@@ -248,11 +248,17 @@ class TestNothingVanishesFromThePlan:
         rows = build_plan(entries, CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
         expected_keys = set(group_rdr_candidates(entries))
         assert {r.rdr_key for r in rows} == expected_keys
-        # The reconciliation that matters is against the three DISPLAY
-        # categories, not canonical-is-None (that partition is a tautology).
-        foreign = [r for r in rows if r.is_foreign(CURRENT_OWNER, THIS_REPO_PREFIX)]
-        mine = [r for r in rows if r not in foreign]
-        resolved = [r for r in mine if r.canonical is not None]
-        unresolvable = [r for r in mine if r.canonical is None]
-        assert len(rows) == len(resolved) + len(unresolvable) + len(foreign)
         assert expected_keys, "vacuous: no RDR keys in the fixture set"
+        # LITERAL expected counts for this known input, not a partition of
+        # rows by the very functions under test — that shape sums to the
+        # whole for any classifier, correct or broken (round-4 critique, T2
+        # nexus/critique-nexus-j9z30-20-round4-2026-09-01, which caught the
+        # previous version of this assertion claiming to be more than it was).
+        # The fixture set: 3 resolvable this-repo RDRs, 1 unresolvable
+        # this-repo RDR (rdr-110-z), 1 foreign (rdr-099-foreign), plus the
+        # two appended above — rdr-174-x (current owner, empty source_uri,
+        # resolvable) and rdr-199-y (foreign).
+        report = format_plan(
+            rows, current_owner=CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX,
+        )
+        assert f"{len(rows)} RDR(s) fetched: 4 resolved, 1 unresolvable, 2 other repos'" in report
