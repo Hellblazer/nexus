@@ -20,7 +20,12 @@ from nexus.formatters import (
 )
 from nexus.scoring import RG_FLOOR_SCORE, round_robin_interleave
 from nexus.db.http_vector_client import VectorServiceError
-from nexus.search_engine import SearchDiagnostics, apply_ranking_boosts, search_cross_corpus
+from nexus.search_engine import (
+    SearchDiagnostics,
+    apply_file_diversity_cap,
+    apply_ranking_boosts,
+    search_cross_corpus,
+)
 from nexus.types import SearchResult
 
 
@@ -354,10 +359,12 @@ def search_cmd(
     # search_cross_corpus so _attach_doc_ids_from_catalog actually runs.
     # Found by the 7.11.0 live parity probe: without catalog= here, CLI
     # results carried doc_id/chunk_count/_display_path all None, so the
-    # --max-file-chunks pass, apply_ranking_boosts' chunk-count penalty
-    # (nexus-dxly), and --path _display_path scoping all keyed on metadata
-    # that was never attached. Failure degrades to None — the documented
-    # no-op path in _attach_doc_ids_from_catalog.
+    # --max-file-chunks pass and --path _display_path scoping keyed on
+    # metadata that was never attached (apply_ranking_boosts' chunk-count
+    # penalty, nexus-dxly, was retired at nexus-0bmhd — see
+    # apply_file_diversity_cap below for where file-domination control
+    # lives now). Failure degrades to None — the documented no-op path in
+    # _attach_doc_ids_from_catalog.
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; catalog only needed on this path
     try:
         _search_catalog = make_catalog_reader()
@@ -490,9 +497,14 @@ def search_cmd(
                         rg_matched_lines.setdefault(fp, []).append(int(ln))
 
     # Hybrid scoring — pass tuning weights from config (honours per-repo .nexus.yml)
-    # nexus-dxly: pass catalog so the code__ file-size penalty can
-    # resolve chunk_count via documents.chunk_count for Phase-3 chunks
-    # (RDR-108 dropped chunk_count from chunk metadata).
+    # nexus-0bmhd: apply_hybrid_scoring's chunk-count penalty (nexus-dxly's
+    # catalog-backed chunk_count resolution) is removed — scoring no longer
+    # reads catalog at all. `catalog=` below is accepted-but-unused vestige
+    # on apply_ranking_boosts()/apply_hybrid_scoring()'s signatures; kept
+    # only so this call site doesn't need to change shape. The reader
+    # itself is still needed independently, for doc_id/_display_path
+    # attachment via search_cross_corpus (see the comment on
+    # make_catalog_reader() above).
     _scoring_cat = _search_catalog  # nexus-mw2kg: reuse the reader passed to search_cross_corpus
     # nexus: hybrid scoring + RDR-055 E2 quality boost — shared with the MCP
     # search()/query() paths via apply_ranking_boosts (search_engine.py) so
@@ -529,15 +541,24 @@ def search_cmd(
             r.hybrid_score = float(r.metadata["rerank_score"])
         _scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
         _unscored = [r for r in results if "rerank_score" not in r.metadata]
-        results = (_scored + _unscored)[:n]
+        # nexus-0bmhd: the file-diversity cap is the LAST ordering step
+        # before the page truncation, unconditionally (every CLI
+        # invocation renders for a reader) — capping before this re-sort
+        # would be undone by it; capping after the [:n] slice is too late,
+        # the domination has already consumed the slots.
+        results = apply_file_diversity_cap(_scored + _unscored)[:n]
     else:
         # No server scores (rerank off, single collection, legacy backend, or
         # fully degraded — the degrade was surfaced above): group by
         # collection and interleave round-robin for even distribution.
+        # round_robin_interleave groups by COLLECTION, not file, so it alone
+        # does not stop one file's chunks from dominating a single-collection
+        # page — the diversity cap below is what does that, again as the
+        # last ordering step before truncation (nexus-0bmhd).
         groups: dict[str, list[SearchResult]] = {}
         for r in results:
             groups.setdefault(r.collection, []).append(r)
-        results = round_robin_interleave(list(groups.values()))[:n]
+        results = apply_file_diversity_cap(round_robin_interleave(list(groups.values())))[:n]
 
     # Post-reranker: apply exact-match boost using pre-captured rg file paths.
     # Fires unconditionally after both reranked and no-rerank paths.

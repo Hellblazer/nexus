@@ -20,6 +20,7 @@ __all__ = [
     "_overfetch_multiplier",
     "SearchDiagnostics",
     "apply_ranking_boosts",
+    "apply_file_diversity_cap",
 ]
 
 
@@ -813,13 +814,15 @@ def apply_ranking_boosts(
     the boost, same as the CLI has always produced.
 
     *tuning* supplies the per-repo ``.nexus.yml`` ``[tuning]`` weights
-    (``vector_weight`` / ``frecency_weight`` / ``file_size_threshold``);
-    pass ``get_tuning_config()``'s result, or omit for
-    :class:`~nexus.config.TuningConfig`'s built-in defaults. *catalog*
-    resolves ``documents.chunk_count`` for the code__ file-size penalty
-    (nexus-dxly) — omitted or failing lookups degrade to the
-    metadata/no-penalty fallback exactly as ``apply_hybrid_scoring``
-    already does on its own.
+    (``vector_weight`` / ``frecency_weight``); pass ``get_tuning_config()``'s
+    result, or omit for :class:`~nexus.config.TuningConfig`'s built-in
+    defaults. ``tuning.file_size_threshold`` and *catalog* are still
+    accepted on this call and forwarded to ``apply_hybrid_scoring``, but
+    scoring no longer reads either (nexus-0bmhd, 2026-09-01: RDR-006's
+    code__ file-size penalty and its catalog ``documents.chunk_count``
+    lookup, nexus-dxly, are removed from scoring entirely — see
+    ``apply_hybrid_scoring``'s docstring). Domination control now lives at
+    the render layer: see :func:`apply_file_diversity_cap` below.
 
     Does NOT apply, by design, to result rows that never carry the
     metadata these boosts read:
@@ -850,6 +853,85 @@ def apply_ranking_boosts(
         catalog=catalog,
     )
     return apply_quality_boost(results)
+
+
+# ── File diversity cap (render layer) — nexus-0bmhd, 2026-09-01 ────────────
+#
+# RDR-006 (2026-02-28) put file-size domination control INSIDE scoring: a
+# relevance-blind multiplicative penalty on every code__ result's
+# hybrid_score. That was the only lever available at the time — no
+# server-side reranker, no cross-model distance calibration, no render/
+# assembly layer downstream of scoring that could hold a cap, and nx_answer
+# (whose plan runner feeds retrieval results into a machine reduction that
+# wants precision, not a human-skimmable top-10) did not exist yet. It was a
+# sound decision for its moment, not a mistake — it aged out of those
+# assumptions. The penalty multiplied score by chunk-count alone, with zero
+# regard for match quality: nexus-vlzz0 measured an exact-match chunk in a
+# 145-chunk file scored ×0.207 purely for living in a large file, losing to
+# unrelated 8-chunk files, and the same blindness broke the RDR-200 Phase 1
+# gate's plan-based retrieval arms.
+#
+# The fix moves domination control here — display/render assembly — instead
+# of scoring, and makes it a REORDERING, never a rescaling: hybrid_score is
+# untouched, so a machine consumer that wants the true ranked order
+# (``structured=True`` in ``mcp/core.py``, which nx_answer's plan runner
+# auto-injects for every retrieval step) sees it uncapped, while a human-
+# facing render (``nx search``'s CLI text/JSON output, unconditionally; MCP
+# ``search()`` text mode) sees at most *max_per_file* chunks from any one
+# file before the rest of that file's chunks are pushed (not dropped) to
+# the tail, making room for other files on the same page.
+
+_DEFAULT_MAX_CHUNKS_PER_FILE = 2
+
+
+def apply_file_diversity_cap(
+    results: list[SearchResult],
+    *,
+    max_per_file: int = _DEFAULT_MAX_CHUNKS_PER_FILE,
+) -> list[SearchResult]:
+    """Reorder *results* so at most *max_per_file* chunks from the same
+    file appear before chunks from other files — a non-destructive stable
+    partition, not a filter: every input result is still present in the
+    output, just reordered. Nothing is dropped and no score is touched.
+
+    File identity resolves per result via ``metadata.doc_id`` ->
+    ``metadata.source_path`` -> ``metadata.file_path`` -> ``r.id``
+    (``doc_id`` first because it is the catalog tumbler, stable across a
+    prune/re-index; the path keys are the legacy pre-doc_id identity the
+    CLI's rg-boost and ``_display_path`` code also fall back on) — a
+    result with none of the first three metadata keys
+    falls back to its own unique ``id``, so results with no shared file
+    identity never cap against each other.
+
+    Walks *results* in their existing (already-scored) order; the first
+    *max_per_file* occurrences of each file key are kept in place, every
+    occurrence after that is moved to the tail, preserving each group's
+    own relative order. Callers that then slice to a page size (``[:n]``)
+    must apply this AFTER any prior sort/rerank step and BEFORE that
+    slice — capping before a re-sort would be undone by it, and capping
+    after the slice is too late (the domination already consumed the
+    slots).
+
+    A no-op (returns *results* unchanged, not a copy) for an empty list
+    or ``max_per_file <= 0``. Otherwise always returns a NEW list; the
+    input list and its elements are never mutated.
+    """
+    if not results or max_per_file <= 0:
+        return results
+    kept: list[SearchResult] = []
+    overflow: list[SearchResult] = []
+    counts: dict[str, int] = {}
+    for r in results:
+        key = (
+            r.metadata.get("doc_id")
+            or r.metadata.get("source_path")
+            or r.metadata.get("file_path")
+            or r.id
+        )
+        seen = counts.get(key, 0)
+        (kept if seen < max_per_file else overflow).append(r)
+        counts[key] = seen + 1
+    return kept + overflow
 
 
 def _fetch_embeddings_for_results(

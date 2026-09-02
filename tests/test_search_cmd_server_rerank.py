@@ -245,3 +245,81 @@ def test_default_rerankermodel_stays_silent(runner, cloud_env):
 
     assert res.exit_code == 0, res.output
     assert "rerankerModel" not in res.output
+
+
+# ── nexus-0bmhd: render-layer file-diversity cap ────────────────────────────
+#
+# RDR-006's file-size scoring penalty is removed (see test_scoring.py,
+# test_hybrid_boost.py); domination control moves to
+# search_engine.apply_file_diversity_cap, applied unconditionally by the
+# CLI as the LAST ordering step before each `[:n]` truncation — on BOTH the
+# server-rerank path (`(_scored + _unscored)[:n]`) and the no-rerank
+# round_robin fallback (`round_robin_interleave(...)[:n]`). Capping before
+# either re-sort would be undone by it; capping after the slice is too
+# late (the domination has already consumed the slots).
+
+def _file_result(id: str, *, source_path: str, distance: float = 0.1,
+                  rerank_score: float | None = None) -> SearchResult:
+    meta: dict = {"source_path": source_path}
+    if rerank_score is not None:
+        meta["rerank_score"] = rerank_score
+    return SearchResult(
+        id=id, content=f"content {id}", distance=distance,
+        collection="knowledge__test", metadata=meta,
+    )
+
+
+def test_diversity_cap_applies_after_server_rerank_resort(runner, cloud_env):
+    """8 chunks from one dominant file server-scored ABOVE 10 distinct
+    other single-chunk files; after the cap a 10-slot page holds at most
+    2 chunks from the dominant file and >= 9 distinct files (the
+    mandatory domination-check shape, mirrored from
+    TestApplyFileDiversityCap in test_search_engine.py)."""
+    results = [
+        _file_result(f"dom{i}", source_path="dominant.py", rerank_score=0.9 - i * 0.001)
+        for i in range(8)
+    ]
+    results += [
+        _file_result(f"o{i}", source_path=f"other{i}.py", rerank_score=0.5 - i * 0.001)
+        for i in range(10)
+    ]
+    mock_t3 = _t3_mock(["knowledge__test", "rdr__nexus"])
+
+    res = _invoke(runner, mock_t3, _fake_retrieval(results),
+                  ["search", "query", "--corpus", "knowledge,rdr", "--json", "--n", "10"])
+
+    assert res.exit_code == 0, res.output
+    items = json.loads(res.stdout)
+    assert len(items) == 10
+    dom_count = sum(1 for it in items if it.get("source_path") == "dominant.py")
+    distinct = {it.get("source_path") for it in items}
+    assert dom_count <= 2, f"expected <=2 dominant-file rows, got {dom_count}: {items}"
+    assert len(distinct) >= 9, f"expected >=9 distinct files, got {len(distinct)}: {items}"
+
+
+def test_diversity_cap_applies_on_fallback_round_robin_path(runner, cloud_env):
+    """Same shape, on the NO-server-rerank fallback path (a single target
+    collection skips server rerank — see
+    test_single_collection_skips_server_rerank above — so results go
+    through round_robin_interleave, which groups by COLLECTION, not file,
+    and does not by itself stop one file's chunks from dominating)."""
+    results = [
+        _file_result(f"dom{i}", source_path="dominant.py", distance=0.01 * i)
+        for i in range(8)
+    ]
+    results += [
+        _file_result(f"o{i}", source_path=f"other{i}.py", distance=0.5 + 0.01 * i)
+        for i in range(10)
+    ]
+    mock_t3 = _t3_mock(["knowledge__test"])
+
+    res = _invoke(runner, mock_t3, _fake_retrieval(results),
+                  ["search", "query", "--corpus", "knowledge", "--json", "--n", "10"])
+
+    assert res.exit_code == 0, res.output
+    items = json.loads(res.stdout)
+    assert len(items) == 10
+    dom_count = sum(1 for it in items if it.get("source_path") == "dominant.py")
+    distinct = {it.get("source_path") for it in items}
+    assert dom_count <= 2, f"expected <=2 dominant-file rows, got {dom_count}: {items}"
+    assert len(distinct) >= 9, f"expected >=9 distinct files, got {len(distinct)}: {items}"

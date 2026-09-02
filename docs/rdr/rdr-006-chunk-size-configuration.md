@@ -554,3 +554,87 @@ For Q3 precision improvement: `qdrant_indexer.py` has cc=18, so `--max-file-chun
 does not suppress it (18 ≤ 30 passes the filter). To exclude `qdrant_indexer.py` specifically
 requires `--max-file-chunks 17`. This hard filter works in multi-corpus mode since it
 applies at the retrieval layer, before the reranker sees any results.
+
+## Revision History
+
+### 2026-09-01 — Mechanism superseded by a render-layer diversity cap (nexus-0bmhd)
+
+Decision by Sam. Bead nexus-0bmhd. Closes nexus-vlzz0.
+
+The scoring-layer mechanism this RDR specified — multiplying every `code__`
+result's `hybrid_score` by `min(1.0, threshold/chunk_count)` inside
+`scoring.py:apply_hybrid_scoring()` — is **removed from scoring entirely**,
+not gated. Domination control now lives one layer downstream, at result
+assembly: `search_engine.apply_file_diversity_cap()` reorders the DISPLAY
+list so at most 2 chunks from any one file lead a page, moving the rest
+(never dropping them) to the tail. It touches ordering only — `hybrid_score`
+itself is untouched, so a consumer that wants the true ranked order still
+gets it. `nx search`'s CLI output applies the cap unconditionally (every CLI
+invocation renders for a human reader); the MCP `search()` tool applies it
+only when rendering text (`structured=False`) and skips it for
+`structured=True`, the signal nx_answer's plan runner uses when a retrieval
+step feeds a machine reduction.
+
+**Why the toolkit changed, not the goal.** RDR-006 was the right call for
+Feb 2026: there was no server-side reranker, no cross-model distance
+calibration, no render/assembly layer downstream of scoring that could hold
+a cap, and nx_answer (whose plan runner turns retrieval results into
+machine-reduced answers, where diversity matters and dominance actively
+hurts) did not exist yet. A file-size proxy multiplied directly into the
+score was the only lever available, and a reasonable one for a human
+skimming a top-10 list. It aged out of those assumptions rather than having
+been a mistake: the multiplier was relevance-blind by construction — it
+knew chunk_count, never match quality — and once a second consumer
+(nx_answer's plan runner) started reading ranked order to feed a reduction
+instead of a human eyeball, that blindness became a correctness problem,
+not just a precision tradeoff.
+
+**Evidence.** `src/nexus/corpus.py` (chunk_count=64) at distance 0.0071 —
+an exact-match hit — scored `×0.469` under the old formula and lost the top
+rank to `tests/test_corpus.py` and `recovery_bundle.py`, files with no
+comparable relevance signal, purely because they were smaller; the largest
+central modules fared worse still (`src/nexus/plans/runner.py`,
+chunk_count=145, `×0.207`, regardless of match quality). The same
+blindness surfaced as an RDR-200 Phase 1 gate finding: plan-based retrieval
+arms could not reach primary sources, because the file-size penalty had
+already buried them before the plan runner ever saw the candidate list (T2
+`nexus/gate-result-rdr200-phase1-2026-09-01`, [23963] — one of at least two
+independent retrieval defects that gate finding named; the other,
+cross-model distance calibration, is a separate fix, nexus-tox2m).
+
+**What "preserved" means here.** RDR-006's own Q2 acceptance criterion was
+that `main.py` (cc=37) was no longer rank 1 — the penalty demoted a
+dominating file below the ceiling of its own relevance score. The cap does
+not reproduce that specific outcome: it bounds a file's *count* of leading
+slots (at most 2 by default), not its *rank*. `apply_file_diversity_cap` is
+a stable partition — each file's first *max_per_file* occurrences stay in
+their original, score-sorted place — so a file whose own best-matching
+chunks are genuinely the top scorers still occupies the top 1-2 positions
+after capping (verified: a fixture shaped like RDR-006's own Q2, a
+dominating file with a genuinely best-scoring top chunk, still ranks that
+file 1st and 2nd post-cap). What changed is the guarantee itself:
+`min(1.0, threshold/chunk_count)` was a scoring-layer rank distortion,
+validated against a rank-1 target; `apply_file_diversity_cap` is a
+render-layer slot-count bound, validated against a distinct-file-count
+target (`TestApplyFileDiversityCap::test_mandatory_domination_check`). Both
+address the underlying complaint — one file crowding a whole page — but
+they are not the same guarantee, and that is a deliberate consequence of
+moving domination control out of scoring: a chunk that is genuinely the
+best match no longer gets pushed down for living in a large file, at the
+cost of no longer guaranteeing it is displaced from the top of the page.
+
+**R9 stands.** R9's original finding — the penalty must be unconditional,
+never gated on `--hybrid` — is not overturned by this change. This
+supersedes the *mechanism* (moves it out of scoring and into the render
+layer) rather than gating the old one in place; R9's argument against
+conditional gating inside scoring remains correct for as long as any
+scoring-layer penalty exists there, which after this change is never.
+
+**Retained, not removed.** `--max-file-chunks` (the hard pre-retrieval
+`where` filter this RDR also introduced) is unrelated to the scoring
+penalty and is untouched by this change. `tuning.scoring.file_size_threshold`
+(`~/.config/nexus/config.yml`, `TuningConfig.file_size_threshold`) is
+likewise retained on the config surface and on the `apply_hybrid_scoring()`
+/ `apply_ranking_boosts()` signatures — accepted, but no longer read by
+scoring as of this change (nexus-0bmhd) — purely so existing config files
+and call sites keep working unchanged.

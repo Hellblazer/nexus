@@ -11,22 +11,19 @@ from nexus.types import SearchResult
 _log = structlog.get_logger()
 
 _EPSILON = 1e-9
-_FILE_SIZE_THRESHOLD = 30
+# nexus-0bmhd (2026-09-01): RDR-006's file-size threshold constant is gone
+# from scoring — see apply_hybrid_scoring()'s docstring "File-size penalty
+# (superseded)" section. `_FILE_SIZE_THRESHOLD` no longer exists; the
+# `file_size_threshold` kwarg on apply_hybrid_scoring()/
+# search_engine.apply_ranking_boosts() is accepted-but-unused vestige, kept
+# only so TuningConfig.file_size_threshold and existing callers keep
+# working unchanged.
 RG_FLOOR_SCORE = 0.5
 
 # Default scoring weights (kept as module constants for backward compatibility).
 # Override by passing explicit weights to hybrid_score() / apply_hybrid_scoring().
 _VECTOR_WEIGHT: float = 0.7
 _FRECENCY_WEIGHT: float = 0.3
-
-
-def _file_size_factor(chunk_count: int, threshold: int = _FILE_SIZE_THRESHOLD) -> float:
-    """Return a [0, 1] penalty factor for files larger than the threshold.
-
-    Files at or below *threshold* chunks return 1.0 (no penalty).
-    Larger files return threshold / chunk_count, linearly reducing the score.
-    """
-    return min(1.0, threshold / max(1, chunk_count))
 
 
 # ── nexus-tox2m: cross-model distance calibration ───────────────────────────
@@ -161,7 +158,7 @@ def apply_hybrid_scoring(
     *,
     vector_weight: float = _VECTOR_WEIGHT,
     frecency_weight: float = _FRECENCY_WEIGHT,
-    file_size_threshold: int = _FILE_SIZE_THRESHOLD,
+    file_size_threshold: int = 30,
     catalog: Any | None = None,
 ) -> list[SearchResult]:
     """Compute hybrid scores for *results*.
@@ -204,29 +201,36 @@ def apply_hybrid_scoring(
     first version of this fix keyed on collection PREFIX and fired
     regardless of the actual embedding model in play).
 
-    File-size penalty: applied to all code__ results unconditionally after the
-    initial score is computed: ``score *= _file_size_factor(chunk_count)``.
-    Unrelated to and unaffected by the calibration above — RDR-006 (2026-
-    02-28) governs this mechanism; see that RDR before changing it (R9:
-    "penalty must be unconditional" — gating it on ``hybrid`` regresses
-    RDR-006's validated single-corpus, non-hybrid code-search scenario,
-    confirmed by code review Critical 1 against a prior draft of this fix
-    that did exactly that).
-
-    nexus-dxly: post-RDR-108 Phase 3 chunks no longer carry the
-    ``chunk_count`` field in metadata. When *catalog* is provided, the
-    penalty resolves ``chunk_count`` via a batch SQL lookup against
-    ``documents.chunk_count`` keyed on the chunk's ``doc_id`` (== catalog
-    tumbler post-RDR-101). Falls back to metadata then ``1`` (no penalty)
-    when the catalog has no row or no catalog is supplied — preserves
-    behaviour for pre-Phase-3 corpora.
+    File-size penalty (SUPERSEDED, nexus-0bmhd, 2026-09-01): this function
+    used to multiply every code__ result's score by
+    ``min(1.0, threshold/chunk_count)`` — RDR-006 (2026-02-28). Removed
+    entirely, not gated: scoring is now chunk-count-blind by construction.
+    RDR-006 was a sound call for its moment — in Feb 2026 there was no
+    server-side reranker, no cross-model distance calibration, no render/
+    assembly layer that could hold a cap, and nx_answer did not exist, so a
+    file-size proxy applied inside scoring was the only lever available and
+    a reasonable one for a human skimming a top-10 list. It aged out of
+    those assumptions: nx_answer's plan runner became a second consumer
+    whose retrieval steps feed a machine reduction, and a relevance-blind
+    multiplicative penalty demoted objectively-better matches purely for
+    living in a large file (nexus-vlzz0: an exact-match chunk in a
+    145-chunk file scored ×0.207 with zero regard for match quality, losing
+    to unrelated 8-chunk files). Domination control still exists — it moved
+    to the render/result-assembly layer, where it belongs: see
+    ``search_engine.apply_file_diversity_cap``, a non-destructive stable
+    partition applied to DISPLAY order, never to ``hybrid_score`` itself.
+    See ``docs/rdr/rdr-006-chunk-size-configuration.md``'s Revision History
+    for the full record. *file_size_threshold* and *catalog* remain on this
+    signature, accepted but unused, purely so existing callers and
+    ``TuningConfig.file_size_threshold`` keep working unchanged — nothing
+    reads them here any more.
 
     If *hybrid* is True but no code__ collections appear in results, a warning
     is logged and all results use 1.0 * vector_norm.
 
-    *vector_weight*, *frecency_weight*, and *file_size_threshold* default to the
-    module constants (backward-compatible).  Pass values from TuningConfig to
-    honour per-repo configuration.
+    *vector_weight* and *frecency_weight* default to the module constants
+    (backward-compatible).  Pass values from TuningConfig to honour
+    per-repo configuration.
 
     Note: Mutates ``hybrid_score`` on each SearchResult in place before
     returning the sorted list.
@@ -259,31 +263,6 @@ def apply_hybrid_scoring(
         if r.collection.startswith("code__")
     ]
 
-    # nexus-dxly: batch-resolve documents.chunk_count for code__ results
-    # when a catalog is supplied; chunks lost the metadata field at
-    # RDR-108 Phase 3.
-    chunk_count_by_doc_id: dict[str, int] = {}
-    if catalog is not None:
-        code_doc_ids = {
-            r.metadata.get("doc_id", "")
-            for r in results
-            if r.collection.startswith("code__")
-        }
-        code_doc_ids.discard("")
-        if code_doc_ids:
-            try:
-                # nexus-qnp5s: chunk_counts_for_docs() is implemented on
-                # both SQLite Catalog and HttpCatalogClient — no raw _db.
-                chunk_count_by_doc_id = catalog.chunk_counts_for_docs(
-                    list(code_doc_ids)
-                )
-            except Exception as exc:  # noqa: BLE001 — best-effort catalog lookup; failure logged, scoring proceeds without chunk counts
-                _log.warning(
-                    "scoring_chunk_count_lookup_failed",
-                    error=str(exc),
-                    doc_id_count=len(code_doc_ids),
-                )
-
     for r in results:
         if r.collection == "rg__cache":
             r.hybrid_score = RG_FLOOR_SCORE
@@ -315,12 +294,6 @@ def apply_hybrid_scoring(
             r.hybrid_score = hybrid_score(v_norm, f_norm, vector_weight, frecency_weight)
         else:
             r.hybrid_score = v_norm
-        if r.collection.startswith("code__"):
-            doc_id = r.metadata.get("doc_id", "")
-            chunk_count = chunk_count_by_doc_id.get(doc_id) or int(
-                r.metadata.get("chunk_count", 1)
-            )
-            r.hybrid_score *= _file_size_factor(chunk_count, file_size_threshold)
 
     return sorted(results, key=lambda r: r.hybrid_score, reverse=True)
 

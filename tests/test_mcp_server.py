@@ -462,6 +462,98 @@ def test_cluster_by_semantic_discards_the_boosted_order():
     assert "hybrid_score" not in out
 
 
+# ── File diversity cap (RDR-006 supersession, nexus-0bmhd) ──────────────────
+#
+# RDR-006's chunk-count scoring penalty is removed from scoring entirely
+# (test_scoring.py, test_hybrid_boost.py); domination control moves to
+# search_engine.apply_file_diversity_cap, applied by _search_render right
+# before pagination — gated on `structured` (the plan-runner's machine/
+# precision signal gets the uncapped order) and skipped when `clustered`
+# (the renderer needs cluster labels contiguous). It must apply on BOTH
+# the fresh-compute path AND the page-cache HIT path (nexus-e4srp), and it
+# must never mutate or poison the cached list itself.
+
+def _dom_result(i: int) -> SearchResult:
+    return SearchResult(id=f"dom{i}", content="x", distance=0.01 * i,
+                         collection="code__test",
+                         metadata={"source_path": "dominant.py"})
+
+
+def _other_result(i: int) -> SearchResult:
+    return SearchResult(id=f"o{i}", content="x", distance=0.5 + 0.01 * i,
+                         collection="code__test",
+                         metadata={"source_path": f"other{i}.py"})
+
+
+def test_structured_true_uncapped_structured_false_capped_same_cache_entry():
+    """8 chunks from one dominant file + 10 distinct other files (the
+    mandatory domination-check shape). Two `_search_render` calls with
+    IDENTICAL query/corpus/cluster_by/where/topic/threshold share one
+    page-cache entry (nexus-e4srp) — the second call is a cache HIT. The
+    first call (structured=True) must see every dominant chunk, uncapped;
+    the second (structured=False, cache hit) must see at most 2 — proving
+    the cap applies on the cache-hit path too, and that capping never
+    poisoned what got cached."""
+    _mock_t3([{"name": "code__test", "count": 18}])
+    fixture = [_dom_result(i) for i in range(8)] + [_other_result(i) for i in range(10)]
+
+    def fake(*_a, **_kw):
+        return [SearchResult(id=r.id, content=r.content, distance=r.distance,
+                              collection=r.collection, metadata=dict(r.metadata))
+                for r in fixture]
+
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.config.load_config", return_value={"search": {"query_sanitizer": False}}):
+        structured_out = _search_render(query="diversity cap pin", corpus="code__test",
+                                         cluster_by="", structured=True, limit=10)
+        text_out = _search_render(query="diversity cap pin", corpus="code__test",
+                                   cluster_by="", structured=False, limit=10)
+
+    dom_ids_structured = [i for i in structured_out["ids"] if i.startswith("dom")]
+    assert len(dom_ids_structured) == 8, (
+        f"structured=True must see the uncapped order; got {structured_out['ids']}"
+    )
+
+    dom_count_text = text_out.count("dominant.py")
+    assert dom_count_text <= 2, (
+        f"structured=False (cache-hit path) must apply the file-diversity "
+        f"cap; got {dom_count_text} dominant.py rows in:\n{text_out}"
+    )
+
+
+def test_clustered_mode_skips_the_diversity_cap():
+    """cluster_by="semantic" preserves the cluster-grouped display order
+    contiguously for the text renderer — the diversity cap is skipped
+    entirely in this mode, in both structured and text output."""
+    _mock_t3([{"name": "code__test", "count": 18}])
+    fixture = [_dom_result(i) for i in range(8)] + [_other_result(i) for i in range(10)]
+
+    def fake(*_a, **_kw):
+        return [SearchResult(id=r.id, content=r.content, distance=r.distance,
+                              collection=r.collection, metadata=dict(r.metadata))
+                for r in fixture]
+
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.config.load_config", return_value={"search": {"query_sanitizer": False}}):
+        out = _search_render(query="clustered no cap pin", corpus="code__test",
+                              cluster_by="semantic", structured=True, limit=10)
+        # The falsifying half (code review [24005], Important): structured=True
+        # bypasses the cap on its own, so only a TEXT render proves the
+        # `clustered` skip does anything. Same fixture, same cache entry.
+        text_out = _search_render(query="clustered no cap pin", corpus="code__test",
+                                   cluster_by="semantic", structured=False, limit=10)
+
+    dom_ids = [i for i in out["ids"] if i.startswith("dom")]
+    assert len(dom_ids) == 8, (
+        f"clustered mode must skip the diversity cap; got {out['ids']}"
+    )
+    dom_count_text = text_out.count("dominant.py")
+    assert dom_count_text == 8, (
+        f"clustered TEXT render must skip the diversity cap (cluster labels "
+        f"must stay contiguous); got {dom_count_text} dominant.py rows in:\n{text_out}"
+    )
+
+
 # ── Store ────────────────────────────────────────────────────────────────────
 
 def test_store_put(t3):

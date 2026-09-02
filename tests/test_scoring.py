@@ -8,7 +8,6 @@ import pytest
 
 from nexus.scoring import (
     _calibration_factor_for_model,
-    _file_size_factor,
     _resolve_calibration_factors,
     apply_hybrid_scoring,
     apply_link_boost,
@@ -81,35 +80,69 @@ def test_round_robin_interleave(groups, expected_dists):
     assert [r.distance for r in result] == expected_dists
 
 
-# ── _file_size_factor ────────────────────────────────────────────────────────
+# ── chunk-count blindness (RDR-006 supersession, nexus-0bmhd) ───────────────
+#
+# RDR-006's file-size scoring penalty (_file_size_factor, _FILE_SIZE_THRESHOLD)
+# is removed from scoring entirely — not gated, absent. Domination control
+# moved to the render layer: search_engine.apply_file_diversity_cap (see
+# tests/test_search_engine.py::TestApplyFileDiversityCap). These tests pin
+# that scoring itself no longer reads chunk_count at all.
 
-@pytest.mark.parametrize("chunks,expected", [
-    (30, 1.0),       # at threshold
-    (37, 30 / 37),   # above threshold
-    (10, 1.0),       # below threshold
-    (0, 1.0),        # zero → max(1, 0)=1
-])
-def test_file_size_factor(chunks, expected):
-    assert _file_size_factor(chunks) == pytest.approx(expected, abs=0.001)
-
-
-def test_size_penalty_applied_to_code():
-    r_a = _r("code__repo", 0.0, chunks=5)
-    r_b = _r("code__repo", 0.5, chunks=60)
-    r_c = _r("code__repo", 1.0, chunks=5)
-    results = apply_hybrid_scoring([r_a, r_b, r_c], hybrid=False)
-    score_map = {r.distance: r.hybrid_score for r in results}
-    assert score_map[0.5] == pytest.approx(0.25, abs=1e-6)
+def test_apply_hybrid_scoring_is_chunk_count_blind():
+    """Two code__ results at an IDENTICAL vector distance, one from a
+    5-chunk file and one from a 5000-chunk file, must score IDENTICALLY —
+    scoring has no opinion on file size any more."""
+    small = _r("code__repo", 0.3, chunks=5)
+    large = _r("code__repo", 0.3, chunks=5000)
+    results = apply_hybrid_scoring([small, large], hybrid=False)
+    assert results[0].hybrid_score == pytest.approx(results[1].hybrid_score, abs=1e-9)
 
 
-@pytest.mark.parametrize("coll", ["docs__corpus", "knowledge__notes"])
-def test_size_penalty_not_applied_to_non_code(coll):
-    r_a = _r(coll, 0.0, chunks=5)
-    r_b = _r(coll, 0.5, chunks=60)
-    r_c = _r(coll, 1.0, chunks=5)
-    results = apply_hybrid_scoring([r_a, r_b, r_c], hybrid=False)
-    score_map = {r.distance: r.hybrid_score for r in results}
-    assert score_map[0.5] == pytest.approx(0.5, abs=1e-6)
+def test_new_scoring_fixes_the_vlzz0_ranking_the_old_formula_got_wrong():
+    """nexus-vlzz0: src/nexus/corpus.py (chunk_count=145, the measured
+    plans/runner.py-scale value) at distance 0.1981 lost to 8-chunk test
+    files at distance 0.267-0.32 under RDR-006's original per-file
+    penalty (0.1981's factor = min(1, 30/145) ~= 0.207, dragging its score
+    below the unpenalized (chunk_count=8 <= threshold=30) test files).
+
+    Reimplements the ORIGINAL (now fully removed from scoring.py) formula
+    inline, labelled historical, purely as a FIXTURE-SANITY gate: if the
+    historical formula did not actually reproduce the bug on these
+    numbers, the "old formula got this wrong" premise would be untested
+    and this test would be vacuous. Then asserts the CURRENT
+    (chunk-count-blind) scoring ranks the impl file first — the fix.
+    """
+    IMPL_DIST = 0.1981
+    IMPL_CHUNKS = 145
+    TEST_DISTANCES = [0.267, 0.29, 0.32]
+    HISTORICAL_THRESHOLD = 30
+
+    def _historical_file_size_factor(chunk_count: int) -> float:
+        # RDR-006's removed formula, reimplemented here ONLY to prove the
+        # fixture reproduces the bug the new scoring fixes.
+        return min(1.0, HISTORICAL_THRESHOLD / max(1, chunk_count))
+
+    distances = [IMPL_DIST, *TEST_DISTANCES]
+    chunk_counts = [IMPL_CHUNKS, 8, 8, 8]
+    lo, hi = min(distances), max(distances)
+    old_scores = [
+        (1.0 - (d - lo) / (hi - lo + 1e-9)) * _historical_file_size_factor(cc)
+        for d, cc in zip(distances, chunk_counts)
+    ]
+    old_winner = "impl" if old_scores[0] == max(old_scores) else "test"
+    assert old_winner != "impl", (
+        "fixture sanity gate: the historical formula must reproduce the "
+        "nexus-vlzz0 bug (impl demoted below a smaller test file) on "
+        "these numbers, or this test proves nothing about the fix"
+    )
+
+    impl_r = _r("code__nexus", IMPL_DIST, chunks=IMPL_CHUNKS)
+    test_rs = [_r("code__nexus", d, chunks=8) for d in TEST_DISTANCES]
+    results = apply_hybrid_scoring([impl_r, *test_rs], hybrid=False)
+    assert results[0].distance == pytest.approx(IMPL_DIST), (
+        f"chunk-count-blind scoring should rank the impl file first; "
+        f"got distance order {[r.distance for r in results]}"
+    )
 
 
 # ── cross-model distance calibration (nexus-tox2m) ──────────────────────────

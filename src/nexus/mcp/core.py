@@ -1853,6 +1853,15 @@ def _search_render(
     ``structured=True`` output (``hybrid_score`` is not surfaced there
     either). Use ``cluster_by=""`` when boosted ranking matters.
 
+    File diversity (nexus-0bmhd, 2026-09-01): a text render (``structured=
+    False``) caps display to at most 2 chunks per file
+    (``search_engine.apply_file_diversity_cap``) so one large file cannot
+    fill an entire page — a reordering applied to display order only,
+    never to ``hybrid_score``. ``structured=True`` (the plan-runner's
+    machine/precision signal) always sees the uncapped, fully-ranked
+    order. ``cluster_by="semantic"`` skips the cap in both modes, to keep
+    same-cluster results contiguous for the renderer.
+
     Args:
         query: Search query string
         corpus: Corpus prefixes or collection names, comma-separated. "all" for everything.
@@ -1873,7 +1882,11 @@ def _search_render(
     try:
         from nexus.config import get_tuning_config, load_config  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
         from nexus.filters import sanitize_query  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-        from nexus.search_engine import apply_ranking_boosts, search_cross_corpus  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        from nexus.search_engine import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            apply_file_diversity_cap,
+            apply_ranking_boosts,
+            search_cross_corpus,
+        )
 
         cfg = load_config()
         if cfg.get("search", {}).get("query_sanitizer", True):
@@ -1987,9 +2000,25 @@ def _search_render(
                 return _structured_no_results(diag)
             return _no_results_message(diag)
 
+        # nexus-0bmhd: render-layer file-diversity cap. `results` was just
+        # cached above (fresh path) or read back unmodified (cache-HIT
+        # path, `cached = _page_cache_get(...)`) — never cap THAT list and
+        # never cache the capped list, or a later structured=True read of
+        # the same cache_key would see the capped order. `structured=True`
+        # is the plan-runner's machine/precision signal (nx_answer
+        # auto-injects it for every retrieval step, plans/runner.py
+        # ~1383): it gets the true ranked order, uncapped. `clustered`
+        # (`cluster_by="semantic"`) is skipped too — its display order is
+        # cluster-grouped and the renderer below assumes cluster labels
+        # appear contiguously; interleaving a file cap into that order
+        # would break the grouping the renderer relies on.
+        display_results = (
+            results if (structured or clustered) else apply_file_diversity_cap(results)
+        )
+
         # Apply pagination
-        total = len(results)
-        page = results[offset:offset + limit]
+        total = len(display_results)
+        page = display_results[offset:offset + limit]
         if not page:
             _off_msg = f"No results at offset {offset} (total {total})."
             if structured:
@@ -2143,6 +2172,16 @@ def search(
     ``truncated``/``truncated_chars`` reflecting whether the 250K text cap
     (``_cap_text_result``) fired — visible in the structured shape even
     though the cap marker itself only lives in the text.
+
+    Two channels, two consumers, ONE response (nexus-0bmhd, nexus-ypmb6):
+    ``content`` / ``structuredContent["text"]`` is the PRESENTATION
+    channel and carries the render-layer file-diversity cap (at most 2
+    chunks per file lead the page); the ``ids``/``tumblers``/``distances``
+    arrays are the MACHINE channel — identical to ``structured=True`` —
+    and are deliberately UNCAPPED, because a consumer parsing those arrays
+    is reading ranked evidence, not skimming a list. The two therefore
+    disagree on order within the same page by design; a client that wants
+    the capped set as ids must derive it from the text.
 
     ``structured=True``: UNCHANGED. Returns the bare dict exactly as
     before — no ``CallToolResult``, no new keys, no ``structuredContent``
