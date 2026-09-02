@@ -190,7 +190,6 @@ for the live version; or the report schema moved).
 from __future__ import annotations
 
 import argparse
-import functools
 import json
 import os
 import pathlib
@@ -199,6 +198,7 @@ import sys
 from datetime import datetime, timezone
 
 import check_wire_contract_pairing as _wire_ledger
+import release_choreography as _choreo
 from nexus import deploy_tracker
 from nexus.db.managed_endpoint import (
     ManagedServiceError,
@@ -207,8 +207,6 @@ from nexus.db.managed_endpoint import (
     resolve_managed_endpoint,
 )
 from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
-from nexus.tables.load import Row, Table, load_table
-from nexus.tables.resolve import resolve as _resolve_table
 
 _REMEDY = (
     "Remedy: cut + deploy + cloud-gate a fresh engine-service via the "
@@ -229,103 +227,29 @@ _UNPINNED_REMEDY = (
 # RDR-201 P2.4 (nexus-j9z30.14): the routed decision path.
 #
 # The ~315 lines of sensors above/below (subprocess git/gh calls, the HTTP
-# probe) stay imperative -- unchanged either way. What this section adds is
-# an alternative DECISION step: instead of the pre-existing inline
-# print()+return branches, resolve docs/tables/release-choreography.toml
-# (RDR-201 P2.3, nexus-j9z30.13) for the sensor's already-reduced outcome and
-# emit that row's exit code + the matching entry from release_messages.py's
-# row-id-keyed catalog.
-#
-# DECISION_PATH is the explicit switch (module-level flag, not an env var):
+# probe) stay imperative -- unchanged either way. The alternative DECISION
+# step -- resolve docs/tables/release-choreography.toml (RDR-201 P2.3) for
+# the sensor's already-reduced outcome and emit that row's exit code + the
+# matching release_messages.py catalog entry -- lives in
+# scripts/release_choreography.py, SHARED with
+# check_client_release_precondition.py (nexus-j9z30.15: one table, one
+# cache, one switch). release_choreography.DECISION_PATH is that switch:
 # "old" (the default) leaves every branch below byte-for-byte unchanged;
 # "table" routes through resolve(). tests/scripts/test_release_table_parity
-# .py's _new_path flips it around one call for the floor-script's own nine
+# .py's _new_path flips it around one call for this script's nine
 # cell-producing functions (check_pin_currency, check_source_ancestry,
 # check_client_lag_ledger, check_paired_preconditions,
 # record_deploy_from_gate_report_leg, check_floor's bare/paired branches,
-# _check_floor_auto_paired, main) -- see that file's _new_path for the
-# harness side. check_client_release_precondition.py's own three
-# cell-producing functions are untouched by this bead (nexus-j9z30.15).
+# _check_floor_auto_paired, main).
 #
 # P2.6 (nexus-j9z30.16) deletes the "old" branches below once parity is
-# proven green over every (cell, event) pair and DECISION_PATH's default is
-# flipped for good.
-DECISION_PATH: str = "old"
-
-#: A DELEGATING branch (this function just returns a sub-call's own return
-#: value, printing nothing itself) is left untouched in BOTH paths below --
-#: the switch cascades automatically, since every sub-function consults the
-#: SAME module-level DECISION_PATH. Only a branch that itself prints and
-#: decides an exit code gets an explicit `if _use_table_path(): ...` arm.
-
-
-def _use_table_path() -> bool:
-    return DECISION_PATH == "table"
-
-
-_CHOREOGRAPHY_TABLE_PATH = (
-    pathlib.Path(__file__).resolve().parent.parent / "docs" / "tables" / "release-choreography.toml"
-)
-
-
-@functools.lru_cache(maxsize=1)
-def _choreography_table() -> Table:
-    """Loaded once per process -- the table is immutable for the run's life."""
-    return load_table(_CHOREOGRAPHY_TABLE_PATH)
-
-
-def _resolve_choreography_row(function: str, guard: dict[str, str]) -> Row:
-    """Resolve one row of the choreography table for ``function``'s match
-    group. ``guard`` names only the dimensions THIS call site has actually
-    reduced a sensor value to; every other declared dimension (including the
-    table-wide, still guard-unreferenced ``event``/``mode``, and every OTHER
-    function's own dimensions) is filled with its domain's first member --
-    harmless by construction, since no row outside ``function``'s own match
-    group ever examines them, and no row within it guards on a dimension
-    this call omits (RDR-201 P2.3's short-circuit-by-omission table
-    construction). Mirrors tests/scripts/test_release_table_parity.py's
-    ``_assignment_for`` for the real, non-test call sites.
-    """
-    table = _choreography_table()
-    assignment: dict[str, str] = {"function": function}
-    for key, value in guard.items():
-        assignment[f"{function}.{key}"] = value
-    for name, dim in table.dimensions.items():
-        assignment.setdefault(name, dim.domain[0])
-    resolution = _resolve_table(table, assignment)
-    if resolution.refusal is not None:
-        raise RuntimeError(
-            f"{function}: docs/tables/release-choreography.toml refused "
-            f"assignment {assignment!r} -- {resolution.refusal} "
-            f"{dict(resolution.detail)}. This is a table-authoring defect "
-            "(RDR-201), not a runtime condition for this script to handle."
-        )
-    return resolution.row
-
-
-def _emit_choreography(
-    function: str, guard: dict[str, str], substitutions: dict[str, str] | None = None,
-) -> int:
-    """Resolve ``function``'s row for ``guard``, print the catalog message
-    (bracket placeholders filled from ``substitutions`` where the caller has
-    a real value in hand; unfilled brackets are left verbatim -- P2.4 wires
-    the DECISION, not a production-grade renderer, see release_messages.py's
-    own docstring), and return the row's exit code. ``release_messages`` is
-    imported lazily here (not at module top) -- it imports THIS module
-    eagerly at ITS top to build the seven static-remedy-constant catalog
-    entries, so an eager import here would be circular.
-    """
-    import release_messages as _release_messages  # noqa: PLC0415 — deferred: release_messages imports THIS module eagerly at its own top; an eager import here would be circular
-
-    row = _resolve_choreography_row(function, guard)
-    outcome = row.outcome
-    assert isinstance(outcome, dict), (function, row.id, outcome)
-    exit_code = int(outcome["exit_code"])
-    message = _release_messages.get(row.id)
-    for key, value in (substitutions or {}).items():
-        message = message.replace(f"[{key}]", value)
-    print(message, file=sys.stderr if exit_code != 0 else sys.stdout)
-    return exit_code
+# proven green over every (cell, event) pair.
+#
+# A DELEGATING branch (this function just returns a sub-call's own return
+# value, printing nothing itself) is left untouched in BOTH paths below --
+# the switch cascades automatically, since every sub-function consults the
+# SAME module-level switch. Only a branch that itself prints and decides an
+# exit code gets an explicit `if _choreo.use_table_path(): ...` arm.
 
 #: Sentinel for "the tag list could not be read". Distinct from "no tags", which
 #: is itself a failure -- a repo with zero engine tags cannot be release-gated.
@@ -384,8 +308,8 @@ def check_pin_currency(newest: object) -> int:
     """
     floor = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
     if newest is _TAGS_UNAVAILABLE:
-        if _use_table_path():
-            return _emit_choreography("check_pin_currency", {"newest": "unavailable"})
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography("check_pin_currency", {"newest": "unavailable"})
         print(
             "ENGINE PIN CHECK FAILED: could not read engine-service tags from git. "
             "Cannot verify that every gated engine tag is pinned -- treat as a "
@@ -394,8 +318,8 @@ def check_pin_currency(newest: object) -> int:
         )
         return 2
     if newest is None:
-        if _use_table_path():
-            return _emit_choreography("check_pin_currency", {"newest": "none"})
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography("check_pin_currency", {"newest": "none"})
         print(
             "ENGINE PIN CHECK FAILED: zero engine-service-v* tags visible. Either "
             "the checkout has no tags (CI: set `fetch-tags: true`) or the tag "
@@ -405,8 +329,8 @@ def check_pin_currency(newest: object) -> int:
         return 2
     if newest > REQUIRED_ENGINE_VERSION:
         newest_s = ".".join(str(p) for p in newest)
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_pin_currency", {"newest": "above_floor"},
                 {"newest": newest_s, "floor": floor},
             )
@@ -418,9 +342,9 @@ def check_pin_currency(newest: object) -> int:
             file=sys.stderr,
         )
         return 1
-    if _use_table_path():
+    if _choreo.use_table_path():
         guard_value = "at_floor" if newest == REQUIRED_ENGINE_VERSION else "below_floor"
-        return _emit_choreography("check_pin_currency", {"newest": guard_value}, {"floor": floor})
+        return _choreo.emit_choreography("check_pin_currency", {"newest": guard_value}, {"floor": floor})
     print(f"engine pin is current: REQUIRED_ENGINE_VERSION v{floor} == newest published tag")
     return 0
 
@@ -616,8 +540,8 @@ def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None
     root = repo_root or pathlib.Path(__file__).resolve().parent.parent
     exists = _tag_exists_in_git(pinned_tag, repo_root=root)
     if exists is _TAGS_UNAVAILABLE:
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_source_ancestry", {"tag_exists": "unavailable"}, {"pinned_tag": pinned_tag},
             )
         print(
@@ -629,8 +553,8 @@ def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None
         )
         return 2
     if not exists:
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_source_ancestry", {"tag_exists": "false"}, {"pinned_tag": pinned_tag},
             )
         print(
@@ -646,8 +570,8 @@ def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None
             cwd=root, capture_output=True, text=True, timeout=30, check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_source_ancestry", {"tag_exists": "true", "diff_result": "exception"},
                 {"exc": str(exc)},
             )
@@ -658,8 +582,8 @@ def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None
         )
         return 2
     if out.returncode != 0:
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_source_ancestry", {"tag_exists": "true", "diff_result": "nonzero"},
                 {
                     "pinned_tag": pinned_tag, "scope": _ANCESTRY_SCOPE,
@@ -675,8 +599,8 @@ def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None
         return 2
     diff = out.stdout.strip()
     if diff:
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_source_ancestry", {"tag_exists": "true", "diff_result": "drift"},
                 {"scope": _ANCESTRY_SCOPE, "pinned_tag": pinned_tag, "diff": diff},
             )
@@ -693,8 +617,8 @@ def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None
             file=sys.stderr,
         )
         return 1
-    if _use_table_path():
-        return _emit_choreography(
+    if _choreo.use_table_path():
+        return _choreo.emit_choreography(
             "check_source_ancestry", {"tag_exists": "true", "diff_result": "clean"},
             {"scope": _ANCESTRY_SCOPE, "pinned_tag": pinned_tag},
         )
@@ -727,8 +651,8 @@ def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
     """
     ledger = _wire_ledger.parse_ledger(_wire_ledger.DEFAULT_LEDGER_PATH)
     if not ledger.unshipped:
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_client_lag_ledger", {"ledger": "empty"},
                 {"ledger_path": str(_wire_ledger.DEFAULT_LEDGER_PATH)},
             )
@@ -745,12 +669,12 @@ def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
     # main on entries the sibling gate certified safe.
     verdict = _wire_ledger.classify_unshipped(ledger, ack_beads)
     if verdict.blocking:
-        if _use_table_path():
+        if _choreo.use_table_path():
             entries = "\n".join(
                 f"  {e.sha}  bead {e.bead}  engine tag {e.engine_tag}  ({e.note})"
                 for e in verdict.blocking
             )
-            return _emit_choreography(
+            return _choreo.emit_choreography(
                 "check_client_lag_ledger", {"ledger": "blocking"},
                 {
                     "n": str(len(verdict.blocking)), "entries": entries,
@@ -781,9 +705,9 @@ def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
 
     acked_beads = sorted(e.bead for e in verdict.acked)
     if verdict.additive:
-        if _use_table_path():
+        if _choreo.use_table_path():
             beads = ", ".join(sorted(e.bead for e in verdict.additive))
-            return _emit_choreography(
+            return _choreo.emit_choreography(
                 "check_client_lag_ledger", {"ledger": "additive"},
                 {"n": str(len(verdict.additive)), "beads": beads},
             )
@@ -804,8 +728,8 @@ def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
         )
         return 0
 
-    if _use_table_path():
-        return _emit_choreography(
+    if _choreo.use_table_path():
+        return _choreo.emit_choreography(
             "check_client_lag_ledger", {"ledger": "acked_only"},
             {"n": str(len(ledger.unshipped)), "beads": ", ".join(acked_beads)},
         )
@@ -848,8 +772,8 @@ def check_paired_preconditions(
     guard: dict[str, str] = {}
     prefix = "engine-service-"
     if not tag.startswith(prefix):
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_paired_preconditions", {"tag_shape": "invalid_prefix"}, {"tag": repr(tag)},
             )
         print(
@@ -861,8 +785,8 @@ def check_paired_preconditions(
     guard["tag_shape"] = "valid_prefix"
     parsed_tag = parse_engine_version(tag[len(prefix):])
     if parsed_tag is None:
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_paired_preconditions", {**guard, "tag_parse": "unparseable"}, {"tag": repr(tag)},
             )
         print(
@@ -875,8 +799,8 @@ def check_paired_preconditions(
 
     exists = _tag_exists_in_git(tag)
     if exists is _TAGS_UNAVAILABLE:
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_paired_preconditions", {**guard, "tag_exists": "unavailable"}, {"tag": tag},
             )
         print(
@@ -887,8 +811,8 @@ def check_paired_preconditions(
         )
         return 2
     if not exists:
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_paired_preconditions", {**guard, "tag_exists": "false"}, {"tag": tag},
             )
         print(
@@ -901,8 +825,8 @@ def check_paired_preconditions(
 
     published, reason = _paired_tag_published(tag)
     if published is _TAGS_UNAVAILABLE:
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_paired_preconditions", {**guard, "tag_published": "unavailable"}, {"reason": reason},
             )
         print(
@@ -912,8 +836,8 @@ def check_paired_preconditions(
         )
         return 2
     if not published:
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_paired_preconditions", {**guard, "tag_published": "false"}, {"reason": reason},
             )
         print(f"PAIRED MODE REJECTED: {reason}.", file=sys.stderr)
@@ -923,8 +847,8 @@ def check_paired_preconditions(
     floor = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
     tag_s = ".".join(str(p) for p in parsed_tag)
     if parsed_tag != REQUIRED_ENGINE_VERSION:
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_paired_preconditions", {**guard, "version_match": "mismatch"},
                 {"tag": tag_s, "floor": floor},
             )
@@ -938,8 +862,8 @@ def check_paired_preconditions(
     guard["version_match"] = "match"
 
     if newest is _TAGS_UNAVAILABLE:
-        if _use_table_path():
-            return _emit_choreography("check_paired_preconditions", {**guard, "newest_state": "unavailable"})
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography("check_paired_preconditions", {**guard, "newest_state": "unavailable"})
         print(
             "PAIRED MODE UNVERIFIABLE: could not read engine-service tags from "
             "git to confirm no newer tag exists.",
@@ -948,9 +872,9 @@ def check_paired_preconditions(
         return 2
     if newest is None or newest != parsed_tag:
         newest_s = ".".join(str(p) for p in newest) if newest is not None else "none"
-        if _use_table_path():
+        if _choreo.use_table_path():
             newest_state = "none" if newest is None else "mismatch"
-            return _emit_choreography(
+            return _choreo.emit_choreography(
                 "check_paired_preconditions", {**guard, "newest_state": newest_state},
                 {"newest": newest_s, "tag": tag_s},
             )
@@ -966,8 +890,8 @@ def check_paired_preconditions(
 
     age_hours = _tag_age_hours(tag)
     if age_hours is _TAGS_UNAVAILABLE:
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_paired_preconditions", {**guard, "age_state": "unavailable"}, {"tag": tag},
             )
         print(
@@ -978,8 +902,8 @@ def check_paired_preconditions(
         )
         return 2
     if age_hours > max_age_hours:
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_paired_preconditions", {**guard, "age_state": "too_old"},
                 {"tag": tag, "age": f"{age_hours:.1f}", "max_age": f"{max_age_hours:.1f}"},
             )
@@ -996,8 +920,8 @@ def check_paired_preconditions(
         return 1
     guard["age_state"] = "fresh"
 
-    if _use_table_path():
-        return _emit_choreography(
+    if _choreo.use_table_path():
+        return _choreo.emit_choreography(
             "check_paired_preconditions", guard,
             {"tag": tag, "age": f"{age_hours:.1f}", "max_age": f"{max_age_hours:.1f}"},
         )
@@ -1139,8 +1063,8 @@ def _paired_below_floor_path(
     if paired_rc != 0:
         return paired_rc
     floor = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
-    if _use_table_path():
-        return _emit_choreography(
+    if _choreo.use_table_path():
+        return _choreo.emit_choreography(
             "check_floor_auto_paired", {"probe": probe, "battery": "passes"},
             {"deployed": repr(deployed_version), "floor": floor},
         )
@@ -1176,8 +1100,8 @@ def _check_floor_auto_paired(
     try:
         caps = probe_managed_service(base_url=base)
     except ManagedServiceUnreachable as exc:
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_floor_auto_paired", {"probe": "unreachable"}, {"base": base, "exc": str(exc)},
             )
         print(
@@ -1195,8 +1119,8 @@ def _check_floor_auto_paired(
         # _classify_probe_failure).
         is_below_floor, deployed = _classify_probe_failure(exc)
         if not is_below_floor:
-            if _use_table_path():
-                return _emit_choreography(
+            if _choreo.use_table_path():
+                return _choreo.emit_choreography(
                     "check_floor_auto_paired", {"probe": "ms_error_not_below_floor"},
                     {"base": base, "floor": floor, "exc": str(exc)},
                 )
@@ -1218,8 +1142,8 @@ def _check_floor_auto_paired(
         pin_rc = check_pin_currency(newest)
         if pin_rc != 0:
             return pin_rc
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_floor_auto_paired", {"probe": "success_at_or_above_floor", "pin_currency": "passes"},
                 {"base_url": caps.base_url, "release_version": caps.release_version, "floor": floor},
             )
@@ -1236,8 +1160,8 @@ def _check_floor_auto_paired(
         # for defense in depth this must not silently fold into paired
         # acceptance either -- same "genuine below-floor only" rule as the
         # exception branch above.
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "check_floor_auto_paired", {"probe": "success_unparseable"},
                 {"base": base, "floor": floor, "release_version": repr(caps.release_version)},
             )
@@ -1330,8 +1254,8 @@ def check_floor(
     except ManagedServiceUnreachable as exc:
         # Unreachable stays a hard failure regardless of pairing -- "could not
         # verify" is never treated as "must be fine", paired or not.
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 table_function, {delegate_key: "passes", "probe": "unreachable"},
                 {"base": base, "exc": str(exc)},
             )
@@ -1360,8 +1284,8 @@ def check_floor(
             # post-probe comparison below, which only patched tests reach).
             is_below_floor, deployed = _classify_probe_failure(exc)
             if not is_below_floor:
-                if _use_table_path():
-                    return _emit_choreography(
+                if _choreo.use_table_path():
+                    return _choreo.emit_choreography(
                         table_function, {delegate_key: "passes", "probe": "ms_error_not_below_floor"},
                         {"base": base, "floor": floor, "exc": str(exc)},
                     )
@@ -1373,15 +1297,15 @@ def check_floor(
                     file=sys.stderr,
                 )
                 return 2
-            if _use_table_path():
-                return _emit_choreography(
+            if _choreo.use_table_path():
+                return _choreo.emit_choreography(
                     table_function, {delegate_key: "passes", "probe": "ms_error_below_floor"},
                     {"deployed": repr(deployed), "floor": floor},
                 )
             _print_paired_ack(deployed, floor)
             return 0
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 table_function, {delegate_key: "passes", "probe": "ms_error"}, {"floor": floor, "exc": str(exc)},
             )
         print(
@@ -1398,8 +1322,8 @@ def check_floor(
                 # reachable via the REAL probe (see probe_managed_service's
                 # docstring), but for defense in depth this must not
                 # silently fold into paired acceptance either.
-                if _use_table_path():
-                    return _emit_choreography(
+                if _choreo.use_table_path():
+                    return _choreo.emit_choreography(
                         table_function, {delegate_key: "passes", "probe": "success_unparseable"},
                         {"base": base, "floor": floor, "release_version": repr(caps.release_version)},
                     )
@@ -1411,15 +1335,15 @@ def check_floor(
                     file=sys.stderr,
                 )
                 return 2
-            if _use_table_path():
-                return _emit_choreography(
+            if _choreo.use_table_path():
+                return _choreo.emit_choreography(
                     table_function, {delegate_key: "passes", "probe": "success_below_floor"},
                     {"deployed": repr(caps.release_version), "floor": floor},
                 )
             _print_paired_ack(caps.release_version, floor)
             return 0
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 table_function, {delegate_key: "passes", "probe": "success_stale"},
                 {"base_url": caps.base_url, "release_version": repr(caps.release_version), "floor": floor},
             )
@@ -1431,9 +1355,9 @@ def check_floor(
         )
         return 1
 
-    if _use_table_path():
+    if _choreo.use_table_path():
         probe_value = "success_at_or_above_floor" if paired_deploy is not None else "success_current"
-        return _emit_choreography(
+        return _choreo.emit_choreography(
             table_function, {delegate_key: "passes", "probe": probe_value},
             {"base_url": caps.base_url, "release_version": caps.release_version, "floor": floor},
         )
@@ -1517,17 +1441,17 @@ def record_deploy_from_gate_report_leg(
             commit_resolver=lambda live: _tag_commit(f"engine-service-v{live}", repo_root),
         )
     except deploy_tracker.DeployTrackerError as exc:
-        if _use_table_path():
+        if _choreo.use_table_path():
             outcome = _TRACKER_ERROR_OUTCOMES.get(type(exc))
             if outcome is not None:
-                return _emit_choreography(
+                return _choreo.emit_choreography(
                     "record_deploy_from_gate_report_leg", {"outcome": outcome}, {"exc": str(exc)},
                 )
         print(f"TRACKER NOT RECORDED (exit 3): {exc}", file=sys.stderr)
         return 3
     except ManagedServiceError as exc:
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "record_deploy_from_gate_report_leg", {"outcome": "managed_service_error"}, {"exc": str(exc)},
             )
         print(
@@ -1537,8 +1461,8 @@ def record_deploy_from_gate_report_leg(
         return 3
     for advisory in result.report.advisories:
         print(f"  STEP-6 advisory ({result.report.basename}): {deploy_tracker.format_advisory(advisory)}")
-    if _use_table_path():
-        return _emit_choreography(
+    if _choreo.use_table_path():
+        return _choreo.emit_choreography(
             "record_deploy_from_gate_report_leg", {"outcome": "ok"},
             {"report.basename": result.report.basename, "content": result.content},
         )
@@ -1707,16 +1631,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if report_dir is None:
         if args.no_record_deploy is not None:
-            if _use_table_path():
-                return _emit_choreography(
+            if _choreo.use_table_path():
+                return _choreo.emit_choreography(
                     "main_dispatch",
                     {"mode": "bare", "check_floor": "passes", "ancestry": "passes", "tracker": "opt_out"},
                     {"reason": args.no_record_deploy.strip()},
                 )
             print(f"{_TRACKER_OPT_OUT_NOTE} Reason given: {args.no_record_deploy.strip()}", file=sys.stderr)
             return 0
-        if _use_table_path():
-            return _emit_choreography(
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
                 "main_dispatch",
                 {"mode": "bare", "check_floor": "passes", "ancestry": "passes", "tracker": "refusal"},
             )

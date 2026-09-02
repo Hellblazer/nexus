@@ -27,8 +27,8 @@ from pathlib import Path
 
 import pytest
 
-import check_engine_release_floor as _floor
 import check_wire_contract_pairing as _wire_ledger
+import release_choreography as _choreo
 
 _EMPTY_LEDGER = "## Unshipped\n\n(none)\n\n## Shipped\n"
 
@@ -63,13 +63,23 @@ def _scrub_gate_report_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _reset_decision_path() -> None:
-    """RDR-201 P2.4 (nexus-j9z30.14): ``check_engine_release_floor
-    .DECISION_PATH`` is a module-level switch a test can flip (directly,
-    or via ``test_release_table_parity.py``'s ``_new_path``, which already
+    """RDR-201 P2.4 (nexus-j9z30.14): ``release_choreography.DECISION_PATH``
+    -- the ONE switch both gated scripts consult (nexus-w2x5x) -- is a
+    module-level flag a test can flip (directly, or via
+    ``test_release_table_parity.py``'s ``_new_path``, which already
     restores it in a ``finally``). This is defense-in-depth against a test
     that flips it and errors before restoring -- every test in this
     directory starts AND ends on the default "old" path, never leaking
     "table" into an unrelated test."""
-    _floor.DECISION_PATH = "old"
+    _choreo.DECISION_PATH = "old"
     yield
-    _floor.DECISION_PATH = "old"
+    _choreo.DECISION_PATH = "old"
+
+
+@pytest.fixture
+def table_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route the gated scripts through the choreography table for one test.
+    ``monkeypatch.setattr`` (raising on a missing attribute) rather than a
+    bare assignment: a flip written onto a module that no longer owns the
+    switch must fail loudly, not silently drive the old path and pass."""
+    monkeypatch.setattr(_choreo, "DECISION_PATH", "table")
