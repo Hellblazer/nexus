@@ -578,13 +578,15 @@ def _rdr_repo_scope(cat: object, repo_root: str) -> tuple[object | None, str]:
 def _supersedes_neighbours(
     cat: object, repo_root: str, rdr_num: int,
 ) -> tuple[list[tuple[int, str]], list[str], str | None]:
-    """``(RDR number, edge text)`` pairs for every record joined to *rdr_num* by a ``supersedes`` catalog edge in
-    EITHER direction, resolved through the same canonical-tumbler chain the
-    dependency generator used to create those edges
+    """``(RDR number, edge text)`` pairs for every record *rdr_num*
+    SUPERSEDES -- its predecessors, the targets of its outgoing
+    ``supersedes`` edges -- resolved through the same canonical-tumbler
+    chain the dependency generator used to create those edges
     (:func:`nexus.catalog.link_generator.rdr_resolution` -- one listing, one
-    admission, one resolution; never a second copy here). Both directions:
-    a successor abandoned leaves its predecessor's ``superseded`` stale, a
-    predecessor revived leaves its successor's premise stale. Returns
+    admission, one resolution; never a second copy here). One direction
+    only (Sam's ruling 2026-09-02: successor -> predecessor): a successor's
+    status changing leaves its predecessor's ``superseded`` verdict stale;
+    a predecessor's own flip marks nobody. Returns
     ``(neighbours, unmapped_tumblers, note)``: *unmapped* are neighbour
     tumblers the numeric index could not map back to an RDR number (a
     number whose registrations collide with no unique ``id:``
@@ -605,15 +607,12 @@ def _supersedes_neighbours(
     if me is None:
         return [], [], f"RDR {rdr_num} has no canonical catalog tumbler (unindexed or ambiguous)"
     tumbler_to_number = {str(t): n for n, t in number_to_tumbler.items()}
-    # neighbour tumbler -> the edge as "RDR-<from> supersedes RDR-<to>", so
-    # the marker records WHICH way the edge runs (critique [24089] S3).
+    # predecessor tumbler -> the edge as "RDR-<from> supersedes RDR-<to>", so
+    # the marker records which way the edge runs (critique [24089] S3).
     edges: dict[str, str] = {}
     for link in cat.links_from(me, link_type=_MARKER_LINK_TYPE):  # type: ignore[attr-defined]
         other = str(link.to_tumbler)
         edges[other] = f"RDR-{rdr_num} supersedes RDR-{tumbler_to_number.get(other, '?')}"
-    for link in cat.links_to(me, link_type=_MARKER_LINK_TYPE):  # type: ignore[attr-defined]
-        other = str(link.from_tumbler)
-        edges[other] = f"RDR-{tumbler_to_number.get(other, '?')} supersedes RDR-{rdr_num}"
     numbers = sorted(
         (n, edges[t]) for t in edges if (n := tumbler_to_number.get(t)) is not None and n != rdr_num
     )

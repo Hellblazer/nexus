@@ -2,13 +2,12 @@
 """RDR-201 P3.3 (nexus-j9z30.22): ``nx rdr set-status`` marks dependents
 ``needs-reexamination``; ``rdr-audit`` lists the markers.
 
-Ruling (Sam, 2026-09-02): the walk follows ONLY ``supersedes`` catalog
+Rulings (Sam, 2026-09-02): the walk follows ONLY ``supersedes`` catalog
 edges -- never ``relates`` (259 of 265 live edges, free-text
-``related_rdrs`` reading aids) and never ``parent_rdr``. Both directions
-of a supersedes edge count: the edge makes each endpoint's status
-contingent on the other's (a successor abandoned leaves its predecessor's
-``superseded`` stale; a predecessor revived leaves its successor's premise
-stale). Report-only posture (RDR-081 precedent): the marker is appended to
+``related_rdrs`` reading aids) and never ``parent_rdr`` -- and ONE
+direction, successor -> predecessor: a successor's flip marks the records
+it supersedes (their ``superseded`` verdict rests on it); a predecessor's
+flip marks nobody. Report-only posture (RDR-081 precedent): the marker is appended to
 the dependent's T2 entry and surfaced by the audit, never auto-resolved and
 never used to block a flip. A catalog or T2 failure is printed as a note;
 the flip itself has already happened and stays.
@@ -139,27 +138,27 @@ def test_supersedes_dependent_is_marked_and_relates_dependent_is_not(tmp_path, m
         _write_rdr(rdr_dir, n, "accepted")
     cat = _FakeCatalog(
         entries=[_entry(tmp_path, 14, 1), _entry(tmp_path, 15, 2), _entry(tmp_path, 16, 3)],
-        links=[_link("1.7.2", "1.7.1", "supersedes"), _link("1.7.3", "1.7.1", "relates")],
+        links=[_link("1.7.2", "1.7.1", "supersedes"), _link("1.7.2", "1.7.3", "relates")],
     )
     project = _project(tmp_path)
     t2 = _FakeT2Client({
-        (project, "15"): {"content": "status: accepted\ntitle: Fifteen\n", "tags": "rdr"},
+        (project, "14"): {"content": "status: superseded\ntitle: Fourteen\n", "tags": "rdr"},
         (project, "16"): {"content": "status: accepted\ntitle: Sixteen\n", "tags": "rdr"},
     })
     _install(monkeypatch, tmp_path, cat, t2)
 
-    result = _flip(tmp_path, 14, "closed")
+    result = _flip(tmp_path, 15, "abandoned")
     assert result.exit_code == 0, result.output
-    assert [p["title"] for p in t2.puts] == ["15"]
-    assert t2.puts[0]["content"].endswith("needs-reexamination: RDR-14 accepted->closed (RDR-15 supersedes RDR-14)\n")
-    assert t2.puts[0]["content"].startswith("status: accepted\ntitle: Fifteen\n")
-    assert f"marked {project}/15 needs-reexamination" in result.output
+    assert [p["title"] for p in t2.puts] == ["14"]
+    assert t2.puts[0]["content"].endswith("needs-reexamination: RDR-15 accepted->abandoned (RDR-15 supersedes RDR-14)\n")
+    assert t2.puts[0]["content"].startswith("status: superseded\ntitle: Fourteen\n")
+    assert f"marked {project}/14 needs-reexamination" in result.output
 
 
-def test_both_directions_of_a_supersedes_edge_are_marked(tmp_path, monkeypatch):
+def test_only_the_predecessor_is_marked_never_the_successor(tmp_path, monkeypatch):
     """RDR-15 supersedes RDR-14 and is superseded by RDR-16: flipping 15
-    marks BOTH neighbours -- the edge makes each endpoint's status
-    contingent on the other's."""
+    marks 14 only (ruling: successor -> predecessor). 16's verdict does not
+    rest on 15; 14's ``superseded`` does."""
     rdr_dir = _rdr_dir(tmp_path)
     for n in (14, 15, 16):
         _write_rdr(rdr_dir, n, "accepted")
@@ -176,10 +175,22 @@ def test_both_directions_of_a_supersedes_edge_are_marked(tmp_path, monkeypatch):
 
     result = _flip(tmp_path, 15, "abandoned")
     assert result.exit_code == 0, result.output
-    assert sorted(p["title"] for p in t2.puts) == ["14", "RDR-16"]
-    by_title = {p["title"]: p["content"] for p in t2.puts}
-    assert by_title["14"].endswith("needs-reexamination: RDR-15 accepted->abandoned (RDR-15 supersedes RDR-14)\n")
-    assert by_title["RDR-16"].endswith("needs-reexamination: RDR-15 accepted->abandoned (RDR-16 supersedes RDR-15)\n")
+    assert [p["title"] for p in t2.puts] == ["14"]
+    assert t2.puts[0]["content"].endswith("needs-reexamination: RDR-15 accepted->abandoned (RDR-15 supersedes RDR-14)\n")
+
+
+def test_flipping_a_predecessor_marks_nobody(tmp_path, monkeypatch):
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 14, "accepted")
+    _write_rdr(rdr_dir, 15, "accepted")
+    cat = _FakeCatalog(
+        entries=[_entry(tmp_path, 14, 1), _entry(tmp_path, 15, 2)],
+        links=[_link("1.7.2", "1.7.1", "supersedes")],
+    )
+    t2 = _FakeT2Client({(_project(tmp_path), "15"): {"content": "status: accepted\n", "tags": ""}})
+    _install(monkeypatch, tmp_path, cat, t2)
+    assert _flip(tmp_path, 14, "closed").exit_code == 0
+    assert t2.puts == []
 
 
 def test_marker_put_keeps_the_entry_permanent_and_keeps_its_tags(tmp_path, monkeypatch):
@@ -194,13 +205,13 @@ def test_marker_put_keeps_the_entry_permanent_and_keeps_its_tags(tmp_path, monke
         links=[_link("1.7.2", "1.7.1", "supersedes")],
     )
     project = _project(tmp_path)
-    t2 = _FakeT2Client({(project, "15"): {"content": "status: accepted\n", "tags": "rdr,architecture"}})
+    t2 = _FakeT2Client({(project, "14"): {"content": "status: superseded\n", "tags": "rdr,architecture"}})
     _install(monkeypatch, tmp_path, cat, t2)
 
-    assert _flip(tmp_path, 14, "closed").exit_code == 0
+    assert _flip(tmp_path, 15, "closed").exit_code == 0
     assert t2.puts == [{
-        "project": project, "title": "15", "tags": "rdr,architecture", "ttl": None,
-        "content": "status: accepted\nneeds-reexamination: RDR-14 accepted->closed (RDR-15 supersedes RDR-14)\n",
+        "project": project, "title": "14", "tags": "rdr,architecture", "ttl": None,
+        "content": "status: superseded\nneeds-reexamination: RDR-15 accepted->closed (RDR-15 supersedes RDR-14)\n",
     }]
 
 
@@ -227,7 +238,7 @@ def test_dependent_with_no_t2_entry_is_named_not_invented(tmp_path, monkeypatch)
     _write_rdr(rdr_dir, 15, "accepted")
     cat = _FakeCatalog(
         entries=[_entry(tmp_path, 14, 1), _entry(tmp_path, 15, 2)],
-        links=[_link("1.7.2", "1.7.1", "supersedes")],
+        links=[_link("1.7.1", "1.7.2", "supersedes")],
     )
     t2 = _FakeT2Client({})
     _install(monkeypatch, tmp_path, cat, t2)
@@ -336,7 +347,7 @@ def test_marker_put_passes_the_entry_agent_and_session_back(tmp_path, monkeypatc
     _write_rdr(rdr_dir, 15, "accepted")
     cat = _FakeCatalog(
         entries=[_entry(tmp_path, 14, 1), _entry(tmp_path, 15, 2)],
-        links=[_link("1.7.2", "1.7.1", "supersedes")],
+        links=[_link("1.7.1", "1.7.2", "supersedes")],
     )
     project = _project(tmp_path)
 
@@ -360,8 +371,8 @@ def test_unmappable_supersedes_neighbour_is_named_not_dropped(tmp_path, monkeypa
     _write_rdr(rdr_dir, 14, "accepted")
     orphan = _entry(tmp_path, 99, 9)
     cat = _FakeCatalog(
-        entries=[_entry(tmp_path, 14, 1)],  # 1.7.9 is linked but never listed -> unmappable
-        links=[_link("1.7.9", "1.7.1", "supersedes")],
+        entries=[_entry(tmp_path, 14, 1)],  # 1.7.9 is a supersedes target but never listed -> unmappable
+        links=[_link("1.7.1", "1.7.9", "supersedes")],
     )
     del orphan
     t2 = _FakeT2Client({})
@@ -378,7 +389,7 @@ def test_one_failing_entry_does_not_hide_the_marks_already_written(tmp_path, mon
         _write_rdr(rdr_dir, n, "accepted")
     cat = _FakeCatalog(
         entries=[_entry(tmp_path, 14, 1), _entry(tmp_path, 15, 2), _entry(tmp_path, 16, 3)],
-        links=[_link("1.7.2", "1.7.1", "supersedes"), _link("1.7.3", "1.7.1", "supersedes")],
+        links=[_link("1.7.1", "1.7.2", "supersedes"), _link("1.7.1", "1.7.3", "supersedes")],
     )
     project = _project(tmp_path)
 
@@ -409,7 +420,7 @@ def test_repeating_a_flip_does_not_stack_a_duplicate_marker(tmp_path, monkeypatc
     _write_rdr(rdr_dir, 15, "accepted")
     cat = _FakeCatalog(
         entries=[_entry(tmp_path, 14, 1), _entry(tmp_path, 15, 2)],
-        links=[_link("1.7.2", "1.7.1", "supersedes")],
+        links=[_link("1.7.1", "1.7.2", "supersedes")],
     )
     project = _project(tmp_path)
     t2 = _FakeT2Client({(project, "15"): {"content": "status: accepted\n", "tags": ""}})
