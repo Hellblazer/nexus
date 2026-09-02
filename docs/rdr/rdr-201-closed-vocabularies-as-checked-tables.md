@@ -292,7 +292,7 @@ One table format, one checker, three tables.
 2. **Checker**: proves coverage and overlap over the declared domains, refuses to claim coverage over any undeclared or non-enum dimension, and reports a bare-green-by-default advisory when a row is a declared catch-all (the intrastate escape-row idea; bead nexus-1c7oq carries the advisory format).
 3. **Three tables**, each linted in CI (the lifecycle table ships in the package, the release table under `docs/tables/`, see Revision History):
    - `rdr-lifecycle`: the record status machine, consumed by `nx rdr set-status` so an illegal transition is refused with a typed reason, and by `rdr-audit` so an out-of-vocabulary status is a finding.
-   - `release-choreography`: the paired-release decision table with an explicit event column (pre-tag, tag-push, deploy, post-deploy verify), consumed by both scripts, which become thin evaluators over one table and so cannot disagree (Finding 2, O1).
+   - `release-choreography`: the paired-release decision table, event-INVARIANT by ruling (nexus-j9z30.26, 2026-09-02, see Revision History: the 7.1.0/v0.1.62 fix changed a remedy string, not decision logic; the event-sensitivity is real but lives in the release / engine-release skill choreography, recorded as citations by `enumerate_release_cells.event_mode_matrix()`), consumed by both scripts through one shared module (`scripts/release_choreography.py`), which become thin evaluators over one table and so cannot disagree (Finding 2, O1).
    - `rdr-dependencies`: not a transition table but the edge list Gap 3 needs; a status change on a record marks every dependent's verdict `needs-reexamination`, surfaced by `rdr-audit`.
 
 ### Technical Design
@@ -461,8 +461,7 @@ and nothing else.
 
 ### Consequences
 
-Three new data files and a checker join the lint bucket. The release scripts
-shrink. `nx rdr set-status` gains a refusal path.
+Three new data files and a checker join the lint bucket. The release scripts shrink only slightly (net 52 lines across both; the decision blocks became emit calls carrying their substitutions) while the system grows: table, catalog and shared evaluator add about 1,500 lines -- see the 2026-09-02 Revision History entry for the measured figures against Finding 2's estimate. `nx rdr set-status` gains a refusal path.
 
 ### Risks and Mitigations
 
@@ -488,7 +487,7 @@ shrink. `nx rdr set-status` gains a refusal path.
 | --- | --- | --- |
 | Checker has a bug and passes a gap | Planted-defect tests in the lint bucket (non-vacuity) | Same exposure as today, not worse |
 | A sensor reduces an open value to the wrong outcome | Phase 2 parity assertion over the 101-cell fixture | Wrong verdict from a right table; caught before the old path is deleted |
-| Message text drifts while exit code and classifier marker are preserved | Phase 2's (exit_code, message_key) parity alone does not catch this (critique T2 nexus/critique-nexus-j9z30-14-2026-09-02 [24073] finding (a)) -- closed by a per-(cell, event) full-TEXT byte-equality assertion in the same Role-2 harness (`tests/scripts/test_release_table_parity.py::test_new_path_matches_old_path_cell_by_cell`), with any cell where full parity is genuinely impossible named explicitly rather than globbed | A content-level regression (dropped caveat, wrong remedy pointer, stale URL) in the catalog's operator-facing prose ships silently once the old, verified-correct text is deleted at Phase 2's cutover |
+| Message text drifts while exit code and classifier marker are preserved | Phase 2's (exit_code, message_key) parity alone does not catch this (critique T2 nexus/critique-nexus-j9z30-14-2026-09-02 [24073] finding (a)). During the cutover it was closed by a live old-vs-new full-TEXT byte-equality assertion (23 mismatches found, six real). Since P2.6 deleted the old path it is closed by two standing assertions in `tests/scripts/test_release_table_parity.py`: `test_real_function_text_matches_frozen_oracle` byte-compares every cell's stdout and stderr, separately and normalized, against `tests/scripts/fixtures/release_cell_texts.json` (the text frozen at the cutover, when it was proven identical to the deleted branches on both streams), and `test_real_function_fills_every_catalog_placeholder` catches a substitution key a call site forgot. Regenerating the oracle is a deliberate act in the same commit as a message change | A content-level regression (dropped caveat, wrong remedy pointer, stale URL) in the catalog's operator-facing prose ships silently once the old, verified-correct text is deleted at Phase 2's cutover |
 | Two rows disagree at runtime (`ambiguous-match`) | Evaluator refuses with the row ids | Release or status change halts loudly; the checker should have caught it, so this is also a checker defect |
 | A record cites a dependency the catalog cannot resolve to one tumbler | Index-time warning naming both candidates | Edge not created; audit shows the record as unlinked |
 | Table file missing or unparsable | Consumer refuses to run, exit 2 | No silent fallback to the old imperative path |
@@ -527,8 +526,10 @@ The lifecycle table lints clean in CI; `nx rdr set-status <id> closed` on a
 1. Enumerate the reachable cells mechanically (Finding 2 estimates about
    101) as a fixture with today's verdicts; this is also where the five
    leaves Finding 2 left without a coverage verdict are settled.
-2. Author `docs/tables/release-choreography.toml` with the event column;
-   lint clean, no escape rows on blocking groups.
+2. Author `docs/tables/release-choreography.toml`; lint clean, no escape
+   rows on blocking groups. (Authored with an event column at P2.3; the
+   column came out at P2.6 under the nexus-j9z30.26 ruling, and a lint
+   test now refuses its return -- see Revision History.)
 3. Route both scripts through `resolve()`; run old and new paths side by
    side over the fixture; assert identical verdicts; delete the old path.
 4. Decide O2 (paired vs paired-auto order asymmetry) as a row pair, with
@@ -634,3 +635,6 @@ class this RDR names was found and fixed during its own research.
 - 2026-09-01: Sam ruled defer is legal from `accepted` as well as `draft` (P1.3 open question).
 - 2026-09-01: Phase 1 complete on develop (epic nexus-j9z30 beads .1-.10): table format, loader, checker (with unmatched-assignment, unused-dimension and zero-dim closed-by-escape added by review), evaluator, packaged lifecycle table with the six-value ruling, set-status and every status list derived from it, docs/rdr swept to the domain, rdr-audit vocabulary findings. Approach item 3 lands one of its three tables in this phase; the release table is Phase 2 (.13), the dependency edges Phase 3. Phase gate: Item1=.1, Item2=.2, Item3=.3.
 - 2026-09-01: Gate critique [23988], 4 significant: RDR-024 relabelled Precedent (the hard accept guard came with set-status, not RDR-024); RDR-149 added as the shared-primitive precedent; match-key shape rule added to the Technical Design; the 101-cell figure marked as an estimate with its 96-cell coverage sum reconciled to Phase 2.
+- 2026-09-02: Sam ruled event-invariance CORRECT (nexus-j9z30.26). The 7.1.0/v0.1.62 fix (79fff05a9) changed a remedy string and prose, no decision logic; the event-sensitivity is real but lives in the release / engine-release skill choreography, not in the two scripts' inputs, so a table over those inputs is event-invariant by construction. The table-wide `event`/`mode` dimensions P2.3 declared were removed at P2.6; Approach item 3 and Phase 2 step 2 amended above; the table header records why and `test_choreography_table_declares_no_event_or_mode_dimension` refuses their return.
+- 2026-09-02: Sam ruled O2 KEEP both rows (nexus-j9z30.17): `--paired-deploy-auto` is the unattended path (release.yml) and trusts the cloud probe; `--paired-deploy` is attended, where refusing and asking is cheap. Recorded as comments at both rows and in the table header; zero behaviour change.
+- 2026-09-02: Phase 2 complete on develop (nexus-j9z30.11-.17, nexus-w2x5x): 89 cells enumerated, table authored, both scripts routed through one shared module (`scripts/release_choreography.py`), old path deleted after per-cell parity on verdict and per-stream text; one cell's stream (`main_bare_tracker_opt_out`, exit 0 on stderr) carried by an `emit.stream` field. Measured size against Finding 2's estimate (about 580 replaced, about 460 added, net 120 saved): the two scripts shrank 52 lines; the table (834), catalog (554) and shared evaluator (124) added about 1,500 -- net about +1,460, not -120. The auditability case (scattered guards becoming checked, disjoint, total rows) stands; the size claim did not, and Trade-offs is amended. The message-drift Failure Modes row is restated for the post-cutover harness (frozen per-stream text oracle plus placeholder check).
