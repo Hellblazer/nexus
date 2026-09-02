@@ -157,4 +157,15 @@ Unchanged from Phase 1 prereg §6.
 
 ## Revision History
 
-(none; frozen at initial commit, before any arm ran)
+- 2026-09-01 (before any arm ran) — **Arm session-model id recorded
+  exactly**: the orchestrating session for Phase 1b runs on
+  `claude-fable-5-1`, so the continuation-arm reducer and the caller-only
+  reasoner (both dispatched in-process from this session and inheriting
+  its model) run on `claude-fable-5-1`. Phase 1 recorded its arm model
+  as `claude-fable-5`; whether that was the same model id written
+  loosely or a genuinely earlier session model cannot be re-verified
+  now, so Phase 1b records the exact id and notes the possible drift.
+  The same-model constraint (continuation vs caller-only) holds within
+  Phase 1b. Judge stays `claude-opus-5`. Arms save the raw `nx_answer`
+  return alongside the answer (`qNN.raw.json`) so the §5 retrieval-reach
+  measurement is taken from the recorded trace, not re-run.
