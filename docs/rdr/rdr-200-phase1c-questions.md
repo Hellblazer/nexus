@@ -3,6 +3,7 @@ title: "RDR-200 Phase 1c Held-Out Question Set (committed AFTER the arms and jud
 parent_prereg: docs/rdr/rdr-200-phase1c-prereg.md
 created: 2026-09-02
 status: frozen
+kind: companion
 ---
 
 # RDR-200 Phase 1c Held-Out Question Set
