@@ -22,7 +22,8 @@ actually sees -- the benign verdict included, serially and under ``-n``.
 ``_REAL_CONFIG_DIR_ENV_OVERRIDE`` points the guard at a throwaway home,
 so nothing here can read or write the operator's own ``~/.config/nexus/``.
 
-Marked ``lint``: three child pytest sessions, roughly 30s, out of the hot loop.
+Marked ``lint``: three child pytest sessions (collection only), out of
+the hot loop.
 """
 from __future__ import annotations
 
@@ -37,9 +38,17 @@ pytestmark = pytest.mark.lint
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-#: A fast, substrate-free target so the child session is dominated by
-#: conftest import rather than by the tests it runs. Its identity does not
-#: matter -- the subject is the session hooks, not this file's assertions.
+#: The child COLLECTS this file and runs nothing (``--collect-only``): the
+#: subject is the session hooks and the exit code they produce, so any inner
+#: test's own outcome would only confound the signal. Measured: it did.
+#: Running the inner tests for real made these cases fail inside a full
+#: ``-m lint -n auto`` bucket (rc 1 with a correct NOTE and no FAIL --
+#: the guard was right and an inner test had failed under concurrency with
+#: the outer suite) while passing standalone. Collection alone still fires
+#: ``pytest_sessionstart``/``pytest_sessionfinish``, so the guard baselines,
+#: classifies, and sets the exit status exactly as in a real run -- verified
+#: across both verdicts and both xdist modes. Any collectable file works;
+#: this one is small and substrate-free.
 _INNER_TARGET = "tests/test_pfuns_append_only_logs_do_not_red_a_run.py"
 
 _PROBE_PLUGIN = '''
@@ -77,8 +86,14 @@ def _run_inner(tmp_path: Path, mode: str, *pytest_args: str) -> tuple[int, str]:
         [str(plugin_dir), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
     )
     proc = subprocess.run(
-        [sys.executable, "-m", "pytest", _INNER_TARGET, "-q", "-p", "nxprobe", *pytest_args],
-        cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=600,
+        [
+            sys.executable, "-m", "pytest", _INNER_TARGET,
+            "-q", "-p", "nxprobe", "--collect-only", *pytest_args,
+        ],
+        # Well inside the lint job's own budget: a collection-only child is
+        # seconds, and a hang here must surface as this test failing rather
+        # than as the whole bucket timing out with no attribution.
+        cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=120,
     )
     return proc.returncode, proc.stdout + proc.stderr
 

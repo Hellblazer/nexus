@@ -132,8 +132,14 @@ def test_rel_path_of_diff_entry_strips_every_verb_and_passes_bare_paths(guard):
 
 
 def test_a_truncated_log_still_reddens_through_the_diff(guard):
-    """The verb strip must not wave a truncation through: same entry shape,
-    opposite verdict."""
+    """The SIZE rule, exercised through the diff rather than on a bare path.
+
+    Honest about what it does not do (code review [24116]): this passes with
+    the verb strip absent too -- pre-fix code reached the same verdict by a
+    different route (unparsed entry -> state) than post-fix code does
+    (parsed, but shrank). It guards the size rule against a future edit that
+    widens the append branch; the verb strip's own falsifiable pin is
+    ``test_the_split_consumes_the_diffs_own_entries`` above."""
     before = {"routing_log.jsonl": (1, 500)}
     after = {"routing_log.jsonl": (2, 10)}
     changed = guard._diff_config_dir_snapshots(before, after)

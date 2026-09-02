@@ -793,8 +793,10 @@ def _check_real_config_dir_mutations(session) -> None:
     )
     if benign_appends:
         print(
-            f"\n\nNOTE: nexus-pfuns — {len(benign_appends)} append-only log(s) "
-            f"grew under the REAL ~/.config/nexus/ during the session: "
+            f"\n\nNOTE: nexus-pfuns — {len(benign_appends)} benign log change(s) "
+            f"under the REAL ~/.config/nexus/ during the session "
+            f"(an append-only log grew, or a live daemon wrote/rotated its own "
+            f"output): "
             f"{', '.join(benign_appends)}\n"
             f"  Reported, not failed: these are append-only logs, not state. "
             f"A truncation or in-place rewrite of the same file WOULD fail.\n"
