@@ -32,14 +32,9 @@
 # status set and its "otherwise" set are complements summing to the full
 # 6-member domain, with no member repeated across the two sets.
 #
-# The `defer` event's origin state (draft -> deferred, below) is not
-# spelled out verbatim in nexus-j9z30.3's ruling text; it is inferred from
-# the status table's own description of `deferred` ("parked ... resumes
-# to draft only") and the enumcheck-prototype fixture's precedent
-# (tests/fixtures/tables/rdr_lifecycle_clean.toml: "only a draft can be
-# deferred") -- draft is the table's sole entry state, so it is the only
-# state a defer-into-park makes sense from. Flagged as an open decision
-# for review, not read into the bead's silence as settled.
+# The `defer` event is legal from `draft` and from `accepted` (Sam,
+# 2026-09-01, RDR-201 Revision History). A deferred record resumes to
+# `draft` only, so deferred-then-resumed work re-gates.
 
 [table]
 id = "rdr-lifecycle"
@@ -121,16 +116,16 @@ match = { status = ["closed", "superseded", "abandoned"], event = "abandon" }
 escape = true
 refuse = "illegal-transition"
 
-# --- defer: draft -> deferred (see the origin-state note above) ------------
+# --- defer: draft | accepted -> deferred ------------------------------------
 
 [[row]]
 id = "defer"
-match = { status = "draft", event = "defer" }
+match = { status = ["draft", "accepted"], event = "defer" }
 to = { status = "deferred" }
 
 [[row]]
 id = "defer-otherwise"
-match = { status = ["accepted", "deferred", "closed", "superseded", "abandoned"], event = "defer" }
+match = { status = ["deferred", "closed", "superseded", "abandoned"], event = "defer" }
 escape = true
 refuse = "illegal-transition"
 
