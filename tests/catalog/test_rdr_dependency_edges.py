@@ -27,11 +27,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import structlog.testing
 
+import nexus.repo_identity as repo_identity_mod
 from nexus.catalog.link_generator import (
     DryRunLinkWriter,
     ProposedLink,
+    bind_rdr_dependency_generator,
     generate_rdr_dependency_links,
 )
 from nexus.catalog.tumbler import Tumbler
@@ -83,9 +86,13 @@ class _FakeCat:
     generator (which only ever calls ``resolve_path`` then reads text).
     """
 
-    def __init__(self, entries: list[CatalogEntry], *, repo_root: Path) -> None:
+    def __init__(
+        self, entries: list[CatalogEntry], *, repo_root: Path,
+        owners: dict[str, Tumbler] | None = None,
+    ) -> None:
         self._entries = entries
         self._repo_root = repo_root
+        self._owners = owners or {}
 
     def all_documents(self, limit=1000, *, content_type: str = "", offset=0):
         if content_type:
@@ -100,6 +107,13 @@ class _FakeCat:
                 p = Path(e.file_path)
                 return p if p.is_absolute() else self._repo_root / p
         return None
+
+    def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
+        """Only used by ``bind_rdr_dependency_generator`` (via
+        ``current_rdr_owner``) — the other tests in this file call
+        ``generate_rdr_dependency_links`` directly with an explicit
+        ``current_owner`` and never reach this."""
+        return self._owners.get(repo_hash)
 
 
 THIS_REPO_PREFIX = "file:///repo/nexus/docs/rdr/"
@@ -514,18 +528,128 @@ class TestRealRepoNonVacuityFloor:
             )
         return _FakeCat(entries, repo_root=repo_root), entries
 
-    def test_real_tree_produces_at_least_six_supersedes_edges(self) -> None:
+    def test_real_tree_produces_the_exact_known_supersedes_edges_and_a_relates_floor(
+        self,
+    ) -> None:
+        """Reviewer critique [24072] SIGNIFICANT 1: a bare count passes even
+        if the generator emits six WRONG edges. These six (from, to) pairs
+        are stable facts about the tree (verified live against the real
+        multi-tenant catalog via mcp__plugin_conexus_nexus-catalog__list on
+        2026-09-02: content_type=rdr (287 entries) + legacy content_type=
+        prose under owner 1.10 (241 entries) resolve to the IDENTICAL six
+        pairs and the identical 259 relates edges this local single-
+        registration fixture produces -- the canonical, de-duplicated graph
+        is the same regardless of how many raw registrations feed it).
+
+        related_rdrs (252 raw references across 50 files, T2 nexus/rdr-201-
+        p3.2-dependency-edges-impl-notes) is the dominant source -- 259 of
+        265 total edges -- and had ZERO catalog links before this bead. A
+        floor here (not an exact count, unlike supersedes' closed/stable
+        set above) proves it is not vacuous; related_rdrs targets grow as
+        the tree grows, so a moving exact count would be the wrong
+        assertion.
+        """
         repo_root = Path(__file__).resolve().parents[2]
         assert (repo_root / "docs" / "rdr").is_dir(), "expected to run inside the nexus checkout"
-        cat, _entries = self._build_real_repo_cat(repo_root)
+        cat, entries = self._build_real_repo_cat(repo_root)
+        tumbler_to_stem = {str(e.tumbler): Path(e.file_path).stem for e in entries}
         prefix = f"file://{(repo_root / 'docs' / 'rdr').resolve()}/"
         w = DryRunLinkWriter()
         count = generate_rdr_dependency_links(
             cat, writer=w, current_owner=CURRENT_OWNER, repo_source_prefix=prefix,
         )
+
+        supersedes_pairs = {
+            (tumbler_to_stem[p.from_tumbler], tumbler_to_stem[p.to_tumbler])
+            for p in w.proposed if p.link_type == "supersedes"
+        }
+        assert supersedes_pairs == {
+            ("rdr-015-indexing-pipeline-rethink", "rdr-014-knowledge-base-retrieval-quality"),
+            ("rdr-108-graph-identity-normalization", "rdr-107-t3-chunk-soft-delete"),
+            ("rdr-120-storage-substrate-split", "rdr-112-storage-as-service-container-boundary"),
+            ("rdr-127-substrate-decoupled-surface-rendering", "rdr-123-nx-answer-a2ui-surfaces"),
+            ("rdr-127-substrate-decoupled-surface-rendering", "rdr-124-subagent-result-surfaces"),
+            ("rdr-185-single-ladder-convergent-upgrade", "rdr-159-guided-upgrade-migration"),
+        }, f"exact supersedes pairs mismatch: got {supersedes_pairs}"
+
         by_type = w.count_by_link_type()
-        assert by_type.get("supersedes", 0) >= 6, (
-            f"non-vacuity floor: expected >= 6 supersedes edges from the real "
-            f"docs/rdr tree, got {by_type}"
+        assert by_type.get("relates", 0) >= 200, (
+            f"non-vacuity floor: expected >= 200 relates edges from the real "
+            f"docs/rdr tree (measured 259 on 2026-09-02), got {by_type}"
         )
         assert count > 0
+
+
+class TestBindRdrDependencyGenerator:
+    """Reviewer critique [24072] CRITICAL: the generator must be REGISTERED
+    at both call sites (``indexer.py``'s ``_catalog_hook``,
+    ``commands/catalog_cmds/links.py``'s ``generate_links_cmd``), not just
+    reachable by calling it directly. ``bind_rdr_dependency_generator`` is
+    the single adapter both sites use (RDR-201's Test Plan sentence — 'an
+    index of docs/rdr must produce the edges' — is only true if an INDEX
+    produces them). These tests exercise that adapter and the registration
+    shape it returns end to end: it is called exactly like the other three
+    generators (``fn(cat, writer=writer, new_tumblers=..., new_content_types=
+    ...)``), through a real ``docs/rdr`` fixture tree on disk — no live
+    engine substrate needed, since the adapter's only substrate-shaped
+    dependency (``current_rdr_owner`` -> ``nexus.repo_identity._repo_
+    identity``) has a documented monkeypatch seam.
+
+    A companion, heavier proof lives in ``tests/test_indexer_linking_
+    phases.py`` (the ``_catalog_hook`` sub-phase family) using the SAME
+    stub-generator pattern the existing rdr/prose/pdf phase tests use —
+    that family requires ``ActiveCatalog`` (the real engine substrate),
+    is environment-gated exactly like its three siblings, and could not be
+    run green in this sandbox (verified pre-existing: `git stash` shows
+    the same four tests red with or without this bead's changes).
+    """
+
+    def test_returns_none_when_no_owner_registered_yet(self, tmp_path: Path) -> None:
+        cat = _FakeCat([], repo_root=tmp_path, owners={})
+        result = bind_rdr_dependency_generator(cat, tmp_path)
+        assert result is None
+
+    def test_bound_generator_over_a_docs_rdr_fixture_tree_emits_the_edges(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The registration-level assertion RDR-201 actually asks for: an
+        INDEX (here, the bound generator called through the exact shape
+        the shared loop uses) over a ``docs/rdr`` fixture tree emits the
+        edges — not just the raw function called with hand-supplied
+        current_owner/repo_source_prefix (that is what every other test in
+        this file already covers)."""
+        monkeypatch.setattr(
+            repo_identity_mod, "_repo_identity", lambda repo: ("fixture-repo", "deadbeef"),
+        )
+        _write_rdr(tmp_path, "rdr-015-a.md", 'title: "RDR-015"\nsupersedes: RDR-014')
+        _write_rdr(tmp_path, "rdr-014-b.md", 'title: "RDR-014"')
+        source = _entry(
+            "1.1.10", file_path="docs/rdr/rdr-015-a.md",
+            source_uri=_source_uri(tmp_path, "rdr-015-a.md"),
+        )
+        target = _entry(
+            "1.1.11", file_path="docs/rdr/rdr-014-b.md",
+            source_uri=_source_uri(tmp_path, "rdr-014-b.md"),
+        )
+        cat = _FakeCat(
+            [source, target], repo_root=tmp_path,
+            owners={"deadbeef": CURRENT_OWNER},
+        )
+
+        entry = bind_rdr_dependency_generator(cat, tmp_path)
+        assert entry is not None
+        kind, fn = entry
+        assert kind == "rdr-dependency"
+
+        # Called through the EXACT shape the shared loop in _catalog_hook /
+        # generate_links_cmd uses for every generator.
+        w = DryRunLinkWriter()
+        count = fn(cat, writer=w, new_tumblers=None, new_content_types=None)
+
+        assert count == 1
+        assert w.proposed == [
+            ProposedLink(
+                from_tumbler="1.1.10", to_tumbler="1.1.11",
+                link_type="supersedes", created_by="rdr_dependency_extractor",
+            )
+        ]

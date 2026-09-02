@@ -1542,6 +1542,7 @@ def _catalog_hook(
             _progress(f"  Catalog: linking {len(new_tumblers)} new entries…\r")
         try:
             from nexus.catalog.link_generator import (  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+                bind_rdr_dependency_generator,
                 generate_pdf_corpus_links,
                 generate_prose_filepath_links,
                 generate_rdr_filepath_links,
@@ -1561,11 +1562,26 @@ def _catalog_hook(
             # emits no pair: claiming a phase that never ran is the
             # honesty defect this emission exists to fix.
             _link_counts: dict[str, int] = {}
-            for _kind, _gen in (
+            _generators: list[tuple[str, Callable[..., int]]] = [
                 ("rdr", generate_rdr_filepath_links),
                 ("prose", generate_prose_filepath_links),
                 ("pdf", generate_pdf_corpus_links),
-            ):
+            ]
+            # RDR-201 P3.2 (nexus-j9z30.21): bind_rdr_dependency_generator
+            # is the single adapter that satisfies generate_rdr_dependency_
+            # links's required (no-default) current_owner/repo_source_prefix
+            # while still slotting into the SAME (cat, writer=, new_tumblers=,
+            # new_content_types=) shape the other three generators use.
+            # Returns None when no owner is registered yet for this repo (a
+            # catalog that has never completed an index has nothing to scope
+            # endpoint resolution against) — skip rather than pass a bogus
+            # owner.
+            _dep_entry = bind_rdr_dependency_generator(cat, repo)
+            if _dep_entry is not None:
+                _generators.append(_dep_entry)
+            else:
+                _log.debug("rdr_dependency_links_skipped_no_owner", repo=repo_name)
+            for _kind, _gen in _generators:
                 _announce = on_phase is not None and incremental_generator_applies(
                     _kind, new_tumblers, new_content_types,
                 )
@@ -1596,11 +1612,13 @@ def _catalog_hook(
             fp_count = _link_counts["rdr"]
             prose_count = _link_counts["prose"]
             pdf_count = _link_counts["pdf"]
-            links_created = fp_count + prose_count + pdf_count
+            dep_count = _link_counts.get("rdr-dependency", 0)
+            links_created = fp_count + prose_count + pdf_count + dep_count
             if links_created:
                 _log.info(
                     "catalog_links_generated",
                     filepath=fp_count, prose=prose_count, pdf=pdf_count,
+                    rdr_dependency=dep_count,
                     repo=repo_name,
                 )
         except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log + audit, must not crash caller

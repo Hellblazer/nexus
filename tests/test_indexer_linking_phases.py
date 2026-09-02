@@ -231,3 +231,87 @@ class TestIncrementalGeneratorApplies:
     def test_unknown_kind_is_a_programming_error(self) -> None:
         with pytest.raises(KeyError):
             link_generator.incremental_generator_applies("code", ["1.2.3"], {"code"})
+
+    def test_rdr_dependency_kind_is_registered(self) -> None:
+        """RDR-201 P3.2 (nexus-j9z30.21): the generator's own source-type
+        set (RDR_CONTENT_TYPES == {"rdr", "prose"}) is wider than the
+        filepath linker's "rdr"-only set, so it gets its own kind rather
+        than reusing "rdr" -- reusing "rdr" would under-announce a batch
+        whose only new entries are legacy "prose"-registered RDRs."""
+        applies = link_generator.incremental_generator_applies
+        assert applies("rdr-dependency", ["1.2.3"], {"prose"}) is True
+        assert applies("rdr-dependency", ["1.2.3"], {"code"}) is False
+        assert applies("rdr-dependency", None, {"code"}) is True
+
+
+class TestRdrDependencyGeneratorRegistration:
+    """Reviewer critique [24072] CRITICAL: the generator must be REGISTERED
+    at ``_catalog_hook``'s linking loop, not just reachable by calling it
+    directly (that direct-call coverage already lives in ``tests/catalog/
+    test_rdr_dependency_edges.py``). This stubs ``link_generator.
+    bind_rdr_dependency_generator`` itself (rather than letting it resolve
+    a real owner through ``ActiveCatalog``) so the assertion is squarely
+    about the LOOP wiring -- does the 5th generator run, in order, with
+    its own sub-phase pair -- independent of owner-registration timing.
+
+    Needs the real engine substrate (``ActiveCatalog``), exactly like this
+    file's other ``TestLinkingSubPhases`` / ``TestGeneratorFailureClosesIts
+    Phase`` tests -- pre-existing, environment-gated, not something this
+    bead's change caused (verified via `git stash`: the same four sibling
+    tests are red in this sandbox with or without this bead's diff, because
+    the sandbox's engine-service jar is stale / the service is not running).
+    A substrate-free proof that the BOUND generator, called through this
+    exact shape, produces real edges from a docs/rdr fixture tree lives in
+    ``tests/catalog/test_rdr_dependency_edges.py::
+    TestBindRdrDependencyGenerator``.
+    """
+
+    def test_fifth_phase_pair_emitted_when_owner_resolves(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: _Clock,
+    ) -> None:
+        calls = _stub_generators(
+            monkeypatch, clock, {"rdr": 8.1, "prose": 25.9, "pdf": 3.4},
+        )
+
+        def _dep_gen(cat, *, writer=None, new_tumblers=None, new_content_types=None):  # noqa: ANN001
+            calls.append("rdr-dependency")
+            clock.now += 4.2
+            return 1
+
+        monkeypatch.setattr(
+            link_generator, "bind_rdr_dependency_generator",
+            lambda cat, repo: ("rdr-dependency", _dep_gen),
+        )
+        rdr = _write(tmp_path, "docs/rdr/rdr-001-x.md", "# RDR-001\n")
+        prose = _write(tmp_path, "docs/guide.md", "# guide\n")
+
+        phases = _run_hook(tmp_path, [
+            (rdr, "rdr", "rdr__nexus"), (prose, "prose", "docs__nexus"),
+        ])
+
+        assert _linking_lines(phases) == [
+            "Catalog linking: rdr…",
+            "Catalog linking: rdr done (8.1s)",
+            "Catalog linking: prose…",
+            "Catalog linking: prose done (25.9s)",
+            "Catalog linking: rdr-dependency…",
+            "Catalog linking: rdr-dependency done (4.2s)",
+        ]
+        assert calls == ["rdr", "prose", "pdf", "rdr-dependency"]
+
+    def test_fifth_phase_skipped_when_no_owner_registered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: _Clock,
+    ) -> None:
+        calls = _stub_generators(
+            monkeypatch, clock, {"rdr": 1.0, "prose": 1.0, "pdf": 1.0},
+        )
+        monkeypatch.setattr(
+            link_generator, "bind_rdr_dependency_generator",
+            lambda cat, repo: None,
+        )
+        rdr = _write(tmp_path, "docs/rdr/rdr-004-w.md", "# RDR-004\n")
+
+        phases = _run_hook(tmp_path, [(rdr, "rdr", "rdr__nexus")])
+
+        assert not any("rdr-dependency" in m for m in _linking_lines(phases))
+        assert calls == ["rdr", "prose", "pdf"]

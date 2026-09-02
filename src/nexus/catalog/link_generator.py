@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import structlog
@@ -16,8 +18,10 @@ from nexus.catalog.types import CatalogEntry
 from nexus.catalog.catalog_protocol import CatalogReader, CatalogWriter
 from nexus.catalog.rdr_canonical import (
     RDR_CONTENT_TYPES,
+    current_rdr_owner,
     group_rdr_candidates,
     is_in_repo,
+    rdr_source_prefix,
     resolve_all,
 )
 from nexus.catalog.tumbler import Tumbler
@@ -114,6 +118,14 @@ _INCREMENTAL_SOURCE_TYPES: dict[str, frozenset[str]] = {
     "rdr": _RDR_FILEPATH_SOURCE_TYPES,
     "prose": _PROSE_FILEPATH_SOURCE_TYPES,
     "pdf": _PDF_CORPUS_SOURCE_TYPES,
+    # RDR-201 P3.2 (nexus-j9z30.21): generate_rdr_dependency_links's own
+    # source-type set (RDR_CONTENT_TYPES == {"rdr", "prose"}) is WIDER
+    # than the filepath linker's "rdr"-only set above, so it gets its own
+    # kind rather than reusing "rdr" -- reusing "rdr" would under-announce
+    # (skip the phase message) for a batch whose only new entries are
+    # legacy "prose"-registered RDRs, which is exactly the Finding-4
+    # fragmentation shape this generator exists to catch.
+    "rdr-dependency": RDR_CONTENT_TYPES,
 }
 
 
@@ -589,6 +601,44 @@ def generate_rdr_dependency_links(
                         field=field,
                     )
     return count
+
+
+def bind_rdr_dependency_generator(
+    cat: CatalogReader, repo_root: Path,
+) -> tuple[str, Callable[..., int]] | None:
+    """Bind :func:`generate_rdr_dependency_links`'s required
+    ``current_owner`` / ``repo_source_prefix`` from *repo_root*, producing
+    a ``("rdr-dependency", fn)`` tuple that slots into the SAME
+    ``(cat, writer=, new_tumblers=, new_content_types=)`` calling
+    convention as ``generate_rdr_filepath_links`` / ``generate_
+    prose_filepath_links`` / ``generate_pdf_corpus_links`` -- the shared
+    loop at both registration sites (``indexer.py``'s ``_catalog_hook``
+    and ``commands/catalog_cmds/links.py``'s ``generate_links_cmd``) calls
+    every generator identically; this is the ONE place that adapter is
+    built, so both sites bind it the same way.
+
+    ``current_owner`` / ``repo_source_prefix`` stay required, no-default
+    parameters on the underlying generator itself (rdr_canonical's own
+    discipline: the repo-scoping check its number resolution depends on
+    can never be silently skipped by omission) -- this function is the
+    adapter that satisfies the uniform call shape without weakening that.
+
+    Returns ``None`` when no catalog owner is registered yet for
+    *repo_root* (a catalog that has never completed an index has nothing
+    to scope endpoint resolution against) -- callers skip registering the
+    generator for this run rather than passing a bogus owner.
+    """
+    owner = current_rdr_owner(cat, repo_root)
+    if owner is None:
+        return None
+    return (
+        "rdr-dependency",
+        partial(
+            generate_rdr_dependency_links,
+            current_owner=owner,
+            repo_source_prefix=rdr_source_prefix(repo_root),
+        ),
+    )
 
 
 def generate_prose_filepath_links(
