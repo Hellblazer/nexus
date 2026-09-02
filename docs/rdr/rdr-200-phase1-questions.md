@@ -4,7 +4,7 @@ parent_prereg: docs/rdr/rdr-200-phase1-prereg.md
 parent_rdr: RDR-200
 parent_bead: nexus-4e75w.7
 created: 2026-09-01
-status: frozen
+kind: companion
 ---
 
 # RDR-200 Phase 1 Frozen Question Set

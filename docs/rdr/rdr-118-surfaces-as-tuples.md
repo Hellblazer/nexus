@@ -2,7 +2,7 @@
 title: "Surfaces as Tuples — The ORB is the Portal Broker (A2UI Adoption + Xanadu Inheritance)"
 id: RDR-118
 type: Architecture
-status: scrapped
+status: abandoned
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self

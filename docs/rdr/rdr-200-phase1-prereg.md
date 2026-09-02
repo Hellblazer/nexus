@@ -4,7 +4,7 @@ parent_rdr: RDR-200
 parent_bead: nexus-4e75w.2
 related_beads: ["nexus-4e75w.7", "nexus-5mft0.3", "nexus-rv9xp"]
 created: 2026-09-01
-status: frozen-pending-question-set
+kind: companion
 ---
 
 # RDR-200 Phase 1 Pre-Registration

@@ -132,12 +132,12 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-107](rdr-107-t3-chunk-soft-delete.md) | T3 Chunk Soft-Delete via Tombstone Metadata | Architecture | Superseded by RDR-108 | 2026-05-08 |
 | [RDR-108](rdr-108-graph-identity-normalization.md) | Graph Identity Normalization: Catalog Holds the Tree, T3 is a Content-Addressed Blob Store | Architecture | Closed 2026-05-20 | 2026-05-08 |
 | [RDR-109](rdr-109-honest-naming-and-cross-encoder-salience.md) | Honest Local-Mode Naming and Cross-Encoder Salience: Two Naming/Scoring Designs Touching the Same Test-Suite Mode-Default Surface | Architecture | Closed 2026-05-20 | 2026-05-10 |
-| [RDR-110](rdr-110-semantic-tuple-space.md) | Semantic Tuple Space: Unified Coordination Primitive over ChromaDB + SQLite | Architecture | **Scrapped 2026-05-19** | 2026-05-09 |
-| [RDR-111](rdr-111-orb-agentic-cockpit-substrate.md) | The ORB: Observable Relay Bus — Hook Projection, Bindings, and C2 Cockpit Substrate | Architecture | **Scrapped 2026-05-19** | 2026-05-11 |
-| [RDR-112](rdr-112-storage-as-service-container-boundary.md) | Storage-as-Service: Every Persistent Shared-State Store Behind a Daemon, T1 Stays In-Container | Architecture | **Scrapped 2026-05-19** (superseded by RDR-120) | 2026-05-12 |
-| [RDR-113](rdr-113-host-trust-model.md) | Host-Trust Model for nexus Daemons: UDS Permissions, Peer Credentials, Single-User v1 | Architecture | **Scrapped 2026-05-19** | 2026-05-13 |
-| [RDR-118](rdr-118-surfaces-as-tuples.md) | Surfaces as Tuples — The ORB is the Portal Broker (A2UI Adoption + Xanadu Inheritance) | Architecture | **Scrapped 2026-05-19** | 2026-05-17 |
-| [RDR-119](rdr-119-cockpit-ui-fabric.md) | Cockpit UI Fabric — Bakke Auto-Layout over A2UI Catalogs, per-Host Realization | Architecture | **Scrapped 2026-05-19** | 2026-05-18 |
+| [RDR-110](rdr-110-semantic-tuple-space.md) | Semantic Tuple Space: Unified Coordination Primitive over ChromaDB + SQLite | Architecture | **Abandoned 2026-05-19** | 2026-05-09 |
+| [RDR-111](rdr-111-orb-agentic-cockpit-substrate.md) | The ORB: Observable Relay Bus — Hook Projection, Bindings, and C2 Cockpit Substrate | Architecture | **Abandoned 2026-05-19** | 2026-05-11 |
+| [RDR-112](rdr-112-storage-as-service-container-boundary.md) | Storage-as-Service: Every Persistent Shared-State Store Behind a Daemon, T1 Stays In-Container | Architecture | **Abandoned 2026-05-19** (superseded by RDR-120) | 2026-05-12 |
+| [RDR-113](rdr-113-host-trust-model.md) | Host-Trust Model for nexus Daemons: UDS Permissions, Peer Credentials, Single-User v1 | Architecture | **Abandoned 2026-05-19** | 2026-05-13 |
+| [RDR-118](rdr-118-surfaces-as-tuples.md) | Surfaces as Tuples — The ORB is the Portal Broker (A2UI Adoption + Xanadu Inheritance) | Architecture | **Abandoned 2026-05-19** | 2026-05-17 |
+| [RDR-119](rdr-119-cockpit-ui-fabric.md) | Cockpit UI Fabric — Bakke Auto-Layout over A2UI Catalogs, per-Host Realization | Architecture | **Abandoned 2026-05-19** | 2026-05-18 |
 | [RDR-120](rdr-120-storage-substrate-split.md) | Storage Substrate Split: Substrate-Only Scope, No Co-Shipped Consumers | Architecture | Accepted 2026-05-21 | 2026-05-19 |
 | [RDR-121](rdr-121-hook-enforced-tool-routing.md) | Hook-Enforced Tool Routing: PreToolUse as Backstop for Soft Guidance | Architecture | Closed 2026-05-20 (shipped in 4.33.0) | 2026-05-19 |
 | [RDR-125](rdr-125-routing-hook-plugin-ownership.md) | Routing-Hook Plugin Ownership: Each Plugin Ships Its Own Rules | Architecture | Closed 2026-05-21 (shipped in 4.33.1) | 2026-05-20 |

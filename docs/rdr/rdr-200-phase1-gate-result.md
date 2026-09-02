@@ -4,7 +4,7 @@ parent_rdr: RDR-200
 parent_prereg: docs/rdr/rdr-200-phase1-prereg.md
 question_set: docs/rdr/rdr-200-phase1-questions.md
 created: 2026-09-01
-status: complete
+kind: companion
 verdict: FAIL — Alternative 4
 ---
 
