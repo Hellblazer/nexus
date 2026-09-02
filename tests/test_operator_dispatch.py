@@ -4500,13 +4500,85 @@ class TestIsolatedHermeticChild:
         )
 
     @pytest.mark.asyncio
-    async def test_default_leaves_argv_untouched(self) -> None:
-        """Byte-identical argv for the 18 pre-existing call sites."""
-        assert "--setting-sources" not in await self._argv_for()
+    async def test_isolation_is_now_the_DEFAULT(self) -> None:
+        """Flipped by nexus-11nm2 (2026-09-02) after the auth risk was
+        closed by measurement: no apiKeyHelper on this box, the cloud
+        estate cannot dispatch at all, and this laptop is the sole nx
+        operator. Every operator now gets a hermetic child."""
+        argv = await self._argv_for()
+        assert "--setting-sources" in argv
+        assert argv[argv.index("--setting-sources") + 1] == ""
 
     @pytest.mark.asyncio
-    async def test_isolated_false_is_explicitly_a_noop(self) -> None:
+    async def test_isolated_false_is_still_an_escape_hatch(self) -> None:
+        """A child that genuinely needs the caller's settings can still
+        ask, explicitly. That is now the exceptional case."""
         assert "--setting-sources" not in await self._argv_for(isolated=False)
+
+    @pytest.mark.asyncio
+    async def test_isolation_does_not_break_the_t1_mint(self) -> None:
+        """The coupling a sibling session asked us to confirm rather than
+        assume (nexus-11nm2).
+
+        Suppressing settings for the child is a SEPARATE mechanism from
+        tool access, so the AGENTS.md contract predicts no interaction: an
+        ephemeral dispatch mints a T1 session only when it grants tool
+        access (nexus-bjltu), and that is unchanged by --setting-sources.
+        Predicted is not measured, and nothing covered isolated=True
+        TOGETHER with tool access -- the reviewer that drove the flag is
+        tool-free, so it only ever walked the non-minting path.
+        """
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+        mint_calls: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(kwargs)
+            return proc
+
+        def _fake_mint(session_id: str, *, context: str) -> dict:
+            mint_calls.append(session_id)
+            return {"session_token": f"tok-for-{session_id}", "expires_in_seconds": 3600}
+
+        with (
+            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
+        ):
+            await claude_dispatch(
+                "prompt", _SIMPLE_SCHEMA, allowed_tools=["Read"], isolated=True
+            )
+
+        assert mint_calls, "tool access must still mint under isolated=True"
+        env = captured[0].get("env")
+        assert env is not None
+        assert env.get("NX_T1_SESSION_ID"), "the minted session id must still reach the child"
+        assert env.get("NX_T1_SESSION"), "the minted token must still reach the child"
+
+    @pytest.mark.asyncio
+    async def test_isolation_still_mints_nothing_when_tool_free(self) -> None:
+        """The other half of the same coupling: the default path must not
+        start minting just because it is now isolated."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        mint_calls: list = []
+
+        async def intercept(*args, **kwargs):
+            return proc
+
+        def _fake_mint(session_id: str, *, context: str) -> dict:
+            mint_calls.append(session_id)
+            return {"session_token": "t", "expires_in_seconds": 3600}
+
+        with (
+            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
+        ):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA, isolated=True)
+
+        assert mint_calls == []
 
     @pytest.mark.asyncio
     async def test_isolation_does_not_disturb_the_mcp_flags(self) -> None:
