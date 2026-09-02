@@ -129,7 +129,7 @@ README_WORD_MAP: dict[str, str] = {"scrapped": "abandoned"}
 _STATUS_LINE_RE = re.compile(r"^(\s*)status:\s*(.*)$")
 _KIND_LINE_RE = re.compile(r"^(\s*)kind:\s*(.*)$")
 _FILENAME_NUMBER_RE = re.compile(r"^rdr-?(\d+)", re.IGNORECASE)
-_README_ROW_PREFIX_RE = re.compile(r"^\|\s*\[RDR-(\d+)\]\(([^)]+)\)")
+_README_ROW_PREFIX_RE = re.compile(r"^\|\s*\[RDR-(\d+)[^\]]*\]\(([^)]+)\)")
 _T2_TITLE_NUMBER_RE = re.compile(r"^(?:RDR-)?(\d+)$", re.IGNORECASE)
 
 _STATUS_WORD_PATTERN = re.compile(
@@ -162,20 +162,33 @@ def extract_status(block: str) -> str | None:
 
 
 def _rewrite_frontmatter_lines(lines: list[str], outcome: StatusOutcome) -> list[str]:
-    """Single-pass line transform: drop any existing ``kind:`` line, replace
-    or remove the ``status:`` line per *outcome*, and (re)insert
-    ``kind: companion`` at the position the status line occupied."""
+    """Single-pass line transform: replace or remove the ``status:`` line per
+    *outcome*, and (re)insert a ``kind:`` line at the position the status
+    line occupied.
+
+    A pre-existing ``kind:`` line's VALUE is preserved unless *outcome*
+    itself sets ``kind == "companion"`` (in which case it is authoritatively
+    overwritten to ``kind: companion`` -- this sweep's whole point for those
+    five statuses). No file in docs/rdr carries a non-companion ``kind:``
+    line today (verified 2026-09-02), but a migration script silently
+    dropping a field it doesn't understand is a latent data-loss bug
+    regardless of whether current data happens to trigger it."""
+    # Pre-scan (not inline) so a `kind:` line's value is captured regardless
+    # of whether it appears before or after `status:` in the original file.
+    existing_kind_line: str | None = next((ln for ln in lines if _KIND_LINE_RE.match(ln)), None)
     new_lines: list[str] = []
     status_seen = False
     for line in lines:
         if _KIND_LINE_RE.match(line):
-            continue  # dropped; reinserted below if still needed
+            continue  # dropped here; reinserted at the status line's position below
         if _STATUS_LINE_RE.match(line):
             status_seen = True
             if outcome.new_status is not None:
                 new_lines.append(f"status: {outcome.new_status}")
             if outcome.kind == "companion":
                 new_lines.append("kind: companion")
+            elif existing_kind_line is not None:
+                new_lines.append(existing_kind_line)
             continue
         new_lines.append(line)
     if not status_seen:
@@ -183,6 +196,8 @@ def _rewrite_frontmatter_lines(lines: list[str], outcome: StatusOutcome) -> list
             new_lines.append(f"status: {outcome.new_status}")
         if outcome.kind == "companion":
             new_lines.append("kind: companion")
+        elif existing_kind_line is not None:
+            new_lines.append(existing_kind_line)
     return new_lines
 
 
@@ -491,14 +506,41 @@ class T2Diff:
     title: str
     old_status: str | None
     new_status: str | None  # None: cleared (companion outcome)
+    #: "migrate" (T2's OWN value changes under STATUS_TRANSITIONS, e.g.
+    #: scrapped -> abandoned) | "clear-companion" (file became kind:
+    #: companion; T2 status cleared regardless of its own text) |
+    #: "drift-report-only" (T2 disagrees with the file's target for some
+    #: OTHER reason -- rdr_hook / nexus-e19sa's reconcile scope, not this
+    #: script's). Only the first two classes are ever written under --apply.
+    reason: str
 
 
 @dataclass
 class T2Report:
-    diffs: list[T2Diff] = field(default_factory=list)
+    diffs: list[T2Diff] = field(default_factory=list)  # apply-eligible: migrate + clear-companion
+    drift: list[T2Diff] = field(default_factory=list)  # report-only, NEVER applied
     disk_only: list[str] = field(default_factory=list)
     t2_only: list[str] = field(default_factory=list)
     ambiguous: dict[str, list[str]] = field(default_factory=dict)
+    #: apply-eligible diffs whose write was skipped because the source T2
+    #: record carries no `ttl` field at all -- see ``_resolve_apply_ttl``.
+    ttl_unknown: list[str] = field(default_factory=list)
+
+
+def _resolve_apply_ttl(entry: dict[str, Any]) -> tuple[bool, int | None]:
+    """Return ``(safe, ttl)`` for forwarding *entry*'s CURRENT ttl policy
+    verbatim on a content-only ``put()``.
+
+    ``safe=False`` means *entry* carries no ``"ttl"`` key at all -- refuse to
+    guess. ``dict.get("ttl")`` cannot distinguish "explicitly ``None``
+    (permanent)" from "field genuinely absent", and guessing wrong in either
+    direction is a real correctness bug on a live store: guessing ``None``
+    would silently PERMANENT a record that was actually time-boxed; guessing
+    a number would silently expire what was actually permanent. A
+    content-only status edit must never carry that side effect as a guess."""
+    if "ttl" not in entry:
+        return False, None
+    return True, entry.get("ttl")
 
 
 def run_t2_leg(
@@ -545,27 +587,83 @@ def run_t2_leg(
         assert outcome is not None  # disk_by_number excludes unmapped outcomes
 
         if outcome.kind == "companion":
+            # The bead's OWN, independent T2 rule -- not derived from
+            # STATUS_TRANSITIONS at all: a file that becomes kind: companion
+            # gets its T2 status CLEARED regardless of what T2's own text
+            # says and regardless of what leg 1 kept on disk
+            # (revised-after-implementation keeps status: closed on the
+            # file but is still cleared here).
             if old_t2_status is None:
                 continue
             new_content = clear_status_in_content(content)
-            report.diffs.append(T2Diff(title=title, old_status=old_t2_status, new_status=None))
+            report.diffs.append(
+                T2Diff(title=title, old_status=old_t2_status, new_status=None, reason="clear-companion")
+            )
         else:
-            mapped = outcome.new_status
-            if old_t2_status == mapped:
-                continue
-            new_content = set_status_in_content(content, mapped)
-            report.diffs.append(T2Diff(title=title, old_status=old_t2_status, new_status=mapped))
+            # "Map by the same rules as leg 1": translate T2's OWN status
+            # through STATUS_TRANSITIONS -- NOT the file's target status.
+            # Only a T2 value that itself changes under the table (today:
+            # only scrapped -> abandoned) is a genuine vocabulary migration.
+            # Reconciling T2 against whatever the file currently says
+            # (regardless of vocabulary) is drift reconciliation -- rdr_
+            # hook's job (nexus-e19sa), out of this bead's scope.
+            t2_outcome = STATUS_TRANSITIONS.get(old_t2_status.lower()) if old_t2_status is not None else None
+            if (
+                t2_outcome is not None
+                and t2_outcome.kind is None
+                and t2_outcome.new_status is not None
+                and t2_outcome.new_status != old_t2_status.lower()
+            ):
+                new_content = set_status_in_content(content, t2_outcome.new_status)
+                report.diffs.append(
+                    T2Diff(
+                        title=title,
+                        old_status=old_t2_status,
+                        new_status=t2_outcome.new_status,
+                        reason="migrate",
+                    )
+                )
+            else:
+                if old_t2_status is None or old_t2_status.lower() != outcome.new_status:
+                    report.drift.append(
+                        T2Diff(
+                            title=title,
+                            old_status=old_t2_status,
+                            new_status=outcome.new_status,
+                            reason="drift-report-only",
+                        )
+                    )
+                continue  # drift (or genuine agreement) is never applied
 
         if apply:
-            client.put(project, title, new_content, tags=entry.get("tags", "") or "", ttl=entry.get("ttl"))
+            safe, ttl = _resolve_apply_ttl(entry)
+            if not safe:
+                report.ttl_unknown.append(title)
+                continue
+            client.put(project, title, new_content, tags=entry.get("tags", "") or "", ttl=ttl)
 
     return report
 
 
 def render_t2_report(report: T2Report, *, applied: bool) -> str:
-    lines = [f"## T2 leg ({'APPLY' if applied else 'DRY-RUN'}) — {len(report.diffs)} proposed diff(s)"]
+    lines = [
+        f"## T2 leg ({'APPLY' if applied else 'DRY-RUN'}) — {len(report.diffs)} proposed diff(s), "
+        f"{len(report.drift)} drift-only (never applied)"
+    ]
     for d in report.diffs:
-        lines.append(f"  - {d.title}: {d.old_status!r} -> {d.new_status!r}")
+        lines.append(f"  - [{d.reason}] {d.title}: {d.old_status!r} -> {d.new_status!r}")
+    if report.drift:
+        lines.append(
+            f"Drift — T2-vs-file disagreement NOT migrated by this script "
+            f"(rdr_hook / nexus-e19sa reconcile scope; never in the apply set) [{len(report.drift)}]:"
+        )
+        for d in report.drift:
+            lines.append(f"  - {d.title}: T2={d.old_status!r} file={d.new_status!r}")
+    if report.ttl_unknown:
+        lines.append(
+            f"TTL policy undeterminable, SKIPPED under --apply (record has no `ttl` field) "
+            f"[{len(report.ttl_unknown)}]: " + ", ".join(report.ttl_unknown)
+        )
     if report.disk_only:
         lines.append(
             f"Disk-only (file has a mapped status, no T2 record) [{len(report.disk_only)}]: "
