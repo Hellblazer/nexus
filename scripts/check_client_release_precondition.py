@@ -60,6 +60,18 @@ import subprocess
 import sys
 
 import check_wire_contract_pairing as _wire_ledger
+import release_choreography as _choreo
+
+# RDR-201 P2.5 (nexus-j9z30.15): the routed decision path. The sensors
+# (git, the ledger parse) stay imperative; every branch below that itself
+# PRINTS and DECIDES an exit code carries an `if _choreo.use_table_path():`
+# arm resolving docs/tables/release-choreography.toml through the SAME
+# scripts/release_choreography.py module check_engine_release_floor.py uses
+# -- one table, one cache, one switch, so the two gates cannot disagree
+# about a ledger entry again (the O1 class). A DELEGATING branch (check()
+# returning check_wire_contract_ledger's own verdict; main() returning
+# check()'s) is left untouched: the switch cascades. See that module's
+# docstring; P2.6 (nexus-j9z30.16) deletes the "old" branches.
 
 #: engine tag (or the literal "next" for the tag about to be cut) -> the
 #: client commits that must be in a RELEASED conexus version before that
@@ -117,6 +129,11 @@ def check_wire_contract_ledger(ack_beads: list[str] | None = None) -> tuple[int,
     """
     ledger = _wire_ledger.parse_ledger(_wire_ledger.DEFAULT_LEDGER_PATH)
     if not ledger.unshipped:
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
+                "check_wire_contract_ledger", {"ledger": "empty"},
+                {"ledger_path": str(_wire_ledger.DEFAULT_LEDGER_PATH)},
+            ), True
         print(
             f"wire-contract ledger: 0 unshipped entries in "
             f"{_wire_ledger.DEFAULT_LEDGER_PATH}"
@@ -131,6 +148,18 @@ def check_wire_contract_ledger(ack_beads: list[str] | None = None) -> tuple[int,
     missing = list(verdict.blocking) + list(verdict.additive)
     blocking = list(verdict.blocking)
     if blocking:
+        if _choreo.use_table_path():
+            entries = "\n".join(
+                f"  {e.sha}  bead {e.bead}  engine tag {e.engine_tag}  ({e.note})"
+                for e in blocking
+            )
+            return _choreo.emit_choreography(
+                "check_wire_contract_ledger", {"ledger": "blocking"},
+                {
+                    "n": str(len(blocking)), "entries": entries,
+                    "ledger_path": str(_wire_ledger.DEFAULT_LEDGER_PATH),
+                },
+            ), False
         print(
             f"BLOCKED: {len(blocking)} both-halves commit(s) in "
             f"{_wire_ledger.DEFAULT_LEDGER_PATH} have an unshipped client "
@@ -153,6 +182,15 @@ def check_wire_contract_ledger(ack_beads: list[str] | None = None) -> tuple[int,
             "acknowledged via --ack-client-lag)"
             if acked_count else ""
         )
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
+                "check_wire_contract_ledger", {"ledger": "additive"},
+                {
+                    "n": str(len(missing)),
+                    "beads": ", ".join(sorted({e.bead for e in missing})),
+                    "acked_suffix": acked_suffix,
+                },
+            ), False
         print(
             f"wire-contract ledger: {len(missing)} unacknowledged unshipped "
             "both-halves commit(s), all marked [additive] (old client + new "
@@ -164,11 +202,16 @@ def check_wire_contract_ledger(ack_beads: list[str] | None = None) -> tuple[int,
         )
         return 0, False
 
+    acked_beads = ", ".join(sorted(acked & {e.bead for e in ledger.unshipped.values()}))
+    if _choreo.use_table_path():
+        return _choreo.emit_choreography(
+            "check_wire_contract_ledger", {"ledger": "acked_only"},
+            {"n": str(len(ledger.unshipped)), "beads": acked_beads},
+        ), False
     print(
         f"wire-contract ledger: {len(ledger.unshipped)} unshipped "
         "both-halves commit(s), all explicitly acknowledged via "
-        "--ack-client-lag: "
-        f"{', '.join(sorted(acked & {e.bead for e in ledger.unshipped.values()}))}"
+        f"--ack-client-lag: {acked_beads}"
     )
     return 0, False
 
@@ -231,6 +274,10 @@ def check(engine_tag: str, ack_client_lag: list[str] | None = None) -> int:
         try:
             release = latest_release_tag()
         except RuntimeError as e:
+            if _choreo.use_table_path():
+                return _choreo.emit_choreography(
+                    "check_composite", {"hand_table": "latest_release_tag_error"}, {"exc": str(e)},
+                )
             print(f"CANNOT VERIFY: {e}", file=sys.stderr)
             return 2
         missing = []
@@ -238,6 +285,11 @@ def check(engine_tag: str, ack_client_lag: list[str] | None = None) -> int:
             try:
                 ok = is_ancestor(commit, release)
             except RuntimeError as e:
+                if _choreo.use_table_path():
+                    return _choreo.emit_choreography(
+                        "check_composite", {"hand_table": "is_ancestor_error"},
+                        {"commit": commit, "exc": str(e)},
+                    )
                 print(f"CANNOT VERIFY {commit}: {e}", file=sys.stderr)
                 return 2
             status = "in" if ok else "MISSING FROM"
@@ -245,6 +297,14 @@ def check(engine_tag: str, ack_client_lag: list[str] | None = None) -> int:
             if not ok:
                 missing.append((commit, why))
         if missing:
+            if _choreo.use_table_path():
+                return _choreo.emit_choreography(
+                    "check_composite", {"hand_table": "missing_commit"},
+                    {
+                        "engine_tag": engine_tag, "n": str(len(missing)), "release": release,
+                        "commits": "\n".join(f"  {commit}: {why}" for commit, why in missing),
+                    },
+                )
             print(
                 f"\nBLOCKED: {engine_tag} must not deploy — "
                 f"{len(missing)} required client commit(s) absent from the "
@@ -262,6 +322,11 @@ def check(engine_tag: str, ack_client_lag: list[str] | None = None) -> int:
         return ledger_rc
 
     if hand_table_vacuous and ledger_vacuous:
+        if _choreo.use_table_path():
+            return _choreo.emit_choreography(
+                "check_composite", {"hand_table": "vacuous", "ledger": "empty"},
+                {"engine_tag": engine_tag, "ledger_path": str(_wire_ledger.DEFAULT_LEDGER_PATH)},
+            )
         print(
             f"OK (VACUOUS -- 0 preconditions registered for {engine_tag} AND "
             f"0 entries in {_wire_ledger.DEFAULT_LEDGER_PATH}'s ## Unshipped "

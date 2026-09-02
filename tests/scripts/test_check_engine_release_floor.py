@@ -2028,6 +2028,28 @@ def test_table_path_check_client_lag_ledger_blocking(table_path, tmp_path) -> No
     assert rc == 1
 
 
+def test_table_path_check_client_lag_ledger_additive_keeps_the_acked_suffix(
+    table_path, tmp_path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """RDR-201 P2.5 (nexus-j9z30.15): a mixed ledger -- one [additive]
+    entry, one acknowledged entry -- prints the acknowledged count as a
+    suffix on the old path. The catalog entry must carry it too
+    (``[acked_suffix]``) or the table path silently drops a fact the
+    operator reads; the fixture's own "additive" ledger state has zero
+    acked entries, so Role 2's full-text parity cannot see this."""
+    additive = (
+        "- `cafebabecafebabecafebabecafebabecafebabe` -- bead nexus-addv -- "
+        "engine tag `engine-service-v9.9.9` -- [additive] env-var contract\n"
+    )
+    ledger = _write_ledger(tmp_path, additive + _FAKE_ENTRY)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger):
+        rc = gate.check_client_lag_ledger(["nexus-fake"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "(1 further entry acknowledged via --ack-client-lag)" in out
+    assert "[acked_suffix]" not in out
+
+
 def test_table_path_check_paired_preconditions_not_published_fills_real_reason(table_path, capsys: pytest.CaptureFixture[str]) -> None:
     """The one row (``battery_not_published``) whose catalog template's
     ``[reason]`` placeholder must be filled with the REAL reason string for

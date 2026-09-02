@@ -705,18 +705,18 @@ def check_client_lag_ledger(ack_beads: list[str] | None = None) -> int:
 
     acked_beads = sorted(e.bead for e in verdict.acked)
     if verdict.additive:
-        if _choreo.use_table_path():
-            beads = ", ".join(sorted(e.bead for e in verdict.additive))
-            return _choreo.emit_choreography(
-                "check_client_lag_ledger", {"ledger": "additive"},
-                {"n": str(len(verdict.additive)), "beads": beads},
-            )
         acked_suffix = (
             f" ({len(acked_beads)} further entr"
             f"{'y' if len(acked_beads) == 1 else 'ies'} acknowledged via "
             "--ack-client-lag)"
             if acked_beads else ""
         )
+        if _choreo.use_table_path():
+            beads = ", ".join(sorted(e.bead for e in verdict.additive))
+            return _choreo.emit_choreography(
+                "check_client_lag_ledger", {"ledger": "additive"},
+                {"n": str(len(verdict.additive)), "beads": beads, "acked_suffix": acked_suffix},
+            )
         print(
             f"client-lag ledger: {len(verdict.additive)} unacknowledged "
             "unshipped both-halves commit(s), all marked [additive] (old "

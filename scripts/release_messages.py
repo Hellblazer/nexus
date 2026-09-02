@@ -24,11 +24,20 @@ detail, the entry keeps the surrounding fixed prose and marks the
 variable span with a bracketed placeholder (e.g. ``[reason]``,
 ``[tag]``) rather than inventing a fake concrete value.
 
-NOT YET CONSUMED by either gated script -- that rewiring is RDR-201
-P2.4/P2.5 (nexus-j9z30.14/.15). This module exists so the message text
-has a single owned home ahead of that rewiring, and so
-``tests/scripts/test_release_table_parity.py`` can assert catalog<->table
-row-id parity now rather than after the scripts are cut over.
+Consumed by BOTH gated scripts through ``release_choreography
+.emit_choreography`` (RDR-201 P2.4/P2.5, nexus-j9z30.14/.15) whenever
+``release_choreography.DECISION_PATH`` is ``"table"``; the placeholders
+are filled from the values each call site has in hand. ``tests/scripts/
+test_release_table_parity.py`` asserts catalog<->table row-id parity and,
+for every enumerated cell, byte-for-byte parity between the text the old
+inline branch prints and the text this catalog renders -- a placeholder
+this catalog lacks (the ``[acked_suffix]`` the two ``ledger_additive_
+authorized`` entries carry, added at P2.5) is a fact the operator stops
+seeing, not a cosmetic gap.
+
+Where the real branch prints an exception's text, the entry carries a
+bare ``[exc]`` placeholder -- never a paraphrase of what the exception
+"would say" (the P2.4 fix round found six entries that invented one).
 
 stdlib only.
 """
@@ -125,7 +134,7 @@ RELEASE_MESSAGES: dict[str, str] = {
         "commit(s), all marked [additive] (old client + new engine safe) "
         "— deploy authorized ahead of the client tag (nexus-1emxn "
         "choreography (a)); pairing completes when the client release "
-        "carrying [beads] bumps the floor."
+        "carrying [beads] bumps the floor.[acked_suffix]"
     ),
     "check_client_lag_ledger::ledger_acked": (
         "client-lag ledger: [n] unshipped both-halves commit(s), all "
@@ -146,7 +155,7 @@ RELEASE_MESSAGES: dict[str, str] = {
         "commit(s), all marked [additive] (old client + new engine safe) "
         "— unpaired deploy authorized ahead of the client tag "
         "(nexus-1emxn choreography (a)); pairing completes when the client "
-        "release carrying [beads] bumps the floor."
+        "release carrying [beads] bumps the floor.[acked_suffix]"
     ),
     "check_wire_contract_ledger::ledger_acked": (
         "wire-contract ledger: [n] unshipped both-halves commit(s), all "
@@ -466,19 +475,19 @@ RELEASE_MESSAGES: dict[str, str] = {
     ),
     # -- check_composite (check_client_release_precondition.py, check()) --
     "check_composite::composite_latest_release_tag_error": (
-        "CANNOT VERIFY: [RuntimeError from latest_release_tag()]"
+        "CANNOT VERIFY: [exc]"
     ),
     "check_composite::composite_is_ancestor_error": (
-        "CANNOT VERIFY [commit]: [RuntimeError from is_ancestor()]"
+        "CANNOT VERIFY [commit]: [exc]"
     ),
     "check_composite::composite_missing_commit": (
-        "BLOCKED: [engine_tag] must not deploy — [n] required client "
-        "commit(s) absent from the latest release [release]: [commits]"
+        "\nBLOCKED: [engine_tag] must not deploy — [n] required client "
+        "commit(s) absent from the latest release [release]:\n[commits]"
         "\n\n" + _precond._REMEDY
     ),
     "check_composite::composite_both_vacuous": (
         "OK (VACUOUS -- 0 preconditions registered for [engine_tag] AND 0 "
-        "entries in docs/wire-contract-pending.md's ## Unshipped section): "
+        "entries in [ledger_path]'s ## Unshipped section): "
         "this run verified NOTHING from EITHER source. An empty hand table "
         "plus an empty ledger means either 'no known client coupling for "
         "this engine tag' or 'nobody added rows to either source' -- this "

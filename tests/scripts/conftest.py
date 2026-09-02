@@ -23,12 +23,15 @@ shadows this one.
 """
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 import check_wire_contract_pairing as _wire_ledger
 import release_choreography as _choreo
+from nexus.tables.load import Table
 
 _EMPTY_LEDGER = "## Unshipped\n\n(none)\n\n## Shipped\n"
 
@@ -83,3 +86,30 @@ def table_path(monkeypatch: pytest.MonkeyPatch) -> None:
     bare assignment: a flip written onto a module that no longer owns the
     switch must fail loudly, not silently drive the old path and pass."""
     monkeypatch.setattr(_choreo, "DECISION_PATH", "table")
+
+
+@pytest.fixture
+def mutate_choreography_row() -> Callable[[str, int], Table]:
+    """Factory: a copy of the REAL choreography table with ONE row's
+    ``emit.exit_code`` replaced -- every other row untouched. ``Row`` and
+    ``Table`` are frozen dataclasses, so this rebuilds both via
+    ``dataclasses.replace``; the real cached table
+    (``release_choreography.choreography_table()``) and the file on disk are
+    never touched. Pair with ``patch.object(release_choreography,
+    "choreography_table", return_value=<mutated>)`` to steer BOTH real gated
+    scripts onto the corrupted copy (nexus-w2x5x): a script whose table path
+    is genuinely live returns the mutated exit code; one whose switch is
+    stale or whose emit reads some other cache returns the real one."""
+
+    def _mutate(row_id: str, exit_code: int) -> Table:
+        table = _choreo.choreography_table()
+        rows = list(table.rows)
+        for i, row in enumerate(rows):
+            if row.id != row_id:
+                continue
+            assert isinstance(row.outcome, dict), (row_id, row.outcome)
+            rows[i] = dataclasses.replace(row, outcome={**row.outcome, "exit_code": str(exit_code)})
+            return dataclasses.replace(table, rows=tuple(rows))
+        raise AssertionError(f"no row with id {row_id!r} in the real choreography table")
+
+    return _mutate

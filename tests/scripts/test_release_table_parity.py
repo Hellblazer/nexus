@@ -10,11 +10,11 @@ via the enumerator's own monkeypatched drivers, never reimplemented here --
 and asserts the observed verdict (exit code + message key) matches the
 fixture's frozen expected column.
 
-Two roles, one test body
--------------------------
+Three roles
+-----------
 
-While no table exists (today), Role 1 (``test_old_path_matches_fixture``)
-is a CHANGE DETECTOR for the enumeration itself, with two independent
+Role 1 (``test_old_path_matches_fixture``) is a CHANGE DETECTOR for the
+enumeration itself, with two independent
 failure modes: (a) a real gated script's branch logic drifting from what
 the fixture recorded (each cell's driver re-executes the real function),
 and (b) the checked-in fixture going STALE relative to
@@ -24,9 +24,23 @@ table in the enumerator but forgets to regenerate the JSON
 below, which compares ``erc.build_fixture()`` -- a pure, deterministic
 function -- against the committed file directly).
 
-``_new_path`` returns ``NotImplemented`` (nothing to compare against yet)
-and ``test_new_path_matches_old_path_cell_by_cell`` skips every case rather
-than asserting anything.
+Role 2 (``test_new_path_matches_old_path_cell_by_cell``) drives the REAL
+gated function twice per cell -- ``release_choreography.DECISION_PATH``
+"old", then "table" -- and asserts the classified verdict AND the full
+printed text agree. Since RDR-201 P2.5 (nexus-j9z30.15) that covers BOTH
+scripts' twelve cell-producing functions; no cell resolves the table in
+isolation any more.
+
+Role 3 (``test_table_row_matches_fixture_by_direct_resolve``) resolves the
+table directly for every cell's assignment and pins the row's own verdict
+(and row id) to the fixture. It is the ONLY coverage the DELEGATING rows
+get: a composite/dispatch cell whose real function prints nothing itself
+and returns a sub-call's verdict (``main_dispatch::main_ledger_only_*``,
+``check_composite::composite_vacuous_table_ledger_*``,
+``precond_main_dispatch::*``) never emits its own row under the table
+path -- the sub-function's row is the decision -- so Role 2 cannot see a
+wrong exit code on it. Not a second copy of Role 2: Role 2 proves the
+wiring, Role 3 proves the rows.
 
 Once P2.4/P2.5 land ``docs/tables/release-choreography.toml`` and rewire the
 two scripts onto ``table.resolve()``, ``_new_path`` starts returning a real
@@ -75,7 +89,6 @@ non-empty, ``[additive]``-entry-bearing ledger state.
 from __future__ import annotations
 
 import copy
-import dataclasses
 import json
 import pathlib
 import random
@@ -343,56 +356,29 @@ def _assignment_for(table: Table, cell_dict: dict[str, Any], event: str) -> dict
     return assignment
 
 
-def _new_path(cell: dict[str, Any], event: str) -> tuple[int, str] | Any:
-    """RDR-201 P2.4 (nexus-j9z30.14): for the FLOOR script's own nine
-    cell-producing functions, drive the REAL gated function with
-    ``release_choreography.DECISION_PATH`` flipped to ``"table"`` -- this
-    exercises the ACTUAL production wiring (``release_choreography
-    .emit_choreography()`` as called from inside
-    ``check_engine_release_floor.py``), not just the table in isolation.
-    Reuses ``_OLD_PATH_DRIVERS[function]`` unchanged: the same driver
-    monkeypatches the sensors and invokes the real gated function either
-    way, so which decision path fires depends only on the flag.
-
-    The precondition script's own three cell-producing functions
-    (``check_wire_contract_ledger`` / ``check_composite`` /
-    ``precond_main_dispatch``) are UNCHANGED by that bead
-    (nexus-j9z30.15 rewires ``check_client_release_precondition.py`` next)
-    -- for those, this keeps resolving the table directly (RDR-201 P2.3's
-    original behavior), a preview of what .15 will wire for real. Either
-    branch reads the table through ``release_choreography
+def _new_path(cell: dict[str, Any], event: str) -> tuple[int, str]:
+    """RDR-201 P2.4/P2.5 (nexus-j9z30.14/.15): drive the REAL gated
+    function for ``cell`` with ``release_choreography.DECISION_PATH``
+    flipped to ``"table"`` -- exercising the ACTUAL production wiring
+    (``release_choreography.emit_choreography()`` as called from inside
+    whichever of the two scripts owns ``cell["function"]``), never the
+    table in isolation. Reuses ``_OLD_PATH_DRIVERS[function]`` unchanged:
+    the same driver monkeypatches the sensors and invokes the real gated
+    function either way, so which decision path fires depends only on the
+    flag. The table is read through ``release_choreography
     .choreography_table()`` -- the ONE accessor -- so a test that patches
-    that name steers both (nexus-w2x5x); there is no private ``table=``
-    override any more.
+    that name steers the real function (nexus-w2x5x).
 
-    A resolve() REFUSAL (no-match / ambiguous-match / unknown-value) on a
-    cell the fixture itself enumerated as reachable is a table-authoring
-    defect, not a legitimate outcome -- raised loudly here rather than
-    folded into the tuple return, so it fails the specific (cell, event)
-    test case with a clear cause instead of a confusing tuple-shape
-    mismatch against ``_drive_old_path``'s output."""
-    function = cell["function"]
-    if function in _FLOOR_SCRIPT_FUNCTIONS:
-        driven_cell = _cell_from_fixture(cell)
-        original_path = _choreo.DECISION_PATH
-        _choreo.DECISION_PATH = "table"
-        try:
-            return _OLD_PATH_DRIVERS[function](driven_cell)
-        finally:
-            _choreo.DECISION_PATH = original_path
-
-    table = _choreo.choreography_table()
-    assignment = _assignment_for(table, cell, event)
-    resolution = resolve(table, assignment)
-    if resolution.refusal is not None:
-        raise AssertionError(
-            f"{cell['cell_id']}@{event}: table refused a cell the fixture "
-            f"enumerated as reachable -- {resolution.refusal} {dict(resolution.detail)} "
-            f"(assignment={assignment})"
-        )
-    outcome = resolution.row.outcome
-    assert isinstance(outcome, dict), (cell["cell_id"], resolution.row.id, outcome)
-    return int(outcome["exit_code"]), outcome["message_key"]
+    ``event`` is carried for parity with the (cell, event) parametrization
+    Role 2 still runs under (see the module docstring); the real function
+    has no event input, so nothing here consults it."""
+    driven_cell = _cell_from_fixture(cell)
+    original_path = _choreo.DECISION_PATH
+    _choreo.DECISION_PATH = "table"
+    try:
+        return _OLD_PATH_DRIVERS[cell["function"]](driven_cell)
+    finally:
+        _choreo.DECISION_PATH = original_path
 
 
 def _assert_old_path_matches_fixture(cell_dict: dict[str, Any]) -> None:
@@ -494,7 +480,7 @@ def test_old_path_matches_fixture(cell_dict: dict[str, Any]) -> None:
 #: RDR-201 P2.4 fix round (critique T2 nexus/critique-nexus-j9z30-14
 #: -2026-09-02 [24073] finding (a); code-review T2
 #: nexus/code-review-nexus-j9z30-14-2026-09-02 [24074] Important 1):
-#: cell_id -> reason, for a floor-script cell whose OLD-path and NEW-path
+#: cell_id -> reason, for a cell whose OLD-path and NEW-path
 #: printed TEXT is legitimately, permanently unequal even though their
 #: (exit_code, message_key) verdict agrees. As of this fix round: EMPTY --
 #: release_messages.py's catalog entries were corrected (ledger-path
@@ -527,26 +513,20 @@ def test_new_path_matches_old_path_cell_by_cell(
     this test resolves for itself by declaring one interpretation correct.
 
     RDR-201 P2.4 fix round (critique T2 nexus/critique-nexus-j9z30-14
-    -2026-09-02 [24073] finding (a)): for a FLOOR-script cell, ALSO drive
-    both paths a second time capturing the full printed TEXT (not just the
-    classified verdict) and assert byte equality -- closing the blind spot
-    where a content-level regression in release_messages.py's prose could
-    preserve the exit code and whatever substring a classifier keys on
-    while still being wrong. Scoped to floor-script cells only: a
-    precondition-script cell's ``_new_path`` still resolves the table
-    directly (nexus-j9z30.15's job) rather than driving real printed
-    output, so there is no NEW-path text to compare against for those --
-    named here explicitly, not globbed away."""
+    -2026-09-02 [24073] finding (a)): ALSO drive both paths a second time
+    capturing the full printed TEXT (not just the classified verdict) and
+    assert byte equality -- closing the blind spot where a content-level
+    regression in release_messages.py's prose could preserve the exit code
+    and whatever substring a classifier keys on while still being wrong.
+    Since RDR-201 P2.5 (nexus-j9z30.15) this covers every cell of BOTH
+    scripts -- the precondition script's three cell-producing functions
+    drive real printed output through the same switch now."""
     new = _new_path(cell_dict, event)
-    if new is NotImplemented:
-        pytest.skip("new path (table resolve()) not wired yet -- RDR-201 P2.4/P2.5")
     cell = _cell_from_fixture(cell_dict)
     old = _drive_old_path(cell)
     assert new == old, (cell_dict["cell_id"], event, old, new)
 
     function = cell_dict["function"]
-    if function not in _FLOOR_SCRIPT_FUNCTIONS:
-        return
     old_verdict, old_text = _drive_capturing_full_text(function, cell, "old")
     new_verdict, new_text = _drive_capturing_full_text(function, cell, "table")
     assert old_verdict == new_verdict, (cell_dict["cell_id"], event, old_verdict, new_verdict)
@@ -557,30 +537,32 @@ def test_new_path_matches_old_path_cell_by_cell(
 
 
 # ---------------------------------------------------------------------------
-# Wiring-completeness canary: a landed table with an unflipped hook must be loud
+# Role 3: every table row (delegating rows included) pins to the fixture
 # ---------------------------------------------------------------------------
 
-def test_wiring_completeness_canary_for_new_path() -> None:
-    """code-review finding (T2 nexus/code-review-nexus-j9z30-12-2026-09-01
-    §5): if ``docs/tables/release-choreography.toml`` exists on disk,
-    ``_new_path`` must not still return ``NotImplemented`` -- that would
-    mean the table landed without anyone flipping this file's hook, and
-    the entire Role-2 suite would go on silently skipping forever. The
-    table now exists (RDR-201 P2.3, nexus-j9z30.13) and ``_new_path`` is
-    wired, so this is a real, live tripwire from here on -- the
-    ``skip`` branch below stays only for a checkout that predates this
-    bead."""
-    if not _CHOREOGRAPHY_TABLE_PATH.is_file():
-        pytest.skip(
-            "docs/tables/release-choreography.toml does not exist yet -- "
-            "RDR-201 P2.4/P2.5"
-        )
-    sample_cell, sample_event = _CELL_EVENT_PAIRS[0]
-    result = _new_path(sample_cell, sample_event)
-    assert result is not NotImplemented, (
-        "docs/tables/release-choreography.toml exists but _new_path() still "
-        "returns NotImplemented -- RDR-201 P2.4/P2.5 landed the table "
-        "without wiring this file's _new_path() hook to table.resolve()."
+@pytest.mark.parametrize("cell_dict", _FIXTURE_CELLS, ids=_FIXTURE_CELL_IDS)
+def test_table_row_matches_fixture_by_direct_resolve(cell_dict: dict[str, Any]) -> None:
+    """Resolve the table directly for ``cell_dict``'s own assignment and
+    pin the row it hits -- id, exit code, message key -- to the fixture.
+    See the module docstring's Role 3: this is the only place a DELEGATING
+    row's verdict is checked at all, since no real function ever emits
+    one. Event-invariant by ruling (nexus-j9z30.26), so one event per cell
+    suffices; a refusal on a cell the fixture enumerated as reachable is a
+    table-authoring defect and fails loudly with the assignment named."""
+    table = _choreo.choreography_table()
+    event = _cell_reachable_events(cell_dict)[0]
+    assignment = _assignment_for(table, cell_dict, event)
+    resolution = resolve(table, assignment)
+    assert resolution.refusal is None, (
+        f"{cell_dict['cell_id']}: table refused a cell the fixture enumerated "
+        f"as reachable -- {resolution.refusal} {dict(resolution.detail)} "
+        f"(assignment={assignment})"
+    )
+    outcome = resolution.row.outcome
+    assert isinstance(outcome, dict), (cell_dict["cell_id"], resolution.row.id, outcome)
+    assert resolution.row.id == cell_dict["cell_id"]
+    assert (int(outcome["exit_code"]), outcome["message_key"]) == (
+        cell_dict["exit_code"], cell_dict["message_key"],
     )
 
 
@@ -763,30 +745,6 @@ def test_battery_published_unavailable_catalog_reason_placeholder_drives_the_cla
 # catching a wrong row at all.
 
 
-def _mutated_table_with_flipped_exit_code(row_id: str) -> Table:
-    """A copy of the real choreography table with ONE row's
-    ``emit.exit_code`` flipped to a value guaranteed different from its
-    real one (see ``_a_wrong_exit_code`` above for the identical technique
-    Role 1 uses) -- every other row is untouched. ``Row`` and ``Table`` are
-    frozen dataclasses, so this rebuilds both via ``dataclasses.replace``
-    rather than mutating in place; the real, cached table
-    (``release_choreography.choreography_table()``) and the file on disk
-    are never touched."""
-    table = _choreo.choreography_table()
-    rows = list(table.rows)
-    for i, row in enumerate(rows):
-        if row.id != row_id:
-            continue
-        assert isinstance(row.outcome, dict), (row_id, row.outcome)
-        corrupted_outcome = dict(row.outcome)
-        corrupted_outcome["exit_code"] = str(
-            _a_wrong_exit_code(int(row.outcome["exit_code"]))
-        )
-        rows[i] = dataclasses.replace(row, outcome=corrupted_outcome)
-        return dataclasses.replace(table, rows=tuple(rows))
-    raise AssertionError(f"no row with id {row_id!r} in the real table")
-
-
 def _first_cell_event_pair_per_script() -> list[tuple[str, dict[str, Any], str]]:
     """One (script, cell, event) sample per gated script -- the first
     reachable pair of each in fixture order. Both scripts must be
@@ -810,7 +768,7 @@ _MUTATION_CANARY_SAMPLES = _first_cell_event_pair_per_script()
     ids=[f"{script}:{cell_dict['cell_id']}@{event}" for script, cell_dict, event in _MUTATION_CANARY_SAMPLES],
 )
 def test_a_mutated_table_row_reds_role_2(
-    script: str, cell_dict: dict[str, Any], event: str,
+    script: str, cell_dict: dict[str, Any], event: str, mutate_choreography_row: Callable[[str, int], Table],
 ) -> None:
     """Flip one row's ``exit_code`` in an in-memory copy of the real table,
     steer the REAL gated function onto that copy by patching
@@ -826,12 +784,12 @@ def test_a_mutated_table_row_reds_role_2(
     cache) ignores the mutation, returns the old verdict, and REDS here --
     which is the whole reason this samples both scripts, not just one.
     The file on disk and the real cached table are never touched: the
-    mutated copy is built BEFORE the patch (from the real accessor) and
-    the patch is scoped to the one ``_new_path`` call."""
-    mutated = _mutated_table_with_flipped_exit_code(cell_dict["cell_id"])
+    mutated copy (``mutate_choreography_row``, tests/scripts/conftest.py)
+    is built BEFORE the patch, from the real accessor, and the patch is
+    scoped to the one ``_new_path`` call."""
+    mutated = mutate_choreography_row(cell_dict["cell_id"], _a_wrong_exit_code(cell_dict["exit_code"]))
     with patch.object(_choreo, "choreography_table", return_value=mutated):
         new = _new_path(cell_dict, event)
-    assert new is not NotImplemented
     cell = _cell_from_fixture(cell_dict)
     old = _drive_old_path(cell)
     assert new != old, (

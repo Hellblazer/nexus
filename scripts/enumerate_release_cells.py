@@ -523,10 +523,8 @@ def wire_contract_ledger_chain() -> GuardChain:
 def drive_wire_contract_ledger(cell: Cell) -> tuple[int, str]:
     ledger, ack = _ledger_fixture(cell.inputs["ledger"])
     with patch.object(wire_ledger, "parse_ledger", return_value=ledger):
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc, _is_vacuous = precond.check_wire_contract_ledger(ack)
-    return rc, _classify_wire_contract_ledger(rc, out.getvalue() + err.getvalue())
+        (rc, _is_vacuous), out, err = _capture(precond.check_wire_contract_ledger, ack)
+    return rc, _classify_wire_contract_ledger(rc, out + err)
 
 
 def _classify_wire_contract_ledger(rc: int, text: str) -> str:
