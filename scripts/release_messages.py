@@ -34,6 +34,9 @@ stdlib only.
 """
 from __future__ import annotations
 
+import check_client_release_precondition as _precond
+import check_engine_release_floor as _floor
+
 #: Row id (== the choreography table's own row id, ``f"{function}::
 #: {message_key}"``) -> the message text that function's real branch
 #: prints today. See the module docstring for the bracketed-placeholder
@@ -57,7 +60,7 @@ RELEASE_MESSAGES: dict[str, str] = {
         "ENGINE PIN CHECK FAILED: engine-service-v[newest] is published but "
         "this release pins v[floor]. Local-mode installs receive ONLY the "
         "pinned identity, so every engine fix between v[floor] and "
-        "v[newest] reaches nobody."
+        "v[newest] reaches nobody.\n" + _floor._UNPINNED_REMEDY
     ),
     "check_pin_currency::pin_currency_current_at_floor": (
         "engine pin is current: REQUIRED_ENGINE_VERSION v[floor] == newest "
@@ -136,13 +139,7 @@ RELEASE_MESSAGES: dict[str, str] = {
     "check_wire_contract_ledger::ledger_blocked": (
         "BLOCKED: [n] both-halves commit(s) in docs/wire-contract-pending.md "
         "have an unshipped client half, no [additive] direction-safety "
-        "token, and no acknowledgment: [entries]\n\nRemedy: this engine "
-        "deploy carries an engine-side wire change "
-        "(docs/wire-contract-pending.md ## Unshipped) whose client half is "
-        "not yet in a published release (nexus-1vogq class -- the 08-13 "
-        "v0.1.73 manifest-400 outage shape). Either pair this deploy with "
-        "the client release carrying the listed commit(s), or pass "
-        "--ack-client-lag <bead-id> for each entry below to deploy anyway."
+        "token, and no acknowledgment: [entries]\n\n" + _precond._LEDGER_REMEDY
     ),
     "check_wire_contract_ledger::ledger_additive_authorized": (
         "wire-contract ledger: [n] unacknowledged unshipped both-halves "
@@ -263,12 +260,12 @@ RELEASE_MESSAGES: dict[str, str] = {
         "treat this as a failed gate, not a pass."
     ),
     "check_floor_bare::bare_probe_stale_via_exception": (
-        "ENGINE FLOOR CHECK FAILED (required v[floor]): [exc]\n[remedy]"
+        "ENGINE FLOOR CHECK FAILED (required v[floor]): [exc]\n" + _floor._REMEDY
     ),
     "check_floor_bare::bare_probe_stale_via_success": (
         "ENGINE FLOOR CHECK FAILED: deployed engine at [base_url] reports "
         "release_version [release_version], required floor is v[floor]."
-        "\n[remedy]"
+        "\n" + _floor._REMEDY
     ),
     "check_floor_bare::bare_probe_current": (
         "cloud engine is current: [base_url] release_version="
@@ -385,19 +382,9 @@ RELEASE_MESSAGES: dict[str, str] = {
         "record_deploy_from_gate_report_leg::* entries above."
     ),
     "main_dispatch::main_bare_tracker_opt_out": (
-        "NOTE (--no-record-deploy): the gate-report directory was not "
-        "read -- REASON is required and printed with the note. Record it "
-        "from a box that holds the reports, or with `nx service "
-        "record-deploy --gate-report-dir`. Reason given: [reason]"
+        _floor._TRACKER_OPT_OUT_NOTE + " Reason given: [reason]"
     ),
-    "main_dispatch::main_bare_tracker_refusal": (
-        "TRACKER NOT RECORDED (exit 3): no gate-report directory was named "
-        "(--record-deploy-from-gate-report or $NX_GATE_REPORT_DIR) and "
-        "--no-record-deploy was not passed. A verify that passes while "
-        "silently skipping the record is the omission vector in a new "
-        "place; the explicit opt-out for a box that does not hold the "
-        "reports is --no-record-deploy."
-    ),
+    "main_dispatch::main_bare_tracker_refusal": _floor._TRACKER_REFUSAL,
     "main_dispatch::main_paired_explicit_check_floor_blocks": (
         "delegates to check_floor -- see the check_floor_paired::* entries "
         "above."
@@ -453,13 +440,7 @@ RELEASE_MESSAGES: dict[str, str] = {
     "check_composite::composite_missing_commit": (
         "BLOCKED: [engine_tag] must not deploy — [n] required client "
         "commit(s) absent from the latest release [release]: [commits]"
-        "\n\nRemedy: this blocks the DEPLOY only -- the engine tag cuts "
-        "whenever the tree is green (a tag gates delivery, not work; Hal "
-        "directive 2026-08-02). Pair the deploy with the conexus release "
-        "that carries the listed commit(s) AND bumps the floor to this "
-        "tag: deploy fires at client-tag push, in parallel with the PyPI "
-        "publish (AGENTS.md § Engine-service release, paired-release "
-        "choreography). Then re-run this check."
+        "\n\n" + _precond._REMEDY
     ),
     "check_composite::composite_both_vacuous": (
         "OK (VACUOUS -- 0 preconditions registered for [engine_tag] AND 0 "

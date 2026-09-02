@@ -37,12 +37,22 @@ post-deploy-verify) at all, while the new table's ``event`` column means the
 SAME cell reached at two different events is not guaranteed to resolve to
 the same new-path verdict. ``_new_path`` therefore already takes
 ``(cell, event)`` today, and the Role-2 test is already parametrized over
-every reachable ``(cell, event)`` pair (still skipping on ``NotImplemented``)
-so P2.4/P2.5 only has to change what ``_new_path`` returns, never this
-file's parametrization shape. The (cell -> reachable events) mapping used
-here is a P2.2-time CONSERVATIVE over-approximation -- see
-``_cell_reachable_events`` below -- deliberately coarser than the precise
-per-cell join P2.3's own table authoring will make possible.
+every reachable ``(cell, event)`` pair. RDR-201 P2.3 (nexus-j9z30.13) has
+now landed the table and wired ``_new_path`` for real, so Role 2 no longer
+skips -- every pair below asserts ``old == new``. The (cell -> reachable
+events) mapping used here is STILL the P2.2-time CONSERVATIVE
+over-approximation -- see ``_cell_reachable_events`` below -- P2.3 did NOT
+deliver the exact per-mode/per-cell join this docstring used to promise:
+what it actually delivered is a table whose verdicts are event/mode-
+INVARIANT (every row's guard omits ``event``/``mode`` entirely, verified
+against commit 79fff05a9, the actual 7.1.0/v0.1.62 fix). Whether the
+choreography SHOULD instead be event-sensitive -- which would make the
+per-mode/per-cell precision this mapping was coarser than actually
+matter -- is an OPEN, Sam-gated question owned by nexus-j9z30.26, not
+settled by this reduction. The conservative mapping stays exactly because
+that question is open: it is the safe direction (more (cell, event)
+cases than a precise join would produce, never fewer), so nothing is
+silently excluded from a future event-sensitive table's coverage either.
 
 Isolation
 ---------
@@ -65,6 +75,7 @@ non-empty, ``[additive]``-entry-bearing ledger state.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import functools
 import json
 import pathlib
@@ -73,6 +84,8 @@ from typing import Any, Callable
 
 import pytest
 
+import check_client_release_precondition as _precond
+import check_engine_release_floor as _floor
 import enumerate_release_cells as erc
 import release_messages
 from nexus.tables.load import Table, load_table
@@ -104,9 +117,12 @@ _NOT_APPLICABLE = "n/a"
 #: A placeholder domain value for a declared dimension no row in the
 #: cell's own function-group examines (RDR-201 P2.3 design: "event" and
 #: "mode" are declared table-wide per the bead's spec but referenced by
-#: no row's guard, since this reduction's verdict is event/mode-invariant
-#: -- see the table's own file header). Any in-domain value resolves
-#: identically; the first declared domain member is used deterministically.
+#: no row's guard in TODAY's table -- see the table's own file header).
+#: Whether the choreography SHOULD be event-sensitive is an open,
+#: Sam-gated question (nexus-j9z30.26); this placeholder is a mechanical
+#: consequence of today's table shape, not a claim that the question is
+#: settled. Any in-domain value resolves identically against today's
+#: table; the first declared domain member is used deterministically.
 _UNUSED_DIM_PLACEHOLDER_INDEX = 0
 
 
@@ -174,13 +190,20 @@ _SCRIPT_REACHABLE_EVENTS = _script_reachable_events()
 
 def _cell_reachable_events(cell_dict: dict[str, Any]) -> tuple[str, ...]:
     """P2.2 conservative mapping: a cell's reachable events = the UNION of
-    reachable events across every MODE its script exposes -- coarser than
-    the exact per-mode/per-cell attribution P2.3's table-authoring join
-    will make possible (e.g. ``check_pin_currency`` is reached by three of
-    the floor script's four modes, at different event sets each), but
-    conservative in the SAFE direction: it can only add MORE (cell, event)
-    parametrized cases than the eventual precise join, never fewer, so
-    nothing is silently excluded from Role 2's future coverage."""
+    reachable events across every MODE its script exposes (e.g.
+    ``check_pin_currency`` is reached by three of the floor script's four
+    modes, at different event sets each) -- coarser than a precise
+    per-mode/per-cell attribution would be. RDR-201 P2.3 (nexus-j9z30.13)
+    did NOT narrow this to that precise join: the table it authored makes
+    every cell's verdict event/mode-invariant instead (no row's guard
+    examines ``event``/``mode`` at all), so there is currently no per-mode
+    event set to join against here. Whether a future, event-sensitive
+    table should replace this coarse mapping with a precise one is part of
+    the open question nexus-j9z30.26 owns. This mapping stays conservative
+    in the SAFE direction regardless of how that question resolves: it can
+    only add MORE (cell, event) parametrized cases than a precise join
+    would, never fewer, so nothing is silently excluded from Role 2's
+    coverage either way."""
     script = _FUNCTION_SCRIPT[cell_dict["function"]]
     return _SCRIPT_REACHABLE_EVENTS[script]
 
@@ -287,12 +310,19 @@ def _assignment_for(table: Table, cell_dict: dict[str, Any], event: str) -> dict
     return assignment
 
 
-def _new_path(cell: dict[str, Any], event: str) -> tuple[int, str] | Any:
-    """RDR-201 P2.3 (nexus-j9z30.13): resolve ``(cell, event)`` against the
-    real ``docs/tables/release-choreography.toml`` and return its verdict
-    as an ``(exit_code, message_key)`` pair, matching :func:`_drive_old_path`'s
-    own return shape exactly so ``test_new_path_matches_old_path_cell_by_cell``
-    can compare them directly.
+def _new_path(
+    cell: dict[str, Any], event: str, table: Table | None = None,
+) -> tuple[int, str] | Any:
+    """RDR-201 P2.3 (nexus-j9z30.13): resolve ``(cell, event)`` against
+    ``table`` (default: the real ``docs/tables/release-choreography.toml``,
+    loaded once via ``_load_choreography_table``'s cache) and return its
+    verdict as an ``(exit_code, message_key)`` pair, matching
+    :func:`_drive_old_path`'s own return shape exactly so
+    ``test_new_path_matches_old_path_cell_by_cell`` can compare them
+    directly. ``table`` is overridable so
+    ``test_a_mutated_table_row_reds_role_2`` below can drive a deliberately
+    corrupted in-memory copy without touching the cached real table or the
+    file on disk.
 
     A resolve() REFUSAL (no-match / ambiguous-match / unknown-value) on a
     cell the fixture itself enumerated as reachable is a table-authoring
@@ -300,7 +330,8 @@ def _new_path(cell: dict[str, Any], event: str) -> tuple[int, str] | Any:
     folded into the tuple return, so it fails the specific (cell, event)
     test case with a clear cause instead of a confusing tuple-shape
     mismatch against ``_drive_old_path``'s output."""
-    table = _load_choreography_table()
+    if table is None:
+        table = _load_choreography_table()
     assignment = _assignment_for(table, cell, event)
     resolution = resolve(table, assignment)
     if resolution.refusal is not None:
@@ -418,11 +449,14 @@ def test_new_path_matches_old_path_cell_by_cell(
     ``docs/tables/release-choreography.toml`` for real, so this asserts
     ``old == new`` for every reachable (cell, event) pair -- see the
     module docstring for why event is part of the comparison, not folded
-    away. The table's own design keeps every row's verdict event/mode-
-    invariant (see the table's file header), so a genuine mismatch here
-    is a table-authoring defect (a mistranscribed guard), not evidence
-    that event ought to matter -- fix the table, per this bead's own
-    instruction, rather than the harness."""
+    away. Today's table happens to make every row's verdict event/mode-
+    invariant, but whether the CHOREOGRAPHY *should* be event-sensitive is
+    an OPEN, Sam-gated question (nexus-j9z30.26, critique T2
+    nexus/critique-nexus-j9z30-13-2026-09-01 [24060]) -- the same posture
+    as the O2 order-asymmetry (nexus-j9z30.17). A mismatch here must stay
+    LOUD and UNDECIDED: it is real signal (either a mistranscribed guard,
+    or evidence bearing on nexus-j9z30.26's question), never something
+    this test resolves for itself by declaring one interpretation correct."""
     new = _new_path(cell_dict, event)
     if new is NotImplemented:
         pytest.skip("new path (table resolve()) not wired yet -- RDR-201 P2.4/P2.5")
@@ -534,3 +568,121 @@ def test_message_catalog_entries_are_nonempty_strings() -> None:
     id-parity test above while carrying no actual message text."""
     for row_id, text in release_messages.RELEASE_MESSAGES.items():
         assert isinstance(text, str) and text.strip(), row_id
+
+
+#: Row id -> the real, IMPORTED module-level constant that row's catalog
+#: entry must contain VERBATIM (code-review IMPORTANT #1, T2
+#: nexus/code-review-nexus-j9z30-13-2026-09-01 [24062]): every one of
+#: these seven branches prints a FIXED constant string (a "remedy" or
+#: "tracker not recorded" paragraph) with no run-specific interpolation
+#: inside the constant itself -- unlike ``_probe_unverifiable_message()``
+#: / ``_print_paired_ack()``, which BUILD their text per call from
+#: dynamic arguments and so have no fixed constant to check against.
+#: Deliberately imports the constants rather than re-typing them: a
+#: hand-transcribed copy is exactly how this drifted the first time
+#: (composite_missing_commit's "--" vs the real em dash, caught by this
+#: test's own first run).
+_STATIC_REMEDY_CONSTANTS: dict[str, str] = {
+    "check_pin_currency::pin_currency_stale_pin": _floor._UNPINNED_REMEDY,
+    "check_floor_bare::bare_probe_stale_via_exception": _floor._REMEDY,
+    "check_floor_bare::bare_probe_stale_via_success": _floor._REMEDY,
+    "main_dispatch::main_bare_tracker_opt_out": _floor._TRACKER_OPT_OUT_NOTE,
+    "main_dispatch::main_bare_tracker_refusal": _floor._TRACKER_REFUSAL,
+    "check_composite::composite_missing_commit": _precond._REMEDY,
+    "check_wire_contract_ledger::ledger_blocked": _precond._LEDGER_REMEDY,
+}
+
+
+def test_static_remedy_constants_are_nonempty() -> None:
+    """Non-vacuity floor for the content check below: pin that the
+    imported constants themselves are real, non-blank text -- a source
+    edit that hollowed one out to `""` would otherwise make the
+    containment assertion below trivially (and silently) true."""
+    assert _STATIC_REMEDY_CONSTANTS
+    for row_id, constant_text in _STATIC_REMEDY_CONSTANTS.items():
+        assert isinstance(constant_text, str) and constant_text.strip(), row_id
+
+
+@pytest.mark.parametrize(
+    "row_id,constant_text",
+    sorted(_STATIC_REMEDY_CONSTANTS.items()),
+    ids=sorted(_STATIC_REMEDY_CONSTANTS),
+)
+def test_message_catalog_contains_static_remedy_constants_verbatim(
+    row_id: str, constant_text: str,
+) -> None:
+    """The catalog-parity CONTENT check (code-review IMPORTANT #1/#3): for
+    every row whose printed text is anchored to a fixed module constant,
+    the catalog entry must contain that constant's CURRENT value
+    byte-for-byte, not a hand-retyped approximation. This is what stops
+    RDR-201 P2.4/P2.5 (nexus-j9z30.14/.15) from silently regressing
+    operator-facing remedy text when the catalog is eventually wired into
+    the two gated scripts -- a paraphrase that reads the same to a human
+    would pass the non-emptiness check above but fail this one."""
+    assert constant_text in release_messages.RELEASE_MESSAGES[row_id], (
+        row_id, constant_text, release_messages.RELEASE_MESSAGES[row_id],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Role 2 harness integrity: a corrupted table row must red the harness
+# ---------------------------------------------------------------------------
+#
+# Mirrors Role 1's ``test_a_corrupted_expected_verdict_reds_the_harness``
+# above (code-review IMPORTANT #4, T2 nexus/code-review-nexus-j9z30-13
+# -2026-09-01 [24062]): Role 2 catches a mistranscribed table row BY
+# CONSTRUCTION today (a wrong ``emit.exit_code`` makes ``new != old``), but
+# nothing proved that until now -- a Role-2 suite that always passes
+# because every authored row happens to already agree with the real
+# scripts would look identical to one that is silently incapable of
+# catching a wrong row at all.
+
+
+def _mutated_table_with_flipped_exit_code(row_id: str) -> Table:
+    """A copy of the real choreography table with ONE row's
+    ``emit.exit_code`` flipped to a value guaranteed different from its
+    real one (see ``_a_wrong_exit_code`` above for the identical technique
+    Role 1 uses) -- every other row is untouched. ``Row`` and ``Table`` are
+    frozen dataclasses, so this rebuilds both via ``dataclasses.replace``
+    rather than mutating in place; the real, cached table
+    (``_load_choreography_table()``) and the file on disk are never
+    touched."""
+    table = _load_choreography_table()
+    rows = list(table.rows)
+    for i, row in enumerate(rows):
+        if row.id != row_id:
+            continue
+        assert isinstance(row.outcome, dict), (row_id, row.outcome)
+        corrupted_outcome = dict(row.outcome)
+        corrupted_outcome["exit_code"] = str(
+            _a_wrong_exit_code(int(row.outcome["exit_code"]))
+        )
+        rows[i] = dataclasses.replace(row, outcome=corrupted_outcome)
+        return dataclasses.replace(table, rows=tuple(rows))
+    raise AssertionError(f"no row with id {row_id!r} in the real table")
+
+
+def test_a_mutated_table_row_reds_role_2() -> None:
+    """Flip one row's ``exit_code`` in an in-memory copy of the real table
+    and confirm Role 2's own comparison (``_new_path`` vs
+    ``_drive_old_path``) actually disagrees -- proof this harness CAN
+    catch a wrong table row, not just a suite that always passes because
+    the table happens to already agree with the real scripts. Uses the
+    same well-known cell ``test_wiring_completeness_canary_for_new_path``
+    already samples (``_CELL_EVENT_PAIRS[0]``), so this canary requires no
+    knowledge of which cells exist beyond what the fixture already
+    guarantees is non-empty (see
+    ``test_fixture_cell_count_is_nonzero_and_matches_the_fixtures_own_header``)."""
+    cell_dict, event = _CELL_EVENT_PAIRS[0]
+    mutated = _mutated_table_with_flipped_exit_code(cell_dict["cell_id"])
+    new = _new_path(cell_dict, event, table=mutated)
+    assert new is not NotImplemented
+    cell = _cell_from_fixture(cell_dict)
+    old = _drive_old_path(cell)
+    assert new != old, (
+        "the mutated table's flipped exit_code did not change the "
+        "resolved verdict -- Role 2's comparison cannot catch a wrong "
+        "table row",
+        cell_dict["cell_id"], event, old, new,
+    )
+

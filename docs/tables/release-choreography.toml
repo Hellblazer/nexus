@@ -17,6 +17,24 @@
 # different functions legitimately reuse a bare name like "ledger" or
 # "probe" for structurally unrelated axes.
 #
+# GROUP SHAPE, MEASURED (code review, T2 nexus/code-review-nexus-j9z30-13
+# -2026-09-01 [24062], which flagged two reviewers disagreeing on this):
+# recomputed directly from the loaded table via nexus.tables.check's own
+# groups_of/dimensions_of/full_product -- 7 of the 12 match groups prove a
+# declared guard-dimension product STRICTLY LARGER than their row count
+# (check_composite 11 rows/20-product, check_floor_auto_paired 9/24,
+# check_floor_bare 5/8, check_floor_paired 7/12, check_paired_preconditions
+# 13/864, check_source_ancestry 6/12, main_dispatch 15/192) -- these are
+# genuine short-circuit-collapse trees, where an earlier row's omitted
+# guard key legitimately absorbs a larger unreached sub-product than a
+# bare per-leaf row count alone would suggest. The other 5 groups
+# (check_client_lag_ledger, check_pin_currency, check_wire_contract_ledger,
+# precond_main_dispatch, record_deploy_from_gate_report_leg) are
+# single-dimension, product == row count exactly -- there is only one
+# guard dimension to omit, so no collapse is possible and every leaf gets
+# its own row 1:1. This settles the disagreement: it is not "11 unique-key
+# trees, only check_composite a real cross-product" -- 7 of 12 groups are.
+#
 # GuardChain functions (check_pin_currency, check_source_ancestry,
 # check_client_lag_ledger, check_wire_contract_ledger,
 # check_paired_preconditions, record_deploy_from_gate_report_leg) are
@@ -51,20 +69,30 @@
 #
 # EVENT / MODE. Both are declared TABLE-WIDE dimensions (RDR-201 P2.3's
 # stated requirement, Finding 2's incident correction: the 7.1.0/v0.1.62
-# failure was an UN-ENCODED event dimension) but deliberately referenced
-# by NO row's guard: this model captures only (exit_code, message_key)
-# per cell, and the 7.1.0/v0.1.62 incident's own fix (commit 79fff05a9)
-# changed a REMEDY STRING plus prose, never decision logic -- so within
-# this reduction every cell's verdict is genuinely event- and
-# mode-invariant, and the bead's own constraint ("the row must give the
-# SAME verdict for every event in that cell's reachable set") holds
-# trivially rather than needing to be proven per row. No row here is
-# EVENT-SENSITIVE under this reduction; a future divergence that
-# genuinely needs an event- or mode-discriminating row is a table
-# amendment, not a silent behavior change (see nexus-j9z30.17 for the
-# analogous Sam-gated ruling on the O2 pair below). check_table reports
-# both as "unused-dimension" advisories (non-blocking) for exactly this
-# reason -- expected, not a defect.
+# failure was an UN-ENCODED event dimension) but referenced by NO row's
+# guard in THIS version of the table: this model captures only
+# (exit_code, message_key) per cell, and the 7.1.0/v0.1.62 incident's
+# own fix (commit 79fff05a9) changed a REMEDY STRING plus prose, not any
+# guard/exit-code/message_key -- so, VERIFIED against that one incident,
+# every cell's verdict IS event- and mode-invariant today, and the
+# bead's own constraint ("the row must give the SAME verdict for every
+# event in that cell's reachable set") holds for every row as authored.
+#
+# WHETHER THE CHOREOGRAPHY *SHOULD* BE EVENT-SENSITIVE IS A SEPARATE,
+# OPEN QUESTION -- NOT SETTLED BY THE ABOVE, and not this bead's (P2.3)
+# to decide unilaterally: Finding 2 classifies the 7.1.0/v0.1.62
+# incident itself as an un-encoded event dimension in the STATE SPACE,
+# independent of what the eventual fix's diff happened to touch, and
+# check_floor's bare mode is reachable at both pre-tag and
+# post-deploy-verify -- two real moments a future incident of the same
+# shape could legitimately need to distinguish. That question is owned
+# by nexus-j9z30.26 (must be answered before nexus-j9z30.16 deletes the
+# old, event-blind decision path -- after that there is no live
+# comparison point left to notice a silently-wrong event-invariant
+# reduction against), the same Sam-gated posture as nexus-j9z30.17's O2
+# ruling below. check_table reports "event"/"mode" as "unused-dimension"
+# advisories (non-blocking) for exactly this reason -- an honest
+# statement of today's shape, not a claim that the shape is correct.
 #
 # O2 ORDER-ASYMMETRY (nexus-j9z30.17): {cloud >= floor, ledger dirty}
 # exits 1 under --paired-deploy (battery-before-probe: the
@@ -114,9 +142,23 @@ domain = [
   "precond_main_dispatch",
 ]
 
+# Event-invariant in TODAY's table (verified against 79fff05a9, the
+# 7.1.0/v0.1.62 fix -- see the EVENT / MODE section above); whether the
+# choreography SHOULD be event-sensitive is UNDECIDED and owned by
+# nexus-j9z30.26, not this bead.
 [dimensions.event]
 domain = ["pre-tag", "tag-push", "deploy", "post-deploy-verify"]
 
+# Same open-question posture as [dimensions.event] above -- see
+# nexus-j9z30.26. Note (code review, T2 nexus/code-review-nexus-j9z30-13
+# -2026-09-01 [24062]): this table-wide "mode" dimension is never
+# referenced by any row's guard either -- "main_dispatch.mode" (a
+# SEPARATE, function-prefixed dimension declared in main_dispatch's own
+# section below) is what actually carries mode semantics for the one
+# function whose verdict genuinely varies by mode today. Left declared
+# regardless: the resulting "unused-dimension" advisory is doing exactly
+# its job (an honest signal that this axis carries no coverage claim),
+# not a defect to silently work around by deleting the dimension.
 [dimensions.mode]
 domain = ["bare", "paired_explicit", "paired_auto", "ledger_only"]
 
