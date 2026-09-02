@@ -304,9 +304,12 @@ def test_decision_table_zero_participating_dimension_is_blocking():
 
 
 def test_state_machine_zero_participating_dimension_is_silent():
+    """Silent on COVERAGE (no blocking finding); the declared-but-unused
+    dimension itself is now reported as the unused-dimension advisory."""
     table = load_table(FIXTURES / "no_participating_dimension_state_machine.toml")
     findings = check_table(table)
-    assert findings == []
+    assert [f.code for f in findings] == [check_mod.UNUSED_DIMENSION]
+    assert check_mod.exit_code(findings) == 0
 
 
 # --------------------------------------------------------------------------
@@ -606,3 +609,21 @@ def test_packaged_rdr_lifecycle_table_is_clean_including_match_totality():
     findings = check_table(table)
     assert UNMATCHED_ASSIGNMENT not in {f.code for f in findings}
     assert exit_code(findings) == 0
+
+
+def test_declared_but_never_named_dimension_is_an_advisory():
+    """RDR-201 Phase 1 critique (T2 nexus/critique-rdr-201-phase-1-2026-09-01):
+    a dimension declared under [dimensions] that no row's match or guard
+    names got zero signal, indistinguishable from "proved". It is now the
+    unused-dimension advisory: reported, non-blocking."""
+    table = load_table(FIXTURES / "unused_dimension.toml")
+    findings = check_mod.check_table(table)
+    unused = [f for f in findings if f.code == check_mod.UNUSED_DIMENSION]
+    assert [f.detail["dimension"] for f in unused] == ["region"]
+    assert check_mod.exit_code(findings) == 0
+    assert check_mod.UNUSED_DIMENSION not in check_mod.BLOCKING_CODES
+
+
+def test_packaged_lifecycle_table_has_no_unused_dimension():
+    findings = check_mod.check_table(load_packaged_table("rdr-lifecycle.toml"))
+    assert not [f for f in findings if f.code == check_mod.UNUSED_DIMENSION]

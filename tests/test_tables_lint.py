@@ -33,6 +33,7 @@ import sys
 import zipfile
 from pathlib import Path
 
+import migrate_rdr_status_vocabulary  # scripts/ is on the test pythonpath (pyproject)
 import pytest
 
 from nexus.tables.check import BLOCKING_CODES, Finding, check_table
@@ -205,3 +206,15 @@ def test_docs_rdr_md_template_lifecycle_statuses_match_table_domain_exactly():
 
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+@pytest.mark.lint
+def test_migration_sweep_target_vocabulary_matches_table_domain_exactly():
+    """scripts/migrate_rdr_status_vocabulary.py carries the target vocabulary
+    as a literal (a one-shot migration cannot import the table it installs
+    the domain FOR without a bootstrap circularity), so this pins it: the
+    sweep's LIFECYCLE_STATUSES equals the packaged table's status domain
+    (RDR-201 Phase 1 code review, T2 nexus/code-review-rdr-201-phase-1-2026-09-01)."""
+    domain = frozenset(load_packaged_table("rdr-lifecycle.toml").dimensions["status"].domain)
+    assert migrate_rdr_status_vocabulary.LIFECYCLE_STATUSES == domain
+    assert domain, "vacuous: empty status domain"

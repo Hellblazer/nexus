@@ -175,22 +175,24 @@ def test_findings_sorted_by_filename(tmp_path: Path):
     assert [f[0] for f in findings] == ["rdr-001-a.md", "rdr-999-z.md"]
 
 
-def test_real_docs_rdr_tree_finds_exactly_the_known_out_of_vocabulary_file():
+def test_real_docs_rdr_tree_is_clean_and_the_scan_is_not_vacuous():
     """Non-vacuity anchor (nexus-moht0 doctrine): run the scan against THIS
-    repo's real docs/rdr/ tree and assert it finds exactly the one known
-    out-of-vocabulary file named in the RDR-201 P1.8 task corrections --
-    ``rdr-200-phase1b-prereg.md`` (status ``frozen-before-arms``), an
-    RDR-200 sub-document whose disposition is a companion conversion left
-    for Sam / the P1.10 gate to apply, never silently rewritten here."""
+    repo's real docs/rdr/ tree. After the RDR-201 Phase 1 sweep plus the
+    Phase 1 gate's conversion of the two late RDR-200 sub-documents
+    (rdr-200-phase1b-prereg.md, rdr-200-phase1b-gate-result.md) to
+    ``kind: companion``, the tree carries zero out-of-vocabulary statuses;
+    the scan is proved non-vacuous by the scanned and companion counts, and
+    the fixture-tree tests above prove it reports a planted defect."""
     repo_root = Path(__file__).resolve().parent.parent
     rdr_dir = repo_root / "docs" / "rdr"
     if not rdr_dir.is_dir():  # pragma: no cover — defensive, not expected in this repo
         pytest.skip("docs/rdr/ not present in this checkout")
 
-    findings, _companions, scanned = _rdr_audit_status_findings(rdr_dir, _STATUS_DOMAIN)
+    findings, companions, scanned = _rdr_audit_status_findings(rdr_dir, _STATUS_DOMAIN)
 
-    assert scanned > 0, "the sweep examined nothing (nexus-moht0 vacuous-gate doctrine)"
-    assert ("rdr-200-phase1b-prereg.md", "frozen-before-arms") in findings, findings
+    assert scanned > 200, "the sweep examined nothing (nexus-moht0 vacuous-gate doctrine)"
+    assert companions >= 9, f"expected the nine known companion documents, saw {companions}"
+    assert findings == [], findings
 
 
 # ---------------------------------------------------------------------------

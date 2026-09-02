@@ -58,6 +58,8 @@ UNPROVABLE_COVERAGE = "unprovable-coverage"
 # checker-clean table was not actually guaranteed total. See
 # _check_match_totality below.
 UNMATCHED_ASSIGNMENT = "unmatched-assignment"
+#: Advisory: a declared dimension no row names (see ``_check_unused_dimensions``).
+UNUSED_DIMENSION = "unused-dimension"
 # unknown-literal is a LOAD-time refusal (nexus.tables.load.UnknownLiteralError),
 # never a check()-time finding: by the time a Table exists, every match/guard
 # literal has already been proven to lie within its declared domain. The
@@ -226,8 +228,38 @@ def _check_match_totality(table: Table) -> list[Finding]:
     ]
 
 
+def _check_unused_dimensions(table: Table) -> list[Finding]:
+    """Advisory: a dimension declared under ``[dimensions]`` that no row's
+    match or guard ever names. Coverage is proved only over dimensions a
+    group participates in, so a declared-but-never-guarded dimension gets
+    no coverage statement at all; without this advisory that silence is
+    indistinguishable from "proved" (RDR-201 Phase 1 critique, T2
+    nexus/critique-rdr-201-phase-1-2026-09-01). Advisory, not blocking: a
+    table may legitimately declare a dimension its evaluator callers bind
+    but no row discriminates on yet."""
+    used: set[str] = set()
+    for row in table.rows:
+        used |= set(row.match.keys()) | set(row.guard.keys())
+    return [
+        Finding(
+            code=UNUSED_DIMENSION,
+            group={},
+            detail={
+                "dimension": name,
+                "message": (
+                    f"dimension {name!r} is declared but no row's match or "
+                    "guard names it; no coverage claim is made over it"
+                ),
+            },
+        )
+        for name in sorted(table.dimensions)
+        if name not in used
+    ]
+
+
 def check_table(table: Table) -> list[Finding]:
     findings: list[Finding] = []
+    findings.extend(_check_unused_dimensions(table))
     findings.extend(_check_match_totality(table))
     for group in groups_of(table):
         findings.extend(_check_group(table, group))

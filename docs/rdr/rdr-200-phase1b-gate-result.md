@@ -5,7 +5,7 @@ parent_prereg: docs/rdr/rdr-200-phase1b-prereg.md
 phase1_result: docs/rdr/rdr-200-phase1-gate-result.md
 question_set: docs/rdr/rdr-200-phase1-questions.md
 created: 2026-09-01
-status: complete
+kind: companion
 verdict: FAIL — Alternative 4 stands
 ---
 

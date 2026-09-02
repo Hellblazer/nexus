@@ -6,7 +6,7 @@ supersedes_result: docs/rdr/rdr-200-phase1-gate-result.md
 inherits_protocol: docs/rdr/rdr-200-phase1-prereg.md
 question_set: docs/rdr/rdr-200-phase1-questions.md
 created: 2026-09-01
-status: frozen-before-arms
+kind: companion
 ---
 
 # RDR-200 Phase 1b Pre-Registration
