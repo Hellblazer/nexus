@@ -2001,6 +2001,8 @@ nx hooks install [PATH]
 
 Hooks run `nx index repo` in the background after each qualifying git operation, appending output to `~/.config/nexus/index.log`. If a hook file already exists, the nexus stanza is appended (sentinel-bounded) without overwriting existing content.
 
+`post-commit` additionally runs [`nx review commit`](#nx-review) (bead nexus-jh86x) in the background. `post-merge` and `post-rewrite` do not: a merge brings in commits already reviewed where they were authored, and post-rewrite fires once per rewritten commit, so one interactive rebase of twenty commits would dispatch twenty reviews of already-reviewed work.
+
 **Hook status values:** `not installed` · `owned` (nexus-created) · `appended` (added to existing hook) · `unmanaged` (no nexus sentinel)
 
 ### nx hook routing-stats
@@ -3660,11 +3662,57 @@ output — "SAME QUERIES, SAME BUCKETS, EVERY TIME" (playbook §4.5).
 
 ---
 
+## nx review
+
+Automated review of committed work (bead nexus-jh86x). Fired by the `post-commit` git hook, and usable by hand.
+
+```
+nx review commit [REV] [--repo PATH] [--quiet]
+nx review show [REV] [--repo PATH]
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| `commit [REV]` | Review REV (default `HEAD`) and record findings in T2. **Always exits 0** — a hook that can fail a commit is a footgun during a tag-push sequence |
+| `show [REV]` | Print the stored review record for REV |
+
+The reviewer is a **tool-free** `claude -p` dispatch over `git show REV` alone. It cannot read the RDR corpus, the bead board, or prior reviews — that independence is the point. Origin: the 2026-09-01 intrastate comparison found that every production defect credited to that project's 116k-line decision-record apparatus was in fact discovered by a per-commit AI reviewer with no visibility into the records; the apparatus only adjudicated findings it did not discover.
+
+Findings carry one of three verdicts, borrowed as-is from intrastate's triage vocabulary:
+
+| Verdict | Meaning |
+|---------|---------|
+| `FIX-NOW` | A defect that should be corrected before the work goes further |
+| `FILE` | A real issue worth tracking, but not urgent |
+| `DROP` | An observation considered and explicitly set aside |
+
+Nothing is auto-applied and nothing is auto-filed. Triage is a human act — intrastate's own measurement is that only 19% of production-class findings warranted an immediate fix.
+
+Records land in T2 project `nexus_commit_review`, titled `review-<12-hex>`, with a default 90-day TTL. Count them with [`nx census reviews`](#nx-census).
+
+**Configuration** (`.nexus.yml#commit_review`, all optional):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `enabled` | `true` | Master switch |
+| `max_budget_usd` | `0.25` | Per-dispatch hard cap, passed to `claude -p --max-budget-usd`. A hard abort at cap, not a truncation |
+| `timeout_seconds` | `180` | Subprocess kill deadline |
+| `max_diff_bytes` | `200000` | Larger diffs are truncated, and the truncation is stated in both the prompt and the record |
+| `ttl_days` | `90` | Review records age out; a per-commit writer with a permanent TTL is an unbounded accumulator |
+| `model` | unset | Override the dispatch model |
+
+`NX_COMMIT_REVIEW=0` disables the reviewer for one shell or one command; `NX_COMMIT_REVIEW=1` re-enables it over a disabling config key. **The environment variable wins over the config key**, so silencing a noisy afternoon never requires editing a file.
+
+A release cut is a burst — a release commit, a back-merge, and any fix-forward landing in quick succession. The hook's `pgrep` guard serialises the burst rather than firing concurrent children; the cap is per dispatch, so an N-commit burst has an N × `max_budget_usd` ceiling.
+
 ## nx census
 
 ```
 nx census capability [--session SESSION_ID] [--since ISO_DATE] [--project-dir PATH] [--json]
+nx census reviews [--as-json]
 ```
+
+`nx census reviews` counts per-commit review findings by verdict across the T2 records [`nx review commit`](#nx-review) writes, and reports **reviewed-and-clean separately from not-reviewed**: a census that could not tell those apart would read an unarmed hook as a clean codebase (the nexus-moht0 vacuous-gate doctrine).
 
 Counts tool calls per capability across Claude Code session transcripts, split **orchestrator vs subagent** (nexus-h33x8.1). Buckets are `skill`, `agent`, `serena`, `nx_answer`, `search_query`, `other_nx_mcp`, `baseline` (Bash/Read/Edit/Write), `other`.
 

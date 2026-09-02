@@ -110,6 +110,66 @@ disown
 {end}""".format(begin=SENTINEL_BEGIN, end=SENTINEL_END)
 
 
+# ── per-commit review (bead nexus-jh86x) ──────────────────────────────────────
+
+#: Appended INSIDE the sentinel block, for ``post-commit`` ONLY.
+#:
+#: Not post-merge and not post-rewrite, deliberately. A merge brings in
+#: commits already reviewed where they were authored, and post-rewrite
+#: fires once per rewritten commit, so a single interactive rebase of
+#: twenty commits would dispatch twenty reviews of work that has already
+#: been reviewed. Fire where authorship happens, once.
+#:
+#: BURST SHAPE (raised by the sibling session nexus-13, 2026-09-02, from a
+#: live 7.27.0 cut): a release is not one commit. It is a release commit,
+#: a back-merge, and any fix-forward, landing in quick succession. The
+#: pgrep guard below is the same instrument the indexing stanza above uses
+#: for the same reason, and it SERIALISES a burst rather than firing N
+#: concurrent ``claude -p`` children. It does not reduce total spend --
+#: the per-dispatch cap does that, and the arithmetic is written down at
+#: ``config.COMMIT_REVIEW_DEFAULT_BUDGET_USD``.
+#:
+#: Never blocks: the dispatch is detached and disowned exactly like the
+#: indexer, and ``nx review commit`` itself always exits 0. A post-commit
+#: hook that can fail is a footgun during a tag-push sequence that has to
+#: land in tight succession.
+_REVIEW_STANZA = """\
+# PER-COMMIT REVIEW (nexus-jh86x). Origin: the intrastate comparison,
+# 2026-09-01 -- every production defect credited to that project's
+# decision-record apparatus was in fact found by a per-commit AI reviewer
+# with no visibility into the records; the apparatus only adjudicated.
+# Opt out with NX_COMMIT_REVIEW=0 (env beats config), or persistently via
+# .nexus.yml#commit_review.enabled. Uninstall removes this with the rest
+# of the stanza.
+if [ "$NX_COMMIT_REVIEW" != "0" ]; then
+  # Serialise a burst (release cut = commit + back-merge + fix-forward in
+  # quick succession) rather than firing N concurrent children.
+  if ! pgrep -f "nx review commit .* --repo $REPO_TOP" > /dev/null 2>&1; then
+    echo "=== nx review post-commit $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
+      >> "$NX_INDEX_LOG"
+    nx review commit "$(git rev-parse HEAD)" --repo "$REPO_TOP" \\
+      >> "$NX_INDEX_LOG" 2>&1 &
+    disown
+  fi
+fi
+"""
+
+
+def _stanza_for(hook_name: str) -> str:
+    """The stanza body installed for *hook_name*.
+
+    ``post-commit`` carries the indexing stanza PLUS the review stanza,
+    inside ONE sentinel block so ``nx hooks uninstall`` still removes both
+    with a single sentinel match. Every other hook gets the indexing
+    stanza unchanged, byte for byte -- which is also what keeps
+    :data:`_STANZA` a valid comparison target for the two callers that
+    hold it (``nexus.health``'s drift check and the ws67k guard tests).
+    """
+    if hook_name != "post-commit":
+        return _STANZA
+    return _STANZA.replace(SENTINEL_END, _REVIEW_STANZA + SENTINEL_END)
+
+
 # ── git helpers ───────────────────────────────────────────────────────────────
 
 
@@ -152,7 +212,7 @@ def _install_hook(hooks_dir: Path, hook_name: str) -> str:
     """Install or append nexus stanza. Returns 'created' | 'appended' | 'already installed'."""
     hook_file = hooks_dir / hook_name
     if not hook_file.exists():
-        hook_file.write_text(f"#!/bin/sh\n{_STANZA}\n")
+        hook_file.write_text(f"#!/bin/sh\n{_stanza_for(hook_name)}\n")
         hook_file.chmod(0o755)
         return "created"
 
@@ -161,7 +221,7 @@ def _install_hook(hooks_dir: Path, hook_name: str) -> str:
         return "already installed"
 
     # Append to existing hook
-    hook_file.write_text(content.rstrip("\n") + "\n" + _STANZA + "\n")
+    hook_file.write_text(content.rstrip("\n") + "\n" + _stanza_for(hook_name) + "\n")
     return "appended"
 
 

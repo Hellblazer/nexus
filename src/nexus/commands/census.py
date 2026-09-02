@@ -120,3 +120,42 @@ def dispatches_cmd(
     click.echo(dispatches_to_json(result) if as_json else render_dispatches_text(result), nl=False)
     if result.exit_code:
         raise SystemExit(result.exit_code)
+
+
+@census_group.command("reviews")
+@click.option("--as-json", is_flag=True, help="Emit JSON instead of text.")
+def reviews_cmd(as_json: bool) -> None:
+    """Count per-commit review findings by verdict (bead nexus-jh86x).
+
+    Reads the review records the post-commit hook writes to T2 and
+    reports the FIX-NOW / FILE / DROP distribution across them, plus how
+    many commits were reviewed and found clean.
+
+    Reviewed-and-clean is reported separately from not-reviewed: a census
+    that cannot tell those apart would read an unarmed hook as a clean
+    codebase (the nexus-moht0 vacuous-gate doctrine).
+    """
+    import json as _json  # noqa: PLC0415 — stdlib deferred to subcommand scope
+
+    from nexus.commands._helpers import t2_handle  # noqa: PLC0415 — deferred; T2 only needed here
+    from nexus.commands.review_cmd import reviews_census  # noqa: PLC0415 — deferred; avoids import cycle at module load
+    from nexus.commit_review import VERDICTS  # noqa: PLC0415 — deferred with its siblings
+
+    with t2_handle() as db:
+        totals = reviews_census(db)
+
+    records = totals.pop("_records", 0)
+    clean = totals.pop("_clean", 0)
+
+    if as_json:
+        click.echo(_json.dumps({"records": records, "clean": clean, "verdicts": totals}, indent=2))
+        return
+
+    if not records:
+        click.echo("No commit reviews recorded. Is the post-commit hook installed?")
+        click.echo("  nx hooks install")
+        return
+
+    click.echo(f"Commit reviews: {records} record(s), {clean} clean")
+    for verdict in VERDICTS:
+        click.echo(f"  {verdict:<8} {totals.get(verdict, 0)}")

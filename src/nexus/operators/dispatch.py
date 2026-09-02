@@ -982,6 +982,7 @@ async def claude_dispatch(
     model: str | None = None,
     operator: str | None = None,
     max_budget_usd: float | None = None,
+    isolated: bool = False,
 ) -> dict[str, Any]:
     """Dispatch a single operator call to claude -p, fully async.
 
@@ -1067,6 +1068,18 @@ async def claude_dispatch(
             error message (only when *model* is also set) so a rejected
             ``--model`` value names both what was rejected and who asked
             for it. Never affects argv or control flow.
+        isolated: Opt-in hermetic child (nexus-jh86x). When True, passes
+            ``--setting-sources ""`` so the child loads NO user/project/local
+            settings file and therefore runs NONE of the caller's hooks.
+            ``--strict-mcp-config`` (always on, above) covers MCP servers
+            only; it does not cover hooks, and a tool-free child was
+            measured booting eight SessionStart hooks on 2026-09-02.
+            Required by any dispatch whose correctness depends on the child
+            NOT seeing the ambient session context. NOT compatible with
+            settings-supplied auth: this box authenticates via OAuth/keychain
+            and was verified working under the flag, but a box relying on an
+            ``apiKeyHelper`` in a settings file would lose it.
+            ``False`` (default) leaves argv byte-identical.
         max_budget_usd: Opt-in per-DISPATCH cost ceiling (nexus-2g8y7),
             passed straight to the CLI's own ``--max-budget-usd`` flag
             (added in Claude Code 2.1.217; confirmed present on installed
@@ -1232,6 +1245,27 @@ async def claude_dispatch(
         # servers; with an opt-in --mcp-config below it loads ONLY those.
         "--strict-mcp-config",
     ]
+    # nexus-jh86x, measured 2026-09-02: --strict-mcp-config stops the child
+    # loading ambient MCP SERVERS, but it does NOT stop it running the
+    # user's SessionStart HOOKS. A probe on this box counted EIGHT
+    # hook_started events in a tool-free child, injecting the conexus
+    # skills preamble, the beads workflow context, a bead list, an RDR
+    # indexing notice and the Serena/Context7 blurb -- into a dispatch with
+    # no tools to act on any of it.
+    #
+    # For the per-commit reviewer this is a CORRECTNESS break, not just
+    # cost: the whole point of copying intrastate's roborev is a child that
+    # reviews a diff with NO visibility into the decision-record
+    # apparatus. A child that boots with the bead board in its context is
+    # not that reviewer.
+    #
+    # Opt-in, exactly like ``model`` above: ``isolated=False`` (the
+    # default, and every pre-existing call site) leaves argv byte-identical.
+    # Whether the other operators should ALSO be isolated is a real
+    # question with real measured savings behind it -- it is bead
+    # nexus-11nm2, not a default flipped here in passing.
+    if isolated:
+        argv += ["--setting-sources", ""]
     # RDR-196 .p2b (nexus-nyry9.15): ability only -- appended ONLY when the
     # caller passes an explicit model. Tier resolution to this string (if
     # any) happens in the CALLER, e.g. via
