@@ -162,21 +162,45 @@ def _agents_md_lifecycle_statuses() -> list[str]:
     return re.findall(r"^- `([a-z][a-z-]*)`", section, re.MULTILINE)
 
 
-def test_agents_md_lifecycle_statuses_match_table_domain_exactly():
+def _docs_rdr_md_lifecycle_statuses() -> list[str]:
+    """Extract the pipe-separated status words from docs/rdr.md's Full
+    Template section's ``status:`` YAML line -- the literal template new
+    RDR authors copy when running ``/conexus:rdr-create`` (RDR-201 P1.8
+    fix round: this was a FIFTH vocabulary copy, carrying the retired
+    ``implemented``/``reverted`` words and missing ``deferred``/``closed``,
+    in the exact text new authors paste into a fresh RDR file)."""
+    text = (REPO_ROOT / "docs" / "rdr.md").read_text(encoding="utf-8")
+    m = re.search(r"^status:\s*(.+\|.+)$", text, re.MULTILINE)
+    assert m, "docs/rdr.md has no pipe-separated 'status:' template line"
+    return [w.strip() for w in m.group(1).split("|")]
+
+
+def _assert_lifecycle_statuses_match_table(doc_statuses: list[str], source: str) -> None:
     table = load_packaged_table("rdr-lifecycle.toml")
     table_domain = set(table.dimensions["status"].domain)
-    doc_statuses = _agents_md_lifecycle_statuses()
 
     # Non-vacuity: a sweep over zero extracted statuses is a failure, not a
     # pass (nexus-moht0) -- proves the regex is actually matching the
-    # section's bullets, not silently finding nothing.
-    assert doc_statuses, "no statuses extracted from docs/rdr/AGENTS.md's lifecycle section"
+    # source's vocabulary list, not silently finding nothing.
+    assert doc_statuses, f"no statuses extracted from {source}"
     assert set(doc_statuses) == table_domain, (
-        f"docs/rdr/AGENTS.md lifecycle list {sorted(doc_statuses)} != "
+        f"{source} lifecycle list {sorted(doc_statuses)} != "
         f"table domain {sorted(table_domain)}"
     )
     # No duplicates in the doc list either.
     assert len(doc_statuses) == len(set(doc_statuses)), doc_statuses
+
+
+def test_agents_md_lifecycle_statuses_match_table_domain_exactly():
+    _assert_lifecycle_statuses_match_table(
+        _agents_md_lifecycle_statuses(), "docs/rdr/AGENTS.md"
+    )
+
+
+def test_docs_rdr_md_template_lifecycle_statuses_match_table_domain_exactly():
+    _assert_lifecycle_statuses_match_table(
+        _docs_rdr_md_lifecycle_statuses(), "docs/rdr.md"
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

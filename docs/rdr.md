@@ -357,7 +357,7 @@ Location: `docs/rdr/TEMPLATE.md` (copied from `conexus/resources/rdr/TEMPLATE.md
 title: "RDR Title"
 id: RDR-NNN
 type: Feature | Bug Fix | Technical Debt | Framework Workaround | Architecture
-status: draft | accepted | implemented | reverted | abandoned | superseded
+status: draft | accepted | deferred | closed | superseded | abandoned
 priority: high | medium | low
 author: Author Name
 reviewed-by: self | reviewer name(s)
@@ -368,6 +368,8 @@ related_tests: []
 implementation_notes: ""
 ---
 ```
+
+The six `status` values are a checked table, not free text (RDR-201) — the authoritative domain is the packaged `src/nexus/tables/rdr-lifecycle.toml` (byte-identical plugin copy at `conexus/resources/tables/rdr-lifecycle.toml`); `nx rdr set-status` enforces every transition against it and `nx rdr preamble rdr-audit` reports any on-disk status outside its domain as a finding.
 
 `reviewed-by: self` is acceptable for solo projects. Collaborative projects require at least one reviewer other than the author. `related_tests` lists test files or test names that validate this RDR's implementation, populated at close time. `implementation_notes` captures deviations from the plan, filled in at close time.
 

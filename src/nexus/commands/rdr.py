@@ -1828,7 +1828,9 @@ def _rdr_audit_status_findings(
     return findings, companion_count, scanned_count
 
 
-def _t2_rdr_status_census(repo_name: str) -> tuple[Counter[str], str | None]:
+def _t2_rdr_status_census(
+    repo_name: str,
+) -> tuple[Counter[str], list[str], str | None]:
     """Read T2 project ``<repo_name>_rdr`` and count entries by their
     ``status:`` field, through the same injectable ``_t2_client_factory``
     seam :func:`_gate_outcome_for` already uses (RDR-201 P1.8 task
@@ -1842,25 +1844,54 @@ def _t2_rdr_status_census(repo_name: str) -> tuple[Counter[str], str | None]:
     at the top every time), so merging the two would report ~200 live T2
     records as perpetually stale.
 
+    Title shapes: T2 RDR records are titled either the bare number
+    (``"42"``) or ``"RDR-42"`` — both are counted, matched via
+    ``^(?:RDR-)?(\\d+)$`` (RDR-201 P1.8 fix round: the bare-digit-only
+    match originally here silently dropped every ``RDR-NNN``-titled
+    record, ~42 of them on the live project). Each distinct RDR number is
+    counted ONCE. When the same number appears under both title shapes
+    with DIFFERING statuses, that is reported as ambiguous rather than
+    silently picking one shape's value — this reads live production T2,
+    and guessing which shape is authoritative is not this census's call
+    to make.
+
     A T2 read failure (unreachable service, timeout, ...) is reported ON
     THIS LINE and never allowed to fail the audit — returns an empty
     ``Counter`` plus a named reason string instead of raising.
+
+    Returns ``(counts, ambiguous, error)`` — *ambiguous* is a sorted list
+    of human-readable ``"<number> (<title>=<status>, <title>=<status>)"``
+    notes, empty when there is nothing to report.
     """
     project = f"{repo_name}_rdr"
     counts: Counter[str] = Counter()
+    ambiguous: list[str] = []
     try:
         with _t2_client_factory() as client:
             entries = client.get_all(project=project)
     except Exception as exc:  # noqa: BLE001 — T2 unreachable is an expected, named failure mode; reported on the census line, never allowed to fail the audit
-        return counts, f"T2 unreachable: {type(exc).__name__}: {exc}"
+        return counts, ambiguous, f"T2 unreachable: {type(exc).__name__}: {exc}"
+
+    by_number: dict[str, dict[str, str]] = {}
     for entry in entries:
         title = entry.get("title", "") if isinstance(entry, dict) else ""
-        if not re.match(r"^\d+$", title):
+        m = re.match(r"^(?:RDR-)?(\d+)$", title)
+        if not m:
             continue
+        number = m.group(1)
         content = entry.get("content", "") if isinstance(entry, dict) else ""
         status = _preamble_parse_t2_field(content, "status") or "<no status>"
-        counts[status] += 1
-    return counts, None
+        by_number.setdefault(number, {})[title] = status
+
+    for number, shapes in by_number.items():
+        statuses = set(shapes.values())
+        if len(statuses) > 1:
+            detail = ", ".join(f"{t}={s}" for t, s in sorted(shapes.items()))
+            ambiguous.append(f"{number} ({detail})")
+            continue
+        counts[next(iter(statuses))] += 1
+
+    return counts, sorted(ambiguous), None
 
 
 @preamble.command("rdr-audit")
@@ -2012,7 +2043,7 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
         else:
             print("> No local worktree found for the target project — nothing to scan.")
 
-        t2_counts, t2_error = _t2_rdr_status_census(target)
+        t2_counts, t2_ambiguous, t2_error = _t2_rdr_status_census(target)
         if t2_error:
             print(f"**T2 `{target}_rdr` status census:** {t2_error}")
         else:
@@ -2020,6 +2051,8 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
                 ", ".join(f"{status}={count}" for status, count in sorted(t2_counts.items()))
                 or "(no entries)"
             )
+            if t2_ambiguous:
+                census_str += "; ambiguous: " + "; ".join(t2_ambiguous)
             print(f"**T2 `{target}_rdr` status census:** {census_str}")
         print()
 

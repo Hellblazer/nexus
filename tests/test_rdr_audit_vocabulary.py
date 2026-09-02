@@ -235,19 +235,81 @@ def test_t2_census_counts_statuses_by_project(monkeypatch: pytest.MonkeyPatch):
     )
     monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
 
-    counts, error = _t2_rdr_status_census("nexus")
+    counts, ambiguous, error = _t2_rdr_status_census("nexus")
 
     assert error is None
     assert counts == Counter({"closed": 2, "draft": 1})
+    assert ambiguous == []
+
+
+def test_t2_census_accepts_rdr_prefixed_titles(monkeypatch: pytest.MonkeyPatch):
+    """Bare digits AND ``RDR-NNN`` titles both count -- fix round (code
+    review [24047] finding 2): the original ``^\\d+$``-only match silently
+    dropped every ``RDR-NNN``-titled record (~42 on the live project)."""
+    fake = _FakeT2CensusClient(
+        entries=[
+            {"title": "1", "content": "status: closed\n"},
+            {"title": "RDR-2", "content": "status: draft\n"},
+            {"title": "RDR-3", "content": "status: accepted\n"},
+        ]
+    )
+    monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+
+    counts, ambiguous, error = _t2_rdr_status_census("nexus")
+
+    assert error is None
+    assert counts == Counter({"closed": 1, "draft": 1, "accepted": 1})
+    assert ambiguous == []
+
+
+def test_t2_census_same_number_both_shapes_same_status_counts_once(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fake = _FakeT2CensusClient(
+        entries=[
+            {"title": "42", "content": "status: closed\n"},
+            {"title": "RDR-42", "content": "status: closed\n"},
+        ]
+    )
+    monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+
+    counts, ambiguous, error = _t2_rdr_status_census("nexus")
+
+    assert error is None
+    assert counts == Counter({"closed": 1})
+    assert ambiguous == []
+
+
+def test_t2_census_same_number_both_shapes_differing_status_is_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fake = _FakeT2CensusClient(
+        entries=[
+            {"title": "42", "content": "status: closed\n"},
+            {"title": "RDR-42", "content": "status: draft\n"},
+        ]
+    )
+    monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+
+    counts, ambiguous, error = _t2_rdr_status_census("nexus")
+
+    assert error is None
+    # Neither shape's status is silently picked into the counts.
+    assert counts == Counter()
+    assert len(ambiguous) == 1
+    assert "42" in ambiguous[0]
+    assert "closed" in ambiguous[0]
+    assert "draft" in ambiguous[0]
 
 
 def test_t2_census_unreachable_reports_reason_never_raises(monkeypatch: pytest.MonkeyPatch):
     fake = _FakeT2CensusClient(raise_on_get_all=ConnectionError("boom"))
     monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
 
-    counts, error = _t2_rdr_status_census("nexus")
+    counts, ambiguous, error = _t2_rdr_status_census("nexus")
 
     assert counts == Counter()
+    assert ambiguous == []
     assert error is not None
     assert "T2 unreachable" in error
     assert "boom" in error
