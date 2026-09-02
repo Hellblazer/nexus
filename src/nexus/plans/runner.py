@@ -459,6 +459,21 @@ _COLLECTION_ARG_KEYS: tuple[str, ...] = ("collection", "collections")
 #: corpus still win; this binding only fills in the gap.
 _CALLER_SCOPE_BINDING: str = "_nx_scope"
 
+#: Last-resort ``corpus`` default for a ``search``/``query`` retrieval
+#: step that reaches dispatch with no corpus pinned by the plan, no
+#: ``scope.taxonomy_domain``, and no caller-supplied ``_nx_scope``
+#: binding (RDR-200 Phase 1b, nexus-rl59s). Deliberately NOT ``"all"``:
+#: ``"all"`` also admits the ``quarantine-*`` collections (see
+#: ``nexus.mcp.core``'s corpus docs), which a fall-through default must
+#: never reach into. Measured cause of the reach gap this closes: with
+#: no default here the runner fell through to the bare MCP tool
+#: default (``search`` = ``knowledge,code,docs``, ``query`` =
+#: ``knowledge``), which omits ``rdr__`` entirely — plan-based
+#: retrieval reached the caller's primary source on only 7-9 of 24
+#: gate questions where a flat search naming this same four-prefix set
+#: reached 24/24 (T2 ``nexus/gate-result-rdr200-phase1b-2026-09-01``).
+_PLAN_STEP_DEFAULT_CORPUS: str = "knowledge,code,docs,rdr"
+
 
 def _collections_in_args(args: dict[str, Any]) -> list[str]:
     """Pull every collection name out of the args dict for validation."""
@@ -973,6 +988,9 @@ def _apply_caller_scope_to_args(
         :func:`_apply_scope_to_args` runs first and populates ``corpus``
         before this helper sees the args.
       * Empty / missing binding → no-op, existing behaviour preserved.
+        (:func:`_apply_default_corpus_to_args` runs next in the pipeline
+        and fills the remaining gap for ``search``/``query`` steps —
+        this function's own no-op is unchanged.)
     """
     if tool not in _RETRIEVAL_TOOLS:
         return args
@@ -983,6 +1001,46 @@ def _apply_caller_scope_to_args(
         return args
     out = dict(args)
     out["corpus"] = override
+    return out
+
+
+#: Tools eligible for the :func:`_apply_default_corpus_to_args`
+#: fall-through. Deliberately narrower than :data:`_RETRIEVAL_TOOLS`:
+#: the catalog-routed combined-query tools (``search_metadata_scoped``,
+#: ``search_topic_scoped``, ``search_graph_hop``, ``search_aspect_scoped``)
+#: and ``store_get_many`` keep their own existing corpus/collection
+#: semantics, and ``traverse`` is non-embedding — none of those five
+#: benefit from (or should be forced into) the plain ``search``/``query``
+#: prefix default.
+_DEFAULT_CORPUS_TOOLS: frozenset[str] = frozenset({"search", "query"})
+
+
+def _apply_default_corpus_to_args(
+    tool: str, args: dict[str, Any],
+) -> dict[str, Any]:
+    """Return *args* with :data:`_PLAN_STEP_DEFAULT_CORPUS` filled in when
+    a ``search``/``query`` step reaches dispatch with no corpus scoping
+    at all (RDR-200 Phase 1b, nexus-rl59s).
+
+    This is the LAST step in the corpus-resolution fall-through:
+    plan-declared ``corpus``/``collection``/``collections`` win, then
+    ``scope.taxonomy_domain`` (:func:`_apply_scope_to_args`), then the
+    caller's ``_nx_scope`` binding (:func:`_apply_caller_scope_to_args`).
+    Only when all three leave ``corpus`` unset does this helper apply —
+    otherwise the step would fall through to the bare MCP tool default
+    (``search`` = ``knowledge,code,docs``, ``query`` = ``knowledge``),
+    which structurally excludes ``rdr__`` and was the measured cause of
+    plan-based retrieval missing the caller's primary source on 7-9 of
+    24 Phase 1b gate questions where a flat search reached 24/24 by
+    naming this same four-prefix set (T2
+    ``nexus/analysis-rdr200-phase1b-retrieval-reach-2026-09-01``).
+    """
+    if tool not in _DEFAULT_CORPUS_TOOLS:
+        return args
+    if "corpus" in args or _collections_in_args(args):
+        return args
+    out = dict(args)
+    out["corpus"] = _PLAN_STEP_DEFAULT_CORPUS
     return out
 
 
@@ -2215,6 +2273,13 @@ async def plan_run(
             resolved = _apply_caller_scope_to_args(
                 tool, resolved, bindings=merged,
             )
+            # RDR-200 Phase 1b (nexus-rl59s): last-resort corpus default for
+            # a bare search/query step that still has no corpus after plan,
+            # scope, AND caller scope all declined to set one. Runs after
+            # _apply_caller_scope_to_args so a plan-declared corpus,
+            # scope.taxonomy_domain, and a caller's _nx_scope binding all
+            # still win over this fall-through.
+            resolved = _apply_default_corpus_to_args(tool, resolved)
             # nexus-h3e2: ``mode: broad`` is an authoring affordance for
             # abstract / community-summary plans whose per-corpus default
             # threshold drops 100% of candidates. Runs last so an explicit

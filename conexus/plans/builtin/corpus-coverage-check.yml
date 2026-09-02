@@ -52,7 +52,13 @@ optional_bindings:
   - corpus
   - limit
 default_bindings:
-  corpus: knowledge
+  # nexus-rl59s (RDR-200 Phase 1b): was "knowledge" -- see the identical
+  # note in document-discovery.yml. This template is the sibling
+  # single-step-guard fast path with the same defect: a non-empty
+  # plan-declared default pre-empts both the fast-path and general-path
+  # default-corpus fall-throughs, so the runner-level fix alone never
+  # reaches it.
+  corpus: knowledge,code,docs,rdr
   limit: 10
 tags: builtin-template,nexus-h33x8,single-step,fast-path
 plan_json:

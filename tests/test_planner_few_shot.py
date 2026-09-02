@@ -178,3 +178,123 @@ async def test_plan_miss_zero_shot_when_no_matches(monkeypatch):
     prompt = captured["prompt"]
     assert "similar questions" not in prompt.lower()
     assert "solo question" in prompt
+
+
+# ── Retrieval scoping rules (RDR-200 Phase 1b, nexus-rl59s) ────────────────
+
+
+@pytest.mark.asyncio
+async def test_plan_miss_prompt_includes_scoping_rules_block(monkeypatch):
+    """The assembled planner prompt carries the scoping-rules block
+    verbatim (module constant, not re-derived per call)."""
+    import nexus.mcp.core as core
+
+    captured: dict = {}
+
+    async def fake_dispatch(prompt, schema, timeout=300.0, model=None, **kw):
+        captured["prompt"] = prompt
+        return {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+
+    monkeypatch.setattr("nexus.operators.dispatch.claude_dispatch", fake_dispatch)
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_names", lambda: [])
+
+    await core._nx_answer_plan_miss("does the scoping block appear")
+
+    prompt = captured["prompt"]
+    assert core._PLANNER_SCOPING_RULES in prompt
+
+
+@pytest.mark.asyncio
+async def test_plan_miss_prompt_scoping_rules_follow_question_and_collections(
+    monkeypatch,
+):
+    """Ordering is load-bearing: the scoping rules must appear AFTER both
+    the question line and the collection-names hint, and BEFORE the tool
+    reference — so the planner reads "what artifact, what collection"
+    before it reads the tool signatures."""
+    import nexus.mcp.core as core
+
+    captured: dict = {}
+
+    async def fake_dispatch(prompt, schema, timeout=300.0, model=None, **kw):
+        captured["prompt"] = prompt
+        return {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+
+    monkeypatch.setattr("nexus.operators.dispatch.claude_dispatch", fake_dispatch)
+    monkeypatch.setattr(
+        "nexus.mcp_infra.get_collection_names",
+        lambda: ["knowledge__dt-papers", "rdr__nexus", "code__nexus-1-1"],
+    )
+
+    await core._nx_answer_plan_miss("Knapp 2026 pyramid SFC paper, section 3")
+
+    prompt = captured["prompt"]
+    assert "knowledge__dt-papers" in prompt
+    assert "rdr__nexus" in prompt
+    question_idx = prompt.index("Question: Knapp 2026 pyramid SFC paper")
+    collections_idx = prompt.index("knowledge__dt-papers")
+    rules_idx = prompt.index(core._PLANNER_SCOPING_RULES)
+    tool_ref_idx = prompt.index(core._PLANNER_TOOL_REFERENCE)
+    assert question_idx < collections_idx < rules_idx < tool_ref_idx
+
+
+def test_planner_scoping_rules_golden_text():
+    """Golden pin on the scoping-rules constant: fails loud if the rules
+    text silently drifts or vanishes. Pins the three ordered directives
+    (named-artifact scoping, content-shaped query, prefer narrow steps)
+    and the four collection-prefix examples, not the exact wording, so
+    the test survives copy-editing but not a dropped rule."""
+    from nexus.mcp.core import _PLANNER_SCOPING_RULES
+
+    rules = _PLANNER_SCOPING_RULES
+    # Rule 1: named-artifact scoping, in order, with the four prefix
+    # mappings and the four-prefix fallback.
+    assert "NAMES an artifact" in rules
+    assert "knowledge__" in rules
+    assert "rdr__" in rules
+    assert "code__" in rules
+    assert "docs__" in rules
+    assert "knowledge,code,docs,rdr" in rules
+    # Rule 2: never the raw question text; content-shaped query instead.
+    assert "NEVER pass the question text" in rules
+    assert "CONTENT-SHAPED query" in rules
+    assert "SEPARATE retrieval steps" in rules
+    # Rule 3: prefer narrow scoped searches, hydrate each.
+    assert "Prefer TWO scoped searches" in rules
+    assert "store_get_many" in rules
+    # Ordering: rule 1 precedes rule 2 precedes rule 3.
+    assert rules.index("1.") < rules.index("2.") < rules.index("3.")
+
+
+def test_planner_tool_reference_shows_named_collection_and_default_corpus():
+    """The tool-reference examples must show a named collection (not a
+    bare 'all') and the four-prefix default, and the corpus contract
+    text must document the comma-separated-list form instead of
+    claiming corpus is restricted to 'all' / a single prefix / a full
+    name."""
+    from nexus.mcp.core import _PLANNER_TOOL_REFERENCE
+
+    ref = _PLANNER_TOOL_REFERENCE
+    assert 'corpus="knowledge__dt-papers"' in ref
+    assert 'corpus="knowledge,code,docs,rdr"' in ref
+    assert "comma-separated list" in ref
+    # The stale claim ("corpus must be 'all', a prefix, or a full
+    # collection name" — no comma-list mention) must be gone.
+    assert "`corpus` must be \"all\"" not in ref
+
+
+def test_collection_hint_samples_every_prefix_family():
+    """nexus-rl59s (critique [24066] S1): alphabetical truncation starved
+    knowledge__/rdr__ out of the planner's hint on real installs."""
+    from nexus.mcp.core import _sample_collection_names_by_prefix
+    names = [f"code__{i}__voyage-code-3__v1" for i in range(18)] + \
+            [f"docs__{i}__voyage-context-3__v1" for i in range(19)] + \
+            [f"knowledge__k{i}__voyage-context-3__v1" for i in range(11)] + \
+            [f"rdr__{i}__voyage-context-3__v1" for i in range(9)]
+    assert sorted(names)[:20] == sorted(n for n in names if n.startswith(("code__", "docs__")))[:20]
+    shown = _sample_collection_names_by_prefix(names, 24)
+    assert len(shown) == 24
+    assert any(n.startswith("knowledge__") for n in shown)
+    assert any(n.startswith("rdr__") for n in shown)
+    assert len(set(shown)) == 24
+    assert _sample_collection_names_by_prefix([], 24) == []

@@ -6160,6 +6160,44 @@ _PLANNER_SCHEMA: dict = {
     "additionalProperties": False,
 }
 
+#: Retrieval-scoping guidance included in the inline-planner prompt,
+#: right after the question and the live collection-name hint (RDR-200
+#: Phase 1b, nexus-rl59s). Measured cause this closes: composed
+#: retrieval steps reached the caller's primary source on only 7-9 of
+#: 24 gate questions, against 24/24 for a flat search that (a) named
+#: the collection holding the question's artifact and (b) rephrased
+#: the query as content-shaped text instead of the raw question (T2
+#: ``nexus/gate-result-rdr200-phase1b-2026-09-01``). This block states
+#: both fixes as imperative rules, in the order the planner should
+#: apply them: scope first, then phrase the query, then prefer narrow
+#: steps over one broad one.
+_PLANNER_SCOPING_RULES = """\
+Retrieval scoping rules — apply BEFORE writing any retrieval step:
+
+1. If the question NAMES an artifact — a paper or author, an RDR
+   number, a file path or module, a spec — emit ONE retrieval step PER
+   NAMED ARTIFACT, scoped to the collection that holds it:
+     * a paper or author      -> the matching knowledge__ collection,
+       matched BY NAME from the "Available collection names" list above.
+     * "RDR-NNN"               -> an rdr__ collection.
+     * "src/..." or a module  -> a code__ collection.
+     * documentation           -> a docs__ collection.
+   When no single collection is obvious, use
+   corpus="knowledge,code,docs,rdr" (the four-prefix default) instead
+   of guessing one collection.
+
+2. NEVER pass the question text itself as `query`/`question`. Write a
+   CONTENT-SHAPED query instead — the terms a matching passage would
+   actually contain: the paper's title or section topic, the
+   function/class name, the RDR's subject. For a multi-part question,
+   emit SEPARATE retrieval steps with SEPARATE content-shaped queries,
+   one per part.
+
+3. Prefer TWO scoped searches over one broad one. Hydrate
+   (store_get_many) each retrieval step's results before reasoning
+   over them.
+"""
+
 #: Tool-signature hint text included in the inline-planner prompt so the
 #: LLM generates args that match the actual MCP tool contracts.  Without
 #: this, the planner typically emits ``operator_extract(corpus=..., query=...)``
@@ -6172,15 +6210,27 @@ Use ONLY these tools (bare names; the runner maps them to MCP calls).
 Each returns {"ids": [...], "tumblers": [...], "distances": [...], "collections": [...]}.
 THEY DO NOT RETURN CONTENT. To get text, chain into store_get_many.
 
-  search(query, corpus="all", limit=10, topic="", where="")
-      - `query` is the search string.  `corpus` must be "all", a prefix
-        (rdr/knowledge/code), or a full collection name.
+  search(query, corpus="knowledge,code,docs,rdr", limit=10, topic="", where="")
+      - `query` is a CONTENT-SHAPED search string — never the raw
+        question text (see "Retrieval scoping rules" above).
+      - `corpus` accepts "all" (also admits quarantine-* — avoid unless
+        you mean it), a single collection name (e.g.
+        "knowledge__dt-papers"), a prefix (rdr/knowledge/code/docs), OR
+        a comma-separated list of prefixes/collection names — e.g.
+        "knowledge,code,docs,rdr", the four-prefix default this runner
+        falls back to when nothing else scopes the step. Prefer a
+        named collection over the default whenever the question names
+        a specific artifact.
       - Output: {ids, tumblers, distances, collections}
 
-  query(question, corpus="all", limit=10, author="", content_type="",
+  query(question, corpus="knowledge,code,docs,rdr", limit=10, author="", content_type="",
         subtree="", follow_links="", depth=1)
+      - `question` is a CONTENT-SHAPED search string — same rule as
+        `search`'s `query`, never the raw question text.
       - Document-level retrieval with catalog-aware routing.
       - Output: {ids, tumblers, distances, collections}
+      - `corpus` accepts the same forms as `search` above: "all", a
+        prefix, a full collection name, or a comma-separated list.
       - Scope filter guidance (bead nexus-sgrg): prefer `corpus=<collection>`
         for project scoping. The `author` filter matches the catalog
         `author` column, which is rarely populated for RDR/docs; setting
@@ -6238,14 +6288,15 @@ Each requires hydrated text as input — NOT ids/tumblers.
 === Correct chain patterns ===
 
 Pattern A (search → hydrate → operate):
-  step1: search(query=..., corpus="all")      → {ids, tumblers, collections}
+  step1: search(query="<content-shaped terms>", corpus="knowledge__dt-papers")
+                                               → {ids, tumblers, collections}
   step2: store_get_many(ids=$step1.ids,
                         collections=$step1.collections)
                                                → {contents, missing}
   step3: summarize(content=$step2.contents)    → {summary}
 
 Pattern B (operator auto-hydration shortcut):
-  step1: search(query=..., corpus="all")
+  step1: search(query="<content-shaped terms>", corpus="knowledge,code,docs,rdr")
   step2: summarize(ids=$step1.ids,
                    collections=$step1.collections)
     # Runner auto-calls store_get_many for you when an operator step
@@ -6881,6 +6932,32 @@ def _nx_answer_record_outcome(plan_id: int, *, success: bool) -> None:
 #: Max historical plans injected as few-shot examples into the inline
 #: planner on a miss (nexus-mhyf3 / CacheRAG R1). Three balances prompt
 #: cost against the demonstrated lift.
+#: nexus-rl59s (critique [24066] S1): the collection-name hint used to be
+#: ``sorted(available)[:20]``, which on a 63-collection install is 100%
+#: code__/docs__ (they sort first) and never shows a knowledge__ or rdr__
+#: name -- the two families the scoping rules ask the planner to name.
+#: Round-robin across prefixes instead so every family is represented.
+_PLANNER_COLLECTION_HINT_MAX = 24
+
+
+def _sample_collection_names_by_prefix(names: list[str], limit: int) -> list[str]:
+    """Return up to *limit* names, round-robin across ``<prefix>__`` families
+    (each family's names in sorted order), so no family is starved by
+    alphabetical truncation. Deterministic: families and names sorted."""
+    by_prefix: dict[str, list[str]] = {}
+    for n in sorted(set(names)):
+        by_prefix.setdefault(n.split("__", 1)[0], []).append(n)
+    out: list[str] = []
+    queues = [by_prefix[k] for k in sorted(by_prefix)]
+    i = 0
+    while len(out) < limit and any(queues):
+        q = queues[i % len(queues)]
+        if q:
+            out.append(q.pop(0))
+        i += 1
+    return out
+
+
 _PLANNER_FEW_SHOT_MAX = 3
 #: Per-example plan-JSON character cap so a pathological stored plan can't
 #: blow the planner prompt budget.
@@ -6980,10 +7057,11 @@ async def _nx_answer_plan_miss(
         available = []
     corpus_names_hint = ""
     if available:
+        shown = _sample_collection_names_by_prefix(available, _PLANNER_COLLECTION_HINT_MAX)
         corpus_names_hint = (
             f"\n\nAvailable collection names in this environment: "
-            f"{', '.join(sorted(available)[:20])}"
-            + (f" (and {len(available) - 20} more)" if len(available) > 20 else "")
+            f"{', '.join(shown)}"
+            + (f" (and {len(available) - len(shown)} more)" if len(available) > len(shown) else "")
             + ".  Pass collection names to `search` via `corpus=<name>` — "
             "bare prefixes like 'knowledge' or 'code' will miss if no "
             "collection actually starts with that prefix."
@@ -7011,6 +7089,7 @@ async def _nx_answer_plan_miss(
         f"{few_shot_block}"
         f"Question: {question}\n"
         f"{corpus_names_hint}\n\n"
+        f"{_PLANNER_SCOPING_RULES}\n\n"
         f"{_PLANNER_TOOL_REFERENCE}\n"
         f"Return the plan as {{\"steps\": [...]}} where each step is "
         f"{{\"tool\": \"<bare name>\", \"args\": {{...}}}}."
@@ -8417,7 +8496,13 @@ async def nx_answer(
                 _nx_answer_record_outcome(best.plan_id, success=False)
                 return _result(str(exc), plan_id=best.plan_id, step_count=0)
             q = step_args.get("question", question)
-            corpus = step_args.get("corpus", "knowledge")
+            # nexus-rl59s (code review [24061] Critical): this fast path
+            # bypasses plan_run, so the runner's fall-through default never
+            # reached it and a corpus-agnostic single_query plan stayed on
+            # query()'s bare "knowledge" default -- the degenerate class A
+            # listings of the RDR-200 Phase 1b gate (q06/q08/q19).
+            from nexus.plans.runner import _PLAN_STEP_DEFAULT_CORPUS  # noqa: PLC0415 — deferred; runner is heavy and this branch is rare
+            corpus = step_args.get("corpus") or _PLAN_STEP_DEFAULT_CORPUS
             try:
                 limit = int(step_args.get("limit", 10))
             except (TypeError, ValueError):

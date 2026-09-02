@@ -332,8 +332,19 @@ class TestSingleQueryFastPathLiveThroughNxAnswer:
             "pass through the literal template token -- got "
             f"{query_calls[0].get('question')!r}"
         )
-        assert query_calls[0].get("corpus") == "knowledge", (
-            f"expected the plan's resolved default corpus 'knowledge', "
-            f"got {query_calls[0].get('corpus')!r}"
+        # nexus-rl59s (RDR-200 Phase 1b): the template's default_bindings
+        # corpus was widened from the bare "knowledge" to the four-prefix
+        # default -- "knowledge" alone is exactly the degenerate class A
+        # reproduction (T2 analysis-rdr200-phase1b-retrieval-reach-2026-09-01:
+        # "single-step guard rerouted to query(corpus=knowledge)"), which a
+        # bare-string plan-declared default pre-empts BOTH the fast-path
+        # `or _PLAN_STEP_DEFAULT_CORPUS` fallback and the general runner's
+        # presence-based `_apply_default_corpus_to_args` guard -- neither
+        # fallback can widen a value the plan itself already supplied.
+        from nexus.plans.runner import _PLAN_STEP_DEFAULT_CORPUS
+        assert query_calls[0].get("corpus") == _PLAN_STEP_DEFAULT_CORPUS, (
+            f"expected the plan's resolved default corpus to be the "
+            f"widened four-prefix default {_PLAN_STEP_DEFAULT_CORPUS!r} "
+            f"(nexus-rl59s), got {query_calls[0].get('corpus')!r}"
         )
         assert "canned single-query result" in result

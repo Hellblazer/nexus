@@ -23,6 +23,8 @@ import json
 
 import pytest
 
+from nexus.plans.runner import _PLAN_STEP_DEFAULT_CORPUS
+
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -76,7 +78,11 @@ async def test_run_resolves_caller_var_in_args() -> None:
     await plan_run(_match(plan), {"intent": "how does X work"}, dispatcher=disp)
 
     assert disp.calls[0] == (
-        "search", {"query": "how does X work", "limit": 5},
+        "search",
+        {
+            "query": "how does X work", "limit": 5,
+            "corpus": _PLAN_STEP_DEFAULT_CORPUS,
+        },
     )
 
 
@@ -92,7 +98,9 @@ async def test_run_caller_binding_overrides_default() -> None:
     match = _match(plan, default_bindings={"intent": "default"})
     disp = _FakeDispatcher()
     await plan_run(match, {"intent": "caller"}, dispatcher=disp)
-    assert disp.calls[0][1] == {"query": "caller"}
+    assert disp.calls[0][1] == {
+        "query": "caller", "corpus": _PLAN_STEP_DEFAULT_CORPUS,
+    }
 
 
 @pytest.mark.asyncio
@@ -106,7 +114,9 @@ async def test_run_falls_back_to_default_when_caller_omits() -> None:
     match = _match(plan, default_bindings={"intent": "from-default"})
     disp = _FakeDispatcher()
     await plan_run(match, {}, dispatcher=disp)
-    assert disp.calls[0][1] == {"query": "from-default"}
+    assert disp.calls[0][1] == {
+        "query": "from-default", "corpus": _PLAN_STEP_DEFAULT_CORPUS,
+    }
 
 
 @pytest.mark.asyncio
@@ -227,7 +237,10 @@ async def test_run_scope_topic_dead_when_args_already_sets_topic() -> None:
     }
     disp = _FakeDispatcher()
     await plan_run(_match(plan), {}, dispatcher=disp)
-    assert disp.calls[0][1] == {"topic": "explicit", "query": "literal"}
+    assert disp.calls[0][1] == {
+        "topic": "explicit", "query": "literal",
+        "corpus": _PLAN_STEP_DEFAULT_CORPUS,
+    }
 
 
 @pytest.mark.asyncio
@@ -292,7 +305,9 @@ async def test_run_optional_var_with_default_still_resolves() -> None:
     match = _match(plan, default_bindings={"topic": "from-default"})
     disp = _FakeDispatcher()
     await plan_run(match, {}, dispatcher=disp)
-    assert disp.calls[0][1] == {"query": "from-default"}
+    assert disp.calls[0][1] == {
+        "query": "from-default", "corpus": _PLAN_STEP_DEFAULT_CORPUS,
+    }
 
 
 @pytest.mark.asyncio
@@ -307,7 +322,9 @@ async def test_run_optional_var_caller_supplied_still_wins() -> None:
     }
     disp = _FakeDispatcher()
     await plan_run(_match(plan), {"topic": "caller-value"}, dispatcher=disp)
-    assert disp.calls[0][1] == {"query": "caller-value"}
+    assert disp.calls[0][1] == {
+        "query": "caller-value", "corpus": _PLAN_STEP_DEFAULT_CORPUS,
+    }
 
 
 @pytest.mark.asyncio
@@ -321,7 +338,13 @@ async def test_run_plan_with_no_var_refs_is_unaffected() -> None:
     }
     disp = _FakeDispatcher()
     await plan_run(_match(plan), {}, dispatcher=disp)
-    assert disp.calls[0] == ("search", {"query": "literal query", "limit": 5})
+    assert disp.calls[0] == (
+        "search",
+        {
+            "query": "literal query", "limit": 5,
+            "corpus": _PLAN_STEP_DEFAULT_CORPUS,
+        },
+    )
 
 
 # ── $stepN.<field> reference ───────────────────────────────────────────────
@@ -733,16 +756,18 @@ async def test_run_caller_scope_skips_non_retrieval_tools() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_no_scope_binding_unchanged() -> None:
-    """When caller omits ``_nx_scope``, behavior is unchanged — the step
-    runs without any corpus injection."""
+async def test_run_no_scope_binding_falls_through_to_plan_step_default() -> None:
+    """When caller omits ``_nx_scope`` too, the step is NOT left
+    corpus-less (RDR-200 Phase 1b, nexus-rl59s) — it falls through to
+    :data:`_PLAN_STEP_DEFAULT_CORPUS` rather than the bare MCP tool
+    default, which structurally excludes ``rdr__``."""
     from nexus.plans.runner import plan_run
 
     plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
     disp = _FakeDispatcher([{"text": "ok", "ids": []}])
     await plan_run(_match(plan), {}, dispatcher=disp)
     _tool, args = disp.calls[0]
-    assert "corpus" not in args
+    assert args["corpus"] == _PLAN_STEP_DEFAULT_CORPUS
 
 
 @pytest.mark.asyncio
@@ -760,6 +785,172 @@ async def test_run_caller_scope_binding_not_forwarded_to_tool() -> None:
     )
     _tool, args = disp.calls[0]
     assert "_nx_scope" not in args
+
+
+# ── Plan-step default corpus fall-through (RDR-200 Phase 1b, nexus-rl59s) ───
+
+
+@pytest.mark.asyncio
+async def test_default_corpus_fills_search_with_no_scoping_at_all() -> None:
+    """A ``search`` step with no plan corpus, no ``scope``, and no caller
+    ``_nx_scope`` binding gets :data:`_PLAN_STEP_DEFAULT_CORPUS`."""
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+    disp = _FakeDispatcher([{"text": "ok", "ids": []}])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    _tool, args = disp.calls[0]
+    assert args["corpus"] == _PLAN_STEP_DEFAULT_CORPUS
+
+
+@pytest.mark.asyncio
+async def test_default_corpus_fills_query_with_no_scoping_at_all() -> None:
+    """``query`` gets the same default-corpus fall-through as ``search``."""
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "query", "args": {"question": "x"}}]}
+    disp = _FakeDispatcher([{"text": "ok", "ids": []}])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    _tool, args = disp.calls[0]
+    assert args["corpus"] == _PLAN_STEP_DEFAULT_CORPUS
+
+
+@pytest.mark.asyncio
+async def test_default_corpus_does_not_override_plan_declared_corpus() -> None:
+    """A plan-pinned ``corpus`` always wins over the fall-through default."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x", "corpus": "code__delos"}},
+        ],
+    }
+    disp = _FakeDispatcher([{"text": "ok", "ids": []}])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    _tool, args = disp.calls[0]
+    assert args["corpus"] == "code__delos"
+
+
+@pytest.mark.asyncio
+async def test_default_corpus_does_not_override_plan_collections() -> None:
+    """A plan-pinned ``collection``/``collections`` arg wins too — no
+    ``corpus`` key is injected alongside it."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {
+                "tool": "search",
+                "args": {"query": "x", "collection": "rdr__delos"},
+            },
+        ],
+    }
+    disp = _FakeDispatcher([{"text": "ok", "ids": []}])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    _tool, args = disp.calls[0]
+    assert "corpus" not in args
+    assert args["collection"] == "rdr__delos"
+
+
+@pytest.mark.asyncio
+async def test_caller_scope_binding_wins_over_the_plan_step_default() -> None:
+    """When ``_nx_scope`` IS present, it fills the corpus before the
+    fall-through default ever runs — the caller's narrower scope wins,
+    not the broad four-prefix default."""
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+    disp = _FakeDispatcher([{"text": "ok", "ids": []}])
+    await plan_run(
+        _match(plan),
+        {"_nx_scope": "rdr__arcaneum-2ad2825c"},
+        dispatcher=disp,
+    )
+    _tool, args = disp.calls[0]
+    assert args["corpus"] == "rdr__arcaneum-2ad2825c"
+
+
+@pytest.mark.asyncio
+async def test_default_corpus_skips_search_metadata_scoped() -> None:
+    """Catalog-routed combined-query tools keep their own semantics —
+    the plain search/query default must not reach them."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search_metadata_scoped", "args": {"query": "x"}},
+        ],
+    }
+    disp = _FakeDispatcher([{"ids": [], "tumblers": [], "collections": []}])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    _tool, args = disp.calls[0]
+    assert "corpus" not in args
+
+
+@pytest.mark.asyncio
+async def test_default_corpus_skips_store_get_many() -> None:
+    """``store_get_many`` hydrates by explicit ids/collections — it must
+    never get a bare-prefix corpus default injected."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "store_get_many", "args": {"ids": ["a"], "collections": "knowledge__x"}},
+        ],
+    }
+    disp = _FakeDispatcher([{"contents": ["c"], "missing": []}])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    _tool, args = disp.calls[0]
+    assert "corpus" not in args
+
+
+@pytest.mark.asyncio
+async def test_default_corpus_skips_traverse() -> None:
+    """``traverse`` operates on tumblers, never embeddings — no corpus
+    default belongs on it."""
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "traverse", "args": {"seeds": ["1.1"]}}]}
+    disp = _FakeDispatcher([{"tumblers": [], "ids": [], "collections": []}])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    _tool, args = disp.calls[0]
+    assert "corpus" not in args
+
+
+@pytest.mark.asyncio
+async def test_default_corpus_end_to_end_two_step_plan() -> None:
+    """A two-step ``search`` (no corpus) → ``store_get_many`` plan
+    dispatches the search step with the default corpus, and the
+    hydration step is unaffected — confirms the matched-plan path (a
+    library plan whose retrieval step declares no corpus) picks up
+    Fix 1's default automatically, with no separate matched-plan change
+    needed."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {
+                "tool": "store_get_many",
+                "args": {"ids": "$step1.ids", "collections": "$step1.collections"},
+            },
+        ],
+    }
+    disp = _FakeDispatcher([
+        {"ids": ["a"], "tumblers": [], "distances": [], "collections": ["knowledge__y"]},
+        {"contents": ["hydrated"], "missing": []},
+    ])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+
+    search_tool, search_args = disp.calls[0]
+    assert search_tool == "search"
+    assert search_args["corpus"] == _PLAN_STEP_DEFAULT_CORPUS
+
+    hydrate_tool, hydrate_args = disp.calls[1]
+    assert hydrate_tool == "store_get_many"
+    assert hydrate_args["ids"] == ["a"]
+    assert hydrate_args["collections"] == ["knowledge__y"]
+    assert "corpus" not in hydrate_args
 
 
 # ── Result + step trace ────────────────────────────────────────────────────

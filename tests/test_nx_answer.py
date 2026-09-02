@@ -326,6 +326,37 @@ class TestSharedStepBindingResolutionHelper:
         )
 
     @pytest.mark.asyncio
+    async def test_single_query_fast_path_uses_plan_step_default_corpus(self, tmp_path):
+        """nexus-rl59s (code review [24061] Critical): the single-step
+        reroute bypasses plan_run, so it must apply the runner's
+        fall-through corpus itself. A corpus-agnostic single_query plan
+        must NOT land on query()'s bare "knowledge" default (which omits
+        rdr__ -- the Phase 1b degenerate class A listings)."""
+        import nexus.mcp_infra as _infra
+        from nexus.plans.runner import _PLAN_STEP_DEFAULT_CORPUS
+
+        match = _make_match(
+            plan_json=json.dumps({
+                "steps": [{"tool": "query", "args": {"question": "$intent"}}],
+            }),
+        )
+        assert "corpus" not in json.loads(match.plan_json)["steps"][0]["args"]
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch("nexus.mcp.core.query", return_value="ok") as q,
+        ):
+            from nexus.mcp.core import nx_answer
+            await nx_answer("q")
+
+        assert q.called
+        assert q.call_args.kwargs.get("corpus") == _PLAN_STEP_DEFAULT_CORPUS, q.call_args
+
+    @pytest.mark.asyncio
     async def test_plan_run_calls_shared_merge_bindings(self):
         import nexus.plans.runner as _runner
         from nexus.plans.runner import plan_run

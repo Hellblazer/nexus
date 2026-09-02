@@ -43,6 +43,12 @@ mechanize, it matters enough to ship.
   adds `nx_answer_report` to the auto-approve list so the new completion-
   report tool does not prompt on every call while every sibling nx_* tool
   auto-approves. RDR-200 Phase 1c.
+- `conexus/plans/builtin/document-discovery.yml` — bead: nexus-rl59s —
+  `default_bindings.corpus` widened from `knowledge` to
+  `knowledge,code,docs,rdr` so the single-step reroute reaches rdr__
+  (RDR-200 Phase 1b degenerate class A, critique [24066]).
+- `conexus/plans/builtin/corpus-coverage-check.yml` — bead: nexus-rl59s —
+  same widening.
 - `conexus/skills/rdr-close/SKILL.md` — bead: nexus-j9z30.4 — the
   Reverted-or-Abandoned flow now runs `nx rdr set-status NNN abandoned`
   (not `reverted`, retired from the rdr-lifecycle table's status domain

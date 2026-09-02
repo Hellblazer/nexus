@@ -43,7 +43,19 @@ optional_bindings:
   - corpus
   - limit
 default_bindings:
-  corpus: knowledge
+  # nexus-rl59s (RDR-200 Phase 1b): was "knowledge" -- a NON-EMPTY string,
+  # so it pre-empted BOTH the fast-path `or _PLAN_STEP_DEFAULT_CORPUS`
+  # fallback (core.py) and the general runner's `_apply_default_corpus_to_args`
+  # (its guard is presence-based: "corpus" in args), since this default
+  # resolves into `args` before either check runs. This template IS q19's
+  # plan 471 reproduction (T2 analysis-rdr200-phase1b-retrieval-reach-2026-09-01:
+  # "single-step guard rerouted to query(corpus=knowledge)") -- the runner-level
+  # fix alone could never widen this because the plan itself declared "knowledge"
+  # as an explicit default, which both fall-throughs correctly treat as a
+  # deliberate plan-level pin. Widened to the same four-prefix default so a
+  # caller who doesn't override `corpus` gets rdr__/knowledge__ coverage
+  # instead of the narrow single-prefix default this bead exists to fix.
+  corpus: knowledge,code,docs,rdr
   limit: 10
 tags: builtin-template,nexus-h33x8,single-step,fast-path
 plan_json:
