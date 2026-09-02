@@ -21,6 +21,7 @@ from nexus.catalog.rdr_canonical import (
     current_rdr_owner,
     group_rdr_candidates,
     is_in_repo,
+    rdr_key_of,
     rdr_source_prefix,
     resolve_all,
 )
@@ -491,6 +492,36 @@ def _numeric_id_index(
     return result
 
 
+#: Above this many new tumblers the per-tumbler seed lookup costs more
+#: round trips than the one full RDR listing it exists to avoid, so the
+#: generator falls through to the listing instead.
+_RDR_SEED_LOOKUP_CAP = 32
+
+
+def _any_new_tumbler_is_rdr_keyed(cat: CatalogReader, new_tumblers: list[Tumbler]) -> bool:
+    """Incremental-mode seed check, one ``resolve`` per NEW tumbler.
+
+    The content-type check (:func:`_no_qualifying_seed`) admits this
+    generator for any batch carrying ``"prose"`` -- but ``prose`` is the
+    repo-wide default for ALL general markdown, so it admits essentially
+    every ``nx index`` run that touches a ``.md`` file and the full
+    RDR listing (~530 rows on this repo) fires on each (RDR-201 P3.2
+    round-2 critique, T2 [24077]). Only a document :func:`rdr_key_of`
+    recognises -- a ``rdr-*.md`` file directly under a ``rdr/`` directory
+    -- can be a SOURCE of a dependency edge, so a small batch with no such
+    tumbler can skip the listing exactly. Batches above
+    :data:`_RDR_SEED_LOOKUP_CAP` fall through (``True``) rather than trade
+    one listing for more lookups than it holds.
+    """
+    if len(new_tumblers) > _RDR_SEED_LOOKUP_CAP:
+        return True
+    for tumbler in new_tumblers:
+        entry = cat.resolve(tumbler)
+        if entry is not None and rdr_key_of(entry) is not None:
+            return True
+    return False
+
+
 def rdr_resolution(
     cat: CatalogReader, current_owner: Tumbler, *, repo_source_prefix: str,
 ) -> tuple[dict[str, Tumbler | None], dict[int, str]]:
@@ -561,6 +592,9 @@ def generate_rdr_dependency_links(
             "rdr_dependency_links_skipped_no_seed",
             new_content_types=sorted(new_content_types) if new_content_types else [],
         )
+        return 0
+    if new_tumblers is not None and not _any_new_tumbler_is_rdr_keyed(cat, new_tumblers):
+        _log.debug("rdr_dependency_links_skipped_no_rdr_keyed_seed", new_count=len(new_tumblers))
         return 0
 
     resolved, number_index = rdr_resolution(

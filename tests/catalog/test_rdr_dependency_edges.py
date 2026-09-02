@@ -95,6 +95,7 @@ class _FakeCat:
         self._owners = owners or {}
 
     def all_documents(self, limit=1000, *, content_type: str = "", offset=0):
+        self.listings = getattr(self, "listings", 0) + 1
         if content_type:
             return [e for e in self._entries if e.content_type == content_type]
         return list(self._entries)
@@ -106,6 +107,14 @@ class _FakeCat:
                     return None
                 p = Path(e.file_path)
                 return p if p.is_absolute() else self._repo_root / p
+        return None
+
+    def resolve(self, tumbler: Tumbler, *, follow_alias: bool = True) -> CatalogEntry | None:
+        """One entry by tumbler -- what the incremental seed check calls per
+        NEW tumbler instead of listing every RDR (RDR-201 P3.2 follow-up)."""
+        for e in self._entries:
+            if e.tumbler == tumbler:
+                return e
         return None
 
     def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
@@ -468,6 +477,64 @@ class TestIncrementalModeAndIdempotency:
         )
         assert count == 0
         assert w.proposed == []
+
+
+class TestIncrementalSeedIsPathAware:
+    """RDR-201 P3.2 round-2 critique (T2 [24077]): content_type="prose" is
+    the repo-wide default for ALL general markdown, so the type-level seed
+    check admitted this generator -- and its full RDR listing -- on
+    essentially every ``nx index`` run touching a ``.md``. The seed check
+    now resolves each NEW tumbler and asks ``rdr_key_of``; only an
+    rdr-keyed document can be a source of an edge."""
+
+    def test_small_prose_batch_with_no_rdr_keyed_tumbler_skips_the_listing(
+        self, tmp_path: Path,
+    ) -> None:
+        _write_rdr(tmp_path, "rdr-015-a.md", 'title: "RDR-015"\nsupersedes: RDR-014')
+        rdr = _entry("1.1.10", file_path="docs/rdr/rdr-015-a.md", source_uri=_source_uri(tmp_path, "rdr-015-a.md"))
+        guide = _entry("1.1.20", file_path="docs/guide.md", content_type="prose")
+        cat = _FakeCat([rdr, guide], repo_root=tmp_path)
+        w = DryRunLinkWriter()
+        count = generate_rdr_dependency_links(
+            cat, writer=w, current_owner=CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX,
+            new_tumblers=[Tumbler.parse("1.1.20")], new_content_types=frozenset({"prose"}),
+        )
+        assert count == 0
+        assert getattr(cat, "listings", 0) == 0, "the full RDR listing must not run for a batch with no rdr-keyed tumbler"
+
+    def test_small_batch_with_an_rdr_keyed_tumbler_still_lists_and_links(
+        self, tmp_path: Path,
+    ) -> None:
+        _write_rdr(tmp_path, "rdr-015-a.md", 'title: "RDR-015"\nsupersedes: RDR-014')
+        _write_rdr(tmp_path, "rdr-014-b.md", 'title: "RDR-014"')
+        source = _entry("1.1.10", file_path="docs/rdr/rdr-015-a.md", source_uri=_source_uri(tmp_path, "rdr-015-a.md"))
+        target = _entry("1.1.11", file_path="docs/rdr/rdr-014-b.md", source_uri=_source_uri(tmp_path, "rdr-014-b.md"))
+        guide = _entry("1.1.20", file_path="docs/guide.md", content_type="prose")
+        cat = _FakeCat([source, target, guide], repo_root=tmp_path)
+        w = DryRunLinkWriter()
+        count = generate_rdr_dependency_links(
+            cat, writer=w, current_owner=CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX,
+            new_tumblers=[Tumbler.parse("1.1.20"), Tumbler.parse("1.1.10")],
+            new_content_types=frozenset({"prose", "rdr"}),
+        )
+        assert count == 1
+        assert getattr(cat, "listings", 0) >= 1
+
+    def test_a_batch_above_the_lookup_cap_falls_through_to_the_listing(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        import nexus.catalog.link_generator as lg
+
+        guide = _entry("1.1.20", file_path="docs/guide.md", content_type="prose")
+        cat = _FakeCat([guide], repo_root=tmp_path)
+        monkeypatch.setattr(lg, "_RDR_SEED_LOOKUP_CAP", 1)
+        count = generate_rdr_dependency_links(
+            cat, writer=DryRunLinkWriter(), current_owner=CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX,
+            new_tumblers=[Tumbler.parse("1.1.20"), Tumbler.parse("1.1.21")],
+            new_content_types=frozenset({"prose"}),
+        )
+        assert count == 0
+        assert getattr(cat, "listings", 0) >= 1, "above the cap the one listing is the cheaper path"
 
 
 class TestSelfReferenceGuard:
