@@ -55,10 +55,19 @@ def _resolve_dt_collection(
     to conformant 4-segment names so the strict-naming guard at
     ``T3Database.get_or_create_collection`` accepts them.
     """
-    from nexus.corpus import resolve_write_embedding_model  # noqa: PLC0415 — command-local import (resolve_write_embedding_model)
+    from nexus.corpus import (  # noqa: PLC0415 — command-local import
+        resolve_write_embedding_model,
+        t3_collection_name,
+    )
 
     if collection:
-        return collection
+        # Measured 2026-09-02 (AgenticScholar re-index): a bare
+        # ``--collection knowledge__agentic-scholar`` was passed through
+        # verbatim and the engine refused it as non-conformant, after the
+        # catalog Document had already been registered. ``nx index pdf``
+        # normalises its --collection through the same resolver; this
+        # path must too.
+        return t3_collection_name(collection, for_write=True)
     owner = corpus.replace("_", "-")
     content_type = "knowledge" if ext == ".pdf" else "docs"
     suffix = f"{owner}-papers" if ext == ".pdf" else owner
