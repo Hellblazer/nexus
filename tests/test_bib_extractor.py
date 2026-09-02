@@ -230,3 +230,233 @@ class TestExtractIdentifiers:
 
         ids = extract_identifiers(filename="paper.pdf", body_text="just text")
         assert ids == {"doi": None, "arxiv": None}
+
+
+# ── Reference-section bound + placeholder rejection (nexus-kho0p) ────────────
+
+
+class TestDoiReferenceSectionBound:
+    """nexus-kho0p: the labeled-DOI preference (nexus-liir) was not bounded
+    to the region above the bibliography. nexus-liir's stated justification
+    — "reference-section DOIs usually appear bare in numbered citation
+    lists" (bib_extractor.py:38-46) — is falsified by preprints whose
+    references carry explicit ``doi:`` labels. On such a paper, with no DOI
+    of its own in the header, the labeled search reached into the
+    bibliography and returned a CITED paper's DOI.
+
+    Measured case: Meta-Harness (arXiv 2603.28052) yielded 10.1145/3591300,
+    its own reference [8] (LMQL / "Prompting Is Programming", PLDI 2023).
+    """
+
+    def test_labeled_doi_in_references_is_not_returned(self) -> None:
+        """The nexus-kho0p defect, reduced. No header DOI; the only labeled
+        DOI in the document is a bibliography entry. Returning None is
+        correct — the caller falls back to the arXiv ID, which is
+        authoritative for a preprint."""
+        from nexus.bib_extractor import extract_doi
+
+        text = (
+            "Meta-Harness: End-to-End Optimization of Model Harnesses\n"
+            "Yoonho Lee, Roshen Nair, Chelsea Finn\n"
+            "Abstract. We introduce Meta-Harness, an outer-loop system.\n"
+            "References\n"
+            "[8] Luca Beurer-Kellner et al. Prompting Is Programming. "
+            "doi:10.1145/3591300\n"
+        )
+        assert extract_doi(text) is None
+
+    def test_header_doi_still_wins_over_labeled_references(self) -> None:
+        """The nexus-liir class must not regress: a paper that DOES print
+        its own DOI still gets it, even when the references also carry
+        labeled DOIs."""
+        from nexus.bib_extractor import extract_doi
+
+        text = (
+            "Credo: Declarative Control of LLM Pipelines\n"
+            "doi:10.14778/3827998.3828054\n"
+            "References\n"
+            "[6] Meta-Harness. doi:10.1145/3591300\n"
+        )
+        assert extract_doi(text) == "10.14778/3827998.3828054"
+
+    def test_bare_doi_above_references_still_found(self) -> None:
+        """The bare-DOI fallback keeps working inside the bounded region."""
+        from nexus.bib_extractor import extract_doi
+
+        text = "Some Paper\n10.1038/s41586-021-04096-9\nReferences\n[1] doi:10.1145/999"
+        assert extract_doi(text) == "10.1038/s41586-021-04096-9"
+
+    @pytest.mark.parametrize(
+        "heading",
+        ["References", "REFERENCES", "## References", "Bibliography",
+         "BIBLIOGRAPHY", "## Bibliography", "REFERENCES CITED"],
+    )
+    def test_heading_variants_bound_the_search(self, heading: str) -> None:
+        from nexus.bib_extractor import extract_doi
+
+        text = f"Paper Title\nAbstract here.\n{heading}\n[1] doi:10.1145/3591300\n"
+        assert extract_doi(text) is None
+
+    def test_nothing_below_the_bibliography_is_harvested(self) -> None:
+        """In a normally-ordered document, everything below the references
+        heading is a citation or an appendix — neither is the paper's own
+        DOI. Both are refused, including the appendix line, which carries no
+        citation marker and so is caught by position rather than by
+        _CITATION_LINE_RE."""
+        from nexus.bib_extractor import extract_doi
+
+        text = (
+            "Paper Title\nAbstract.\n"
+            "References\n[1] doi:10.1145/3591300\n"
+            "A Appendix\nFurther detail. doi:10.1109/OTHER.2024\n"
+        )
+        assert extract_doi(text) is None
+
+    def test_citation_only_document_yields_none(self) -> None:
+        """When every DOI in the document sits in a bibliography entry, the
+        answer is None — the paper printed no DOI of its own. This is the
+        nexus-kho0p case reduced to its essential shape."""
+        from nexus.bib_extractor import extract_doi
+
+        text = (
+            "Paper Title\nAbstract.\n"
+            "References\n"
+            "[1] Someone et al. doi:10.1145/3591300\n"
+            "[2] Another. doi:10.1109/OTHER.2024\n"
+        )
+        assert extract_doi(text) is None
+
+    def test_references_appearing_twice_bounds_at_the_first(self) -> None:
+        from nexus.bib_extractor import extract_doi
+
+        text = (
+            "Paper Title\ndoi:10.14778/REAL.DOI\n"
+            "References\n[1] doi:10.1145/3591300\n"
+            "Appendix A\nReferences\n[1] doi:10.1109/OTHER.2024\n"
+        )
+        assert extract_doi(text) == "10.14778/REAL.DOI"
+
+    def test_no_heading_falls_back_to_whole_text(self) -> None:
+        """When no bibliography heading is present there is nothing to bound
+        against; behaviour is unchanged from before nexus-kho0p."""
+        from nexus.bib_extractor import extract_doi
+
+        assert extract_doi("Paper. doi:10.1145/3654657.3654729") == "10.1145/3654657.3654729"
+
+
+class TestDoiWrappedCitationEntry:
+    """nexus-kho0p regression, taken verbatim from arXiv 2603.28052.
+
+    Invented fixtures put the DOI on the same line as the ``[N]`` marker,
+    which line-level citation detection catches. Real reference entries wrap:
+    the DOI lands on a continuation line with no marker and no "et al.", so
+    only the position guard sees it. This fixture is the measured text — it
+    is the case that passed a fixture-only test run and still returned the
+    wrong DOI against the actual PDF.
+    """
+
+    REAL = (
+        "Meta-Harness: End-to-End Optimization of Model Harnesses\n"
+        "Yoonho Lee, Roshen Nair, Qizheng Zhang, Kangwook Lee, Omar Khattab, Chelsea Finn\n"
+        "Abstract. The performance of large language model systems depends not\n"
+        "only on model weights, but also on their harness.\n"
+        "arXiv:2603.28052\n"
+        "References\n"
+        "[8] Luca Beurer-Kellner, Marc Fischer, and Martin Vechev. Prompting is programming:\n"
+        "A query language for large language models.Proceedings of the ACM on Programming\n"
+        "Languages, 7(PLDI):1946\u20131969, June 2023. ISSN 2475-1421. doi: 10.1145/3591300. URL\n"
+    )
+
+    def test_wrapped_citation_doi_is_not_returned(self) -> None:
+        from nexus.bib_extractor import extract_doi
+
+        assert extract_doi(self.REAL) is None
+
+    def test_caller_still_gets_a_correct_identifier(self) -> None:
+        """The point of returning None: the arXiv ID is right there."""
+        from nexus.bib_extractor import extract_identifiers
+
+        ids = extract_identifiers(body_text=self.REAL)
+        assert ids["doi"] is None
+        assert ids["arxiv"] == "2603.28052"
+
+
+class TestDoiPlaceholderRejection:
+    """nexus-kho0p: unfilled LaTeX template DOIs are not identifiers. The
+    acmart default ``10.1145/nnnnnnn.nnnnnnn`` was observed verbatim on FOUR
+    different papers in the user's corpus."""
+
+    @pytest.mark.parametrize(
+        "placeholder",
+        [
+            "doi:10.1145/nnnnnnn.nnnnnnn",       # acmart, unfilled
+            "doi:10.4230/LIPIcs.SoCG.2026.XX",   # LIPIcs, unfilled
+            "doi:10.1109/XXX.0000.0000000",      # IEEE template
+            "doi:10.1364/ao.XX.XXXXXX",          # Optica template
+        ],
+    )
+    def test_placeholder_dois_rejected(self, placeholder: str) -> None:
+        from nexus.bib_extractor import extract_doi
+
+        assert extract_doi(placeholder) is None
+
+    def test_placeholder_shaped_but_real_suffixes_survive(self) -> None:
+        """Guard against over-rejection. These are the existing fixtures in
+        this file plus real-world forms; a general 'repeated character run'
+        rule would wrongly kill them."""
+        from nexus.bib_extractor import extract_doi
+
+        for doi in (
+            "10.1145/AAAA.BBBB",
+            "10.1109/CCCC.DDDD",
+            "10.1109/X.Y",
+            "10.48550/arXiv.2503.07641",   # 'arXiv' contains X
+            "10.1109/ABC.2024.012345",
+            "10.1038/s41586-021-04096-9",
+        ):
+            assert extract_doi(f"doi:{doi}") == doi
+
+    def test_url_suffix_not_absorbed(self) -> None:
+        """Observed: 10.3389/fpsyg.2014.01053/pdf — the regex swallowed a
+        URL path segment."""
+        from nexus.bib_extractor import extract_doi
+
+        got = extract_doi("https://doi.org/10.3389/fpsyg.2014.01053/pdf")
+        assert got == "10.3389/fpsyg.2014.01053"
+
+    def test_percent_encoded_and_file_extensions_rejected(self) -> None:
+        from nexus.bib_extractor import extract_doi
+
+        assert extract_doi("doi:10.1234/some%20file%20name.pdf") is None
+        assert extract_doi("doi:10.1234/paper.pdf") is None
+
+    def test_unbalanced_open_paren_trimmed(self) -> None:
+        """Observed: 10.1016/S0004-3702(01 — truncated mid-parenthesis."""
+        from nexus.bib_extractor import extract_doi
+
+        assert extract_doi("doi:10.1016/S0004-3702(01") == "10.1016/S0004-3702"
+
+    def test_balanced_parens_preserved(self) -> None:
+        from nexus.bib_extractor import extract_doi
+
+        assert extract_doi("doi:10.1016/S0004-3702(01)00108-4") == "10.1016/S0004-3702(01)00108-4"
+
+
+class TestPreprintIdentifierFallback:
+    """nexus-kho0p end-to-end: the whole point of returning None rather than
+    a reference DOI is that the arXiv ID is still there and is correct."""
+
+    def test_meta_harness_shape_falls_back_to_arxiv(self) -> None:
+        from nexus.bib_extractor import extract_identifiers
+
+        ids = extract_identifiers(
+            filename="Meta-Harness- End-to-End Optimization of Model Harnesses.pdf",
+            body_text=(
+                "Meta-Harness: End-to-End Optimization of Model Harnesses\n"
+                "arXiv:2603.28052\n"
+                "References\n"
+                "[8] Prompting Is Programming. doi:10.1145/3591300\n"
+            ),
+        )
+        assert ids["doi"] is None
+        assert ids["arxiv"] == "2603.28052"
