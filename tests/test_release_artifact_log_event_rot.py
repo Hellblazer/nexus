@@ -281,8 +281,17 @@ _FALSE_CANDIDATE_ALLOWLIST: dict[tuple[str, str], str] = {
         "confirmed zero occurrences repo-wide outside this one assertion "
         "and the fixture file itself."
     ),
+    ("tests/e2e/rdr195-voyage-mvv.sh", "voyage_retry"): (
+        "LIVE producer the extractor cannot see: service/src/main/java/dev/"
+        "nexus/service/vectors/VoyageRetryLoop.java composes the event name "
+        "at runtime as `logPrefix + \"_retry\"` (line ~111) and "
+        "VoyageEmbedder constructs it with logPrefix=\"voyage\", so "
+        "`event=voyage_retry` is still emitted on every embed retry; the "
+        "literal never appears in source since the nexus-1vpal retry-loop "
+        "consolidation (bff9c7cdd). The gate's grep is correct."
+    ),
 }
-_ALLOWLIST_CEILING = 1
+_ALLOWLIST_CEILING = 2
 
 
 #: (relative-path, token) -> reason. Distinct from _FALSE_CANDIDATE_ALLOWLIST

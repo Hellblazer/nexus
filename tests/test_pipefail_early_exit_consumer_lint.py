@@ -995,8 +995,8 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         # dist-info sniffing. The former third entry (the `--version`
         # banner sniff) was FIXED rather than exempted -- it needed no
         # live infra, being a plain capture-then-parameter-expansion.
-        "tests/e2e/fresh-install-mvv.sh:549",
-        "tests/e2e/fresh-install-mvv.sh:575",
+        "tests/e2e/fresh-install-mvv.sh:577",
+        "tests/e2e/fresh-install-mvv.sh:603",
         # --- tests/e2e/local-index-memory-gate.sh (1 entry): owned by a
         # concurrent agent in the authoring session (nexus-wbeyi itself)
         # -- reported to that hand-off, not fixed here. This is a

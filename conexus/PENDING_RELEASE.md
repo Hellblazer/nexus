@@ -39,8 +39,12 @@ mechanize, it matters enough to ship.
 - `conexus/skills/using-nx-skills/SKILL.md` — bead: nexus-4e75w.4 —
   same one-paragraph description in the routing table's `nx_answer`
   entry. RDR-200 Phase 1b.
+- `conexus/hooks/scripts/auto-approve-nx-mcp.sh` — bead: nexus-4e75w.5 —
+  adds `nx_answer_report` to the auto-approve list so the new completion-
+  report tool does not prompt on every call while every sibling nx_* tool
+  auto-approves. RDR-200 Phase 1c.
 
-Both are INERT until the next release or plugin cut: sessions load the
+All three are INERT until the next release or plugin cut: sessions load the
 plugin from the pinned tag, so continuation mode is live in the CLIENT
-(shipped 85c79761e) while these two descriptions of it are not yet
+(shipped 85c79761e) while these descriptions and the auto-approve entry are not yet
 loaded by any session.
