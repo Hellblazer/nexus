@@ -1226,11 +1226,21 @@ def precond_main_dispatch_cells() -> EnumerationResult:
     """``check_client_release_precondition.main()``'s own decision surface:
     which ``(engine_tag, ack_client_lag)`` tuple it threads into
     :func:`check` (already fully enumerated by :func:`check_composite_cells`
-    under the name ``check_composite`` -- these cells verify the WIRING and
-    the exit-code PASS-THROUGH, not re-derive ``check()``'s own leaves).
-    ``main()`` has zero ``.error()`` call sites (confirmed by
-    :func:`scan_parser_error_call_sites`) -- no CLI-shape refusal exists
-    here to exclude."""
+    under the name ``check_composite`` -- these cells verify the WIRING
+    (argv -> engine_tag/ack_client_lag) AND that ``main()`` returns a
+    GENUINELY DERIVED exit code from a real ``check()`` execution, not a
+    re-derivation of ``check()``'s own 11 leaves).
+
+    code-review Important (T2 nexus/code-review-nexus-j9z30-12-2026-09-01):
+    the prior driver mocked ``check`` to return ``cell.exit_code`` verbatim,
+    so ``rc == cell.exit_code`` by construction -- a comparison of the
+    fixture to itself. Fixed by driving a real ``check()`` call (hand table
+    forced vacuous via an empty ``ENGINE_CLIENT_PRECONDITIONS``, exactly as
+    :func:`drive_check_composite`'s "vacuous" scenarios do) over two REAL,
+    independently distinguishable ledger states: an acknowledged blocking
+    entry (0) and an unacknowledged one (1). ``main()`` has zero
+    ``.error()`` call sites (confirmed by :func:`scan_parser_error_call_sites`)
+    -- no CLI-shape refusal exists here to exclude."""
     cells = [
         Cell("precond_main_dispatch", {"engine_tag": "explicit", "ack": "given"}, 0,
              "precond_main_explicit_tag_with_ack"),
@@ -1241,6 +1251,14 @@ def precond_main_dispatch_cells() -> EnumerationResult:
 
 
 def drive_precond_main_dispatch(cell: Cell) -> tuple[int, str]:
+    """Drive the REAL ``check()`` through ``main()``'s real argv parsing.
+
+    ``precond.check`` is spied on, not stubbed: ``spying_check`` captures
+    the arguments ``main()`` passed it (proving the wiring) and then
+    DELEGATES to the original, unpatched ``check`` (proving the exit code
+    is genuinely derived, not injected) -- "capture then delegate", unlike
+    the prior driver's stub, which never let real ``check()`` logic run.
+    """
     inputs = cell.inputs
     argv: list[str] = []
     if inputs["engine_tag"] == "explicit":
@@ -1248,19 +1266,29 @@ def drive_precond_main_dispatch(cell: Cell) -> tuple[int, str]:
         expected_tag = "engine-service-vTEST"
     else:
         expected_tag = precond._pinned_engine_tag()
-    expected_ack: list[str] | None = None
+
     if inputs["ack"] == "given":
-        argv += ["--ack-client-lag", "nexus-fakeack"]
-        expected_ack = ["nexus-fakeack"]
+        # a real blocking ledger entry, explicitly acknowledged by its own
+        # bead -- check_wire_contract_ledger's real "acked" branch, rc=0.
+        ledger, expected_ack = _ledger_fixture("acked_only")
+    else:
+        # a real blocking ledger entry, no acknowledgment -- the real
+        # "blocked" branch, rc=1.
+        ledger, expected_ack = _ledger_fixture("blocking")
+    for bead in expected_ack or []:
+        argv += ["--ack-client-lag", bead]
 
     captured: dict[str, Any] = {}
+    real_check = precond.check
 
-    def fake_check(engine_tag: str, ack_client_lag: list[str] | None = None) -> int:
+    def spying_check(engine_tag: str, ack_client_lag: list[str] | None = None) -> int:
         captured["engine_tag"] = engine_tag
         captured["ack_client_lag"] = ack_client_lag
-        return cell.exit_code  # proves main() passes check()'s rc through unchanged
+        return real_check(engine_tag, ack_client_lag)
 
-    with patch.object(precond, "check", side_effect=fake_check):
+    with patch.object(precond, "check", side_effect=spying_check), \
+         patch.dict(precond.ENGINE_CLIENT_PRECONDITIONS, {}, clear=True), \
+         patch.object(wire_ledger, "parse_ledger", return_value=ledger):
         rc, _out, _err = _capture(precond.main, argv)
     assert captured["engine_tag"] == expected_tag, (cell, captured)
     assert captured["ack_client_lag"] == expected_ack, (cell, captured)
