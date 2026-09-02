@@ -620,6 +620,14 @@ def _supersedes_neighbours(
     return numbers, unmapped, None
 
 
+def _t2_rdr_titles(number: int) -> tuple[str, ...]:
+    """The title shapes a record's T2 entry is found under, in lookup
+    order: bare (``"42"``), zero-padded (``"042"`` -- the early records,
+    e.g. RDR-014), and ``RDR-``-prefixed in both widths. The census
+    matches ``^(?:RDR-)?\\d+$`` and so already counts every shape."""
+    return (str(number), f"{number:03d}", f"RDR-{number}", f"RDR-{number:03d}")
+
+
 def _append_marker_to_t2(client: object, project: str, number: int, marker: str) -> str | None:
     """Append *marker* as its own line to RDR *number*'s T2 entry, under
     whichever title shape the record uses (``"42"`` or ``"RDR-42"``, the two
@@ -634,7 +642,7 @@ def _append_marker_to_t2(client: object, project: str, number: int, marker: str)
     session) cannot expire, strip or re-attribute a permanent record. The
     row's ``timestamp`` becomes now() regardless -- the engine owns it --
     and ``access_count`` is preserved server-side."""
-    for title in (str(number), f"RDR-{number}"):
+    for title in _t2_rdr_titles(number):
         entry = client.get(project=project, title=title)  # type: ignore[attr-defined]
         if not entry:
             continue
@@ -673,7 +681,7 @@ def _write_t2_status(repo_name: str, rdr_num: int, new_status: str, date: str) -
     project = f"{repo_name}_rdr"
     try:
         with _t2_client_factory() as client:
-            for title in (str(rdr_num), f"RDR-{rdr_num}"):
+            for title in _t2_rdr_titles(rdr_num):
                 entry = client.get(project=project, title=title)
                 if not entry:
                     continue

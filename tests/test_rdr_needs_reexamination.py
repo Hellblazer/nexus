@@ -516,3 +516,20 @@ def test_set_status_names_a_missing_t2_entry_and_still_flips(tmp_path, monkeypat
     assert result.exit_code == 0, result.output
     assert "status: closed" in path.read_text()
     assert "no T2 entry for RDR 14" in result.output
+
+
+def test_t2_title_shapes_include_the_zero_padded_early_records():
+    """RDR-014's T2 entry is titled "014" (RDR-090's "090"); the first live
+    set-status flip after the T2 mirror landed missed it."""
+    assert rdr_mod._t2_rdr_titles(14) == ("14", "014", "RDR-14", "RDR-014")
+    assert rdr_mod._t2_rdr_titles(201) == ("201", "201", "RDR-201", "RDR-201")
+
+
+def test_set_status_finds_a_zero_padded_t2_title(tmp_path, monkeypatch):
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 14, "accepted")
+    project = _project(tmp_path)
+    t2 = _FakeT2Client({(project, "014"): {"content": "status: accepted\n", "tags": ""}})
+    _install(monkeypatch, tmp_path, _FakeCatalog(entries=[_entry(tmp_path, 14, 1)]), t2)
+    assert _flip(tmp_path, 14, "closed").exit_code == 0
+    assert t2.puts[0]["title"] == "014"
