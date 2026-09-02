@@ -31,6 +31,23 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.26.0)
 
+- `conexus/hooks/scripts/rdr_hook.py` + `conexus/resources/tables/rdr-lifecycle.toml`
+  (DELETED) — bead: nexus-e19sa — Sam's ruling 2026-09-02. The SessionStart
+  hook's file filter (`re.match(r"\d+", p.stem)`) matched zero of this
+  repo's `rdr-NNN-*.md` files, so the hook exited before any logic on every
+  session since it was written. The file<->T2 status RECONCILE half
+  (`_reconcile`, `_update_file_status`, `_update_t2_status`, the
+  `_STATUS_ORDER`/`_TERMINAL` derivation) is deleted, not switched on:
+  `nx rdr set-status` writes file + T2 through the checked table now, and a
+  never-watched two-way writer would have resolved nine known file/T2
+  disagreements by a ranking rule nobody had seen run. The read-only
+  summary stays and the filter is fixed (`rdr-NNN-*`, `rdrNNN-*`, `NNN-*`
+  stems; `docs/rdr/*.md` non-recursive; `_EXCLUDE_FILES` kept), so the
+  `RDR: N documents (...)` line prints for the first time. The
+  plugin-shipped table copy had no reader left and is removed; the
+  `[lifecycle] terminal_preserving_events` section that fed the deleted
+  derivation is gone from the packaged table too. Inert for installed
+  users until this ships.
 - `conexus/skills/query/SKILL.md` — bead: nexus-4e75w.4 — describes
   `nx_answer`'s two possible return shapes now that continuation mode
   exists (composed answer, or a reduction instruction the calling

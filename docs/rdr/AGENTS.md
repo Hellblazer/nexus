@@ -31,8 +31,7 @@ Frontmatter `status:` field carries one of six values (Sam's ruling, RDR-201):
 This is a **checked table, not prose** (RDR-201): the authoritative source is the
 packaged `src/nexus/tables/rdr-lifecycle.toml` (loaded via
 `nexus.tables.load.load_packaged_table`, so it is reachable from any installed
-`conexus`, not just a checkout), byte-identical to the plugin's own copy at
-`conexus/resources/tables/rdr-lifecycle.toml`. `nx rdr set-status` enforces
+`conexus`, not just a checkout). `nx rdr set-status` enforces
 every transition against that table's state machine; `nx rdr preamble
 rdr-audit` reports any on-disk status outside the table's domain as a
 finding. A lint test (`tests/test_tables_lint.py`) asserts this list matches

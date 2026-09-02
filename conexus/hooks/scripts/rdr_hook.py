@@ -1,6 +1,24 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SessionStart hook: detect RDR dir, reconcile file↔T2 status, report."""
+"""SessionStart hook: detect the RDR dir and report document count, T2 status
+breakdown, and whether the tree is indexed. Read-only.
+
+nexus-e19sa (Sam's ruling, 2026-09-02): this hook used to carry a second
+half -- a file<->T2 status RECONCILE that rewrote whichever side ranked
+lower (``_reconcile`` / ``_update_file_status`` / ``_update_t2_status`` and
+the terminal-rank derivation feeding them). It never ran once: the file
+filter was ``re.match(r"\\d+", p.stem)`` against stems shaped
+``rdr-201-...``, so it matched zero files and the hook exited before any
+logic, on every session since it was written. That killed both halves.
+The writer half is DELETED rather than switched on: ``nx rdr set-status``
+now writes the file and T2 together through the checked lifecycle table
+(RDR-201 Phase 1), so the drift class the reconcile existed for is
+designed out at the source, and a never-watched two-way writer whose first
+live run would have resolved nine known file/T2 disagreements by a ranking
+rule nobody had seen work was the risky thing here, not the missing
+feature. The read-only summary is kept and the filter fixed so it finally
+prints. The nine drift rows are a separate, hand-fixed follow-up.
+"""
 from __future__ import annotations
 
 import sys
@@ -14,133 +32,20 @@ if sys.version_info < (3, 12):
 
 import re
 import subprocess
-import tomllib
 from collections import Counter
 from pathlib import Path
 
-# RDR-201 P1.5 (nexus-j9z30.5): this hook runs under BARE SYSTEM PYTHON
-# (conexus/hooks/hooks.json -> _run_python_hook.sh execs `python3.x`
-# directly, never this repo's venv), so `import nexus` fails here and
-# `nexus.tables.load.load_packaged_table` is unreachable. The status
-# vocabulary is instead read with stdlib `tomllib` from a PLUGIN-SHIPPED
-# copy of the table (conexus/resources/tables/rdr-lifecycle.toml) — a
-# byte-identity lint test (tests/hooks/test_rdr_hook.py) keeps it in step
-# with the package copy (src/nexus/tables/rdr-lifecycle.toml), the same
-# two-copies-kept-identical pattern already used for
-# conexus/hooks/scripts/expectations.sh.
-_LIFECYCLE_TABLE_PATH = Path(__file__).resolve().parents[2] / "resources" / "tables" / "rdr-lifecycle.toml"
-
-# "open" ranks WITH "draft" (nexus-e2sim / GH #1409): it is the accepted
-# pre-accept synonym in rdr.py's accept flow, and rdr-create always seeds
-# T2 at "draft" — an unranked "open" here made this hook silently rewrite
-# every open-status file back to draft on session start. `open` is retired
-# from the table's own domain, so it is added onto the derived order below
-# rather than appearing as a table row.
-_OPEN_STATUS_ALIAS = "open"
-
-
-def _status_membership(value: object) -> set[str]:
-    """Normalize a raw TOML ``match.status`` value (bare string or list) to
-    a set of member literals."""
-    if isinstance(value, list):
-        return set(value)
-    if value is None:
-        return set()
-    return {str(value)}
-
-
-def _derive_status_order_and_terminal(doc: dict) -> tuple[dict[str, int], set[str]]:
-    """Derive a monotonic status rank + terminal set from a raw parsed
-    rdr-lifecycle TOML document (RDR-201 P1.5, T2
-    nexus/plan-rdr-201-audit-round-3-residuals [23999] item 2).
-
-    No ``[lifecycle] order = [...]`` section was needed for RANKING: the
-    table's own rows are enough. A status is TERMINAL when none of its
-    non-escape outgoing rows carry an event named in the table's own
-    ``[lifecycle] terminal_preserving_events`` list (RDR-201 P1.5 fix
-    round, T2 nexus/critique-nexus-j9z30-5-2026-09-01 [24042] finding 3 --
-    the event name, today just ``supersede``, is data the table declares
-    about ITSELF, not a literal this hook may hardcode; see the table's
-    own header comment for the downstream-reader contract this encodes).
-    An ABSENT ``[lifecycle]`` section is an explicit, documented empty set
-    -- never a silent fallback to ``supersede`` -- so a table that forgets
-    to declare the section simply treats every outgoing row as
-    non-terminal-preserving. Non-terminal statuses rank by their position
-    in the declared ``status`` domain; ALL terminal statuses share the
-    next rank after the highest non-terminal one -- the reconcile logic
-    below only ever compares "both terminal" (short-circuited to a
-    warning, ranks unused) or "one terminal vs one not" (any terminal rank
-    beats any non-terminal one), so terminal statuses never need to be
-    ordered against each other. ``open`` is folded in at ``draft``'s rank
-    (or rank 0 if ``draft`` is somehow absent from the domain), per the
-    historical alias above.
-    """
-    domain = list(doc.get("dimensions", {}).get("status", {}).get("domain", []))
-    rows = doc.get("row", [])
-    terminal_preserving_events = set(
-        doc.get("lifecycle", {}).get("terminal_preserving_events", [])
-    )
-
-    non_terminal_outgoing: set[str] = set()
-    for row in rows:
-        if "to" not in row:
-            continue
-        match = row.get("match", {})
-        if match.get("event") in terminal_preserving_events:
-            continue
-        non_terminal_outgoing |= _status_membership(match.get("status"))
-
-    non_terminal_in_order = [s for s in domain if s in non_terminal_outgoing]
-    terminal = {s for s in domain if s not in non_terminal_outgoing}
-
-    order = {status: i for i, status in enumerate(non_terminal_in_order)}
-    terminal_rank = len(non_terminal_in_order)
-    for status in terminal:
-        order[status] = terminal_rank
-
-    order[_OPEN_STATUS_ALIAS] = order.get("draft", 0)
-    return order, terminal
-
-
-def _load_status_order_and_terminal() -> tuple[dict[str, int], set[str]]:
-    """Load the plugin's lifecycle table and derive rank/terminal from it.
-
-    A SessionStart hook must never crash a session: a missing or malformed
-    table degrades to an EMPTY order/terminal (the reconcile below then
-    treats every status as equally-ranked and never fires) with a loud
-    stderr note, rather than raising past ``main()``.
-
-    A successful load logs the loaded table's ``id``/``version`` on stderr
-    (RDR-201 P1.5 fix round, T2 nexus/critique-nexus-j9z30-5-2026-09-01
-    [24042] finding 4). This plugin copy and the package copy
-    (``src/nexus/tables/rdr-lifecycle.toml``) are kept byte-identical by a
-    lint test on develop, but a USER's package upgrade and their Claude
-    Code plugin update are independent channels (RDR-143's problem
-    statement) -- there is no lockstep mechanism here, only this line
-    making the skew DETECTABLE after the fact.
-    """
-    try:
-        with _LIFECYCLE_TABLE_PATH.open("rb") as fh:
-            doc = tomllib.load(fh)
-        table_meta = doc.get("table", {})
-        sys.stderr.write(
-            f"rdr_hook: loaded lifecycle table id={table_meta.get('id')!r} "
-            f"version={table_meta.get('version')!r}\n"
-        )
-        return _derive_status_order_and_terminal(doc)
-    except Exception as exc:  # noqa: BLE001 — defensive: see docstring
-        sys.stderr.write(
-            f"rdr_hook: cannot load lifecycle table ({_LIFECYCLE_TABLE_PATH}), "
-            f"status reconcile disabled: {type(exc).__name__}: {exc}\n"
-        )
-        return {}, set()
-
-
-_STATUS_ORDER, _TERMINAL = _load_status_order_and_terminal()
 _EXCLUDE_FILES = {
     "readme.md", "template.md", "index.md", "overview.md",
     "workflow.md", "templates.md", "agents.md",
 }
+
+#: The stems this repo's RDR files actually have: ``rdr-201-foo`` (the
+#: standard shape), ``rdr137-foo`` (one legacy file with no second hyphen),
+#: and the bare ``001-foo`` shape the original filter was written for and
+#: nothing here ever used. Anchored at the start of the stem, so a sibling
+#: like ``status-census-2026-09-01`` (digits, not leading) is not an RDR.
+_RDR_STEM_RE = re.compile(r"(?:rdr-?)?(\d+)", re.IGNORECASE)
 
 
 def _repo_root() -> Path | None:
@@ -203,29 +108,12 @@ def _collection_exists(target: str) -> bool:
     return False
 
 
-def _parse_frontmatter_status(filepath: Path) -> str | None:
-    """Extract status from YAML frontmatter."""
-    try:
-        text = filepath.read_text(errors="replace")
-    except Exception:
-        return None
-    if not text.startswith("---"):
-        return None
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return None
-    block = parts[1]
-    for line in block.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("status:"):
-            val = stripped.split(":", 1)[1].strip().strip('"').strip("'")
-            return val.lower() if val else None
-    return None
-
-
 def _extract_rdr_id(filepath: Path) -> str | None:
-    """Extract numeric ID from filename like 001-foo.md."""
-    m = re.match(r"(\d+)", filepath.stem)
+    """Numeric RDR id from a ``docs/rdr`` filename, or ``None`` for a file
+    that is not an RDR document (see :data:`_RDR_STEM_RE`). This is the
+    file filter ``main`` applies; nexus-e19sa's whole lesson is that a
+    filter selecting nothing looks exactly like a quiet success."""
+    m = _RDR_STEM_RE.match(filepath.stem)
     return m.group(1) if m else None
 
 
@@ -255,97 +143,6 @@ def _load_all_t2_statuses(repo_name: str) -> dict[str, str]:
     return statuses
 
 
-def _update_t2_status(repo_name: str, rdr_id: str, new_status: str) -> bool:
-    """Update T2 record status field. Reads existing, replaces status line."""
-    try:
-        result = subprocess.run(
-            ["nx", "memory", "get", "--project", f"{repo_name}_rdr", "--title", rdr_id],
-            capture_output=True, text=True, timeout=10,
-        )
-        content = (result.stdout or "").strip()
-        if not content:
-            return False
-        # Replace status line
-        updated_lines = []
-        for line in content.splitlines():
-            if line.strip().startswith("status:"):
-                updated_lines.append(f'status: "{new_status}"')
-            else:
-                updated_lines.append(line)
-        updated = "\n".join(updated_lines)
-        result = subprocess.run(
-            ["nx", "memory", "put", "-", "--project", f"{repo_name}_rdr",
-             "--title", rdr_id, "--ttl", "permanent", "--tags", "rdr"],
-            input=updated, capture_output=True, text=True, timeout=10,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def _update_file_status(filepath: Path, new_status: str) -> bool:
-    """Update frontmatter status in RDR file."""
-    try:
-        text = filepath.read_text(errors="replace")
-        if not text.startswith("---"):
-            return False
-        parts = text.split("---", 2)
-        if len(parts) < 3:
-            return False
-        # Replace status line in frontmatter
-        fm_lines = parts[1].splitlines()
-        new_fm = []
-        for line in fm_lines:
-            if line.strip().startswith("status:"):
-                new_fm.append(f"status: {new_status}")
-            else:
-                new_fm.append(line)
-        new_text = "---\n" + "\n".join(new_fm).strip() + "\n---" + parts[2]
-        filepath.write_text(new_text)
-        return True
-    except Exception:
-        return False
-
-
-def _reconcile(root: Path, repo_name: str, rdr_files: list[Path],
-               t2_statuses: dict[str, str]) -> int:
-    """Reconcile file↔T2 status. Returns count of reconciled records."""
-    reconciled = 0
-    for filepath in rdr_files:
-        rdr_id = _extract_rdr_id(filepath)
-        if not rdr_id:
-            continue
-
-        file_status = _parse_frontmatter_status(filepath)
-        t2_status = t2_statuses.get(rdr_id)
-
-        if file_status is None or t2_status is None:
-            continue
-        if file_status == t2_status:
-            continue
-
-        file_rank = _STATUS_ORDER.get(file_status, -1)
-        t2_rank = _STATUS_ORDER.get(t2_status, -1)
-
-        # Both terminal but different — warn, do NOT auto-reconcile
-        if file_status in _TERMINAL and t2_status in _TERMINAL and file_status != t2_status:
-            print(f"     WARNING: RDR {rdr_id} terminal conflict "
-                  f"(T2={t2_status}, file={file_status}) — manual resolution needed")
-            continue
-        elif file_rank > t2_rank:
-            # File is more advanced — update T2
-            print(f"     RDR {rdr_id}: {t2_status} → {file_status} (syncing T2 to file)")
-            _update_t2_status(repo_name, rdr_id, file_status)
-            reconciled += 1
-        elif t2_rank > file_rank:
-            # T2 is more advanced — update file
-            print(f"     RDR {rdr_id}: {file_status} → {t2_status} (syncing file to T2)")
-            _update_file_status(filepath, t2_status)
-            reconciled += 1
-
-    return reconciled
-
-
 def _rdr_status_counts(repo_name: str, preloaded: dict[str, str] | None = None) -> Counter[str]:
     """Status counts from T2. Uses preloaded statuses if available."""
     statuses = preloaded if preloaded is not None else _load_all_t2_statuses(repo_name)
@@ -368,6 +165,16 @@ def _rdr_dir(root: Path) -> Path:
     return root / "docs" / "rdr"
 
 
+def _rdr_files(rdr_dir: Path) -> list[Path]:
+    """The RDR documents directly under *rdr_dir* -- non-recursive, so
+    ``docs/rdr/post-mortem/`` (a separate document set) is never counted,
+    with the index/template/agents files excluded by name."""
+    return [
+        p for p in rdr_dir.glob("*.md")
+        if p.name.lower() not in _EXCLUDE_FILES and _extract_rdr_id(p) is not None
+    ]
+
+
 def main() -> None:
     root = _repo_root()
     if root is None:
@@ -377,11 +184,7 @@ def main() -> None:
     if not rdr_dir.exists():
         sys.exit(0)
 
-    rdr_files = [
-        p for p in rdr_dir.glob("*.md")
-        if p.name.lower() not in _EXCLUDE_FILES
-        and re.match(r"\d+", p.stem)
-    ]
+    rdr_files = _rdr_files(rdr_dir)
     if not rdr_files:
         sys.exit(0)
 
@@ -389,18 +192,7 @@ def main() -> None:
     rdr_collection = _resolve_rdr_collection(root)
     indexed = bool(rdr_collection) and _collection_exists(rdr_collection)
 
-    # Batch-load T2 statuses once (used by both reconcile and status counts)
-    t2_statuses = _load_all_t2_statuses(repo_name)
-
-    # Reconcile file↔T2 status (monotonic-advance rule)
-    reconciled = _reconcile(root, repo_name, rdr_files, t2_statuses)
-    if reconciled:
-        print(f"RDR sync: {reconciled} record(s) reconciled")
-        # Reload after reconciliation changed statuses
-        t2_statuses = _load_all_t2_statuses(repo_name)
-
-    # Status breakdown from T2 (post-reconciliation)
-    counts = _rdr_status_counts(repo_name, preloaded=t2_statuses)
+    counts = _rdr_status_counts(repo_name)
     if counts:
         breakdown = ", ".join(f"{n} {s}" for s, n in counts.most_common())
         status_info = f"{len(rdr_files)} documents ({breakdown})"
