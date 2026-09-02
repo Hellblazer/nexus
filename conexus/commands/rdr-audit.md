@@ -20,7 +20,9 @@ line — free text with apostrophes/quotes breaks the quoting (nexus-ybvyo).
 
 Follow the `rdr-audit` skill body.
 
-The preamble above has already derived the target project and pre-scoped the evidence layer. The skill body should:
+The preamble above has already derived the target project and pre-scoped the evidence layer, AND (RDR-201 P1.8, nexus-j9z30.8) run a closed-vocabulary scan of the target's `docs/rdr/*.md` frontmatter against the packaged `rdr-lifecycle` table: any on-disk `status:` value outside the table's domain is printed as a `FINDING:` line naming the file and the value; a file carrying `kind: companion` is skipped and counted separately (companions carry no lifecycle status at all). A separate `T2 <repo>_rdr status census:` line reports the same repo's T2-side status counts — this is informational only, never merged into the file findings (the T2 reconcile hook does not run in this repo, so treating T2 as authoritative would report live records as perpetually stale). If those `FINDING:` lines are non-empty, surface them to the user alongside the skill body's own drift-audit summary below; they are a distinct, mechanically-checked signal from the LLM-judged silent-scope-reduction audit the rest of this command runs.
+
+The skill body should:
 
 1. **Seed T1 link context** to RDR-067 tumbler (1.1.771) so audit findings auto-link
 2. **Run the main-session transcript pre-step** — NOT delegatable (see skill body §Main-Session PRE-STEP). Honor the `--no-transcripts` flag if passed.

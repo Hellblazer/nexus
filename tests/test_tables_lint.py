@@ -27,6 +27,7 @@ wheel and inspecting its contents can, so this module builds one.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import zipfile
@@ -35,7 +36,7 @@ from pathlib import Path
 import pytest
 
 from nexus.tables.check import BLOCKING_CODES, Finding, check_table
-from nexus.tables.load import load_table
+from nexus.tables.load import load_packaged_table, load_table
 
 pytestmark = pytest.mark.lint
 
@@ -140,6 +141,42 @@ def test_lifecycle_table_present_in_built_wheel(tmp_path: Path):
         "conexus. Wheel contents (nexus/tables/*): "
         f"{sorted(n for n in names if n.startswith('nexus/tables/'))}"
     )
+
+
+# --------------------------------------------------------------------------
+# docs/rdr/AGENTS.md's lifecycle prose must equal the table's status domain
+# exactly (RDR-201 P1.8, nexus-j9z30.8) -- docs/rdr/AGENTS.md:21-26 was a
+# FOURTH copy of this vocabulary before this bead (draft/accepted/closed/
+# superseded, missing deferred and abandoned) in the very document AGENTS.md
+# sends readers to first for RDR lifecycle semantics. This assertion is what
+# keeps it from drifting again.
+
+
+def _agents_md_lifecycle_statuses() -> list[str]:
+    """Extract the backtick-quoted status words from docs/rdr/AGENTS.md's
+    ``## RDR lifecycle`` section's bullet list."""
+    text = (REPO_ROOT / "docs" / "rdr" / "AGENTS.md").read_text(encoding="utf-8")
+    m = re.search(r"\n## RDR lifecycle\n(.*?)\n## ", text, re.DOTALL)
+    assert m, "docs/rdr/AGENTS.md has no '## RDR lifecycle' section"
+    section = m.group(1)
+    return re.findall(r"^- `([a-z][a-z-]*)`", section, re.MULTILINE)
+
+
+def test_agents_md_lifecycle_statuses_match_table_domain_exactly():
+    table = load_packaged_table("rdr-lifecycle.toml")
+    table_domain = set(table.dimensions["status"].domain)
+    doc_statuses = _agents_md_lifecycle_statuses()
+
+    # Non-vacuity: a sweep over zero extracted statuses is a failure, not a
+    # pass (nexus-moht0) -- proves the regex is actually matching the
+    # section's bullets, not silently finding nothing.
+    assert doc_statuses, "no statuses extracted from docs/rdr/AGENTS.md's lifecycle section"
+    assert set(doc_statuses) == table_domain, (
+        f"docs/rdr/AGENTS.md lifecycle list {sorted(doc_statuses)} != "
+        f"table domain {sorted(table_domain)}"
+    )
+    # No duplicates in the doc list either.
+    assert len(doc_statuses) == len(set(doc_statuses)), doc_statuses
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import tomllib
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1773,8 +1774,94 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# preamble rdr-audit
+# preamble rdr-audit — closed-vocabulary scan (RDR-201 P1.8, nexus-j9z30.8)
 # ---------------------------------------------------------------------------
+
+_RDR_AUDIT_EXCLUDED_FILENAMES: frozenset[str] = frozenset({"agents.md", "readme.md"})
+
+
+def _rdr_audit_status_findings(
+    rdr_dir: Path, status_domain: frozenset[str]
+) -> tuple[list[tuple[str, str]], int, int]:
+    """Scan *rdr_dir* non-recursively for frontmatter statuses outside
+    *status_domain*.
+
+    Scan scope (RDR-201 P1.8 task corrections, T2
+    nexus/plan-rdr-201-closed-vocabularies.md [23998] residual 7,
+    nexus/plan-rdr-201-enrichment-deltas [24001]): ``docs/rdr/*.md``,
+    non-recursive — ``docs/rdr/post-mortem/`` is a separate document set
+    carrying its own status values and is excluded by construction (a
+    single-level glob), not a special case — excluding ``AGENTS.md`` /
+    ``README.md`` by filename, case-insensitive.
+
+    A file carrying ``kind: companion`` in its frontmatter has no
+    lifecycle status at all and is SKIPPED entirely — counted, never
+    reported as a finding, regardless of any leftover ``status:`` value
+    (the ``revised-after-implementation`` shape keeps ``status: closed``
+    *and* ``kind: companion`` — RDR-201 P1.7 leg 1). A file with no
+    frontmatter, or frontmatter with no ``status:`` field and no
+    ``kind: companion``, contributes to neither list — there is nothing
+    to check.
+
+    Returns ``(findings, companion_count, scanned_count)`` where
+    *findings* is a sorted-by-filename list of ``(filename, status)`` for
+    every out-of-vocabulary status found, and *scanned_count* counts every
+    non-excluded ``.md`` file (companions included).
+    """
+    findings: list[tuple[str, str]] = []
+    companion_count = 0
+    scanned_count = 0
+    for path in sorted(rdr_dir.glob("*.md")):
+        if path.name.lower() in _RDR_AUDIT_EXCLUDED_FILENAMES:
+            continue
+        scanned_count += 1
+        fm, _text = _preamble_parse_frontmatter(path)
+        if fm.get("kind") == "companion":
+            companion_count += 1
+            continue
+        status = fm.get("status")
+        if status is None:
+            continue
+        if status not in status_domain:
+            findings.append((path.name, str(status)))
+    findings.sort(key=lambda pair: pair[0])
+    return findings, companion_count, scanned_count
+
+
+def _t2_rdr_status_census(repo_name: str) -> tuple[Counter[str], str | None]:
+    """Read T2 project ``<repo_name>_rdr`` and count entries by their
+    ``status:`` field, through the same injectable ``_t2_client_factory``
+    seam :func:`_gate_outcome_for` already uses (RDR-201 P1.8 task
+    corrections: "through the existing preamble T2 facade, injected for
+    tests").
+
+    This is a SEPARATE, clearly labelled census line — never merged into
+    :func:`_rdr_audit_status_findings`'s file findings. The T2 reconcile
+    hook that would keep the two surfaces in sync never runs in this repo
+    (nexus-e19sa: ``rdr_hook.py``'s stem regex never matches, so it exits
+    at the top every time), so merging the two would report ~200 live T2
+    records as perpetually stale.
+
+    A T2 read failure (unreachable service, timeout, ...) is reported ON
+    THIS LINE and never allowed to fail the audit — returns an empty
+    ``Counter`` plus a named reason string instead of raising.
+    """
+    project = f"{repo_name}_rdr"
+    counts: Counter[str] = Counter()
+    try:
+        with _t2_client_factory() as client:
+            entries = client.get_all(project=project)
+    except Exception as exc:  # noqa: BLE001 — T2 unreachable is an expected, named failure mode; reported on the census line, never allowed to fail the audit
+        return counts, f"T2 unreachable: {type(exc).__name__}: {exc}"
+    for entry in entries:
+        title = entry.get("title", "") if isinstance(entry, dict) else ""
+        if not re.match(r"^\d+$", title):
+            continue
+        content = entry.get("content", "") if isinstance(entry, dict) else ""
+        status = _preamble_parse_t2_field(content, "status") or "<no status>"
+        counts[status] += 1
+    return counts, None
+
 
 @preamble.command("rdr-audit")
 @click.argument("args", nargs=-1)
@@ -1890,6 +1977,51 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
                 f"Probed roots ({roots_source}): {probed}."
             )
             print("> Set `NEXUS_PROJECT_ROOTS` to the directory(ies) for project worktrees.")
+
+        print()
+        print("**Status vocabulary scan (`docs/rdr/*.md`, non-recursive):**")
+        if found_path:
+            scan_dir = found_path / "docs" / "rdr"
+            if scan_dir.is_dir():
+                try:
+                    status_domain = frozenset(
+                        load_packaged_table("rdr-lifecycle.toml").dimensions["status"].domain
+                    )
+                except (OSError, TableLoadError, tomllib.TOMLDecodeError) as exc:
+                    print(
+                        f"> Cannot load the RDR lifecycle table — scan skipped "
+                        f"({type(exc).__name__}: {exc})."
+                    )
+                else:
+                    findings, companion_count, scanned_count = (
+                        _rdr_audit_status_findings(scan_dir, status_domain)
+                    )
+                    if findings:
+                        for filename, status in findings:
+                            print(
+                                f"- FINDING: `{filename}` status `{status}` is "
+                                "outside the lifecycle domain "
+                                f"({', '.join(sorted(status_domain))})"
+                            )
+                    print(
+                        f"> {len(findings)} finding(s), {scanned_count} file(s) "
+                        f"scanned, {companion_count} `kind: companion` file(s) skipped."
+                    )
+            else:
+                print(f"> No `docs/rdr/` directory found at `{found_path}` — nothing to scan.")
+        else:
+            print("> No local worktree found for the target project — nothing to scan.")
+
+        t2_counts, t2_error = _t2_rdr_status_census(target)
+        if t2_error:
+            print(f"**T2 `{target}_rdr` status census:** {t2_error}")
+        else:
+            census_str = (
+                ", ".join(f"{status}={count}" for status, count in sorted(t2_counts.items()))
+                or "(no entries)"
+            )
+            print(f"**T2 `{target}_rdr` status census:** {census_str}")
+        print()
 
         claude_projects = home / ".claude" / "projects"
         if claude_projects.exists():

@@ -78,9 +78,19 @@ mechanize, it matters enough to ship.
   session transcript rather than silently producing a stale-but-uncomplained-about
   reconcile order. No lockstep enforcement is introduced here — that
   remains RDR-143's scope.
+- `conexus/commands/rdr-audit.md` — bead: nexus-j9z30.8 — documents the
+  `nx rdr preamble rdr-audit` closed-vocabulary scan (RDR-201 Phase 1):
+  the preamble now reports every `docs/rdr/*.md` frontmatter `status:`
+  value outside the packaged `rdr-lifecycle` table's domain as a
+  `FINDING:` line (file + value), skips (and separately counts)
+  `kind: companion` files, and prints a separately-labelled `T2 <repo>_rdr
+  status census:` line that is never merged into the file findings. No
+  behavior change to the skill body's own silent-scope-reduction audit
+  dispatch — this only documents the preamble's new output for the agent
+  following the command.
 
-All four are INERT until the next release or plugin cut: sessions load the
+All five are INERT until the next release or plugin cut: sessions load the
 plugin from the pinned tag, so continuation mode is live in the CLIENT
-(shipped 85c79761e) while these descriptions, the auto-approve entry, and
-the rdr_hook.py/rdr-lifecycle.toml changes are not yet loaded by any
-session.
+(shipped 85c79761e) while these descriptions, the auto-approve entry, the
+rdr_hook.py/rdr-lifecycle.toml changes, and the rdr-audit.md scan
+documentation are not yet loaded by any session.
