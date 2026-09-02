@@ -2,7 +2,8 @@
 title: "Closed Vocabularies as Checked Tables"
 id: RDR-201
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-09-02
 priority: high
 author: Sam
 created: 2026-09-01
