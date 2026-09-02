@@ -22,6 +22,8 @@ Follow the `rdr-audit` skill body.
 
 The preamble above has already derived the target project and pre-scoped the evidence layer, AND (RDR-201 P1.8, nexus-j9z30.8) run a closed-vocabulary scan of the target's `docs/rdr/*.md` frontmatter against the packaged `rdr-lifecycle` table: any on-disk `status:` value outside the table's domain is printed as a `FINDING:` line naming the file and the value; a file carrying `kind: companion` is skipped and counted separately (companions carry no lifecycle status at all). A separate `T2 <repo>_rdr status census:` line reports the same repo's T2-side status counts — this is informational only, never merged into the file findings (the T2 reconcile hook does not run in this repo, so treating T2 as authoritative would report live records as perpetually stale). If those `FINDING:` lines are non-empty, surface them to the user alongside the skill body's own drift-audit summary below; they are a distinct, mechanically-checked signal from the LLM-judged silent-scope-reduction audit the rest of this command runs.
 
+A `Needs re-examination (T2 <repo>_rdr markers):` section follows the census (RDR-201 P3.3, nexus-j9z30.22): every `needs-reexamination: RDR-<from> <old>-><new>` line that `nx rdr set-status` appended to a dependent's T2 entry when a record joined to it by a `supersedes` edge changed status. Report-only: surface the list verbatim to the user; never clear a marker, never treat one as blocking. The list from the FIRST run after this landed is the measured backlog -- record it in T2 rather than resolving it.
+
 The skill body should:
 
 1. **Seed T1 link context** to RDR-067 tumbler (1.1.771) so audit findings auto-link

@@ -491,6 +491,32 @@ def _numeric_id_index(
     return result
 
 
+def rdr_resolution(
+    cat: CatalogReader, current_owner: Tumbler, *, repo_source_prefix: str,
+) -> tuple[dict[str, Tumbler | None], dict[int, str]]:
+    """This repo's RDR records, resolved: ``(rdr_key -> canonical tumbler
+    or None, RDR number -> rdr_key)``.
+
+    The ONE place the dependency generator and ``nx rdr set-status``
+    (RDR-201 P3.3, nexus-j9z30.22) both derive "which catalog tumbler IS
+    RDR-<n>" from -- one listing, one in-repo admission
+    (:func:`nexus.catalog.rdr_canonical.is_in_repo`), one canonical
+    resolution (:func:`nexus.catalog.rdr_canonical.resolve_all`), one
+    number disambiguation (:func:`_numeric_id_index`). A caller that
+    re-derived any of those steps would be the second, narrower copy of
+    an admission test this arc keeps finding and deleting.
+    """
+    entries = [
+        e
+        for content_type in RDR_CONTENT_TYPES
+        for e in _entries_of_type(cat, content_type)
+    ]
+    in_repo_entries = [e for e in entries if is_in_repo(e, current_owner, repo_source_prefix)]
+    in_repo_groups = group_rdr_candidates(in_repo_entries)
+    resolved = resolve_all(in_repo_entries, current_owner, repo_source_prefix=repo_source_prefix)
+    return resolved, _numeric_id_index(cat, in_repo_groups)
+
+
 def generate_rdr_dependency_links(
     cat: CatalogReader,
     *,
@@ -537,15 +563,9 @@ def generate_rdr_dependency_links(
         )
         return 0
 
-    entries = [
-        e
-        for content_type in RDR_CONTENT_TYPES
-        for e in _entries_of_type(cat, content_type)
-    ]
-    in_repo_entries = [e for e in entries if is_in_repo(e, current_owner, repo_source_prefix)]
-    in_repo_groups = group_rdr_candidates(in_repo_entries)
-    resolved = resolve_all(in_repo_entries, current_owner, repo_source_prefix=repo_source_prefix)
-    number_index = _numeric_id_index(cat, in_repo_groups)
+    resolved, number_index = rdr_resolution(
+        cat, current_owner, repo_source_prefix=repo_source_prefix,
+    )
 
     if new_tumblers is not None:
         new_set = {str(t) for t in new_tumblers}

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tomllib
 from collections import Counter
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -530,6 +531,137 @@ def _default_t2_client() -> object:
 _t2_client_factory = _default_t2_client
 
 
+# ---------------------------------------------------------------------------
+# RDR-201 P3.3 (nexus-j9z30.22): needs-reexamination markers
+# ---------------------------------------------------------------------------
+
+#: The T2 field a dependent's entry gains when a record it is joined to by
+#: a ``supersedes`` edge changes status. One line per flip, appended, never
+#: consumed by anything but ``rdr-audit``'s listing -- report-only posture
+#: (RDR-081 precedent): surfaced, never auto-resolved, never a block.
+NEEDS_REEXAMINATION_FIELD = "needs-reexamination"
+
+#: The ONLY catalog edge type the marker walk follows (ruling nexus-j9z30.22,
+#: Sam 2026-09-02): of 265 edges the dependency generator proposes over the
+#: real tree, 259 are ``relates`` from free-text ``related_rdrs`` -- a
+#: reading aid an author typed, not a dependency -- against 6 curated
+#: ``supersedes`` edges. Walking everything would flag dozens of loosely
+#: associated records on every flip and the six meaningful markers would
+#: vanish in the noise. Widen only on evidence that a specific missed
+#: ``relates`` edge would have prevented a real error.
+_MARKER_LINK_TYPE = "supersedes"
+
+
+def _default_catalog_reader() -> object:
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; catalog is only needed after a successful flip, and importing it at module load would pull the service client into every `nx rdr` invocation
+
+    return make_catalog_reader()
+
+
+#: Injectable seam, same shape as ``_t2_client_factory``: production builds
+#: the service-backed reader; tests substitute a fake serving real
+#: ``CatalogEntry`` / ``CatalogLink`` objects.
+_catalog_reader_factory = _default_catalog_reader
+
+
+def _rdr_repo_scope(cat: object, repo_root: str) -> tuple[object | None, str]:
+    """``(current owner tumbler, docs/rdr source prefix)`` for *repo_root* --
+    the two values every in-repo admission check needs
+    (:func:`nexus.catalog.rdr_canonical.is_in_repo`). Derived from git
+    identity in production; a seam so tests can scope a fake catalog
+    without a git remote."""
+    from nexus.catalog.rdr_canonical import current_rdr_owner, rdr_source_prefix  # noqa: PLC0415 — deferred import, see _default_catalog_reader
+
+    return current_rdr_owner(cat, repo_root), rdr_source_prefix(repo_root)
+
+
+def _supersedes_neighbours(cat: object, repo_root: str, rdr_num: int) -> tuple[list[int], str | None]:
+    """RDR numbers joined to *rdr_num* by a ``supersedes`` catalog edge in
+    EITHER direction, resolved through the same canonical-tumbler chain the
+    dependency generator used to create those edges
+    (:func:`nexus.catalog.link_generator.rdr_resolution` -- one listing, one
+    admission, one resolution; never a second copy here). Both directions:
+    a successor abandoned leaves its predecessor's ``superseded`` stale, a
+    predecessor revived leaves its successor's premise stale. Returns
+    ``(numbers, note)``; a non-empty *note* names why nothing could be
+    walked (repo never indexed, the flipped RDR itself unresolvable)."""
+    from nexus.catalog.link_generator import rdr_resolution  # noqa: PLC0415 — deferred import, see _default_catalog_reader
+
+    owner, prefix = _rdr_repo_scope(cat, repo_root)
+    if owner is None:
+        return [], "no catalog owner registered for this repo (never indexed)"
+    resolved, number_index = rdr_resolution(cat, owner, repo_source_prefix=prefix)
+    number_to_tumbler = {
+        n: resolved[key] for n, key in number_index.items() if resolved.get(key) is not None
+    }
+    me = number_to_tumbler.get(rdr_num)
+    if me is None:
+        return [], f"RDR {rdr_num} has no canonical catalog tumbler (unindexed or ambiguous)"
+    tumbler_to_number = {str(t): n for n, t in number_to_tumbler.items()}
+    neighbours: set[str] = set()
+    for link in cat.links_from(me, link_type=_MARKER_LINK_TYPE):  # type: ignore[attr-defined]
+        neighbours.add(str(link.to_tumbler))
+    for link in cat.links_to(me, link_type=_MARKER_LINK_TYPE):  # type: ignore[attr-defined]
+        neighbours.add(str(link.from_tumbler))
+    numbers = sorted(
+        n for t in neighbours if (n := tumbler_to_number.get(t)) is not None and n != rdr_num
+    )
+    return numbers, None
+
+
+def _append_marker_to_t2(client: object, project: str, number: int, marker: str) -> str | None:
+    """Append *marker* as its own line to RDR *number*'s T2 entry, under
+    whichever title shape the record uses (``"42"`` or ``"RDR-42"``, the two
+    shapes :func:`_t2_rdr_status_census` counts). Returns the title written,
+    or ``None`` when no entry exists -- an absent record is named by the
+    caller, never invented here. ``ttl=None`` and the entry's own tags are
+    passed explicitly: the facade's ``put`` defaults to a 30-day TTL and
+    empty tags, either of which would silently damage a permanent record."""
+    for title in (str(number), f"RDR-{number}"):
+        entry = client.get(project=project, title=title)  # type: ignore[attr-defined]
+        if not entry:
+            continue
+        content = str(entry.get("content", "")).rstrip("\n")
+        tags = entry.get("tags", "")
+        if isinstance(tags, (list, tuple)):
+            tags = ",".join(str(t) for t in tags)
+        client.put(  # type: ignore[attr-defined]
+            project=project, title=title, content=f"{content}\n{marker}\n",
+            tags=str(tags or ""), ttl=None,
+        )
+        return title
+    return None
+
+
+def _mark_dependents_needs_reexamination(
+    rdr_num: int, old_status: str, new_status: str, repo_root: str, repo_name: str,
+) -> tuple[list[str], list[int], str | None]:
+    """Walk the flipped record's ``supersedes`` neighbours and mark each
+    one's T2 entry ``needs-reexamination: RDR-<from> <old>-><new>``.
+    Returns ``(titles marked, numbers with no T2 entry, note)``. Never
+    raises -- a catalog or T2 failure becomes *note*; the flip that
+    triggered this has already been written and stands regardless."""
+    marker = f"{NEEDS_REEXAMINATION_FIELD}: RDR-{rdr_num} {old_status}->{new_status}"
+    project = f"{repo_name}_rdr"
+    try:
+        cat = _catalog_reader_factory()
+        numbers, note = _supersedes_neighbours(cat, repo_root, rdr_num)
+        if note is not None or not numbers:
+            return [], [], note
+        marked: list[str] = []
+        missing: list[int] = []
+        with _t2_client_factory() as client:
+            for number in numbers:
+                title = _append_marker_to_t2(client, project, number, marker)
+                if title is None:
+                    missing.append(number)
+                else:
+                    marked.append(title)
+        return marked, missing, None
+    except Exception as exc:  # noqa: BLE001 — report-only leg: the flip already happened; a catalog/T2 failure is named on its own line, never allowed to fail the command
+        return [], [], f"{type(exc).__name__}: {exc}"
+
+
 def _gate_outcome_for(rdr_num: str, repo_name: str) -> tuple[str, str | None]:
     """Read the T2 gate result for *rdr_num* and reduce it to the
     rdr-lifecycle table's ``gate`` dimension value.
@@ -782,6 +914,24 @@ def set_status(
         click.echo(f"updated README index row -> {readme_label}")
     else:
         click.echo("README index row not found (skipped)", err=True)
+
+    # RDR-201 P3.3 (nexus-j9z30.22): decisions get memory across amendment.
+    # Report-only; the flip above is already on disk whatever happens here.
+    flipped_num_match = re.search(r"\d+", rdr_file.stem)
+    if flipped_num_match:
+        repo_name = _gate_repo_name(repo_root)
+        marked, missing, note = _mark_dependents_needs_reexamination(
+            int(flipped_num_match.group(0)), current_status, new_status, repo_root, repo_name,
+        )
+        for title in marked:
+            click.echo(f"marked {repo_name}_rdr/{title} {NEEDS_REEXAMINATION_FIELD} (supersedes edge)")
+        for number in missing:
+            click.echo(
+                f"dependent RDR {number} has no T2 entry in {repo_name}_rdr -- not marked",
+                err=True,
+            )
+        if note:
+            click.echo(f"dependents not marked: {note}", err=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1894,6 +2044,36 @@ def _t2_rdr_status_census(
     return counts, sorted(ambiguous), None
 
 
+def _t2_needs_reexamination_markers(
+    repo_name: str, *, client_factory: Callable[[], object] | None = None,
+) -> tuple[list[tuple[str, str]], str | None]:
+    """Every ``needs-reexamination:`` line on every RDR-titled entry in T2
+    project ``<repo_name>_rdr`` (RDR-201 P3.3, nexus-j9z30.22), as sorted
+    ``(title, marker line)`` pairs -- one pair per marker, so a record
+    flagged twice appears twice. Same title-shape rule and same
+    never-fail-the-audit posture as :func:`_t2_rdr_status_census`: a T2
+    failure comes back as the *error* string, never raised."""
+    project = f"{repo_name}_rdr"
+    factory = client_factory or _t2_client_factory
+    try:
+        with factory() as client:  # type: ignore[attr-defined]
+            entries = client.get_all(project=project)
+    except Exception as exc:  # noqa: BLE001 — T2 unreachable is reported on this line, never allowed to fail the audit
+        return [], f"T2 unreachable: {type(exc).__name__}: {exc}"
+    rows: list[tuple[str, str]] = []
+    for entry in entries:
+        title = entry.get("title", "") if isinstance(entry, dict) else ""
+        if not re.match(r"^(?:RDR-)?\d+$", title):
+            continue
+        content = entry.get("content", "") if isinstance(entry, dict) else ""
+        for line in str(content).splitlines():
+            stripped = line.strip()
+            if stripped.startswith(f"{NEEDS_REEXAMINATION_FIELD}:"):
+                rows.append((title, stripped))
+    rows.sort(key=lambda pair: (int(re.sub(r"\D", "", pair[0])), pair[1]))
+    return rows, None
+
+
 @preamble.command("rdr-audit")
 @click.argument("args", nargs=-1)
 def preamble_rdr_audit(args: tuple[str, ...]) -> None:
@@ -2054,6 +2234,16 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
             if t2_ambiguous:
                 census_str += "; ambiguous: " + "; ".join(t2_ambiguous)
             print(f"**T2 `{target}_rdr` status census:** {census_str}")
+        marker_rows, marker_error = _t2_needs_reexamination_markers(target)
+        print(f"**Needs re-examination (T2 `{target}_rdr` markers):**", end="")
+        if marker_error:
+            print(f" {marker_error}")
+        elif not marker_rows:
+            print(" (none)")
+        else:
+            print()
+            for title, marker in marker_rows:
+                print(f"- `{title}`: {marker}")
         print()
 
         claude_projects = home / ".claude" / "projects"
