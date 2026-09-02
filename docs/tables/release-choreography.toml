@@ -82,14 +82,19 @@
 # the incident write-up and re-add them: a declared dimension no row reads
 # is exactly what the checker's unused-dimension advisory exists to flag.
 #
-# O2 ORDER-ASYMMETRY (nexus-j9z30.17): {cloud >= floor, ledger dirty}
-# exits 1 under --paired-deploy (battery-before-probe: the
-# check_floor_paired::paired_battery_blocks row below) and 0 under
-# --paired-deploy-auto (probe-first, ledger never read: the
-# check_floor_auto_paired::auto_current / auto_current_pin_blocks rows
-# below). Both are already separate, faithfully-encoded rows below (two
-# different functions -> two different match groups) -- nothing here
-# reconciles them; do not merge without Sam's ruling (nexus-j9z30.17).
+# O2 ORDER-ASYMMETRY -- RULED: KEEP BOTH ROWS (nexus-j9z30.17, Sam,
+# 2026-09-02). {cloud >= floor, ledger dirty} exits 1 under
+# --paired-deploy (battery-before-probe: check_floor_paired::
+# paired_battery_blocks below) and 0 under --paired-deploy-auto
+# (probe-first, ledger never read: check_floor_auto_paired::auto_current
+# below). Intended, not accidental: --paired-deploy-auto is the UNATTENDED
+# path (release.yml runs it; no human present to interpret a dirty
+# ledger), so it trusts the cloud probe -- the engine already being at
+# floor is the fact that matters there. --paired-deploy is the ATTENDED
+# path, where refusing and asking a human is cheap and a dirty ledger is
+# worth stopping for. Two modes, two audiences, deliberately different
+# answers. Do NOT unify the two modes; each row's own comment names the
+# other so the pair is never read as a contradiction to "fix".
 #
 # EXCLUDED (T2 nexus_rdr/201-research-4; scripts/enumerate_release_cells
 # .py's own header docstring): gate-report directory contents (collapsed
@@ -494,6 +499,14 @@ domain = [
   "success_unparseable", "success_below_floor", "success_at_or_above_floor",
 ]
 
+# O2 pair, half 1 of 2 (ruling nexus-j9z30.17, Sam 2026-09-02: KEEP).
+# Exit 1 here even when the cloud is already at floor, because the
+# battery (ledger included) runs BEFORE the probe in explicit paired
+# mode. The same world state exits 0 at
+# check_floor_auto_paired::auto_current below. Not a contradiction:
+# --paired-deploy is the ATTENDED path, where refusing and asking a
+# human is cheap and a dirty ledger is worth stopping for. Do not merge
+# with, or reorder to match, the auto row.
 [[row]]
 id = "check_floor_paired::paired_battery_blocks"
 match = { function = "check_floor_paired" }
@@ -584,6 +597,14 @@ match = { function = "check_floor_auto_paired" }
 guard = { "check_floor_auto_paired.probe" = "success_at_or_above_floor", "check_floor_auto_paired.pin_currency" = "blocks" }
 emit = { exit_code = "2", message_key = "auto_current_pin_blocks" }
 
+# O2 pair, half 2 of 2 (ruling nexus-j9z30.17, Sam 2026-09-02: KEEP).
+# Exit 0 here with the ledger never read, because auto mode probes the
+# cloud FIRST and an engine already at floor is a byte-for-byte bare
+# pass. The same world state with a dirty ledger exits 1 at
+# check_floor_paired::paired_battery_blocks above. Not a contradiction:
+# --paired-deploy-auto is the UNATTENDED path (release.yml), with no
+# human present to interpret a dirty ledger, so it trusts the probe.
+# Do not merge with, or reorder to match, the explicit-paired row.
 [[row]]
 id = "check_floor_auto_paired::auto_current"
 match = { function = "check_floor_auto_paired" }
