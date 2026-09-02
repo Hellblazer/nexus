@@ -656,6 +656,56 @@ def _append_marker_to_t2(client: object, project: str, number: int, marker: str)
     return None
 
 
+_STATUS_DATE_KEY: dict[str, str] = {"accepted": "accepted_date", "closed": "closed_date"}
+
+
+def _write_t2_status(repo_name: str, rdr_num: int, new_status: str, date: str) -> tuple[str | None, str | None]:
+    """Mirror a successful file flip onto the record's own T2 entry
+    (project ``<repo>_rdr``, title ``"<n>"`` or ``"RDR-<n>"``): rewrite the
+    ``status:`` line (or prepend one -- several live records carried only
+    a prose ``STATUS: x`` the census could not read, bead nexus-nxn5g), and
+    set ``accepted_date`` / ``closed_date`` the way
+    :func:`_rewrite_frontmatter_status` does on the file. Until 2026-09-02
+    the lifecycle skills were the only T2 status writer, in prose; the
+    nine drift rows in nexus-nxn5g are what that produced. Same
+    preservation rules as :func:`_append_marker_to_t2` (tags, agent,
+    session, ttl=None). Returns ``(title written, note)``; never raises."""
+    project = f"{repo_name}_rdr"
+    try:
+        with _t2_client_factory() as client:
+            for title in (str(rdr_num), f"RDR-{rdr_num}"):
+                entry = client.get(project=project, title=title)
+                if not entry:
+                    continue
+                lines = str(entry.get("content", "")).splitlines()
+                date_key = _STATUS_DATE_KEY.get(new_status)
+                out: list[str] = []
+                seen_status = seen_date = False
+                for line in lines:
+                    stripped = line.strip()
+                    if stripped.startswith("status:") and not seen_status:
+                        out.append(f"status: {new_status}")
+                        seen_status = True
+                    elif date_key and stripped.startswith(f"{date_key}:") and not seen_date:
+                        out.append(f"{date_key}: {date}")
+                        seen_date = True
+                    else:
+                        out.append(line)
+                if not seen_status:
+                    out.insert(0, f"status: {new_status}")
+                if date_key and not seen_date:
+                    out.insert(1 if not seen_status else out.index(f"status: {new_status}") + 1, f"{date_key}: {date}")
+                tags = entry.get("tags", "")
+                if isinstance(tags, (list, tuple)):
+                    tags = ",".join(str(t) for t in tags)
+                keep = {k: entry[k] for k in ("agent", "session") if isinstance(entry.get(k), str) and entry[k]}
+                client.put(project=project, title=title, content="\n".join(out) + "\n", tags=str(tags or ""), ttl=None, **keep)
+                return title, None
+        return None, f"no T2 entry for RDR {rdr_num} in {project} -- status not mirrored"
+    except Exception as exc:  # noqa: BLE001 — the file flip already happened; a T2 failure is named, never allowed to fail the command
+        return None, f"T2 status not mirrored: {type(exc).__name__}: {exc}"
+
+
 def _mark_dependents_needs_reexamination(
     rdr_num: int, old_status: str, new_status: str, repo_root: str, repo_name: str,
 ) -> tuple[list[str], list[int], list[str]]:
@@ -963,6 +1013,11 @@ def set_status(
     flipped_num_match = re.search(r"\d+", rdr_file.stem)
     if flipped_num_match:
         repo_name = _gate_repo_name(repo_root)
+        t2_title, t2_note = _write_t2_status(repo_name, int(flipped_num_match.group(0)), new_status, date)
+        if t2_title:
+            click.echo(f"updated T2 {repo_name}_rdr/{t2_title} status -> {new_status}")
+        if t2_note:
+            click.echo(t2_note, err=True)
         marked, missing, notes = _mark_dependents_needs_reexamination(
             int(flipped_num_match.group(0)), current_status, new_status, repo_root, repo_name,
         )

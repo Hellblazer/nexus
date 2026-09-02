@@ -475,3 +475,44 @@ def test_audit_preamble_prints_drift_lines(monkeypatch, tmp_path, capsys):
     assert result.exit_code == 0, result.output
     assert "- DRIFT: RDR-159 file=`closed` T2=`superseded`" in result.output
     assert "1 file-vs-T2 status disagreement(s)" in result.output
+
+
+# ---------------------------------------------------------------------------
+# set-status mirrors the flip onto the record's own T2 entry (Sam, 2026-09-02:
+# until then the lifecycle skills were the only T2 status writer, in prose)
+# ---------------------------------------------------------------------------
+
+
+def test_set_status_rewrites_the_t2_status_line_and_date(tmp_path, monkeypatch):
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 14, "accepted")
+    project = _project(tmp_path)
+    t2 = _FakeT2Client({(project, "14"): {"content": "title: x\nstatus: accepted\naccepted_date: 2026-01-01\n", "tags": "rdr"}})
+    _install(monkeypatch, tmp_path, _FakeCatalog(entries=[_entry(tmp_path, 14, 1)]), t2)
+    result = CliRunner().invoke(rdr, ["set-status", "14", "closed", "--date", "2026-09-02", "--root", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert t2.puts[0]["content"] == "title: x\nstatus: closed\nclosed_date: 2026-09-02\naccepted_date: 2026-01-01\n"
+    assert t2.puts[0]["ttl"] is None and t2.puts[0]["tags"] == "rdr"
+    assert f"updated T2 {project}/14 status -> closed" in result.output
+
+
+def test_set_status_prepends_a_status_line_when_the_entry_has_only_prose(tmp_path, monkeypatch):
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr(rdr_dir, 14, "accepted")
+    project = _project(tmp_path)
+    t2 = _FakeT2Client({(project, "RDR-14"): {"content": "RDR-14 thing. STATUS: accepted.\n", "tags": ""}})
+    _install(monkeypatch, tmp_path, _FakeCatalog(entries=[_entry(tmp_path, 14, 1)]), t2)
+    result = CliRunner().invoke(rdr, ["set-status", "14", "closed", "--date", "2026-09-02", "--root", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert t2.puts[0]["title"] == "RDR-14"
+    assert t2.puts[0]["content"] == "status: closed\nclosed_date: 2026-09-02\nRDR-14 thing. STATUS: accepted.\n"
+
+
+def test_set_status_names_a_missing_t2_entry_and_still_flips(tmp_path, monkeypatch):
+    rdr_dir = _rdr_dir(tmp_path)
+    path = _write_rdr(rdr_dir, 14, "accepted")
+    _install(monkeypatch, tmp_path, _FakeCatalog(entries=[_entry(tmp_path, 14, 1)]), _FakeT2Client({}))
+    result = _flip(tmp_path, 14, "closed")
+    assert result.exit_code == 0, result.output
+    assert "status: closed" in path.read_text()
+    assert "no T2 entry for RDR 14" in result.output
