@@ -367,7 +367,7 @@ class TestPassthroughFlags:
             "--collection", "knowledge__test",
         ])
         assert result.exit_code == 0, result.output
-        assert fake_dispatcher[0]["collection"] == "knowledge__test"
+        assert fake_dispatcher[0]["collection"] == "knowledge__test__voyage-context-3__v1"  # nexus-t952k: --collection is normalised
 
     def test_corpus_passthrough(
         self, runner, fake_selectors, fake_dispatcher,
@@ -499,7 +499,7 @@ class TestDefaultCollectionByExtension:
             "--collection", "knowledge__custom-thing",
         ])
         assert result.exit_code == 0, result.output
-        assert fake_dispatcher[0]["collection"] == "knowledge__custom-thing"
+        assert fake_dispatcher[0]["collection"] == "knowledge__custom-thing__voyage-context-3__v1"  # nexus-t952k: --collection is normalised
 
 
 # ── Error handling ───────────────────────────────────────────────────────────
@@ -1761,6 +1761,19 @@ class TestWriteback:
     reports the count.
     """
 
+    @pytest.fixture(autouse=True)
+    def _dt_available(self, monkeypatch):
+        """nexus-fdk1x: index_cmd now probes DT reachability once up front
+        for any of dt-content/link-semantic/writeback/highlights before
+        running the per-record layer calls below (which are themselves
+        monkeypatched to bypass DT entirely) -- force the probe on so these
+        CLI-wiring tests keep exercising the stubbed layer functions rather
+        than tripping the new "DEVONthink MCP unreachable" exit-2 path.
+        """
+        import nexus.mcp_client.devonthink as _dt_mod
+
+        monkeypatch.setattr(_dt_mod, "available", lambda **kw: True)
+
     def test_writeback_invoked_per_stamped_record(
         self, runner, fake_selectors, fake_dispatcher, monkeypatch,
     ):
@@ -1806,6 +1819,13 @@ class TestWriteback:
 
 class TestLinkSemantic:
     """``nx dt index --link-semantic`` invokes Layer B edge generation."""
+
+    @pytest.fixture(autouse=True)
+    def _dt_available(self, monkeypatch):
+        """nexus-fdk1x: see TestWriteback._dt_available."""
+        import nexus.mcp_client.devonthink as _dt_mod
+
+        monkeypatch.setattr(_dt_mod, "available", lambda **kw: True)
 
     def test_link_semantic_invoked_per_stamped_record(
         self, runner, fake_selectors, fake_dispatcher, monkeypatch,
@@ -1918,7 +1938,7 @@ class TestEnrichWiring:
             "--collection", "knowledge__test", "--enrich",
         ])
         assert result.exit_code == 0, result.output
-        assert calls == [("knowledge__test", {"source": "dt"})]
+        assert calls == [("knowledge__test__voyage-context-3__v1", {"source": "dt"})]  # nexus-t952k
         assert "Enriching bibliographic metadata" in result.output
 
     def test_no_enrich_flag_skips_enrichment(

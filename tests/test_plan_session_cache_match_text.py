@@ -41,6 +41,24 @@ class TestSynthesizeMatchText:
             "research find-by-author scope global"
         )
 
+    def test_question_shaped_description_carries_no_punctuation_wart(self) -> None:
+        """nexus-7g0rg #4: grown plans store the originating QUESTION as
+        their description, and stripping only '.' before the suffix join
+        produced '...chunks?. research ...' on every grown row. Terminal
+        '.?!' all collapse to the single joining period."""
+        row = {
+            "query": "What is the chunk identity convention used for T3 chunks?",
+            "verb": "research",
+            "name": "chunk-identity-convention-used-t3",
+            "scope": "personal",
+        }
+        out = _synthesize_match_text(row)
+        assert out == (
+            "What is the chunk identity convention used for T3 chunks. "
+            "research chunk-identity-convention-used-t3 scope personal"
+        )
+        assert "?." not in out
+
     def test_missing_verb_falls_back_to_description(self) -> None:
         row = {
             "query": "Legacy plan with no dimensions",
@@ -236,4 +254,51 @@ class TestSynthesizerParityWithPlanLibrary:
         assert cache_out == lib_out, (
             f"synthesiser drift on row={row!r}: "
             f"session_cache→{cache_out!r}, plan_library→{lib_out!r}"
+        )
+
+
+# ── nexus-93cc6: the cache embeds the STORED match_text when present ─────────
+
+
+class TestUpsertPrefersStoredMatchText:
+    def test_stored_match_text_wins_over_resynthesis(
+        self, cache: PlanSessionCache,
+    ) -> None:
+        """A grown row whose stored match_text carries a GENERALIZED
+        description (the grow-time generalizer) must embed those bytes —
+        re-synthesis from the row's own columns cannot reproduce them."""
+        cache.upsert({
+            "id": 7,
+            "query": "What is the chunk identity convention used for T3 chunks?",
+            "verb": "research",
+            "name": "chunk-identity",
+            "scope": "personal",
+            "tags": "ad-hoc,grown",
+            "project": "nexus",
+            "match_text": (
+                "Explains content-addressed chash identity for stored chunks. "
+                "research chunk-identity scope personal"
+            ),
+        })
+        hits = cache.query("content-addressed chash identity", n=3)
+        assert hits and hits[0][0] == 7, (
+            "the stored (generalized) match_text must be what got embedded"
+        )
+
+    def test_empty_stored_match_text_falls_back_to_synthesis(
+        self, cache: PlanSessionCache,
+    ) -> None:
+        cache.upsert({
+            "id": 8,
+            "query": "how does the projector replay events",
+            "verb": "research",
+            "name": "projector-replay",
+            "scope": "personal",
+            "tags": "",
+            "project": "",
+            "match_text": "   ",
+        })
+        hits = cache.query("research projector-replay", n=3)
+        assert hits and hits[0][0] == 8, (
+            "blank stored match_text must fall back to synthesis"
         )

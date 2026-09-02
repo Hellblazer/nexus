@@ -979,6 +979,58 @@ _PER_PAPER_COST_USD = 1.18
 # real signal.
 _DEFAULT_VALIDATE_SAMPLE_PCT = 5
 
+# nexus-xwvwx: default filename for --validate-sample's disagreement log,
+# written under nexus_config_dir() (never the CWD -- see
+# _run_validation_sample's docstring for the incident this closes).
+_VALIDATION_FAILURES_FILENAME = "aspect_validation_failures.jsonl"
+
+# nexus-xwvwx: the evidence handed to operator_verify is the SAME
+# full reassembled document text extract_aspects prompted the extractor
+# with (via read_indexed_text -> read_source, no truncation at that
+# layer). This cap is a defensive ceiling only, sized well above any
+# realistic paper (a full-length paper reassembled from T3 chunks runs to
+# a few hundred KB of prose at most) so full hydration is the normal
+# case; it exists to bound worst-case operator_verify subprocess cost on
+# a pathological outlier, not to shrink the evidence window by default
+# the way the prior hardcoded ``content[:50000]`` slice did.
+_VALIDATION_EVIDENCE_CHAR_CAP = 500_000
+
+# nexus-fdk1x code-review (T2 [24110], xwvwx finding): a flat 60s
+# operator_verify timeout under-served exactly the large-paper population
+# the _VALIDATION_EVIDENCE_CHAR_CAP raise above targets -- the evidence
+# cap removal took worst-case evidence from ~50k chars (the old hardcoded
+# content[:50000] slice) to the full 500k-char ceiling above (roughly
+# 10x more prose, ~125k tokens worst case), and a validation sample that
+# times out lands SILENTLY in `errored` (not `disagreement`/`unverifiable`),
+# undermining the fix's own goal. Scales linearly with evidence size,
+# capped so a pathological outlier can't stall the batch indefinitely.
+_VERIFY_TIMEOUT_BASE_SECONDS = 60.0
+#: critique [24114] S2: at the old 1s/5k rate the 500k-char cap scaled to
+#: 160s, which the critic measured as near-zero margin against real
+#: operator_verify latency on a full paper — a validation that timed out
+#: was recorded as "errored", i.e. the same silence this bead set out to
+#: remove. 1s/2k doubles the budget (500k -> 310s) and the cap moves with
+#: it so the scaler, not the cap, is what binds at realistic sizes.
+_VERIFY_TIMEOUT_PER_CHARS = 2_000
+_VERIFY_TIMEOUT_SECONDS_PER_CHUNK = 1.0
+_VERIFY_TIMEOUT_CAP_SECONDS = 600.0
+
+
+def _scaled_verify_timeout(evidence_chars: int) -> float:
+    """``60s + 1s per 2k evidence chars``, capped at 600s.
+
+    At the _VALIDATION_EVIDENCE_CHAR_CAP ceiling (500k chars) this scales
+    to 60 + 250 = 310s. The rate was doubled from 1s/5k after critique
+    [24114] measured near-zero margin against real operator_verify
+    latency at that ceiling; the cap exists so a hypothetical larger
+    evidence string is bounded rather than growing the timeout
+    unboundedly.
+    """
+    scaled = _VERIFY_TIMEOUT_BASE_SECONDS + (
+        max(0, evidence_chars) / _VERIFY_TIMEOUT_PER_CHARS
+    ) * _VERIFY_TIMEOUT_SECONDS_PER_CHUNK
+    return min(scaled, _VERIFY_TIMEOUT_CAP_SECONDS)
+
 
 @enrich.command(name="aspects")
 @click.argument("collection")
@@ -995,7 +1047,18 @@ _DEFAULT_VALIDATE_SAMPLE_PCT = 5
     help=(
         "Validate N%% of newly-extracted aspects via operator_verify "
         "(claim=aspects, evidence=document text). Disagreements append "
-        "to ./validation_failures.jsonl. Pass 0 to skip validation."
+        "to <nexus config dir>/aspect_validation_failures.jsonl (override "
+        "with --validation-out). Pass 0 to skip validation."
+    ),
+)
+@click.option(
+    "--validation-out",
+    type=str,
+    default="",
+    help=(
+        "Path for the validation-sample failures JSONL (nexus-xwvwx). "
+        "Defaults to <nexus config dir>/aspect_validation_failures.jsonl "
+        "-- never the current working directory."
     ),
 )
 @click.option(
@@ -1024,6 +1087,7 @@ def enrich_aspects(
     collection: str,
     dry_run: bool,
     validate_sample: int,
+    validation_out: str,
     extract_all: bool,
     re_extract: bool,
     extractor_version: str,
@@ -1116,7 +1180,10 @@ def enrich_aspects(
 
     if validate_sample > 0:
         _run_validation_sample(
-            extracted, collection=collection, sample_pct=validate_sample,
+            extracted,
+            collection=collection,
+            sample_pct=validate_sample,
+            validation_out=validation_out,
         )
 
 
@@ -1620,10 +1687,12 @@ def _run_validation_sample(
     *,
     collection: str,
     sample_pct: int,
+    validation_out: str = "",
 ) -> None:
     """Sample N% of extracted records, run operator_verify against the
     INDEXED T3 chunk text (the same evidence the extractor consumed), and
-    write disagreements to ``./validation_failures.jsonl``.
+    write disagreements to ``<nexus config dir>/aspect_validation_failures.jsonl``
+    (override with ``validation_out``).
 
     nexus-vwns1: this previously read the raw source file off disk and
     handed those bytes to the verifier. For PDFs that yields the
@@ -1641,6 +1710,29 @@ def _run_validation_sample(
     a behavior change (previously validated against file bytes); such a
     sample is now skipped-and-counted rather than validated against a
     different source than the extractor used.
+
+    nexus-xwvwx — two fixes:
+
+    * The failures log used to land at ``./validation_failures.jsonl`` —
+      the CWD, which for an operator running the command from a checkout
+      is the repo root, leaving an untracked file behind. It now defaults
+      under :func:`nexus.config.nexus_config_dir` (``--validation-out``
+      overrides), and the resolved path is always printed in the final
+      summary line.
+    * ``read_indexed_text`` already returns the FULL reassembled document
+      text — the SAME evidence :func:`nexus.aspect_extractor.extract_aspects`
+      prompted the extractor with, no truncation at that layer. The prior
+      code then silently sliced it to the first 50,000 characters (the
+      document's intro, for anything long) before calling
+      ``operator_verify``, so a real claim about later sections (a
+      results table, a later baseline) came back "unverified" against
+      evidence that never contained it — a false disagreement, not a
+      real one. This function now hands the verifier the full text and
+      only falls back to a bounded window on a pathological outlier
+      (:data:`_VALIDATION_EVIDENCE_CHAR_CAP`); when that fallback fires
+      AND the verifier reports non-verified, the row is classified
+      ``unverifiable`` (evidence window was partial), never
+      ``disagreement`` — the summary counts the two separately.
     """
     import asyncio  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
     import json  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
@@ -1648,6 +1740,7 @@ def _run_validation_sample(
     from datetime import UTC, datetime  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
 
     from nexus.aspect_extractor import read_indexed_text  # noqa: PLC0415 — command-local import; deferred to validation path
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — command-local import; deferred to validation path
 
     # Process-cached catalog projections (same builders the extractor used);
     # cheap to rebuild here so validation is self-contained.
@@ -1667,8 +1760,13 @@ def _run_validation_sample(
         f"({sample_pct}%) via operator_verify..."
     )
 
-    failures_path = Path("validation_failures.jsonl")
+    failures_path = (
+        Path(validation_out) if validation_out
+        else nexus_config_dir() / _VALIDATION_FAILURES_FILENAME
+    )
+    failures_path.parent.mkdir(parents=True, exist_ok=True)
     failures = 0
+    unverifiable = 0
     verified = 0
     errored = 0
 
@@ -1697,8 +1795,15 @@ def _run_validation_sample(
         }
         claim_json = json.dumps(claim_payload)
 
+        document_chars = len(content)
+        evidence_truncated = document_chars > _VALIDATION_EVIDENCE_CHAR_CAP
+        evidence = (
+            content[:_VALIDATION_EVIDENCE_CHAR_CAP] if evidence_truncated else content
+        )
+        evidence_chars = len(evidence)
+
         try:
-            result = asyncio.run(_verify(claim_json, content[:50000]))
+            result = asyncio.run(_verify(claim_json, evidence))
         except Exception as exc:  # noqa: BLE001 — per-sample isolation; verify failure counted as errored, validation loop continues
             errored += 1
             _log.warning(
@@ -1711,7 +1816,15 @@ def _run_validation_sample(
             verified += 1
             continue
 
-        failures += 1
+        # nexus-xwvwx: a non-verified result against a TRUNCATED evidence
+        # window is not a real disagreement -- the verifier may simply not
+        # have seen the section the claim references. Classify separately
+        # so the summary never conflates "the extraction looks wrong" with
+        # "the sample's evidence window was partial".
+        if evidence_truncated:
+            unverifiable += 1
+        else:
+            failures += 1
         with failures_path.open("a") as f:
             f.write(json.dumps({
                 "source_path": source_path,
@@ -1719,6 +1832,9 @@ def _run_validation_sample(
                 "operator_verify_reason": result.get("reason", ""),
                 "citations": result.get("citations", []),
                 "timestamp": datetime.now(UTC).isoformat(),
+                "evidence_truncated": evidence_truncated,
+                "evidence_chars": evidence_chars,
+                "document_chars": document_chars,
             }) + "\n")
 
     # nexus-vwns1: an all-errored run (no sample's indexed text could be
@@ -1733,15 +1849,16 @@ def _run_validation_sample(
             f"(no verification signal this run)",
             err=True,
         )
-    elif failures:
+    elif failures or unverifiable:
         click.echo(
-            f"Validation: {verified} verified, {failures} disagreement(s) "
-            f"written to {failures_path}, {errored} errored."
+            f"Validation: {verified} verified, {failures} disagreement(s), "
+            f"{unverifiable} unverifiable (evidence truncated), "
+            f"{errored} errored. Failures written to {failures_path}."
         )
     else:
         click.echo(
             f"Validation: all {verified} sample(s) verified "
-            f"({errored} errored)."
+            f"({errored} errored). Output: {failures_path}."
         )
 
 
@@ -1757,12 +1874,17 @@ async def _verify(claim_json: str, evidence: str) -> dict:
     so this caveat is forward-risk only. If the CLI ever gets
     invoked from inside an event loop, restructure this helper
     to run the coroutine in a dedicated thread.
+
+    Timeout scales with evidence size (see :func:`_scaled_verify_timeout`)
+    rather than a flat 60s -- a large-paper validation sample (up to the
+    500k-char _VALIDATION_EVIDENCE_CHAR_CAP) needs more than 60s to
+    subprocess-dispatch and reason over.
     """
     from nexus.mcp.core import operator_verify  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
     return await operator_verify(
         claim=claim_json,
         evidence=evidence,
-        timeout=60.0,
+        timeout=_scaled_verify_timeout(len(evidence)),
     )
 
 

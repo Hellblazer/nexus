@@ -1,0 +1,17 @@
+# A state-machine row with no guard at all: a zero-dim group is legitimate
+# for a state machine (e.g. `create`, which has no prior-state
+# precondition) and produces no finding at all.
+[table]
+id = "no-dims-sm"
+kind = "state-machine"
+
+[dimensions.event]
+domain = ["create"]
+
+[dimensions.state]
+domain = ["draft"]
+
+[[row]]
+id = "r1"
+match = { event = "create" }
+to = { state = "draft" }

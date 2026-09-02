@@ -8,10 +8,10 @@
 # reviewer is asking about, and the catalog resolves it the way
 # citation-traversal resolves its seed.
 name: default
-description: Critique / audit / review of a change set. Resolve the changed files to their catalog
-  entries, walk decision-evolution history (which RDRs superseded or cited what touches this
-  code), hydrate the RDR content, extract the decisions, and compare against the proposed change
-  so any drift from prior decisions surfaces explicitly.
+description: >-
+  Review or critique a change set. What are the risks in this change? Does this diff
+  align with prior decisions? What history bears on these files? Audits changed files
+  against the decisions and documents that shaped them.
 dimensions:
   verb: review
   scope: global

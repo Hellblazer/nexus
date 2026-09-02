@@ -459,3 +459,117 @@ class TestLiveSqliteRoundTrip:
             "ttl_days=0 must disable growth; no plan should have been saved"
         )
         assert not cache_stub.upsert.called
+
+
+# ── nexus-93cc6 D2: grow-time match-text generalizer ─────────────────────────
+
+
+class TestGrownMatchDescription:
+    """The generalizer feeds save_plan(match_description=...); every failure
+    shape degrades to None (= today's verbatim-question match text). The
+    suite-wide conftest stub pins None; these tests re-patch the seam."""
+
+    @pytest.mark.asyncio
+    async def test_generalized_description_flows_into_save_kwargs(self):
+        from nexus.mcp.core import nx_answer
+
+        match = _ad_hoc_match()
+        save_mock = MagicMock(return_value=999)
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = save_mock
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 999, "query": "q"})
+
+        generalized = (
+            "Explains how widget frobnication is configured across the fleet. "
+            "How do I frobnicate a widget? What controls frobnication?"
+        )
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_success())), \
+             patch("nexus.mcp.core._generalize_grown_match_description",
+                   AsyncMock(return_value=generalized)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn: fn(db_stub)), \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="how is widget frobnication configured?")
+
+        assert save_mock.called
+        kwargs = save_mock.call_args.kwargs
+        assert kwargs["match_description"] == generalized
+        # The verbatim question is UNTOUCHED — it keys the verbatim-repeat
+        # bypass (T2 [23880] coupling).
+        assert kwargs["query"] == "how is widget frobnication configured?"
+
+    @pytest.mark.asyncio
+    async def test_generalizer_none_keeps_todays_behavior(self):
+        from nexus.mcp.core import nx_answer
+
+        match = _ad_hoc_match()
+        save_mock = MagicMock(return_value=999)
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = save_mock
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 999, "query": "q"})
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_success())), \
+             patch("nexus.mcp.core._generalize_grown_match_description",
+                   AsyncMock(return_value=None)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn: fn(db_stub)), \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="some question")
+
+        assert save_mock.called
+        assert save_mock.call_args.kwargs["match_description"] is None
+
+
+class TestGeneralizerHelper:
+    """_generalize_grown_match_description itself — dispatch patched, never
+    a real subprocess (the marker opts out of the conftest stub so the real
+    helper body runs)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.plan_grow_generalizer
+    async def test_good_output_is_returned(self):
+        from nexus.mcp import core
+
+        text = (
+            "Describes the retry semantics for upstream rate limits and when "
+            "budgets apply. When do 429 budgets fire? How are retries bounded?"
+        )
+        with patch("nexus.operators.dispatch.claude_dispatch",
+                   AsyncMock(return_value={"description": text})):
+            out = await core._generalize_grown_match_description(
+                question="q", plan_json='{"steps": []}',
+            )
+        assert out == text
+
+    @pytest.mark.asyncio
+    @pytest.mark.plan_grow_generalizer
+    async def test_dispatch_failure_is_fail_soft_none(self):
+        from nexus.mcp import core
+
+        with patch("nexus.operators.dispatch.claude_dispatch",
+                   AsyncMock(side_effect=RuntimeError("boom"))):
+            out = await core._generalize_grown_match_description(
+                question="q", plan_json='{"steps": []}',
+            )
+        assert out is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.plan_grow_generalizer
+    async def test_out_of_bounds_output_is_dropped(self):
+        from nexus.mcp import core
+
+        for bad in ("too short", "x" * 5000, ""):
+            with patch("nexus.operators.dispatch.claude_dispatch",
+                       AsyncMock(return_value={"description": bad})):
+                out = await core._generalize_grown_match_description(
+                    question="q", plan_json='{"steps": []}',
+                )
+            assert out is None, f"length {len(bad)} must be dropped"

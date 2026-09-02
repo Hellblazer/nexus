@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+import structlog
+from structlog.testing import capture_logs
 
+from nexus.config import MineruSkewInfo
 from nexus.pdf_extractor import PDFExtractor
 
 
@@ -92,6 +96,85 @@ class TestMineruServerAvailable:
             for _ in range(5):
                 extractor._mineru_server_available()
             assert mock_get.call_count == 1
+
+
+# ── nexus-eti1v: a KNOWN skew must skip straight to subprocess ───────────────
+#
+# Measured 2026-09-02 on one 54-page PDF: mineru_server_version_skew logged
+# 63 times (once per health poll), then the client dialled the hardcoded
+# default :8010 (refused), "rediscovered" the same :8010, waited the full
+# mineru_ensure_health_timeout (120s), then fell back to subprocess -- ~2.5
+# minutes spent on a server it had already decided not to use. On a
+# get_mineru_server_url() sentinel (None), the extractor must not dial
+# anything, must not wait, and must log exactly once with both versions.
+
+
+_SKEW = MineruSkewInfo(
+    registered_version="3.4.5", our_version="3.1.11",
+    pid=12345, port=61425, registered_python="/some/python",
+)
+
+
+class TestMineruServerAvailableSkew:
+
+    def test_skips_straight_to_subprocess_no_http_dial(self, extractor: PDFExtractor) -> None:
+        with (
+            patch("nexus.config.get_mineru_server_url", return_value=None),
+            patch("nexus.config.get_mineru_skew_info", return_value=_SKEW),
+            patch("nexus.pdf_extractor.httpx.get") as mock_get,
+        ):
+            assert extractor._mineru_server_available() is False
+            mock_get.assert_not_called()
+
+    def test_logs_once_with_both_versions_and_remedy(self, extractor: PDFExtractor) -> None:
+        # The fallback log is INFO-level (bead nexus-eti1v: it is expected
+        # behavior on a known skew, not itself a warning condition — the
+        # config-layer mineru_server_version_skew WARNING already covers
+        # that). The suite's default structlog level is WARNING, so raise
+        # it for this assertion the same way test_nx_answer_plan_choice.py
+        # does for its own INFO-level event assertions.
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+        with (
+            patch("nexus.config.get_mineru_server_url", return_value=None),
+            patch("nexus.config.get_mineru_skew_info", return_value=_SKEW),
+            capture_logs() as logs,
+        ):
+            extractor._mineru_server_available()
+
+        fallback_events = [
+            e for e in logs if e.get("event") == "mineru_skew_subprocess_fallback"
+        ]
+        assert len(fallback_events) == 1, (
+            f"expected exactly one mineru_skew_subprocess_fallback log, "
+            f"got {len(fallback_events)}: {fallback_events}"
+        )
+        event = fallback_events[0]
+        assert event["registered_version"] == "3.4.5"
+        assert event["our_version"] == "3.1.11"
+        assert "nx mineru restart" in event["remedy"]
+
+    def test_no_health_wait_no_ensure_mineru_running_call(self, extractor: PDFExtractor) -> None:
+        """The bug's core cost: a full mineru_ensure_health_timeout wait
+        for a server already known unusable. On skew, ensure_mineru_running
+        (the autostart/health-wait path) must never be reached."""
+        with (
+            patch("nexus.config.get_mineru_server_url", return_value=None),
+            patch("nexus.config.get_mineru_skew_info", return_value=_SKEW),
+            patch(
+                "nexus.daemon.mineru_lifecycle.ensure_mineru_running",
+            ) as mock_ensure,
+        ):
+            extractor._mineru_server_available()
+            mock_ensure.assert_not_called()
+
+    def test_result_cached_per_instance(self, extractor: PDFExtractor) -> None:
+        with (
+            patch("nexus.config.get_mineru_server_url", return_value=None) as mock_url,
+            patch("nexus.config.get_mineru_skew_info", return_value=_SKEW),
+        ):
+            for _ in range(5):
+                assert extractor._mineru_server_available() is False
+            assert mock_url.call_count == 1
 
 
 # ── _mineru_run_via_server ───────────────────────────────────────────────────
@@ -190,6 +273,34 @@ class TestMineruRunViaServer:
             md, content_list, pdf_info = extractor._mineru_run_via_server(dummy_pdf, 0, None)
         assert content_list == cl_data
         assert pdf_info == mj_data["pdf_info"]
+
+    def test_url_none_mid_extraction_raises_connect_error_not_unsupported_protocol(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        """substantive-critic (T2 critique-index-path-four-beads-2026-09-02):
+        this method re-resolves ``get_mineru_server_url()`` FRESH on every
+        call, independent of ``_mineru_server_available()``'s once-per-
+        instance cache. A skew that appears between the two (another
+        process runs `nx mineru restart` onto a differently-versioned
+        server mid-extraction) makes THIS call see the ``None`` sentinel
+        eti1v introduced -- pre-fix, an unguarded f-string turned that into
+        the literal URL "None/file_parse", which httpx refuses with
+        UnsupportedProtocol: NOT one of the exception types
+        ``_mineru_run_isolated``'s caller catches
+        (ConnectError/TimeoutException/RemoteProtocolError/HTTPStatusError),
+        so it propagated uncaught instead of triggering the existing
+        "server crashed -- invalidate cache, try restart, fall back to
+        subprocess" recovery path. Must now raise ``httpx.ConnectError``
+        (caught by that existing recovery machinery) and must never reach
+        ``httpx.post`` at all."""
+        with (
+            patch("nexus.pdf_extractor.httpx.post") as mock_post,
+            patch("nexus.config.get_mineru_server_url", return_value=None),
+            _patch_config(),
+        ):
+            with pytest.raises(httpx.ConnectError):
+                extractor._mineru_run_via_server(dummy_pdf, 0, 5)
+        mock_post.assert_not_called()
 
     @pytest.mark.parametrize("status,message", [
         (409, "Conflict"),

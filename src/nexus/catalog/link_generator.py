@@ -6,14 +6,27 @@
 from __future__ import annotations
 
 import re
+from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import structlog
 
 from nexus.catalog.types import CatalogEntry
 from nexus.catalog.catalog_protocol import CatalogReader, CatalogWriter
+from nexus.catalog.rdr_canonical import (
+    RDR_CONTENT_TYPES,
+    current_rdr_owner,
+    group_rdr_candidates,
+    is_in_repo,
+    rdr_key_of,
+    rdr_source_prefix,
+    resolve_all,
+)
 from nexus.catalog.tumbler import Tumbler
+from nexus.md_chunker import parse_frontmatter
 
 _log = structlog.get_logger()
 
@@ -106,6 +119,14 @@ _INCREMENTAL_SOURCE_TYPES: dict[str, frozenset[str]] = {
     "rdr": _RDR_FILEPATH_SOURCE_TYPES,
     "prose": _PROSE_FILEPATH_SOURCE_TYPES,
     "pdf": _PDF_CORPUS_SOURCE_TYPES,
+    # RDR-201 P3.2 (nexus-j9z30.21): generate_rdr_dependency_links's own
+    # source-type set (RDR_CONTENT_TYPES == {"rdr", "prose"}) is WIDER
+    # than the filepath linker's "rdr"-only set above, so it gets its own
+    # kind rather than reusing "rdr" -- reusing "rdr" would under-announce
+    # (skip the phase message) for a batch whose only new entries are
+    # legacy "prose"-registered RDRs, which is exactly the Finding-4
+    # fragmentation shape this generator exists to catch.
+    "rdr-dependency": RDR_CONTENT_TYPES,
 }
 
 
@@ -298,6 +319,385 @@ def generate_rdr_filepath_links(
                 )
 
     return count
+
+
+# ── RDR-to-RDR dependency edges (RDR-201 Phase 3.2, nexus-j9z30.21) ─────────
+#
+# Seeds catalog links from frontmatter that already exists on disk --
+# ``supersedes``, ``superseded_by``, ``parent_rdr``, ``related_rdrs``
+# (Finding 4, T2 ``nexus_rdr/201-research-2``). No new frontmatter field is
+# introduced; this generator only reads what authors have already been
+# writing. Both endpoints resolve through ``nexus.catalog.rdr_canonical`` --
+# ``is_in_repo`` is the single admission gate and ``resolve_all`` /
+# ``resolve_canonical_tumbler`` are the single resolution authority for
+# turning an rdr_key (basename identity) into a canonical tumbler. This
+# generator does not reimplement any part of that rule; it only adds the
+# ONE thing rdr_canonical deliberately does not do -- turning a numeric
+# ``RDR-NNN`` text reference into the rdr_key that rule operates on.
+
+#: SOURCE content types this generator scans for frontmatter (mirrors
+#: RDR_CONTENT_TYPES -- "rdr" is the live scheme, "prose" the legacy one
+#: Finding 4 found still registered for some never-reindexed files).
+_RDR_DEPENDENCY_SOURCE_TYPES = RDR_CONTENT_TYPES
+
+#: Matches an RDR cross-reference at the START of a frontmatter value.
+#: Anchoring at position 0 is deliberate and load-bearing, not cosmetic:
+#: it accepts "RDR-159 (partial: ...)" (real corpus shape, rdr-185) by
+#: matching the identifier and ignoring the trailing prose, but REJECTS
+#: "conexus:RDR-001" (real corpus shape, rdr-155's related_rdrs) because
+#: that value does not start with "RDR-" -- a foreign-repo-qualified
+#: reference is never mistaken for this repo's own same-numbered RDR.
+_RDR_REF_RE = re.compile(r"^RDR-(\d+)\b", re.IGNORECASE)
+
+#: Extracts the leading number from an rdr_key (rdr_canonical's basename
+#: identity, e.g. "rdr-107-t3-chunk-soft-delete"). Deliberately mirrors
+#: rdr_key_of's own "rdr-" + digits + "-" anchor: a dash-less filename
+#: like "rdr137-test-fixture-partition-deliverable.md" is already outside
+#: rdr_key_of's domain (never grouped, never a source or a target here)
+#: for the identical reason -- one convention, not a second copy of it.
+_RDR_KEY_NUM_RE = re.compile(r"^rdr-(\d+)-", re.IGNORECASE)
+
+#: Matches a frontmatter ``id:`` value that self-declares "I am RDR-NNN"
+#: (as opposed to "companion-note" or no id: field at all).
+_ID_SELF_DECLARATION_RE = re.compile(r"^rdr-0*(\d+)$", re.IGNORECASE)
+
+#: field -> (catalog link_type, source_is_from). ``source_is_from=True``
+#: means the edge points FROM the document carrying the field TO the
+#: document it names -- the natural reading of "X supersedes Y",
+#: "X's parent_rdr is Y", "X related_rdrs includes Y". ``supersedes`` and
+#: ``superseded_by`` both map to the catalog's existing ``supersedes``
+#: link type; ``superseded_by`` gets ``source_is_from=False`` so the
+#: RESULTING edge still reads successor->predecessor regardless of which
+#: of the two documents made the declaration (RDR-014's own
+#: ``superseded_by: RDR-015`` produces the identical edge shape as
+#: RDR-015's ``supersedes: RDR-014`` -- one relationship, one direction).
+#: ``parent_rdr`` and ``related_rdrs`` map to the catalog's ``relates``
+#: type -- there is no better-fitting built-in (no "parent-of"/"child-of"
+#: type exists), so the softer, symmetric-in-meaning ``relates`` is the
+#: correct choice for both; direction is declaring-doc -> referenced-doc,
+#: same convention as the forward ``supersedes`` case, for one consistent
+#: rule across all four fields.
+_RDR_DEPENDENCY_FIELDS: dict[str, tuple[str, bool]] = {
+    "supersedes": ("supersedes", True),
+    "superseded_by": ("supersedes", False),
+    "parent_rdr": ("relates", True),
+    "related_rdrs": ("relates", True),
+}
+
+
+def _extract_rdr_ref_numbers(value: object) -> list[int]:
+    """Pull every same-repo ``RDR-NNN`` reference out of one frontmatter
+    value. Accepts both shapes seen in the wild -- a bare scalar
+    (``supersedes: RDR-014``) and a YAML list (``related_rdrs: [RDR-053,
+    RDR-106]``) -- coerced to a single-item list when scalar. A value that
+    is not RDR-shaped at all (a file path, a PR reference, a foreign-repo-
+    qualified id) is not malformed, just not a same-repo reference, and is
+    silently skipped rather than warned about -- see :data:`_RDR_REF_RE`.
+    """
+    items = value if isinstance(value, list) else [value]
+    numbers: list[int] = []
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        m = _RDR_REF_RE.match(item.strip())
+        if m:
+            numbers.append(int(m.group(1)))
+    return numbers
+
+
+def _rdr_key_number(rdr_key: str) -> int | None:
+    m = _RDR_KEY_NUM_RE.match(rdr_key)
+    return int(m.group(1)) if m else None
+
+
+def _reads_frontmatter(cat: CatalogReader, tumbler: Tumbler) -> dict:
+    """Resolve *tumbler* to its on-disk file and parse its frontmatter.
+
+    Returns ``{}`` on any failure (missing path, unreadable file, broken
+    YAML) -- this generator treats an unreadable RDR the same way
+    ``generate_rdr_filepath_links`` does (skip, never crash the whole
+    run over one bad file).
+    """
+    resolved = cat.resolve_path(tumbler)
+    if resolved is None or not resolved.is_file():
+        return {}
+    try:
+        text = resolved.read_text(errors="replace")
+    except OSError:
+        return {}
+    fm, _body = parse_frontmatter(text, source=str(resolved))
+    return fm
+
+
+def _group_self_declares_id(
+    cat: CatalogReader, candidates: list[CatalogEntry], number: int,
+) -> bool:
+    """True when ANY candidate in *candidates* has its own frontmatter
+    ``id:`` field declaring it IS ``RDR-<number>`` (as opposed to a
+    companion note's ``id: companion-note`` or no ``id:`` at all). All
+    candidates in one rdr_key group are registrations of the SAME on-disk
+    file (Finding-4 fragmentation), so checking the first one that
+    actually resolves is sufficient -- their frontmatter is identical.
+    """
+    for c in candidates:
+        fm = _reads_frontmatter(cat, c.tumbler)
+        if not fm:
+            continue
+        id_val = fm.get("id")
+        if not isinstance(id_val, str):
+            return False
+        m = _ID_SELF_DECLARATION_RE.match(id_val.strip())
+        return bool(m) and int(m.group(1)) == number
+    return False
+
+
+def _numeric_id_index(
+    cat: CatalogReader, in_repo_groups: dict[str, list[CatalogEntry]],
+) -> dict[int, str]:
+    """Map each RDR number to the ONE rdr_key that is that number's own
+    canonical document.
+
+    Multiple rdr_key groups can share the same leading number -- a
+    companion note or phase artifact living beside the RDR it documents
+    (rdr_canonical's own module docstring: RDR-152 has three ``rdr-152-
+    *.md`` files under this repo alone). This disambiguates via each
+    group's own frontmatter ``id: RDR-<num>`` self-declaration -- the
+    file that says it IS RDR-<num>, not merely adjacent to it. A number
+    with only one candidate group needs no disambiguation. A number whose
+    groups collide and where zero or more than one group self-declares is
+    left OUT of the map entirely: never a guess. *in_repo_groups* must
+    already be scoped to this repo (:func:`nexus.catalog.rdr_canonical.
+    is_in_repo`) -- passing an unscoped fetch risks a same-numbered
+    foreign-repo document supplying a spurious second (or a spurious
+    matching) ``id:`` declaration.
+    """
+    by_number: dict[int, list[str]] = defaultdict(list)
+    for rdr_key in in_repo_groups:
+        n = _rdr_key_number(rdr_key)
+        if n is not None:
+            by_number[n].append(rdr_key)
+
+    result: dict[int, str] = {}
+    for number, keys in by_number.items():
+        if len(keys) == 1:
+            result[number] = keys[0]
+            continue
+        declared = [
+            k for k in keys if _group_self_declares_id(cat, in_repo_groups[k], number)
+        ]
+        if len(declared) == 1:
+            result[number] = declared[0]
+        # else: genuine collision, left unresolved (logged at the call
+        # site, which has the source context this function does not).
+    return result
+
+
+#: Above this many new tumblers the generator lists instead of probing.
+#: The listing is len(RDR_CONTENT_TYPES) == 2 round trips carrying ~530 rows
+#: on this repo; each probe is one single-row round trip, serialized under
+#: the service catalog lock. The crossover is NOT measured (this box is a
+#: production install and cannot be timed from a dev session): 4 keeps the
+#: one-to-few-file `nx index md` case -- the reported regression -- at
+#: fewer round trips than the listing, and anything larger takes the
+#: listing as before. Measure before moving it.
+_RDR_SEED_LOOKUP_CAP = 4
+
+
+def _any_new_tumbler_is_rdr_keyed(cat: CatalogReader, new_tumblers: list[Tumbler]) -> bool:
+    """Incremental-mode seed check, one ``resolve`` per NEW tumbler.
+
+    The content-type check (:func:`_no_qualifying_seed`) admits this
+    generator for any batch carrying ``"prose"`` -- but ``prose`` is the
+    repo-wide default for ALL general markdown, so it admits essentially
+    every ``nx index`` run that touches a ``.md`` file and the full
+    RDR listing (~530 rows on this repo) fires on each (RDR-201 P3.2
+    round-2 critique, T2 [24077]). Only a document :func:`rdr_key_of`
+    recognises -- a ``rdr-*.md`` file directly under a ``rdr/`` directory
+    -- can be a SOURCE of a dependency edge, so a small batch with no such
+    tumbler can skip the listing exactly. Batches above
+    :data:`_RDR_SEED_LOOKUP_CAP` fall through (``True``) rather than trade
+    one listing for more lookups than it holds.
+    """
+    if len(new_tumblers) > _RDR_SEED_LOOKUP_CAP:
+        return True
+    for tumbler in new_tumblers:
+        entry = cat.resolve(tumbler)
+        if entry is not None and rdr_key_of(entry) is not None:
+            return True
+    return False
+
+
+def rdr_resolution(
+    cat: CatalogReader, current_owner: Tumbler, *, repo_source_prefix: str,
+) -> tuple[dict[str, Tumbler | None], dict[int, str]]:
+    """This repo's RDR records, resolved: ``(rdr_key -> canonical tumbler
+    or None, RDR number -> rdr_key)``.
+
+    The ONE place the dependency generator and ``nx rdr set-status``
+    (RDR-201 P3.3, nexus-j9z30.22) both derive "which catalog tumbler IS
+    RDR-<n>" from -- one listing, one in-repo admission
+    (:func:`nexus.catalog.rdr_canonical.is_in_repo`), one canonical
+    resolution (:func:`nexus.catalog.rdr_canonical.resolve_all`), one
+    number disambiguation (:func:`_numeric_id_index`). A caller that
+    re-derived any of those steps would be the second, narrower copy of
+    an admission test this arc keeps finding and deleting.
+    """
+    entries = [
+        e
+        for content_type in RDR_CONTENT_TYPES
+        for e in _entries_of_type(cat, content_type)
+    ]
+    in_repo_entries = [e for e in entries if is_in_repo(e, current_owner, repo_source_prefix)]
+    in_repo_groups = group_rdr_candidates(in_repo_entries)
+    resolved = resolve_all(in_repo_entries, current_owner, repo_source_prefix=repo_source_prefix)
+    return resolved, _numeric_id_index(cat, in_repo_groups)
+
+
+def generate_rdr_dependency_links(
+    cat: CatalogReader,
+    *,
+    writer: CatalogWriter | None = None,
+    current_owner: Tumbler,
+    repo_source_prefix: str,
+    new_tumblers: list[Tumbler] | None = None,
+    new_content_types: frozenset[str] | set[str] | None = None,
+) -> int:
+    """Seed RDR-to-RDR catalog links from existing frontmatter.
+
+    Reads ``supersedes``, ``superseded_by``, ``parent_rdr``,
+    ``related_rdrs`` off each resolvable RDR document's own frontmatter
+    (see :data:`_RDR_DEPENDENCY_FIELDS` for the link-type/direction
+    mapping) and creates the corresponding catalog link. Both endpoints
+    resolve through :func:`nexus.catalog.rdr_canonical.resolve_all` /
+    :func:`nexus.catalog.rdr_canonical.resolve_canonical_tumbler` -- an
+    endpoint that does not resolve (Finding-4 ambiguity, a foreign-repo
+    collision, or simply no on-disk RDR at that number) creates NO edge
+    and logs ``rdr_dependency_target_unresolved`` naming both the source
+    and the unresolved target number (RDR-201 § Failure Modes: never a
+    guess, never a silent pick).
+
+    *current_owner* and *repo_source_prefix* are REQUIRED (no default),
+    mirroring :func:`resolve_canonical_tumbler`'s own discipline -- the
+    repo-scoping check this generator's number resolution depends on can
+    never be silently skipped by omission. Callers derive them via
+    :func:`nexus.catalog.rdr_canonical.current_rdr_owner` /
+    :func:`nexus.catalog.rdr_canonical.rdr_source_prefix`.
+
+    *new_tumblers* / *new_content_types*: same incremental-mode contract
+    as the other generators in this module (see
+    :func:`generate_rdr_filepath_links`) -- when supplied, only entries
+    whose CANONICAL tumbler is in *new_tumblers* are scanned as sources;
+    target resolution always considers the full catalog, since a newly
+    indexed RDR can reference an RDR that already existed.
+    """
+    if new_tumblers is not None and len(new_tumblers) == 0:
+        return 0
+    if _no_qualifying_seed(new_tumblers, new_content_types, _RDR_DEPENDENCY_SOURCE_TYPES):
+        _log.debug(
+            "rdr_dependency_links_skipped_no_seed",
+            new_content_types=sorted(new_content_types) if new_content_types else [],
+        )
+        return 0
+    if new_tumblers is not None and not _any_new_tumbler_is_rdr_keyed(cat, new_tumblers):
+        _log.debug("rdr_dependency_links_skipped_no_rdr_keyed_seed", new_count=len(new_tumblers))
+        return 0
+
+    resolved, number_index = rdr_resolution(
+        cat, current_owner, repo_source_prefix=repo_source_prefix,
+    )
+
+    if new_tumblers is not None:
+        new_set = {str(t) for t in new_tumblers}
+        source_keys = [k for k, t in resolved.items() if t is not None and str(t) in new_set]
+    else:
+        source_keys = [k for k, t in resolved.items() if t is not None]
+
+    w = writer if writer is not None else cat
+    count = 0
+    for source_key in source_keys:
+        source_tumbler = resolved[source_key]
+        fm = _reads_frontmatter(cat, source_tumbler)
+        if not fm:
+            continue
+        for field, (link_type, source_is_from) in _RDR_DEPENDENCY_FIELDS.items():
+            if field not in fm:
+                continue
+            for number in _extract_rdr_ref_numbers(fm[field]):
+                target_key = number_index.get(number)
+                target_tumbler = resolved.get(target_key) if target_key else None
+                if target_key is None or target_tumbler is None:
+                    _log.warning(
+                        "rdr_dependency_target_unresolved",
+                        source=source_key,
+                        source_tumbler=str(source_tumbler),
+                        field=field,
+                        target_number=number,
+                        target_key=target_key or "",
+                        reason=(
+                            "target_tumbler_unresolvable" if target_key
+                            else "target_rdr_number_not_found_or_ambiguous"
+                        ),
+                    )
+                    continue
+                if target_key == source_key or target_tumbler == source_tumbler:
+                    continue  # self-reference: no edge
+                from_t, to_t = (
+                    (source_tumbler, target_tumbler) if source_is_from
+                    else (target_tumbler, source_tumbler)
+                )
+                try:
+                    created = w.link_if_absent(
+                        from_t, to_t, link_type,
+                        created_by="rdr_dependency_extractor",
+                    )
+                except ValueError:
+                    continue
+                if created:
+                    count += 1
+                    _log.debug(
+                        "rdr_dependency_link_created",
+                        from_t=str(from_t), to_t=str(to_t), link_type=link_type,
+                        field=field,
+                    )
+    return count
+
+
+def bind_rdr_dependency_generator(
+    cat: CatalogReader, repo_root: Path,
+) -> tuple[str, Callable[..., int]] | None:
+    """Bind :func:`generate_rdr_dependency_links`'s required
+    ``current_owner`` / ``repo_source_prefix`` from *repo_root*, producing
+    a ``("rdr-dependency", fn)`` tuple that slots into the SAME
+    ``(cat, writer=, new_tumblers=, new_content_types=)`` calling
+    convention as ``generate_rdr_filepath_links`` / ``generate_
+    prose_filepath_links`` / ``generate_pdf_corpus_links`` -- the shared
+    loop at both registration sites (``indexer.py``'s ``_catalog_hook``
+    and ``commands/catalog_cmds/links.py``'s ``generate_links_cmd``) calls
+    every generator identically; this is the ONE place that adapter is
+    built, so both sites bind it the same way.
+
+    ``current_owner`` / ``repo_source_prefix`` stay required, no-default
+    parameters on the underlying generator itself (rdr_canonical's own
+    discipline: the repo-scoping check its number resolution depends on
+    can never be silently skipped by omission) -- this function is the
+    adapter that satisfies the uniform call shape without weakening that.
+
+    Returns ``None`` when no catalog owner is registered yet for
+    *repo_root* (a catalog that has never completed an index has nothing
+    to scope endpoint resolution against) -- callers skip registering the
+    generator for this run rather than passing a bogus owner.
+    """
+    owner = current_rdr_owner(cat, repo_root)
+    if owner is None:
+        return None
+    return (
+        "rdr-dependency",
+        partial(
+            generate_rdr_dependency_links,
+            current_owner=owner,
+            repo_source_prefix=rdr_source_prefix(repo_root),
+        ),
+    )
 
 
 def generate_prose_filepath_links(

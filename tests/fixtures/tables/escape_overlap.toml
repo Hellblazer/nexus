@@ -1,0 +1,72 @@
+# CRITICAL 2 (nexus-akmum) repro fixture, both directions, plus the round-2
+# critique's un-narrowed strict-superset case:
+#
+# - "overlap-case" group: a non-bare escape row's guard (status=draft)
+#   DUPLICATES the ordinary row's guard (status=draft) exactly. A non-bare
+#   escape is a narrowed rescue, not a catch-all -- it must be held to the
+#   same non-overlap standard as an ordinary row, so two rows both
+#   unconditionally accepting status=draft must be flagged as OVERLAP.
+# - "superset-case" group: a non-bare escape row's guard (status=[draft,
+#   accepted]) is a STRICT SUPERSET of the ordinary row's guard
+#   (status=draft) -- the round-2 critique's repro, and the more natural
+#   authoring mistake (a rescue guard written too broadly). RDR-201 sec
+#   Background states intrastate "has no hit policy, so overlap is a lint
+#   failure rather than something a priority order resolves" -- there is
+#   no textual basis for exempting strict subsumption, so this must ALSO
+#   be flagged as OVERLAP (T2 nexus/critique-nexus-j9z30-1-round2-2026-09-01
+#   [24008]).
+# - "clean-case" group: a non-bare escape row (guard={status=[accepted,
+#   closed]}) is DISJOINT from the ordinary row's guard (status=draft) and
+#   together they close the full 3-value domain. This must produce NO
+#   finding at all -- not an overlap (disjoint), and not closed-by-escape
+#   (the escape isn't bare) -- proving the overlap fix does not over-flag
+#   a legitimate non-bare-escape rescue when there truly is no shared
+#   assignment.
+[table]
+id = "escape-overlap-fixture"
+kind = "state-machine"
+
+[dimensions.event]
+domain = ["overlap-case", "superset-case", "clean-case"]
+
+[dimensions.status]
+domain = ["draft", "accepted", "closed"]
+
+[[row]]
+id = "overlap-ordinary"
+match = { event = "overlap-case" }
+guard = { status = "draft" }
+to = { status = "accepted" }
+
+[[row]]
+id = "overlap-escape"
+match = { event = "overlap-case" }
+guard = { status = "draft" }
+escape = true
+refuse = "illegal-transition"
+
+[[row]]
+id = "superset-ordinary"
+match = { event = "superset-case" }
+guard = { status = "draft" }
+to = { status = "accepted" }
+
+[[row]]
+id = "superset-escape"
+match = { event = "superset-case" }
+guard = { status = ["draft", "accepted"] }
+escape = true
+refuse = "illegal-transition"
+
+[[row]]
+id = "clean-ordinary"
+match = { event = "clean-case" }
+guard = { status = "draft" }
+to = { status = "accepted" }
+
+[[row]]
+id = "clean-escape"
+match = { event = "clean-case" }
+guard = { status = ["accepted", "closed"] }
+escape = true
+refuse = "illegal-transition"

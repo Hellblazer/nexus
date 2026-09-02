@@ -50,6 +50,26 @@ from nexus.mcp_infra import (
     t2_ctx as _t2_ctx,
     t2_index_write as _t2_index_write,
 )
+# RDR-200 Phase 0 (nexus-5mft0.1): pure (prompt, schema) builders hoisted
+# out of the operator_* tools below, callable by both the tool and (RDR-200
+# Phase 1) the continuation path. operator_requests.py is a leaf module
+# (no nexus-internal imports) so this import carries no cycle risk.
+# _CHECK_EVIDENCE_ITEM_SCHEMA is re-exported at this module's scope so
+# nexus.plans.bundle's existing `from nexus.mcp.core import
+# _CHECK_EVIDENCE_ITEM_SCHEMA` keeps resolving unchanged.
+from nexus.mcp.operator_requests import (
+    _CHECK_EVIDENCE_ITEM_SCHEMA,
+    build_aggregate_request,
+    build_check_request,
+    build_compare_request,
+    build_extract_request,
+    build_filter_request,
+    build_generate_request,
+    build_groupby_request,
+    build_rank_request,
+    build_summarize_request,
+    build_verify_request,
+)
 from nexus.ttl import parse_ttl
 
 #: Module logger for MCP tool handlers (nexus-yttqr). Read-path handlers return a
@@ -94,24 +114,77 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
     branch below since the two are mutually exclusive failure shapes (a 401
     is not a connection failure) and the marker text is specific enough
     (contains "unauthorized") that ordering does not matter in practice.
+
+    nexus-fe96p: the guidance below used to assert, UNCONDITIONALLY, that a
+    401 reaching this point meant the self-heal "found no fresh token to
+    adopt" and therefore "the owner incarnation is gone or its refresh loop
+    died". Measured false on 2026-09-01 (mcp.log, session 49d1c3ab): the
+    heal DID adopt a fresh session token from the lease and the retry still
+    401'd, because the retry itself (a separate defect, now fixed) was
+    sending a stale bearer. The message now branches on the heal-outcome
+    suffix ``HttpScratchStore`` threads into the exception text, rather than
+    stating one inference as observed fact for every case.
     """
     _log.error(f"mcp_{tool}_failed", error=str(e), exc_info=True)
     text = str(e)
 
-    from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER  # noqa: PLC0415 — deferred import; only paid on the (rare) error path
+    from nexus.db.http_scratch_store import (  # noqa: PLC0415 — deferred import; only paid on the (rare) error path
+        HEAL_ADOPTED_SUFFIX,
+        HEAL_DECLINED_SUFFIX,
+        HEAL_REMINT_SUFFIX,
+        SESSION_UNAUTHORIZED_MARKER,
+    )
 
     if SESSION_UNAUTHORIZED_MARKER in text:
+        if HEAL_ADOPTED_SUFFIX in text:
+            return (
+                f"Error: {text}\n"
+                "The MCP session's T1 (scratch) session token had rotated, and "
+                "the automatic self-heal (nexus-g5hzk) DID adopt a fresh token "
+                "and retry — the retry itself still failed authorization. The "
+                "owner incarnation and its refresh loop are NOT implicated; a "
+                "session token adopted but the request still failed "
+                "authorization. Reconnect the conexus MCP/extension so the "
+                "store is rebuilt from scratch; if the same failure recurs "
+                "immediately after reconnecting, the service-side auth state "
+                "needs direct investigation."
+            )
+        if HEAL_REMINT_SUFFIX in text:
+            return (
+                f"Error: {text}\n"
+                "The session-lease self-heal (nexus-g5hzk) found nothing "
+                "fresher, but the data-token re-mint (nexus-wrwb7) DID mint a "
+                "fresh bearer and retried — the retry still failed "
+                "authorization. With the bearer freshly minted, the SESSION "
+                "token in the lease is the likely stale credential (its owner "
+                "may be gone or its refresh loop stopped — an inference, not "
+                "an observation). Reconnect the conexus MCP/extension so a "
+                "fresh session-scoped token is minted; a bare CLI self-heals "
+                "on its next invocation."
+            )
+        if HEAL_DECLINED_SUFFIX in text:
+            return (
+                f"Error: {text}\n"
+                "The MCP session's T1 (scratch) session token is no longer valid, "
+                "AND the automatic self-heal already failed: on this 401 the store "
+                "re-read the owner-republished session lease and found no fresh "
+                "token to adopt (nexus-g5hzk — no lease, expired, or unchanged). "
+                "That means the token's owner incarnation is gone or its refresh "
+                "loop died — reconnect the conexus MCP/extension so a fresh "
+                "session-scoped token is minted. A bare CLI self-heals on its "
+                "next invocation; a live MCP session can adopt a rotated token "
+                "from the lease but cannot MINT one mid-conversation."
+            )
+        # No heal-outcome suffix present (an older/hand-built exception
+        # string) — fall back to the stage-agnostic guidance rather than
+        # guessing which case applies.
         return (
             f"Error: {text}\n"
-            "The MCP session's T1 (scratch) session token is no longer valid, "
-            "AND the automatic self-heal already failed: on this 401 the store "
-            "re-read the owner-republished session lease and found no fresh "
-            "token to adopt (nexus-g5hzk — no lease, expired, or unchanged). "
-            "That means the token's owner incarnation is gone or its refresh "
-            "loop died — reconnect the conexus MCP/extension so a fresh "
-            "session-scoped token is minted. A bare CLI self-heals on its "
-            "next invocation; a live MCP session can adopt a rotated token "
-            "from the lease but cannot MINT one mid-conversation."
+            "The MCP session's T1 (scratch) session token is no longer valid. "
+            "Reconnect the conexus MCP/extension so a fresh session-scoped "
+            "token is minted. A bare CLI self-heals on its next invocation; a "
+            "live MCP session can adopt a rotated token from the lease but "
+            "cannot MINT one mid-conversation."
         )
     if isinstance(e, (ConnectionError, TimeoutError)) or any(
         m in text.lower() for m in _CONNECTION_ERROR_MARKERS
@@ -1780,6 +1853,15 @@ def _search_render(
     ``structured=True`` output (``hybrid_score`` is not surfaced there
     either). Use ``cluster_by=""`` when boosted ranking matters.
 
+    File diversity (nexus-0bmhd, 2026-09-01): a text render (``structured=
+    False``) caps display to at most 2 chunks per file
+    (``search_engine.apply_file_diversity_cap``) so one large file cannot
+    fill an entire page — a reordering applied to display order only,
+    never to ``hybrid_score``. ``structured=True`` (the plan-runner's
+    machine/precision signal) always sees the uncapped, fully-ranked
+    order. ``cluster_by="semantic"`` skips the cap in both modes, to keep
+    same-cluster results contiguous for the renderer.
+
     Args:
         query: Search query string
         corpus: Corpus prefixes or collection names, comma-separated. "all" for everything.
@@ -1800,7 +1882,11 @@ def _search_render(
     try:
         from nexus.config import get_tuning_config, load_config  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
         from nexus.filters import sanitize_query  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-        from nexus.search_engine import apply_ranking_boosts, search_cross_corpus  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        from nexus.search_engine import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            apply_file_diversity_cap,
+            apply_ranking_boosts,
+            search_cross_corpus,
+        )
 
         cfg = load_config()
         if cfg.get("search", {}).get("query_sanitizer", True):
@@ -1914,9 +2000,25 @@ def _search_render(
                 return _structured_no_results(diag)
             return _no_results_message(diag)
 
+        # nexus-0bmhd: render-layer file-diversity cap. `results` was just
+        # cached above (fresh path) or read back unmodified (cache-HIT
+        # path, `cached = _page_cache_get(...)`) — never cap THAT list and
+        # never cache the capped list, or a later structured=True read of
+        # the same cache_key would see the capped order. `structured=True`
+        # is the plan-runner's machine/precision signal (nx_answer
+        # auto-injects it for every retrieval step, plans/runner.py
+        # ~1383): it gets the true ranked order, uncapped. `clustered`
+        # (`cluster_by="semantic"`) is skipped too — its display order is
+        # cluster-grouped and the renderer below assumes cluster labels
+        # appear contiguously; interleaving a file cap into that order
+        # would break the grouping the renderer relies on.
+        display_results = (
+            results if (structured or clustered) else apply_file_diversity_cap(results)
+        )
+
         # Apply pagination
-        total = len(results)
-        page = results[offset:offset + limit]
+        total = len(display_results)
+        page = display_results[offset:offset + limit]
         if not page:
             _off_msg = f"No results at offset {offset} (total {total})."
             if structured:
@@ -2070,6 +2172,16 @@ def search(
     ``truncated``/``truncated_chars`` reflecting whether the 250K text cap
     (``_cap_text_result``) fired — visible in the structured shape even
     though the cap marker itself only lives in the text.
+
+    Two channels, two consumers, ONE response (nexus-0bmhd, nexus-ypmb6):
+    ``content`` / ``structuredContent["text"]`` is the PRESENTATION
+    channel and carries the render-layer file-diversity cap (at most 2
+    chunks per file lead the page); the ``ids``/``tumblers``/``distances``
+    arrays are the MACHINE channel — identical to ``structured=True`` —
+    and are deliberately UNCAPPED, because a consumer parsing those arrays
+    is reading ranked evidence, not skimming a list. The two therefore
+    disagree on order within the same page by design; a client that wants
+    the capped set as ids must derive it from the text.
 
     ``structured=True``: UNCHANGED. Returns the bare dict exactly as
     before — no ``CallToolResult``, no new keys, no ``structuredContent``
@@ -5136,8 +5248,13 @@ def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) 
     """
     try:
         with _t2_ctx() as db:
-            # Over-fetch by 1 to detect if there are more
-            results = db.search_plans(query, limit=limit + 1, project=project)
+            # Over-fetch by 1 to detect if there are more.
+            # any_lexeme=True (nexus-vi8fp decision C): this is a HUMAN
+            # browsing surface — a person judges the list — so it gets the
+            # any-lexeme recall fallback plan_match deliberately does not.
+            results = db.search_plans(
+                query, limit=limit + 1, project=project, any_lexeme=True,
+            )
         if offset:
             results = results[offset:]
         has_more = len(results) > limit
@@ -5388,20 +5505,7 @@ async def operator_extract(
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
-    prompt = (
-        f"Extract the following fields from each item: {fields}\n\n"
-        f"Items:\n{inputs}"
-    )
-    schema = {
-        "type": "object",
-        "required": ["extractions"],
-        "properties": {
-            "extractions": {
-                "type": "array",
-                "items": {"type": "object"},
-            }
-        },
-    }
+    prompt, schema = build_extract_request(inputs, fields)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_extract",
@@ -5428,18 +5532,7 @@ async def operator_rank(
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
-    prompt = (
-        f"Rank the following items by {criterion}.\n"
-        f"Return them in ranked order, best first.\n\n"
-        f"Items:\n{items}"
-    )
-    schema = {
-        "type": "object",
-        "required": ["ranked"],
-        "properties": {
-            "ranked": {"type": "array", "items": {"type": "string"}},
-        },
-    }
+    prompt, schema = build_rank_request(items, criterion)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_rank",
@@ -5493,47 +5586,12 @@ async def operator_compare(
         label_a: Human-readable label for side A (default "A").
         label_b: Human-readable label for side B (default "B").
     """
-    import json as _json  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
-
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
-    def _fmt(v) -> str:
-        if isinstance(v, (list, dict)):
-            return _json.dumps(v, indent=2, default=str)
-        return v if isinstance(v, str) else str(v)
-
-    focus_clause = f" Focus on: {focus}." if focus else ""
-    if items_a and items_b:
-        a_text = _fmt(items_a)
-        b_text = _fmt(items_b)
-        prompt = (
-            f"Compare two sets of items across corpora.{focus_clause}\n\n"
-            f"Set {label_a}:\n{a_text}\n\n"
-            f"Set {label_b}:\n{b_text}\n\n"
-            "Name:\n"
-            f"  * **Shared axes**: concerns both {label_a} and {label_b} "
-            "address with comparable intent (even if mechanism differs).\n"
-            f"  * **Divergent decisions**: places where {label_a} and {label_b} "
-            "take different approaches on the same question; attribute each "
-            "choice to its side.\n"
-            f"  * **Side-only axes**: concerns that appear in {label_a} or "
-            f"{label_b} but not both.\n"
-            "  * **Philosophy difference**: one or two sentences on the "
-            "underlying stance difference, if one emerges from the evidence."
-        )
-    else:
-        items_text = _fmt(items)
-        prompt = (
-            f"Compare the following items.{focus_clause}\n\n"
-            f"Items:\n{items_text}"
-        )
-    schema = {
-        "type": "object",
-        "required": ["comparison"],
-        "properties": {
-            "comparison": {"type": "string"},
-        },
-    }
+    prompt, schema = build_compare_request(
+        items, focus, items_a=items_a, items_b=items_b,
+        label_a=label_a, label_b=label_b,
+    )
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_compare",
@@ -5560,16 +5618,7 @@ async def operator_summarize(
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
-    cite_clause = " Include citations as a list of source references." if cited else ""
-    prompt = f"Summarize the following content concisely.{cite_clause}\n\n{content}"
-    schema: dict = {
-        "type": "object",
-        "required": ["summary"],
-        "properties": {
-            "summary": {"type": "string"},
-            "citations": {"type": "array", "items": {"type": "string"}},
-        },
-    }
+    prompt, schema = build_summarize_request(content, cited)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_summarize",
@@ -5598,41 +5647,11 @@ async def operator_generate(
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
-    cite_clause = " Include citations as a list of source references." if cited else ""
-    prompt = (
-        f"Generate a {template}.{cite_clause}\n\n"
-        f"Context:\n{context}"
-    )
-    schema: dict = {
-        "type": "object",
-        "required": ["output"],
-        "properties": {
-            "output": {"type": "string"},
-            "citations": {"type": "array", "items": {"type": "string"}},
-        },
-    }
+    prompt, schema = build_generate_request(template, context, cited)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_generate",
     )
-
-
-#: Shared evidence-item schema for ``operator_check`` (RDR-088 Phase 2).
-#: Each entry is a citation-like record grounding the verdict across a
-#: multi-item consistency probe. ``role`` is enum-restricted so downstream
-#: plan steps can branch on the trichotomy without parsing free text.
-_CHECK_EVIDENCE_ITEM_SCHEMA: dict = {
-    "type": "object",
-    "required": ["item_id", "quote", "role"],
-    "properties": {
-        "item_id": {"type": "string"},
-        "quote": {"type": "string"},
-        "role": {
-            "type": "string",
-            "enum": ["supports", "contradicts", "neutral"],
-        },
-    },
-}
 
 
 @mcp.tool(
@@ -5715,36 +5734,7 @@ async def operator_filter(
         # override.
         return {**sql_result, "_dispatch_source": "sql"}
 
-    prompt = (
-        f"Filter the following items by this criterion: {criterion}\n"
-        f"Return only the items that satisfy the criterion in the 'items' "
-        f"array. Populate 'rationale' with one entry per input item, "
-        f"keyed by the item's id, giving the reason each item was kept "
-        f"or rejected. The output 'items' array must be a subset of the "
-        f"input; never add synthetic items.\n\n"
-        f"Items:\n{items}"
-    )
-    schema: dict = {
-        "type": "object",
-        "required": ["items", "rationale"],
-        "properties": {
-            "items": {
-                "type": "array",
-                "items": {"type": "object"},
-            },
-            "rationale": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "required": ["id", "reason"],
-                    "properties": {
-                        "id": {"type": "string"},
-                        "reason": {"type": "string"},
-                    },
-                },
-            },
-        },
-    }
+    prompt, schema = build_filter_request(items, criterion)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_filter",
@@ -5791,27 +5781,7 @@ async def operator_check(
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
-    prompt = (
-        f"Check whether the following items are consistent with this "
-        f"claim or question: {check_instruction}\n"
-        f"Set ok=true when every item supports the claim, false when at "
-        f"least one item contradicts it. Populate 'evidence' with a "
-        f"record per item containing a short grounding 'quote' and a "
-        f"'role' of 'supports', 'contradicts', or 'neutral'. Keep quotes "
-        f"short enough to be verifiable against the source item.\n\n"
-        f"Items:\n{items}"
-    )
-    schema: dict = {
-        "type": "object",
-        "required": ["ok", "evidence"],
-        "properties": {
-            "ok": {"type": "boolean"},
-            "evidence": {
-                "type": "array",
-                "items": _CHECK_EVIDENCE_ITEM_SCHEMA,
-            },
-        },
-    }
+    prompt, schema = build_check_request(items, check_instruction)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_check",
@@ -5852,29 +5822,7 @@ async def operator_verify(
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
-    prompt = (
-        f"Verify whether the following claim is grounded in the evidence "
-        f"provided.\n\n"
-        f"Claim: {claim}\n\n"
-        f"Evidence:\n{evidence}\n\n"
-        f"Set verified=true only when the claim is directly supported by "
-        f"the evidence. Provide a concise 'reason' explaining the "
-        f"verdict. Populate 'citations' with locators (section, page, "
-        f"table, or quoted span snippets) that pinpoint the supporting "
-        f"or contradicting passages."
-    )
-    schema: dict = {
-        "type": "object",
-        "required": ["verified", "reason", "citations"],
-        "properties": {
-            "verified": {"type": "boolean"},
-            "reason": {"type": "string"},
-            "citations": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-        },
-    }
+    prompt, schema = build_verify_request(claim, evidence)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_verify",
@@ -5970,40 +5918,7 @@ async def operator_groupby(
         # override.
         return {**sql_result, "_dispatch_source": "sql"}
 
-    prompt = (
-        f"Partition the following items by this key: {key}\n"
-        f"Output a list of groups. Each group has a string `key_value` "
-        f"(the partition label, e.g. a year, a fault model, a system "
-        f"property) and an `items` array carrying each item's full "
-        f"content INLINE — preserve the original `id` field and any "
-        f"other fields verbatim. Every input item appears in exactly "
-        f"one group's `items`. Items the partition cannot confidently "
-        f"assign go in a group with `key_value` of \"unassigned\".\n\n"
-        f"Do not reference items by id-only — carry the full item "
-        f"dicts in each group's `items` array so downstream operators "
-        f"see the content without a separate lookup.\n\n"
-        f"Items:\n{items}"
-    )
-    schema: dict = {
-        "type": "object",
-        "required": ["groups"],
-        "properties": {
-            "groups": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "required": ["key_value", "items"],
-                    "properties": {
-                        "key_value": {"type": "string"},
-                        "items": {
-                            "type": "array",
-                            "items": {"type": "object"},
-                        },
-                    },
-                },
-            },
-        },
-    }
+    prompt, schema = build_groupby_request(items, key)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_groupby",
@@ -6084,34 +5999,7 @@ async def operator_aggregate(
         # override.
         return {**sql_result, "_dispatch_source": "sql"}
 
-    prompt = (
-        f"Reduce each group of items into a per-group summary using "
-        f"this reducer instruction: {reducer}\n\n"
-        f"Output one aggregate per input group, preserving the group's "
-        f"`key_value` verbatim. Each `summary` MUST reference only the "
-        f"items in that group's `items` array. Do NOT pull content "
-        f"from items in other groups, even when vocabulary overlaps "
-        f"across groups. The summary is a short paragraph answering "
-        f"the reducer instruction USING ONLY this group's items.\n\n"
-        f"Groups:\n{groups}"
-    )
-    schema: dict = {
-        "type": "object",
-        "required": ["aggregates"],
-        "properties": {
-            "aggregates": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "required": ["key_value", "summary"],
-                    "properties": {
-                        "key_value": {"type": "string"},
-                        "summary": {"type": "string"},
-                    },
-                },
-            },
-        },
-    }
+    prompt, schema = build_aggregate_request(groups, reducer)
     return await claude_dispatch(
         prompt, schema, timeout=timeout, model=_pin_default_model(model),
         operator="operator_aggregate",
@@ -6272,6 +6160,44 @@ _PLANNER_SCHEMA: dict = {
     "additionalProperties": False,
 }
 
+#: Retrieval-scoping guidance included in the inline-planner prompt,
+#: right after the question and the live collection-name hint (RDR-200
+#: Phase 1b, nexus-rl59s). Measured cause this closes: composed
+#: retrieval steps reached the caller's primary source on only 7-9 of
+#: 24 gate questions, against 24/24 for a flat search that (a) named
+#: the collection holding the question's artifact and (b) rephrased
+#: the query as content-shaped text instead of the raw question (T2
+#: ``nexus/gate-result-rdr200-phase1b-2026-09-01``). This block states
+#: both fixes as imperative rules, in the order the planner should
+#: apply them: scope first, then phrase the query, then prefer narrow
+#: steps over one broad one.
+_PLANNER_SCOPING_RULES = """\
+Retrieval scoping rules — apply BEFORE writing any retrieval step:
+
+1. If the question NAMES an artifact — a paper or author, an RDR
+   number, a file path or module, a spec — emit ONE retrieval step PER
+   NAMED ARTIFACT, scoped to the collection that holds it:
+     * a paper or author      -> the matching knowledge__ collection,
+       matched BY NAME from the "Available collection names" list above.
+     * "RDR-NNN"               -> an rdr__ collection.
+     * "src/..." or a module  -> a code__ collection.
+     * documentation           -> a docs__ collection.
+   When no single collection is obvious, use
+   corpus="knowledge,code,docs,rdr" (the four-prefix default) instead
+   of guessing one collection.
+
+2. NEVER pass the question text itself as `query`/`question`. Write a
+   CONTENT-SHAPED query instead — the terms a matching passage would
+   actually contain: the paper's title or section topic, the
+   function/class name, the RDR's subject. For a multi-part question,
+   emit SEPARATE retrieval steps with SEPARATE content-shaped queries,
+   one per part.
+
+3. Prefer TWO scoped searches over one broad one. Hydrate
+   (store_get_many) each retrieval step's results before reasoning
+   over them.
+"""
+
 #: Tool-signature hint text included in the inline-planner prompt so the
 #: LLM generates args that match the actual MCP tool contracts.  Without
 #: this, the planner typically emits ``operator_extract(corpus=..., query=...)``
@@ -6284,15 +6210,27 @@ Use ONLY these tools (bare names; the runner maps them to MCP calls).
 Each returns {"ids": [...], "tumblers": [...], "distances": [...], "collections": [...]}.
 THEY DO NOT RETURN CONTENT. To get text, chain into store_get_many.
 
-  search(query, corpus="all", limit=10, topic="", where="")
-      - `query` is the search string.  `corpus` must be "all", a prefix
-        (rdr/knowledge/code), or a full collection name.
+  search(query, corpus="knowledge,code,docs,rdr", limit=10, topic="", where="")
+      - `query` is a CONTENT-SHAPED search string — never the raw
+        question text (see "Retrieval scoping rules" above).
+      - `corpus` accepts "all" (also admits quarantine-* — avoid unless
+        you mean it), a single collection name (e.g.
+        "knowledge__dt-papers"), a prefix (rdr/knowledge/code/docs), OR
+        a comma-separated list of prefixes/collection names — e.g.
+        "knowledge,code,docs,rdr", the four-prefix default this runner
+        falls back to when nothing else scopes the step. Prefer a
+        named collection over the default whenever the question names
+        a specific artifact.
       - Output: {ids, tumblers, distances, collections}
 
-  query(question, corpus="all", limit=10, author="", content_type="",
+  query(question, corpus="knowledge,code,docs,rdr", limit=10, author="", content_type="",
         subtree="", follow_links="", depth=1)
+      - `question` is a CONTENT-SHAPED search string — same rule as
+        `search`'s `query`, never the raw question text.
       - Document-level retrieval with catalog-aware routing.
       - Output: {ids, tumblers, distances, collections}
+      - `corpus` accepts the same forms as `search` above: "all", a
+        prefix, a full collection name, or a comma-separated list.
       - Scope filter guidance (bead nexus-sgrg): prefer `corpus=<collection>`
         for project scoping. The `author` filter matches the catalog
         `author` column, which is rarely populated for RDR/docs; setting
@@ -6350,14 +6288,15 @@ Each requires hydrated text as input — NOT ids/tumblers.
 === Correct chain patterns ===
 
 Pattern A (search → hydrate → operate):
-  step1: search(query=..., corpus="all")      → {ids, tumblers, collections}
+  step1: search(query="<content-shaped terms>", corpus="knowledge__dt-papers")
+                                               → {ids, tumblers, collections}
   step2: store_get_many(ids=$step1.ids,
                         collections=$step1.collections)
                                                → {contents, missing}
   step3: summarize(content=$step2.contents)    → {summary}
 
 Pattern B (operator auto-hydration shortcut):
-  step1: search(query=..., corpus="all")
+  step1: search(query="<content-shaped terms>", corpus="knowledge,code,docs,rdr")
   step2: summarize(ids=$step1.ids,
                    collections=$step1.collections)
     # Runner auto-calls store_get_many for you when an operator step
@@ -6521,6 +6460,110 @@ def _infer_grown_plan_name(
     content = [t for t in tokens if t not in _GROWN_PLAN_NAME_STOP_WORDS]
     take = content[:max_words] if content else tokens[:max_words]
     return "-".join(take) or "grown-plan"
+
+
+#: nexus-93cc6 D2: bounds on the generalizer's output. Shorter than a
+#: sentence is degenerate; longer than this is prompt-injection-shaped or
+#: runaway prose — either way the fail-soft contract says drop it and keep
+#: today's verbatim-question match text.
+_GROWN_MATCH_DESCRIPTION_MIN_CHARS: int = 40
+#: v2 (pipeline measurement, 2026-08-31): v1's 1200 admitted 700-1000-char
+#: abstract essays that scored BELOW the verbatim baseline at the 0.55
+#: floor (14/24 vs 15/24) — verbose prose dilutes cosine. The winning
+#: hand-written shape is ~300 chars, mostly example questions; 600 is the
+#: hard quality gate, the prompt asks for 400.
+_GROWN_MATCH_DESCRIPTION_MAX_CHARS: int = 600
+
+_GROWN_MATCH_DESCRIPTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"description": {"type": "string"}},
+    "required": ["description"],
+}
+
+
+async def _generalize_grown_match_description(
+    *, question: str, plan_json: str,
+) -> "str | None":
+    """Generalized match-text description for a grown plan (nexus-93cc6 D2).
+
+    One tool-free, cheap-tier ``claude_dispatch`` producing the shape the
+    93cc6 spike validated (T2 [23880]): a 2-3 sentence statement of what
+    the plan ANSWERS, followed by 4-6 short paraphrase exemplars — the
+    builtin-template match-text shape, which measured +17pp paraphrase
+    recall at the grown floor with zero precision cost against the
+    verbatim-question baseline.
+
+    FAIL-SOFT BY CONTRACT: every failure path — dispatch error, timeout,
+    empty or out-of-bounds output — returns ``None``, which downstream
+    means "synthesize match_text from the verbatim question", exactly
+    today's behavior. The generalizer can only ever ADD recall; it must
+    never block or delay-fail a grow (the grow itself is already
+    best-effort), and it never touches the ``query`` column (the
+    verbatim-repeat bypass keys on it).
+    """
+    try:
+        from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — deferred: heavy import, grow path only
+
+        steps_hint = plan_json[:1500]
+        # Prompt v2 (measured, 2026-08-31): v1 asked for "2-3 sentences ...
+        # then examples" and haiku wrote abstract essays that scored BELOW
+        # the verbatim baseline; the compact exemplar-dense register is
+        # what the spike validated. The examples ARE the match surface.
+        prompt = (
+            "Write a match-text description for a saved retrieval plan.\n\n"
+            "The plan was grown from this question:\n"
+            f"  {question}\n\n"
+            "Its retrieval steps (JSON, truncated):\n"
+            f"  {steps_hint}\n\n"
+            "Produce ONE plain-text paragraph of AT MOST 400 characters: "
+            "one short sentence stating what the plan answers, then 5-7 "
+            "short paraphrased example questions users might ask, separated "
+            "by question marks — the example questions must make up most of "
+            "the text. Use concrete domain words from the question and "
+            "steps; never abstract phrasing like 'best practices' or "
+            "'guidance'. No markdown, no preamble, and do not repeat the "
+            "original question verbatim."
+        )
+        result = await claude_dispatch(
+            prompt,
+            _GROWN_MATCH_DESCRIPTION_SCHEMA,
+            # 45s, measured (2026-09-01): 20s killed all six live probe
+            # dispatches mid-generation (claude -p subprocess startup +
+            # generation wall, not bare API latency); 60s succeeded 6/6 and
+            # 45s itself measured 5/6 with the sixth degrading fail-soft —
+            # the accepted trade for a tighter wall bound.
+            # This timeout IS the wall-time bound the reviewers asked to
+            # see accounted: it extends a plan-miss SUCCESS run (already
+            # 80-100s) by the dispatch wall, once per NOVEL question, and
+            # only when a plan is actually being grown. Fire-and-forget
+            # was considered and rejected (the no-fire-and-forget
+            # directive; a detached task dies silently with the process).
+            timeout=45.0,
+            # Cheap alias on purpose: this is a bounded reformulation task,
+            # the same tier the check/verify operators default to
+            # (nexus-3mea3 precedent).
+            model="haiku",
+            operator="plan_grow_generalize",
+        )
+        description = str(result.get("description") or "").strip()
+        if not (
+            _GROWN_MATCH_DESCRIPTION_MIN_CHARS
+            <= len(description)
+            <= _GROWN_MATCH_DESCRIPTION_MAX_CHARS
+        ):
+            _log.info(
+                "plan_grow_generalize_out_of_bounds",
+                length=len(description),
+            )
+            return None
+        _log.info(
+            "plan_grow_generalize_ok",
+            length=len(description),
+        )
+        return description
+    except Exception:  # noqa: BLE001 — fail-soft by contract; the grow proceeds with the verbatim question
+        _log.info("plan_grow_generalize_failed", exc_info=True)
+        return None
 
 
 def _nx_answer_classify_plan(match: Any) -> str:
@@ -6889,6 +6932,32 @@ def _nx_answer_record_outcome(plan_id: int, *, success: bool) -> None:
 #: Max historical plans injected as few-shot examples into the inline
 #: planner on a miss (nexus-mhyf3 / CacheRAG R1). Three balances prompt
 #: cost against the demonstrated lift.
+#: nexus-rl59s (critique [24066] S1): the collection-name hint used to be
+#: ``sorted(available)[:20]``, which on a 63-collection install is 100%
+#: code__/docs__ (they sort first) and never shows a knowledge__ or rdr__
+#: name -- the two families the scoping rules ask the planner to name.
+#: Round-robin across prefixes instead so every family is represented.
+_PLANNER_COLLECTION_HINT_MAX = 24
+
+
+def _sample_collection_names_by_prefix(names: list[str], limit: int) -> list[str]:
+    """Return up to *limit* names, round-robin across ``<prefix>__`` families
+    (each family's names in sorted order), so no family is starved by
+    alphabetical truncation. Deterministic: families and names sorted."""
+    by_prefix: dict[str, list[str]] = {}
+    for n in sorted(set(names)):
+        by_prefix.setdefault(n.split("__", 1)[0], []).append(n)
+    out: list[str] = []
+    queues = [by_prefix[k] for k in sorted(by_prefix)]
+    i = 0
+    while len(out) < limit and any(queues):
+        q = queues[i % len(queues)]
+        if q:
+            out.append(q.pop(0))
+        i += 1
+    return out
+
+
 _PLANNER_FEW_SHOT_MAX = 3
 #: Per-example plan-JSON character cap so a pathological stored plan can't
 #: blow the planner prompt budget.
@@ -6988,10 +7057,11 @@ async def _nx_answer_plan_miss(
         available = []
     corpus_names_hint = ""
     if available:
+        shown = _sample_collection_names_by_prefix(available, _PLANNER_COLLECTION_HINT_MAX)
         corpus_names_hint = (
             f"\n\nAvailable collection names in this environment: "
-            f"{', '.join(sorted(available)[:20])}"
-            + (f" (and {len(available) - 20} more)" if len(available) > 20 else "")
+            f"{', '.join(shown)}"
+            + (f" (and {len(available) - len(shown)} more)" if len(available) > len(shown) else "")
             + ".  Pass collection names to `search` via `corpus=<name>` — "
             "bare prefixes like 'knowledge' or 'code' will miss if no "
             "collection actually starts with that prefix."
@@ -7019,6 +7089,7 @@ async def _nx_answer_plan_miss(
         f"{few_shot_block}"
         f"Question: {question}\n"
         f"{corpus_names_hint}\n\n"
+        f"{_PLANNER_SCOPING_RULES}\n\n"
         f"{_PLANNER_TOOL_REFERENCE}\n"
         f"Return the plan as {{\"steps\": [...]}} where each step is "
         f"{{\"tool\": \"<bare name>\", \"args\": {{...}}}}."
@@ -7240,6 +7311,29 @@ _NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN: int = 0
 #: too, so it is exported as a named constant instead of inlined here).
 NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX: str = "[budget exhausted"
 
+#: RDR-200 §Telemetry (nexus-4e75w.5). Handoff-row marker — the SAME
+#: "a stable prefix, followed by call-specific detail" convention as
+#: ``NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX`` above. Written by
+#: ``nx_answer`` itself, BEFORE the envelope ever returns to a caller
+#: (RDR-200 R2 — the ordering rule that keeps telemetry from going
+#: dark). Full text shape: ``f"{PREFIX} continuation_id={id}]"``.
+#: ``commands/answer_runs.py``'s four-way split imports THIS constant
+#: rather than retyping the literal, matching the budget-marker's own
+#: precedent for why (a hand-typed second copy silently drifts).
+NX_ANSWER_CONTINUATION_MARKER_PREFIX: str = "[continuation handed off"
+
+#: RDR-200 §Telemetry. Completion-REPORT marker — written by
+#: ``nx_answer_report``, a SECOND, independent append (never a mutation
+#: of the handoff row; the telemetry log is append-only by doctrine).
+#: Paired with a handoff row at READ time
+#: (``commands/answer_runs.py``) by matching the ``continuation_id``
+#: embedded in both markers' text. A report row is a REPORT EVENT, not
+#: a run — ``commands/answer_runs.py``'s four-way split excludes any row
+#: carrying this prefix entirely, never counting it as executed/failed/
+#: handed-off/degenerate. Full text shape:
+#: ``f"{PREFIX} continuation_id={id} ok={ok}] {excerpt}"``.
+NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX: str = "[continuation completed"
+
 
 @mcp.tool(
     title="Multi-Step Knowledge Answer",
@@ -7260,6 +7354,7 @@ async def nx_answer(
     min_confidence: float | None = None,
     force_dynamic: bool = False,
     bindings: dict[str, Any] | None = None,
+    continuation: bool | None = None,
 ) -> "str | dict":
     """Answer a knowledge question using plan-match-first retrieval. RDR-080 P1.
 
@@ -7481,6 +7576,20 @@ async def nx_answer(
             generation from the matched-plan path on collection-scoped
             questions where ``scope`` would otherwise act as a forced-
             miss proxy.
+        continuation: RDR-200 Phase 1a (nexus-4e75w.3). ``None`` (the
+            default) means the policy default — OFF for Phase 1, so
+            omitting this parameter is byte-identical to today.
+            ``False`` explicitly forces the headless ``claude -p``
+            reduction path (the reference implementation). ``True``
+            requests continuation mode; in Phase 1a this classifies the
+            plan's continuation cut (see
+            :mod:`nexus.plans.continuation`) and logs the decision via
+            structlog, but the continuation envelope itself is not yet
+            built — every call still falls through to the headless path
+            unchanged, so ``True`` is currently also byte-identical to
+            ``None``/``False`` in this call's return value. The envelope
+            (nexus-4e75w.4) and handoff telemetry (nexus-4e75w.5) are
+            what make ``True`` behave differently.
 
     Returns:
         The final step's output — a string by default, or the envelope
@@ -7598,7 +7707,8 @@ async def nx_answer(
     def _result(text: str, *, plan_id: int = 0, step_count: int = 0,
                 chunks: "list | None" = None,
                 budget_exhausted_at_step: "int | None" = None,
-                step_records: "list | None" = None) -> "str | dict":
+                step_records: "list | None" = None,
+                continuation: "dict | None" = None) -> "str | dict":
         # RDR-196 .p3c (nexus-nyry9.21), extended round 2 / round 3:
         # single emitter for every budget WARNING, both shapes. Reads
         # the closure list `_budget_warning_entries` (declared near the
@@ -7715,6 +7825,16 @@ async def nx_answer(
             # caller reading the envelope and one tailing the log see one
             # shape.
             "plan_choice": _plan_choice_info,
+            # RDR-200 Phase 1b/1c (nexus-4e75w.4/.5): always present, same
+            # "a caller relies on the key, never membership-checks it"
+            # convention as budget_exhausted_at_step / truncated_chars
+            # above. ``None`` on every call that is not a real
+            # continuation handoff (including every call for the whole of
+            # Phase 1b, and every post-go-live call whose cut fell back
+            # to headless) — a real envelope dict ONLY on the handoff
+            # path below, and ONLY after the handoff telemetry row has
+            # already been written (RDR-200 R2).
+            "continuation": continuation,
         }
 
     # nexus-h33x8.6 a4 / nexus-nyry9.2 (RDR-196 .r2): single shared
@@ -7924,6 +8044,14 @@ async def nx_answer(
     if min_confidence is not None and not (0.0 <= min_confidence <= 1.0):
         return _result(
             f"min_confidence must be in [0.0, 1.0], got {min_confidence!r}"
+        )
+    # RDR-200 Phase 1a (nexus-4e75w.3): bounds-check the same way
+    # min_confidence is checked immediately above — a degenerate value
+    # fails loudly before any dispatch rather than being silently
+    # coerced by a bare truthy check further down.
+    if continuation is not None and not isinstance(continuation, bool):
+        return _result(
+            f"continuation must be a bool or None, got {continuation!r}"
         )
     effective_min_confidence = (
         min_confidence if min_confidence is not None
@@ -8368,7 +8496,13 @@ async def nx_answer(
                 _nx_answer_record_outcome(best.plan_id, success=False)
                 return _result(str(exc), plan_id=best.plan_id, step_count=0)
             q = step_args.get("question", question)
-            corpus = step_args.get("corpus", "knowledge")
+            # nexus-rl59s (code review [24061] Critical): this fast path
+            # bypasses plan_run, so the runner's fall-through default never
+            # reached it and a corpus-agnostic single_query plan stayed on
+            # query()'s bare "knowledge" default -- the degenerate class A
+            # listings of the RDR-200 Phase 1b gate (q06/q08/q19).
+            from nexus.plans.runner import _PLAN_STEP_DEFAULT_CORPUS  # noqa: PLC0415 — deferred; runner is heavy and this branch is rare
+            corpus = step_args.get("corpus") or _PLAN_STEP_DEFAULT_CORPUS
             try:
                 limit = int(step_args.get("limit", 10))
             except (TypeError, ValueError):
@@ -8568,6 +8702,55 @@ async def nx_answer(
     if _budget_remaining_usd is not None:
         _plan_run_kwargs["budget_usd_remaining"] = _budget_remaining_usd
 
+    # RDR-200 Phase 1a (nexus-4e75w.3): cut-selection. When the caller
+    # opted in (``continuation=True``), classify the matched/grown plan's
+    # continuation suffix and log the decision.
+    # ``_cut``/``_continuation_steps`` default to None/[] so the
+    # Phase 1c handoff block below (right after ``_result_step_records``
+    # is computed) can check "did continuation=True actually classify a
+    # cut" without a NameError when continuation is falsy.
+    #
+    # RDR-200 Phase 1c (nexus-4e75w.5): ``_continuation_engaged`` decides
+    # whether THIS call's ``plan_run`` invocation stops before the
+    # terminal suffix (the "stop-before-cut" mechanism,
+    # ``continuation_cut_at_step`` threaded into ``_plan_run_kwargs``
+    # below) — true only when the cut is handoff-eligible (SHAPE_A/
+    # SHAPE_B, never NO_SUFFIX/MULTI_UNIT) AND go-live is armed
+    # (``nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE``).
+    # Every other call (continuation False/None, a non-handoff-eligible
+    # cut, or go-live not yet armed) leaves ``_plan_run_kwargs`` untouched
+    # and reaches the SAME headless ``plan_run`` call below, unchanged.
+    _cut: "ContinuationCut | None" = None
+    _continuation_steps: list[dict] = []
+    _continuation_engaged: bool = False
+    if continuation:
+        from nexus.plans.continuation import (  # noqa: PLC0415 — rare/branch-local path (Phase-1 opt-in only), avoids paying this import on every call
+            CutShape as _CutShape,
+            classify_continuation_cut,
+        )
+
+        try:
+            _continuation_steps = json.loads(best.plan_json).get("steps") or []
+        except (json.JSONDecodeError, TypeError):
+            _continuation_steps = []
+        _cut = classify_continuation_cut(_continuation_steps)
+        _log.info(
+            "nx_answer_continuation_cut",
+            plan_id=best.plan_id,
+            shape=_cut.shape.value,
+            cut_at_step=_cut.cut_at_step,
+            operators=list(_cut.operators),
+            step_count=len(_continuation_steps),
+        )
+        if _cut.shape in (_CutShape.SHAPE_A, _CutShape.SHAPE_B):
+            from nexus.plans.continuation_envelope import (  # noqa: PLC0415 — rare/branch-local path
+                _CONTINUATION_GO_LIVE as _continuation_go_live,
+            )
+
+            if _continuation_go_live:
+                _continuation_engaged = True
+                _plan_run_kwargs["continuation_cut_at_step"] = _cut.cut_at_step
+
     try:
         result = await _plan_run(best, run_bindings, **_plan_run_kwargs)
     except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
@@ -8664,6 +8847,161 @@ async def nx_answer(
     _result_step_records = getattr(result, "step_records", None)
     if not isinstance(_result_step_records, list):
         _result_step_records = []
+
+    # ── RDR-200 Phase 1c (nexus-4e75w.5): continuation handoff decision ──
+    # Only reached when ``_continuation_engaged`` — Phase 1a classified a
+    # handoff-eligible cut AND go-live is armed, in which case ``result``
+    # above is PREFIX-ONLY: plan_run's "stop-before-cut" mechanism
+    # already stopped it before dispatching the cut's terminal suffix
+    # (RDR-200 R2 — "the terminal suffix MUST NOT execute server-side
+    # when it is being handed off"). Every other call (continuation
+    # False/None, a non-handoff-eligible cut, or go-live not armed) skips
+    # this block entirely and reaches Step 5 exactly as before.
+    if _continuation_engaged:
+        _continuation_envelope: "dict | None" = None
+        # CR-Important-1 / critic-F1 (T2 [23951]/[23952], both reviewers
+        # reproduced live): on ANY of the four fallback triggers below
+        # (SQL-probe hit, oversized prompt, empty evidence, or this
+        # try's own assembly exception), the second `plan_run` call a
+        # few lines down re-executes the WHOLE prefix from scratch —
+        # including any already-dispatched, already-PAID LLM operator
+        # step an interleaved plan's prefix can genuinely contain (the
+        # RDR's own worked example: search->extract->search($step.ids)
+        # ->generate — `extract` is prefix, not suffix, and pays for a
+        # real claude -p subprocess). That step's real cost is paid a
+        # SECOND time on fallback. Computed once here, BEFORE the
+        # assembly attempt, so every one of the four fallback-decision
+        # structlog events below can report it — observability, not a
+        # fix: resume-from-prefix (never re-dispatching a step that
+        # already ran) is real architecture work, explicitly deferred to
+        # Phase 2 by the critic's ruling, not built here.
+        _prefix_billable_records = [
+            r for r in _result_step_records
+            if getattr(r, "source", None) in ("llm", "bundle")
+        ]
+        _prefix_may_redispatch = bool(_prefix_billable_records)
+        _prefix_redispatch_step_count = len(_prefix_billable_records)
+        try:
+            from nexus.plans.continuation_envelope import (  # noqa: PLC0415 — rare/branch-local path
+                assemble_continuation_envelope,
+                render_continuation_text,
+            )
+            from nexus.plans.runner import merge_bindings  # noqa: PLC0415 — rare/branch-local path
+
+            _continuation_merged = merge_bindings(best.default_bindings, run_bindings)
+            _continuation_envelope = assemble_continuation_envelope(
+                cut=_cut, steps=_continuation_steps, bindings=_continuation_merged,
+                step_outputs=result.steps, plan_id=best.plan_id, run_id=None,
+                prefix_may_redispatch=_prefix_may_redispatch,
+                prefix_redispatch_step_count=_prefix_redispatch_step_count,
+            )
+        except Exception as exc:  # noqa: BLE001 — a broken reconstruction must never strand a call whose prefix already stopped short of the suffix — falls back exactly like an assembly-returns-None case
+            _log.warning(
+                "nx_answer_continuation_envelope_assembly_failed",
+                plan_id=best.plan_id, error=str(exc),
+                fallback_may_redispatch=_prefix_may_redispatch,
+                fallback_redispatch_step_count=_prefix_redispatch_step_count,
+            )
+            _continuation_envelope = None
+
+        if _continuation_envelope is not None:
+            # ── HANDOFF: the row is written BEFORE this function ever
+            # returns the envelope to the caller (RDR-200 R2 — the
+            # ordering rule that keeps telemetry from going dark).
+            # step_count/cost_usd cover ONLY the server-side-executed
+            # prefix's real StepRecords — never the planned total, never
+            # a fabricated cost for the caller-side reduction (RDR-200
+            # §Telemetry: "cost_usd is the honest server-side sum").
+            _continuation_elapsed_ms = int((time.monotonic() - start) * 1000)
+            _continuation_id = _continuation_envelope["continuation_id"]
+            _handoff_text = (
+                f"{NX_ANSWER_CONTINUATION_MARKER_PREFIX} "
+                f"continuation_id={_continuation_id}]"
+            )
+            try:
+                with _t2_ctx() as db:
+                    _nx_answer_record_run(
+                        db.telemetry, question=question, plan_id=best.plan_id,
+                        matched_confidence=best.confidence,
+                        step_count=len(result.steps),
+                        final_text=_handoff_text, step_records=_result_step_records,
+                        duration_ms=_continuation_elapsed_ms, trace=trace,
+                    )
+            except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
+                pass
+            _nx_answer_record_outcome(best.plan_id, success=True)
+            _continuation_rendered = render_continuation_text(_continuation_envelope)
+            return _result(
+                _continuation_rendered, plan_id=best.plan_id,
+                step_count=len(result.steps),
+                step_records=_result_step_records,
+                continuation=_continuation_envelope,
+            )
+
+        # ── FALLBACK: no handoff happened (SQL-fast-path would have hit,
+        # an oversized prompt, or a reconstruction failure). The
+        # prefix-only run above never dispatched the suffix, so it must
+        # run now — WITHOUT the cut — to give the caller the SAME normal
+        # answer headless always would ("the caller gets a normal
+        # answer", RDR-200 §Size discipline's own fallback framing).
+        #
+        # HONEST COST NOTE (CR-Important-1 / critic-F1, T2 [23951]/
+        # [23952] — this comment previously and INCORRECTLY claimed the
+        # re-executed prefix is "cheap, read-only retrieval": that is
+        # only true when the prefix is pure retrieval. An INTERLEAVED
+        # plan's prefix (search->extract->search($step.ids)->generate —
+        # the RDR's own worked example) can contain an already-
+        # dispatched, already-PAID LLM operator step, and this second
+        # `plan_run` call re-executes the WHOLE plan from scratch,
+        # re-dispatching that step and paying for it TWICE. Not a
+        # correctness bug in the returned answer (the caller still gets
+        # the right text) and Phase 1 leaves it unfixed — resume-from-
+        # prefix is real architecture work, deferred to Phase 2 by the
+        # critic's ruling — but every fallback trigger below shares this
+        # exact path, so `_prefix_may_redispatch`/
+        # `_prefix_redispatch_step_count` (computed above, before the
+        # assembly attempt) are threaded into the fallback-decision
+        # structlog events so a contaminated run is OBSERVABLE post-hoc,
+        # even though it is not prevented here. `budget_usd_remaining`
+        # below is the SAME value Step 4 computed for the primary call —
+        # it has no memory of what the discarded prefix-only run already
+        # spent, so a fallback call's total spend can exceed the
+        # caller's own dollar cap by up to one extra prefix-LLM-step's
+        # cost; a real budget-contract gap, also left to Phase 2.
+        _continuation_fallback_kwargs = dict(_plan_run_kwargs)
+        _continuation_fallback_kwargs.pop("continuation_cut_at_step", None)
+        try:
+            result = await _plan_run(best, run_bindings, **_continuation_fallback_kwargs)
+        except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller — mirrors the primary plan_run call's own except-arm above
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            _log.error("nx_answer_plan_run_error", plan_id=best.plan_id, error=str(exc))
+            _exc_step_records = getattr(exc, "step_records", None)
+            if not isinstance(_exc_step_records, list):
+                _exc_step_records = []
+            try:
+                with _t2_ctx() as db:
+                    _nx_answer_record_run(
+                        db.telemetry, question=question, plan_id=best.plan_id,
+                        matched_confidence=best.confidence,
+                        step_count=len(_exc_step_records),
+                        final_text=f"Error: {exc}", step_records=_exc_step_records,
+                        duration_ms=elapsed_ms, trace=trace,
+                    )
+            except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
+                pass
+            _nx_answer_record_outcome(best.plan_id, success=False)
+            return _result(
+                f"Error during plan execution: {exc}",
+                plan_id=best.plan_id,
+                step_count=len(_exc_step_records),
+                step_records=_exc_step_records,
+            )
+        _result_step_records = getattr(result, "step_records", None)
+        if not isinstance(_result_step_records, list):
+            _result_step_records = []
+        _budget_response = _budget_exhausted_response(result)
+        if _budget_response is not None:
+            return _budget_response
 
     # ── Step 5: extract final answer ─────────────────────────────────────
     elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -8821,6 +9159,15 @@ async def nx_answer(
                     "scope": "personal",
                     "strategy": grown_name,
                 })
+                # nexus-93cc6 D2: generalize the match text BEFORE the save —
+                # a grown plan whose match_text is only its verbatim question
+                # matches paraphrases at 62.5%; a generalized description +
+                # exemplars measured +17pp with zero precision cost (T2
+                # [23880]/[23881]). Fail-soft by contract: any generalizer
+                # failure yields None and the save proceeds exactly as today.
+                grown_match_description = await _generalize_grown_match_description(
+                    question=question, plan_json=best.plan_json,
+                )
                 # nexus-j5geq: route through daemon (eliminates second WAL writer).
                 _grow_scope_tags = scope or None
                 _grow_plan_json = best.plan_json
@@ -8838,6 +9185,7 @@ async def nx_answer(
                         verb=grown_verb,
                         name=grown_name,
                         dimensions=grown_dimensions,
+                        match_description=grown_match_description,
                     )
                     # Feed the new plan into the T1 cosine cache so the next
                     # paraphrase can match without a SessionStart re-populate.
@@ -8860,6 +9208,13 @@ async def nx_answer(
             except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
                 _log.warning("plan_grow_save_failed", error=str(exc))
 
+    # RDR-200 (nexus-4e75w.5): a continuation handoff, when one applies,
+    # already returned early from the block above — Step 6 below only
+    # ever records a genuine headless run (continuation False/None, a
+    # non-handoff-eligible cut, go-live not armed, or the fallback path
+    # that completed the plan after a would-have-hit/oversized/failed
+    # assembly attempt).
+
     # ── Step 6: record run ───────────────────────────────────────────────
     try:
         with _t2_ctx() as db:
@@ -8879,6 +9234,76 @@ async def nx_answer(
         chunks=envelope_chunks if structured else None,
         step_records=_result_step_records,
     )
+
+
+@mcp.tool(
+    title="Report Continuation Completion",
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+    structured_output=False,
+)
+async def nx_answer_report(
+    continuation_id: str,
+    ok: bool,
+    final_text_excerpt: str = "",
+) -> dict:
+    """Report that an ``nx_answer`` continuation handoff (RDR-200) was
+    completed by the caller.
+
+    The handoff row (written by ``nx_answer`` itself, BEFORE the
+    envelope ever returned — RDR-200 R2) already recorded that a
+    reduction was handed off. This tool records the OTHER half: that the
+    calling model actually executed the reduction, so ``nx answer-runs``
+    can report an honest **unreported rate** rather than treating every
+    un-paired handoff as silent failure by default.
+
+    **Completion reporting is a second append, not a mutation** (RDR-200
+    §Telemetry). The ``nx_answer_runs`` log is append-only by doctrine —
+    this writes a SECOND row carrying the SAME ``continuation_id`` in its
+    own marker line (``NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX``),
+    never touches the original handoff row. ``commands/answer_runs.py``
+    pairs the two at READ time by matching the id embedded in both
+    markers' ``final_text``. This report row is classified as a REPORT
+    EVENT, not a run — excluded from the four-way run split entirely, so
+    it can never double-count a run or land in ``degenerate`` on its own
+    ``step_count = 0``.
+
+    Best-effort, zero engine change: writes through the SAME
+    ``POST /v1/telemetry/nx_answer_runs/record`` route ``nx_answer``
+    itself uses — no new column, no new table, no schema migration.
+
+    Args:
+        continuation_id: The id from the ``continuation.continuation_id``
+            field of the envelope ``nx_answer`` returned (or, in text
+            mode, the id named in the rendered instruction's final
+            line). Required — a report with no id cannot be paired.
+        ok: Whether the reduction completed successfully.
+        final_text_excerpt: Optional short excerpt of the caller's
+            reduction output, for diagnostic visibility on the report
+            row. Capped to 500 chars — this tool is a completion signal,
+            not a second copy of the caller's full answer.
+    """
+    excerpt = (final_text_excerpt or "")[:500]
+    marker = (
+        f"{NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX} "
+        f"continuation_id={continuation_id} ok={ok}]"
+    )
+    final_text = f"{marker} {excerpt}" if excerpt else marker
+    try:
+        with _t2_ctx() as db:
+            db.telemetry.record_nx_answer_run(
+                question=f"nx_answer_report({continuation_id})",
+                plan_id=None,
+                matched_confidence=None,
+                step_count=0,
+                final_text=final_text[:2000],
+                cost_usd=None,
+                duration_ms=0,
+                steps=None,
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller
+        _warn_telemetry_drop("nx_answer_runs", exc)
+        return {"ok": False, "recorded": False, "continuation_id": continuation_id, "error": str(exc)}
+    return {"ok": True, "recorded": True, "continuation_id": continuation_id}
 
 
 @mcp.tool(

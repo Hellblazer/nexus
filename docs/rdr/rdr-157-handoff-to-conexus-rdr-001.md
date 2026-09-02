@@ -2,7 +2,7 @@
 title: "RDR-157 to conexus RDR-001 handoff: distribution & install primitives"
 id: companion-note
 parent_rdr: RDR-157
-status: companion-note
+kind: companion
 ---
 
 # RDR-157 to conexus RDR-001 handoff: distribution & install primitives

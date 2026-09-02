@@ -2,7 +2,7 @@
 title: "Cockpit UI Fabric — Bakke Auto-Layout over A2UI Catalogs, per-Host Realization"
 id: RDR-119
 type: Architecture
-status: scrapped
+status: abandoned
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self

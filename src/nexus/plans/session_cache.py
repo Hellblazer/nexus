@@ -219,7 +219,14 @@ class PlanSessionCache:
             return False
 
     def _upsert_row(self, row: dict[str, Any]) -> bool:
-        match_text = _synthesize_match_text(row)
+        # nexus-93cc6: prefer the STORED match_text over re-synthesis — the
+        # save path may have built it from a GENERALIZED description (the
+        # grow-time generalizer) that the row's individual columns cannot
+        # reproduce, and the stored bytes are literally what the engine's
+        # generated fts_vector indexes, so T1 cosine and T2 FTS agree by
+        # construction. Synthesis remains the fallback for rows whose
+        # stored match_text is empty (pre-RDR-092 legacy rows).
+        match_text = (row.get("match_text") or "").strip() or _synthesize_match_text(row)
         if not match_text:
             return False
         plan_id = row.get("id")

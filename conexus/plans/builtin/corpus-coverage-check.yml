@@ -37,9 +37,11 @@
 
 name: corpus-coverage-check
 description: >-
-  Does the corpus cover this? Yes or no: does the corpus have
-  anything about this at all? Simply, is there anything in the corpus
-  about this?
+  Does the corpus cover this? Is there anything in the corpus about this topic? Yes or
+  no: does the corpus have anything about this at all? Does the corpus cover this
+  subject or area? Do we hold any document mentioning this? Is this topic covered
+  anywhere in the collections? A yes-or-no coverage check for a topic across the indexed
+  corpus.
 dimensions:
   verb: research
   scope: global
@@ -50,7 +52,13 @@ optional_bindings:
   - corpus
   - limit
 default_bindings:
-  corpus: knowledge
+  # nexus-rl59s (RDR-200 Phase 1b): was "knowledge" -- see the identical
+  # note in document-discovery.yml. This template is the sibling
+  # single-step-guard fast path with the same defect: a non-empty
+  # plan-declared default pre-empts both the fast-path and general-path
+  # default-corpus fall-throughs, so the runner-level fix alone never
+  # reaches it.
+  corpus: knowledge,code,docs,rdr
   limit: 10
 tags: builtin-template,nexus-h33x8,single-step,fast-path
 plan_json:

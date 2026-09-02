@@ -126,6 +126,34 @@ _SEARCH_TELEMETRY_ALL_TIME_DAYS = 36_500
 #: knowledge__knowledge" — exactly two).
 _ZERO_HIT_RATE_WORST_N = 2
 
+#: RDR-200 consumer caveat (critic-F2, T2 [23952], population sweep
+#: item 6): this figure reads the engine's RAW ``hit_count``/
+#: ``fallback_count``/``total``/``since_count`` aggregates, which have
+#: ZERO visibility into the RDR-200 continuation markers by design (F6,
+#: zero engine change — nothing was ever taught to the query route
+#: about them). Two concrete distortions, confirmed by static reasoning
+#: against the engine's own documented predicate
+#: (``http_telemetry_store.py``'s hit/fallback split, ``plan_id IS NULL
+#: OR plan_id==0 => fallback``): every ``nx_answer_report`` completion
+#: row (``plan_id=None``, verified in the diff) is misclassified
+#: server-side as an inline-planner fallback, inflating
+#: ``fallback_count``; and a single logical continuation call
+#: contributes TWO physical rows (handoff + report) to ``total``/
+#: ``since_count`` where a normal call contributes one. Client-side
+#: text only — the engine is not, and by RDR-200's own Phase 1-2
+#: constraint cannot be, changed to fix this. Unconditional (this
+#: figure has no per-row visibility to gate the caveat on presence/
+#: absence in the current window), same "always-labeled" doctrine as
+#: ``search_telemetry``'s LOWER BOUND caveat just below it.
+_NX_ANSWER_RUNS_CONTINUATION_CAVEAT = (
+    "hit/fallback/total/since_count above have ZERO visibility into "
+    "RDR-200 continuation rows (zero engine change): every "
+    "nx_answer_report completion row is misclassified server-side as "
+    "an inline-planner fallback, and a paired continuation call "
+    "contributes 2 physical rows for 1 logical nx_answer invocation — "
+    "see `nx answer-runs` for a marker-aware four-way split instead"
+)
+
 
 def _unavailable(reason: str) -> str:
     return f"UNAVAILABLE: {reason}"
@@ -205,6 +233,7 @@ def _capture_nx_answer_runs(since: str | None, store: Any, store_error: Exceptio
         "latency_buckets": windowed.get("latency_buckets") or {},
         "oldest_created_at": windowed.get("oldest_created_at") or None,
         "newest_created_at": newest_created_at,
+        "continuation_caveat": _NX_ANSWER_RUNS_CONTINUATION_CAVEAT,
     }
 
 
@@ -447,6 +476,8 @@ def _render_text(data: dict[str, Any]) -> None:
     if isinstance(buckets, dict) and buckets:
         rendered = "  ".join(f"{k}={buckets.get(k, 0)}" for k in _BUCKET_ORDER)
         click.echo(f"    latency buckets: {rendered}")
+    if nar.get("continuation_caveat"):
+        click.echo(f"    CAVEAT: {nar['continuation_caveat']}")
 
     tw = data["tier_writes"]
     click.echo(f"  tier writes ({_fmt_window(tw['window'])}): total={tw['total']}  by_tier={tw['by_tier']}")
@@ -524,6 +555,18 @@ def baseline_cmd(since: str | None, json_out: bool) -> None:
     reported as a fabricated zero. Every figure carries its own window
     (``--since``-scoped or all-time) — see ``--since``'s own help text.
     """
+    # nexus-spbay (code-review Important #1): validate/normalize --since
+    # BEFORE any store call — a bad value must fail as a usage error
+    # naming the value, never surface through a reader's UNAVAILABLE arm
+    # as a phantom service failure (and never reach an old engine, whose
+    # parser turned any unparseable since into `since now()` = zeros).
+    if since:
+        from nexus.db.t2.http_telemetry_store import normalize_since_filter  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
+
+        try:
+            since = normalize_since_filter(since)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="--since") from exc
     data = _capture_baseline(since)
     if json_out:
         click.echo(_json.dumps(data, indent=2))

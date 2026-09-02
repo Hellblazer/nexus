@@ -471,7 +471,7 @@ _MODULE_LEVEL_BY_VALUE_IMPORT_CEILING = 0
 # `from nexus.config import nexus_config_dir` import (inside
 # remediation_opt_in()) was deleted with the whole file, shrinking the
 # total by 1.
-_TOTAL_BY_VALUE_IMPORT_CEILING = 76
+_TOTAL_BY_VALUE_IMPORT_CEILING = 77  # +1: commands/enrich.py nexus_config_dir (nexus-xwvwx)
 
 
 def test_module_level_by_value_import_ratchet() -> None:

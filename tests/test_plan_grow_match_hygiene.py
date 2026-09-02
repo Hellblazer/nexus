@@ -400,3 +400,64 @@ def test_unanchored_grown_kept_for_corpus_all_sentinel(library) -> None:
     assert [m.plan_id for m in result] == [plan_id], (
         "corpus:all sentinel must not trigger the unanchored-grown drop"
     )
+
+
+def test_anchored_grown_verbatim_repeat_hits_under_scope_pref(library) -> None:
+    """nexus-7g0rg's named regression, the ANCHORED counterpart of the
+    drop tests above: a grown plan saved the way the grow path saves
+    today — ``scope_tags=None`` so the library INFERS the anchor from the
+    plan's own retrieval steps — must HIT its verbatim question under a
+    scoped caller. This is the exact live shape that run 382 missed when
+    the row was still unanchored: the remedy was never a bypass (reverted,
+    see above), it was anchoring the save, and this pin is what keeps
+    that remedy load-bearing. Measured 2026-08-31: all surviving live
+    grown rows are anchored and the scope-conflict drop has fired exactly
+    once in the whole mcp.log (run 382 itself).
+
+    Assertion roles, stated precisely (code-review nit, 2026-08-31): the
+    match-HIT below is carried by EITHER anchor — the non-empty project
+    alone already escapes _is_unanchored_grown, here and in production's
+    grow path. The scope_tags assertion is the one that genuinely pins
+    INFERENCE (save_plan(scope_tags=None) deriving the anchor from the
+    plan's retrieval steps); the HIT assertion pins the end-to-end recall
+    the run-382 shape lost."""
+    import json as _json
+
+    from nexus.plans.matcher import plan_match
+    from nexus.plans.schema import canonical_dimensions_json
+
+    question = "What is the chunk identity convention used for T3 chunks?"
+    plan_id = library.save_plan(
+        query=question,
+        plan_json=_json.dumps({"steps": [
+            {"tool": "search",
+             "args": {"query": "chunk identity chash", "corpus": "knowledge"}},
+        ]}),
+        tags="ad-hoc,grown",
+        project="nexus",
+        dimensions=canonical_dimensions_json(
+            {"verb": "research", "scope": "personal",
+             "strategy": "chunk-identity-convention-used-t3"}),
+        verb="research",
+        scope="personal",
+        name="chunk-identity-convention-used-t3",
+        scope_tags=None,  # the grow path's shape: '' coerced to None -> inference
+    )
+    row = library.get_plan(plan_id)
+    assert (row.get("scope_tags") or "").strip() == "knowledge", (
+        f"save_plan(scope_tags=None) must infer the anchor from the plan's "
+        f"retrieval steps; stored {row.get('scope_tags')!r}"
+    )
+
+    cache = _FakeCache(hits=[(plan_id, 0.06)])  # 0.94 — run 382's measured value
+    result = plan_match(
+        intent=question, library=library, cache=cache,
+        min_confidence=0.40, n=5,
+        scope_preference="knowledge__nexus",
+    )
+    assert [m.plan_id for m in result] == [plan_id], (
+        "an ANCHORED grown plan must hit its verbatim question under a "
+        "scoped caller — this is the recall run 382 lost to the unanchored "
+        "shape, recovered by anchoring the save rather than bypassing the drop"
+    )
+    assert result[0].confidence == 1.0, "verbatim repeat forces confidence=1.0"

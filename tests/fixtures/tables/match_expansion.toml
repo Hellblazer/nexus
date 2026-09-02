@@ -1,0 +1,24 @@
+# A list-valued match key expands into one row per member, suffixing the
+# row id with #<member> -- r1 becomes r1#x and r1#y, r1-rest becomes
+# r1-rest#x and r1-rest#y (4 rows total, 2 groups, each closed cleanly).
+[table]
+id = "match-expansion"
+kind = "state-machine"
+
+[dimensions.event]
+domain = ["x", "y"]
+
+[dimensions.state]
+domain = ["a", "b"]
+
+[[row]]
+id = "r1"
+match = { event = ["x", "y"] }
+guard = { state = "a" }
+to = { state = "a" }
+
+[[row]]
+id = "r1-rest"
+match = { event = ["x", "y"] }
+escape = true
+refuse = "illegal-transition"

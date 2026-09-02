@@ -293,7 +293,7 @@ T2DATABASE_CONSTRUCTION_ALLOWLIST: dict[str, int] = {
     "src/nexus/commands/doc.py": 3,        # read-only T2 access
     "src/nexus/commands/enrich.py": 8,     # read-only T2 access (+ routed writes); was 10 with the aspects-without-catalog census (nexus-mlu3k) + --sweep recovery-target probe (nexus-kkumv) — both RETIRED (hygiene-001, nexus-tk070.p6a follow-on): document_aspects.doc_id NOT NULL means an aspect row without a live document can no longer exist, so the census/sweep have nothing to count
     "src/nexus/commands/index.py": 2,      # read-only probes; writes via t2_index_write
-    "src/nexus/commands/rdr.py": 1,        # short-lived read-only preamble CLI
+    "src/nexus/commands/rdr.py": 2,        # short-lived read-only preamble CLI + set-status gate read (RDR-201 P1.4, accept event only)
     "src/nexus/commands/search_cmd.py": 1, # read-only T2 access
     "src/nexus/commands/taxonomy_cmd.py": 1,  # taxonomy CLI factory
 }

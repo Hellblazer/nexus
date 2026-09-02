@@ -6,25 +6,24 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.net.ProxySelector;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.Random;
 
 /**
  * RDR-188 bead nexus-9o6y2.1 — CLOUD Voyage AI reranker (rerank-2.5).
  *
- * <p>Sibling of {@link VoyageEmbedder}: same 3-attempt reactive backoff on
- * 429/5xx, same typed {@link UpstreamAuthException} on 401/403, same explicit
+ * <p>Sibling of {@link VoyageEmbedder}: same consolidated {@link VoyageRetryLoop}
+ * choreography (nexus-1vpal — budget-bounded 429s with {@code Retry-After}
+ * honoured, attempt-bounded equal-jittered 5xx/network), same typed
+ * {@link UpstreamAuthException} on 401/403, same explicit
  * {@link EgressProxy} wiring (the cloud private subnet has no NAT — a bare
  * client works locally and dies in cloud). Differences, per the RDR:
  * <ul>
@@ -48,30 +47,74 @@ import java.util.Optional;
  *
  * <p>Governor: reactive retry only, matching VoyageEmbedder. The proactive
  * rate limiter is accepted engine-wide debt (nexus-rb67a) — do not add here.
+ * On a budget-exhausted 429 the typed {@link UpstreamRateLimitedException}
+ * surfaces to {@code RerankStage}, which degrades the search LOUDLY (results
+ * still served in distance order) rather than failing the whole request —
+ * rate-limited reranking is a degraded search, not a broken one.
  *
  * <p>Stateless: each {@link #rerank} call is independent. Thread-safe.
  */
 public final class VoyageReranker implements Reranker {
-
-    private static final Logger log = LoggerFactory.getLogger(VoyageReranker.class);
 
     /** Voyage rerank API hard cap (R3); requests above it are rejected, not truncated. */
     public static final int MAX_DOCS_PER_REQUEST = 1000;
     public static final String DEFAULT_MODEL = "rerank-2.5";
 
     private static final String VOYAGE_RERANK_URL = "https://api.voyageai.com/v1/rerank";
-    private static final int    MAX_RETRIES = 3;
     private static final long   RETRY_BASE_MS = 500L;
     // Fused-stage bound: worst case with retries ≈ 3×30s + backoff, still under
     // typical client HTTP timeouts; the embed path's 120s would not be.
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
 
+    /**
+     * Total 429-absorption budget for ONE {@link #rerank} call (nexus-1vpal —
+     * the nexus-99r7y semantics, sized for THIS path, not copied from the
+     * embedders' 20s): rerank runs synchronously inside an interactive fused
+     * search stage, where {@link dev.nexus.service.http.RerankStage} can
+     * DEGRADE to distance order the moment the reranker gives up — so
+     * sustained limiting should degrade the search in a couple of seconds,
+     * not hold it hostage for 20. 2.5s absorbs a {@code Retry-After: 1} blip
+     * with margin (the old un-jittered 3-attempt loop already slept ~1.5s at
+     * the production base) and fails typed on anything sustained, well
+     * inside the 30s edge bound.
+     *
+     * <p>Interplay with {@link VoyageRetryLoop#MIN_CALL_ALLOWANCE_MS} (1s),
+     * stated because at this scale it is 40% of the budget, not the
+     * embedders' 5%: the largest honourable {@code Retry-After} is ~1.5s,
+     * so {@code Retry-After: 2} degrades IMMEDIATELY on the first 429 with
+     * zero retries — by design. Voyage explicitly asking for a 2s wait
+     * inside an interactive stage is the degrade-now case; retrying before
+     * an advertised Retry-After elapses is the herd behavior the header
+     * exists to stop. Pinned by the reranker test
+     * {@code retryAfterTwoSecondsAtProductionBudgetDegradesImmediatelyByDesign}.
+     */
+    private static final long RATE_LIMIT_BUDGET_MS = 2_500L;
+
+    /** Terminal-failure vocabulary handed to {@link #retryLoop}: everything
+     *  non-auth, non-rate-limit stays {@link RerankUpstreamException} so the
+     *  RDR-188 loud-degrade contract is unchanged. */
+    private static final VoyageRetryLoop.Failures RERANK_FAILURES = new VoyageRetryLoop.Failures() {
+        @Override
+        public RuntimeException status(int status, String body) {
+            return new RerankUpstreamException(
+                    "Voyage AI rerank failed: HTTP " + status + " body=" + body);
+        }
+
+        @Override
+        public RuntimeException wrap(String message, Throwable cause) {
+            return new RerankUpstreamException(message, cause);
+        }
+    };
+
     private final String       apiKey;
     private final String       model;
     private final String       url;
-    private final long         retryBaseMs;
     private final HttpClient   http;
     private final ObjectMapper mapper;
+
+    /** The consolidated retry choreography (nexus-1vpal) — owns backoff,
+     *  Retry-After, the 429 budget arithmetic, and the shared auth arm. */
+    private final VoyageRetryLoop retryLoop;
 
     /**
      * @param apiKey Voyage AI API key (the engine's {@code NX_VOYAGE_API_KEY})
@@ -89,10 +132,23 @@ public final class VoyageReranker implements Reranker {
      */
     public VoyageReranker(String apiKey, String model, String url, long retryBaseMs,
                           Optional<ProxySelector> proxy) {
+        this(apiKey, model, url, retryBaseMs, proxy, new Random(), RATE_LIMIT_BUDGET_MS);
+    }
+
+    /**
+     * Full wiring — the single build path (nexus-1vpal, mirrors the embedders'
+     * widest constructors): adds the injectable jitter source and 429 budget so
+     * tests can assert the budget-bounded fail-fast without wall clock.
+     * Production always takes {@link #RATE_LIMIT_BUDGET_MS} and an unseeded
+     * {@link Random} via the shorter constructors.
+     */
+    VoyageReranker(String apiKey, String model, String url, long retryBaseMs,
+                   Optional<ProxySelector> proxy, Random jitterRandom, long rateLimitBudgetMs) {
         this.apiKey = apiKey;
         this.model = model;
         this.url = url;
-        this.retryBaseMs = retryBaseMs;
+        this.retryLoop = new VoyageRetryLoop("voyage_rerank", "Voyage rerank", retryBaseMs,
+                                             rateLimitBudgetMs, jitterRandom, () -> { });
         var builder = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10));
         proxy.ifPresent(builder::proxy);
         this.http = builder.build();
@@ -134,7 +190,7 @@ public final class VoyageReranker implements Reranker {
                     + " set before reranking.");
         }
         String body = buildJson(query, documents, topK);
-        String responseBody = callApi(body);
+        String responseBody = callApi(body, retryLoop.newDeadlineNanos());
         return parseResponse(responseBody, documents.size());
     }
 
@@ -158,59 +214,20 @@ public final class VoyageReranker implements Reranker {
         }
     }
 
-    private String callApi(String json) {
-        for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-            try {
-                HttpRequest req = HttpRequest.newBuilder()
-                        .uri(URI.create(url))
-                        .header("Authorization", "Bearer " + apiKey)
-                        .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString(json))
-                        .timeout(REQUEST_TIMEOUT)
-                        .build();
-
-                HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-                int status = resp.statusCode();
-
-                if (status == 200) return resp.body();
-
-                boolean retryable = (status == 429 || status >= 500);
-                if (retryable && attempt < MAX_RETRIES) {
-                    long delay = retryBaseMs * (1L << (attempt - 1));
-                    log.warn("event=voyage_rerank_retry attempt={} status={} delay_ms={}",
-                             attempt, status, delay);
-                    Thread.sleep(delay);
-                    continue;
-                }
-                if (status == 401 || status == 403) {
-                    // Same posture as the embed path (nexus-pmhpc): a credentials
-                    // problem, not an engine defect — handler maps to 502-with-detail.
-                    throw new UpstreamAuthException(
-                            "Voyage AI rejected the service's API key (HTTP " + status
-                            + ") on rerank: the key is invalid, expired, or lacks scope. Rotate"
-                            + " the service's Voyage key and restart. body=" + resp.body());
-                }
-                throw new RerankUpstreamException(
-                        "Voyage AI rerank failed: HTTP " + status + " body=" + resp.body());
-
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RerankUpstreamException("Voyage rerank interrupted", e);
-            } catch (RuntimeException e) {
-                throw e;
-            } catch (Exception e) {
-                if (attempt == MAX_RETRIES) {
-                    throw new RerankUpstreamException(
-                            "Voyage rerank failed after " + MAX_RETRIES + " attempts", e);
-                }
-                try { Thread.sleep(retryBaseMs * (1L << (attempt - 1))); }
-                catch (InterruptedException ix) {
-                    Thread.currentThread().interrupt();
-                    throw new RerankUpstreamException("Voyage rerank interrupted", ix);
-                }
-            }
-        }
-        throw new RerankUpstreamException("Voyage rerank: exhausted retries"); // unreachable
+    private String callApi(String json, long deadlineNanos) {
+        // nexus-1vpal: retry choreography consolidated into VoyageRetryLoop
+        // (budget-bounded 429s with Retry-After, attempt-bounded jittered
+        // 5xx/network, shared auth arm). On budget exhaustion the loop throws
+        // the typed UpstreamRateLimitedException, which RerankStage catches
+        // and DEGRADES on — search keeps serving, per the RDR-188 contract.
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Authorization", "Bearer " + apiKey)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(json))
+                .timeout(REQUEST_TIMEOUT)
+                .build();
+        return retryLoop.send(http, req, deadlineNanos, RERANK_FAILURES);
     }
 
     /**

@@ -1490,13 +1490,29 @@ def _index_document(
     # Incremental sync: skip if file is already indexed with the same hash AND model.
     # nexus-dcym: prefer doc_id-keyed lookup; content_hash fallback when
     # the catalog is absent (RDR-101 Phase 5c — source_path is gone).
+    #
+    # nexus-t952k half 2 (mirrors index_pdf's identical fix): *doc_id* here
+    # is the caller's already-registered tumbler (index_markdown pre-flights
+    # via _register_or_lookup_doc_id before calling this function) — a
+    # failure on THIS read runs after registration but before
+    # ``_fence_begin`` (below, once ``_catalog_doc_id_for_batch`` is
+    # resolved), so it was previously invisible to every fence try/except in
+    # this function. Mark the row 'failed' before re-raising rather than
+    # leaving it looking like an ordinary live document.
     incremental_where = _identity_where(sp, corpus, content_hash=content_hash)
-    existing = _vector_with_retry(
-        col.get,
-        where=incremental_where,
-        include=["metadatas"],
-        limit=1,
-    )
+    try:
+        existing = _vector_with_retry(
+            col.get,
+            where=incremental_where,
+            include=["metadatas"],
+            limit=1,
+        )
+    except Exception as exc:
+        # _fence_fail never raises, so the original exception always
+        # propagates unmasked.
+        if doc_id:
+            _fence_fail(doc_id, str(exc))
+        raise
     if not force and existing["metadatas"]:
         stored_hash = existing["metadatas"][0].get("content_hash", "")
         stored_model = existing["metadatas"][0].get("embedding_model", "")
@@ -2404,13 +2420,32 @@ def index_pdf(
     # Incremental sync: skip if file is already indexed with the same hash AND model.
     # nexus-dcym: prefer doc_id-keyed lookup; content_hash fallback when
     # the catalog is absent (RDR-101 Phase 5c — source_path is gone).
+    #
+    # nexus-t952k half 2: this read runs AFTER the pre-flight registration
+    # above but BEFORE the first possible ``_fence_begin`` (inside whichever
+    # of the streaming/incremental/batch branches below actually runs) — a
+    # window none of index_pdf's existing fence try/except blocks cover.
+    # Measured 2026-09-02 (AgenticScholar, T2 nexus/index-agenticscholar-
+    # paper-2026-09-02): a non-conformant *col_name* refused THIS call with a
+    # 400 after the row was already registered, and the exception propagated
+    # straight out of index_pdf with index_state never touched — the row
+    # then looked like an ordinary live, complete document to
+    # ``nx catalog verify``/doctor. Mark it 'failed' before re-raising,
+    # exactly like the embed/upsert try/except further below does.
     incremental_where = _identity_where(str(pdf_path), corpus, content_hash=content_hash)
-    existing = _vector_with_retry(
-        col.get,
-        where=incremental_where,
-        include=["metadatas"],
-        limit=1,
-    )
+    try:
+        existing = _vector_with_retry(
+            col.get,
+            where=incremental_where,
+            include=["metadatas"],
+            limit=1,
+        )
+    except Exception as exc:
+        # _fence_fail never raises, so the original exception always
+        # propagates unmasked.
+        if doc_id:
+            _fence_fail(doc_id, str(exc))
+        raise
     if not force and existing["metadatas"]:
         stored_hash = existing["metadatas"][0].get("content_hash", "")
         stored_model = existing["metadatas"][0].get("embedding_model", "")
@@ -3008,6 +3043,13 @@ def _catalog_markdown_hook(
             # nexus-tqudo: same cross-owner blind spot as the pre-flight.
             existing = _repo_owner_document_for(reader, md_path)
         if existing is not None:
+            # nexus-t952k half 2: mirror pipeline_stages._catalog_pdf_hook —
+            # a real repoint (old != new, old non-empty so a never-indexed
+            # ghost is excluded per nexus-sz89e) is logged AFTER the write
+            # below, so the claim is only made once the row actually moved
+            # (critique [24114] S1). Origin: the AgenticScholar incident,
+            # T2 nexus/index-agenticscholar-paper-2026-09-02.
+            old_physical_collection = existing.physical_collection
             update_kwargs: dict = dict(
                 physical_collection=collection_name,
                 chunk_count=chunk_count,
@@ -3025,6 +3067,14 @@ def _catalog_markdown_hook(
             if year and not getattr(existing, "year", 0):
                 update_kwargs["year"] = year
             writer.update(existing.tumbler, **update_kwargs)
+            if old_physical_collection and old_physical_collection != collection_name:
+                _log.warning(
+                    "catalog_physical_collection_repointed",
+                    tumbler=str(existing.tumbler),
+                    file_path=fp,
+                    old_collection=old_physical_collection,
+                    new_collection=collection_name,
+                )
         else:
             # nexus-u8n4r: refuse a brand-new registration when ``fp``
             # (absolute when no ``base_path`` was threaded — the shape

@@ -75,6 +75,30 @@ _HEADER_T1_SESSION: str = "X-Nexus-T1-Session"
 #: the coupling end-to-end.
 SESSION_UNAUTHORIZED_MARKER: str = "HttpScratchStore: unauthorized T1 session (HTTP 401)"
 
+#: Appended to SESSION_UNAUTHORIZED_MARKER when the post-401 self-heal was
+#: attempted but found nothing fresher to adopt (no lease, expired, or
+#: unchanged) -- the ADOPTED/DECLINED distinction the owner-death guidance in
+#: ``mcp.core._mcp_tool_error`` branches on (nexus-fe96p: that guidance used
+#: to assert owner death unconditionally, which was measured false when the
+#: heal actually succeeded and the retry failed for an unrelated reason).
+HEAL_DECLINED_SUFFIX: str = "(heal: declined -- no fresher token found)"
+
+#: Appended to SESSION_UNAUTHORIZED_MARKER when the g5hzk SESSION-LEASE heal
+#: (specifically -- the wrwb7 re-mint case carries HEAL_REMINT_SUFFIX) DID
+#: adopt a fresh token and retried, but the retry itself still came back
+#: unauthorized -- a materially different failure than HEAL_DECLINED_SUFFIX:
+#: the token was live at the top of the retry, so the owner/refresh-loop are
+#: not implicated (nexus-fe96p).
+HEAL_ADOPTED_SUFFIX: str = "(heal: adopted a fresh token, retry still unauthorized)"
+
+#: Appended when the g5hzk lease heal DECLINED but the nexus-wrwb7 data-token
+#: re-mint healed the BEARER -- and the retry still came back unauthorized.
+#: Distinct from HEAL_ADOPTED_SUFFIX so the guidance names the mechanism that
+#: actually fired: both reviewers flagged that a shared ``healed`` bool let
+#: the message credit g5hzk for a re-mint heal (the inference-as-fact class
+#: this bead exists to fix, one level down).
+HEAL_REMINT_SUFFIX: str = "(heal: re-minted the data-token bearer, retry still unauthorized)"
+
 
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
@@ -681,6 +705,7 @@ class HttpScratchStore:
                 raise RuntimeError(f"HttpScratchStore: connect failed on retry {path}: {exc}") from exc
         except httpx.HTTPError as exc:
             raise RuntimeError(f"HttpScratchStore: network error on {path}: {exc}") from exc
+        heal_suffix = ""  # nexus-fe96p: only ever set inside the 401 branch below
         if resp.status_code == 401:
             # nexus-cmzib (critic kopmj): an EDGE-authored 401 short-circuits
             # BEFORE the self-heal chain — lease refresh / re-mint cannot fix
@@ -694,15 +719,30 @@ class HttpScratchStore:
             # nexus-g5hzk: the owner rotated the SESSION token; ours went
             # stale. Try that self-heal FIRST (unchanged precedence).
             healed = self._refresh_session_token_from_lease(sent_token)
-            if not healed:
+            if healed:
+                heal_suffix = f" {HEAL_ADOPTED_SUFFIX}"
+            else:
                 # nexus-wrwb7: the session-token refresh didn't resolve it --
                 # if a mint_token credential is configured, the AUTHORIZATION
                 # bearer (a self-minted data token) may be what actually went
-                # stale. Try re-minting before giving up.
+                # stale. Try re-minting before giving up. The suffix records
+                # WHICH mechanism healed (reviewer fold on nexus-fe96p).
                 healed = self._remint_data_token_and_rebuild()
+                heal_suffix = f" {HEAL_REMINT_SUFFIX}" if healed else f" {HEAL_DECLINED_SUFFIX}"
             if healed:
                 try:
-                    resp = self._client.post(path, json=payload)
+                    # nexus-fe96p: resolve the Authorization header FRESH on
+                    # the retry too -- the heal above may have rebuilt the
+                    # client (re-baking self._headers), but self._headers
+                    # only ever carries the Authorization value as of the
+                    # LAST bearer-touching heal/ctor; a since-rotated bearer
+                    # (RDR-005 self-minted data token) is only visible via
+                    # _current_authorization_header(), same as the initial
+                    # request above.
+                    resp = self._client.post(
+                        path, json=payload,
+                        headers={"Authorization": self._current_authorization_header()},
+                    )
                 except httpx.HTTPError as exc:
                     raise RuntimeError(
                         f"HttpScratchStore: network error on token-refresh retry {path}: {exc}"
@@ -713,7 +753,7 @@ class HttpScratchStore:
                 raise RuntimeError(edge)
             if resp.status_code == 401:
                 raise RuntimeError(
-                    f"{SESSION_UNAUTHORIZED_MARKER} on {path}: {resp.text[:200]}"
+                    f"{SESSION_UNAUTHORIZED_MARKER} on {path}{heal_suffix}: {resp.text[:200]}"
                 )
             raise RuntimeError(
                 f"HttpScratchStore: {path} returned HTTP {resp.status_code}: {resp.text[:200]}"
@@ -756,6 +796,7 @@ class HttpScratchStore:
                 raise RuntimeError(f"HttpScratchStore: connect failed on retry {path}: {exc}") from exc
         except httpx.HTTPError as exc:
             raise RuntimeError(f"HttpScratchStore: network error on {path}: {exc}") from exc
+        heal_suffix = ""  # nexus-fe96p: only ever set inside the 401 branch below
         if resp.status_code == 401:
             # nexus-cmzib (critic kopmj): edge-authored 401 short-circuits the
             # heal chain — see _post's matching comment.
@@ -764,13 +805,21 @@ class HttpScratchStore:
                 raise RuntimeError(edge)
             # nexus-g5hzk: rotated SESSION token — try that self-heal first.
             healed = self._refresh_session_token_from_lease(sent_token)
-            if not healed:
+            if healed:
+                heal_suffix = f" {HEAL_ADOPTED_SUFFIX}"
+            else:
                 # nexus-wrwb7: fall back to a data-token re-mint (see _post's
-                # matching comment for the full rationale).
+                # matching comment for the full rationale + suffix split).
                 healed = self._remint_data_token_and_rebuild()
+                heal_suffix = f" {HEAL_REMINT_SUFFIX}" if healed else f" {HEAL_DECLINED_SUFFIX}"
             if healed:
                 try:
-                    resp = self._client.post(path, json=payload)
+                    # nexus-fe96p: see _post's matching comment -- resolve
+                    # the Authorization header FRESH on the retry too.
+                    resp = self._client.post(
+                        path, json=payload,
+                        headers={"Authorization": self._current_authorization_header()},
+                    )
                 except httpx.HTTPError as exc:
                     raise RuntimeError(
                         f"HttpScratchStore: network error on token-refresh retry {path}: {exc}"
@@ -783,7 +832,7 @@ class HttpScratchStore:
                 raise RuntimeError(edge)
             if resp.status_code == 401:
                 raise RuntimeError(
-                    f"{SESSION_UNAUTHORIZED_MARKER} on {path}: {resp.text[:200]}"
+                    f"{SESSION_UNAUTHORIZED_MARKER} on {path}{heal_suffix}: {resp.text[:200]}"
                 )
             raise RuntimeError(
                 f"HttpScratchStore: {path} returned HTTP {resp.status_code}: {resp.text[:200]}"

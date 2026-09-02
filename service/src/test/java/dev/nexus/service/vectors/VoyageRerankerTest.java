@@ -38,8 +38,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *       on 401/403, {@link RerankUpstreamException} otherwise) — NEVER a silent
  *       input-order fallback (the scoring.py:419-468 client anti-pattern this
  *       RDR retires);</li>
- *   <li>429/5xx retried with backoff, max 3 attempts (VoyageEmbedder.callApi
- *       shape); auth and 4xx failures are terminal on the first response;</li>
+ *   <li>retry via the consolidated {@link VoyageRetryLoop} (nexus-1vpal):
+ *       429s budget-bounded with {@code Retry-After} honoured and typed
+ *       {@link UpstreamRateLimitedException} on exhaustion; 5xx retried with
+ *       backoff, max 3 attempts; auth and 4xx failures are terminal on the
+ *       first response;</li>
  *   <li>&gt;1000 docs throws — never silently truncates (R3 API cap);</li>
  *   <li>results ordered by relevance score descending regardless of upstream
  *       order; indices validated against the input document list.</li>
@@ -70,6 +73,9 @@ class VoyageRerankerTest {
             byte[] body = (scripted == null ? "{\"data\": []}" : (String) scripted[1])
                     .getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "application/json");
+            if (scripted != null && scripted.length > 2 && scripted[2] != null) {
+                exchange.getResponseHeaders().set("Retry-After", (String) scripted[2]);
+            }
             exchange.sendResponseHeaders(status, body.length);
             try (OutputStream os = exchange.getResponseBody()) {
                 os.write(body);
@@ -91,6 +97,16 @@ class VoyageRerankerTest {
 
     private void respond(int status, String body) {
         responses.add(new Object[] {status, body});
+    }
+
+    private void respondWithRetryAfter(int status, String body, String retryAfter) {
+        responses.add(new Object[] {status, body, retryAfter});
+    }
+
+    /** nexus-1vpal: injectable 429 budget so fail-fast tests need no wall clock. */
+    private VoyageReranker rerankerWithBudget(long budgetMs) {
+        return new VoyageReranker("test-key", "rerank-2.5", url, 10L, Optional.empty(),
+                                  new java.util.Random(), budgetMs);
     }
 
     private static String dataBody(String entries) {
@@ -216,6 +232,81 @@ class VoyageRerankerTest {
                 .isInstanceOf(RerankUpstreamException.class)
                 .hasMessageContaining("500");
         assertThat(requestBodies).hasSize(3);
+    }
+
+    // ── nexus-1vpal: budget-bounded 429s + Retry-After (99r7y semantics) ─────
+
+    @Test
+    void sustained429IsBudgetBoundedNotAttemptBoundedAndTyped() {
+        // Rerank storms share the account-wide Voyage RPM ceiling with the
+        // embed paths (the 2026-08-15 incident class). Old behavior burned 3
+        // attempts and threw the generic RerankUpstreamException; new
+        // behavior keeps absorbing 429s past 3 attempts while the budget
+        // lasts, then fails TYPED so RerankStage degrades with the
+        // retry-after in the reason.
+        for (int i = 0; i < 200; i++) respond(429, "{\"detail\": \"rate limited\"}");
+
+        assertThatThrownBy(() -> rerankerWithBudget(2_500L).rerank("q", List.of("a"), null))
+                .isInstanceOf(UpstreamRateLimitedException.class);
+        assertThat(requestBodies.size())
+                .as("429s must be budget-bounded, not capped at 3 attempts")
+                .isGreaterThan(3);
+    }
+
+    @Test
+    void retryAfterExceedingBudgetFailsFastTypedAfterOneRequest() {
+        respondWithRetryAfter(429, "{\"detail\": \"rate limited\"}", "60");
+
+        long start = System.nanoTime();
+        assertThatThrownBy(() -> rerankerWithBudget(500L).rerank("q", List.of("a"), null))
+                .isInstanceOf(UpstreamRateLimitedException.class)
+                .satisfies(e -> assertThat(
+                        ((UpstreamRateLimitedException) e).retryAfterSeconds())
+                        .isEqualTo(60L));
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
+        assertThat(elapsedMs)
+                .as("fail-fast must not sleep out the advertised Retry-After")
+                .isLessThan(5_000L);
+        assertThat(requestBodies).hasSize(1);
+    }
+
+    @Test
+    void retryAfterWithinBudgetIsHonouredThenSucceeds() {
+        // Retry-After: 1 fits the production 2.5s rerank budget — the sleep
+        // must respect the header (>= ~1s, not the ~10ms jitter base), then
+        // the retry succeeds. This is the brief-blip case the small budget
+        // is sized to absorb rather than degrade.
+        respondWithRetryAfter(429, "{\"detail\": \"rate limited\"}", "1");
+        respond(200, dataBody("{\"index\": 0, \"relevance_score\": 0.5}"));
+
+        long start = System.nanoTime();
+        List<Reranker.Scored> out = reranker().rerank("q", List.of("a"), null);
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
+
+        assertThat(out).containsExactly(new Reranker.Scored(0, 0.5));
+        assertThat(elapsedMs).isGreaterThanOrEqualTo(900L);
+        assertThat(requestBodies).hasSize(2);
+    }
+
+    @Test
+    void retryAfterTwoSecondsAtProductionBudgetDegradesImmediatelyByDesign() {
+        // Critic finding 1 (2026-08-31), pinned DELIBERATELY: at the rerank
+        // path's 2.5s budget, MIN_CALL_ALLOWANCE (1s) means Retry-After: 2
+        // (2000 + 1000 > 2500) fails typed on the FIRST 429 — zero retries,
+        // fewer than the old 3-attempt loop made. That is the intended
+        // boundary, not an accident: Voyage explicitly asking for a 2s wait
+        // inside an interactive fused search stage IS the degrade-now case,
+        // and retrying before an explicit Retry-After elapses is the herd
+        // behavior the header exists to stop. Retry-After: 1 remains the
+        // absorbed-blip case (retryAfterWithinBudgetIsHonouredThenSucceeds).
+        respondWithRetryAfter(429, "{\"detail\": \"rate limited\"}", "2");
+
+        assertThatThrownBy(() -> reranker().rerank("q", List.of("a"), null))
+                .isInstanceOf(UpstreamRateLimitedException.class)
+                .satisfies(e -> assertThat(
+                        ((UpstreamRateLimitedException) e).retryAfterSeconds())
+                        .isEqualTo(2L));
+        assertThat(requestBodies).hasSize(1);
     }
 
     @Test

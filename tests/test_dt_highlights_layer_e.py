@@ -160,6 +160,11 @@ def test_index_highlights_flag_routes_and_summarizes(runner, fake_gather, monkey
     from nexus.cli import main
 
     fake_gather.append(("U1", "/a.pdf"))
+    # nexus-fdk1x: index_cmd probes DT reachability once up front when
+    # --highlights is set; force it on so this CLI-wiring test keeps
+    # exercising the stubbed _ingest_highlights_record below rather than
+    # tripping the new "DEVONthink MCP unreachable" exit-2 path.
+    monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **kw: True)
     monkeypatch.setattr("nexus.commands.dt._index_record",
                         lambda uuid, path, *, collection, corpus, dry_run, extractor="auto": (True, 1))
     calls: list[str] = []

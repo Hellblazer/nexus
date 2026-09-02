@@ -1,0 +1,14 @@
+# A decision-table row with no guard at all: the group has zero
+# participating dimensions, which is a blocking unprovable-coverage
+# (reason=no-participating-dimension) for a decision table.
+[table]
+id = "no-dims"
+kind = "decision-table"
+
+[dimensions.decision]
+domain = ["decide"]
+
+[[row]]
+id = "r1"
+match = { decision = "decide" }
+emit = { verdict = "ok" }

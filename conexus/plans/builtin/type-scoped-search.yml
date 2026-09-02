@@ -1,13 +1,8 @@
 name: type-scoped-search
 description: >-
-  Search within a single content type (code, paper, rdr, knowledge).
-  Routes through the combined metadata-scoped query (RDR-156 P4): one
-  statement joins the vector chunks to the catalog and filters by content
-  type, ranks the matches semantically, and summarises the findings.
-  Useful when the caller knows the artefact kind (for example, "search code
-  for X" or "search RDRs for Y") but not the specific document, and wants
-  the answer scoped narrowly enough that unrelated corpora do not dilute the
-  ranking.
+  Search only one content type: just the code, just the paper collection, or just the
+  RDRs. Find code files about a subject. Search the RDRs alone for a topic. Restrict the
+  search to a single content type.
 dimensions:
   verb: research
   scope: global

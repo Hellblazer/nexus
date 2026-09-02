@@ -96,6 +96,7 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
 - **Never `git add -A` or `git add .`.** Stage by explicit path so untracked drafts don't sneak in.
 - **Never include AI attribution in commits.** No "Generated with Claude", no `Co-Authored-By: Claude`. Bead references and `Closes #N` only.
 - **Never delete RDR files.** Closing an RDR is a frontmatter `status: closed` flip — the file stays. See [`docs/rdr/AGENTS.md`](docs/rdr/AGENTS.md).
+- **Closed vocabularies (RDR status, and future ones) are CHECKED TABLES, not prose — see [`docs/rdr/AGENTS.md`](docs/rdr/AGENTS.md) § RDR lifecycle for the full story.** `src/nexus/tables/` (packaged, checked at load time); `docs/tables/` for repo-only tables (the release-choreography table both release gates resolve).
 - **Always use full MCP tool names.** `mcp__plugin_<plugin>_<server>__<tool>`. Short names fail at runtime.
 - **`expectations_*` is a SOURCED SHELL LIB, not a tool and not an `nx` verb.** The RDR-184 background-teammate ledger (`expectations_expect` / `expectations_census` / `expectations_undeclared`) is bash. Searching the MCP tool registry for it returns nothing **by design**, and `nx expectations` / `nx orchestration` / `nx guard` do not exist (nexus-3ra9h).
   ```bash

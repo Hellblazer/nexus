@@ -615,7 +615,9 @@ def test_dual_population_baseline_locked():
     # in enrich.py; back to 24 -- hygiene-001 (nexus-tk070.p6a follow-on)
     # RETIRED both: document_aspects.doc_id NOT NULL means an aspect row
     # without a live document can no longer exist, so the census/sweep
-    # have nothing left to count).
+    # have nothing left to count); 25 since RDR-201 P1.4 (nexus-j9z30.4):
+    # `nx rdr set-status` reads the accept gate from T2, a second
+    # short-lived construction in commands/rdr.py beside the preamble's).
     assert result.t2database_constructions == sum(
         T2DATABASE_CONSTRUCTION_ALLOWLIST.values()
     ), (
@@ -623,7 +625,7 @@ def test_dual_population_baseline_locked():
         f"{result.t2database_constructions} != allowlist sum "
         f"{sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values())}"
     )
-    assert sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values()) == 24
+    assert sum(T2DATABASE_CONSTRUCTION_ALLOWLIST.values()) == 25
 
 
 def test_named_allowlists_point_at_live_files():

@@ -48,8 +48,10 @@ __all__ = [
     "BUNDLED_INTERMEDIATE",
     "DEFERRED_REF_KEY",
     "MAX_BUNDLE_PROMPT_CHARS",
+    "MAX_CONTINUATION_PROMPT_CHARS",
     "is_operator_tool",
     "segment_steps",
+    "resolve_dispatch_segments",
     "compose_bundle_prompt",
     "dispatch_bundle",
 ]
@@ -74,6 +76,23 @@ DEFERRED_REF_KEY: str = "__nexus_deferred_step_ref__"
 MAX_BUNDLE_PROMPT_CHARS: int = 200_000
 
 
+#: RDR-200 §Size discipline (nexus-4e75w.4, R3). A separate, SMALLER cap
+#: than :data:`MAX_BUNDLE_PROMPT_CHARS` for the continuation-mode
+#: envelope's ``reduction_spec.prompt``. ``MAX_BUNDLE_PROMPT_CHARS`` is
+#: sized for a dedicated ``claude -p`` subprocess; a continuation prompt
+#: instead lands in the CALLING session's own working context, alongside
+#: whatever else that session is already holding — a materially smaller
+#: budget. 60,000 chars (~15k tokens) is an explicit STARTING VALUE with
+#: NO measurement behind it yet; RDR-200 Phase 1's measured fallback rate
+#: is what tunes it. On breach the continuation envelope is not built for
+#: that call and the caller falls back to the headless path for the whole
+#: answer — the same "no silent truncation of evidence" contract
+#: ``bundle_oversized_fallback_to_per_step`` already established, applied
+#: at the coarser (whole-reduction, not per-step) granularity a
+#: continuation cut operates at.
+MAX_CONTINUATION_PROMPT_CHARS: int = 60_000
+
+
 #: Operators eligible for bundling into a single ``claude -p`` subprocess
 #: (substantive-critic Obs A). An operator may be added here only when:
 #:
@@ -88,9 +107,9 @@ MAX_BUNDLE_PROMPT_CHARS: int = 200_000
 #:    Don't bundle an operator whose failure must be retried in
 #:    isolation.
 #:
-#: Today the eight AgenticScholar operators (extract / rank / compare /
-#: summarize / generate / filter / check / verify) all satisfy (1),
-#: (2), and (3). Bare and resolved forms are both accepted because
+#: Today all ten operators (extract / rank / compare / summarize /
+#: generate / filter / check / verify / groupby / aggregate) satisfy
+#: (1), (2), and (3). Bare and resolved forms are both accepted because
 #: plan YAMLs use either.
 BUNDLEABLE_OPERATORS: frozenset[str] = frozenset({
     "extract", "rank", "compare", "summarize", "generate",
@@ -242,6 +261,48 @@ def segment_steps(steps: list[dict[str, Any]]) -> list[Segment]:
             segments.append(IsolatedStep(plan_index=i, step=step))
     _flush()
     return segments
+
+
+def resolve_dispatch_segments(
+    steps: list[dict[str, Any]],
+    *,
+    bundle_operators: bool = True,
+    supports_bundling: bool = True,
+) -> list[Segment]:
+    """Return the :class:`Segment` list AS THE RUNNER WOULD ACTUALLY DISPATCH IT.
+
+    ``segment_steps`` is purely structural — it always fuses a contiguous
+    run of ≥2 operator steps into one :class:`OperatorBundleSlice`,
+    regardless of whether bundling is actually engaged for this run.
+    ``plan_run`` additionally gates that fusion on its own
+    ``use_bundle_path`` predicate (``bundle_operators and
+    getattr(dispatcher, _SUPPORTS_BUNDLING_ATTR, False)``) and, when the
+    gate is closed, flattens every ``OperatorBundleSlice`` back into
+    per-step :class:`IsolatedStep` entries so each operator dispatches in
+    isolation — one ``claude -p`` per step instead of one for the whole
+    run.
+
+    This function performs exactly that same two-stage resolution
+    (segment, then gate-and-flatten) so any caller that needs the REAL
+    dispatch shape — not just the structural segmentation — reads it
+    from one place. ``plan_run`` itself calls this (see its own
+    ``use_bundle_path`` handling); RDR-200's continuation cut classifier
+    (:mod:`nexus.plans.continuation`) is the second caller, added so its
+    shape classification can never drift from what the runner actually
+    does (nexus-4e75w.3 audit round-2 residual).
+    """
+    segments = segment_steps(steps)
+    use_bundle_path = bundle_operators and supports_bundling
+    if use_bundle_path:
+        return segments
+    flat: list[Segment] = []
+    for seg in segments:
+        if isinstance(seg, OperatorBundleSlice):
+            for pi in seg.plan_indices:
+                flat.append(IsolatedStep(plan_index=pi, step=steps[pi]))
+        else:
+            flat.append(seg)
+    return flat
 
 
 # ── Prompt composition ────────────────────────────────────────────────────────

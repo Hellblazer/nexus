@@ -23,9 +23,23 @@ import inspect
 from importlib.metadata import version as _pkg_version
 
 import pytest
+from structlog.testing import capture_logs
 
 from nexus import _mineru_spawn
 from nexus.config import _read_live_mineru_port as _live_port
+
+
+@pytest.fixture(autouse=True)
+def _reset_mineru_skew_warned_dedup():
+    """nexus-eti1v: the skew-warning dedup set is process-global by design
+    (once per process, not once per call) — reset it around every test in
+    this module so one test's skew doesn't silently suppress another
+    test's warning assertion."""
+    from nexus import config as _config_mod
+
+    _config_mod._mineru_skew_warned.clear()
+    yield
+    _config_mod._mineru_skew_warned.clear()
 
 
 # ── _read_live_mineru_port ───────────────────────────────────────────
@@ -306,13 +320,112 @@ def test_matching_version_is_adopted(tmp_path: Path, monkeypatch) -> None:
 def test_skewed_version_is_REFUSED(tmp_path: Path, monkeypatch) -> None:
     """The whole point: a server running a different mineru must not be used.
 
-    Refusing returns None, so resolution falls through to the default and a
-    matching server gets spawned — rather than silently extracting through a
-    version this environment does not pin.
+    Refusing returns None at the port level. What resolution does with
+    that refusal is ``get_mineru_server_url``'s call — see the
+    nexus-eti1v block below: on a KNOWN skew it returns its own sentinel
+    (``None``) rather than falling through to the default port, because
+    the registered pid already holds this box's only local server and
+    nothing else is going to answer at :8010.
     """
     _pidfile(tmp_path, monkeypatch,
              mineru_version="0.0.0-not-ours", python="/other/python")
     assert _live_port() is None
+
+
+# ── nexus-eti1v: a KNOWN skew must short-circuit, not dial-then-wait ─────────
+#
+# Measured 2026-09-02 on one 54-page PDF: the skew warning above fired 63
+# times (once per health poll), the client then dialled the hardcoded
+# default :8010 (refused), "rediscovered" the same :8010, waited the full
+# mineru_ensure_health_timeout (120s), then fell back to subprocess — ~2.5
+# minutes spent on a server it had already decided not to use.
+
+
+def test_url_returns_sentinel_on_known_skew(tmp_path: Path, monkeypatch) -> None:
+    """On a KNOWN skew, get_mineru_server_url must return the sentinel
+    (None), never the built-in default — a refused server must not be
+    'rediscovered' as itself."""
+    _pidfile(tmp_path, monkeypatch,
+             mineru_version="0.0.0-not-ours-eti1v-1", python="/other/python")
+    with patch(
+        "nexus.config.get_pdf_config",
+        return_value=type("X", (), {
+            "mineru_server_url": "http://127.0.0.1:8010",
+        })(),
+    ):
+        from nexus.config import get_mineru_server_url
+        assert get_mineru_server_url() is None
+
+
+def test_url_explicit_config_still_wins_over_skew(tmp_path: Path, monkeypatch) -> None:
+    """RDR-148 Gap 1 precedence is unchanged by nexus-eti1v: an explicit,
+    non-default operator URL wins outright, even over a skewed local
+    server — the skew short-circuit only applies on the default-config
+    path (the pid-file path this operator has explicitly stepped
+    around)."""
+    _pidfile(tmp_path, monkeypatch,
+             mineru_version="0.0.0-not-ours-eti1v-2", python="/other/python")
+    with patch(
+        "nexus.config.get_pdf_config",
+        return_value=type("X", (), {
+            "mineru_server_url": "http://mineru.internal:9999",
+        })(),
+    ):
+        from nexus.config import get_mineru_server_url
+        assert get_mineru_server_url() == "http://mineru.internal:9999"
+
+
+def test_skew_warning_logged_once_across_repeated_calls(tmp_path: Path, monkeypatch) -> None:
+    """The measured defect: 63 identical warnings for one document, one
+    per ~2s health poll. The warning fires once per process for the same
+    (recorded, ours, pid) triple, not once per call."""
+    _pidfile(tmp_path, monkeypatch,
+             mineru_version="0.0.0-not-ours-eti1v-3", python="/other/python")
+    with patch(
+        "nexus.config.get_pdf_config",
+        return_value=type("X", (), {
+            "mineru_server_url": "http://127.0.0.1:8010",
+        })(),
+    ):
+        from nexus.config import get_mineru_server_url
+
+        with capture_logs() as logs:
+            for _ in range(5):
+                assert get_mineru_server_url() is None
+
+    skew_events = [e for e in logs if e.get("event") == "mineru_server_version_skew"]
+    assert len(skew_events) == 1, (
+        f"expected exactly one mineru_server_version_skew warning across "
+        f"5 identical calls, got {len(skew_events)}: {skew_events}"
+    )
+
+
+def test_get_mineru_skew_info_reports_both_versions(tmp_path: Path, monkeypatch) -> None:
+    """The extractor's own fallback log needs both versions, the pid, and
+    the port to be actionable — get_mineru_skew_info is that seam."""
+    ours = _pkg_version("mineru")
+    _pidfile(tmp_path, monkeypatch,
+             mineru_version="0.0.0-not-ours-eti1v-4", python="/other/python")
+    from nexus.config import get_mineru_skew_info
+    skew = get_mineru_skew_info()
+    assert skew is not None
+    assert skew.registered_version == "0.0.0-not-ours-eti1v-4"
+    assert skew.our_version == ours
+    assert skew.pid == os.getpid()
+    assert skew.port == 49353
+
+
+def test_get_mineru_skew_info_none_when_versions_match(tmp_path: Path, monkeypatch) -> None:
+    _pidfile(tmp_path, monkeypatch,
+             mineru_version=_pkg_version("mineru"), python="/some/python")
+    from nexus.config import get_mineru_skew_info
+    assert get_mineru_skew_info() is None
+
+
+def test_get_mineru_skew_info_none_when_no_pid_file(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    from nexus.config import get_mineru_skew_info
+    assert get_mineru_skew_info() is None
 
 
 def test_legacy_pidfile_without_the_field_still_works(

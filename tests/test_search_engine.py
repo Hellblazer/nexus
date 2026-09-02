@@ -11,7 +11,12 @@ from nexus.scoring import (
     min_max_normalize,
     round_robin_interleave,
 )
-from nexus.search_engine import _attach_display_paths, apply_ranking_boosts, search_cross_corpus
+from nexus.search_engine import (
+    _attach_display_paths,
+    apply_file_diversity_cap,
+    apply_ranking_boosts,
+    search_cross_corpus,
+)
 from nexus.types import SearchResult
 
 
@@ -1474,3 +1479,106 @@ class TestApplyRankingBoosts:
         ]
         out = apply_ranking_boosts(results, hybrid=True)
         assert out[0].hybrid_score == pytest.approx(0.3)
+
+
+# ── apply_file_diversity_cap (RDR-006 supersession, nexus-0bmhd) ────────────
+#
+# Domination control moves from scoring (RDR-006's relevance-blind
+# chunk-count penalty, removed at nexus-0bmhd — see test_scoring.py and
+# test_hybrid_boost.py) to this render-layer, non-destructive reordering.
+
+
+class TestApplyFileDiversityCap:
+    def _r(self, *, id: str, doc_id: str | None = None,
+           source_path: str | None = None, file_path: str | None = None,
+           dist: float = 0.1) -> SearchResult:
+        meta: dict = {}
+        if doc_id is not None:
+            meta["doc_id"] = doc_id
+        if source_path is not None:
+            meta["source_path"] = source_path
+        if file_path is not None:
+            meta["file_path"] = file_path
+        return SearchResult(id=id, content="x", distance=dist,
+                             collection="code__r", metadata=meta)
+
+    def test_empty_results_is_noop(self):
+        assert apply_file_diversity_cap([]) == []
+
+    def test_max_per_file_zero_is_noop(self):
+        results = [self._r(id="1", doc_id="a"), self._r(id="2", doc_id="a")]
+        out = apply_file_diversity_cap(results, max_per_file=0)
+        assert out == results
+
+    def test_caps_by_doc_id(self):
+        results = [self._r(id=str(i), doc_id="a") for i in range(4)]
+        out = apply_file_diversity_cap(results, max_per_file=2)
+        # first 2 occurrences kept in place; the rest pushed to the tail.
+        assert [r.id for r in out] == ["0", "1", "2", "3"]
+
+    def test_falls_back_to_source_path_when_no_doc_id(self):
+        results = [self._r(id=str(i), source_path="a.py") for i in range(3)]
+        out = apply_file_diversity_cap(results, max_per_file=2)
+        # 3rd occurrence (no doc_id, same source_path) is overflow -> tail.
+        assert [r.id for r in out] == ["0", "1", "2"]
+
+    def test_falls_back_to_file_path_when_no_doc_id_or_source_path(self):
+        results = [self._r(id=str(i), file_path="a.py") for i in range(3)]
+        out = apply_file_diversity_cap(results, max_per_file=2)
+        assert [r.id for r in out] == ["0", "1", "2"]
+        assert out[-1].id == "2"  # 3rd occurrence pushed to the tail
+
+    def test_no_file_identity_never_caps_against_each_other(self):
+        """Results with no doc_id/source_path/file_path fall back to
+        their own ``r.id`` — distinct ids never share a bucket, so
+        max_per_file never fires across them."""
+        results = [self._r(id=str(i)) for i in range(5)]
+        out = apply_file_diversity_cap(results, max_per_file=2)
+        assert [r.id for r in out] == [str(i) for i in range(5)]
+
+    def test_kept_and_overflow_each_preserve_relative_order(self):
+        results = [
+            self._r(id="a1", doc_id="a"), self._r(id="b1", doc_id="b"),
+            self._r(id="a2", doc_id="a"), self._r(id="a3", doc_id="a"),
+            self._r(id="b2", doc_id="b"),
+        ]
+        out = apply_file_diversity_cap(results, max_per_file=1)
+        # kept: first occurrence of each file, in original order (a1, b1).
+        # overflow: everything past the cap, in original relative order
+        # (a2, a3, b2).
+        assert [r.id for r in out] == ["a1", "b1", "a2", "a3", "b2"]
+
+    def test_does_not_mutate_input_list(self):
+        results = [self._r(id=str(i), doc_id="a") for i in range(3)]
+        original = list(results)
+        apply_file_diversity_cap(results, max_per_file=1)
+        assert results == original
+
+    def test_returns_new_list(self):
+        results = [self._r(id="1", doc_id="a")]
+        out = apply_file_diversity_cap(results, max_per_file=1)
+        assert out is not results
+
+    def test_mandatory_domination_check(self):
+        """8 strong chunks from ONE dominant file, objectively better
+        distance than 10 other distinct single-chunk files: after the
+        cap, a 10-slot page must hold exactly 2 chunks from the
+        dominant file and >= 9 distinct files. (A draft with fewer than
+        10 other files legitimately fails this: there would not be
+        enough distinct files to fill the page without falling back to
+        the dominant file's own overflow — the point of this test is
+        that with ENOUGH other candidates, the cap actually bites.)
+        """
+        dominant = [self._r(id=f"dom{i}", doc_id="dom", dist=0.01 * i)
+                    for i in range(8)]
+        others = [self._r(id=f"other{i}", doc_id=f"other{i}", dist=0.5 + 0.01 * i)
+                  for i in range(10)]
+        ordered = dominant + others  # dominant chunks rank first (best distance)
+
+        out = apply_file_diversity_cap(ordered, max_per_file=2)
+        page = out[:10]
+
+        dom_count = sum(1 for r in page if r.metadata.get("doc_id") == "dom")
+        distinct_files = {r.metadata.get("doc_id") for r in page}
+        assert dom_count == 2, f"expected exactly 2 dominant-file chunks in the page, got {dom_count}"
+        assert len(distinct_files) >= 9, f"expected >= 9 distinct files in the page, got {len(distinct_files)}"

@@ -1,0 +1,358 @@
+{
+  "check_client_lag_ledger::ledger_acked": {
+    "err": "",
+    "out": "client-lag ledger: 1 unshipped both-halves commit(s), all explicitly acknowledged via --ack-client-lag: nexus-fake3\n"
+  },
+  "check_client_lag_ledger::ledger_additive_authorized": {
+    "err": "",
+    "out": "client-lag ledger: 1 unacknowledged unshipped both-halves commit(s), all marked [additive] (old client + new engine safe) \u2014 deploy authorized ahead of the client tag (nexus-1emxn choreography (a)); pairing completes when the client release carrying nexus-fake2 bumps the floor.\n"
+  },
+  "check_client_lag_ledger::ledger_blocked": {
+    "err": "PAIRED DEPLOY BLOCKED: 1 both-halves commit(s) in <LEDGER_PATH> have an unshipped client half, no [additive] direction-safety token, and no acknowledgment:\n  deadbeef1  bead nexus-fake1  engine tag engine-service-v9.9.9  (blocking, no token)\n\nThis engine tag cannot deploy without an explicit paired-client acknowledgment (nexus-1vogq). Either pair this deploy with the client release carrying the listed commit(s), or pass --ack-client-lag <bead-id> for each entry above to deploy anyway.\n",
+    "out": ""
+  },
+  "check_client_lag_ledger::ledger_clean": {
+    "err": "",
+    "out": "client-lag ledger clean: 0 unshipped both-halves commits in <LEDGER_PATH>\n"
+  },
+  "check_composite::composite_both_vacuous": {
+    "err": "",
+    "out": "wire-contract ledger: 0 unshipped entries in <LEDGER_PATH>\nOK (VACUOUS -- 0 preconditions registered for engine-service-vTEST AND 0 entries in <LEDGER_PATH>'s ## Unshipped section): this run verified NOTHING from EITHER source. An empty hand table plus an empty ledger means either 'no known client coupling for this engine tag' or 'nobody added rows to either source' -- this script cannot tell the two apart. See ENGINE_CLIENT_PRECONDITIONS's module docstring before treating this as evidence the deploy is safe.\n"
+  },
+  "check_composite::composite_is_ancestor_error": {
+    "err": "CANNOT VERIFY deadbeef: simulated\n",
+    "out": ""
+  },
+  "check_composite::composite_latest_release_tag_error": {
+    "err": "CANNOT VERIFY: simulated\n",
+    "out": ""
+  },
+  "check_composite::composite_missing_commit": {
+    "err": "\nBLOCKED: engine-service-vTEST must not deploy \u2014 1 required client commit(s) absent from the latest release v0.0.1:\n  deadbeef: test\n\nRemedy: this blocks the DEPLOY only \u2014 the engine tag cuts whenever the tree is green (a tag gates delivery, not work; Hal directive 2026-08-02). Pair the deploy with the conexus release that carries the listed commit(s) AND bumps the floor to this tag: deploy fires at client-tag push, in parallel with the PyPI publish (AGENTS.md \u00a7 Engine-service release, paired-release choreography). Then re-run this check.\n",
+    "out": "  deadbeef  MISSING FROM v0.0.1  (test...)\n"
+  },
+  "check_composite::composite_table_satisfied_ledger_acked": {
+    "err": "",
+    "out": "  deadbeef  in v0.0.1  (test...)\nOK: all client preconditions for engine-service-vTEST are in v0.0.1\nwire-contract ledger: 1 unshipped both-halves commit(s), all explicitly acknowledged via --ack-client-lag: nexus-fake3\n"
+  },
+  "check_composite::composite_table_satisfied_ledger_additive": {
+    "err": "",
+    "out": "  deadbeef  in v0.0.1  (test...)\nOK: all client preconditions for engine-service-vTEST are in v0.0.1\nwire-contract ledger: 1 unacknowledged unshipped both-halves commit(s), all marked [additive] (old client + new engine safe) \u2014 unpaired deploy authorized ahead of the client tag (nexus-1emxn choreography (a)); pairing completes when the client release carrying nexus-fake2 bumps the floor.\n"
+  },
+  "check_composite::composite_table_satisfied_ledger_blocks": {
+    "err": "BLOCKED: 1 both-halves commit(s) in <LEDGER_PATH> have an unshipped client half, no [additive] direction-safety token, and no acknowledgment:\n  deadbeef1  bead nexus-fake1  engine tag engine-service-v9.9.9  (blocking, no token)\n\nRemedy: this engine deploy carries an engine-side wire change (docs/wire-contract-pending.md ## Unshipped) whose client half is not yet in a published release (nexus-1vogq class -- the 08-13 v0.1.73 manifest-400 outage shape). Either pair this deploy with the client release carrying the listed commit(s) (see AGENTS.md \u00a7 Engine-service release, paired-release choreography), or pass --ack-client-lag <bead-id> for each entry below to deploy anyway.\n",
+    "out": "  deadbeef  in v0.0.1  (test...)\nOK: all client preconditions for engine-service-vTEST are in v0.0.1\n"
+  },
+  "check_composite::composite_table_satisfied_ledger_empty": {
+    "err": "",
+    "out": "  deadbeef  in v0.0.1  (test...)\nOK: all client preconditions for engine-service-vTEST are in v0.0.1\nwire-contract ledger: 0 unshipped entries in <LEDGER_PATH>\n"
+  },
+  "check_composite::composite_vacuous_table_ledger_acked": {
+    "err": "",
+    "out": "wire-contract ledger: 1 unshipped both-halves commit(s), all explicitly acknowledged via --ack-client-lag: nexus-fake3\n"
+  },
+  "check_composite::composite_vacuous_table_ledger_additive": {
+    "err": "",
+    "out": "wire-contract ledger: 1 unacknowledged unshipped both-halves commit(s), all marked [additive] (old client + new engine safe) \u2014 unpaired deploy authorized ahead of the client tag (nexus-1emxn choreography (a)); pairing completes when the client release carrying nexus-fake2 bumps the floor.\n"
+  },
+  "check_composite::composite_vacuous_table_ledger_blocks": {
+    "err": "BLOCKED: 1 both-halves commit(s) in <LEDGER_PATH> have an unshipped client half, no [additive] direction-safety token, and no acknowledgment:\n  deadbeef1  bead nexus-fake1  engine tag engine-service-v9.9.9  (blocking, no token)\n\nRemedy: this engine deploy carries an engine-side wire change (docs/wire-contract-pending.md ## Unshipped) whose client half is not yet in a published release (nexus-1vogq class -- the 08-13 v0.1.73 manifest-400 outage shape). Either pair this deploy with the client release carrying the listed commit(s) (see AGENTS.md \u00a7 Engine-service release, paired-release choreography), or pass --ack-client-lag <bead-id> for each entry below to deploy anyway.\n",
+    "out": ""
+  },
+  "check_floor_auto_paired::auto_below_via_exception_ack": {
+    "err": "",
+    "out": "client-lag ledger clean: 0 unshipped both-halves commits in <LEDGER_PATH>\npaired mode ARMED: engine-service-v<FLOOR> verified published, pinned to REQUIRED_ENGINE_VERSION, newest published engine tag, and 1.0h old (within the 72.0h window).\nPAIRED MODE: cloud reports release_version '<FLOOR-1>', behind floor v<FLOOR>. Expected pre-deploy under the paired-release choreography -- the deploy fires at client-tag push (AGENTS.md \u00a7 Cutting a release, step 0), not before this tag exists. Pairing AUTO-derived from REQUIRED_ENGINE_VERSION (--paired-deploy-auto, nexus-gc9ir) -- no explicit --paired-deploy given.\nPOST-TAG VERIFY REQUIRED: re-run this script WITHOUT --paired-deploy once the deploy lands, to confirm the cloud engine actually converged -- escalate loudly (never silently re-accept) if it is still behind at that point.\n"
+  },
+  "check_floor_auto_paired::auto_below_via_exception_battery_blocks": {
+    "err": "PAIRED DEPLOY BLOCKED: 1 both-halves commit(s) in <LEDGER_PATH> have an unshipped client half, no [additive] direction-safety token, and no acknowledgment:\n  deadbeef1  bead nexus-fake1  engine tag engine-service-v9.9.9  (blocking, no token)\n\nThis engine tag cannot deploy without an explicit paired-client acknowledgment (nexus-1vogq). Either pair this deploy with the client release carrying the listed commit(s), or pass --ack-client-lag <bead-id> for each entry above to deploy anyway.\n",
+    "out": ""
+  },
+  "check_floor_auto_paired::auto_below_via_success_ack": {
+    "err": "",
+    "out": "client-lag ledger clean: 0 unshipped both-halves commits in <LEDGER_PATH>\npaired mode ARMED: engine-service-v<FLOOR> verified published, pinned to REQUIRED_ENGINE_VERSION, newest published engine tag, and 1.0h old (within the 72.0h window).\nPAIRED MODE: cloud reports release_version '<FLOOR-1>', behind floor v<FLOOR>. Expected pre-deploy under the paired-release choreography -- the deploy fires at client-tag push (AGENTS.md \u00a7 Cutting a release, step 0), not before this tag exists. Pairing AUTO-derived from REQUIRED_ENGINE_VERSION (--paired-deploy-auto, nexus-gc9ir) -- no explicit --paired-deploy given.\nPOST-TAG VERIFY REQUIRED: re-run this script WITHOUT --paired-deploy once the deploy lands, to confirm the cloud engine actually converged -- escalate loudly (never silently re-accept) if it is still behind at that point.\n"
+  },
+  "check_floor_auto_paired::auto_below_via_success_battery_blocks": {
+    "err": "PAIRED DEPLOY BLOCKED: 1 both-halves commit(s) in <LEDGER_PATH> have an unshipped client half, no [additive] direction-safety token, and no acknowledgment:\n  deadbeef1  bead nexus-fake1  engine tag engine-service-v9.9.9  (blocking, no token)\n\nThis engine tag cannot deploy without an explicit paired-client acknowledgment (nexus-1vogq). Either pair this deploy with the client release carrying the listed commit(s), or pass --ack-client-lag <bead-id> for each entry above to deploy anyway.\n",
+    "out": ""
+  },
+  "check_floor_auto_paired::auto_current": {
+    "err": "",
+    "out": "engine pin is current: REQUIRED_ENGINE_VERSION v<FLOOR> == newest published tag\ncloud engine is current: https://example.test release_version=<FLOOR+1> (floor v<FLOOR>)\n"
+  },
+  "check_floor_auto_paired::auto_current_pin_blocks": {
+    "err": "ENGINE PIN CHECK FAILED: could not read engine-service tags from git. Cannot verify that every gated engine tag is pinned -- treat as a failed gate, not a pass. In CI, actions/checkout needs `fetch-tags: true`.\n",
+    "out": ""
+  },
+  "check_floor_auto_paired::auto_probe_unreachable": {
+    "err": "ENGINE FLOOR CHECK FAILED: managed service at https://example.test is unreachable (simulated: unreachable). Cannot verify the cloud engine version -- treat this as a failed gate, not a pass.\n",
+    "out": ""
+  },
+  "check_floor_auto_paired::auto_probe_unverifiable_exception": {
+    "err": "ENGINE FLOOR CHECK UNVERIFIABLE (required v<FLOOR>): managed service at https://example.test probe failed without a genuine below-floor version reading (simulated: endpoint error). Paired mode only ever accepts a GENUINE, parseable below-floor version report as 'deploy pending' -- an endpoint error or a malformed/unparseable response is never folded into that acceptance, paired or not. Treat as a failed gate, not a pass.\n",
+    "out": ""
+  },
+  "check_floor_auto_paired::auto_probe_unverifiable_success": {
+    "err": "ENGINE FLOOR CHECK UNVERIFIABLE (required v<FLOOR>): managed service at https://example.test reported an unparseable release_version 'not-a-version'. Paired mode only ever accepts a GENUINE, parseable below-floor version report as 'deploy pending' -- an endpoint error or a malformed/unparseable response is never folded into that acceptance, paired or not. Treat as a failed gate, not a pass.\n",
+    "out": ""
+  },
+  "check_floor_bare::bare_pin_blocks": {
+    "err": "ENGINE PIN CHECK FAILED: could not read engine-service tags from git. Cannot verify that every gated engine tag is pinned -- treat as a failed gate, not a pass. In CI, actions/checkout needs `fetch-tags: true`.\n",
+    "out": ""
+  },
+  "check_floor_bare::bare_probe_current": {
+    "err": "",
+    "out": "engine pin is current: REQUIRED_ENGINE_VERSION v<FLOOR> == newest published tag\ncloud engine is current: https://example.test release_version=<FLOOR+1> (floor v<FLOOR>)\n"
+  },
+  "check_floor_bare::bare_probe_stale_via_exception": {
+    "err": "ENGINE FLOOR CHECK FAILED (required v<FLOOR>): simulated: stale\nRemedy: cut + deploy + cloud-gate a fresh engine-service via the `engine-release` skill (AGENTS.md \u00a7 Engine-service release), then re-run this check before cutting the PyPI release.\n",
+    "out": "engine pin is current: REQUIRED_ENGINE_VERSION v<FLOOR> == newest published tag\n"
+  },
+  "check_floor_bare::bare_probe_stale_via_success": {
+    "err": "ENGINE FLOOR CHECK FAILED: deployed engine at https://example.test reports release_version '<FLOOR-1>', required floor is v<FLOOR>.\nRemedy: cut + deploy + cloud-gate a fresh engine-service via the `engine-release` skill (AGENTS.md \u00a7 Engine-service release), then re-run this check before cutting the PyPI release.\n",
+    "out": "engine pin is current: REQUIRED_ENGINE_VERSION v<FLOOR> == newest published tag\n"
+  },
+  "check_floor_bare::bare_probe_unreachable": {
+    "err": "ENGINE FLOOR CHECK FAILED: managed service at https://example.test is unreachable (simulated: unreachable). Cannot verify the cloud engine version -- treat this as a failed gate, not a pass.\n",
+    "out": "engine pin is current: REQUIRED_ENGINE_VERSION v<FLOOR> == newest published tag\n"
+  },
+  "check_floor_paired::paired_battery_blocks": {
+    "err": "PAIRED DEPLOY BLOCKED: 1 both-halves commit(s) in <LEDGER_PATH> have an unshipped client half, no [additive] direction-safety token, and no acknowledgment:\n  deadbeef1  bead nexus-fake1  engine tag engine-service-v9.9.9  (blocking, no token)\n\nThis engine tag cannot deploy without an explicit paired-client acknowledgment (nexus-1vogq). Either pair this deploy with the client release carrying the listed commit(s), or pass --ack-client-lag <bead-id> for each entry above to deploy anyway.\n",
+    "out": ""
+  },
+  "check_floor_paired::paired_probe_ack_via_exception": {
+    "err": "",
+    "out": "client-lag ledger clean: 0 unshipped both-halves commits in <LEDGER_PATH>\npaired mode ARMED: engine-service-v<FLOOR> verified published, pinned to REQUIRED_ENGINE_VERSION, newest published engine tag, and 1.0h old (within the 72.0h window).\nPAIRED MODE: cloud reports release_version '<FLOOR-1>', behind floor v<FLOOR>. Expected pre-deploy under the paired-release choreography -- the deploy fires at client-tag push (AGENTS.md \u00a7 Cutting a release, step 0), not before this tag exists. Pairing named via --paired-deploy.\nPOST-TAG VERIFY REQUIRED: re-run this script WITHOUT --paired-deploy once the deploy lands, to confirm the cloud engine actually converged -- escalate loudly (never silently re-accept) if it is still behind at that point.\n"
+  },
+  "check_floor_paired::paired_probe_ack_via_success": {
+    "err": "",
+    "out": "client-lag ledger clean: 0 unshipped both-halves commits in <LEDGER_PATH>\npaired mode ARMED: engine-service-v<FLOOR> verified published, pinned to REQUIRED_ENGINE_VERSION, newest published engine tag, and 1.0h old (within the 72.0h window).\nPAIRED MODE: cloud reports release_version '<FLOOR-1>', behind floor v<FLOOR>. Expected pre-deploy under the paired-release choreography -- the deploy fires at client-tag push (AGENTS.md \u00a7 Cutting a release, step 0), not before this tag exists. Pairing named via --paired-deploy.\nPOST-TAG VERIFY REQUIRED: re-run this script WITHOUT --paired-deploy once the deploy lands, to confirm the cloud engine actually converged -- escalate loudly (never silently re-accept) if it is still behind at that point.\n"
+  },
+  "check_floor_paired::paired_probe_current": {
+    "err": "",
+    "out": "client-lag ledger clean: 0 unshipped both-halves commits in <LEDGER_PATH>\npaired mode ARMED: engine-service-v<FLOOR> verified published, pinned to REQUIRED_ENGINE_VERSION, newest published engine tag, and 1.0h old (within the 72.0h window).\ncloud engine is current: https://example.test release_version=<FLOOR+1> (floor v<FLOOR>)\n"
+  },
+  "check_floor_paired::paired_probe_unreachable": {
+    "err": "ENGINE FLOOR CHECK FAILED: managed service at https://example.test is unreachable (simulated: unreachable). Cannot verify the cloud engine version -- treat this as a failed gate, not a pass.\n",
+    "out": "client-lag ledger clean: 0 unshipped both-halves commits in <LEDGER_PATH>\npaired mode ARMED: engine-service-v<FLOOR> verified published, pinned to REQUIRED_ENGINE_VERSION, newest published engine tag, and 1.0h old (within the 72.0h window).\n"
+  },
+  "check_floor_paired::paired_probe_unverifiable_exception": {
+    "err": "ENGINE FLOOR CHECK UNVERIFIABLE (required v<FLOOR>): managed service at https://example.test probe failed without a genuine below-floor version reading (simulated: endpoint error). Paired mode only ever accepts a GENUINE, parseable below-floor version report as 'deploy pending' -- an endpoint error or a malformed/unparseable response is never folded into that acceptance, paired or not. Treat as a failed gate, not a pass.\n",
+    "out": "client-lag ledger clean: 0 unshipped both-halves commits in <LEDGER_PATH>\npaired mode ARMED: engine-service-v<FLOOR> verified published, pinned to REQUIRED_ENGINE_VERSION, newest published engine tag, and 1.0h old (within the 72.0h window).\n"
+  },
+  "check_floor_paired::paired_probe_unverifiable_success": {
+    "err": "ENGINE FLOOR CHECK UNVERIFIABLE (required v<FLOOR>): managed service at https://example.test reported an unparseable release_version 'not-a-version'. Paired mode only ever accepts a GENUINE, parseable below-floor version report as 'deploy pending' -- an endpoint error or a malformed/unparseable response is never folded into that acceptance, paired or not. Treat as a failed gate, not a pass.\n",
+    "out": "client-lag ledger clean: 0 unshipped both-halves commits in <LEDGER_PATH>\npaired mode ARMED: engine-service-v<FLOOR> verified published, pinned to REQUIRED_ENGINE_VERSION, newest published engine tag, and 1.0h old (within the 72.0h window).\n"
+  },
+  "check_paired_preconditions::battery_age_unavailable": {
+    "err": "PAIRED MODE UNVERIFIABLE: could not determine engine-service-v<FLOOR>'s commit age from git. Cannot verify the pairing is fresh -- treat as a failed gate, not a pass.\n",
+    "out": ""
+  },
+  "check_paired_preconditions::battery_armed": {
+    "err": "",
+    "out": "paired mode ARMED: engine-service-v<FLOOR> verified published, pinned to REQUIRED_ENGINE_VERSION, newest published engine tag, and 1.0h old (within the 72.0h window).\n"
+  },
+  "check_paired_preconditions::battery_bad_prefix": {
+    "err": "PAIRED MODE REJECTED: --paired-deploy 'not-an-engine-tag' is not an engine-service-v* tag.\n",
+    "out": ""
+  },
+  "check_paired_preconditions::battery_exists_unavailable": {
+    "err": "PAIRED MODE UNVERIFIABLE: could not read git tags to confirm engine-service-v9.9.9 exists. Cannot verify the pairing -- treat as a failed gate, not a pass.\n",
+    "out": ""
+  },
+  "check_paired_preconditions::battery_newest_mismatch": {
+    "err": "PAIRED MODE REJECTED: newest published engine tag is v<FLOOR+1>, not v<FLOOR> -- a newer engine tag exists than the one this release pairs with; unaccounted engine work. Keep the pin-currency red until it is pinned or explained.\n",
+    "out": ""
+  },
+  "check_paired_preconditions::battery_newest_none": {
+    "err": "PAIRED MODE REJECTED: newest published engine tag is vnone, not v<FLOOR> -- a newer engine tag exists than the one this release pairs with; unaccounted engine work. Keep the pin-currency red until it is pinned or explained.\n",
+    "out": ""
+  },
+  "check_paired_preconditions::battery_newest_unavailable": {
+    "err": "PAIRED MODE UNVERIFIABLE: could not read engine-service tags from git to confirm no newer tag exists.\n",
+    "out": ""
+  },
+  "check_paired_preconditions::battery_not_published": {
+    "err": "PAIRED MODE REJECTED: not published.\n",
+    "out": ""
+  },
+  "check_paired_preconditions::battery_published_unavailable": {
+    "err": "PAIRED MODE UNVERIFIABLE: gh unavailable. Cannot verify publication -- treat as a failed gate, not a pass.\n",
+    "out": ""
+  },
+  "check_paired_preconditions::battery_tag_not_exists": {
+    "err": "PAIRED MODE REJECTED: engine-service-v9.9.9 does not exist in git. --paired-deploy must name a tag that has actually been pushed.\n",
+    "out": ""
+  },
+  "check_paired_preconditions::battery_too_old": {
+    "err": "PAIRED MODE REJECTED: engine-service-v<FLOOR> is 172.0h old, past the 72.0h paired-tag freshness window. Deploy fires AT client-tag push -- a pairing this old is not THIS release's partner, and accepting it reopens the multi-release i5c2u drift class this gate exists to close. If this release genuinely lagged its engine tag, override explicitly with --paired-tag-max-age-hours.\n",
+    "out": ""
+  },
+  "check_paired_preconditions::battery_unparseable_tag": {
+    "err": "PAIRED MODE REJECTED: --paired-deploy 'engine-service-vBAD' does not parse as a version.\n",
+    "out": ""
+  },
+  "check_paired_preconditions::battery_version_mismatch": {
+    "err": "PAIRED MODE REJECTED: --paired-deploy names v9.9.9 but REQUIRED_ENGINE_VERSION is v<FLOOR> -- wrong pairing. The flag must name the exact tag this release pairs with.\n",
+    "out": ""
+  },
+  "check_pin_currency::pin_currency_current_at_floor": {
+    "err": "",
+    "out": "engine pin is current: REQUIRED_ENGINE_VERSION v<FLOOR> == newest published tag\n"
+  },
+  "check_pin_currency::pin_currency_current_below_floor": {
+    "err": "",
+    "out": "engine pin is current: REQUIRED_ENGINE_VERSION v<FLOOR> == newest published tag\n"
+  },
+  "check_pin_currency::pin_currency_stale_pin": {
+    "err": "ENGINE PIN CHECK FAILED: engine-service-v<FLOOR+1> is published but this release pins v<FLOOR>. Local-mode installs receive ONLY the pinned identity, so every engine fix between v<FLOOR> and v<FLOOR+1> reaches nobody.\nRemedy: bump REQUIRED_ENGINE_VERSION (src/nexus/engine_version.py) to that tag. That single edit also moves PINNED_SERVICE_TAG, which is DERIVED from it. If the tag is not deployed to the managed service yet, get conexus to deploy it FIRST -- bumping ahead of the deploy makes cloud clients refuse the managed service as below-identity (GH #1402 inverted).\n",
+    "out": ""
+  },
+  "check_pin_currency::pin_currency_tags_unavailable": {
+    "err": "ENGINE PIN CHECK FAILED: could not read engine-service tags from git. Cannot verify that every gated engine tag is pinned -- treat as a failed gate, not a pass. In CI, actions/checkout needs `fetch-tags: true`.\n",
+    "out": ""
+  },
+  "check_pin_currency::pin_currency_zero_tags": {
+    "err": "ENGINE PIN CHECK FAILED: zero engine-service-v* tags visible. Either the checkout has no tags (CI: set `fetch-tags: true`) or the tag namespace changed. A gate that sees nothing must not report success.\n",
+    "out": ""
+  },
+  "check_source_ancestry::ancestry_clean": {
+    "err": "",
+    "out": "engine source is current: no service/src/main drift between engine-service-v<FLOOR> and HEAD\n"
+  },
+  "check_source_ancestry::ancestry_diff_exception": {
+    "err": "ENGINE SOURCE-ANCESTRY CHECK UNVERIFIABLE: git diff failed (simulated git diff failure). Cannot compare source trees -- treat as a failed gate, not a pass.\n",
+    "out": ""
+  },
+  "check_source_ancestry::ancestry_diff_nonzero": {
+    "err": "ENGINE SOURCE-ANCESTRY CHECK UNVERIFIABLE: `git diff engine-service-v<FLOOR> HEAD -- service/src/main` exited 1: simulated git diff error\n",
+    "out": ""
+  },
+  "check_source_ancestry::ancestry_drift": {
+    "err": "ENGINE SOURCE-ANCESTRY CHECK FAILED: this release ships service/src/main source that its pinned engine tag (engine-service-v<FLOOR>) does not contain:\nservice/src/main/Foo.java | 2 +-\nThe floor is version-CURRENT but SOURCE-STALE: a pin equal to the newest published tag can still predate shipped engine source (nexus-ajlz5). Cut a fresh engine tag carrying this source (or re-pin to a tag that already does) before releasing -- see AGENTS.md \u00a7 Engine-service release, paired-release choreography.\n",
+    "out": ""
+  },
+  "check_source_ancestry::ancestry_tag_missing": {
+    "err": "ENGINE SOURCE-ANCESTRY CHECK UNVERIFIABLE: engine-service-v<FLOOR> does not exist in this checkout's git history. Cannot compare source trees -- treat as a failed gate, not a pass.\n",
+    "out": ""
+  },
+  "check_source_ancestry::ancestry_tag_unavailable": {
+    "err": "ENGINE SOURCE-ANCESTRY CHECK UNVERIFIABLE: could not confirm engine-service-v<FLOOR> exists in git. Cannot compare source trees -- treat as a failed gate, not a pass. In CI, actions/checkout needs `fetch-depth: 0` (release.yml already sets this).\n",
+    "out": ""
+  },
+  "check_wire_contract_ledger::ledger_acked": {
+    "err": "",
+    "out": "wire-contract ledger: 1 unshipped both-halves commit(s), all explicitly acknowledged via --ack-client-lag: nexus-fake3\n"
+  },
+  "check_wire_contract_ledger::ledger_additive_authorized": {
+    "err": "",
+    "out": "wire-contract ledger: 1 unacknowledged unshipped both-halves commit(s), all marked [additive] (old client + new engine safe) \u2014 unpaired deploy authorized ahead of the client tag (nexus-1emxn choreography (a)); pairing completes when the client release carrying nexus-fake2 bumps the floor.\n"
+  },
+  "check_wire_contract_ledger::ledger_blocked": {
+    "err": "BLOCKED: 1 both-halves commit(s) in <LEDGER_PATH> have an unshipped client half, no [additive] direction-safety token, and no acknowledgment:\n  deadbeef1  bead nexus-fake1  engine tag engine-service-v9.9.9  (blocking, no token)\n\nRemedy: this engine deploy carries an engine-side wire change (docs/wire-contract-pending.md ## Unshipped) whose client half is not yet in a published release (nexus-1vogq class -- the 08-13 v0.1.73 manifest-400 outage shape). Either pair this deploy with the client release carrying the listed commit(s) (see AGENTS.md \u00a7 Engine-service release, paired-release choreography), or pass --ack-client-lag <bead-id> for each entry below to deploy anyway.\n",
+    "out": ""
+  },
+  "check_wire_contract_ledger::ledger_clean": {
+    "err": "",
+    "out": "wire-contract ledger: 0 unshipped entries in <LEDGER_PATH>\n"
+  },
+  "main_dispatch::main_bare_ancestry_blocks": {
+    "err": "",
+    "out": ""
+  },
+  "main_dispatch::main_bare_check_floor_blocks": {
+    "err": "",
+    "out": ""
+  },
+  "main_dispatch::main_bare_tracker_delegates": {
+    "err": "",
+    "out": ""
+  },
+  "main_dispatch::main_bare_tracker_opt_out": {
+    "err": "NOTE (--no-record-deploy): deployed-engine-version tracker NOT recorded by this verify. Pass --record-deploy-from-gate-report <conexus checkout>/deploy (or set NX_GATE_REPORT_DIR) so the post-tag VERIFY writes the tracker from conexus's STEP-6 report (nexus-nx3l5). Record it from a box that holds the reports, or with `nx service record-deploy --gate-report-dir`. Reason given: a representative reason\n",
+    "out": ""
+  },
+  "main_dispatch::main_bare_tracker_refusal": {
+    "err": "TRACKER NOT RECORDED (exit 3): deployed-engine-version tracker NOT recorded by this verify. Pass --record-deploy-from-gate-report <conexus checkout>/deploy (or set NX_GATE_REPORT_DIR) so the post-tag VERIFY writes the tracker from conexus's STEP-6 report (nexus-nx3l5). A verify that passes while silently skipping the record is the omission vector in a new place; the explicit opt-out for a box that does not hold the reports is --no-record-deploy.\n",
+    "out": ""
+  },
+  "main_dispatch::main_ledger_only_acked": {
+    "err": "",
+    "out": "client-lag ledger: 1 unshipped both-halves commit(s), all explicitly acknowledged via --ack-client-lag: nexus-fake3\n"
+  },
+  "main_dispatch::main_ledger_only_additive": {
+    "err": "",
+    "out": "client-lag ledger: 1 unacknowledged unshipped both-halves commit(s), all marked [additive] (old client + new engine safe) \u2014 deploy authorized ahead of the client tag (nexus-1emxn choreography (a)); pairing completes when the client release carrying nexus-fake2 bumps the floor.\n"
+  },
+  "main_dispatch::main_ledger_only_blocked": {
+    "err": "PAIRED DEPLOY BLOCKED: 1 both-halves commit(s) in <LEDGER_PATH> have an unshipped client half, no [additive] direction-safety token, and no acknowledgment:\n  deadbeef1  bead nexus-fake1  engine tag engine-service-v9.9.9  (blocking, no token)\n\nThis engine tag cannot deploy without an explicit paired-client acknowledgment (nexus-1vogq). Either pair this deploy with the client release carrying the listed commit(s), or pass --ack-client-lag <bead-id> for each entry above to deploy anyway.\n",
+    "out": ""
+  },
+  "main_dispatch::main_ledger_only_clean": {
+    "err": "",
+    "out": "client-lag ledger clean: 0 unshipped both-halves commits in <LEDGER_PATH>\n"
+  },
+  "main_dispatch::main_paired_auto_ancestry_blocks": {
+    "err": "",
+    "out": ""
+  },
+  "main_dispatch::main_paired_auto_check_floor_blocks": {
+    "err": "",
+    "out": ""
+  },
+  "main_dispatch::main_paired_auto_non_bare_return": {
+    "err": "",
+    "out": ""
+  },
+  "main_dispatch::main_paired_explicit_ancestry_blocks": {
+    "err": "",
+    "out": ""
+  },
+  "main_dispatch::main_paired_explicit_check_floor_blocks": {
+    "err": "",
+    "out": ""
+  },
+  "main_dispatch::main_paired_explicit_non_bare_return": {
+    "err": "",
+    "out": ""
+  },
+  "precond_main_dispatch::precond_main_default_tag_no_ack": {
+    "err": "BLOCKED: 1 both-halves commit(s) in <LEDGER_PATH> have an unshipped client half, no [additive] direction-safety token, and no acknowledgment:\n  deadbeef1  bead nexus-fake1  engine tag engine-service-v9.9.9  (blocking, no token)\n\nRemedy: this engine deploy carries an engine-side wire change (docs/wire-contract-pending.md ## Unshipped) whose client half is not yet in a published release (nexus-1vogq class -- the 08-13 v0.1.73 manifest-400 outage shape). Either pair this deploy with the client release carrying the listed commit(s) (see AGENTS.md \u00a7 Engine-service release, paired-release choreography), or pass --ack-client-lag <bead-id> for each entry below to deploy anyway.\n",
+    "out": ""
+  },
+  "precond_main_dispatch::precond_main_explicit_tag_with_ack": {
+    "err": "",
+    "out": "wire-contract ledger: 1 unshipped both-halves commit(s), all explicitly acknowledged via --ack-client-lag: nexus-fake3\n"
+  },
+  "record_deploy_from_gate_report_leg::tracker_directory_error": {
+    "err": "TRACKER NOT RECORDED (exit 3): simulated: directory_error\n",
+    "out": ""
+  },
+  "record_deploy_from_gate_report_leg::tracker_gate_red": {
+    "err": "TRACKER NOT RECORDED (exit 3): simulated: gate_red\n",
+    "out": ""
+  },
+  "record_deploy_from_gate_report_leg::tracker_live_version_mismatch": {
+    "err": "TRACKER NOT RECORDED (exit 3): simulated: live_version_mismatch\n",
+    "out": ""
+  },
+  "record_deploy_from_gate_report_leg::tracker_managed_service_error": {
+    "err": "TRACKER NOT RECORDED (exit 3): the live /version re-read failed (simulated live re-read failure)\n",
+    "out": ""
+  },
+  "record_deploy_from_gate_report_leg::tracker_no_report_for_version": {
+    "err": "TRACKER NOT RECORDED (exit 3): simulated: no_report_for_version\n",
+    "out": ""
+  },
+  "record_deploy_from_gate_report_leg::tracker_recorded": {
+    "err": "",
+    "out": "deployed-engine-version recorded from report.json: deployed-engine-version: fake\n"
+  },
+  "record_deploy_from_gate_report_leg::tracker_schema_error": {
+    "err": "TRACKER NOT RECORDED (exit 3): simulated: schema_error\n",
+    "out": ""
+  },
+  "record_deploy_from_gate_report_leg::tracker_version_mismatch": {
+    "err": "TRACKER NOT RECORDED (exit 3): simulated: version_mismatch\n",
+    "out": ""
+  }
+}

@@ -1,0 +1,5 @@
+# table.kind is not one of "state-machine" / "decision-table": refused at
+# load time (TableLoadError).
+[table]
+id = "bad-kind"
+kind = "nonsense"

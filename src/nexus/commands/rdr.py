@@ -11,11 +11,17 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
+from collections import Counter
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
 import click
 import yaml
+
+from nexus.tables.load import Table, TableLoadError, load_packaged_table
+from nexus.tables.resolve import resolve
 
 
 # ---------------------------------------------------------------------------
@@ -308,18 +314,87 @@ def lint(paths: tuple[Path, ...], root: Path | None) -> None:
 # set-status — code-enforced frontmatter flip (RDR-165/166 ledger-drift fix)
 # ---------------------------------------------------------------------------
 
-#: Status words recognised in the README index status cell, so the cell can be
-#: rewritten without assuming a fixed column position.
-_KNOWN_STATUSES: frozenset[str] = frozenset({
-    "draft", "open", "proposed", "accepted", "closed", "deferred", "superseded",
-    "scrapped", "abandoned", "revised", "locked", "final",
-})
-
-#: status -> the date-stamp frontmatter key it should carry.
+#: status -> the date-stamp frontmatter key it should carry. Unchanged by
+#: RDR-201 P1.4 — the table has no notion of date keys, so this stays a
+#: plain literal.
 _STATUS_DATE_KEY: dict[str, str] = {
     "accepted": "accepted_date",
     "closed": "closed_date",
 }
+
+#: ``open`` is retired from the rdr-lifecycle table's ``status`` domain but
+#: remains a live, READ-TIME-ONLY pre-accept synonym for ``draft`` in the
+#: rdr-accept preamble (GH #1409, nexus-qsryj) -- a project whose RDR
+#: convention never uses ``draft`` (open -> accepted) can still accept.
+#: Named once here so the two preamble sites that need it (RDR-201 P1.5)
+#: don't each carry their own literal.
+_OPEN_STATUS_ALIAS = "open"
+
+
+def _from_statuses_for_event(table: Table, event: str) -> frozenset[str]:
+    """Every status the table's non-escape *event* rows transition FROM.
+
+    Queries the loaded rows directly instead of a hand-maintained status
+    literal (RDR-201 P1.5, T2 nexus/plan-rdr-201-audit-round-3-residuals
+    [23999] item 2 / nexus/plan-rdr-201-enrichment-deltas [24001]) -- a
+    preamble guard built this way tracks the table by construction; one
+    hardcoded independently is exactly the three-way disagreement RDR-201
+    Finding 1 exists to end. Escape/``refuse`` rows are excluded: they are
+    the table's own record of statuses *event* is illegal from, so they
+    must never contribute to the "eligible" set.
+    """
+    return frozenset(
+        str(row.match["status"])
+        for row in table.rows
+        if row.match.get("event") == event
+        and not row.escape
+        and row.outcome_kind == "to"
+    )
+
+
+def _to_status_for_event(table: Table, event: str) -> str:
+    """The single status the table's non-escape *event* rows transition TO.
+
+    Refuses loudly (:class:`TableLoadError`) if *event*'s non-escape rows
+    don't converge on exactly one target. The rdr-accept preamble's
+    idempotency check ("already accepted RDRs are allowed through") assumes
+    a single "the status past this event" value to compare against; a table
+    edit that broke that assumption should surface here, not produce a
+    silently-wrong guard.
+    """
+    targets = frozenset(
+        str(row.outcome["status"])
+        for row in table.rows
+        if row.match.get("event") == event
+        and not row.escape
+        and row.outcome_kind == "to"
+    )
+    if len(targets) != 1:
+        raise TableLoadError(
+            f"rdr-lifecycle table: event {event!r} has {len(targets)} distinct "
+            f"non-escape 'to' targets ({sorted(targets)}), expected exactly 1"
+        )
+    return next(iter(targets))
+
+
+def _target_status_to_event(table: Table) -> dict[str, str]:
+    """Derive the requested-target-status -> table ``event`` mapping.
+
+    RDR-201 P1.5 fix round (T2 nexus/critique-nexus-j9z30-5-2026-09-01
+    [24042] finding 4): mechanically reproduces the old hand-maintained
+    ``_TARGET_STATUS_TO_EVENT`` literal by calling :func:`_to_status_for_event`
+    for every event in the table's ``event`` domain except ``resume`` --
+    ``resume``'s target, ``draft``, is ambiguous on its own (resume from
+    ``deferred`` vs. a no-op from ``draft`` itself) and stays resolved from
+    (current, target) in :func:`set_status` instead (RDR-201 P1.4 audit
+    residual, T2 nexus/plan-rdr-201-audit-round-3-residuals [23999] item 1)
+    -- that is the one Python-side rule this derivation does not absorb.
+    """
+    return {
+        _to_status_for_event(table, event): event
+        for event in table.dimensions["event"].domain
+        if event != "resume"
+    }
 
 
 def _rewrite_frontmatter_status(text: str, new_status: str, date: str) -> str:
@@ -381,24 +456,45 @@ def _rewrite_frontmatter_status(text: str, new_status: str, date: str) -> str:
     return "---" + fm + "---" + parts[2]
 
 
-def _update_readme_status_row(readme: Path, rdr_filename: str, new_status: str) -> bool:
+#: Extracts a cell's leading word, tolerant of markdown decoration
+#: (``**Scrapped 2026-05-19**`` -> ``Scrapped``) so a decorated README cell
+#: is still detected without requiring the full shape-aware rewrite (that is
+#: bead nexus-j9z30.7's job, per T2
+#: nexus/plan-rdr-201-enrichment-deltas [24001] finding 4).
+_README_CELL_LEADING_WORD = re.compile(r"[\*_]*([A-Za-z][A-Za-z-]*)")
+
+
+def _update_readme_status_row(
+    readme: Path, rdr_filename: str, label: str, status_domain: frozenset[str]
+) -> bool:
     """Update the README index-row status cell for *rdr_filename*.
 
+    *label* is the exact cell text to write — the caller decorates it
+    (e.g. ``"Superseded by RDR-108"`` rather than the bare ``"Superseded"``
+    for a supersede transition, since the successor id is otherwise not
+    recorded anywhere on disk; code review, T2
+    nexus/critique-nexus-j9z30-4-2026-09-01 [24034] finding 9).
+
     Returns True if a row was found and rewritten. Matches the row by the RDR
-    filename link and replaces the first cell whose content is a known status
-    word, so the rewrite is robust to the index table's column ordering.
+    filename link and replaces the first cell whose LEADING WORD (case-
+    insensitive, decoration-stripped) is a member of *status_domain* — the
+    rdr-lifecycle table's ``status`` dimension — so the rewrite is robust to
+    both bare cells (``Draft``) and decorated ones (``Closed (implemented)``)
+    without assuming a fixed column position.
     """
     if not readme.exists():
         return False
     lines = readme.read_text(encoding="utf-8").splitlines(keepends=True)
-    target_cell = new_status.capitalize()
+    target_cell = label
     changed = False
     for idx, line in enumerate(lines):
         if rdr_filename not in line or "|" not in line:
             continue
         cells = line.split("|")
         for i, cell in enumerate(cells):
-            if cell.strip().lower() in _KNOWN_STATUSES:
+            m = _README_CELL_LEADING_WORD.match(cell.strip())
+            leading_word = m.group(1).lower() if m else ""
+            if leading_word in status_domain:
                 cells[i] = f" {target_cell} "
                 changed = True
                 break
@@ -408,6 +504,325 @@ def _update_readme_status_row(readme: Path, rdr_filename: str, new_status: str) 
     if changed:
         readme.write_text("".join(lines), encoding="utf-8")
     return changed
+
+
+def _default_t2_client() -> object:
+    """Construct the real T2 HTTP client used to read the gate result.
+
+    ``nexus.db.t2.T2Database`` is the same facade ``nx rdr preamble``
+    already uses (see ``_preamble_get_rdrs_from_t2``); this is a thin
+    factory rather than a direct construction inside
+    :func:`_gate_outcome_for` so tests can inject a fake by monkeypatching
+    the module-level ``_t2_client_factory`` without touching any T2
+    substrate (RDR-201 P1.4 follow-up — Sam, 2026-09-02: the accept
+    event's gate guard needs a real T2 read, not a hardcoded constant).
+    """
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
+    return T2Database(default_db_path())  # boundary-allow: same short-lived preamble facade as :222, gate read for the accept event only
+
+
+#: Injection seam for :func:`_gate_outcome_for` — production code never
+#: calls ``_default_t2_client`` directly, only through this indirection, so
+#: a test can monkeypatch it to a factory returning a fake client (any
+#: context manager exposing ``get(project=..., title=...) -> dict | None``,
+#: matching ``T2Database``'s facade ``get()``).
+_t2_client_factory = _default_t2_client
+
+
+# ---------------------------------------------------------------------------
+# RDR-201 P3.3 (nexus-j9z30.22): needs-reexamination markers
+# ---------------------------------------------------------------------------
+
+#: The T2 field a dependent's entry gains when a record it is joined to by
+#: a ``supersedes`` edge changes status. One line per flip, appended, never
+#: consumed by anything but ``rdr-audit``'s listing -- report-only posture
+#: (RDR-081 precedent): surfaced, never auto-resolved, never a block.
+NEEDS_REEXAMINATION_FIELD = "needs-reexamination"
+
+#: The ONLY catalog edge type the marker walk follows (ruling nexus-j9z30.22,
+#: Sam 2026-09-02): of 265 edges the dependency generator proposes over the
+#: real tree, 259 are ``relates`` from free-text ``related_rdrs`` -- a
+#: reading aid an author typed, not a dependency -- against 6 curated
+#: ``supersedes`` edges. Walking everything would flag dozens of loosely
+#: associated records on every flip and the six meaningful markers would
+#: vanish in the noise. Widen only on evidence that a specific missed
+#: ``relates`` edge would have prevented a real error.
+_MARKER_LINK_TYPE = "supersedes"
+
+
+def _default_catalog_reader() -> object:
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; catalog is only needed after a successful flip, and importing it at module load would pull the service client into every `nx rdr` invocation
+
+    return make_catalog_reader()
+
+
+#: Injectable seam, same shape as ``_t2_client_factory``: production builds
+#: the service-backed reader; tests substitute a fake serving real
+#: ``CatalogEntry`` / ``CatalogLink`` objects.
+_catalog_reader_factory = _default_catalog_reader
+
+
+def _rdr_repo_scope(cat: object, repo_root: str) -> tuple[object | None, str]:
+    """``(current owner tumbler, docs/rdr source prefix)`` for *repo_root* --
+    the two values every in-repo admission check needs
+    (:func:`nexus.catalog.rdr_canonical.is_in_repo`). Derived from git
+    identity in production; a seam so tests can scope a fake catalog
+    without a git remote."""
+    from nexus.catalog.rdr_canonical import current_rdr_owner, rdr_source_prefix  # noqa: PLC0415 — deferred import, see _default_catalog_reader
+
+    return current_rdr_owner(cat, repo_root), rdr_source_prefix(repo_root)
+
+
+def _supersedes_neighbours(
+    cat: object, repo_root: str, rdr_num: int,
+) -> tuple[list[tuple[int, str]], list[str], str | None]:
+    """``(RDR number, edge text)`` pairs for every record *rdr_num*
+    SUPERSEDES -- its predecessors, the targets of its outgoing
+    ``supersedes`` edges -- resolved through the same canonical-tumbler
+    chain the dependency generator used to create those edges
+    (:func:`nexus.catalog.link_generator.rdr_resolution` -- one listing, one
+    admission, one resolution; never a second copy here). One direction
+    only (Sam's ruling 2026-09-02: successor -> predecessor): a successor's
+    status changing leaves its predecessor's ``superseded`` verdict stale;
+    a predecessor's own flip marks nobody. Returns
+    ``(neighbours, unmapped_tumblers, note)``: *unmapped* are neighbour
+    tumblers the numeric index could not map back to an RDR number (a
+    number whose registrations collide with no unique ``id:``
+    self-declaration -- RDR-040 and RDR-079 on this repo today), named so
+    the caller reports them instead of dropping them; a non-empty *note*
+    names why nothing could be walked at all (repo never indexed, the
+    flipped RDR itself unresolvable)."""
+    from nexus.catalog.link_generator import rdr_resolution  # noqa: PLC0415 — deferred import, see _default_catalog_reader
+
+    owner, prefix = _rdr_repo_scope(cat, repo_root)
+    if owner is None:
+        return [], [], "no catalog owner registered for this repo (never indexed)"
+    resolved, number_index = rdr_resolution(cat, owner, repo_source_prefix=prefix)
+    number_to_tumbler = {
+        n: resolved[key] for n, key in number_index.items() if resolved.get(key) is not None
+    }
+    me = number_to_tumbler.get(rdr_num)
+    if me is None:
+        return [], [], f"RDR {rdr_num} has no canonical catalog tumbler (unindexed or ambiguous)"
+    tumbler_to_number = {str(t): n for n, t in number_to_tumbler.items()}
+    # predecessor tumbler -> the edge as "RDR-<from> supersedes RDR-<to>", so
+    # the marker records which way the edge runs (critique [24089] S3).
+    edges: dict[str, str] = {}
+    for link in cat.links_from(me, link_type=_MARKER_LINK_TYPE):  # type: ignore[attr-defined]
+        other = str(link.to_tumbler)
+        edges[other] = f"RDR-{rdr_num} supersedes RDR-{tumbler_to_number.get(other, '?')}"
+    numbers = sorted(
+        (n, edges[t]) for t in edges if (n := tumbler_to_number.get(t)) is not None and n != rdr_num
+    )
+    unmapped = sorted(t for t in edges if t not in tumbler_to_number)
+    return numbers, unmapped, None
+
+
+def _t2_rdr_titles(number: int) -> tuple[str, ...]:
+    """The title shapes a record's T2 entry is found under, in lookup
+    order: bare (``"42"``), zero-padded (``"042"`` -- the early records,
+    e.g. RDR-014), and ``RDR-``-prefixed in both widths. The census
+    matches ``^(?:RDR-)?\\d+$`` and so already counts every shape."""
+    return (str(number), f"{number:03d}", f"RDR-{number}", f"RDR-{number:03d}")
+
+
+def _append_marker_to_t2(client: object, project: str, number: int, marker: str) -> str | None:
+    """Append *marker* as its own line to RDR *number*'s T2 entry, under
+    whichever title shape the record uses (``"42"`` or ``"RDR-42"``, the two
+    shapes :func:`_t2_rdr_status_census` counts). Returns the title written,
+    or ``None`` when no entry exists -- an absent record is named by the
+    caller, never invented here. An entry already carrying this exact marker
+    line is left untouched (a repeated flip does not stack duplicates). The
+    engine upserts on (project, title) and
+    re-stamps every column from the payload: ``ttl=None`` and the entry's
+    own ``tags``/``agent``/``session`` are passed back explicitly so the
+    facade's defaults (30-day TTL, empty tags, THIS process's agent and
+    session) cannot expire, strip or re-attribute a permanent record. The
+    row's ``timestamp`` becomes now() regardless -- the engine owns it --
+    and ``access_count`` is preserved server-side."""
+    for title in _t2_rdr_titles(number):
+        entry = client.get(project=project, title=title)  # type: ignore[attr-defined]
+        if not entry:
+            continue
+        content = str(entry.get("content", "")).rstrip("\n")
+        if marker in {line.strip() for line in content.splitlines()}:
+            return title  # already carries this exact marker: idempotent, no re-put
+        tags = entry.get("tags", "")
+        if isinstance(tags, (list, tuple)):
+            tags = ",".join(str(t) for t in tags)
+        keep = {
+            k: entry[k] for k in ("agent", "session")
+            if isinstance(entry.get(k), str) and entry[k]
+        }
+        client.put(  # type: ignore[attr-defined]
+            project=project, title=title, content=f"{content}\n{marker}\n",
+            tags=str(tags or ""), ttl=None, **keep,
+        )
+        return title
+    return None
+
+
+_STATUS_DATE_KEY: dict[str, str] = {"accepted": "accepted_date", "closed": "closed_date"}
+
+
+def _write_t2_status(repo_name: str, rdr_num: int, new_status: str, date: str) -> tuple[str | None, str | None]:
+    """Mirror a successful file flip onto the record's own T2 entry
+    (project ``<repo>_rdr``, title ``"<n>"`` or ``"RDR-<n>"``): rewrite the
+    ``status:`` line (or prepend one -- several live records carried only
+    a prose ``STATUS: x`` the census could not read, bead nexus-nxn5g), and
+    set ``accepted_date`` / ``closed_date`` the way
+    :func:`_rewrite_frontmatter_status` does on the file. Until 2026-09-02
+    the lifecycle skills were the only T2 status writer, in prose; the
+    nine drift rows in nexus-nxn5g are what that produced. Same
+    preservation rules as :func:`_append_marker_to_t2` (tags, agent,
+    session, ttl=None). Returns ``(title written, note)``; never raises."""
+    project = f"{repo_name}_rdr"
+    try:
+        with _t2_client_factory() as client:
+            for title in _t2_rdr_titles(rdr_num):
+                entry = client.get(project=project, title=title)
+                if not entry:
+                    continue
+                lines = str(entry.get("content", "")).splitlines()
+                date_key = _STATUS_DATE_KEY.get(new_status)
+                out: list[str] = []
+                seen_status = seen_date = False
+                for line in lines:
+                    stripped = line.strip()
+                    if stripped.startswith("status:") and not seen_status:
+                        out.append(f"status: {new_status}")
+                        seen_status = True
+                    elif date_key and stripped.startswith(f"{date_key}:") and not seen_date:
+                        out.append(f"{date_key}: {date}")
+                        seen_date = True
+                    else:
+                        out.append(line)
+                if not seen_status:
+                    out.insert(0, f"status: {new_status}")
+                if date_key and not seen_date:
+                    out.insert(1 if not seen_status else out.index(f"status: {new_status}") + 1, f"{date_key}: {date}")
+                tags = entry.get("tags", "")
+                if isinstance(tags, (list, tuple)):
+                    tags = ",".join(str(t) for t in tags)
+                keep = {k: entry[k] for k in ("agent", "session") if isinstance(entry.get(k), str) and entry[k]}
+                client.put(project=project, title=title, content="\n".join(out) + "\n", tags=str(tags or ""), ttl=None, **keep)
+                return title, None
+        return None, f"no T2 entry for RDR {rdr_num} in {project} -- status not mirrored"
+    except Exception as exc:  # noqa: BLE001 — the file flip already happened; a T2 failure is named, never allowed to fail the command
+        return None, f"T2 status not mirrored: {type(exc).__name__}: {exc}"
+
+
+def _mark_dependents_needs_reexamination(
+    rdr_num: int, old_status: str, new_status: str, repo_root: str, repo_name: str,
+) -> tuple[list[str], list[int], list[str]]:
+    """Walk the flipped record's ``supersedes`` neighbours and mark each
+    one's T2 entry ``needs-reexamination: RDR-<from> <old>-><new>``.
+    Returns ``(titles marked, numbers with no T2 entry, notes)``. The marker
+    line is ``needs-reexamination: RDR-<from> <old>-><new> (RDR-a supersedes
+    RDR-b)`` -- the edge named so the reader knows which way it runs. Never
+    raises -- a catalog failure, an unmappable neighbour tumbler, or a T2
+    failure on one entry each become a note, and a failure on entry N
+    never discards what was already marked for 1..N-1; the flip that
+    triggered this has already been written and stands regardless."""
+    project = f"{repo_name}_rdr"
+    notes: list[str] = []
+    try:
+        cat = _catalog_reader_factory()
+        numbers, unmapped, note = _supersedes_neighbours(cat, repo_root, rdr_num)
+    except Exception as exc:  # noqa: BLE001 — report-only leg: the flip already happened; a catalog failure is named on its own line, never allowed to fail the command
+        return [], [], [f"{type(exc).__name__}: {exc}"]
+    if note is not None:
+        notes.append(note)
+    for tumbler in unmapped:
+        notes.append(
+            f"supersedes neighbour {tumbler} could not be mapped to an RDR number "
+            "(colliding registrations with no unique id: self-declaration) -- not marked"
+        )
+    if not numbers:
+        return [], [], notes
+    marked: list[str] = []
+    missing: list[int] = []
+    try:
+        client_cm = _t2_client_factory()
+    except Exception as exc:  # noqa: BLE001 — same report-only posture
+        return [], [], notes + [f"{type(exc).__name__}: {exc}"]
+    with client_cm as client:
+        for number, edge in numbers:
+            marker = f"{NEEDS_REEXAMINATION_FIELD}: RDR-{rdr_num} {old_status}->{new_status} ({edge})"
+            try:
+                title = _append_marker_to_t2(client, project, number, marker)
+            except Exception as exc:  # noqa: BLE001 — one entry's failure is named; the loop continues so earlier marks are still reported
+                notes.append(f"RDR {number}: {type(exc).__name__}: {exc}")
+                continue
+            if title is None:
+                missing.append(number)
+            else:
+                marked.append(title)
+    return marked, missing, notes
+
+
+def _gate_outcome_for(rdr_num: str, repo_name: str) -> tuple[str, str | None]:
+    """Read the T2 gate result for *rdr_num* and reduce it to the
+    rdr-lifecycle table's ``gate`` dimension value.
+
+    T2 project ``<repo>_rdr``, title ``<rdr_num>-gate-latest`` — the same
+    coordinates ``nx rdr preamble rdr-accept`` already prints as an
+    instruction. Parses the entry content's ``outcome:`` line: ``PASSED``
+    -> ``"passed"``, ``BLOCKED`` -> ``"blocked"``; a missing record, a
+    record with no ``outcome:`` line, or an unrecognised outcome value all
+    reduce to ``"none"``.
+
+    Returns ``(gate_value, note)``. *note* is ``None`` when the read
+    behaved normally (PASSED, BLOCKED, or a legitimately absent gate
+    record — no gate run yet is an ordinary ``"none"``, not a T2
+    failure); it carries a short, named reason when the record is
+    missing or T2 itself could not be reached, so the CLI's refusal
+    message can say why instead of a bare ``gate-not-passed``.
+    """
+    project = f"{repo_name}_rdr"
+    title = f"{rdr_num}-gate-latest"
+    try:
+        with _t2_client_factory() as client:
+            entry = client.get(project=project, title=title)
+    except Exception as exc:  # noqa: BLE001 — T2 unreachable is an expected, named failure mode here (connection errors, timeouts, ...); reduced to gate="none" with the exception surfaced in `note`, never silently swallowed and never re-raised past this CLI boundary.
+        return "none", f"T2 unreachable: {type(exc).__name__}: {exc}"
+
+    if entry is None:
+        return "none", f"no gate record found (T2 project {project!r}, title {title!r})"
+
+    content = entry.get("content", "") if isinstance(entry, dict) else ""
+    outcome = _preamble_parse_t2_field(content, "outcome")
+    if outcome is None:
+        return "none", f"gate record {title!r} has no `outcome:` field"
+    outcome_upper = outcome.strip().upper()
+    if outcome_upper == "PASSED":
+        return "passed", None
+    if outcome_upper == "BLOCKED":
+        return "blocked", None
+    return "none", f"gate record {title!r} outcome is {outcome!r} (expected PASSED or BLOCKED)"
+
+
+def _gate_repo_name(repo_root: str) -> str:
+    """Worktree-stable repo basename for the T2 gate project (``<repo>_rdr``).
+
+    Plain ``Path(repo_root).name`` returns the WORKTREE directory's own
+    basename (e.g. ``agent-a9b6e48835b938551``) when *repo_root* is a
+    Claude Code agent worktree, not the main checkout's name every other
+    T2 write under this project already uses — resolving the gate lookup
+    that way would silently address a per-agent T2 project no gate result
+    was ever written to (code review, T2
+    nexus/critique-nexus-j9z30-4-2026-09-01 [24034] finding 8).
+    ``nexus.repo_identity._resolve_main_repo`` walks
+    ``git rev-parse --git-common-dir`` to the main checkout even from a
+    worktree path; a *repo_root* that is not a git repo at all (e.g. a
+    bare ``tmp_path`` in a unit test) falls back to its own basename
+    unchanged, matching the pre-existing non-worktree behavior.
+    """
+    from nexus.repo_identity import _resolve_main_repo  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
+    return _resolve_main_repo(Path(repo_root)).name
 
 
 @rdr.command("set-status")
@@ -432,16 +847,59 @@ def set_status(
     The code-enforced half of the accept/close lifecycle: the skills call this
     instead of hand-editing frontmatter, closing the ledger-drift class where
     T2 was advanced to ``accepted``/``closed`` but the RDR file stayed ``draft``
-    (RDR-165 / RDR-166). Pure filesystem; no T2 dependency.
+    (RDR-165 / RDR-166).
+
+    RDR-201 P1.4: the requested *new_status* is resolved to the packaged
+    ``rdr-lifecycle`` state-machine table's ``event`` dimension (derived
+    from the table itself, see :func:`_target_status_to_event`, RDR-201
+    P1.5); the file's current frontmatter status binds ``status``. An
+    illegal edge REFUSES with the table row's typed
+    reason (``illegal-transition`` / ``gate-not-passed`` /
+    ``successor-not-named``) instead of the old unconditional flip. The
+    table is missing or unparsable -> exit 2, no fallback to a hardcoded
+    list. Re-requesting the CURRENT status is a no-op (exit 0) for every
+    status, not only ``draft`` — ``rdr-accept``'s self-heal and repeated
+    ``rdr-close`` runs depend on this command being idempotent.
+
+    ``open`` is a retired status word, but ``nx rdr preamble rdr-accept``
+    still advertises it as a live pre-accept synonym for ``draft``
+    (nexus-qsryj). A file whose current status is ``open`` is read as
+    ``draft`` for the purpose of this resolution (never written back —
+    only the requested *new_status* is ever written to the file); one
+    line notes the alias so it is visible, not silent.
+
+    ``gate`` is read from T2 (project ``<repo>_rdr``, title
+    ``<id>-gate-latest``, using the WORKTREE-STABLE repo basename — see
+    :func:`_gate_repo_name`) ONLY when the resolved event is ``accept``
+    AND the (possibly alias-normalized) current status is ``draft`` —
+    every other (status, event) pair that maps to ``accept`` is already
+    illegal by the table's ``accept-otherwise`` escape row regardless of
+    ``gate``, so no T2 round-trip happens for those, and no
+    T2-unreachable/no-record note is ever appended to a refusal that
+    never consulted T2. See :func:`_gate_outcome_for`. T2 unreachable, or
+    no gate record yet, both reduce to ``gate="none"``, which the table
+    refuses as ``gate-not-passed`` (never a silent pass).
     """
     new_status = new_status.strip().lower()
-    if new_status not in _KNOWN_STATUSES:
+
+    try:
+        table = load_packaged_table("rdr-lifecycle.toml")
+    except (OSError, TableLoadError, tomllib.TOMLDecodeError) as exc:
         click.echo(
-            f"unknown status '{new_status}'. Valid statuses: "
-            f"{', '.join(sorted(_KNOWN_STATUSES))}",
+            f"cannot load the RDR lifecycle table: {type(exc).__name__}: {exc}",
             err=True,
         )
         sys.exit(2)
+
+    status_domain = frozenset(table.dimensions["status"].domain)
+    if new_status not in status_domain:
+        click.echo(
+            f"unknown status '{new_status}'. Valid statuses: "
+            f"{', '.join(sorted(status_domain))}",
+            err=True,
+        )
+        sys.exit(2)
+
     if root is not None:
         repo_root = str(root)
     else:
@@ -452,6 +910,75 @@ def set_status(
     rdr_file = _preamble_find_rdr_file(rdr_path, rdr_id)
     if rdr_file is None:
         click.echo(f"RDR not found for ID: {rdr_id} (in {rdr_path})", err=True)
+        sys.exit(1)
+
+    meta, _ = _preamble_parse_frontmatter(rdr_file)
+    current_status = str(meta.get("status") or "").strip().lower()
+
+    # `open` is retired from the table's domain but still a live pre-accept
+    # synonym for `draft` elsewhere in this file (rdr-accept preamble,
+    # nexus-qsryj). Normalize for resolution only — new_status (what gets
+    # WRITTEN) is never touched here. Named explicitly, not silently.
+    if current_status == _OPEN_STATUS_ALIAS:
+        click.echo(f"{rdr_file.name}: treating current status 'open' as 'draft' (pre-accept synonym)")
+        current_status = "draft"
+
+    # Re-requesting the status the record already carries is a no-op for
+    # EVERY status (not only draft) — rdr-accept's self-heal and repeated
+    # rdr-close runs depend on set-status being idempotent (Sam,
+    # 2026-09-02). This also resolves draft's own ambiguity: draft ->
+    # draft is caught here before `event` is ever computed.
+    if new_status == current_status:
+        click.echo(f"{rdr_file.name} is already {new_status} (no-op)")
+        return
+    target_status_to_event = _target_status_to_event(table)
+    event = "resume" if new_status == "draft" else target_status_to_event[new_status]
+
+    superseded_by = str(meta.get("superseded_by") or "").strip()
+
+    # Only `accept` FROM `draft` ever consults the table's `gate` guard
+    # (accept's other match rows are all escape/illegal-transition and
+    # never reference `gate`) — consulting T2 for any other (status,
+    # event) would cost a live round-trip for a refusal it can't affect,
+    # and would attach a misleading "T2 unreachable" tail to an
+    # illegal-transition refusal that never touched T2 (code review, T2
+    # nexus/code-review-nexus-j9z30-4-2026-09-01 [24033] finding 3).
+    gate_value = "none"
+    gate_note: str | None = None
+    if event == "accept" and current_status == "draft":
+        rdr_num_match = re.search(r"\d+", rdr_file.stem)
+        rdr_num = rdr_num_match.group(0) if rdr_num_match else rdr_file.stem
+        gate_value, gate_note = _gate_outcome_for(rdr_num, _gate_repo_name(repo_root))
+
+    assignment = {
+        "status": current_status,
+        "event": event,
+        "gate": gate_value,
+        "successor": "named" if superseded_by else "absent",
+    }
+
+    resolution = resolve(table, assignment)
+    if resolution.refusal is not None:
+        # Evaluator-level defect (unknown-value / ambiguous-match / no-match):
+        # the checker's lint bucket should have made this unreachable for a
+        # well-formed table; treat it as a defect, not a business refusal.
+        click.echo(
+            f"cannot resolve transition for {rdr_file.name}: "
+            f"{resolution.refusal} {dict(resolution.detail)}",
+            err=True,
+        )
+        sys.exit(2)
+
+    row = resolution.row
+    assert row is not None  # exactly one of row/refusal is set (Resolution invariant)
+    if row.outcome_kind == "refuse":
+        msg = (
+            f"{rdr_file.name}: refused ({row.outcome}) for "
+            f"(status={current_status!r}, event={event!r})"
+        )
+        if gate_note:
+            msg += f" — {gate_note}"
+        click.echo(msg, err=True)
         sys.exit(1)
 
     if date is None:
@@ -467,14 +994,50 @@ def set_status(
     if new_text != text:
         rdr_file.write_text(new_text, encoding="utf-8")
 
+    # A supersede transition's ONLY on-disk record of the successor is
+    # this README cell (the frontmatter's own `superseded_by` lives in the
+    # FILE, not the index) — decorate it rather than writing a bare
+    # "Superseded" (code review, T2
+    # nexus/critique-nexus-j9z30-4-2026-09-01 [24034] finding 9).
+    # `superseded_by` is guaranteed non-empty here: a supersede transition
+    # with it empty would already have refused successor-not-named above.
+    readme_label = (
+        f"Superseded by {superseded_by}" if new_status == "superseded" else new_status.capitalize()
+    )
+
     readme = rdr_path / "README.md"
-    readme_updated = _update_readme_status_row(readme, rdr_file.name, new_status)
+    readme_updated = _update_readme_status_row(
+        readme, rdr_file.name, readme_label, status_domain
+    )
 
     click.echo(f"set {rdr_file.name} status -> {new_status}")
     if readme_updated:
-        click.echo(f"updated README index row -> {new_status.capitalize()}")
+        click.echo(f"updated README index row -> {readme_label}")
     else:
         click.echo("README index row not found (skipped)", err=True)
+
+    # RDR-201 P3.3 (nexus-j9z30.22): decisions get memory across amendment.
+    # Report-only; the flip above is already on disk whatever happens here.
+    flipped_num_match = re.search(r"\d+", rdr_file.stem)
+    if flipped_num_match:
+        repo_name = _gate_repo_name(repo_root)
+        t2_title, t2_note = _write_t2_status(repo_name, int(flipped_num_match.group(0)), new_status, date)
+        if t2_title:
+            click.echo(f"updated T2 {repo_name}_rdr/{t2_title} status -> {new_status}")
+        if t2_note:
+            click.echo(t2_note, err=True)
+        marked, missing, notes = _mark_dependents_needs_reexamination(
+            int(flipped_num_match.group(0)), current_status, new_status, repo_root, repo_name,
+        )
+        for title in marked:
+            click.echo(f"marked {repo_name}_rdr/{title} {NEEDS_REEXAMINATION_FIELD} (supersedes edge)")
+        for number in missing:
+            click.echo(
+                f"dependent RDR {number} has no T2 entry in {repo_name}_rdr -- not marked",
+                err=True,
+            )
+        for note in notes:
+            click.echo(f"dependents not marked: {note}", err=True)
 
 
 # ---------------------------------------------------------------------------
@@ -939,6 +1502,19 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         print(f"> No RDRs found — `{rdr_dir}` does not exist in this repo.")
         return
 
+    try:
+        table = load_packaged_table("rdr-lifecycle.toml")
+    except (OSError, TableLoadError, tomllib.TOMLDecodeError) as exc:
+        print(f"> **ERROR**: cannot load the RDR lifecycle table: {type(exc).__name__}: {exc}")
+        return
+    # RDR-201 P1.5: derived from the table's `accept` event rows, not a
+    # hand-maintained ("draft", "open") literal (T2
+    # nexus/plan-rdr-201-audit-round-3-residuals [23999] item 2). `open` is
+    # retired from the table's domain but stays a live pre-accept synonym for
+    # `draft` here (GH #1409, nexus-qsryj).
+    pre_accept_statuses = _from_statuses_for_event(table, "accept") | {_OPEN_STATUS_ALIAS}
+    accept_target_status = _to_status_for_event(table, "accept")
+
     id_match = re.search(r"\d+", args_str)
 
     if not id_match:
@@ -948,7 +1524,7 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         # GH #1409 (nexus-qsryj): `open` is an accepted pre-accept synonym for
         # `draft` — some projects' RDR conventions (open -> accepted) never use
         # draft at all; the rdr-gate PASSED check is the real acceptance guard.
-        draft_rdrs = [r for r in rdrs if r["status"].lower() in ("draft", "open")]
+        draft_rdrs = [r for r in rdrs if r["status"].lower() in pre_accept_statuses]
         print("### Draft RDRs (eligible for acceptance)")
         print()
         if draft_rdrs:
@@ -982,7 +1558,9 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
     # Accepted status is allowed — agent handles idempotency. `open` is a
     # pre-accept synonym for `draft` (GH #1409, nexus-qsryj): the rdr-gate
     # PASSED lookup below is the real acceptance guard, not the status word.
-    if current_status.lower() not in ("draft", "open", "accepted"):
+    # RDR-201 P1.5: derived from the table (pre-accept statuses plus the
+    # `accept` event's own target status), not a hand-maintained literal.
+    if current_status.lower() not in pre_accept_statuses | {accept_target_status}:
         print(
             f"> **BLOCKED**: RDR status is `{current_status}`. "
             "Only pre-accept (draft or open) RDRs can be accepted."
@@ -1158,18 +1736,28 @@ def preamble_rdr_close(args: tuple[str, ...]) -> None:
         print(f"**Force Implemented (audit):** {force_implemented_reason}")
     print()
 
-    # Hard-block: refuse to close unless status is accepted or final
-    if current_status.lower() not in ("accepted", "final"):
+    # Hard-block: refuse to close unless status is a table close-source
+    # (RDR-201 P1.5: derived from the table's `close` event rows, not a
+    # hand-maintained ("accepted", "final") literal — `final` is retired
+    # from the table's domain, RDR-201 Revision History).
+    try:
+        close_table = load_packaged_table("rdr-lifecycle.toml")
+    except (OSError, TableLoadError, tomllib.TOMLDecodeError) as exc:
+        print(f"> **ERROR**: cannot load the RDR lifecycle table: {type(exc).__name__}: {exc}")
+        return
+    close_source_statuses = _from_statuses_for_event(close_table, "close")
+    close_source_label = " or ".join(f"`{s}`" for s in sorted(close_source_statuses))
+    if current_status.lower() not in close_source_statuses:
         if force:
             print(
-                f"> **Override**: RDR status is `{current_status}` (not accepted/final). "
+                f"> **Override**: RDR status is `{current_status}` (not {close_source_label}). "
                 "Proceeding with `--force`."
             )
             print()
         else:
             print(
                 f"> **BLOCKED**: RDR status is `{current_status}`. "
-                "Close requires status `accepted` or `final`."
+                f"Close requires status {close_source_label}."
             )
             print("> Run `nx rdr preamble rdr-gate` to validate, or use `--force` to override.")
             print()
@@ -1442,8 +2030,200 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# preamble rdr-audit
+# preamble rdr-audit — closed-vocabulary scan (RDR-201 P1.8, nexus-j9z30.8)
 # ---------------------------------------------------------------------------
+
+_RDR_AUDIT_EXCLUDED_FILENAMES: frozenset[str] = frozenset({"agents.md", "readme.md"})
+
+
+def _rdr_audit_status_findings(
+    rdr_dir: Path, status_domain: frozenset[str]
+) -> tuple[list[tuple[str, str]], int, int]:
+    """Scan *rdr_dir* non-recursively for frontmatter statuses outside
+    *status_domain*.
+
+    Scan scope (RDR-201 P1.8 task corrections, T2
+    nexus/plan-rdr-201-closed-vocabularies.md [23998] residual 7,
+    nexus/plan-rdr-201-enrichment-deltas [24001]): ``docs/rdr/*.md``,
+    non-recursive — ``docs/rdr/post-mortem/`` is a separate document set
+    carrying its own status values and is excluded by construction (a
+    single-level glob), not a special case — excluding ``AGENTS.md`` /
+    ``README.md`` by filename, case-insensitive.
+
+    A file carrying ``kind: companion`` in its frontmatter has no
+    lifecycle status at all and is SKIPPED entirely — counted, never
+    reported as a finding, regardless of any leftover ``status:`` value
+    (the ``revised-after-implementation`` shape keeps ``status: closed``
+    *and* ``kind: companion`` — RDR-201 P1.7 leg 1). A file with no
+    frontmatter, or frontmatter with no ``status:`` field and no
+    ``kind: companion``, contributes to neither list — there is nothing
+    to check.
+
+    Returns ``(findings, companion_count, scanned_count)`` where
+    *findings* is a sorted-by-filename list of ``(filename, status)`` for
+    every out-of-vocabulary status found, and *scanned_count* counts every
+    non-excluded ``.md`` file (companions included).
+    """
+    findings: list[tuple[str, str]] = []
+    companion_count = 0
+    scanned_count = 0
+    for path in sorted(rdr_dir.glob("*.md")):
+        if path.name.lower() in _RDR_AUDIT_EXCLUDED_FILENAMES:
+            continue
+        scanned_count += 1
+        fm, _text = _preamble_parse_frontmatter(path)
+        if fm.get("kind") == "companion":
+            companion_count += 1
+            continue
+        status = fm.get("status")
+        if status is None:
+            continue
+        if status not in status_domain:
+            findings.append((path.name, str(status)))
+    findings.sort(key=lambda pair: pair[0])
+    return findings, companion_count, scanned_count
+
+
+def _t2_rdr_status_census(
+    repo_name: str,
+) -> tuple[Counter[str], list[str], str | None, dict[str, str]]:
+    """Read T2 project ``<repo_name>_rdr`` and count entries by their
+    ``status:`` field, through the same injectable ``_t2_client_factory``
+    seam :func:`_gate_outcome_for` already uses (RDR-201 P1.8 task
+    corrections: "through the existing preamble T2 facade, injected for
+    tests").
+
+    This is a SEPARATE, clearly labelled census line — never merged into
+    :func:`_rdr_audit_status_findings`'s file findings. Nothing keeps the
+    two surfaces in sync automatically (the reconcile hook that claimed to
+    never ran and was deleted, nexus-e19sa; ``set-status`` writes the file,
+    the lifecycle skills write T2), so the fourth return value — ``{number:
+    status}`` for every unambiguous record — feeds
+    :func:`_file_vs_t2_status_drift`, the DETECTOR the audit prints so a
+    disagreement is a finding a human sees rather than a writer's guess.
+
+    Title shapes: T2 RDR records are titled either the bare number
+    (``"42"``) or ``"RDR-42"`` — both are counted, matched via
+    ``^(?:RDR-)?(\\d+)$`` (RDR-201 P1.8 fix round: the bare-digit-only
+    match originally here silently dropped every ``RDR-NNN``-titled
+    record, ~42 of them on the live project). Each distinct RDR number is
+    counted ONCE. When the same number appears under both title shapes
+    with DIFFERING statuses, that is reported as ambiguous rather than
+    silently picking one shape's value — this reads live production T2,
+    and guessing which shape is authoritative is not this census's call
+    to make.
+
+    A T2 read failure (unreachable service, timeout, ...) is reported ON
+    THIS LINE and never allowed to fail the audit — returns an empty
+    ``Counter`` plus a named reason string instead of raising.
+
+    Returns ``(counts, ambiguous, error, statuses_by_number)`` — *ambiguous*
+    is a sorted list of human-readable ``"<number> (<title>=<status>,
+    <title>=<status>)"`` notes, empty when there is nothing to report.
+    """
+    project = f"{repo_name}_rdr"
+    counts: Counter[str] = Counter()
+    ambiguous: list[str] = []
+    statuses_by_number: dict[str, str] = {}
+    try:
+        with _t2_client_factory() as client:
+            entries = client.get_all(project=project)
+    except Exception as exc:  # noqa: BLE001 — T2 unreachable is an expected, named failure mode; reported on the census line, never allowed to fail the audit
+        return counts, ambiguous, f"T2 unreachable: {type(exc).__name__}: {exc}", statuses_by_number
+
+    by_number: dict[str, dict[str, str]] = {}
+    for entry in entries:
+        title = entry.get("title", "") if isinstance(entry, dict) else ""
+        m = re.match(r"^(?:RDR-)?(\d+)$", title)
+        if not m:
+            continue
+        number = m.group(1)
+        content = entry.get("content", "") if isinstance(entry, dict) else ""
+        status = _preamble_parse_t2_field(content, "status") or "<no status>"
+        by_number.setdefault(number, {})[title] = status
+
+    for number, shapes in by_number.items():
+        statuses = set(shapes.values())
+        if len(statuses) > 1:
+            detail = ", ".join(f"{t}={s}" for t, s in sorted(shapes.items()))
+            ambiguous.append(f"{number} ({detail})")
+            continue
+        status = next(iter(statuses))
+        counts[status] += 1
+        statuses_by_number[number] = status
+
+    return counts, sorted(ambiguous), None, statuses_by_number
+
+
+def _rdr_file_statuses(rdr_dir: Path) -> dict[str, str]:
+    """``{number: status}`` from ``docs/rdr/*.md`` frontmatter, non-recursive,
+    same scope and companion rule as :func:`_rdr_audit_status_findings`
+    (a ``kind: companion`` file carries no lifecycle status and is skipped).
+    Numbers are the leading digits of the filename, unpadded, matching the
+    T2 title shapes the census counts."""
+    statuses: dict[str, str] = {}
+    for path in sorted(rdr_dir.glob("*.md")):
+        if path.name.lower() in _RDR_AUDIT_EXCLUDED_FILENAMES:
+            continue
+        m = re.match(r"(?:rdr-?)?(\d+)", path.stem, re.IGNORECASE)
+        if not m:
+            continue
+        fm, _text = _preamble_parse_frontmatter(path)
+        if fm.get("kind") == "companion" or fm.get("status") is None:
+            continue
+        statuses[str(int(m.group(1)))] = str(fm["status"]).strip().lower()
+    return statuses
+
+
+def _file_vs_t2_status_drift(
+    file_statuses: dict[str, str], t2_statuses: dict[str, str],
+) -> list[tuple[str, str, str]]:
+    """Every RDR number present on BOTH surfaces whose statuses disagree, as
+    sorted ``(number, file_status, t2_status)`` — the detector for the
+    drift class nexus-e19sa's deleted reconciler used to arbitrate silently
+    (critique [24089] Critical). Numbers on one side only are not drift
+    (an unregistered file, a T2-only research note); ``open`` is read as
+    ``draft`` on the file side, the pre-accept synonym set-status itself
+    honours."""
+    drift: list[tuple[str, str, str]] = []
+    for number in sorted(set(file_statuses) & set(t2_statuses), key=int):
+        file_status = file_statuses[number]
+        if file_status == _OPEN_STATUS_ALIAS:
+            file_status = "draft"
+        if file_status != t2_statuses[number].lower():
+            drift.append((number, file_statuses[number], t2_statuses[number]))
+    return drift
+
+
+def _t2_needs_reexamination_markers(
+    repo_name: str, *, client_factory: Callable[[], object] | None = None,
+) -> tuple[list[tuple[str, str]], str | None]:
+    """Every ``needs-reexamination:`` line on every RDR-titled entry in T2
+    project ``<repo_name>_rdr`` (RDR-201 P3.3, nexus-j9z30.22), as sorted
+    ``(title, marker line)`` pairs -- one pair per marker, so a record
+    flagged twice appears twice. Same title-shape rule and same
+    never-fail-the-audit posture as :func:`_t2_rdr_status_census`: a T2
+    failure comes back as the *error* string, never raised."""
+    project = f"{repo_name}_rdr"
+    factory = client_factory or _t2_client_factory
+    try:
+        with factory() as client:  # type: ignore[attr-defined]
+            entries = client.get_all(project=project)
+    except Exception as exc:  # noqa: BLE001 — T2 unreachable is reported on this line, never allowed to fail the audit
+        return [], f"T2 unreachable: {type(exc).__name__}: {exc}"
+    rows: list[tuple[str, str]] = []
+    for entry in entries:
+        title = entry.get("title", "") if isinstance(entry, dict) else ""
+        if not re.match(r"^(?:RDR-)?\d+$", title):
+            continue
+        content = entry.get("content", "") if isinstance(entry, dict) else ""
+        for line in str(content).splitlines():
+            stripped = line.strip()
+            if stripped.startswith(f"{NEEDS_REEXAMINATION_FIELD}:"):
+                rows.append((title, stripped))
+    rows.sort(key=lambda pair: (int(re.sub(r"\D", "", pair[0])), pair[1]))
+    return rows, None
+
 
 @preamble.command("rdr-audit")
 @click.argument("args", nargs=-1)
@@ -1559,6 +2339,72 @@ def preamble_rdr_audit(args: tuple[str, ...]) -> None:
                 f"Probed roots ({roots_source}): {probed}."
             )
             print("> Set `NEXUS_PROJECT_ROOTS` to the directory(ies) for project worktrees.")
+
+        print()
+        print("**Status vocabulary scan (`docs/rdr/*.md`, non-recursive):**")
+        if found_path:
+            scan_dir = found_path / "docs" / "rdr"
+            if scan_dir.is_dir():
+                try:
+                    status_domain = frozenset(
+                        load_packaged_table("rdr-lifecycle.toml").dimensions["status"].domain
+                    )
+                except (OSError, TableLoadError, tomllib.TOMLDecodeError) as exc:
+                    print(
+                        f"> Cannot load the RDR lifecycle table — scan skipped "
+                        f"({type(exc).__name__}: {exc})."
+                    )
+                else:
+                    findings, companion_count, scanned_count = (
+                        _rdr_audit_status_findings(scan_dir, status_domain)
+                    )
+                    if findings:
+                        for filename, status in findings:
+                            print(
+                                f"- FINDING: `{filename}` status `{status}` is "
+                                "outside the lifecycle domain "
+                                f"({', '.join(sorted(status_domain))})"
+                            )
+                    print(
+                        f"> {len(findings)} finding(s), {scanned_count} file(s) "
+                        f"scanned, {companion_count} `kind: companion` file(s) skipped."
+                    )
+            else:
+                print(f"> No `docs/rdr/` directory found at `{found_path}` — nothing to scan.")
+        else:
+            print("> No local worktree found for the target project — nothing to scan.")
+
+        t2_counts, t2_ambiguous, t2_error, t2_by_number = _t2_rdr_status_census(target)
+        if t2_error:
+            print(f"**T2 `{target}_rdr` status census:** {t2_error}")
+        else:
+            census_str = (
+                ", ".join(f"{status}={count}" for status, count in sorted(t2_counts.items()))
+                or "(no entries)"
+            )
+            if t2_ambiguous:
+                census_str += "; ambiguous: " + "; ".join(t2_ambiguous)
+            print(f"**T2 `{target}_rdr` status census:** {census_str}")
+            scan_dir = (found_path / "docs" / "rdr") if found_path else None
+            if scan_dir is not None and scan_dir.is_dir():
+                drift = _file_vs_t2_status_drift(_rdr_file_statuses(scan_dir), t2_by_number)
+                for number, file_status, t2_status in drift:
+                    print(f"- DRIFT: RDR-{number} file=`{file_status}` T2=`{t2_status}`")
+                print(
+                    f"> {len(drift)} file-vs-T2 status disagreement(s) (nexus-e19sa: nothing "
+                    "reconciles these automatically; fix by hand, see nexus-nxn5g)."
+                )
+        marker_rows, marker_error = _t2_needs_reexamination_markers(target)
+        print(f"**Needs re-examination (T2 `{target}_rdr` markers):**", end="")
+        if marker_error:
+            print(f" {marker_error}")
+        elif not marker_rows:
+            print(" (none)")
+        else:
+            print()
+            for title, marker in marker_rows:
+                print(f"- `{title}`: {marker}")
+        print()
 
         claude_projects = home / ".claude" / "projects"
         if claude_projects.exists():

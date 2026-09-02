@@ -702,6 +702,97 @@ class TestIndexPdfFreshMintRollback:
         assert rollback_calls[0] == fallback_doc_id
 
 
+class TestIndexPdfPreFenceVectorFailure:
+    """nexus-t952k half 2: a vector-store failure between pre-flight
+    registration and the first possible ``_fence_begin`` must mark the row
+    'failed', not leave it looking like an ordinary live document to
+    ``nx catalog verify``/doctor. Measured 2026-09-02 (AgenticScholar, T2
+    nexus/index-agenticscholar-paper-2026-09-02): a non-conformant
+    collection name refused the incremental staleness read (POST
+    /v1/vectors/get 400) AFTER registration had already landed the row,
+    and index_state was never touched — none of index_pdf's existing
+    fence try/except blocks (embed/upsert, streaming, incremental) cover
+    this earlier window."""
+
+    def test_incremental_check_failure_marks_fence_failed(
+        self, sample_pdf, mock_t3, empty_col,
+    ):
+        """Narrow proof: the exact failure site is wrapped and routes to
+        ``_fence_fail`` with the resolved doc_id — and never reaches
+        ``_fence_begin`` at all, since the failure precedes it."""
+        from nexus.doc_indexer import index_pdf
+
+        doc_id = "1.1.t952k-prefence-pdf"
+        empty_col.get.side_effect = RuntimeError("t952k prefence boom")
+
+        def _register_side_effect(*args, with_created=False, **kwargs):
+            return (doc_id, True) if with_created else doc_id
+
+        with patch(
+            "nexus.doc_indexer._register_or_lookup_doc_id",
+            side_effect=_register_side_effect,
+        ), patch("nexus.doc_indexer._fence_begin") as mock_begin, \
+             patch("nexus.doc_indexer._fence_fail") as mock_fail:
+            with pytest.raises(RuntimeError, match="t952k prefence boom"):
+                index_pdf(
+                    sample_pdf, corpus="t952k-prefence-pdf", t3=mock_t3,
+                    streaming="never",
+                )
+        mock_begin.assert_not_called()
+        mock_fail.assert_called_once_with(doc_id, "t952k prefence boom")
+
+    def test_incremental_check_failure_marks_index_state_failed_end_to_end(
+        self, sample_pdf, mock_t3, empty_col,
+    ):
+        """End-to-end against the REAL catalog substrate (mirrors
+        tests/integration/test_2t63u_collection_reconcile.py's pattern for
+        this bead's sibling reconcile fix): the row itself, not just a
+        mocked ``_fence_fail`` call, must carry ``index_state == 'failed'``
+        after this run, via the REAL pre-flight registration."""
+        from nexus.doc_indexer import index_pdf
+
+        empty_col.get.side_effect = RuntimeError("t952k prefence e2e boom")
+
+        with pytest.raises(RuntimeError, match="t952k prefence e2e boom"):
+            index_pdf(
+                sample_pdf, corpus="t952k-prefence-e2e", t3=mock_t3,
+                streaming="never",
+            )
+
+        rows = documents_by_file_path(str(sample_pdf.resolve()))
+        assert len(rows) == 1, f"expected exactly one registered row, got {rows}"
+        assert rows[0].index_state == "failed", (
+            f"a vector-op failure between registration and the first "
+            f"_fence_begin must mark the row 'failed' — got "
+            f"{rows[0].index_state!r}"
+        )
+
+
+class TestIndexDocumentPreFenceVectorFailure:
+    """nexus-t952k half 2, markdown/prose sibling: ``index_markdown``
+    pre-flights registration BEFORE calling ``_index_document`` (unlike
+    ``index_pdf``, which registers inline) — this function's own
+    incremental staleness read carries the identical pre-fence gap."""
+
+    def test_incremental_check_failure_marks_index_state_failed_end_to_end(
+        self, sample_md, mock_t3, empty_col,
+    ):
+        from nexus.doc_indexer import index_markdown
+
+        empty_col.get.side_effect = RuntimeError("t952k prefence md boom")
+
+        with pytest.raises(RuntimeError, match="t952k prefence md boom"):
+            index_markdown(sample_md, corpus="t952k-prefence-md", t3=mock_t3)
+
+        rows = documents_by_file_path(str(sample_md.resolve()))
+        assert len(rows) == 1, f"expected exactly one registered row, got {rows}"
+        assert rows[0].index_state == "failed", (
+            f"a vector-op failure between registration and the first "
+            f"_fence_begin must mark the row 'failed' — got "
+            f"{rows[0].index_state!r}"
+        )
+
+
 class TestBatchIndexMarkdownsUnchunkableFiles:
     def test_zero_byte_file_marked_failed_and_never_registers(
         self, tmp_path,
@@ -904,6 +995,57 @@ class TestCatalogMarkdownHookEphemeralPathGuard:
         assert documents_by_file_path(str(worktree_md)) == []
         primary_mirror = clean_root / "docs" / "rdr" / "rdr-unique.md"
         assert documents_by_file_path(str(primary_mirror)) == []
+
+
+class TestMarkdownCatalogHookPhysicalCollectionRepointLogging:
+    """nexus-t952k half 2: mirror of
+    tests/test_catalog_pdf_hook.py::TestPdfCatalogHookPhysicalCollectionRepointLogging
+    for the markdown hook's identical existing-branch update."""
+
+    def test_reindex_into_different_collection_logs_repoint(self, tmp_path):
+        import structlog.testing
+
+        from nexus.doc_indexer import _catalog_markdown_hook
+
+        cat = ActiveCatalog()
+        corpus = "t952k-md-repoint"
+        md_path = tmp_path / "t952k-repoint.md"
+        md_path.write_text("# Paper\n", encoding="utf-8")
+
+        _catalog_markdown_hook(md_path, "docs__v1", "prose", corpus, 3)
+        with structlog.testing.capture_logs() as logs:
+            _catalog_markdown_hook(md_path, "docs__v2", "prose", corpus, 3)
+
+        events = [
+            e for e in logs
+            if e.get("event") == "catalog_physical_collection_repointed"
+        ]
+        assert len(events) == 1, f"expected exactly one repoint log, got {logs}"
+        assert events[0]["old_collection"] == "docs__v1"
+        assert events[0]["new_collection"] == "docs__v2"
+        rows = documents_by_file_path(str(md_path.resolve()))
+        assert len(rows) == 1
+        assert events[0]["tumbler"] == str(rows[0].tumbler)
+        assert rows[0].physical_collection == "docs__v2"
+
+    def test_reindex_into_same_collection_logs_nothing(self, tmp_path):
+        import structlog.testing
+
+        from nexus.doc_indexer import _catalog_markdown_hook
+
+        corpus = "t952k-md-nop"
+        md_path = tmp_path / "t952k-nop.md"
+        md_path.write_text("# Paper\n", encoding="utf-8")
+
+        _catalog_markdown_hook(md_path, "docs__v1", "prose", corpus, 3)
+        with structlog.testing.capture_logs() as logs:
+            _catalog_markdown_hook(md_path, "docs__v1", "prose", corpus, 3)
+
+        events = [
+            e for e in logs
+            if e.get("event") == "catalog_physical_collection_repointed"
+        ]
+        assert events == [], f"same-collection re-index must log nothing, got {logs}"
 
 
 def test_batch_index_markdowns_skips_malformed_frontmatter_and_continues(

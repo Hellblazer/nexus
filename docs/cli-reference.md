@@ -580,6 +580,7 @@ nx enrich aspects knowledge__delos                     # gap-fill: only uncovere
 nx enrich aspects knowledge__delos --all               # re-extract everything (pre-7.18.0 default)
 nx enrich aspects knowledge__delos --dry-run
 nx enrich aspects knowledge__delos --validate-sample 10
+nx enrich aspects knowledge__delos --validate-sample 10 --validation-out /tmp/aspects.jsonl
 nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku-4-5-20251001
 ```
 
@@ -588,7 +589,8 @@ nx enrich aspects knowledge__delos --re-extract --extractor-version claude-haiku
 | `COLLECTION` (positional) | Must be a `knowledge__*` collection (Phase 1 scope). Other prefixes return a "no extractor config" error |
 | `--all` | Re-extract EVERY document, including ones that already have an aspect row. The pre-7.18.0 default; now opt-in because it re-spends on the whole corpus. Without it, only documents with NO aspect row are processed |
 | `--dry-run` | Report document count + cost estimate (Haiku-class). No API calls, no T2 writes. The read-side skip prediction samples the first 25 entries (one vector-service round-trip each) and projects the skip rate onto the rest (7.21.0, nexus-bocft: one round-trip per entry ran a 407-entry cloud dry-run past five minutes with nothing printed); the exact per-entry verdicts come from the real run |
-| `--validate-sample N` | Validate N% of newly-extracted aspects via `operator_verify` against the document text. Disagreements append to `./validation_failures.jsonl`. Pass 0 to skip. Default 5 |
+| `--validate-sample N` | Validate N% of newly-extracted aspects via `operator_verify` against the full document text. Disagreements append to `<nexus config dir>/aspect_validation_failures.jsonl` (nexus-xwvwx: never the current working directory). A document whose text is truncated before the check is reported as **unverifiable**, not as a disagreement. Pass 0 to skip. Default 5 |
+| `--validation-out PATH` | Override the validation-failures JSONL path (nexus-xwvwx) |
 | `--re-extract` | Re-run only on rows whose `model_version` is strictly less than `--extractor-version` (and rows that are missing entirely) |
 | `--extractor-version v` | Threshold for `--re-extract` (lexicographic STRICT-less-than) |
 
@@ -3343,7 +3345,7 @@ List service tokens: 12-char id prefix, tenant, status (`active`/`expired`/`revo
 nx tier-status [--session SESSION_ID] [--last N] [--since ISO8601] [--json]
 ```
 
-Audit tier-write activity (T1 scratch, T2 memory/plans, T3 store) for a session. Defaults to the current session (`NX_SESSION_ID`); `--last N` aggregates the most recent N sessions, `--since` bounds by timestamp, `--json` emits structured output instead of the human table. Phase 1B (nexus-a52i).
+Audit tier-write activity (T1 scratch, T2 memory/plans, T3 store) for a session. Defaults to the current session (`NX_SESSION_ID`); `--last N` aggregates the most recent N sessions, `--since` bounds by timestamp (accepts `2026-08-01`, `2026-08-01T12:00:00`, or full offset forms; date-only means midnight UTC — nexus-spbay), `--json` emits structured output instead of the human table. Phase 1B (nexus-a52i).
 
 In service mode the counts are read from the engine via `GET /v1/telemetry/tier_writes/query` (nexus-59wjj) — same filters, same row shape as the local SQLite path. Requires an engine that carries the route; against an older engine (or an unreachable service) the command degrades to an honest "service-backed; read unavailable" message rather than reporting a false zero. The doctor tier-discipline check reads through the same route.
 
@@ -3361,7 +3363,7 @@ writes a row here via `POST /v1/telemetry/nx_answer_runs/record`, and until
 read one back — the ETL `import_nx_answer_run` path doesn't count, it only
 writes in the other direction. Service-mode only; the table has no
 session_id column, so unlike `nx tier-status` there is no per-session
-default — `--since` bounds the window, `--limit` caps the listed page
+default — `--since` bounds the window (accepts `2026-08-01`, `2026-08-01T12:00:00`, or full offset forms; date-only means midnight UTC — nexus-spbay), `--limit` caps the listed page
 (default 20, does not affect the whole-set aggregates below), `--json`
 emits structured output.
 
@@ -3709,7 +3711,7 @@ RDR (Research-Design-Review) authoring helpers.
 | Subcommand | Description |
 |------------|-------------|
 | `lint` | Lint RDR frontmatter/structure; reports findings per file |
-| `set-status STATUS` | Flip an RDR's `status:` frontmatter field |
+| `set-status STATUS` | Flip an RDR's `status:` frontmatter field and README row (refused unless the lifecycle table allows the transition); then append `needs-reexamination` to the T2 entry of every RDR joined to it by a `supersedes` edge (RDR-201 P3.3) |
 | `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-close`, `rdr-research`) |
 
 Run `nx rdr --help` / `nx rdr preamble --help` for the full subcommand list. The `preamble` subcommands are primarily invoked by the conexus RDR-lifecycle skills.

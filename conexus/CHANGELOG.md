@@ -6,6 +6,44 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.27.0] - 2026-09-02
+
+Advancing `source.ref` to `v7.27.0` is what makes the eight plugin changes
+below live; they were merged on `develop` and inert in every running session
+until this tag.
+
+- `rdr_hook.py` (nexus-e19sa): the SessionStart RDR summary prints for the
+  first time. Its file filter (`re.match(r"\d+", p.stem)`) matched zero of
+  this repo's `rdr-NNN-*.md` files, so the hook exited before any logic on
+  every session since it was written; the filter now accepts `rdr-NNN-*`,
+  `rdrNNN-*` and `NNN-*` stems. The file↔T2 status **reconciler** is deleted
+  rather than switched on — a never-watched two-way writer would have
+  resolved nine known file/T2 disagreements by a ranking rule nobody had
+  seen run. `nx rdr preamble rdr-audit` now prints a `DRIFT:` line per
+  disagreement instead of reconciling anything.
+- `commands/rdr-audit.md` (nexus-j9z30.8): documents the `nx rdr preamble
+  rdr-audit` closed-vocabulary scan — `FINDING:` lines for on-disk statuses
+  outside the packaged `rdr-lifecycle` table's domain, `kind: companion`
+  files skipped and counted separately, and a separately-labelled T2 status
+  census that is never merged into the file findings.
+- `skills/rdr-close/SKILL.md` (nexus-j9z30.4): the Reverted-or-Abandoned flow
+  runs `nx rdr set-status NNN abandoned` (`reverted` is retired from the
+  status domain); the "reverted" reason is recorded in T2 / the post-mortem
+  only. The Superseded flow writes `superseded_by` into the old RDR's
+  frontmatter *before* calling `set-status ... superseded`, matching the
+  table's `successor` guard.
+- `plans/builtin/document-discovery.yml`, `plans/builtin/corpus-coverage-check.yml`
+  (nexus-rl59s): `default_bindings.corpus` widened from `knowledge` to
+  `knowledge,code,docs,rdr` so the single-step reroute reaches `rdr__`.
+- `skills/query/SKILL.md`, `skills/using-nx-skills/SKILL.md`
+  (nexus-4e75w.4): describe `nx_answer`'s two possible return shapes now that
+  continuation mode exists — a composed answer, or a reduction instruction
+  the calling session executes in-context. No routing change.
+- `hooks/scripts/auto-approve-nx-mcp.sh` (nexus-4e75w.5): adds
+  `nx_answer_report` to the auto-approve list, so the completion-report tool
+  does not prompt on every call while every sibling `nx_*` tool
+  auto-approves.
+
 ## [7.26.0] - 2026-08-31
 
 - Plugin version aligned with conexus 7.26.0. No plugin-side changes

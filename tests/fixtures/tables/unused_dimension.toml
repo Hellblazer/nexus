@@ -1,0 +1,26 @@
+# A declared dimension no row names. Coverage is proved only over
+# participating dimensions, so without the unused-dimension advisory this
+# table lints as a bare green over `region` (RDR-201 Phase 1 critique).
+[table]
+id = "unused-dimension"
+kind = "decision-table"
+version = 1
+
+[dimensions.event]
+domain = ["decide"]
+[dimensions.tier]
+domain = ["free", "paid"]
+[dimensions.region]
+domain = ["eu", "us"]
+
+[[row]]
+id = "free"
+match = { event = "decide" }
+guard = { tier = "free" }
+emit = { plan = "basic" }
+
+[[row]]
+id = "paid"
+match = { event = "decide" }
+guard = { tier = "paid" }
+emit = { plan = "pro" }

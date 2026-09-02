@@ -209,3 +209,55 @@ def test_hook_failure_routes_through_telemetry_store(monkeypatch):
     batch_call = tel.record_hook_failure.call_args_list[1].kwargs
     assert batch_call["is_batch"] is True
     assert batch_call["batch_doc_ids"] == '["a", "b"]'
+
+
+# ── nexus-spbay: --since normalization (client half of the paired fix) ───────
+# The engine's historical since parser (parseTs) fell back to now() on any
+# form OffsetDateTime.parse cannot read — a bare date silently became
+# "since right now" and every date-filtered telemetry read returned a
+# confirmatory zero (measured: 214 rows, "(no runs)" for every date tested,
+# T2 [23879]). The client normalizes BEFORE the wire so date-only and naive
+# forms work against every engine already deployed.
+
+
+def test_normalize_since_filter_accepts_the_three_caller_shapes():
+    from nexus.db.t2.http_telemetry_store import normalize_since_filter
+
+    assert normalize_since_filter("2026-08-01") == "2026-08-01T00:00:00Z"
+    assert normalize_since_filter("2026-08-01T12:30:00") == "2026-08-01T12:30:00Z"
+    assert normalize_since_filter("2026-08-01T12:30:00Z") == "2026-08-01T12:30:00Z"
+    assert normalize_since_filter("2026-08-01T12:30:00+00:00") == "2026-08-01T12:30:00Z"
+    # Non-UTC offsets convert, never drop, the offset.
+    assert normalize_since_filter("2026-08-01T12:30:00+02:00") == "2026-08-01T10:30:00Z"
+    assert normalize_since_filter(" 2026-08-01 ") == "2026-08-01T00:00:00Z"
+
+
+def test_normalize_since_filter_rejects_garbage_loudly():
+    import pytest
+
+    from nexus.db.t2.http_telemetry_store import normalize_since_filter
+
+    with pytest.raises(ValueError, match="not-a-date"):
+        normalize_since_filter("not-a-date")
+    with pytest.raises(ValueError):
+        normalize_since_filter("08-01")  # ambiguous partial — refuse, never guess
+
+
+def test_query_methods_send_normalized_since_on_the_wire():
+    """The choke point: every since-bearing read method normalizes before
+    the wire, so a date-only --since works against the DEPLOYED engine
+    (whose parser needs a full offset form) — not only against engines
+    carrying the paired parseSinceFilter fix."""
+    from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+
+    store = HttpTelemetryStore.__new__(HttpTelemetryStore)  # bypass network init
+    gets = []
+    store._get = lambda path, params=None: gets.append((path, dict(params or {}))) or {}
+
+    store.query_nx_answer_runs(since="2026-08-01", limit=5)
+    store.query_tier_writes(since="2026-08-01")
+    store.list_tier_writes(since="2026-08-01")
+
+    assert len(gets) == 3
+    for path, params in gets:
+        assert params.get("since") == "2026-08-01T00:00:00Z", (path, params)

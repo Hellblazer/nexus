@@ -594,11 +594,13 @@ def suggest_links_cmd(limit: int, threshold: float) -> None:
 @click.option("--filepath/--no-filepath", default=True, help="RDR filepath links")
 @click.option("--prose/--no-prose", default=True, help="Prose/markdown filepath links")
 @click.option("--pdf/--no-pdf", default=True, help="PDF corpus links")
+@click.option("--rdr-dependency/--no-rdr-dependency", default=True,
+              help="RDR-to-RDR dependency links from supersedes/superseded_by/parent_rdr/related_rdrs frontmatter")
 @click.option("--dry-run", is_flag=True, help="Report what WOULD be created, per generator, without writing")
 @click.option("-n", "--sample", "sample", type=int, default=5,
               help="Proposed links to show per generator under --dry-run")
 def generate_links_cmd(
-    citations: bool, filepath: bool, prose: bool, pdf: bool,
+    citations: bool, filepath: bool, prose: bool, pdf: bool, rdr_dependency: bool,
     dry_run: bool, sample: int,
 ) -> None:
     """Auto-generate typed links from metadata cross-matching.
@@ -614,18 +616,29 @@ def generate_links_cmd(
     generators, so prose and pdf links were reachable at index time but not
     from the CLI. All four now run; --no-prose / --no-pdf restore the old
     scope.
+
+    RDR-201 P3.2 (nexus-j9z30.21): --rdr-dependency adds a 5th generator,
+    seeding RDR-to-RDR links (supersedes/relates) from frontmatter that
+    already exists on disk. Needs a registered owner for the current repo
+    to scope endpoint resolution (rdr_canonical's Finding-4 fragmentation
+    guard) — on a repo with no owner registered yet (never indexed), it is
+    skipped with a note rather than run against a bogus scope.
     """
+    from pathlib import Path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
     cat = _cat_cmd._get_catalog()
     from nexus.catalog.link_generator import (  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         DryRunLinkWriter,
+        bind_rdr_dependency_generator,
         generate_citation_links,
         generate_pdf_corpus_links,
         generate_prose_filepath_links,
         generate_rdr_filepath_links,
         load_existing_link_keys,
     )
+    from nexus.indexer_utils import find_repo_root  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     generators = [
         ("citation", citations, generate_citation_links),
@@ -633,6 +646,17 @@ def generate_links_cmd(
         ("prose-filepath", prose, generate_prose_filepath_links),
         ("pdf-corpus", pdf, generate_pdf_corpus_links),
     ]
+    if rdr_dependency:
+        repo_root = find_repo_root(Path.cwd()) or Path.cwd()
+        dep_entry = bind_rdr_dependency_generator(cat, repo_root)
+        if dep_entry is not None:
+            name, fn = dep_entry
+            generators.append((name, True, fn))
+        else:
+            click.echo(
+                "  rdr-dependency: skipped (no catalog owner registered yet "
+                f"for {repo_root} — run an index first)"
+            )
     selected = [(name, fn) for name, enabled, fn in generators if enabled]
     if not selected:
         click.echo("No generators selected.")

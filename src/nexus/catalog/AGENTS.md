@@ -38,8 +38,97 @@ The `query` MCP tool has catalog-aware routing: `author`, `content_type`, `subtr
 | `chunk_quarantine.py` | Orphan-chunk soft delete (nexus-xukbj) — moves GC orphans to a sibling `quarantine__*` collection (excluded from every search corpus by construction) instead of hard-deleting; restores chashes that become referenced again. |
 | `dt_link_generator.py` | DEVONthink semantic + structural link generation (RDR-139 Layer B) — writes `relates` edges from DT 'See Also' similarity and author-curated item links; gated on `devonthink.available`. |
 | `collection_name.py` | `CollectionName` value object (RDR-103 Phase 1) — the four-segment `(content_type, owner_id, embedding_model, model_version)` tuple rendered as `<content_type>__<owner_id>__<embedding_model>__v<n>`; `parse` is strict. |
+| `rdr_canonical.py` | RDR-201 Phase 3.1 (nexus-j9z30.20) canonical-tumbler resolution — see § RDR canonical-tumbler rule below. |
 
 Deleted in nexus-i711w (RDR-158 P4 terminal deletion): `catalog.py` (the local `Catalog` class), `catalog_db.py`, `event_log.py`, `projector.py`, `events.py`, `catalog_owners.py`, `catalog_sync.py`, `catalog_links.py`, `catalog_docs.py`, `catalog_backup.py`, `catalog_git.py`, `catalog_writes.py` (ManifestRow relocated to `types.py`), `consolidation.py`, `collections_owner_backfill.py`, `synthesizer.py`.
+
+## RDR canonical-tumbler rule (RDR-201 Phase 3.1, nexus-j9z30.20)
+
+The catalog has no notion of "the one true tumbler for RDR-NNN" — a re-index
+run mints a fresh owner every time the repo's derived `repo_hash` shifts
+(worktree moves, historical registration churn), and RDR files predate the
+`content_type="rdr"` scheme (they used to register as `content_type="prose"`).
+Measured against the live catalog (2026-09-01): 206 on-disk RDR files are
+registered under roughly ten different owner ids, plus a legacy `prose`
+registration under owner `1.10` for any RDR never re-indexed since. Nothing
+that depends on "which tumbler is RDR-NNN" (RDR-to-RDR dependency edges,
+Phase 3.2) means anything until this is resolved to exactly one tumbler per
+RDR. `nexus.catalog.rdr_canonical` owns that resolution — no catalog writes,
+no edge creation (that is bead nexus-j9z30.21).
+
+**Identity key**: two registrations are candidates for the SAME RDR only
+when their `file_path` basenames are identical AND the file sits directly
+inside a `rdr/` directory (`docs/rdr/rdr-201-….md`, absolute or relative).
+This is narrower than "contains an `RDR-NNN` substring" on purpose:
+`docs/rdr/post-mortem/rdr-191-….md` (a different subdirectory) and sibling
+artifacts that share an RDR's numeric prefix but not its basename
+(`rdr-200-phase1-prereg.md`, `rdr-200-phase1-gate-result.md`) are DISTINCT
+catalog documents, not duplicate registrations of the RDR they discuss — a
+loose numeric-prefix match collapses them together, which is a false
+ambiguity the rule must not manufacture. (Found while building this module:
+6 of the corpus's apparent duplicates were exactly this before the basename
+fix landed.)
+
+**Repo scoping is load-bearing, not optional** (CRITICAL fix, code-review +
+critique, 2026-09-01): the SAME catalog holds other repos' RDR registrations
+under other owners — measured live, `/Users/hal.hildebrand/git/ART` is
+registered `content_type="rdr"` in this same catalog under a different owner
+— so a same-basename collision across repos is real, not hypothetical. Repo
+identity is `rdr_source_prefix(repo_root)`, a `file://` prefix anchored on
+`docs/rdr/` (the exact directory `nx index rdr` walks) — **not the bare repo
+root**: a nested agent-worktree checkout
+(`<repo_root>/.claude/worktrees/<name>/docs/rdr/…`, a real fragmentation
+source found live in this repo's own catalog) sits inside the repo root's
+own path but is a different `docs/rdr/` directory and must not be treated
+as in-repo. A bare-root prefix would wrongly admit it; the `docs/rdr/`-
+anchored one does not.
+
+**Resolution rule**, given the candidate registrations sharing one identity
+key, in order:
+
+1. `content_type == "rdr"` beats the legacy `"prose"` registration — when at
+   least one `"rdr"` candidate exists, only `"rdr"` candidates survive to
+   step 2.
+2. ADMISSION (unconditional — applies to a single surviving candidate too,
+   not only a tie): a candidate is admitted only when it is verifiably THIS
+   repo's own — its owner is the CURRENT repo owner (the owner id
+   `nx index rdr` registers new content under today — resolved via
+   `_repo_identity`'s `repo_hash` → `CatalogReader.owner_for_repo`, see
+   `current_rdr_owner`) OR its `source_uri` sits under this repo's own
+   `rdr_source_prefix`. A candidate that fails BOTH checks is never a
+   winner, however few other candidates exist — the bug this closes: the
+   original single-candidate fast path accepted a lone registration
+   unconditionally, so a same-basename document from a different repo (the
+   `ART` shape above) or a stale nested-worktree copy could be silently
+   resolved as canonical with no warning.
+3. WINNER SELECTION among admitted candidates: the one under the current
+   owner wins when unique; otherwise a single admitted candidate still
+   resolves unambiguously (the common case: a legacy registration under a
+   stale owner that `source_uri` nonetheless confirms is this repo's own
+   file — roughly 150 of this repo's 184 RDR-shaped documents have never
+   been re-indexed under the current owner and resolve this way). Zero
+   admitted candidates, or two or more with no unique current-owner match,
+   is UNRESOLVABLE: no guess, no silent pick. `resolve_canonical_tumbler`
+   logs a structlog `rdr_tumbler_unresolvable` warning naming every
+   surviving candidate and returns `None` — the caller creates no edge for
+   that record.
+
+`resolve_all` is the single authority that runs this rule over a full
+catalog fetch (group → resolve, one entry point) — every caller needing a
+full-catalog resolution routes through it rather than re-deriving the loop;
+`scripts/collapse_rdr_registrations.py`'s `build_plan` calls it directly.
+
+`scripts/collapse_rdr_registrations.py` is the `nx`-free reporting/collapse
+tool built on this rule: it fetches `content_type="rdr"`/`"prose"` and
+scopes every entry by `rdr_source_prefix` BEFORE grouping (never relies on
+the caller to have pre-filtered); `--dry-run` (the default) then lists, per
+RDR, every admitted registration found and which one the rule keeps;
+`--apply` sets `alias_of` on the losing registrations via the whitelisted
+`CatalogWriter.update` RPC (never `HttpCatalogClient.set_alias` directly —
+that method is not in `CATALOG_WRITE_OPS`). **Bead nexus-j9z30.20 ships the
+resolution rule and the dry-run/report tool ONLY** — `--apply` has never
+been run against the live catalog, and whether/when to run it live is a
+SEPARATE follow-up decision this bead does not schedule or imply.
 
 ## Adding a new source-URI scheme
 

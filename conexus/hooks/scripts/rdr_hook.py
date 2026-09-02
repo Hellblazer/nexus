@@ -1,6 +1,26 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SessionStart hook: detect RDR dir, reconcile file↔T2 status, report."""
+"""SessionStart hook: detect the RDR dir and report document count, T2 status
+breakdown, and whether the tree is indexed. Read-only.
+
+nexus-e19sa (Sam's ruling, 2026-09-02): this hook used to carry a second
+half -- a file<->T2 status RECONCILE that rewrote whichever side ranked
+lower (``_reconcile`` / ``_update_file_status`` / ``_update_t2_status`` and
+the terminal-rank derivation feeding them). It never ran once: the file
+filter was ``re.match(r"\\d+", p.stem)`` against stems shaped
+``rdr-201-...``, so it matched zero files and the hook exited before any
+logic, on every session since it was written. That killed both halves.
+The writer half is DELETED rather than switched on: a never-watched
+two-way writer whose first live run would have resolved nine known file/T2
+disagreements by a ranking rule nobody had seen work was the risky thing
+here, not the missing feature. (The ruling's other ground -- that ``nx rdr
+set-status`` now writes file and T2 together -- is not so: set-status
+writes the file and README, the lifecycle skills write T2. The drift class
+therefore still exists and is DETECTED, not reconciled: ``nx rdr preamble
+rdr-audit`` prints a ``DRIFT:`` line per disagreement for a human to
+settle.) The read-only summary is kept and the filter fixed so it finally
+prints. The nine known drift rows are bead nexus-nxn5g.
+"""
 from __future__ import annotations
 
 import sys
@@ -17,27 +37,17 @@ import subprocess
 from collections import Counter
 from pathlib import Path
 
-
-# Monotonic status ordering (higher index = more advanced)
-# "open" ranks WITH "draft" (nexus-e2sim / GH #1409): it is the accepted
-# pre-accept synonym in rdr.py's accept flow, and rdr-create always seeds
-# T2 at "draft" — an unranked "open" here made this hook silently rewrite
-# every open-status file back to draft on session start.
-_STATUS_ORDER = {
-    "draft": 0,
-    "open": 0,
-    "accepted": 1,
-    "implemented": 2,
-    "closed": 3,
-    "reverted": 4,
-    "abandoned": 4,
-    "superseded": 4,
-}
-_TERMINAL = {"closed", "reverted", "abandoned", "superseded"}
 _EXCLUDE_FILES = {
     "readme.md", "template.md", "index.md", "overview.md",
-    "workflow.md", "templates.md",
+    "workflow.md", "templates.md", "agents.md",
 }
+
+#: The stems this repo's RDR files actually have: ``rdr-201-foo`` (the
+#: standard shape), ``rdr137-foo`` (one legacy file with no second hyphen),
+#: and the bare ``001-foo`` shape the original filter was written for and
+#: nothing here ever used. Anchored at the start of the stem, so a sibling
+#: like ``status-census-2026-09-01`` (digits, not leading) is not an RDR.
+_RDR_STEM_RE = re.compile(r"(?:rdr-?)?(\d+)", re.IGNORECASE)
 
 
 def _repo_root() -> Path | None:
@@ -100,29 +110,12 @@ def _collection_exists(target: str) -> bool:
     return False
 
 
-def _parse_frontmatter_status(filepath: Path) -> str | None:
-    """Extract status from YAML frontmatter."""
-    try:
-        text = filepath.read_text(errors="replace")
-    except Exception:
-        return None
-    if not text.startswith("---"):
-        return None
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return None
-    block = parts[1]
-    for line in block.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("status:"):
-            val = stripped.split(":", 1)[1].strip().strip('"').strip("'")
-            return val.lower() if val else None
-    return None
-
-
 def _extract_rdr_id(filepath: Path) -> str | None:
-    """Extract numeric ID from filename like 001-foo.md."""
-    m = re.match(r"(\d+)", filepath.stem)
+    """Numeric RDR id from a ``docs/rdr`` filename, or ``None`` for a file
+    that is not an RDR document (see :data:`_RDR_STEM_RE`). This is the
+    file filter ``main`` applies; nexus-e19sa's whole lesson is that a
+    filter selecting nothing looks exactly like a quiet success."""
+    m = _RDR_STEM_RE.match(filepath.stem)
     return m.group(1) if m else None
 
 
@@ -152,97 +145,6 @@ def _load_all_t2_statuses(repo_name: str) -> dict[str, str]:
     return statuses
 
 
-def _update_t2_status(repo_name: str, rdr_id: str, new_status: str) -> bool:
-    """Update T2 record status field. Reads existing, replaces status line."""
-    try:
-        result = subprocess.run(
-            ["nx", "memory", "get", "--project", f"{repo_name}_rdr", "--title", rdr_id],
-            capture_output=True, text=True, timeout=10,
-        )
-        content = (result.stdout or "").strip()
-        if not content:
-            return False
-        # Replace status line
-        updated_lines = []
-        for line in content.splitlines():
-            if line.strip().startswith("status:"):
-                updated_lines.append(f'status: "{new_status}"')
-            else:
-                updated_lines.append(line)
-        updated = "\n".join(updated_lines)
-        result = subprocess.run(
-            ["nx", "memory", "put", "-", "--project", f"{repo_name}_rdr",
-             "--title", rdr_id, "--ttl", "permanent", "--tags", "rdr"],
-            input=updated, capture_output=True, text=True, timeout=10,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def _update_file_status(filepath: Path, new_status: str) -> bool:
-    """Update frontmatter status in RDR file."""
-    try:
-        text = filepath.read_text(errors="replace")
-        if not text.startswith("---"):
-            return False
-        parts = text.split("---", 2)
-        if len(parts) < 3:
-            return False
-        # Replace status line in frontmatter
-        fm_lines = parts[1].splitlines()
-        new_fm = []
-        for line in fm_lines:
-            if line.strip().startswith("status:"):
-                new_fm.append(f"status: {new_status}")
-            else:
-                new_fm.append(line)
-        new_text = "---\n" + "\n".join(new_fm).strip() + "\n---" + parts[2]
-        filepath.write_text(new_text)
-        return True
-    except Exception:
-        return False
-
-
-def _reconcile(root: Path, repo_name: str, rdr_files: list[Path],
-               t2_statuses: dict[str, str]) -> int:
-    """Reconcile file↔T2 status. Returns count of reconciled records."""
-    reconciled = 0
-    for filepath in rdr_files:
-        rdr_id = _extract_rdr_id(filepath)
-        if not rdr_id:
-            continue
-
-        file_status = _parse_frontmatter_status(filepath)
-        t2_status = t2_statuses.get(rdr_id)
-
-        if file_status is None or t2_status is None:
-            continue
-        if file_status == t2_status:
-            continue
-
-        file_rank = _STATUS_ORDER.get(file_status, -1)
-        t2_rank = _STATUS_ORDER.get(t2_status, -1)
-
-        # Both terminal but different — warn, do NOT auto-reconcile
-        if file_status in _TERMINAL and t2_status in _TERMINAL and file_status != t2_status:
-            print(f"     WARNING: RDR {rdr_id} terminal conflict "
-                  f"(T2={t2_status}, file={file_status}) — manual resolution needed")
-            continue
-        elif file_rank > t2_rank:
-            # File is more advanced — update T2
-            print(f"     RDR {rdr_id}: {t2_status} → {file_status} (syncing T2 to file)")
-            _update_t2_status(repo_name, rdr_id, file_status)
-            reconciled += 1
-        elif t2_rank > file_rank:
-            # T2 is more advanced — update file
-            print(f"     RDR {rdr_id}: {file_status} → {t2_status} (syncing file to T2)")
-            _update_file_status(filepath, t2_status)
-            reconciled += 1
-
-    return reconciled
-
-
 def _rdr_status_counts(repo_name: str, preloaded: dict[str, str] | None = None) -> Counter[str]:
     """Status counts from T2. Uses preloaded statuses if available."""
     statuses = preloaded if preloaded is not None else _load_all_t2_statuses(repo_name)
@@ -265,6 +167,16 @@ def _rdr_dir(root: Path) -> Path:
     return root / "docs" / "rdr"
 
 
+def _rdr_files(rdr_dir: Path) -> list[Path]:
+    """The RDR documents directly under *rdr_dir* -- non-recursive, so
+    ``docs/rdr/post-mortem/`` (a separate document set) is never counted,
+    with the index/template/agents files excluded by name."""
+    return [
+        p for p in rdr_dir.glob("*.md")
+        if p.name.lower() not in _EXCLUDE_FILES and _extract_rdr_id(p) is not None
+    ]
+
+
 def main() -> None:
     root = _repo_root()
     if root is None:
@@ -274,11 +186,7 @@ def main() -> None:
     if not rdr_dir.exists():
         sys.exit(0)
 
-    rdr_files = [
-        p for p in rdr_dir.glob("*.md")
-        if p.name.lower() not in _EXCLUDE_FILES
-        and re.match(r"\d+", p.stem)
-    ]
+    rdr_files = _rdr_files(rdr_dir)
     if not rdr_files:
         sys.exit(0)
 
@@ -286,18 +194,7 @@ def main() -> None:
     rdr_collection = _resolve_rdr_collection(root)
     indexed = bool(rdr_collection) and _collection_exists(rdr_collection)
 
-    # Batch-load T2 statuses once (used by both reconcile and status counts)
-    t2_statuses = _load_all_t2_statuses(repo_name)
-
-    # Reconcile file↔T2 status (monotonic-advance rule)
-    reconciled = _reconcile(root, repo_name, rdr_files, t2_statuses)
-    if reconciled:
-        print(f"RDR sync: {reconciled} record(s) reconciled")
-        # Reload after reconciliation changed statuses
-        t2_statuses = _load_all_t2_statuses(repo_name)
-
-    # Status breakdown from T2 (post-reconciliation)
-    counts = _rdr_status_counts(repo_name, preloaded=t2_statuses)
+    counts = _rdr_status_counts(repo_name)
     if counts:
         breakdown = ", ".join(f"{n} {s}" for s, n in counts.most_common())
         status_info = f"{len(rdr_files)} documents ({breakdown})"

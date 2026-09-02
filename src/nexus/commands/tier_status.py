@@ -122,6 +122,17 @@ def tier_status_cmd(
         raise click.UsageError(
             "--session, --last, and --since are mutually exclusive"
         )
+    # nexus-spbay: validate/normalize --since up front — same defect class
+    # as `nx answer-runs --since` (the engine's old parser turned any
+    # unparseable value into `since now()`, a guaranteed zero); fail as a
+    # usage error naming the value, and send old engines a form they parse.
+    if since:
+        from nexus.db.t2.http_telemetry_store import normalize_since_filter  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
+
+        try:
+            since = normalize_since_filter(since)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="--since") from exc
 
     # nexus-59wjj: read parity — query the service-backed telemetry store
     # through GET /v1/telemetry/tier_writes/query. On any failure fall

@@ -1,0 +1,92 @@
+# Release-floor decision table, DEFECT variant: plants one graph-overlap
+# (overlap-x-bare-or-paired vs overlap-y-paired-or-auto, both scoped to
+# cloud_vs_floor=equal, both fire wherever mode=paired, and neither
+# subsumes the other) and one graph-coverage-gap (the below/paired-auto/
+# non-additive-ledger row is missing, leaving 2 of 36 cells uncovered).
+
+# Release-floor decision table (decision-table class), CLEAN.
+# cloud_vs_floor(4) x mode(3) x ledger(3) = 36 cells, one group ("decide"),
+# fully enumerated -- no escape row needed, coverage proved by the rows
+# themselves. Modeled loosely on AGENTS.md's paired-release choreography
+# and check_engine_release_floor.py's --paired-deploy / --paired-deploy-auto
+# / additive-ledger logic.
+
+[model]
+id = "release-floor-decision"
+class = "decision-table"
+
+[tags.cloud_vs_floor]
+domain = ["below", "equal", "above", "unreachable"]
+
+[tags.mode]
+domain = ["bare", "paired", "paired-auto"]
+
+[tags.ledger]
+domain = ["all-additive", "non-additive", "none"]
+
+[[rows]]
+id = "overlap-x-bare-or-paired"
+outcome = "decide"
+[rows.guard_all]
+cloud_vs_floor = "equal"
+mode = ["bare", "paired"]
+[rows.emit]
+verdict = "n/a"
+
+[[rows]]
+id = "overlap-y-paired-or-auto"
+outcome = "decide"
+[rows.guard_all]
+cloud_vs_floor = "equal"
+mode = ["paired", "paired-auto"]
+[rows.emit]
+verdict = "n/a"
+
+# cloud already at or above the floor: pass regardless of mode/ledger (18 cells)
+[[rows]]
+id = "at-or-above-floor"
+outcome = "decide"
+[rows.guard_all]
+cloud_vs_floor = ["equal", "above"]
+[rows.emit]
+verdict = "pass"
+
+# cloud verification unreachable: block regardless (9 cells)
+[[rows]]
+id = "unreachable"
+outcome = "decide"
+[rows.guard_all]
+cloud_vs_floor = "unreachable"
+[rows.emit]
+verdict = "block"
+
+# below floor, bare mode: no pairing story, always block (3 cells)
+[[rows]]
+id = "below-bare"
+outcome = "decide"
+[rows.guard_all]
+cloud_vs_floor = "below"
+mode = "bare"
+[rows.emit]
+verdict = "block"
+
+# below floor, paired mode: human confirmed the exact tag, accept regardless of ledger (3 cells)
+[[rows]]
+id = "below-paired"
+outcome = "decide"
+[rows.guard_all]
+cloud_vs_floor = "below"
+mode = "paired"
+[rows.emit]
+verdict = "pass"
+
+# below floor, paired-auto, all-additive ledger: safe to deploy engine-first (1 cell)
+[[rows]]
+id = "below-paired-auto-additive"
+outcome = "decide"
+[rows.guard_all]
+cloud_vs_floor = "below"
+mode = "paired-auto"
+ledger = "all-additive"
+[rows.emit]
+verdict = "pass"

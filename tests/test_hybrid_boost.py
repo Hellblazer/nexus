@@ -164,20 +164,24 @@ def test_hybrid_score_in_valid_range():
     assert 0.0 <= v_result.hybrid_score <= 1.0
 
 
-def test_file_size_penalty_uses_catalog_chunk_count_when_provided():
-    """nexus-dxly: post-RDR-108 Phase-3 chunks lack ``chunk_count`` in
-    metadata. When a catalog is supplied, the file-size penalty
-    resolves it via documents.chunk_count keyed on doc_id (tumbler).
-    Pre-fix, every Phase-3 chunk defaulted to chunk_count=1 (no penalty)
-    and large files outranked small ones on identical vector distance.
+def test_catalog_chunk_count_no_longer_consulted_for_scoring():
+    """nexus-0bmhd (2026-09-01): RDR-006's file-size penalty — and its
+    catalog ``documents.chunk_count`` lookup for post-RDR-108 Phase-3
+    chunks, nexus-dxly — is removed from scoring entirely. Domination
+    control moved to the render layer
+    (``search_engine.apply_file_diversity_cap``). Two code__ results at
+    an identical vector distance must score IDENTICALLY regardless of
+    doc_id/chunk_count, and ``chunk_counts_for_docs`` must not even be
+    CALLED — scoring has nothing left to resolve it for.
     """
     from nexus.scoring import apply_hybrid_scoring
 
+    calls: list[list] = []
+
     class _FakeCatalog:
-        """nexus-qnp5s: uses the public API (chunk_counts_for_docs) instead of _db."""
         def chunk_counts_for_docs(self, doc_ids: list) -> dict:
-            counts = {"ART-small": 5, "ART-large": 5000}
-            return {d: counts[d] for d in doc_ids if d in counts}
+            calls.append(list(doc_ids))
+            return {"ART-small": 5, "ART-large": 5000}
 
     # Two code__ results, identical vector distance, no chunk_count
     # in metadata (Phase-3 shape).  Only doc_id differs.
@@ -191,17 +195,18 @@ def test_file_size_penalty_uses_catalog_chunk_count_when_provided():
         [small, large], hybrid=False, catalog=_FakeCatalog(),
     )
     score = {r.id: r.hybrid_score for r in results}
-    # Large file should score lower than small file due to penalty.
-    assert score["s"] > score["l"], (
-        f"small file (chunk_count=5) should outrank large file "
-        f"(chunk_count=5000) at equal vector distance; got {score!r}"
+    assert score["s"] == pytest.approx(score["l"], abs=1e-9), (
+        f"chunk-count-blind scoring must score equal-distance results "
+        f"identically regardless of file size; got {score!r}"
+    )
+    assert calls == [], (
+        "chunk_counts_for_docs must not be consulted for scoring any more"
     )
 
 
-def test_file_size_penalty_without_catalog_falls_back_to_metadata():
-    """Without a catalog the lookup is skipped and the legacy
-    ``metadata["chunk_count"]`` read still works (back-compat for
-    pre-Phase-3 chunks that still carry the field).
+def test_metadata_chunk_count_no_longer_consulted_for_scoring():
+    """Same pin via the legacy ``metadata["chunk_count"]`` path (no
+    catalog supplied) — also chunk-count-blind now.
     """
     from nexus.scoring import apply_hybrid_scoring
 
@@ -210,7 +215,7 @@ def test_file_size_penalty_without_catalog_falls_back_to_metadata():
 
     results = apply_hybrid_scoring([small, large], hybrid=False)
     score = {r.id: r.hybrid_score for r in results}
-    assert score["s"] > score["l"]
+    assert score["s"] == pytest.approx(score["l"], abs=1e-9)
 
 
 def test_non_hybrid_search_unaffected():

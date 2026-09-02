@@ -33,6 +33,22 @@ from nexus.devonthink import DTNotAvailableError, _is_darwin
 _log = structlog.get_logger(__name__)
 
 
+class _DTUnreachableError(click.ClickException):
+    """DEVONthink MCP was unreachable on every transport with a layer flag set.
+
+    nexus-fdk1x: exit code 2 (distinct from the generic ClickException
+    exit code 1) so scripted callers can tell "DT unreachable" apart from
+    an ordinary usage/argument error. ``show()`` is a no-op -- the loud
+    message is already echoed to stdout by the caller before this is
+    raised, and Click's default ``Error: <msg>`` would duplicate it.
+    """
+
+    exit_code = 2
+
+    def show(self, file: object = None) -> None:  # noqa: ARG002 — Click's ClickException.show() signature
+        pass
+
+
 _SUPPORTED_EXTS: frozenset[str] = frozenset({".pdf", ".md"})
 
 
@@ -55,10 +71,19 @@ def _resolve_dt_collection(
     to conformant 4-segment names so the strict-naming guard at
     ``T3Database.get_or_create_collection`` accepts them.
     """
-    from nexus.corpus import resolve_write_embedding_model  # noqa: PLC0415 — command-local import (resolve_write_embedding_model)
+    from nexus.corpus import (  # noqa: PLC0415 — command-local import
+        resolve_write_embedding_model,
+        t3_collection_name,
+    )
 
     if collection:
-        return collection
+        # Measured 2026-09-02 (AgenticScholar re-index): a bare
+        # ``--collection knowledge__agentic-scholar`` was passed through
+        # verbatim and the engine refused it as non-conformant, after the
+        # catalog Document had already been registered. ``nx index pdf``
+        # normalises its --collection through the same resolver; this
+        # path must too.
+        return t3_collection_name(collection, for_write=True)
     owner = corpus.replace("_", "-")
     content_type = "knowledge" if ext == ".pdf" else "docs"
     suffix = f"{owner}-papers" if ext == ".pdf" else owner
@@ -798,14 +823,41 @@ def index_cmd(
         PER_RECORD_SURVIVABLE_EXCEPTIONS,
     )
 
-    # RDR-139 Layer D: only probe DT availability once, and only when the
-    # opt-in flag is set. Flag off -> the unsupported-extension skip path is
+    # RDR-139 Layer D / nexus-fdk1x: probe DT reachability ONCE for
+    # link-semantic/writeback/highlights (which now try HTTP then fall
+    # back to the stdio transport -- see nexus.mcp_client.devonthink.dt_call)
+    # so all three share one check. No layer flag set -> no probe at all,
     # byte-identical to today (Gap 0).
+    #
+    # ``loud_layers`` -- and the probe itself -- is DELIBERATELY scoped to
+    # just those three (code-review finding 4, T2 [24110]): dt-content's
+    # own Gap-0 contract (DT unavailable -> skip, exit 0,
+    # tests/test_dt_content_layer_d.py::test_flag_with_dt_unavailable_skips)
+    # predates this bead, and a plain ``--dt-content`` (no B/E/F flag) must
+    # NOT pay the stdio-spawn probe the other three need -- it keeps its
+    # pre-fdk1x fast HTTP-only availability check
+    # (``transport="http"``) instead. When dt-content is combined with a
+    # loud layer, the shared (auto-transport) probe already answers both.
+    loud_layers: list[str] = []
+    if link_semantic:
+        loud_layers.append("link-semantic")
+    if writeback:
+        loud_layers.append("writeback")
+    if highlights:
+        loud_layers.append("highlights")
+
     dt_content_active = False
-    if dt_content:
+    dt_reachable = True
+    if loud_layers:
         from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415 — command-local import (mcp_client.devonthink)
 
-        dt_content_active = _dt.available()
+        dt_reachable = _dt.available()
+        if dt_content:
+            dt_content_active = dt_reachable
+    elif dt_content:
+        from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415 — command-local import (mcp_client.devonthink)
+
+        dt_content_active = _dt.available(transport="http")
 
     for uuid, path in records:
         ext = Path(path).suffix.lower()
@@ -1137,6 +1189,21 @@ def index_cmd(
         # bead — only a POSITIVE engine verdict or a write/identity
         # failure fails the run.
         raise_identity_drop_exception(subject="record")
+
+    # nexus-fdk1x: a layer flag was requested but DT never became reachable
+    # on ANY transport (HTTP nor stdio) -- the pre-fix behaviour was a
+    # silent "0 semantically linked, 0 written back, 0 highlights ingested"
+    # at rc=0 with no remedy. Loud instead: name every transport tried and
+    # fail the run. dt_reachable is a single up-front probe (see above) --
+    # it does not change mid-run, so this is safe to check once, here.
+    if loud_layers and not dt_reachable:
+        detail = _dt.last_unreachable_detail() or "no transport configured"
+        message = (
+            f"DEVONthink MCP unreachable ({detail}): "
+            f"layers {'/'.join(loud_layers)} skipped"
+        )
+        click.echo(message)
+        raise _DTUnreachableError(message)
 
 
 def _gather_records(

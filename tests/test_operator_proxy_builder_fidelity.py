@@ -33,6 +33,17 @@ intentionally not compared — the proxy's fixture differs from core.py's
 own docstring examples on purpose; only the constant template shape
 (which literal text appears where, and how many substitution slots sit
 between them) must match.
+
+RDR-200 Phase 0 (nexus-5mft0.1) retarget: the ``operator_*`` functions
+in ``core.py`` no longer build their prompt inline — each now calls a
+pure ``build_<op>_request`` in ``nexus.mcp.operator_requests`` and
+unpacks the result. The six PAIRS below compare the harness's
+``bench.operator_proxy.build_*`` functions against THOSE hoisted
+builders instead of the (now prompt-construction-free) ``core.py``
+functions directly — the fidelity contract this module exists to
+enforce (harness prompt shape == the real dispatch's prompt shape) is
+unchanged; only the reference side of the comparison moved to where
+the real construction now lives.
 """
 from __future__ import annotations
 
@@ -48,15 +59,15 @@ from bench.operator_proxy import (
     build_verify,
 )
 
-from nexus.mcp import core as mcp_core
+from nexus.mcp import operator_requests as core_requests
 
 _CASES = [
-    (build_extract, mcp_core.operator_extract),
-    (build_rank, mcp_core.operator_rank),
-    (build_filter, mcp_core.operator_filter),
-    (build_check, mcp_core.operator_check),
-    (build_verify, mcp_core.operator_verify),
-    (build_groupby, mcp_core.operator_groupby),
+    (build_extract, core_requests.build_extract_request),
+    (build_rank, core_requests.build_rank_request),
+    (build_filter, core_requests.build_filter_request),
+    (build_check, core_requests.build_check_request),
+    (build_verify, core_requests.build_verify_request),
+    (build_groupby, core_requests.build_groupby_request),
 ]
 
 
@@ -163,7 +174,7 @@ class TestBuilderFidelity:
         exact historical build_rank bug) must fail the shape comparison.
         Constructed synthetically here so the test doesn't depend on the
         bug still being present anywhere in the codebase."""
-        core_shape = _prompt_shape(mcp_core.operator_rank)
+        core_shape = _prompt_shape(core_requests.build_rank_request)
         bad_source = (
             "def _fake_build_rank():\n"
             "    criterion = 'x'\n"

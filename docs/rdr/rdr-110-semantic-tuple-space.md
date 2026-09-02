@@ -2,7 +2,7 @@
 title: "Semantic Tuple Space: Unified Coordination Primitive over ChromaDB + SQLite"
 id: RDR-110
 type: Architecture
-status: scrapped
+status: abandoned
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self

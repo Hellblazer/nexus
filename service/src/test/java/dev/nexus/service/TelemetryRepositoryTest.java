@@ -1450,6 +1450,72 @@ class TelemetryRepositoryTest {
     }
 
     @Test
+    void queryNxAnswerRuns_dateOnlySinceFiltersCorrectly_neverSilentlyEmpty() {
+        // nexus-spbay: the old parseTs fallback turned a bare date into
+        // now() — `since 2026-08-01` became `since right now` and every
+        // date-filtered read returned a confirmatory zero against a
+        // populated table (measured live: 214 rows, "(no runs)" for every
+        // date tested). Date-only now parses as midnight UTC.
+        // Fixture discipline (code-review Important #2, 2026-08-31): every
+        // row AND since value sits in the PAST relative to wall clock, so
+        // a regression to parseTs's now()-fallback yields 0 rows for BOTH
+        // probes — each assert below discriminates against the exact bug.
+        String tenant = "nar-dateonly-" + System.nanoTime();
+        repo.importNxAnswerRunRow(tenant, "old", null, null,
+            0, "a", 0.0, 1_000L, "2020-01-01T00:00:00Z");
+        repo.importNxAnswerRunRow(tenant, "new", null, null,
+            0, "a", 0.0, 1_000L, "2025-06-15T12:00:00Z");
+
+        var recent = repo.queryNxAnswerRuns(tenant, "2024-01-01", 100);
+        assertThat(recent.get("total")).isEqualTo(1);
+
+        var everything = repo.queryNxAnswerRuns(tenant, "2019-01-01", 100);
+        assertThat(everything.get("total")).isEqualTo(2);
+    }
+
+    @Test
+    void queryNxAnswerRuns_malformedSinceThrows_neverSilentEmptySet() {
+        // The other half of nexus-spbay: garbage must FAIL LOUD (the
+        // handler's global IllegalArgumentException arm answers 400) —
+        // never the old silent now()-substitution that manufactured an
+        // empty set indistinguishable from "no usage".
+        String tenant = "nar-badsince-" + System.nanoTime();
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> repo.queryNxAnswerRuns(tenant, "not-a-date", 100))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("not-a-date");
+    }
+
+    @Test
+    void parseSinceFilter_acceptsTheThreeCallerShapes() {
+        assertThat(TelemetryRepository.parseSinceFilter("2026-08-01")
+                .toString()).startsWith("2026-08-01T00:00");
+        assertThat(TelemetryRepository.parseSinceFilter("2026-08-01T12:30:00")
+                .toString()).startsWith("2026-08-01T12:30");
+        assertThat(TelemetryRepository.parseSinceFilter("2026-08-01T12:30:00Z")
+                .toString()).startsWith("2026-08-01T12:30");
+        assertThat(TelemetryRepository.parseSinceFilter("2026-08-01T12:30:00+00:00")
+                .toString()).startsWith("2026-08-01T12:30");
+    }
+
+    @Test
+    void queryTierWrites_dateOnlySinceFiltersCorrectly() {
+        // Same nexus-spbay defect class at the tier_writes since sites.
+        // Same past-only fixture discipline as the nx_answer test above —
+        // under the now()-fallback bug this returns 0, never 1.
+        String tenant = "tw-dateonly-" + System.nanoTime();
+        repo.recordTierWrite(tenant, "s1", "2020-01-01T00:00:00Z",
+            "memory_put", "T2", "", "", "");
+        repo.recordTierWrite(tenant, "s2", "2025-06-15T12:00:00Z",
+            "memory_put", "T2", "", "", "");
+
+        var recent = repo.queryTierWrites(tenant, "", "2024-01-01", 0);
+        long total = recent.stream()
+            .mapToLong(r -> ((Number) r.get("count")).longValue()).sum();
+        assertThat(total).isEqualTo(1);
+    }
+
+    @Test
     void queryNxAnswerRuns_isTenantScoped() {
         String mine = "nar-iso-mine-" + System.nanoTime();
         String theirs = "nar-iso-theirs-" + System.nanoTime();

@@ -1,0 +1,17 @@
+# Two rows share the id "r1": refused at load time (DuplicateRowIdError).
+[table]
+id = "dup-id"
+kind = "decision-table"
+
+[dimensions.decision]
+domain = ["a", "b"]
+
+[[row]]
+id = "r1"
+match = { decision = "a" }
+emit = { verdict = "x" }
+
+[[row]]
+id = "r1"
+match = { decision = "b" }
+emit = { verdict = "y" }

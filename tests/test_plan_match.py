@@ -1213,3 +1213,59 @@ def test_superset_empty_verb_falls_back_to_strict_equality() -> None:
     assert _superset(plan_dims, {"verb": "research"}) is False
     plan_dims = {"verb": None}
     assert _superset(plan_dims, {"verb": "research"}) is False
+
+
+# ── nexus-vi8fp: any-lexeme FTS fallback is OPT-IN (decision C) ──────────────
+# plainto_tsquery ANDs the question's tokens, so a vocabulary-gap question
+# missed a match_text literally containing its jargon (T2 [23881]). The
+# engine's any-lexeme fallback exists for that — but MEASURED (T2 [23891]),
+# auto-admitting fallback rows into plan_match let 9/10 unrelated questions
+# run a junk plan via one shared common word (confidence=None auto-admit,
+# and a wrong-but-runnable plan records SUCCESS, so nothing retires it).
+# Sam's decision C (2026-08-31): recall widening is for HUMAN browsing
+# surfaces (search_plans any_lexeme=True — the plan_search MCP tool);
+# plan_match stays AND-only and pays the inline planner for vocabulary-gap
+# questions. These tests pin BOTH halves of that boundary.
+
+
+class TestAnyLexemeFallbackIsOptIn:
+    def test_plan_match_does_not_admit_via_any_lexeme(self, library) -> None:
+        """The junk-admission surface: plan_match must NOT see fallback
+        rows — a vocabulary-gap question falls through to the planner
+        (correct answers over plan reuse; the measured alternative ran
+        junk on 9/10 unrelated questions)."""
+        from nexus.plans.matcher import plan_match
+
+        _seed(
+            library,
+            query="Describes the chunk identity convention: content-addressed chash for T3 chunks",
+            dimensions={"verb": "research", "scope": "personal"},
+        )
+        matches = plan_match(
+            intent="What is a chash and how is it derived exactly?",
+            library=library, cache=None,
+            min_confidence=0.40, n=5,
+        )
+        assert matches == [], (
+            "plan_match must stay AND-only — any-lexeme admission was "
+            "measured as a junk generator (T2 [23891])"
+        )
+
+    def test_search_plans_any_lexeme_rescues_for_browsing(self, library) -> None:
+        """The browsing surface gets the recall: the same AND-miss question
+        returns the row under any_lexeme=True, and nothing without it."""
+        plan_id = _seed(
+            library,
+            query="Describes the chunk identity convention: content-addressed chash for T3 chunks",
+            dimensions={"verb": "research", "scope": "personal"},
+        )
+        and_only = library.search_plans(
+            "What is a chash and how is it derived exactly?", limit=5,
+        )
+        assert and_only == [], "default search_plans must stay AND-only"
+
+        rescued = library.search_plans(
+            "What is a chash and how is it derived exactly?", limit=5,
+            any_lexeme=True,
+        )
+        assert [r["id"] for r in rescued] == [plan_id]

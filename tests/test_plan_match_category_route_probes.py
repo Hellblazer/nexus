@@ -273,3 +273,54 @@ def test_probe_baseline_without_the_route(
             f"{question!r} now matches without the route — if the cosine "
             f"path improved, the route may no longer be needed for it"
         )
+
+
+# ── nexus-mmfag: routing guards for the templates the original five probes
+# do not cover. Authored INDEPENDENTLY of the description exemplars and run
+# once at authoring time (critique [23897] significant 2: 7 of 12 templates
+# had no positive routing guard, including three where the mmfag tuning
+# itself observed cross-template stealing). DISCIPLINE for future editors:
+# if a description edit flips one of these, fix the ROUTING (or record the
+# guard as known-uncovered here) — do NOT iterate the description against
+# this table until it passes, which is the exemplar-echo trap the critique
+# caught.
+
+
+_MMFAG_ROUTING_GUARDS = [
+    ("What themes run through this set of papers?", "abstract-themes"),
+    ("Compare the tradeoffs these papers report for caching strategies", "default"),
+    ("Research the citation chain around this paper, inward and outward",
+     "citation-traversal"),
+    ("Audit the documentation for the indexing area", "default"),
+    # find-by-author: KNOWN-UNCOVERED by a cosine guard (recorded, not
+    # tuned-for): generic author-question wordings route to
+    # document-discovery at this geometry — the two templates genuinely
+    # overlap there. find-by-author's production mechanism is its typed
+    # `author` binding (a question naming a real author, e.g. "papers by
+    # Grossberg", supplies the binding via _nx_answer_caller_bindings and
+    # the type-scoped pool becomes reachable) — pinned by the qi8t probe
+    # above, not by raw cosine.
+    ("Which specific paper reported that number?", "hybrid-factual-lookup"),
+    ("Find the retry helper in just the code files", "type-scoped-search"),
+]
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_name"),
+    _MMFAG_ROUTING_GUARDS,
+    ids=[q[:40] for q, _ in _MMFAG_ROUTING_GUARDS],
+)
+def test_mmfag_routing_guard(rows, cache, question, expected_name):
+    """The intended template wins its own question, by cosine or route."""
+    verb = infer_verb(question)
+    assert verb is not None, f"{question!r} derived no verb"
+    matches = plan_match(
+        question, library=_Library(rows), cache=cache,
+        category_verb=verb, n=5,
+        available_bindings=_nx_answer_bindings(question),
+    )
+    assert matches, f"{question!r} matched nothing at all"
+    top = _Library(rows).get_plan(matches[0].plan_id)
+    assert top["name"] == expected_name, (
+        f"{question!r} routed to {top['name']!r}, expected {expected_name!r}"
+    )

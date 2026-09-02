@@ -1,0 +1,98 @@
+# Fixture: a copy of src/nexus/tables/rdr-lifecycle.toml with ONE planted
+# defect -- the `accept-blocked` row is DELETED, leaving the
+# {status=draft, event=accept} group's coverage proved over only
+# {gate=passed} out of the full {passed, blocked, none} product. Non-vacuity
+# fixture for
+# tests/test_tables_lint.py::test_planted_deleted_row_is_reported_as_coverage_gap
+# (nexus-j9z30.3 / nexus-moht0): proves the sweep's zero-blocking-findings
+# assertion is live detection, not an accidentally-passing tautology.
+
+[table]
+id = "rdr-lifecycle-gap-fixture"
+kind = "state-machine"
+
+[dimensions.status]
+domain = ["draft", "accepted", "deferred", "closed", "superseded", "abandoned"]
+[dimensions.event]
+domain = ["accept", "close", "supersede", "abandon", "defer", "resume"]
+[dimensions.gate]
+domain = ["passed", "blocked", "none"]
+[dimensions.successor]
+domain = ["named", "absent"]
+
+[[row]]
+id = "accept"
+match = { status = "draft", event = "accept" }
+guard = { gate = "passed" }
+to = { status = "accepted" }
+
+# --- planted defect: `accept-blocked` (guard.gate = ["blocked", "none"]) --
+# --- is deleted, leaving {gate=blocked} / {gate=none} uncovered -----------
+
+[[row]]
+id = "accept-otherwise"
+match = { status = ["accepted", "deferred", "closed", "superseded", "abandoned"], event = "accept" }
+escape = true
+refuse = "illegal-transition"
+
+[[row]]
+id = "close"
+match = { status = "accepted", event = "close" }
+to = { status = "closed" }
+
+[[row]]
+id = "close-otherwise"
+match = { status = ["draft", "deferred", "closed", "superseded", "abandoned"], event = "close" }
+escape = true
+refuse = "illegal-transition"
+
+[[row]]
+id = "supersede"
+match = { status = ["draft", "accepted", "deferred", "closed"], event = "supersede" }
+guard = { successor = "named" }
+to = { status = "superseded" }
+
+[[row]]
+id = "supersede-unnamed"
+match = { status = ["draft", "accepted", "deferred", "closed"], event = "supersede" }
+guard = { successor = "absent" }
+refuse = "successor-not-named"
+
+[[row]]
+id = "supersede-otherwise"
+match = { status = ["superseded", "abandoned"], event = "supersede" }
+escape = true
+refuse = "illegal-transition"
+
+[[row]]
+id = "abandon"
+match = { status = ["draft", "accepted", "deferred"], event = "abandon" }
+to = { status = "abandoned" }
+
+[[row]]
+id = "abandon-otherwise"
+match = { status = ["closed", "superseded", "abandoned"], event = "abandon" }
+escape = true
+refuse = "illegal-transition"
+
+[[row]]
+id = "defer"
+match = { status = "draft", event = "defer" }
+to = { status = "deferred" }
+
+[[row]]
+id = "defer-otherwise"
+match = { status = ["accepted", "deferred", "closed", "superseded", "abandoned"], event = "defer" }
+escape = true
+refuse = "illegal-transition"
+
+[[row]]
+id = "resume"
+match = { status = "deferred", event = "resume" }
+to = { status = "draft" }
+
+[[row]]
+id = "resume-otherwise"
+match = { status = ["draft", "accepted", "closed", "superseded", "abandoned"], event = "resume" }
+escape = true
+refuse = "illegal-transition"

@@ -18,8 +18,7 @@ The test surface pins:
 from __future__ import annotations
 
 import importlib.util
-import os
-import sys
+import re
 from pathlib import Path
 
 import pytest
@@ -85,85 +84,98 @@ def test_resolve_rdr_collection_synthesises_conformant_when_catalog_absent(
 # test_resolve_rdr_collection_synthesises_conformant_when_catalog_absent above.
 
 
-# ── nexus-e2sim: `open` is a pre-accept synonym for `draft` (GH #1409) ──────
+# ── nexus-e19sa (Sam's ruling, 2026-09-02): the reconcile half is gone,
+# the summary must actually print ──────────────────────────────────────────
+#
+# The file filter used to be ``re.match(r"\d+", p.stem)`` against stems shaped
+# ``rdr-201-...``: zero matches, ``sys.exit(0)`` before any logic, on every
+# session since the hook was written. Nobody noticed the silence. The
+# reconcile tests that lived here exercised ``_reconcile`` directly and so
+# never saw that ``main`` could not reach it; they went with the code they
+# pinned. What replaces them pins the two things that matter now: the filter
+# selects this repo's real files, and the summary prints for the real tree.
+
+PACKAGE_TABLE_PATH = REPO_ROOT / "src" / "nexus" / "tables" / "rdr-lifecycle.toml"
 
 
-def _write_rdr(tmp_path: Path, status: str) -> Path:
-    f = tmp_path / "001-test-decision.md"
-    f.write_text(f"---\nstatus: {status}\ntitle: test\n---\n\n# RDR-001\n")
-    return f
+@pytest.mark.parametrize(
+    "stem,expected",
+    [
+        ("rdr-201-closed-vocabularies-as-checked-tables", "201"),
+        ("rdr137-test-fixture-partition-deliverable", "137"),
+        ("001-legacy-shape", "001"),
+        ("RDR-005-upper-case", "005"),
+        ("status-census-2026-09-01", None),
+        ("README", None),
+        ("rdr-", None),
+    ],
+)
+def test_extract_rdr_id_matches_this_repos_filename_shapes(rdr_hook_module, stem, expected) -> None:
+    assert rdr_hook_module._extract_rdr_id(Path(f"/x/{stem}.md")) == expected
 
 
-def test_reconcile_open_file_vs_draft_t2_is_no_op(
-    rdr_hook_module, tmp_path, monkeypatch
+def test_rdr_files_selects_every_rdr_in_a_fixture_tree_and_nothing_else(
+    rdr_hook_module, tmp_path,
 ) -> None:
-    """nexus-e2sim (GH #1409 follow-through): rdr-create seeds T2 at
-    'draft', so an RDR file legitimately using 'open' (the qsryj-accepted
-    pre-accept synonym) must NOT be silently rewritten back to 'draft' by
-    the SessionStart reconcile — the exact revert the fix was filed
-    against. Equal rank means neither side wins: pure no-op."""
+    rdr_dir = tmp_path / "docs" / "rdr"
+    (rdr_dir / "post-mortem").mkdir(parents=True)
+    for name in (
+        "rdr-201-thing.md", "rdr137-legacy.md", "001-older.md",
+        "README.md", "AGENTS.md", "template.md", "status-census-2026-09-01.md",
+    ):
+        (rdr_dir / name).write_text("---\nstatus: draft\n---\n")
+    (rdr_dir / "post-mortem" / "rdr-191-postmortem.md").write_text("---\nstatus: closed\n---\n")
+
+    selected = sorted(p.name for p in rdr_hook_module._rdr_files(rdr_dir))
+    assert selected == ["001-older.md", "rdr-201-thing.md", "rdr137-legacy.md"]
+
+
+def test_rdr_files_on_the_real_tree_is_not_vacuous(rdr_hook_module) -> None:
+    """The filter that selected nothing for the life of this hook must select
+    this repo's own RDRs (nexus-moht0 vacuous-gate doctrine: a sweep that
+    examined nothing is a failure, not a pass)."""
+    files = rdr_hook_module._rdr_files(REPO_ROOT / "docs" / "rdr")
+    assert len(files) > 200, len(files)
+    assert all(rdr_hook_module._extract_rdr_id(p) for p in files)
+    assert "AGENTS.md" not in {p.name for p in files}
+
+
+def test_summary_prints_for_this_repos_real_tree(rdr_hook_module, monkeypatch, capsys) -> None:
+    """The ruling's own test: run ``main`` against THIS checkout's real
+    ``docs/rdr/`` tree, with only the substrate calls (T2, catalog, the
+    ``nx collection list`` subprocess) stubbed, and require the summary
+    line to PRINT with a document count that could only come from the
+    real files. Silence is the failure this hook shipped with."""
     mod = rdr_hook_module
-    f = _write_rdr(tmp_path, "open")
-    file_writes: list = []
-    t2_writes: list = []
-    monkeypatch.setattr(
-        mod, "_update_file_status", lambda *a: file_writes.append(a) or True
-    )
-    monkeypatch.setattr(
-        mod, "_update_t2_status", lambda *a: t2_writes.append(a) or True
-    )
+    monkeypatch.setattr(mod, "_repo_root", lambda: REPO_ROOT)
+    monkeypatch.setattr(mod, "_load_all_t2_statuses", lambda repo: {"1": "closed", "2": "closed", "3": "accepted"})
+    monkeypatch.setattr(mod, "_resolve_rdr_collection", lambda root: "rdr__nexus-1-1__voyage-context-3__v1")
+    monkeypatch.setattr(mod, "_collection_exists", lambda target: False)
 
-    reconciled = mod._reconcile(
-        tmp_path, "myrepo", [f], {"001": "draft"}
-    )
-
-    assert reconciled == 0
-    assert file_writes == [], (
-        "the hook must not rewrite an 'open' file back to 'draft' "
-        "(the GH #1409 revert this test pins)"
-    )
-    assert t2_writes == []
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main()
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    m = re.search(r"^RDR: (\d+) documents \(2 closed, 1 accepted\) in docs/rdr but NOT indexed\.$", out, re.M)
+    assert m, out
+    assert int(m.group(1)) > 200, out
+    assert "Run: nx index rdr" in out
 
 
-def test_reconcile_draft_file_vs_open_t2_is_no_op(
-    rdr_hook_module, tmp_path, monkeypatch
-) -> None:
-    mod = rdr_hook_module
-    f = _write_rdr(tmp_path, "draft")
-    file_writes: list = []
-    t2_writes: list = []
-    monkeypatch.setattr(
-        mod, "_update_file_status", lambda *a: file_writes.append(a) or True
-    )
-    monkeypatch.setattr(
-        mod, "_update_t2_status", lambda *a: t2_writes.append(a) or True
-    )
-
-    reconciled = mod._reconcile(
-        tmp_path, "myrepo", [f], {"001": "open"}
-    )
-
-    assert reconciled == 0
-    assert file_writes == [] and t2_writes == []
+def test_hook_carries_no_writer(rdr_hook_module) -> None:
+    """Ruling nexus-e19sa: the reconcile half is deleted, not disabled. A
+    future re-introduction has to argue with this."""
+    for name in ("_reconcile", "_update_file_status", "_update_t2_status",
+                 "_STATUS_ORDER", "_TERMINAL", "_derive_status_order_and_terminal"):
+        assert not hasattr(rdr_hook_module, name), name
 
 
-def test_reconcile_open_file_still_advances_to_accepted_t2(
-    rdr_hook_module, tmp_path, monkeypatch
-) -> None:
-    """'open' ranks WITH 'draft', not above the lifecycle: a T2 record at
-    'accepted' still wins and updates the file, same as it would for
-    'draft'."""
-    mod = rdr_hook_module
-    f = _write_rdr(tmp_path, "open")
-    file_writes: list = []
-    monkeypatch.setattr(
-        mod, "_update_file_status", lambda *a: file_writes.append(a) or True
-    )
-    monkeypatch.setattr(mod, "_update_t2_status", lambda *a: True)
+def test_exclude_files_covers_agents_md(rdr_hook_module) -> None:
+    assert "agents.md" in rdr_hook_module._EXCLUDE_FILES
 
-    reconciled = mod._reconcile(
-        tmp_path, "myrepo", [f], {"001": "accepted"}
-    )
 
-    assert reconciled == 1
-    assert file_writes == [(f, "accepted")]
+def test_real_table_declares_a_version():
+    import tomllib
+
+    doc = tomllib.loads(PACKAGE_TABLE_PATH.read_text(encoding="utf-8"))
+    assert isinstance(doc["table"].get("version"), int)

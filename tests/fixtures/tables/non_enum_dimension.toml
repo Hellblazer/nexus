@@ -1,0 +1,21 @@
+# Loads fine (a non-enum dimension's literal is not validated at load
+# time); check_table refuses to claim coverage over `retries`
+# (unprovable-coverage, reason=non-enum-dimension).
+[table]
+id = "non-enum-dim"
+kind = "decision-table"
+
+[dimensions.decision]
+domain = ["decide"]
+
+[dimensions.tier]
+domain = ["free", "paid"]
+
+[dimensions.retries]
+kind = "int"
+
+[[row]]
+id = "r1"
+match = { decision = "decide" }
+guard = { tier = "free", retries = "3" }
+emit = { verdict = "ok" }

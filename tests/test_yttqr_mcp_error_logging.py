@@ -84,6 +84,66 @@ class TestMcpToolError:
         out = _mcp_tool_error("scratch", exc)
         assert "reconnect the conexus mcp" in out.lower()
 
+    def test_session_unauthorized_heal_declined_names_owner_death(self) -> None:
+        """nexus-fe96p: when the heal-outcome suffix says the self-heal found
+        nothing fresher (HEAL_DECLINED_SUFFIX), the owner/refresh-loop-death
+        guidance is warranted -- that IS what a declined heal means."""
+        from nexus.db.http_scratch_store import (
+            HEAL_DECLINED_SUFFIX,
+            SESSION_UNAUTHORIZED_MARKER,
+        )
+
+        exc = RuntimeError(
+            f"{SESSION_UNAUTHORIZED_MARKER} on /v1/t1/put {HEAL_DECLINED_SUFFIX}: "
+            '{"error":"unauthorized"}'
+        )
+        out = _mcp_tool_error("scratch", exc)
+        assert "owner incarnation is gone" in out.lower()
+        assert "reconnect the conexus mcp" in out.lower()
+
+    def test_session_unauthorized_heal_adopted_does_not_blame_owner(self) -> None:
+        """nexus-fe96p: when the heal-outcome suffix says the self-heal DID
+        adopt a fresh token and the retry still failed (HEAL_ADOPTED_SUFFIX),
+        the message must NOT claim the owner incarnation is gone -- that
+        claim is exactly what was measured false in the 2026-09-01 incident
+        (the heal succeeded; the retry failed for an unrelated reason)."""
+        from nexus.db.http_scratch_store import (
+            HEAL_ADOPTED_SUFFIX,
+            SESSION_UNAUTHORIZED_MARKER,
+        )
+
+        exc = RuntimeError(
+            f"{SESSION_UNAUTHORIZED_MARKER} on /v1/t1/put {HEAL_ADOPTED_SUFFIX}: "
+            '{"error":"unauthorized"}'
+        )
+        out = _mcp_tool_error("scratch", exc)
+        assert "owner incarnation is gone" not in out.lower()
+        assert "refresh loop died" not in out.lower()
+        assert "adopted" in out.lower()
+        assert "reconnect the conexus mcp" in out.lower()
+
+    def test_session_unauthorized_remint_heal_names_the_remint_not_g5hzk(self) -> None:
+        """Reviewer fold on nexus-fe96p: when the wrwb7 data-token re-mint is
+        what healed (HEAL_REMINT_SUFFIX), the guidance must name the re-mint
+        and must NOT claim the g5hzk lease heal adopted a token -- crediting
+        the wrong mechanism is the same inference-as-fact defect one level
+        down. Owner-death may be OFFERED as an inference here (the lease had
+        nothing fresher), never stated as observed fact."""
+        from nexus.db.http_scratch_store import (
+            HEAL_REMINT_SUFFIX,
+            SESSION_UNAUTHORIZED_MARKER,
+        )
+
+        exc = RuntimeError(
+            f"{SESSION_UNAUTHORIZED_MARKER} on /v1/t1/put {HEAL_REMINT_SUFFIX}: "
+            '{"error":"unauthorized"}'
+        )
+        out = _mcp_tool_error("scratch", exc)
+        assert "re-mint" in out.lower()
+        assert "did adopt a fresh token" not in out.lower()
+        assert "an inference, not an observation" in out.lower()
+        assert "reconnect the conexus mcp" in out.lower()
+
 
 class TestMdChunkerStructuredWarning:
     def test_fallback_warning_carries_error_field(self) -> None:

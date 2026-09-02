@@ -291,7 +291,10 @@ class TestTemplateRetrieval:
         probes = [
             "find documents attributed",   # find-by-author
             "trace the citation chain",    # citation-traversal
-            "search within a single content type",  # type-scoped-search
+            # Probe derives from the CURRENT description (nexus-mmfag
+            # rewrote it; this test's contract is FTS-discoverability of
+            # whatever the shipped description says).
+            "restrict the search to a single content type",  # type-scoped-search
         ]
         for probe in probes:
             results = db.search_plans(probe, limit=10)

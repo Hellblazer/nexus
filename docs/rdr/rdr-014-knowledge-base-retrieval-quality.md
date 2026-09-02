@@ -1,7 +1,7 @@
 ---
 title: "Knowledge Base Retrieval Quality: Code Context and Docs Deduplication"
 type: bug
-status: closed
+status: superseded
 closed_date: 2026-03-02
 close_reason: implemented
 priority: P2

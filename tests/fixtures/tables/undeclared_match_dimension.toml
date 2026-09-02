@@ -1,0 +1,18 @@
+# `status` is used as a MATCH key but has no [dimensions.status] section:
+# refused at load time (UndeclaredDimensionError, RDR-201 P1.2 code review,
+# T2 nexus/code-review-nexus-j9z30-2-2026-09-01) -- an undeclared match key
+# would otherwise open a group over a domain nobody declared, and leave
+# check_table's match-key-product totality proof (`unmatched-assignment`)
+# without a well-defined domain to enumerate for it.
+
+[table]
+id = "undeclared-match-key"
+kind = "state-machine"
+
+[dimensions.event]
+domain = ["go"]
+
+[[row]]
+id = "r1"
+match = { status = "a", event = "go" }
+to = { status = "b" }

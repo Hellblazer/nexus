@@ -35,7 +35,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-011](rdr-011-pdf-ingest-test-coverage.md) | PDF Ingest Test Coverage: Unit, Subsystem, and E2E with Local ChromaDB | Testing | Closed | 2026-03-01 |
 | [RDR-012](rdr-012-pdfplumber-extraction-tier.md) | pdfplumber Extraction Tier for Complex-Table PDFs | Architecture | Closed | 2026-03-01 |
 | [RDR-013](rdr-013-remove-nx-pm-layer.md) | Remove nx pm Layer — Use T2 Memory Directly | Architecture | Closed | 2026-03-01 |
-| [RDR-014](rdr-014-knowledge-base-retrieval-quality.md) | Knowledge Base Retrieval Quality: Code Context and Docs Deduplication | Bug | Closed | 2026-03-02 |
+| [RDR-014](rdr-014-knowledge-base-retrieval-quality.md) | Knowledge Base Retrieval Quality: Code Context and Docs Deduplication | Bug | Superseded by RDR-015 | 2026-03-02 |
 | [RDR-015](rdr-015-indexing-pipeline-rethink.md) | Indexing Pipeline Rethink: Align Nexus with Arcaneum's Battle-Tested Implementation | Enhancement | Closed | 2026-03-02 |
 | [RDR-016](rdr-016-ast-chunk-line-range-bug.md) | AST Chunk Line Range Bug: CodeSplitter Returns Empty Metadata, Breaking Context Prefix | Bug | Closed | 2026-03-03 |
 | [RDR-017](rdr-017-indexing-progress-reporting.md) | Indexing Progress Reporting: tqdm-Based Progress Bar for nx index | Enhancement | Closed | 2026-03-03 |
@@ -132,12 +132,12 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-107](rdr-107-t3-chunk-soft-delete.md) | T3 Chunk Soft-Delete via Tombstone Metadata | Architecture | Superseded by RDR-108 | 2026-05-08 |
 | [RDR-108](rdr-108-graph-identity-normalization.md) | Graph Identity Normalization: Catalog Holds the Tree, T3 is a Content-Addressed Blob Store | Architecture | Closed 2026-05-20 | 2026-05-08 |
 | [RDR-109](rdr-109-honest-naming-and-cross-encoder-salience.md) | Honest Local-Mode Naming and Cross-Encoder Salience: Two Naming/Scoring Designs Touching the Same Test-Suite Mode-Default Surface | Architecture | Closed 2026-05-20 | 2026-05-10 |
-| [RDR-110](rdr-110-semantic-tuple-space.md) | Semantic Tuple Space: Unified Coordination Primitive over ChromaDB + SQLite | Architecture | **Scrapped 2026-05-19** | 2026-05-09 |
-| [RDR-111](rdr-111-orb-agentic-cockpit-substrate.md) | The ORB: Observable Relay Bus — Hook Projection, Bindings, and C2 Cockpit Substrate | Architecture | **Scrapped 2026-05-19** | 2026-05-11 |
-| [RDR-112](rdr-112-storage-as-service-container-boundary.md) | Storage-as-Service: Every Persistent Shared-State Store Behind a Daemon, T1 Stays In-Container | Architecture | **Scrapped 2026-05-19** (superseded by RDR-120) | 2026-05-12 |
-| [RDR-113](rdr-113-host-trust-model.md) | Host-Trust Model for nexus Daemons: UDS Permissions, Peer Credentials, Single-User v1 | Architecture | **Scrapped 2026-05-19** | 2026-05-13 |
-| [RDR-118](rdr-118-surfaces-as-tuples.md) | Surfaces as Tuples — The ORB is the Portal Broker (A2UI Adoption + Xanadu Inheritance) | Architecture | **Scrapped 2026-05-19** | 2026-05-17 |
-| [RDR-119](rdr-119-cockpit-ui-fabric.md) | Cockpit UI Fabric — Bakke Auto-Layout over A2UI Catalogs, per-Host Realization | Architecture | **Scrapped 2026-05-19** | 2026-05-18 |
+| [RDR-110](rdr-110-semantic-tuple-space.md) | Semantic Tuple Space: Unified Coordination Primitive over ChromaDB + SQLite | Architecture | **Abandoned 2026-05-19** | 2026-05-09 |
+| [RDR-111](rdr-111-orb-agentic-cockpit-substrate.md) | The ORB: Observable Relay Bus — Hook Projection, Bindings, and C2 Cockpit Substrate | Architecture | **Abandoned 2026-05-19** | 2026-05-11 |
+| [RDR-112](rdr-112-storage-as-service-container-boundary.md) | Storage-as-Service: Every Persistent Shared-State Store Behind a Daemon, T1 Stays In-Container | Architecture | **Abandoned 2026-05-19** (superseded by RDR-120) | 2026-05-12 |
+| [RDR-113](rdr-113-host-trust-model.md) | Host-Trust Model for nexus Daemons: UDS Permissions, Peer Credentials, Single-User v1 | Architecture | **Abandoned 2026-05-19** | 2026-05-13 |
+| [RDR-118](rdr-118-surfaces-as-tuples.md) | Surfaces as Tuples — The ORB is the Portal Broker (A2UI Adoption + Xanadu Inheritance) | Architecture | **Abandoned 2026-05-19** | 2026-05-17 |
+| [RDR-119](rdr-119-cockpit-ui-fabric.md) | Cockpit UI Fabric — Bakke Auto-Layout over A2UI Catalogs, per-Host Realization | Architecture | **Abandoned 2026-05-19** | 2026-05-18 |
 | [RDR-120](rdr-120-storage-substrate-split.md) | Storage Substrate Split: Substrate-Only Scope, No Co-Shipped Consumers | Architecture | Accepted 2026-05-21 | 2026-05-19 |
 | [RDR-121](rdr-121-hook-enforced-tool-routing.md) | Hook-Enforced Tool Routing: PreToolUse as Backstop for Soft Guidance | Architecture | Closed 2026-05-20 (shipped in 4.33.0) | 2026-05-19 |
 | [RDR-125](rdr-125-routing-hook-plugin-ownership.md) | Routing-Hook Plugin Ownership: Each Plugin Ships Its Own Rules | Architecture | Closed 2026-05-21 (shipped in 4.33.1) | 2026-05-20 |
@@ -214,6 +214,9 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-196](rdr-196-cost-aware-nx-answer.md) | Cost-Aware nx_answer: Per-Step Cost/Quality Telemetry, Per-Operator Model Routing, and Cost-Ranked Plan Choice — Closing the NOMA §5.1–5.3 Gap | Architecture | Closed | 2026-08-19 |
 | [RDR-197](rdr-197-plugin-only-release-channel.md) | Independent Plugin Release Channel (plugin-vX.Y.Z-n) | Architecture | Closed | 2026-08-22 |
 | [RDR-198](rdr-198-collapse-duplicated-client-transport.md) | Collapse the Duplicated Client Transport: One Pooled Connection to One Engine | Architecture | Closed | 2026-08-23 |
+| [RDR-199](rdr-199-indexing-lifecycle-ref-identity.md) | Indexing Lifecycle: Give the Corpus a Nameable Source Revision — Index the Mainline Ref from the Git Object Store, Diff-Driven and Opt-In | Architecture | Draft | 2026-08-23 |
+| [RDR-200](rdr-200-nx-answer-continuation-mode.md) | nx_answer Continuation Mode and the Composed-Retrieval Bridge Route | Architecture | Accepted | 2026-09-01 |
+| [RDR-201](rdr-201-closed-vocabularies-as-checked-tables.md) | Closed | Architecture | Accepted | 2026-09-01 |
 
 > **Scrapped 2026-05-19 (RDR-110-119 arc).** Bundled the storage-substrate split with new abstractions (tuplespace, ORB, host-trust, surfaces-as-tuples, UI fabric); scope discipline failed across nine RDRs and 67 stranded beads. Files preserved as tombstones per the "never delete RDR files" rule. Postmortem: [docs/postmortem/2026-05-16-rdr110-113-remediation-chain.md](../postmortem/2026-05-16-rdr110-113-remediation-chain.md). Active substrate work continues as [RDR-120](rdr-120-storage-substrate-split.md) with an explicit moratorium on co-shipped consumers. Numbers RDR-114 through RDR-117 are unused on `main` (drafted on feature branches that never merged).
 

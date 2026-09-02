@@ -61,11 +61,27 @@ check () { # name, command...
     # Strip ANSI first: pytest colourises source context, and an un-stripped
     # grep happily returns a highlighted SOURCE line instead of the assertion.
     # The detail line is what the next person reads -- it must name the cause.
-    local detail
-    detail="$(printf '%s' "$out" \
-      | sed -e 's/\x1b\[[0-9;]*m//g' \
+    local detail stripped
+    stripped="$(printf '%s' "$out" | sed -e 's/\x1b\[[0-9;]*m//g')"
+    detail="$(printf '%s' "$stripped" \
       | grep -aE '^(FAILED|E  +|FATAL)|GATE (FAILED|UNVERIFIABLE|BLOCKED)|assert' \
       | sed -e 's/^E  *//' | cut -c1-160)"
+    # A red whose reason matched no pattern above used to record an EMPTY
+    # detail -- the reader gets "[FAIL] engine-release-floor" and nothing
+    # else, and has to re-run the leg by hand to learn why. Measured at the
+    # 7.27.0 cut: check_engine_release_floor.py's exit 3 ("TRACKER NOT
+    # RECORDED (exit 3): ...") names its own remedy in one line and matched
+    # nothing. Second tier: this repo's loud-verdict shape -- a line opening
+    # with an ALL-CAPS label followed by "(" or ":". Deliberately NOT a
+    # last-non-empty-line fallback: these gates interleave PASSING lines
+    # after the failing one, so last-line attributed the red to a green
+    # ("engine source is current") -- a wrong reason is worse than none.
+    if [ -z "$detail" ]; then
+      detail="$(printf '%s' "$stripped" \
+        | grep -aE '^[A-Z][A-Z0-9 ]{2,}[(:]' | cut -c1-160)"
+      detail="$(first_line "$detail")"
+    fi
+    [ -n "$detail" ] || detail="(no verdict line matched -- re-run this leg alone to see its output)"
     record FAIL "$name" "$(first_line "$detail")"
   fi
 }
@@ -90,6 +106,11 @@ echo "== release preflight =="
 #    paired acceptance the human Step 0 invocation uses (--paired-deploy: the
 #    named tag must verify published, pinned, newest) -- stricter, never looser,
 #    and the flag names the pairing out loud in the transcript.
+# CLOUD-MODE BOX: check_engine_release_floor.py's bare form exits 3 ("TRACKER
+# NOT RECORDED") by design (nexus-nx3l5) until it is told where conexus's
+# STEP-6 gate reports live. Export NX_GATE_REPORT_DIR=<conexus checkout>/deploy
+# before running this script, or the floor leg reds for a reason that is not a
+# release problem. Local-mode boxes need nothing.
 if [ -n "${NX_PAIRED_DEPLOY:-}" ]; then
     check "engine-release-floor"  uv run python scripts/check_engine_release_floor.py --paired-deploy "$NX_PAIRED_DEPLOY"
 else

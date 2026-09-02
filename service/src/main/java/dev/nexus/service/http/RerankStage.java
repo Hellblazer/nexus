@@ -5,6 +5,7 @@ package dev.nexus.service.http;
 import dev.nexus.service.vectors.Reranker;
 import dev.nexus.service.vectors.RerankUpstreamException;
 import dev.nexus.service.vectors.UpstreamAuthException;
+import dev.nexus.service.vectors.UpstreamRateLimitedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -91,6 +92,17 @@ final class RerankStage {
         List<Reranker.Scored> scored;
         try {
             scored = reranker.rerank(query, documents, topK);
+        } catch (UpstreamRateLimitedException e) {
+            // nexus-1vpal: Voyage is rate limiting and the reranker's bounded
+            // budget could not absorb it. Rate-limited reranking is a DEGRADED
+            // search, not a broken one — results still serve in distance
+            // order, and the loud degrade reason carries the retry-after so
+            // the client can pace itself. Deliberately NOT propagated to the
+            // handler's whole-request 429 arm: a degrade path exists here.
+            log.warn("event=rerank_degraded reason=upstream_rate_limited retry_after_s={} error=\"{}\"",
+                     e.retryAfterSeconds(), e.getMessage());
+            return degrade(rows, topK, "Voyage AI is rate limiting the reranker (retry after ~"
+                    + e.retryAfterSeconds() + "s): " + e.getMessage());
         } catch (RerankUpstreamException | UpstreamAuthException e) {
             log.warn("event=rerank_degraded reason=upstream_failure error=\"{}\"", e.getMessage());
             return degrade(rows, topK, e.getMessage());

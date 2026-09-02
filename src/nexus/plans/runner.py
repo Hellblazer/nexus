@@ -391,6 +391,16 @@ class PlanResult:
     #: llm attribution rules. In-process only; the engine-side
     #: ``nx_answer_steps`` write is `.p1c`/`.p1d`, not this bead.
     step_records: list[StepRecord] = field(default_factory=list)
+    #: RDR-200 .p1c (nexus-4e75w.5): ``True`` when a caller-supplied
+    #: ``continuation_cut_at_step`` actually stopped this run before
+    #: dispatching the segment at/after that index — ``False`` (the
+    #: default) whenever ``continuation_cut_at_step`` was ``None``, or
+    #: the run stopped/exhausted/errored for some OTHER reason before
+    #: ever reaching the cut point. Lets a caller distinguish "the
+    #: suffix was withheld as designed" from "the suffix never got a
+    #: chance to run" without re-deriving it from ``len(steps)`` vs
+    #: ``total_planned_steps``.
+    continuation_cut_applied: bool = False
 
 
 # ── Embedding-domain mapping ────────────────────────────────────────────────
@@ -448,6 +458,21 @@ _COLLECTION_ARG_KEYS: tuple[str, ...] = ("collection", "collections")
 #: requiring plan-library schema changes. Plans that pin their own
 #: corpus still win; this binding only fills in the gap.
 _CALLER_SCOPE_BINDING: str = "_nx_scope"
+
+#: Last-resort ``corpus`` default for a ``search``/``query`` retrieval
+#: step that reaches dispatch with no corpus pinned by the plan, no
+#: ``scope.taxonomy_domain``, and no caller-supplied ``_nx_scope``
+#: binding (RDR-200 Phase 1b, nexus-rl59s). Deliberately NOT ``"all"``:
+#: ``"all"`` also admits the ``quarantine-*`` collections (see
+#: ``nexus.mcp.core``'s corpus docs), which a fall-through default must
+#: never reach into. Measured cause of the reach gap this closes: with
+#: no default here the runner fell through to the bare MCP tool
+#: default (``search`` = ``knowledge,code,docs``, ``query`` =
+#: ``knowledge``), which omits ``rdr__`` entirely — plan-based
+#: retrieval reached the caller's primary source on only 7-9 of 24
+#: gate questions where a flat search naming this same four-prefix set
+#: reached 24/24 (T2 ``nexus/gate-result-rdr200-phase1b-2026-09-01``).
+_PLAN_STEP_DEFAULT_CORPUS: str = "knowledge,code,docs,rdr"
 
 
 def _collections_in_args(args: dict[str, Any]) -> list[str]:
@@ -963,6 +988,9 @@ def _apply_caller_scope_to_args(
         :func:`_apply_scope_to_args` runs first and populates ``corpus``
         before this helper sees the args.
       * Empty / missing binding → no-op, existing behaviour preserved.
+        (:func:`_apply_default_corpus_to_args` runs next in the pipeline
+        and fills the remaining gap for ``search``/``query`` steps —
+        this function's own no-op is unchanged.)
     """
     if tool not in _RETRIEVAL_TOOLS:
         return args
@@ -973,6 +1001,46 @@ def _apply_caller_scope_to_args(
         return args
     out = dict(args)
     out["corpus"] = override
+    return out
+
+
+#: Tools eligible for the :func:`_apply_default_corpus_to_args`
+#: fall-through. Deliberately narrower than :data:`_RETRIEVAL_TOOLS`:
+#: the catalog-routed combined-query tools (``search_metadata_scoped``,
+#: ``search_topic_scoped``, ``search_graph_hop``, ``search_aspect_scoped``)
+#: and ``store_get_many`` keep their own existing corpus/collection
+#: semantics, and ``traverse`` is non-embedding — none of those five
+#: benefit from (or should be forced into) the plain ``search``/``query``
+#: prefix default.
+_DEFAULT_CORPUS_TOOLS: frozenset[str] = frozenset({"search", "query"})
+
+
+def _apply_default_corpus_to_args(
+    tool: str, args: dict[str, Any],
+) -> dict[str, Any]:
+    """Return *args* with :data:`_PLAN_STEP_DEFAULT_CORPUS` filled in when
+    a ``search``/``query`` step reaches dispatch with no corpus scoping
+    at all (RDR-200 Phase 1b, nexus-rl59s).
+
+    This is the LAST step in the corpus-resolution fall-through:
+    plan-declared ``corpus``/``collection``/``collections`` win, then
+    ``scope.taxonomy_domain`` (:func:`_apply_scope_to_args`), then the
+    caller's ``_nx_scope`` binding (:func:`_apply_caller_scope_to_args`).
+    Only when all three leave ``corpus`` unset does this helper apply —
+    otherwise the step would fall through to the bare MCP tool default
+    (``search`` = ``knowledge,code,docs``, ``query`` = ``knowledge``),
+    which structurally excludes ``rdr__`` and was the measured cause of
+    plan-based retrieval missing the caller's primary source on 7-9 of
+    24 Phase 1b gate questions where a flat search reached 24/24 by
+    naming this same four-prefix set (T2
+    ``nexus/analysis-rdr200-phase1b-retrieval-reach-2026-09-01``).
+    """
+    if tool not in _DEFAULT_CORPUS_TOOLS:
+        return args
+    if "corpus" in args or _collections_in_args(args):
+        return args
+    out = dict(args)
+    out["corpus"] = _PLAN_STEP_DEFAULT_CORPUS
     return out
 
 
@@ -1526,6 +1594,7 @@ async def plan_run(
     bundle_operators: bool = True,
     deadline: float | None = None,
     budget_usd_remaining: float | None = None,
+    continuation_cut_at_step: int | None = None,
 ) -> PlanResult:
     """Execute the steps in *match* and return the captured outputs.
 
@@ -1587,6 +1656,35 @@ async def plan_run(
     like the ``deadline`` trigger, sharing the same marker convention on
     the ``nx_answer`` side.
 
+    ``continuation_cut_at_step`` (RDR-200 .p1c, nexus-4e75w.5 — the
+    "stop-before-cut" mechanism): a 0-based ``plan_json.steps`` index,
+    the SAME convention as :attr:`nexus.plans.continuation.
+    ContinuationCut.cut_at_step` (the caller computes this via
+    :func:`nexus.plans.continuation.classify_continuation_cut` BEFORE
+    calling ``plan_run`` — this module never imports that classifier
+    itself, keeping the runner decoupled from continuation-mode policy,
+    per the bead's own "the runner must not import MCP-layer state"
+    constraint). ``None`` (the default) reproduces pre-.p1c behavior
+    exactly — every segment dispatches, unchanged. When set, checked at
+    the SAME pre-segment point as ``deadline``/``budget_usd_remaining``
+    above: if the segment about to start (its first plan index) is at or
+    past ``continuation_cut_at_step``, the loop stops WITHOUT dispatching
+    that segment or any segment after it — the terminal continuation
+    suffix a caller is about to hand off NEVER executes server-side, the
+    exact contract RDR-200 R2 requires ("the terminal suffix MUST NOT
+    execute server-side when it is being handed off"). Steps before the
+    cut run exactly as they would without this parameter; their
+    :class:`StepRecord` entries are real, not fabricated, and
+    ``PlanResult.step_records``/``.steps`` reflect only what actually
+    ran — the same "step_count counts steps that actually executed
+    server-side, never the planned total" contract the RDR states for
+    the handoff telemetry row this parameter exists to make possible.
+    :attr:`PlanResult.continuation_cut_applied` records whether the cut
+    actually fired (``False`` when the run stopped/errored/exhausted its
+    budget before ever reaching the cut point, or when the plan simply
+    has fewer segments than the cut index — in either case nothing was
+    withheld that would otherwise have run).
+
     **Validation is WHOLE-PLAN and PRE-DISPATCH (nexus-pucte), which
     runs BEFORE either budget check above ever executes.** Required
     bindings, malformed-step shape, and unresolved ``$var`` references
@@ -1613,7 +1711,7 @@ async def plan_run(
         compose_bundle_prompt,
         dispatch_bundle,
         is_operator_tool,
-        segment_steps,
+        resolve_dispatch_segments,
     )
 
     def _extract_tool(step: dict[str, Any]) -> str:
@@ -1711,6 +1809,11 @@ async def plan_run(
     #: segment. See StepRecord's own docstring for the source/model/cost
     #: attribution rules.
     step_records: list[StepRecord] = []
+    #: RDR-200 .p1c (nexus-4e75w.5): set True the moment the
+    #: ``continuation_cut_at_step`` pre-segment check actually stops
+    #: dispatch. See ``continuation_cut_at_step``'s own docstring
+    #: paragraph above and :attr:`PlanResult.continuation_cut_applied`.
+    continuation_cut_applied: bool = False
 
     def _step_source(tool: str, result: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         """Classify an isolated/bundle-fallback dispatch's ``source`` and
@@ -1762,22 +1865,19 @@ async def plan_run(
         ))
 
     # One authoritative segmentation. When bundling is off or the caller
-    # supplied a dispatcher that doesn't opt into bundling, flatten the
-    # slices back into isolated steps so the per-step path handles
-    # everything. Gate is attribute-based so decorator wrappers survive.
-    segments: list = segment_steps(steps)
-    use_bundle_path = bundle_operators and getattr(
-        dispatch, _SUPPORTS_BUNDLING_ATTR, False,
+    # supplied a dispatcher that doesn't opt into bundling,
+    # ``resolve_dispatch_segments`` flattens the slices back into
+    # isolated steps so the per-step path handles everything. Gate is
+    # attribute-based so decorator wrappers survive. Extracted to
+    # ``bundle.resolve_dispatch_segments`` (nexus-4e75w.3) so RDR-200's
+    # continuation cut classifier reads the same real dispatch-shape
+    # resolution this call site uses, rather than a second
+    # reimplementation of this gate that could drift from it.
+    segments: list = resolve_dispatch_segments(
+        steps,
+        bundle_operators=bundle_operators,
+        supports_bundling=getattr(dispatch, _SUPPORTS_BUNDLING_ATTR, False),
     )
-    if not use_bundle_path:
-        flat: list = []
-        for seg in segments:
-            if isinstance(seg, OperatorBundleSlice):
-                for pi in seg.plan_indices:
-                    flat.append(IsolatedStep(plan_index=pi, step=steps[pi]))
-            else:
-                flat.append(seg)
-        segments = flat
 
     try:
         for seg in segments:
@@ -1829,6 +1929,26 @@ async def plan_run(
                         kind=budget_exhausted_kind,
                         spent_usd=_spent_so_far,
                         budget_usd_remaining=budget_usd_remaining,
+                    )
+                    break
+
+            # RDR-200 .p1c (nexus-4e75w.5): "stop-before-cut". Same
+            # pre-segment placement as the two checks above — the
+            # segment about to start does not dispatch when it is at or
+            # past the continuation cut. See continuation_cut_at_step's
+            # own docstring paragraph for the full contract.
+            if continuation_cut_at_step is not None:
+                if isinstance(seg, OperatorBundleSlice):
+                    _seg_start_index = seg.plan_indices[0]
+                else:
+                    _seg_start_index = seg.plan_index
+                if _seg_start_index >= continuation_cut_at_step:
+                    continuation_cut_applied = True
+                    _log.info(
+                        "nx_answer_continuation_cut_applied",
+                        at_step=_seg_start_index + 1,
+                        total_steps=len(steps),
+                        steps_completed=len(step_outputs),
                     )
                     break
 
@@ -2153,6 +2273,13 @@ async def plan_run(
             resolved = _apply_caller_scope_to_args(
                 tool, resolved, bindings=merged,
             )
+            # RDR-200 Phase 1b (nexus-rl59s): last-resort corpus default for
+            # a bare search/query step that still has no corpus after plan,
+            # scope, AND caller scope all declined to set one. Runs after
+            # _apply_caller_scope_to_args so a plan-declared corpus,
+            # scope.taxonomy_domain, and a caller's _nx_scope binding all
+            # still win over this fall-through.
+            resolved = _apply_default_corpus_to_args(tool, resolved)
             # nexus-h3e2: ``mode: broad`` is an authoring affordance for
             # abstract / community-summary plans whose per-corpus default
             # threshold drops 100% of candidates. Runs last so an explicit
@@ -2301,4 +2428,5 @@ async def plan_run(
         budget_exhausted_kind=budget_exhausted_kind,
         total_planned_steps=len(steps),
         step_records=step_records,
+        continuation_cut_applied=continuation_cut_applied,
     )

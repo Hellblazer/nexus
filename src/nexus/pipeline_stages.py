@@ -657,6 +657,19 @@ def _catalog_pdf_hook(
         except OSError:
             source_mtime = 0.0
         if existing:
+            # nexus-t952k half 2: this is the tail reconcile step that
+            # already stamps physical_collection onto the row unconditionally
+            # (below) — the FIX is making a real repoint observable. Without
+            # this log, a re-index that lands chunks in a different
+            # collection than the row's stale physical_collection silently
+            # repoints with no trace, which is exactly how the AgenticScholar
+            # incident (2026-09-02, T2 nexus/index-agenticscholar-paper-
+            # 2026-09-02) went undetected until a manual `nx catalog verify`
+            # dug it up by hand. A ghost/never-indexed row (blank
+            # physical_collection) is not a repoint — nothing to compare
+            # against — so it is excluded, mirroring nexus-sz89e's identical
+            # ghost exemption.
+            old_physical_collection = existing.physical_collection
             update_kwargs: dict[str, Any] = dict(
                 physical_collection=collection_name,
                 chunk_count=chunk_count,
@@ -685,6 +698,16 @@ def _catalog_pdf_hook(
             if year and not getattr(existing, "year", 0):
                 update_kwargs["year"] = year
             writer.update(existing.tumbler, **update_kwargs)
+            # nexus-t952k (critique [24114] S1): logged AFTER the write, so
+            # the claim "repointed" is only made once the row actually moved.
+            if old_physical_collection and old_physical_collection != collection_name:
+                _log.warning(
+                    "catalog_physical_collection_repointed",
+                    tumbler=str(existing.tumbler),
+                    file_path=file_path_str,
+                    old_collection=old_physical_collection,
+                    new_collection=collection_name,
+                )
         else:
             # nexus-u8n4r: refuse a brand-new registration when
             # ``file_path_str`` (always absolute — see the resolve()

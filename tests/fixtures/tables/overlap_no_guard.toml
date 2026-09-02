@@ -1,0 +1,24 @@
+# CRITICAL 1 (nexus-akmum) repro fixture: two rows share the exact same
+# match assignment and carry NO guard at all. A zero-guard-dimension group
+# has exactly one assignment -- the empty tuple -- and both rows accept it,
+# so this is unconditional duplicate coverage: an OVERLAP, not a silent
+# pass. Neither row is an escape row.
+[table]
+id = "overlap-no-guard"
+kind = "state-machine"
+
+[dimensions.status]
+domain = ["draft", "accepted"]
+
+[dimensions.event]
+domain = ["accept"]
+
+[[row]]
+id = "accept-a"
+match = { status = "draft", event = "accept" }
+to = { status = "accepted" }
+
+[[row]]
+id = "accept-b"
+match = { status = "draft", event = "accept" }
+refuse = "already-handled"

@@ -5,7 +5,8 @@ parent_bead: nexus-tts0d.3
 related_beads: [nexus-tts0d.19, nexus-tts0d.20, nexus-tts0d.21]
 created: 2026-05-28
 updated: 2026-05-28
-status: revised-after-implementation
+status: closed
+kind: companion
 ---
 
 # RDR-137 Test-Fixture Partition

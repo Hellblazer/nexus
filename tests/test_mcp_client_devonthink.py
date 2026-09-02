@@ -52,24 +52,27 @@ async def test_dt_call_running_loop_guard_logs_distinctly() -> None:
 
 
 def test_available_true_when_running(monkeypatch) -> None:
-    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: {"running": True})
+    # nexus-fdk1x: available() now forwards `transport=` to dt_call() (its
+    # per-call transport-override kwarg, code-review finding 4) -- the
+    # fake must accept it even though this test doesn't exercise it.
+    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None, transport=None: {"running": True})
     assert dt.available(refresh=True) is True
 
 
 def test_available_false_when_not_running(monkeypatch) -> None:
-    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: {"running": False})
+    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None, transport=None: {"running": False})
     assert dt.available(refresh=True) is False
 
 
 def test_available_false_when_unreachable(monkeypatch) -> None:
-    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None: None)
+    monkeypatch.setattr(dt, "dt_call", lambda tool, args=None, transport=None: None)
     assert dt.available(refresh=True) is False
 
 
 def test_available_is_cached(monkeypatch) -> None:
     calls = {"n": 0}
 
-    def _fake(tool, args=None):
+    def _fake(tool, args=None, transport=None):
         calls["n"] += 1
         return {"running": True}
 
@@ -227,12 +230,22 @@ def test_dt_call_unwraps_real_exceptiongroup_to_root_cause(monkeypatch) -> None:
     'unhandled errors in a TaskGroup (N sub-exception)' default __str__.
 
     Plain (non-async) test: dt_call is CLI-path-only and asserts no running
-    loop; asyncio.run happens INSIDE dt_call itself."""
+    loop; asyncio.run happens INSIDE dt_call itself.
+
+    nexus-fdk1x: dt_call() now falls back to a stdio-spawned session when
+    the HTTP leg fails. Force ``transport="http"`` so this pin stays
+    isolated to the HTTP-failure log-formatting contract it exercises —
+    on a machine with the real DEVONthink MCP stdio binary present, an
+    unforced fallback would mask the None-on-HTTP-failure this test
+    asserts behind a genuine (and here, irrelevant) stdio success.
+    """
     events: list[dict[str, Any]] = []
 
     def _capture(logger, method_name, event_dict):
         events.append(dict(event_dict))
         raise structlog.DropEvent
+
+    monkeypatch.setattr(dt, "dt_mcp_transport", lambda: "http")
 
     class _BoomingSession:
         async def __aenter__(self):

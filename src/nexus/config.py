@@ -5,7 +5,7 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
     from nexus.stranded_install import StrandedInstall
@@ -217,8 +217,62 @@ def get_telemetry_config(
 def get_pdf_extractor(repo_root: Path | None = None) -> str:
     return get_pdf_config(repo_root).extractor
 
-def _read_live_mineru_port() -> int | None:
-    """Return the port of the currently-alive MinerU server, or None.
+class MineruSkewInfo(NamedTuple):
+    """Details of a KNOWN mineru version skew on the registered server.
+
+    nexus-eti1v: carried separately from the plain ``int | None`` port so
+    callers that need to explain a fallback (a log line naming both
+    versions and the remedy) don't have to re-derive it themselves.
+    """
+
+    registered_version: str
+    our_version: str
+    pid: int
+    port: int
+    registered_python: str | None
+
+
+#: nexus-eti1v: keys already warned about, so a known skew is logged once
+#: per process instead of once per health poll — measured: 63x for one
+#: document (once every ~2s across a 120s ``mineru_ensure_health_timeout``
+#: wait that a known skew can never resolve). Keyed on the values that
+#: make a warning meaningfully NEW: a different registered version, a
+#: different installed version, or a different server pid (e.g. after
+#: ``nx mineru restart`` comes up still mismatched).
+_mineru_skew_warned: set[tuple[str, str, int]] = set()
+
+
+def _warn_mineru_skew_once(
+    *, recorded: str, ours: str, pid: int, port: int, registered_python: str | None,
+) -> None:
+    key = (recorded, ours, pid)
+    if key in _mineru_skew_warned:
+        return
+    _mineru_skew_warned.add(key)
+    _log.warning(
+        "mineru_server_version_skew",
+        registered_version=recorded,
+        our_version=ours,
+        registered_python=registered_python,
+        pid=pid,
+        port=port,
+        remedy="nx mineru restart  (or set pdf.mineru_server_url explicitly)",
+    )
+
+
+def _read_live_mineru_port_full() -> tuple[int | None, MineruSkewInfo | None]:
+    """Return ``(port, skew)`` for the currently-registered MinerU server.
+
+    ``port`` is the live server's port when its identity is confirmed to
+    match ours; ``None`` otherwise (no pid file, dead pid, malformed pid
+    file, or a KNOWN skew). ``skew`` carries details when — and only when
+    — a live, liveness-confirmed server was found whose stamped mineru
+    version does not match ours; ``None`` in every other case, including
+    "no server at all". That distinction matters (nexus-eti1v): on a
+    known skew, the registered pid already holds the only local server
+    this box has, so neither dialling the built-in default port nor
+    waiting on autostart can ever produce anything — both were, before
+    this function existed, tried anyway.
 
     Source of truth is the PID file written by ``nx mineru start`` /
     ``_restart_mineru_server`` at ``~/.config/nexus/mineru.pid``. The
@@ -243,16 +297,16 @@ def _read_live_mineru_port() -> int | None:
             read_pid_file,
         )
     except Exception:  # noqa: BLE001 — best-effort PID probe; any import/read failure degrades to None
-        return None
+        return None, None
     info = read_pid_file()
     if not info:
-        return None
+        return None, None
     pid = info.get("pid")
     port = info.get("port")
     if not isinstance(pid, int) or not isinstance(port, int):
-        return None
+        return None, None
     if not is_process_alive(pid):
-        return None
+        return None, None
 
     # nexus-yq3vk: IDENTITY, not just existence. The pid file is shared by every
     # process reading this config dir, and until now the only check was "is that
@@ -271,16 +325,15 @@ def _read_live_mineru_port() -> int | None:
         except Exception:  # noqa: BLE001 — cannot compare: fall through rather than block
             ours = None
         if ours is not None and ours != recorded:
-            _log.warning(
-                "mineru_server_version_skew",
-                registered_version=recorded,
-                our_version=ours,
-                registered_python=info.get("python"),
-                pid=pid,
-                port=port,
-                remedy="nx mineru restart  (or set pdf.mineru_server_url explicitly)",
+            registered_python = info.get("python")
+            _warn_mineru_skew_once(
+                recorded=recorded, ours=ours, pid=pid, port=port,
+                registered_python=registered_python,
             )
-            return None
+            return None, MineruSkewInfo(
+                registered_version=recorded, our_version=ours, pid=pid,
+                port=port, registered_python=registered_python,
+            )
     # A pid file without the field predates nexus-yq3vk. Say so once rather than
     # silently trusting it — absent identity is not matching identity.
     elif info.get("python") is None:
@@ -290,14 +343,35 @@ def _read_live_mineru_port() -> int | None:
             detail="pid file predates version stamping; cannot verify the "
                    "server runs the mineru this environment pins",
         )
+    return port, None
+
+
+def _read_live_mineru_port() -> int | None:
+    """Return the port of the currently-alive, identity-matched MinerU
+    server, or ``None``. Thin wrapper over
+    :func:`_read_live_mineru_port_full` — kept for existing callers/tests
+    that only need the port, not the skew detail."""
+    port, _skew = _read_live_mineru_port_full()
     return port
+
+
+def get_mineru_skew_info() -> MineruSkewInfo | None:
+    """Return details of a KNOWN mineru version skew, or ``None``.
+
+    nexus-eti1v: for a caller (the PDF extractor) that already received
+    ``None`` from :func:`get_mineru_server_url` and wants to explain the
+    fallback — both versions and the remedy — in its own log line,
+    without re-implementing the identity check.
+    """
+    _port, skew = _read_live_mineru_port_full()
+    return skew
 
 
 _MINERU_DEFAULT_URL = "http://127.0.0.1:8010"
 
 
-def get_mineru_server_url(repo_root: Path | None = None) -> str:
-    """Return the URL of the MinerU server to talk to.
+def get_mineru_server_url(repo_root: Path | None = None) -> str | None:
+    """Return the URL of the MinerU server to talk to, or ``None``.
 
     Resolution order (RDR-148 Gap 1 — explicit operator intent wins):
     1. An explicit, non-default ``pdf.mineru_server_url`` — when the
@@ -310,7 +384,20 @@ def get_mineru_server_url(repo_root: Path | None = None) -> str:
        source of truth when ``nx mineru start`` brought a server up on
        an ephemeral port and the config was left at the default.
        Validated via ``_is_process_alive``.
-    3. Built-in default ``http://127.0.0.1:8010``.
+    3. Built-in default ``http://127.0.0.1:8010`` — only reached when
+       there is no live pid-file server AND no known skew (i.e. no pid
+       file at all, or a stale/dead one; nexus-eti1v).
+
+    Returns ``None`` when step 2 finds a live, locally-registered server
+    with a KNOWN mineru version mismatch (nexus-yq3vk identity check).
+    That is a distinct outcome from "no server at all": the registered
+    pid already holds the only local server this box is going to have,
+    so falling through to the built-in default would just dial a port
+    nothing is listening on, and any autostart attempt would find the
+    registered pid still alive and wait out its own health timeout for
+    nothing — measured cost, one 54-page PDF: ~2.5 minutes (nexus-eti1v).
+    Callers MUST treat ``None`` as "skip straight to subprocess", never as
+    license to still try the default port.
 
     Documented heuristic limitation: the ``!=`` default check cannot
     distinguish "operator deliberately fixed local :8010" from "config
@@ -322,9 +409,11 @@ def get_mineru_server_url(repo_root: Path | None = None) -> str:
     configured = get_pdf_config(repo_root).mineru_server_url
     if configured != _MINERU_DEFAULT_URL:
         return configured
-    live = _read_live_mineru_port()
+    live, skew = _read_live_mineru_port_full()
     if live is not None:
         return f"http://127.0.0.1:{live}"
+    if skew is not None:
+        return None
     return configured
 
 

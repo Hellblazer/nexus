@@ -1,0 +1,17 @@
+# `tier = "enterprise"` is outside the declared domain ["free", "paid"]:
+# refused at LOAD time (UnknownLiteralError), never reaches check_table.
+[table]
+id = "bad-literal"
+kind = "decision-table"
+
+[dimensions.decision]
+domain = ["decide"]
+
+[dimensions.tier]
+domain = ["free", "paid"]
+
+[[row]]
+id = "r1"
+match = { decision = "decide" }
+guard = { tier = "enterprise" }
+emit = { verdict = "ok" }

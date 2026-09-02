@@ -23,6 +23,8 @@ import json
 
 import pytest
 
+from nexus.plans.runner import _PLAN_STEP_DEFAULT_CORPUS
+
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -76,7 +78,11 @@ async def test_run_resolves_caller_var_in_args() -> None:
     await plan_run(_match(plan), {"intent": "how does X work"}, dispatcher=disp)
 
     assert disp.calls[0] == (
-        "search", {"query": "how does X work", "limit": 5},
+        "search",
+        {
+            "query": "how does X work", "limit": 5,
+            "corpus": _PLAN_STEP_DEFAULT_CORPUS,
+        },
     )
 
 
@@ -92,7 +98,9 @@ async def test_run_caller_binding_overrides_default() -> None:
     match = _match(plan, default_bindings={"intent": "default"})
     disp = _FakeDispatcher()
     await plan_run(match, {"intent": "caller"}, dispatcher=disp)
-    assert disp.calls[0][1] == {"query": "caller"}
+    assert disp.calls[0][1] == {
+        "query": "caller", "corpus": _PLAN_STEP_DEFAULT_CORPUS,
+    }
 
 
 @pytest.mark.asyncio
@@ -106,7 +114,9 @@ async def test_run_falls_back_to_default_when_caller_omits() -> None:
     match = _match(plan, default_bindings={"intent": "from-default"})
     disp = _FakeDispatcher()
     await plan_run(match, {}, dispatcher=disp)
-    assert disp.calls[0][1] == {"query": "from-default"}
+    assert disp.calls[0][1] == {
+        "query": "from-default", "corpus": _PLAN_STEP_DEFAULT_CORPUS,
+    }
 
 
 @pytest.mark.asyncio
@@ -227,7 +237,10 @@ async def test_run_scope_topic_dead_when_args_already_sets_topic() -> None:
     }
     disp = _FakeDispatcher()
     await plan_run(_match(plan), {}, dispatcher=disp)
-    assert disp.calls[0][1] == {"topic": "explicit", "query": "literal"}
+    assert disp.calls[0][1] == {
+        "topic": "explicit", "query": "literal",
+        "corpus": _PLAN_STEP_DEFAULT_CORPUS,
+    }
 
 
 @pytest.mark.asyncio
@@ -292,7 +305,9 @@ async def test_run_optional_var_with_default_still_resolves() -> None:
     match = _match(plan, default_bindings={"topic": "from-default"})
     disp = _FakeDispatcher()
     await plan_run(match, {}, dispatcher=disp)
-    assert disp.calls[0][1] == {"query": "from-default"}
+    assert disp.calls[0][1] == {
+        "query": "from-default", "corpus": _PLAN_STEP_DEFAULT_CORPUS,
+    }
 
 
 @pytest.mark.asyncio
@@ -307,7 +322,9 @@ async def test_run_optional_var_caller_supplied_still_wins() -> None:
     }
     disp = _FakeDispatcher()
     await plan_run(_match(plan), {"topic": "caller-value"}, dispatcher=disp)
-    assert disp.calls[0][1] == {"query": "caller-value"}
+    assert disp.calls[0][1] == {
+        "query": "caller-value", "corpus": _PLAN_STEP_DEFAULT_CORPUS,
+    }
 
 
 @pytest.mark.asyncio
@@ -321,7 +338,13 @@ async def test_run_plan_with_no_var_refs_is_unaffected() -> None:
     }
     disp = _FakeDispatcher()
     await plan_run(_match(plan), {}, dispatcher=disp)
-    assert disp.calls[0] == ("search", {"query": "literal query", "limit": 5})
+    assert disp.calls[0] == (
+        "search",
+        {
+            "query": "literal query", "limit": 5,
+            "corpus": _PLAN_STEP_DEFAULT_CORPUS,
+        },
+    )
 
 
 # ── $stepN.<field> reference ───────────────────────────────────────────────
@@ -733,16 +756,18 @@ async def test_run_caller_scope_skips_non_retrieval_tools() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_no_scope_binding_unchanged() -> None:
-    """When caller omits ``_nx_scope``, behavior is unchanged — the step
-    runs without any corpus injection."""
+async def test_run_no_scope_binding_falls_through_to_plan_step_default() -> None:
+    """When caller omits ``_nx_scope`` too, the step is NOT left
+    corpus-less (RDR-200 Phase 1b, nexus-rl59s) — it falls through to
+    :data:`_PLAN_STEP_DEFAULT_CORPUS` rather than the bare MCP tool
+    default, which structurally excludes ``rdr__``."""
     from nexus.plans.runner import plan_run
 
     plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
     disp = _FakeDispatcher([{"text": "ok", "ids": []}])
     await plan_run(_match(plan), {}, dispatcher=disp)
     _tool, args = disp.calls[0]
-    assert "corpus" not in args
+    assert args["corpus"] == _PLAN_STEP_DEFAULT_CORPUS
 
 
 @pytest.mark.asyncio
@@ -760,6 +785,172 @@ async def test_run_caller_scope_binding_not_forwarded_to_tool() -> None:
     )
     _tool, args = disp.calls[0]
     assert "_nx_scope" not in args
+
+
+# ── Plan-step default corpus fall-through (RDR-200 Phase 1b, nexus-rl59s) ───
+
+
+@pytest.mark.asyncio
+async def test_default_corpus_fills_search_with_no_scoping_at_all() -> None:
+    """A ``search`` step with no plan corpus, no ``scope``, and no caller
+    ``_nx_scope`` binding gets :data:`_PLAN_STEP_DEFAULT_CORPUS`."""
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+    disp = _FakeDispatcher([{"text": "ok", "ids": []}])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    _tool, args = disp.calls[0]
+    assert args["corpus"] == _PLAN_STEP_DEFAULT_CORPUS
+
+
+@pytest.mark.asyncio
+async def test_default_corpus_fills_query_with_no_scoping_at_all() -> None:
+    """``query`` gets the same default-corpus fall-through as ``search``."""
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "query", "args": {"question": "x"}}]}
+    disp = _FakeDispatcher([{"text": "ok", "ids": []}])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    _tool, args = disp.calls[0]
+    assert args["corpus"] == _PLAN_STEP_DEFAULT_CORPUS
+
+
+@pytest.mark.asyncio
+async def test_default_corpus_does_not_override_plan_declared_corpus() -> None:
+    """A plan-pinned ``corpus`` always wins over the fall-through default."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x", "corpus": "code__delos"}},
+        ],
+    }
+    disp = _FakeDispatcher([{"text": "ok", "ids": []}])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    _tool, args = disp.calls[0]
+    assert args["corpus"] == "code__delos"
+
+
+@pytest.mark.asyncio
+async def test_default_corpus_does_not_override_plan_collections() -> None:
+    """A plan-pinned ``collection``/``collections`` arg wins too — no
+    ``corpus`` key is injected alongside it."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {
+                "tool": "search",
+                "args": {"query": "x", "collection": "rdr__delos"},
+            },
+        ],
+    }
+    disp = _FakeDispatcher([{"text": "ok", "ids": []}])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    _tool, args = disp.calls[0]
+    assert "corpus" not in args
+    assert args["collection"] == "rdr__delos"
+
+
+@pytest.mark.asyncio
+async def test_caller_scope_binding_wins_over_the_plan_step_default() -> None:
+    """When ``_nx_scope`` IS present, it fills the corpus before the
+    fall-through default ever runs — the caller's narrower scope wins,
+    not the broad four-prefix default."""
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+    disp = _FakeDispatcher([{"text": "ok", "ids": []}])
+    await plan_run(
+        _match(plan),
+        {"_nx_scope": "rdr__arcaneum-2ad2825c"},
+        dispatcher=disp,
+    )
+    _tool, args = disp.calls[0]
+    assert args["corpus"] == "rdr__arcaneum-2ad2825c"
+
+
+@pytest.mark.asyncio
+async def test_default_corpus_skips_search_metadata_scoped() -> None:
+    """Catalog-routed combined-query tools keep their own semantics —
+    the plain search/query default must not reach them."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search_metadata_scoped", "args": {"query": "x"}},
+        ],
+    }
+    disp = _FakeDispatcher([{"ids": [], "tumblers": [], "collections": []}])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    _tool, args = disp.calls[0]
+    assert "corpus" not in args
+
+
+@pytest.mark.asyncio
+async def test_default_corpus_skips_store_get_many() -> None:
+    """``store_get_many`` hydrates by explicit ids/collections — it must
+    never get a bare-prefix corpus default injected."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "store_get_many", "args": {"ids": ["a"], "collections": "knowledge__x"}},
+        ],
+    }
+    disp = _FakeDispatcher([{"contents": ["c"], "missing": []}])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    _tool, args = disp.calls[0]
+    assert "corpus" not in args
+
+
+@pytest.mark.asyncio
+async def test_default_corpus_skips_traverse() -> None:
+    """``traverse`` operates on tumblers, never embeddings — no corpus
+    default belongs on it."""
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "traverse", "args": {"seeds": ["1.1"]}}]}
+    disp = _FakeDispatcher([{"tumblers": [], "ids": [], "collections": []}])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+    _tool, args = disp.calls[0]
+    assert "corpus" not in args
+
+
+@pytest.mark.asyncio
+async def test_default_corpus_end_to_end_two_step_plan() -> None:
+    """A two-step ``search`` (no corpus) → ``store_get_many`` plan
+    dispatches the search step with the default corpus, and the
+    hydration step is unaffected — confirms the matched-plan path (a
+    library plan whose retrieval step declares no corpus) picks up
+    Fix 1's default automatically, with no separate matched-plan change
+    needed."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {
+                "tool": "store_get_many",
+                "args": {"ids": "$step1.ids", "collections": "$step1.collections"},
+            },
+        ],
+    }
+    disp = _FakeDispatcher([
+        {"ids": ["a"], "tumblers": [], "distances": [], "collections": ["knowledge__y"]},
+        {"contents": ["hydrated"], "missing": []},
+    ])
+    await plan_run(_match(plan), {}, dispatcher=disp)
+
+    search_tool, search_args = disp.calls[0]
+    assert search_tool == "search"
+    assert search_args["corpus"] == _PLAN_STEP_DEFAULT_CORPUS
+
+    hydrate_tool, hydrate_args = disp.calls[1]
+    assert hydrate_tool == "store_get_many"
+    assert hydrate_args["ids"] == ["a"]
+    assert hydrate_args["collections"] == ["knowledge__y"]
+    assert "corpus" not in hydrate_args
 
 
 # ── Result + step trace ────────────────────────────────────────────────────
@@ -2449,6 +2640,143 @@ async def test_budget_usd_remaining_unknown_cost_steps_never_trip() -> None:
     assert result.budget_exhausted_at_step is None
     assert result.budget_exhausted_kind is None
     assert all(r.cost_usd is None for r in result.step_records)
+
+
+# ── RDR-200 .p1c (nexus-4e75w.5): continuation "stop-before-cut" ──────────
+#
+# Same pre-segment placement as deadline / budget_usd_remaining above: the
+# segment at or past continuation_cut_at_step never dispatches. Proves the
+# terminal continuation suffix a caller is about to hand off never executes
+# server-side (RDR-200 R2).
+
+
+@pytest.mark.asyncio
+async def test_continuation_cut_at_step_stops_before_terminal_operator() -> None:
+    """search (step 0) runs; extract (step 1, the cut point) must NOT
+    dispatch at all -- proves zero claude_dispatch/SQL executions for a
+    suffix step once the cut applies."""
+    from unittest.mock import patch
+
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "extract", "args": {"inputs": "$step1.ids", "fields": "a"}},
+        ],
+    }
+    extract_calls: list[str] = []
+
+    async def stub_search(**kwargs):
+        return {"ids": ["a"], "tumblers": ["1.1"], "distances": [0.1], "collections": ["knowledge"]}
+
+    async def stub_extract(**kwargs):
+        extract_calls.append("extract")
+        return {"extractions": []}
+
+    from nexus.mcp import core as mcp_core
+
+    with patch.object(mcp_core, "search", stub_search), \
+         patch.object(mcp_core, "operator_extract", stub_extract):
+        result = await plan_run(
+            _match(plan), {}, continuation_cut_at_step=1, bundle_operators=False,
+        )
+
+    assert extract_calls == [], (
+        "the cut step must never dispatch -- zero executions of the "
+        "suffix operator"
+    )
+    assert len(result.steps) == 1, "only the pre-cut search step ran"
+    assert result.steps[0]["ids"] == ["a"]
+    assert result.continuation_cut_applied is True
+    assert result.step_records[0].operator == "search"
+    assert result.budget_exhausted_at_step is None, (
+        "a continuation cut is a distinct mechanism from budget "
+        "exhaustion -- it must never set the budget marker fields"
+    )
+
+
+@pytest.mark.asyncio
+async def test_continuation_cut_at_step_none_preserves_default_fields() -> None:
+    """``continuation_cut_at_step=None`` (the default) must reproduce
+    pre-.p1c behavior exactly -- every segment dispatches, unchanged."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x"}},
+            {"tool": "extract", "args": {"inputs": "$step1.ids", "fields": "a"}},
+        ],
+    }
+    from unittest.mock import patch
+
+    from nexus.mcp import core as mcp_core
+
+    async def stub_search(**kwargs):
+        return {"ids": ["a"], "tumblers": ["1.1"], "distances": [0.1], "collections": ["knowledge"]}
+
+    async def stub_extract(**kwargs):
+        return {"extractions": []}
+
+    with patch.object(mcp_core, "search", stub_search), \
+         patch.object(mcp_core, "operator_extract", stub_extract):
+        result = await plan_run(_match(plan), {}, bundle_operators=False)
+
+    assert len(result.steps) == 2
+    assert result.continuation_cut_applied is False
+
+
+@pytest.mark.asyncio
+async def test_continuation_cut_at_step_past_the_plan_never_fires() -> None:
+    """A cut index beyond the plan's last segment must let the whole
+    plan run -- ``continuation_cut_applied`` stays False (nothing was
+    withheld that would otherwise have run)."""
+    from unittest.mock import patch
+
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+
+    async def stub_search(**kwargs):
+        return {"ids": ["a"], "tumblers": ["1.1"], "distances": [0.1], "collections": ["knowledge"]}
+
+    from nexus.mcp import core as mcp_core
+
+    with patch.object(mcp_core, "search", stub_search):
+        result = await plan_run(_match(plan), {}, continuation_cut_at_step=5)
+
+    assert len(result.steps) == 1
+    assert result.continuation_cut_applied is False
+
+
+@pytest.mark.asyncio
+async def test_continuation_cut_at_step_zero_stops_before_the_first_step() -> None:
+    """A cut at the very first step (an all-operator plan) withholds
+    everything -- zero StepRecords, matching the RDR's "the terminal
+    suffix MUST NOT execute server-side" contract for the degenerate
+    all-suffix case."""
+    from unittest.mock import patch
+
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "summarize", "args": {"content": "x"}}]}
+    calls: list[str] = []
+
+    async def stub_summarize(**kwargs):
+        calls.append("summarize")
+        return {"summary": "x"}
+
+    from nexus.mcp import core as mcp_core
+
+    with patch.object(mcp_core, "operator_summarize", stub_summarize):
+        result = await plan_run(
+            _match(plan), {}, continuation_cut_at_step=0, bundle_operators=False,
+        )
+
+    assert calls == []
+    assert result.steps == []
+    assert result.step_records == []
+    assert result.continuation_cut_applied is True
 
 
 # ── StepRecord (RDR-196 .p1b, nexus-nyry9.8) ────────────────────────────────

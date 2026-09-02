@@ -252,8 +252,15 @@ public final class PlanHandler implements HttpHandler {
 
     /**
      * POST /v1/plans/search
-     * Request: {"query": "...", "project": "...", "limit": 5}
+     * Request: {"query": "...", "project": "...", "limit": 5,
+     *           "any_lexeme": false}
      * Response 200: [plan objects]
+     *
+     * <p>{@code any_lexeme} (nexus-vi8fp, OPTIONAL, default false so the
+     * wire shape is unchanged when absent): opt-in any-lexeme recall
+     * fallback for HUMAN browsing surfaces — see
+     * {@link PlanRepository#searchPlans(String, String, String, int, boolean)}
+     * for the measured decision record. plan_match never sends it.
      */
     private void handleSearch(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -261,7 +268,8 @@ public final class PlanHandler implements HttpHandler {
         String query   = requireString(body, "query");
         String project = optStringOrNull(body, "project");
         int limit      = optIntDefault(body, "limit", 5);
-        var rows = repo.searchPlans(tenant, query, project, limit);
+        boolean anyLexeme = Boolean.TRUE.equals(body.get("any_lexeme"));
+        var rows = repo.searchPlans(tenant, query, project, limit, anyLexeme);
         HttpUtil.send(ex, 200, json(rows.stream().map(PlanRepository::recordToMap).toList()));
     }
 

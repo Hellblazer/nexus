@@ -455,7 +455,15 @@ class TestRequiredEngineVersion:
         # on VectorHandler/CatalogHandler (nexus-99r7y); zero changesets,
         # engine deployed BEFORE the client tag (1emxn (a)), --acquire and
         # cloud client-path gates green pre-bump.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 93)
+        # ->(0,1,94) 2026-09-02 for 7.27.0 (all-[additive], additive-first):
+        # VoyageRetryLoop consolidation carrying the 4ktfm/99r7y semantics
+        # (nexus-1vpal), telemetry `since` strict parsing replacing a silent
+        # `since now()` empty set with a 400 (nexus-spbay), and the opt-in
+        # any-lexeme plan-search engine half (nexus-vi8fp). Zero Liquibase
+        # changesets in the delta — no fork walk; both wire-ledger entries
+        # are [additive], so the engine deployed and cloud-gated GREEN
+        # BEFORE this client tag (1emxn (a)).
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 94)
 
 
 class TestParseEngineVersion:

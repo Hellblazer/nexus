@@ -304,6 +304,30 @@ class TestNxAnswerRuns:
         assert nar["fallback_count"] == 2
         assert nar["latency_buckets"]["5s_to_30s"] == 2
 
+    def test_continuation_caveat_present_in_json_and_text(self, monkeypatch) -> None:
+        """critic-F2 (T2 [23952], population sweep item 6): hit/
+        fallback/total figures have zero visibility into RDR-200
+        continuation rows (zero engine change) -- the caveat must be
+        present in both output shapes, unconditionally (this figure
+        has no per-row visibility to gate presence on)."""
+        from nexus.commands.telemetry_cmd import (
+            _NX_ANSWER_RUNS_CONTINUATION_CAVEAT,
+            baseline_cmd,
+        )
+
+        store = _FakeStore(nar_since=_nar_result(total=5, hit=3, fallback=2))
+        _patch_all_ok(monkeypatch, store=store)
+
+        json_result = CliRunner().invoke(baseline_cmd, ["--json"])
+        payload = json.loads(json_result.stdout)
+        assert payload["nx_answer_runs"]["continuation_caveat"] == (
+            _NX_ANSWER_RUNS_CONTINUATION_CAVEAT
+        )
+
+        text_result = CliRunner().invoke(baseline_cmd, [])
+        assert "CAVEAT" in text_result.stdout
+        assert "RDR-200" in text_result.stdout
+
     def test_oldest_and_newest_created_at_present_and_correct(self, monkeypatch) -> None:
         """Coordinator fix round 1, item 1 (Critical): this is the
         instrument behind 08-27's 'zero rows since <ts>' finding -- it

@@ -825,3 +825,188 @@ class TestMintTokenResolutionSeam:
             )
         finally:
             self._reset_manager()
+
+
+# ── nexus-fe96p: post-heal RETRY must carry the CURRENT bearer, not the ──────
+# ── httpx client's construction-time baked default ───────────────────────────
+#
+# Every fixture above pins the bearer (_token=TOKEN), which makes
+# _current_authorization_header()'s fresh-resolved value byte-identical to
+# the baked client default in every request -- the gap that hid nexus-fe96p.
+# This section builds an UNPINNED store (_token=None) whose bearer is
+# resolved through a fake DataTokenManager and can be rotated independently
+# of the store, and a fake server that gates BOTH the bearer and (once) the
+# session token -- so a request can 401 on the SESSION check, trigger the
+# g5hzk lease-reread heal, rebuild the client (which re-bakes the STALE
+# bearer, since the heal only ever touches the session-token header), and
+# then retry. Before the nexus-fe96p fix the retry dropped the per-request
+# override and sent the stale baked bearer, 401-ing again; after the fix the
+# retry resolves the bearer fresh and succeeds.
+
+_ROTATE_BEARER: dict[str, str] = {"value": ""}
+_ROTATE_REQUIRED_SESSION: dict[str, str | None] = {"token": None}
+
+
+class _RotatingBearerHandler(FakeT2HandlerBase):
+    """Fake T1 service that validates the Authorization bearer against a
+    MUTABLE current value (``_ROTATE_BEARER``) rather than a fixed constant,
+    and optionally requires an exact ``X-Nexus-T1-Session`` header value
+    (mirroring the g5hzk require-minted gate in ``_FakeScratchHandler``)."""
+
+    def _check_auth(self) -> bool:
+        auth = self.headers.get("Authorization", "")
+        if auth != f"Bearer {_ROTATE_BEARER['value']}":
+            self._send(401, {"error": "unauthorized"})
+            return False
+        required = _ROTATE_REQUIRED_SESSION.get("token")
+        if required is not None and self.headers.get("X-Nexus-T1-Session", "") != required:
+            self._send(401, {"error": "unauthorized"})
+            return False
+        return True
+
+    def do_POST(self):  # noqa: N802
+        if not self._check_auth():
+            return
+        path = self.path.split("?")[0]
+        body = self._read_body()
+        if path == "/v1/t1/put":
+            self._send(200, {"id": body.get("id", "gen-id")})
+        elif path == "/v1/t1/get":
+            self._send(200, {"found": False})
+        elif path == "/v1/t1/resolve_prefix":
+            # get()'s not-found fallback probes this path; no candidates.
+            self._send(200, {"ids": []})
+        else:
+            self._send(404, {"error": "not found"})
+
+
+@pytest.fixture
+def rotating_bearer_server():
+    _ROTATE_BEARER["value"] = ""
+    _ROTATE_REQUIRED_SESSION["token"] = None
+    with fake_http_server(_RotatingBearerHandler) as url:
+        yield url
+    _ROTATE_BEARER["value"] = ""
+    _ROTATE_REQUIRED_SESSION["token"] = None
+
+
+class TestStaleBearerOnHealedRetry:
+    """nexus-fe96p regression: the post-401 self-heal retry must resolve the
+    Authorization bearer FRESH, not fall back to the client's baked default."""
+
+    STALE_SESSION = "fe96p-stale-session-token"
+    FRESH_SESSION = "fe96p-fresh-session-token"
+    BEARER_V1 = "fe96p-bearer-v1"
+    BEARER_V2 = "fe96p-bearer-v2"
+
+    class _RotatingBearerManager:
+        """Fake DataTokenManager stand-in: ``bearer_for`` always returns the
+        CURRENT ``_ROTATE_BEARER['value']`` -- an unpinned store resolves
+        this fresh on every call via ``_current_authorization_header``."""
+
+        def bearer_for(self, base_url: str, tenant: str) -> str:
+            return _ROTATE_BEARER["value"]
+
+    def _new_unpinned_store(
+        self, rotating_bearer_server, tmp_path, monkeypatch, session_id: str,
+    ) -> HttpScratchStore:
+        import nexus.db.data_token as data_token_module
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "unused-static-fallback-token")
+        monkeypatch.setenv("NX_T1_SESSION", self.STALE_SESSION)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        monkeypatch.setenv("NX_T1_SESSION_ID", session_id)
+        monkeypatch.setattr(
+            data_token_module, "get_data_token_manager", self._RotatingBearerManager,
+        )
+
+        # Bearer at CONSTRUCTION time -- gets baked into the httpx client's
+        # default headers by _build_client().
+        _ROTATE_BEARER["value"] = self.BEARER_V1
+        store = HttpScratchStore(
+            base_url=rotating_bearer_server,
+            tenant=DEFAULT_TENANT,
+            session_id=session_id,
+            _token=None,
+            _session_token=self.STALE_SESSION,
+        )
+        assert store._token_pinned is False, "the store must be UNPINNED to exercise fresh-bearer resolution"
+        assert store._headers["Authorization"] == f"Bearer {self.BEARER_V1}"
+
+        # Rotate the bearer AFTER construction -- the baked client default is
+        # now stale; only a fresh per-request resolution sees BEARER_V2.
+        _ROTATE_BEARER["value"] = self.BEARER_V2
+        # Gate the session token so the first request 401s on the SESSION
+        # check (not the bearer check, which already carries the fresh
+        # value via the per-request override) and publish the lease with
+        # the fresh session token so the g5hzk heal has something to adopt.
+        _ROTATE_REQUIRED_SESSION["token"] = self.FRESH_SESSION
+        publish_t1_session_lease(session_id, self.FRESH_SESSION, tmp_path, ttl_seconds=300.0)
+        return store
+
+    def test_post_retry_uses_fresh_bearer_after_session_heal(
+        self, rotating_bearer_server, tmp_path, monkeypatch,
+    ) -> None:
+        """_post (used by put()) must carry the fresh bearer on the
+        post-heal retry, not the client's stale baked default."""
+        store = self._new_unpinned_store(
+            rotating_bearer_server, tmp_path, monkeypatch, "fe96p-post-session",
+        )
+
+        result = store.put("survives bearer rotation across the heal retry")
+
+        assert result, "the retry must succeed once it carries the CURRENT bearer"
+        assert store._session_token == self.FRESH_SESSION, "the session heal must have adopted the lease's fresh token"
+
+    def test_post_raw_retry_uses_fresh_bearer_after_session_heal(
+        self, rotating_bearer_server, tmp_path, monkeypatch,
+    ) -> None:
+        """_post_raw (used by get()) must carry the fresh bearer on the
+        post-heal retry, not the client's stale baked default."""
+        store = self._new_unpinned_store(
+            rotating_bearer_server, tmp_path, monkeypatch, "fe96p-post-raw-session",
+        )
+
+        # get() -> _post_raw; the fake server's /v1/t1/get always returns
+        # {"found": False} -- what matters is that the retry does NOT raise
+        # SESSION_UNAUTHORIZED_MARKER.
+        result = store.get("some-id")
+
+        assert result is None, "a clean {'found': False} response, not a 401 RuntimeError"
+        assert store._session_token == self.FRESH_SESSION, "the session heal must have adopted the lease's fresh token"
+
+    def test_remint_heal_carries_remint_suffix_not_adopted(
+        self, rotating_bearer_server, tmp_path, monkeypatch,
+    ) -> None:
+        """Reviewer fold on nexus-fe96p (both reviewers, independently): when
+        the g5hzk lease heal DECLINES (lease unchanged) and the wrwb7
+        data-token re-mint is what heals, the raised marker must carry
+        HEAL_REMINT_SUFFIX -- never HEAL_ADOPTED_SUFFIX, which would credit
+        the wrong mechanism (the inference-as-fact class this bead fixes)."""
+        from nexus.db.http_scratch_store import (
+            HEAL_ADOPTED_SUFFIX,
+            HEAL_REMINT_SUFFIX,
+            SESSION_UNAUTHORIZED_MARKER,
+        )
+
+        store = self._new_unpinned_store(
+            rotating_bearer_server, tmp_path, monkeypatch, "fe96p-remint-session",
+        )
+        # Overwrite the helper's FRESH lease with the SAME stale token the
+        # store already holds: the g5hzk heal reads it, sees "unchanged",
+        # and declines.
+        publish_t1_session_lease(
+            "fe96p-remint-session", self.STALE_SESSION, tmp_path, ttl_seconds=300.0,
+        )
+        # The wrwb7 re-mint "succeeds" (bearer side healed) -- but the
+        # session token stays stale, so the retry still 401s.
+        monkeypatch.setattr(store, "_remint_data_token_and_rebuild", lambda: True)
+
+        with pytest.raises(RuntimeError) as excinfo:
+            store.put("remint-heal suffix attribution")
+
+        text = str(excinfo.value)
+        assert SESSION_UNAUTHORIZED_MARKER in text
+        assert HEAL_REMINT_SUFFIX in text, "the re-mint heal must be attributed to wrwb7"
+        assert HEAL_ADOPTED_SUFFIX not in text, "the lease-adoption suffix must not fire for a re-mint heal"

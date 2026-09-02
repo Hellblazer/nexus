@@ -41,9 +41,13 @@ carries no method signature for a contract change to reconcile against) is a
 - **Direction-safety token** (nexus-1emxn choreography (a)): an Unshipped
   entry whose note BEGINS with the literal `[additive]` asserts OLD client
   + NEW engine is safe -- the engine half may deploy BEFORE the client
-  tag, so `check_client_release_precondition.py` treats an all-`[additive]`
-  Unshipped section as authorization for the unpaired deploy instead of a
-  block (no refusal window can open for such entries). `[not-additive]`
+  tag, so BOTH gates above treat an all-`[additive]` Unshipped section as
+  authorization instead of a block (no refusal window can open for such
+  entries). One shared classifier,
+  `check_wire_contract_pairing.classify_unshipped`, interprets the token
+  for both; before nexus-hcdk3 (2026-09-01) only the precondition gate
+  honored it, and the floor gate's `--ledger-only` leg red-gated every PR
+  to `main` on entries the precondition gate certified safe. `[not-additive]`
   (or NO leading token -- the fail-safe default for every pre-token entry)
   keeps the blocking behaviour. The token must LEAD the note (a
   mid-sentence mention is prose, not a statement -- the parser is anchored)
@@ -55,7 +59,12 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
+
 ## Shipped
+
+- `033f8d71b` -- bead nexus-vi8fp -- shipped in `v7.27.0` -- engine half engine-service-v0.1.94 (tagged 2026-09-02 on 13c5b2c31, alongside the 1vpal/spbay payloads; pre-tag battery green; ZERO Liquibase changesets in the delta so no PITR fork walk; all-[additive], so the engine deployed and cloud-gated GREEN before the client tag per nexus-1emxn choreography (a)) -- [additive] opt-in any-lexeme plan-search fallback. Engine half: `PlanRepository.searchPlans` 5-arg `anyLexeme` overload (4-arg stays AND-only, byte-identical for every existing caller) + `POST /v1/plans/search` OPTIONAL `any_lexeme` body field (absent = unchanged wire). Client half in the same commit: `HttpPlanLibrary.search_plans(any_lexeme=False)` keyword, field OMITTED from the payload unless True; only the `plan_search` MCP tool passes True; `plan_match` never does (decision C on the T2 [23891] admission measurement — auto-admission ran junk plans on 9/10 unrelated probes). Direction safety, both directions: NEW client + OLD engine = the unknown body field is ignored by the old handler, AND-only results, exactly today's behavior (the browsing surface just gains nothing until the tag deploys); OLD client + NEW engine = the field is never sent, the 4-arg-equivalent path runs, byte-identical results. No existing request or response shape changed.
+
+- `e24a91c4a` -- bead nexus-spbay -- shipped in `v7.27.0` -- engine half engine-service-v0.1.94 (tagged 2026-09-02 on 13c5b2c31; that tag also carries the gated nexus-4ktfm + nexus-99r7y payload and nexus-1vpal; deployed and cloud-gated GREEN before the client tag, all-[additive]) -- [additive] telemetry `since` filter parsing. Engine half: `TelemetryRepository.parseSinceFilter` (date-only -> midnight UTC, naive datetime -> UTC, malformed -> IllegalArgumentException -> the handler's 400) at the three since-filter sites (`GET /v1/telemetry/nx_answer_runs/query`, `/tier_writes/query`, `/tier_writes/list`) — replacing the write-stamp `parseTs`, whose malformed-input fallback silently turned any unparseable `since` into `since now()` (a guaranteed empty set). Client half in the same commit: `normalize_since_filter` in `http_telemetry_store.py` converts date-only/naive forms to full UTC ISO BEFORE the wire, plus CLI pre-try validation. Direction safety, both directions: NEW client + OLD engine = the client only ever sends full offset ISO (the one form the old parser reads correctly), so the fix is complete client-side against the deployed engine — verified live 2026-08-31 (`--since 2026-08-01` returns 42 rows on the v0.1.93 cloud). OLD client + NEW engine = a well-formed `since` parses identically; a malformed one now gets an explicit 400 instead of a silently-empty 200 — every since-bearing caller wraps the read in a broad except with an honest failure message, so the change surfaces as a loud degrade, never a crash (fail-loud in the direction this repo's doctrine requires).
 
 - `5ac9f09e03e554d34acd17b6062cfbc16a6212d9` -- bead nexus-ogccs -- shipped in `v7.25.0` -- engine half engine-service-v0.1.92 (tagged 2026-08-31 on 14bd80442; pre-tag battery green — service-ci full suite, CANDIDATE SHAKEOUT PASSED incl. the native-smoke probe set, published-client write gate PASSED on the 7.24.1 client; ZERO Liquibase changesets in the delta so no PITR fork walk; all-[additive], so the deploy fires BEFORE the client tag per nexus-1emxn choreography (a)) -- [additive] ONNX model root resolution (env/HOME, never bare passwd user.home). Engine half: OnnxModelPaths (NX_ONNX_MODEL_DIR -> $HOME/.cache/nexus/onnx_models -> user.home) feeds Bge768Embedder + CrossEncoderReranker DEFAULT_*_PATH, boot log event=onnx_model_root. Client half in the same commit: nexus.db.onnx_model_root shared root, provisioner dirs derive from it, supervisor pins NX_ONNX_MODEL_DIR in the engine spawn env. Not a wire-shape change (env-var contract, not HTTP): NEW client + OLD engine = env var ignored, pre-fix behaviour; NEW engine + OLD client = HOME rung alone fixes supervisor spawns. Ack condition met: 7.25.0 bumps REQUIRED_ENGINE_VERSION to (0,1,92), and the plugin-cut rehearsal Dockerfile's passwd-home==sandbox-HOME alignment comes out in the same commit as the bump.
 

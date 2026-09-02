@@ -1,0 +1,14 @@
+# r1 carries both `to` and `refuse`: refused at load time
+# (MultipleOutcomesError) -- a row must carry exactly one of to/emit/refuse.
+[table]
+id = "multi-outcome"
+kind = "decision-table"
+
+[dimensions.decision]
+domain = ["decide"]
+
+[[row]]
+id = "r1"
+match = { decision = "decide" }
+to = { state = "x" }
+refuse = "not-allowed"

@@ -1,0 +1,141 @@
+# Fixture: RDR lifecycle transition table (state-machine kind), CLEAN.
+# Converted from the enumcheck prototype's models/rdr_lifecycle.toml
+# (tests/fixtures/tables/_prototype/models/rdr_lifecycle.toml, RDR-201 P1.1)
+# onto the production [table]/[dimensions]/[[row]] schema.
+#
+# 7 states x 9 events. Every event that guards on `state` closes coverage
+# either by enumerating every state value or by a bare escape row rescuing
+# the states the event does not admit. `create` guards nothing (a fresh RDR
+# has no prior state) -- legitimate for a state-machine, silent, no finding.
+#
+# This is a TEST FIXTURE for the checker's coverage/overlap proof, not the
+# production lifecycle table. The real table (status/event/gate/successor
+# dimensions from RDR-201 Sec Technical Design) ships in bead nexus-j9z30.3
+# as src/nexus/tables/rdr-lifecycle.toml.
+
+[table]
+id = "rdr-lifecycle-fixture"
+kind = "state-machine"
+
+[dimensions.event]
+domain = ["create", "gate-pass", "gate-block", "accept", "close", "supersede", "scrap", "defer", "resume"]
+
+[dimensions.state]
+domain = ["draft", "accepted", "closed", "superseded", "scrapped", "deferred", "abandoned"]
+
+# --- create: no state precondition ---------------------------------------
+
+[[row]]
+id = "create"
+match = { event = "create" }
+to = { state = "draft" }
+
+# --- gate-pass / gate-block: only meaningful from draft -------------------
+
+[[row]]
+id = "gate-pass-draft"
+match = { event = "gate-pass" }
+guard = { state = "draft" }
+to = { state = "draft" }
+
+[[row]]
+id = "gate-pass-otherwise"
+match = { event = "gate-pass" }
+escape = true
+refuse = "illegal-transition"
+
+[[row]]
+id = "gate-block-draft"
+match = { event = "gate-block" }
+guard = { state = "draft" }
+to = { state = "draft" }
+
+[[row]]
+id = "gate-block-otherwise"
+match = { event = "gate-block" }
+escape = true
+refuse = "illegal-transition"
+
+# --- accept: draft -> accepted --------------------------------------------
+
+[[row]]
+id = "accept-draft"
+match = { event = "accept" }
+guard = { state = "draft" }
+to = { state = "accepted" }
+
+[[row]]
+id = "accept-otherwise"
+match = { event = "accept" }
+escape = true
+refuse = "illegal-transition"
+
+# --- close: draft, accepted, or deferred can be closed ---------------------
+
+[[row]]
+id = "close-open"
+match = { event = "close" }
+guard = { state = ["draft", "accepted", "deferred"] }
+to = { state = "closed" }
+
+[[row]]
+id = "close-otherwise"
+match = { event = "close" }
+escape = true
+refuse = "illegal-transition"
+
+# --- supersede: accepted or closed can be superseded -----------------------
+
+[[row]]
+id = "supersede-settled"
+match = { event = "supersede" }
+guard = { state = ["accepted", "closed"] }
+to = { state = "superseded" }
+
+[[row]]
+id = "supersede-otherwise"
+match = { event = "supersede" }
+escape = true
+refuse = "illegal-transition"
+
+# --- scrap: only a draft can be scrapped -----------------------------------
+
+[[row]]
+id = "scrap-draft"
+match = { event = "scrap" }
+guard = { state = "draft" }
+to = { state = "scrapped" }
+
+[[row]]
+id = "scrap-otherwise"
+match = { event = "scrap" }
+escape = true
+refuse = "illegal-transition"
+
+# --- defer: only a draft can be deferred -----------------------------------
+
+[[row]]
+id = "defer-draft"
+match = { event = "defer" }
+guard = { state = "draft" }
+to = { state = "deferred" }
+
+[[row]]
+id = "defer-otherwise"
+match = { event = "defer" }
+escape = true
+refuse = "illegal-transition"
+
+# --- resume: only a deferred RDR can resume ---------------------------------
+
+[[row]]
+id = "resume-deferred"
+match = { event = "resume" }
+guard = { state = "deferred" }
+to = { state = "draft" }
+
+[[row]]
+id = "resume-otherwise"
+match = { event = "resume" }
+escape = true
+refuse = "illegal-transition"

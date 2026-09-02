@@ -1,0 +1,152 @@
+# RDR-201 Phase 1: the RDR status-transition table (state-machine kind).
+#
+# Ships INSIDE THE PACKAGE (src/nexus/tables/, not docs/tables/) -- only
+# src/nexus reaches a wheel (pyproject.toml's
+# [tool.hatch.build.targets.wheel] packages = ["src/nexus"]), and
+# `nx rdr set-status` is a top-level CLI that resolves any repo's root and
+# must run in every installed conexus, not just this checkout. Load via
+# nexus.tables.load.load_packaged_table("rdr-lifecycle.toml"), never a
+# path relative to a repo root.
+#
+# Status domain (Sam's ruling, 2026-09-01 -- RDR-201 Sec Technical Design):
+#   draft       entry state; under research or revision
+#   accepted    gate passed; implementation may start
+#   deferred    parked; resumes to draft ONLY, never directly to accepted
+#   closed      implemented and shipped (terminal)
+#   superseded  replaced by a named successor (terminal)
+#   abandoned   not going to happen (terminal); merges the old `scrapped`
+#
+# `match` scopes a group (status, event); `guard` names the dimension(s)
+# coverage is proved over within that group. Every row names the same
+# match keys (status, event); a list-valued match key expands one row per
+# member (RDR-201 Sec Technical Design), which is how each event's
+# "otherwise" catch-all becomes one bare `escape = true` row per remaining
+# status -- coverage in this design is proved per literal (status, event)
+# group over its GUARD dimensions, not automatically across the full
+# status x event product, so every status must be named explicitly for
+# every event: either handled by name, or swept into an `escape` row's
+# match.status list. Getting that enumeration wrong (omitting a status
+# entirely from an event) is NOT caught by the checker -- a status a row
+# never names has no group at all, so there is nothing to check. The
+# arithmetic below is verified by construction: each event's explicit
+# status set and its "otherwise" set are complements summing to the full
+# 6-member domain, with no member repeated across the two sets.
+#
+# The `defer` event is legal from `draft` and from `accepted` (Sam,
+# 2026-09-01, RDR-201 Revision History). A deferred record resumes to
+# `draft` only, so deferred-then-resumed work re-gates.
+#
+# No downstream reader derives anything from this table's ROWS any more.
+# conexus/hooks/scripts/rdr_hook.py used to derive a terminal/non-terminal
+# status rank here (RDR-201 P1.5) to drive a file<->T2 status reconcile;
+# that reconcile had never executed and was deleted at nexus-e19sa (Sam,
+# 2026-09-02) along with the `[lifecycle] terminal_preserving_events`
+# section that existed only to feed it. `nx rdr set-status` is the one
+# writer of RDR status and resolves this table through nexus.tables.
+
+[table]
+id = "rdr-lifecycle"
+kind = "state-machine"
+version = 1
+
+[dimensions.status]
+domain = ["draft", "accepted", "deferred", "closed", "superseded", "abandoned"]
+[dimensions.event]
+domain = ["accept", "close", "supersede", "abandon", "defer", "resume"]
+[dimensions.gate]
+domain = ["passed", "blocked", "none"]
+[dimensions.successor]                    # superseded_by present in frontmatter?
+domain = ["named", "absent"]
+
+# --- accept: draft -> accepted, gated on RDR finalization ------------------
+
+[[row]]
+id = "accept"
+match = { status = "draft", event = "accept" }
+guard = { gate = "passed" }
+to = { status = "accepted" }
+
+[[row]]
+id = "accept-blocked"
+match = { status = "draft", event = "accept" }
+guard = { gate = ["blocked", "none"] }
+refuse = "gate-not-passed"
+
+[[row]]
+id = "accept-otherwise"
+match = { status = ["accepted", "deferred", "closed", "superseded", "abandoned"], event = "accept" }
+escape = true
+refuse = "illegal-transition"
+
+# --- close: accepted -> closed only -----------------------------------------
+
+[[row]]
+id = "close"
+match = { status = "accepted", event = "close" }
+to = { status = "closed" }
+
+[[row]]
+id = "close-otherwise"
+match = { status = ["draft", "deferred", "closed", "superseded", "abandoned"], event = "close" }
+escape = true
+refuse = "illegal-transition"
+
+# --- supersede: draft/accepted/deferred/closed -> superseded, guarded on ---
+# --- a named successor (superseded_by present in frontmatter) --------------
+
+[[row]]
+id = "supersede"
+match = { status = ["draft", "accepted", "deferred", "closed"], event = "supersede" }
+guard = { successor = "named" }
+to = { status = "superseded" }
+
+[[row]]
+id = "supersede-unnamed"
+match = { status = ["draft", "accepted", "deferred", "closed"], event = "supersede" }
+guard = { successor = "absent" }
+refuse = "successor-not-named"
+
+[[row]]
+id = "supersede-otherwise"
+match = { status = ["superseded", "abandoned"], event = "supersede" }
+escape = true
+refuse = "illegal-transition"
+
+# --- abandon: any non-terminal state -> abandoned ---------------------------
+
+[[row]]
+id = "abandon"
+match = { status = ["draft", "accepted", "deferred"], event = "abandon" }
+to = { status = "abandoned" }
+
+[[row]]
+id = "abandon-otherwise"
+match = { status = ["closed", "superseded", "abandoned"], event = "abandon" }
+escape = true
+refuse = "illegal-transition"
+
+# --- defer: draft | accepted -> deferred ------------------------------------
+
+[[row]]
+id = "defer"
+match = { status = ["draft", "accepted"], event = "defer" }
+to = { status = "deferred" }
+
+[[row]]
+id = "defer-otherwise"
+match = { status = ["deferred", "closed", "superseded", "abandoned"], event = "defer" }
+escape = true
+refuse = "illegal-transition"
+
+# --- resume: deferred -> draft only (there is NO deferred -> accepted edge) -
+
+[[row]]
+id = "resume"
+match = { status = "deferred", event = "resume" }
+to = { status = "draft" }
+
+[[row]]
+id = "resume-otherwise"
+match = { status = ["draft", "accepted", "closed", "superseded", "abandoned"], event = "resume" }
+escape = true
+refuse = "illegal-transition"

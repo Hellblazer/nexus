@@ -269,28 +269,33 @@ Renamed documents do not automatically gain `category="rdr_postmortem"` on their
 
 ## Flow: Reverted or Abandoned
 
-1. Prompt for reason (free text)
+1. Prompt for reason (free text) — e.g. "reverted" (implementation started, then rolled back) or "never going to happen". This reason is recorded in T2 and the post-mortem only; it is NOT a file status. RDR-201's lifecycle table status domain is `{draft, accepted, deferred, closed, superseded, abandoned}` — `reverted` was explicitly retired, so both reasons above close the file to the SAME status, `abandoned`.
 2. Offer post-mortem (useful for capturing what was learned, even from abandoned work)
-3. Update T2 record with close reason
-4. **Flip the file frontmatter + README via the CLI (do NOT hand-edit):** run `nx rdr set-status NNN reverted` (or `abandoned`). Code-enforced — same ledger-drift fix as the Implemented flow.
-5. **Scoped conditional reindex** — if the RDR body changed, run `nx index rdr docs/rdr/rdr-NNN-<slug>.md` (single-file form). A frontmatter-only `status: reverted` flip does not warrant a reindex. Apply the same diff check from Step 4 of the Implemented flow.
+3. Update T2 record with close reason — record the reason text (e.g. "reverted") even though the file status written in step 4 is always `abandoned`.
+4. **Flip the file frontmatter + README via the CLI (do NOT hand-edit):** run `nx rdr set-status NNN abandoned`. Code-enforced — same ledger-drift fix as the Implemented flow. (`reverted` is not a valid `set-status` target — the CLI exits 2 on it; the T2 reason from step 3 is where "reverted" is recorded.)
+5. **Scoped conditional reindex** — if the RDR body changed, run `nx index rdr docs/rdr/rdr-NNN-<slug>.md` (single-file form). A frontmatter-only `status: abandoned` flip does not warrant a reindex. Apply the same diff check from Step 4 of the Implemented flow.
 6. Archive post-mortem (if created) to the conformant knowledge collection via Step 6 of the Implemented flow: same `nx catalog collection-name --content-type knowledge` lookup, same `category="rdr_postmortem"` stamp.
 7. (README index row is updated by `set-status` in step 4 — no separate regen.)
 
 ## Flow: Superseded
 
 1. Prompt for superseding RDR ID
-2. **Flip the old RDR's file status + README via the CLI:** run `nx rdr set-status MMM superseded` (code-enforced; do NOT hand-edit the status). Then cross-link both RDRs (bidirectional):
-   - **Old RDR**: In T2, set `superseded_by: "NNN"`. In markdown, add "Superseded by RDR-NNN" note
+2. **Write `superseded_by` into the OLD RDR's YAML frontmatter FIRST.** `nx rdr set-status ... superseded`'s `successor` guard reads this key from the file AT CALL TIME and refuses `successor-not-named` if it is absent — the frontmatter edit must happen BEFORE the CLI call in step 3, never after. Edit the old RDR's frontmatter block to add (or set) the key:
+   ```
+   superseded_by: "RDR-NNN"
+   ```
+   (NNN = the superseding RDR's numeric ID.)
+3. **Flip the old RDR's file status + README via the CLI:** run `nx rdr set-status MMM superseded` (code-enforced; do NOT hand-edit the `status:` line itself — the frontmatter edit in step 2 is the only direct edit, and it comes first). The README index cell is written as "Superseded by RDR-NNN" automatically, reading the `superseded_by` key from step 2. Then cross-link both RDRs (bidirectional):
+   - **Old RDR**: In T2, set `superseded_by: "RDR-NNN"` (the T2 record; separate from the frontmatter key already written in step 2). In markdown BODY (below the frontmatter fence), add a "Superseded by RDR-NNN" note.
    - **New RDR**: In T2, set `supersedes: "MMM"`. In markdown, add "Supersedes RDR-MMM" note
-3. **Scoped reindex** — this flow typically DOES warrant a reindex because the markdown notes added in step 2 live in the RDR body. Run the single-file form: `nx index rdr docs/rdr/rdr-NNN-<slug>.md` on the OLD RDR, and separately on the NEW RDR. Two files → two single-file invocations. Do NOT run the whole-corpus form.
-4. **Catalog link** (if catalog initialized): Create `supersedes` link in the catalog so the graph reflects the relationship:
+4. **Scoped reindex** — this flow typically DOES warrant a reindex because the markdown notes added in step 3 live in the RDR body. Run the single-file form: `nx index rdr docs/rdr/rdr-NNN-<slug>.md` on the OLD RDR, and separately on the NEW RDR. Two files → two single-file invocations. Do NOT run the whole-corpus form.
+5. **Catalog link** (if catalog initialized): Create `supersedes` link in the catalog so the graph reflects the relationship:
    ```
    # Find both RDRs by title in catalog
    mcp__plugin_conexus_nexus-catalog__link(from_tumbler="<new-rdr-title>", to_tumbler="<old-rdr-title>", link_type="supersedes", created_by="rdr-close")
    ```
    If catalog is not initialized or either RDR is not found, skip silently — the T2 record is the authority.
-5. Regenerate index
+6. Regenerate index
 
 ## Failure Handling
 

@@ -1,0 +1,24 @@
+# escape-a and escape-b share match={event="accept"} (the same group) and
+# both carry escape=true: refused at load time
+# (MultipleEscapesInGroupError) -- at most one escape row per group.
+[table]
+id = "multi-escape"
+kind = "state-machine"
+
+[dimensions.event]
+domain = ["accept"]
+
+[dimensions.state]
+domain = ["draft", "accepted"]
+
+[[row]]
+id = "escape-a"
+match = { event = "accept" }
+escape = true
+refuse = "illegal-transition"
+
+[[row]]
+id = "escape-b"
+match = { event = "accept" }
+escape = true
+refuse = "illegal-transition"

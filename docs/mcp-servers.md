@@ -57,7 +57,7 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 |---|---|
 | `collection_list` | List all T3 collections visible to the current credentials |
 | `plan_save` | Persist a plan template or ad-hoc plan (TTL-bounded) for later reuse |
-| `plan_search` | Retrieve cached plans by PostgreSQL full-text search (`ts_rank` relevance) |
+| `plan_search` | Retrieve cached plans by PostgreSQL full-text search (`ts_rank` relevance). Since 7.27.0 (nexus-vi8fp) an any-lexeme OR fallback fires when the default AND query returns nothing — reachable from this browsing tool only; `plan_match` structurally cannot reach it |
 | `plan_delete` | Delete a plan-library entry by id (cleanup counterpart to `plan_save`) |
 | `traverse` | Walk the catalog link graph from seed tumblers with typed link filters or a named purpose. Depth capped at 3. Returns `{tumblers, ids, collections}` for downstream retrieval |
 
@@ -85,6 +85,7 @@ Inside `nx_answer` / `plan_run`, consecutive operator steps collapse into a sing
 | Tool | Purpose |
 |---|---|
 | `nx_answer` | Retrieval trunk: `plan_match` → `plan_run` → record. Plan-miss falls through to an inline `claude -p` planner. See [Querying Guide § nx_answer](querying-guide.md#conexusquery-skill--nx_answer-mcp-tool-analytical-queries) |
+| `nx_answer_report` | Report that an `nx_answer` continuation handoff (RDR-200) was completed by the caller. Appends a marker-paired report row keyed on the envelope's `continuation_id`, never mutating the handoff row, so `nx answer-runs` can report an honest unreported rate |
 | `nx_tidy` | Consolidate T3 knowledge entries on a topic |
 | `nx_enrich_beads` | Enrich a bead with execution context (file paths, test commands, constraints) |
 | `nx_plan_audit` | Audit a plan for correctness and codebase alignment |

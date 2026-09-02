@@ -19,12 +19,24 @@ Only after that, if you still want the *why*, reach for an RDR — and check its
 
 ## RDR lifecycle
 
-Frontmatter `status:` field carries one of:
+Frontmatter `status:` field carries one of six values (Sam's ruling, RDR-201):
 
-- `draft` — under discussion, may be wrong, **don't quote as authoritative**.
-- `accepted` — current design intent.
-- `closed` — work shipped, RDR is historical record.
-- `superseded` — replaced by a later RDR (frontmatter names the successor).
+- `draft` — entry state; under discussion or revision, **don't quote as authoritative**.
+- `accepted` — gate passed; current design intent, implementation may start.
+- `deferred` — parked; resumes to `draft` only, never directly to `accepted`.
+- `closed` — implemented and shipped; RDR is historical record (terminal).
+- `superseded` — replaced by a named successor RDR (terminal).
+- `abandoned` — not going to happen; merges the retired `scrapped` value (terminal).
+
+This is a **checked table, not prose** (RDR-201): the authoritative source is the
+packaged `src/nexus/tables/rdr-lifecycle.toml` (loaded via
+`nexus.tables.load.load_packaged_table`, so it is reachable from any installed
+`conexus`, not just a checkout). `nx rdr set-status` enforces
+every transition against that table's state machine; `nx rdr preamble
+rdr-audit` reports any on-disk status outside the table's domain as a
+finding. A lint test (`tests/test_tables_lint.py`) asserts this list matches
+the table's `status` domain exactly, so this section cannot silently drift
+from the table again.
 
 The **only** way to retire an RDR is the `status:` flip. **Never delete an RDR file** — they're the project's permanent decision record.
 

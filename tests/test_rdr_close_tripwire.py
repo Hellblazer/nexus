@@ -35,6 +35,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from nexus.tables.load import load_packaged_table
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _RDR_DIR = _REPO_ROOT / "docs" / "rdr"
 _PM_DIR = _RDR_DIR / "post-mortem"
@@ -121,12 +123,20 @@ def test_closed_rdrs_have_post_mortems() -> None:
     )
 
 
-#: Status words recognised in the README index status cell (kept in sync with
-#: ``nexus.commands.rdr._KNOWN_STATUSES``).
-_README_STATUS_WORDS: frozenset[str] = frozenset({
-    "draft", "proposed", "accepted", "closed", "deferred", "superseded",
-    "scrapped", "abandoned", "revised", "locked", "final",
-})
+#: Status words recognised in the README index status cell. RDR-201 P1.5
+#: (nexus-j9z30.5): derived from the packaged rdr-lifecycle table's
+#: ``status`` domain (``src/nexus/tables/rdr-lifecycle.toml``) rather than a
+#: hand-maintained literal that claimed to be "kept in sync" with a
+#: ``nexus.commands.rdr._KNOWN_STATUSES`` constant that no longer exists —
+#: exactly the three-way disagreement RDR-201 Finding 1 exists to end.
+#: Legacy words this set used to carry by hand (``proposed``, ``scrapped``,
+#: ``revised``, ``locked``, ``final``) are gone: nexus-j9z30.7's README sweep
+#: left no bare cell using any of them (verified 2026-09-01), and a word
+#: outside the table's closed vocabulary has no home in a status cell going
+#: forward.
+_README_STATUS_WORDS: frozenset[str] = frozenset(
+    load_packaged_table("rdr-lifecycle.toml").dimensions["status"].domain
+)
 
 
 def _readme_status_cell(readme_text: str, filename: str) -> str | None:
@@ -180,6 +190,18 @@ def test_readme_status_matches_frontmatter() -> None:
         "`nx rdr set-status <id> <status>` or fix the README cell:\n"
         + "\n".join(offenders)
     )
+
+
+def test_readme_status_words_match_table_domain_exactly() -> None:
+    """RDR-201 P1.5: proves ``_README_STATUS_WORDS`` is the table's domain,
+    not an independently hand-typed superset. Before this bead the literal
+    also carried ``proposed``/``scrapped``/``revised``/``locked``/``final`` —
+    words outside the table's closed vocabulary — which this equality (not a
+    subset check) would have caught."""
+    table = load_packaged_table("rdr-lifecycle.toml")
+    assert _README_STATUS_WORDS == frozenset(table.dimensions["status"].domain)
+    for legacy_word in ("proposed", "scrapped", "revised", "locked", "final"):
+        assert legacy_word not in _README_STATUS_WORDS
 
 
 def test_grandfather_list_does_not_mask_existing_post_mortems() -> None:

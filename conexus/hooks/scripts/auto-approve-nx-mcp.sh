@@ -30,6 +30,7 @@ case "$TOOL_NAME" in
   mcp__plugin_conexus_nexus__plan_delete|\
   mcp__plugin_conexus_nexus__traverse|\
   mcp__plugin_conexus_nexus__nx_answer|\
+  mcp__plugin_conexus_nexus__nx_answer_report|\
   mcp__plugin_conexus_nexus__nx_tidy|\
   mcp__plugin_conexus_nexus__nx_enrich_beads|\
   mcp__plugin_conexus_nexus__nx_plan_audit|\

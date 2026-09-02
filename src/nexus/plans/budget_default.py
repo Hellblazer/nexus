@@ -148,6 +148,18 @@ class BudgetDerivation:
     n_excluded_no_steps: int
     n_excluded_pre_flip: int
     n_excluded_unknown_cost: int
+    #: RDR-200 §Telemetry (nexus-4e75w.5 fold): rows carrying either
+    #: continuation marker (handed-off OR a report event —
+    #: ``nexus.mcp.core.NX_ANSWER_CONTINUATION_MARKER_PREFIX`` /
+    #: ``NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX``). Counted and
+    #: excluded BEFORE ``n_executed_ok`` -- continuation runs are never
+    #: folded into the headless cost average this derivation computes,
+    #: exactly as the RDR states. A handed-off row's ``step_count`` is
+    #: legitimately > 0 and it is not ``_row_is_failed``, so without
+    #: this explicit marker check it would otherwise pass straight into
+    #: ``n_executed_ok`` and contaminate the population with a
+    #: prefix-only, partially-LLM-free run cost.
+    n_excluded_continuation: int
     n_runs: int
     tier_config: str
     costs: tuple[float, ...]
@@ -172,6 +184,7 @@ class BudgetDerivation:
             "n_excluded_no_steps": self.n_excluded_no_steps,
             "n_excluded_pre_flip": self.n_excluded_pre_flip,
             "n_excluded_unknown_cost": self.n_excluded_unknown_cost,
+            "n_excluded_continuation": self.n_excluded_continuation,
             "n_runs": self.n_runs,
             "min_derivation_runs": MIN_DERIVATION_RUNS,
             "sufficient": self.sufficient,
@@ -247,10 +260,14 @@ def derive_budget_default(
     degrades to an all-zero derivation (``sufficient`` False), which the
     CLI prints as such -- never as a value.
     """
-    from nexus.commands.answer_runs import _row_is_failed  # noqa: PLC0415 — deferred: layering (plans/ depending on commands/), same as cost_estimate
+    from nexus.commands.answer_runs import (  # noqa: PLC0415 — deferred: layering (plans/ depending on commands/), same as cost_estimate
+        _row_is_continuation_report,
+        _row_is_failed,
+        _row_is_handed_off,
+    )
 
     tier_config = describe_tier_config()
-    empty = BudgetDerivation(0, 0, 0, 0, 0, 0, tier_config, (), {}, {}, {})
+    empty = BudgetDerivation(0, 0, 0, 0, 0, 0, 0, tier_config, (), {}, {}, {})
     try:
         result = telemetry_store.query_nx_answer_runs(
             since=since, limit=limit, include_steps=True,
@@ -262,10 +279,23 @@ def derive_budget_default(
         return empty
 
     rows = result.get("rows") or []
-    n_executed_ok = n_no_steps = n_pre_flip = n_unknown = 0
+    n_executed_ok = n_no_steps = n_pre_flip = n_unknown = n_continuation = 0
     costs: list[float] = []
     flipped_models: dict[str, int] = {}
     for row in rows:
+        # RDR-200 §Telemetry (nexus-4e75w.5 fold): checked FIRST, before
+        # the step_count/failed gate below -- a handed-off row's
+        # step_count is legitimately > 0 and _row_is_failed(row) is
+        # False for it (its final_text carries neither the "Error:" nor
+        # the budget-exhausted prefix), so without this explicit marker
+        # check it would fall straight through into n_executed_ok and
+        # contaminate the headless cost population. A report row's
+        # step_count==0 already routes it past the next check, but the
+        # exclusion here is an explicit, named check rather than relying
+        # on that coincidence.
+        if _row_is_handed_off(row) or _row_is_continuation_report(row):
+            n_continuation += 1
+            continue
         if int(row.get("step_count") or 0) <= 0 or _row_is_failed(row):
             continue
         n_executed_ok += 1
@@ -301,6 +331,7 @@ def derive_budget_default(
         n_excluded_no_steps=n_no_steps,
         n_excluded_pre_flip=n_pre_flip,
         n_excluded_unknown_cost=n_unknown,
+        n_excluded_continuation=n_continuation,
         n_runs=len(costs),
         tier_config=tier_config,
         costs=tuple(costs),

@@ -283,7 +283,7 @@ tuning:
   scoring:
     vector_weight: 0.7            # weight for vector similarity in hybrid scoring
     frecency_weight: 0.3          # weight for git frecency in hybrid scoring
-    file_size_threshold: 30       # chunks — files larger than this are down-ranked
+    file_size_threshold: 30       # accepted, ignored as of nexus-0bmhd — see table below
   frecency:
     decay_rate: 0.01              # frecency decay rate (higher = faster decay)
   chunking:
@@ -298,7 +298,7 @@ tuning:
 |-----|---------|-------------|
 | `tuning.scoring.vector_weight` | `0.7` | Vector similarity weight in hybrid scoring formula |
 | `tuning.scoring.frecency_weight` | `0.3` | Git frecency weight in hybrid scoring formula |
-| `tuning.scoring.file_size_threshold` | `30` | Chunk count above which code files are down-ranked |
+| `tuning.scoring.file_size_threshold` | `30` | Accepted, ignored as of nexus-0bmhd — RDR-006's chunk-count scoring penalty was superseded by a render-layer file-diversity cap (`search_engine.apply_file_diversity_cap`); the key is retained for config-file back-compat but no longer read |
 | `tuning.frecency.decay_rate` | `0.01` | Exponential decay rate for frecency scoring |
 | `tuning.chunking.code_chunk_lines` | `150` | Target lines per code chunk (line-based fallback) |
 | `tuning.chunking.pdf_chunk_chars` | `1500` | Target characters per PDF chunk |

@@ -17,6 +17,7 @@ from unittest.mock import patch
 import pytest
 
 import check_client_release_precondition as gate
+import release_choreography as _choreo
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -424,3 +425,151 @@ class TestWiring:
             "the skill must state the deploy-not-tag scoping explicitly — "
             "the 7.1.0/v0.1.62 inversion came from this wording"
         )
+
+
+# ---------------------------------------------------------------------------
+# RDR-201 P2.5/P2.6 (nexus-j9z30.15/.16): the decision path
+# ---------------------------------------------------------------------------
+#
+# Exhaustive per-cell coverage lives in
+# tests/scripts/test_release_table_parity.py (every enumerated cell of both
+# scripts, via the enumerator's own drivers). These are the FOCUSED proof
+# that this script's three cell-producing functions genuinely resolve
+# docs/tables/release-choreography.toml through the SAME
+# release_choreography module the floor script uses -- by steering the real
+# function onto an in-memory table with one row's exit code changed and
+# watching the verdict follow the table. Output text alone cannot prove
+# that: a branch that still printed its own verdict would print the same
+# words.
+
+
+class TestChoreographyPath:
+    _ENTRY = (
+        "- `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` -- bead nexus-fake -- "
+        "engine tag `engine-service-v9.9.9` -- test fixture\n"
+    )
+    _ADDITIVE_ENTRY = (
+        "- `cafebabecafebabecafebabecafebabecafebabe` -- bead nexus-addv -- "
+        "engine tag `engine-service-v9.9.9` -- [additive] env-var contract\n"
+    )
+
+    @staticmethod
+    def _write_ledger(tmp_path, entry: str | None = None):
+        ledger = tmp_path / "wire-contract-pending.md"
+        ledger.write_text(f"## Unshipped\n\n{entry or '(none)'}\n\n## Shipped\n")
+        return ledger
+
+    def test_wire_contract_ledger_clean_follows_the_table(
+        self, mutate_choreography_row, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", self._write_ledger(tmp_path))
+        mutated = mutate_choreography_row("check_wire_contract_ledger::ledger_clean", 7)
+        with patch.object(_choreo, "choreography_table", return_value=mutated):
+            rc, is_vacuous = gate.check_wire_contract_ledger()
+        assert (rc, is_vacuous) == (7, True)
+
+    def test_wire_contract_ledger_blocked_follows_the_table_and_fills_entries(
+        self, mutate_choreography_row, tmp_path, monkeypatch, capsys,
+    ):
+        monkeypatch.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", self._write_ledger(tmp_path, self._ENTRY))
+        mutated = mutate_choreography_row("check_wire_contract_ledger::ledger_blocked", 7)
+        with patch.object(_choreo, "choreography_table", return_value=mutated):
+            rc, is_vacuous = gate.check_wire_contract_ledger()
+        assert (rc, is_vacuous) == (7, False)
+        err = capsys.readouterr().err
+        assert "deadbeef" in err and "nexus-fake" in err
+        assert str(tmp_path) in err
+        for unfilled in ("[n]", "[entries]", "[ledger_path]"):
+            assert unfilled not in err, unfilled
+        assert "[additive] direction-safety token" in err, "the literal token in the prose must survive substitution"
+
+    def test_wire_contract_ledger_additive_keeps_the_acked_suffix(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """A mixed ledger -- one [additive] entry, one acknowledged entry --
+        prints the acknowledged count as a suffix on the old path; the
+        catalog entry must carry it too (``[acked_suffix]``), or the table
+        path silently drops a fact the operator reads."""
+        monkeypatch.setattr(
+            gate._wire_ledger, "DEFAULT_LEDGER_PATH",
+            self._write_ledger(tmp_path, self._ADDITIVE_ENTRY + self._ENTRY),
+        )
+        rc, is_vacuous = gate.check_wire_contract_ledger(["nexus-fake"])
+        assert (rc, is_vacuous) == (0, False)
+        out = capsys.readouterr().out
+        assert "(1 further entry acknowledged via --ack-client-lag)" in out
+        assert "[acked_suffix]" not in out
+
+    def test_check_both_vacuous_follows_the_table_and_fills_ledger_path(
+        self, mutate_choreography_row, tmp_path, monkeypatch, capsys,
+    ):
+        ledger = self._write_ledger(tmp_path)
+        monkeypatch.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", ledger)
+        mutated = mutate_choreography_row("check_composite::composite_both_vacuous", 7)
+        with patch.object(_choreo, "choreography_table", return_value=mutated), \
+             patch.dict(gate.ENGINE_CLIENT_PRECONDITIONS, {}, clear=True):
+            rc = gate.check("engine-service-vTEST")
+        assert rc == 7
+        err = capsys.readouterr().err
+        assert "engine-service-vTEST" in err and str(ledger) in err
+        assert "[engine_tag]" not in err and "[ledger_path]" not in err
+
+    def test_check_latest_release_tag_error_follows_the_table_and_fills_exc(
+        self, mutate_choreography_row, monkeypatch, capsys,
+    ):
+        monkeypatch.setattr(gate, "latest_release_tag", lambda: (_ for _ in ()).throw(RuntimeError("git exploded")))
+        mutated = mutate_choreography_row("check_composite::composite_latest_release_tag_error", 7)
+        with patch.object(_choreo, "choreography_table", return_value=mutated), \
+             patch.dict(gate.ENGINE_CLIENT_PRECONDITIONS, {"engine-service-vTEST": {"deadbeef": "why"}}, clear=True):
+            rc = gate.check("engine-service-vTEST")
+        assert rc == 7
+        assert capsys.readouterr().err == "CANNOT VERIFY: git exploded\n"
+
+    def test_check_is_ancestor_error_follows_the_table_and_fills_commit(
+        self, mutate_choreography_row, monkeypatch, capsys,
+    ):
+        monkeypatch.setattr(gate, "latest_release_tag", lambda: "v0.0.1")
+
+        def boom(commit, tag):
+            raise RuntimeError("git exploded")
+
+        monkeypatch.setattr(gate, "is_ancestor", boom)
+        mutated = mutate_choreography_row("check_composite::composite_is_ancestor_error", 7)
+        with patch.object(_choreo, "choreography_table", return_value=mutated), \
+             patch.dict(gate.ENGINE_CLIENT_PRECONDITIONS, {"engine-service-vTEST": {"deadbeef": "why"}}, clear=True):
+            rc = gate.check("engine-service-vTEST")
+        assert rc == 7
+        assert capsys.readouterr().err == "CANNOT VERIFY deadbeef: git exploded\n"
+
+    def test_check_missing_commit_follows_the_table_and_lists_commits(
+        self, mutate_choreography_row, monkeypatch, capsys,
+    ):
+        monkeypatch.setattr(gate, "latest_release_tag", lambda: "v0.0.1")
+        monkeypatch.setattr(gate, "is_ancestor", lambda commit, tag: False)
+        mutated = mutate_choreography_row("check_composite::composite_missing_commit", 7)
+        with patch.object(_choreo, "choreography_table", return_value=mutated), \
+             patch.dict(gate.ENGINE_CLIENT_PRECONDITIONS, {"engine-service-vTEST": {"deadbeef": "why it matters"}}, clear=True):
+            rc = gate.check("engine-service-vTEST")
+        assert rc == 7
+        err = capsys.readouterr().err
+        assert "  deadbeef: why it matters" in err
+        assert err.rstrip().endswith(gate._REMEDY)
+        for unfilled in ("[engine_tag]", "[n]", "[release]", "[commits]"):
+            assert unfilled not in err, unfilled
+
+    def test_delegating_branches_emit_only_the_delegate_row(
+        self, mutate_choreography_row, tmp_path, monkeypatch, capsys,
+    ):
+        """``check()``'s vacuous-table + non-empty-ledger cells DELEGATE:
+        the ledger function's own row is the whole decision, and the
+        composite row (``composite_vacuous_table_ledger_blocks``) is a
+        table/catalog description that is never printed. Mutating the
+        composite row must therefore change NOTHING -- the same discipline
+        the floor script's delegating ``main_dispatch::*`` rows follow."""
+        monkeypatch.setattr(gate._wire_ledger, "DEFAULT_LEDGER_PATH", self._write_ledger(tmp_path, self._ENTRY))
+        mutated = mutate_choreography_row("check_composite::composite_vacuous_table_ledger_blocks", 7)
+        with patch.object(_choreo, "choreography_table", return_value=mutated), \
+             patch.dict(gate.ENGINE_CLIENT_PRECONDITIONS, {}, clear=True):
+            rc = gate.check("engine-service-vTEST")
+        assert rc == 1
+        assert capsys.readouterr().err.count("BLOCKED:") == 1
