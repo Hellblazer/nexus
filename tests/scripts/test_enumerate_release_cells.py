@@ -274,40 +274,119 @@ class TestPreconditionLinearChains:
 class TestFloorOrchestratorCells:
     def test_check_floor_bare_mode_cells_are_non_vacuous_and_driven(self) -> None:
         result = erc.check_floor_bare_cells()
-        assert len(result.reachable) >= 4
+        assert len(result.reachable) == 5
         for cell in result.reachable:
             observed = erc.drive_check_floor_bare(cell)
             assert erc.verify_cell(cell, observed), cell
 
     def test_check_floor_paired_explicit_cells_are_non_vacuous_and_driven(self) -> None:
         result = erc.check_floor_paired_explicit_cells()
-        assert len(result.reachable) >= 4
+        assert len(result.reachable) == 7
         for cell in result.reachable:
             observed = erc.drive_check_floor_paired_explicit(cell)
             assert erc.verify_cell(cell, observed), cell
 
     def test_check_floor_auto_paired_cells_are_non_vacuous_and_driven(self) -> None:
         result = erc.check_floor_auto_paired_cells()
-        assert len(result.reachable) >= 4
+        assert len(result.reachable) == 9
         for cell in result.reachable:
             observed = erc.drive_check_floor_auto_paired(cell)
             assert erc.verify_cell(cell, observed), cell
 
-    def test_tracker_leg_dispatch_cells_are_non_vacuous_and_driven(self) -> None:
-        result = erc.tracker_leg_dispatch_cells()
-        assert len(result.reachable) >= 3
+    def test_main_dispatch_cells_are_non_vacuous_and_driven(self) -> None:
+        """code-review CRITICAL, 2026-09-01: main()'s FULL post-argparse tail --
+        mode dispatch (bare/--paired-deploy/--paired-deploy-auto/--ledger-only),
+        check_floor/ancestry propagation, the tracker leg, and the non_bare
+        early return -- not just the bare-mode tracker leg the prior
+        tracker_leg_dispatch_cells() covered."""
+        result = erc.main_dispatch_cells()
+        assert len(result.reachable) == 15
         for cell in result.reachable:
-            observed = erc.drive_tracker_leg_dispatch(cell)
+            observed = erc.drive_main_dispatch(cell)
             assert erc.verify_cell(cell, observed), cell
+
+    def test_main_dispatch_cells_cover_all_four_modes(self) -> None:
+        result = erc.main_dispatch_cells()
+        modes = {cell.inputs["mode"] for cell in result.reachable}
+        assert modes == {"bare", "paired_explicit", "paired_auto", "ledger_only"}
+
+    def test_main_dispatch_ledger_only_covers_all_four_ledger_outcomes(self) -> None:
+        result = erc.main_dispatch_cells()
+        ledger_only_cells = [c for c in result.reachable if c.inputs["mode"] == "ledger_only"]
+        assert {c.inputs["ledger"] for c in ledger_only_cells} == {
+            "empty", "blocking", "additive", "acked_only",
+        }
 
 
 class TestPreconditionOrchestratorCells:
     def test_check_composite_cells_are_non_vacuous_and_driven(self) -> None:
         result = erc.check_composite_cells()
-        assert len(result.reachable) >= 8
+        assert len(result.reachable) == 11
         for cell in result.reachable:
             observed = erc.drive_check_composite(cell)
             assert erc.verify_cell(cell, observed), cell
+
+    def test_precond_main_dispatch_cells_are_non_vacuous_and_driven(self) -> None:
+        """critique SIGNIFICANT 1: check_client_release_precondition.main()'s
+        own argparse wiring (--engine-tag, --ack-client-lag threading) and
+        exit-code pass-through, driven through main() itself, not just
+        check()."""
+        result = erc.precond_main_dispatch_cells()
+        assert len(result.reachable) == 2
+        for cell in result.reachable:
+            observed = erc.drive_precond_main_dispatch(cell)
+            assert erc.verify_cell(cell, observed), cell
+
+
+class TestCLIValidationRefusals:
+    """critique CRITICAL: the 6 parser.error() mutual-exclusion refusals in
+    check_engine_release_floor.py's main() are CLI-shape refusals, excluded
+    from the decision-cell model on that ground -- but the exclusion must be
+    NON-VACUOUS: a scan that finds nothing would silently pass forever."""
+
+    def test_scan_finds_at_least_one_site(self) -> None:
+        found = erc.scan_parser_error_call_sites()
+        assert len(found) > 0
+
+    def test_scan_matches_the_declared_exclusion_list_exactly(self) -> None:
+        found = erc.scan_parser_error_call_sites()
+        found_set = {(s["script"], s["message"]) for s in found}
+        declared_set = {(s["script"], s["message"]) for s in erc.CLI_VALIDATION_REFUSAL_SITES}
+        assert found_set == declared_set
+
+    def test_precondition_script_has_zero_parser_error_sites(self) -> None:
+        found = erc.scan_parser_error_call_sites()
+        precond_sites = [s for s in found if s["script"] == "check_client_release_precondition.py"]
+        assert precond_sites == []
+
+    def test_fixture_declares_cli_validation_refusals_as_a_third_exclusion(self) -> None:
+        fixture = erc.build_fixture()
+        excluded = fixture["header"]["excluded_dimensions"]
+        assert len(excluded) == 3
+        row = next(r for r in excluded if r["name"] == "cli_argument_validation_refusals")
+        assert len(row["sites"]) == len(erc.CLI_VALIDATION_REFUSAL_SITES) == 6
+        assert row["fixed_representative_value"]
+
+
+class TestRdrLeafTraceability:
+    """critique SIGNIFICANT 2: each of the RDR's 7 previously-untested leaves
+    (T2 nexus_rdr/201-research-4) must resolve to at least one cell id
+    actually present in the fixture -- pinned, not merely claimed in prose."""
+
+    def test_traceability_covers_exactly_seven_leaves(self) -> None:
+        assert len(erc.RDR_UNCOVERED_LEAF_TRACEABILITY) == 7
+
+    def test_every_traced_cell_id_exists_in_the_fixture(self) -> None:
+        fixture = erc.build_fixture()
+        cell_ids = {c["cell_id"] for c in fixture["cells"]}
+        for entry in erc.RDR_UNCOVERED_LEAF_TRACEABILITY:
+            assert entry["cell_ids"], entry
+            for cid in entry["cell_ids"]:
+                assert cid in cell_ids, (entry["rdr_leaf"], cid, sorted(cell_ids))
+
+    def test_fixture_includes_the_traceability_table(self) -> None:
+        fixture = erc.build_fixture()
+        assert len(fixture["rdr_leaf_traceability"]) == 7
 
 
 # ---------------------------------------------------------------------------
@@ -364,14 +443,15 @@ class TestBuildFixture:
         # round-trips through json without error
         json.loads(json.dumps(fixture))
 
-    def test_fixture_header_names_the_two_excluded_dimensions(self) -> None:
+    def test_fixture_header_names_all_three_excluded_dimensions(self) -> None:
         fixture = erc.build_fixture()
         excluded = fixture["header"]["excluded_dimensions"]
-        assert len(excluded) == 2
+        assert len(excluded) == 3
         names = {row["name"] for row in excluded}
         assert names == {
             "gate_report_directory_contents",
             "no_record_deploy_reason",
+            "cli_argument_validation_refusals",
         }
         for row in excluded:
             assert row["fixed_representative_value"]
@@ -385,7 +465,11 @@ class TestBuildFixture:
 
     def test_every_cell_has_function_inputs_exit_code_and_message_key(self) -> None:
         fixture = erc.build_fixture()
+        seen_ids = set()
         for cell in fixture["cells"]:
+            assert cell["cell_id"]
+            assert cell["cell_id"] not in seen_ids, "cell_id must be unique"
+            seen_ids.add(cell["cell_id"])
             assert cell["function"]
             assert isinstance(cell["inputs"], dict)
             assert isinstance(cell["exit_code"], int)

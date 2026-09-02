@@ -21,9 +21,10 @@ Finding 2's incident correction says the state space was missing entirely
 inversion was an UN-ENCODED EVENT, not a guard defect: commit 79fff05a9
 changed only a remedy string and prose, no decision logic).
 
-TWO dimensions do NOT reduce and stay OUTSIDE this model, fixed to one
-representative value (recorded in the fixture header, never silently
-dropped):
+THREE things stay OUTSIDE this model entirely (recorded in the fixture
+header, never silently dropped) -- two non-reducing dimensions fixed to one
+representative value, plus one CLI-shape refusal class excluded on a
+different ground (critique CRITICAL, T2 nexus/critique-nexus-j9z30-11-2026-09-01):
 
 - the gate-report DIRECTORY CONTENTS deploy_tracker.py's discovery logic
   reads (arbitrary file listings / timestamps / JSON bodies) -- this module
@@ -36,6 +37,14 @@ dropped):
 - the free-text ``--no-record-deploy`` reason: modeled only as
   "present" vs "absent" (argparse already enforces non-blank), never as its
   literal content.
+- argparse's own ``parser.error()`` mutual-exclusion refusals (6 sites in
+  ``check_engine_release_floor.py``'s ``main()``, exit code 2; zero in the
+  precondition script's) are CLI-SHAPE refusals, not release decisions --
+  Phase 2's table replaces the gated scripts' decision logic, not argparse's
+  flag-combination validation. Declared as :data:`CLI_VALIDATION_REFUSAL_SITES`
+  and made non-vacuous by :func:`scan_parser_error_call_sites`, an AST scan
+  asserted (test suite) to find EXACTLY that set -- a new or reworded
+  validation branch reds the test rather than silently vanishing.
 
 Two modeling shapes, by function structure
 -------------------------------------------
@@ -54,8 +63,10 @@ chain's own guard steps that no combination ever selects is reported in
 ``unreachable_declared_leaves``, never dropped silently.
 
 **Orchestrator functions** (``check_floor``, ``_check_floor_auto_paired``,
-the CLI tracker-leg dispatch in ``main()``, and the precondition script's
-``check()``) are TREE-shaped, not a single linear AND-chain: which sensor is
+BOTH scripts' full ``main()`` post-argparse-validation dispatch (mode
+selection, propagation, the tracker leg, and the precondition script's own
+``--engine-tag``/``--ack-client-lag`` threading), and the precondition
+script's ``check()``) are TREE-shaped, not a single linear AND-chain: which sensor is
 even consulted next depends on which branch a PRIOR sensor took (e.g.
 ``_check_floor_auto_paired`` probes the cloud FIRST and only then decides
 whether to consult the ledger+battery at all). Forcing that shape through
@@ -86,6 +97,7 @@ Test: uv run pytest -n auto tests/scripts/test_enumerate_release_cells.py
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import dataclasses
 import datetime
@@ -959,49 +971,164 @@ def _classify_check_floor_auto_paired(rc: int, text: str, probe: str, battery: s
     raise AssertionError(f"unclassified _check_floor_auto_paired output: rc={rc} text={text!r} probe={probe}")
 
 
-def tracker_leg_dispatch_cells() -> EnumerationResult:
-    """``main()``'s F7 tracker-mode dispatch, AFTER check_floor/ancestry both
-    passed (``non_bare=False``, i.e. the bare post-tag VERIFY). ``--flag DIR``
-    and ``$NX_GATE_REPORT_DIR`` behave IDENTICALLY once ``report_dir`` is
-    resolved (main.py:1330-1332) -- both collapse to the same "resolved"
-    cell, which fans out to :func:`tracker_outcome_chain`'s 8 leaves,
-    represented here by ONE collapsed delegate cell."""
+def main_dispatch_cells() -> EnumerationResult:
+    """``main()``'s FULL post-argparse-validation tail, over its own ``mode``
+    dimension (code-review CRITICAL, 2026-09-01: the prior
+    ``tracker_leg_dispatch_cells`` drove ONLY the bare-mode tracker leg with
+    check_floor/ancestry hardcoded to pass, so ``--ledger-only``'s dispatch
+    (:func:`floor.main`, the ``args.ledger_only`` branch) and the ``non_bare``
+    early return (both paired modes, reached whenever check_floor AND
+    check_source_ancestry both pass) had zero cells -- real release
+    decisions, not CLI-shape refusals, unlike the parser.error() sites
+    :data:`CLI_VALIDATION_REFUSAL_SITES` excludes).
+
+    ``check_floor`` and ``check_source_ancestry`` are each collapsed to a
+    representative "blocks" (rc=2) / "passes" (rc=0) pair here -- their OWN
+    leaves are already fully enumerated by :func:`check_floor_bare_cells` /
+    :func:`check_floor_paired_explicit_cells` / :func:`check_floor_auto_paired_cells`
+    / :func:`source_ancestry_chain`; this function's job is main()'s
+    SEQUENCING and MODE DISPATCH around them, not their own internals.
+
+    mode=bare: check_floor blocks (1) + [passes: ancestry blocks (1) +
+    passes: 3 tracker-leg cells] = 5.
+    mode=paired_explicit / paired_auto (--paired-deploy / --paired-deploy-auto):
+    check_floor blocks (1) + [passes: ancestry blocks (1) + passes: the
+    ``non_bare`` early return, ONE cell, rc=0]) = 3 each.
+    mode=ledger_only (--ledger-only): bypasses check_floor/ancestry entirely
+    (the early explicit return in main()) -- driven over the same 4 ledger
+    outcomes :func:`client_lag_ledger_chain` already enumerates for the
+    function directly, this time through the REAL ``main(["--ledger-only"])``
+    dispatch route. 4 cells.
+
+    Total: 5 + 3 + 3 + 4 = 15.
+    """
     cells = [
-        Cell("tracker_leg_dispatch", {"report_dir": "resolved"}, 0, "tracker_leg_delegates",
+        # mode=bare
+        Cell("main_dispatch", {"mode": "bare", "check_floor": "blocks"},
+             2, "main_bare_check_floor_blocks"),
+        Cell("main_dispatch", {"mode": "bare", "check_floor": "passes", "ancestry": "blocks"},
+             2, "main_bare_ancestry_blocks"),
+        Cell("main_dispatch",
+             {"mode": "bare", "check_floor": "passes", "ancestry": "passes", "tracker": "resolved"},
+             0, "main_bare_tracker_delegates",
              note="delegate to record_deploy_from_gate_report_leg; its own 8 leaves "
                   "are enumerated separately by tracker_outcome_chain"),
-        Cell("tracker_leg_dispatch", {"report_dir": "absent", "no_record_deploy": "given"}, 0, "tracker_leg_opt_out"),
-        Cell("tracker_leg_dispatch", {"report_dir": "absent", "no_record_deploy": "absent"}, 3, "tracker_leg_refusal"),
+        Cell("main_dispatch",
+             {"mode": "bare", "check_floor": "passes", "ancestry": "passes", "tracker": "opt_out"},
+             0, "main_bare_tracker_opt_out"),
+        Cell("main_dispatch",
+             {"mode": "bare", "check_floor": "passes", "ancestry": "passes", "tracker": "refusal"},
+             3, "main_bare_tracker_refusal"),
+        # mode=paired_explicit (--paired-deploy)
+        Cell("main_dispatch", {"mode": "paired_explicit", "check_floor": "blocks"},
+             2, "main_paired_explicit_check_floor_blocks"),
+        Cell("main_dispatch",
+             {"mode": "paired_explicit", "check_floor": "passes", "ancestry": "blocks"},
+             2, "main_paired_explicit_ancestry_blocks"),
+        Cell("main_dispatch",
+             {"mode": "paired_explicit", "check_floor": "passes", "ancestry": "passes"},
+             0, "main_paired_explicit_non_bare_return",
+             note="the `if non_bare: return 0` early return (pre-deploy modes verify "
+                  "preconditions; there is no post-deploy report to record from yet)"),
+        # mode=paired_auto (--paired-deploy-auto)
+        Cell("main_dispatch", {"mode": "paired_auto", "check_floor": "blocks"},
+             2, "main_paired_auto_check_floor_blocks"),
+        Cell("main_dispatch",
+             {"mode": "paired_auto", "check_floor": "passes", "ancestry": "blocks"},
+             2, "main_paired_auto_ancestry_blocks"),
+        Cell("main_dispatch",
+             {"mode": "paired_auto", "check_floor": "passes", "ancestry": "passes"},
+             0, "main_paired_auto_non_bare_return"),
+        # mode=ledger_only (--ledger-only)
+        Cell("main_dispatch", {"mode": "ledger_only", "ledger": "empty"},
+             0, "main_ledger_only_clean"),
+        Cell("main_dispatch", {"mode": "ledger_only", "ledger": "blocking"},
+             1, "main_ledger_only_blocked"),
+        Cell("main_dispatch", {"mode": "ledger_only", "ledger": "additive"},
+             0, "main_ledger_only_additive"),
+        Cell("main_dispatch", {"mode": "ledger_only", "ledger": "acked_only"},
+             0, "main_ledger_only_acked"),
     ]
-    return make_result("tracker_leg_dispatch", cells)
+    return make_result("main_dispatch", cells)
 
 
-def drive_tracker_leg_dispatch(cell: Cell) -> tuple[int, str]:
-    report_dir = cell.inputs["report_dir"]
-    no_record = cell.inputs.get("no_record_deploy")
-    with patch.object(floor, "check_floor", return_value=0), \
-         patch.object(floor, "check_source_ancestry", return_value=0):
-        argv = ["--url", "https://example.test"]
-        if report_dir == "resolved":
+def drive_main_dispatch(cell: Cell) -> tuple[int, str]:
+    inputs = cell.inputs
+    mode = inputs["mode"]
+
+    if mode == "ledger_only":
+        ledger, ack = _ledger_fixture(inputs["ledger"])
+        argv = ["--ledger-only"]
+        for bead in ack or []:
+            argv += ["--ack-client-lag", bead]
+        with patch.object(wire_ledger, "parse_ledger", return_value=ledger):
+            rc, out, err = _capture(floor.main, argv)
+        return rc, _classify_main_dispatch(rc, out + err, inputs)
+
+    check_floor_rc = 2 if inputs["check_floor"] == "blocks" else 0
+    ancestry_rc = 2 if inputs.get("ancestry") == "blocks" else 0
+
+    argv = ["--url", "https://example.test"]
+    if mode == "paired_explicit":
+        argv += ["--paired-deploy", _PINNED_TAG]
+    elif mode == "paired_auto":
+        argv += ["--paired-deploy-auto"]
+
+    patches = [
+        patch.object(floor, "check_floor", return_value=check_floor_rc),
+        patch.object(floor, "check_source_ancestry", return_value=ancestry_rc),
+    ]
+    tracker = inputs.get("tracker")
+    if mode == "bare" and inputs["check_floor"] == "passes" and inputs.get("ancestry") == "passes":
+        if tracker == "resolved":
             argv += ["--record-deploy-from-gate-report", "/fake/dir"]
-            with patch.object(floor, "record_deploy_from_gate_report_leg", return_value=0):
-                rc, out, err = _capture(floor.main, argv)
-        elif no_record == "given":
+            patches.append(patch.object(floor, "record_deploy_from_gate_report_leg", return_value=0))
+        elif tracker == "opt_out":
             argv += ["--no-record-deploy", "a representative reason"]
-            rc, out, err = _capture(floor.main, argv)
-        else:
-            rc, out, err = _capture(floor.main, argv)
-    return rc, _classify_tracker_leg_dispatch(rc, out + err, report_dir, no_record)
+        # "refusal": bare argv as-is (no tracker flag, no env var)
+
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        rc, out, err = _capture(floor.main, argv)
+    return rc, _classify_main_dispatch(rc, out + err, inputs)
 
 
-def _classify_tracker_leg_dispatch(rc: int, text: str, report_dir: str, no_record: str | None) -> str:
-    if report_dir == "resolved":
-        return "tracker_leg_delegates"
-    if no_record == "given":
-        assert "NOTE (--no-record-deploy)" in text
-        return "tracker_leg_opt_out"
-    assert "TRACKER NOT RECORDED" in text
-    return "tracker_leg_refusal"
+def _classify_main_dispatch(rc: int, text: str, inputs: dict[str, str]) -> str:
+    mode = inputs["mode"]
+    if mode == "ledger_only":
+        generic_keys = {
+            "empty": "ledger_clean",
+            "blocking": "ledger_blocked",
+            "additive": "ledger_additive_authorized",
+            "acked_only": "ledger_acked",
+        }
+        main_keys = {
+            "empty": "main_ledger_only_clean",
+            "blocking": "main_ledger_only_blocked",
+            "additive": "main_ledger_only_additive",
+            "acked_only": "main_ledger_only_acked",
+        }
+        # sanity: --ledger-only's dispatch prints nothing beyond the real
+        # check_client_lag_ledger text -- confirm it made it through unchanged.
+        assert _classify_client_lag_ledger(rc, text) == generic_keys[inputs["ledger"]], (rc, text, inputs)
+        return main_keys[inputs["ledger"]]
+    if inputs["check_floor"] == "blocks":
+        return f"main_{mode}_check_floor_blocks"
+    if inputs.get("ancestry") == "blocks":
+        return f"main_{mode}_ancestry_blocks"
+    if mode == "bare":
+        key = {
+            "resolved": "main_bare_tracker_delegates",
+            "opt_out": "main_bare_tracker_opt_out",
+            "refusal": "main_bare_tracker_refusal",
+        }[inputs["tracker"]]
+        if key == "main_bare_tracker_opt_out":
+            assert "NOTE (--no-record-deploy)" in text
+        elif key == "main_bare_tracker_refusal":
+            assert "TRACKER NOT RECORDED" in text
+        return key
+    return f"main_{mode}_non_bare_return"
 
 
 # ---------------------------------------------------------------------------
@@ -1089,6 +1216,181 @@ def _classify_check_composite(rc: int, text: str, hand_table: str, ledger_label:
     if ledger_label == "empty":
         return "composite_table_satisfied_ledger_empty"
     return "composite_table_satisfied_ledger_acked"
+
+
+# ---------------------------------------------------------------------------
+# PRECONDITION script: main()'s own argparse wiring (critique SIGNIFICANT 1)
+# ---------------------------------------------------------------------------
+
+def precond_main_dispatch_cells() -> EnumerationResult:
+    """``check_client_release_precondition.main()``'s own decision surface:
+    which ``(engine_tag, ack_client_lag)`` tuple it threads into
+    :func:`check` (already fully enumerated by :func:`check_composite_cells`
+    under the name ``check_composite`` -- these cells verify the WIRING and
+    the exit-code PASS-THROUGH, not re-derive ``check()``'s own leaves).
+    ``main()`` has zero ``.error()`` call sites (confirmed by
+    :func:`scan_parser_error_call_sites`) -- no CLI-shape refusal exists
+    here to exclude."""
+    cells = [
+        Cell("precond_main_dispatch", {"engine_tag": "explicit", "ack": "given"}, 0,
+             "precond_main_explicit_tag_with_ack"),
+        Cell("precond_main_dispatch", {"engine_tag": "default", "ack": "absent"}, 1,
+             "precond_main_default_tag_no_ack"),
+    ]
+    return make_result("precond_main_dispatch", cells)
+
+
+def drive_precond_main_dispatch(cell: Cell) -> tuple[int, str]:
+    inputs = cell.inputs
+    argv: list[str] = []
+    if inputs["engine_tag"] == "explicit":
+        argv += ["--engine-tag", "engine-service-vTEST"]
+        expected_tag = "engine-service-vTEST"
+    else:
+        expected_tag = precond._pinned_engine_tag()
+    expected_ack: list[str] | None = None
+    if inputs["ack"] == "given":
+        argv += ["--ack-client-lag", "nexus-fakeack"]
+        expected_ack = ["nexus-fakeack"]
+
+    captured: dict[str, Any] = {}
+
+    def fake_check(engine_tag: str, ack_client_lag: list[str] | None = None) -> int:
+        captured["engine_tag"] = engine_tag
+        captured["ack_client_lag"] = ack_client_lag
+        return cell.exit_code  # proves main() passes check()'s rc through unchanged
+
+    with patch.object(precond, "check", side_effect=fake_check):
+        rc, _out, _err = _capture(precond.main, argv)
+    assert captured["engine_tag"] == expected_tag, (cell, captured)
+    assert captured["ack_client_lag"] == expected_ack, (cell, captured)
+    return rc, cell.message_key
+
+
+# ---------------------------------------------------------------------------
+# CLI argument-validation refusals (critique CRITICAL): parser.error() sites
+# ---------------------------------------------------------------------------
+#
+# Both scripts' main() validate FLAG COMBINATIONS before ever reaching a
+# release decision (argparse's own ``parser.error()``, which prints usage +
+# message to stderr and exits 2). These are CLI-SHAPE refusals, not release
+# decisions -- Phase 2's table replaces the release-gate decision logic
+# (check_floor / check_paired_preconditions / check() / ...), not argparse's
+# flag-combination validation. So, per the critique's ruling, they are
+# declared as a THIRD explicit exclusion (alongside gate-report directory
+# contents and the --no-record-deploy free-text reason) rather than modeled
+# as decision cells -- and the exclusion is made NON-VACUOUS by
+# :func:`scan_parser_error_call_sites`, an AST-based scan asserted (in the
+# test suite) to find EXACTLY this declared set: a new validation branch
+# (or a changed one) reds that test instead of silently vanishing from the
+# model.
+
+CLI_VALIDATION_REFUSAL_SITES: tuple[dict[str, str], ...] = (
+    {
+        "script": "check_engine_release_floor.py",
+        "message": "--paired-deploy and --paired-deploy-auto are mutually exclusive",
+    },
+    {
+        "script": "check_engine_release_floor.py",
+        "message": "--record-deploy-from-gate-report is the post-tag VERIFY's flag; it is "
+                    "mutually exclusive with --paired-deploy, --paired-deploy-auto, and --ledger-only",
+    },
+    {
+        "script": "check_engine_release_floor.py",
+        "message": "--no-record-deploy needs a REASON (why this box is not recording the tracker)",
+    },
+    {
+        "script": "check_engine_release_floor.py",
+        "message": "--no-record-deploy and --record-deploy-from-gate-report are mutually exclusive",
+    },
+    {
+        "script": "check_engine_release_floor.py",
+        "message": "--no-record-deploy applies to the bare post-tag VERIFY only; the pre-deploy "
+                    "modes never record",
+    },
+    {
+        "script": "check_engine_release_floor.py",
+        "message": "--ledger-only is mutually exclusive with --url, --paired-deploy, and --paired-deploy-auto",
+    },
+)
+
+#: The two gated scripts, by their module's own ``__file__`` -- resolved via
+#: the already-imported module objects rather than a hardcoded path, so this
+#: scan can never silently point at a stale copy.
+_SCANNED_SCRIPTS: dict[str, pathlib.Path] = {
+    "check_engine_release_floor.py": pathlib.Path(floor.__file__),
+    "check_client_release_precondition.py": pathlib.Path(precond.__file__),
+}
+
+
+def scan_parser_error_call_sites() -> list[dict[str, Any]]:
+    """AST-scan both gated scripts for every ``<name>.error(...)`` call site
+    (argparse's ``ArgumentParser.error`` convention -- neither script calls
+    any OTHER ``.error(`` method, confirmed by grep at authoring time) and
+    return each site's script, line, and literal message text.
+
+    Deliberately keyed by MESSAGE, not line number, for the comparison this
+    feeds (:data:`CLI_VALIDATION_REFUSAL_SITES`): line numbers are known to
+    drift with unrelated edits elsewhere in a 1300+ line file (the bead's
+    own reminder: "re-locate by symbol, not by line"), while the message
+    text is what a human actually reads and is what changes when a
+    validation branch is genuinely added, removed, or reworded.
+    """
+    sites: list[dict[str, Any]] = []
+    for script_name, path in _SCANNED_SCRIPTS.items():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "error" and isinstance(node.func.value, ast.Name)):
+                continue
+            message = ""
+            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                message = node.args[0].value
+            sites.append({"script": script_name, "line": node.lineno, "message": message})
+    return sites
+
+
+# ---------------------------------------------------------------------------
+# RDR-201 research traceability (critique SIGNIFICANT 2): the 7 leaves T2
+# nexus_rdr/201-research-4 flagged as having "no test at any layer" prior
+# to this bead, each pinned to the cell id(s) that now cover it.
+# ---------------------------------------------------------------------------
+
+def cell_id(function: str, message_key: str) -> str:
+    return f"{function}::{message_key}"
+
+
+RDR_UNCOVERED_LEAF_TRACEABILITY: tuple[dict[str, Any], ...] = (
+    {
+        "rdr_leaf": "FLOOR ancestry git OSError (research doc ~line 523)",
+        "cell_ids": [cell_id("check_source_ancestry", "ancestry_diff_exception")],
+    },
+    {
+        "rdr_leaf": "FLOOR ancestry git-nonzero (research doc ~line 530)",
+        "cell_ids": [cell_id("check_source_ancestry", "ancestry_diff_nonzero")],
+    },
+    {
+        "rdr_leaf": "FLOOR bare-mode unparseable release_version via parsed is None "
+                    "(research doc ~line 1099)",
+        "cell_ids": [cell_id("check_floor_bare", "bare_probe_stale_via_success")],
+    },
+    {
+        "rdr_leaf": "FLOOR tracker-leg ManagedServiceError re-read (research doc ~line 1172)",
+        "cell_ids": [cell_id("record_deploy_from_gate_report_leg", "tracker_managed_service_error")],
+    },
+    {
+        "rdr_leaf": "FLOOR paired battery newest-UNAVAILABLE (research doc ~line 701)",
+        "cell_ids": [cell_id("check_paired_preconditions", "battery_newest_unavailable")],
+    },
+    {
+        "rdr_leaf": "FLOOR paired battery newest-None (research doc ~line 708)",
+        "cell_ids": [cell_id("check_paired_preconditions", "battery_newest_none")],
+    },
+    {
+        "rdr_leaf": "PRECOND latest_release_tag RuntimeError (research doc ~line 236)",
+        "cell_ids": [cell_id("check_composite", "composite_latest_release_tag_error")],
+    },
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1191,8 +1493,9 @@ def _all_orchestrator_results() -> list[EnumerationResult]:
         check_floor_bare_cells(),
         check_floor_paired_explicit_cells(),
         check_floor_auto_paired_cells(),
-        tracker_leg_dispatch_cells(),
+        main_dispatch_cells(),
         check_composite_cells(),
+        precond_main_dispatch_cells(),
     ]
 
 
@@ -1211,6 +1514,7 @@ def build_fixture() -> dict[str, Any]:
     for result in results:
         for cell in result.reachable:
             cells.append({
+                "cell_id": cell_id(cell.function, cell.message_key),
                 "function": cell.function,
                 "inputs": cell.inputs,
                 "exit_code": cell.exit_code,
@@ -1253,7 +1557,25 @@ def build_fixture() -> dict[str, Any]:
                           "and no downstream branch reads its content, only its presence.",
                 "fixed_representative_value": "\"a representative reason\"",
             },
+            {
+                "name": "cli_argument_validation_refusals",
+                "reason": "critique CRITICAL ruling (T2 nexus/critique-nexus-j9z30-11-2026-09-01): "
+                          "argparse mutual-exclusion / validation refusals (parser.error(), exit "
+                          "code 2) are CLI-shape refusals, not release decisions -- Phase 2's table "
+                          "replaces release-gate DECISION logic, not argparse's own flag-combination "
+                          "validation. Made non-vacuous by scan_parser_error_call_sites(), asserted "
+                          "(test suite) to find EXACTLY this site list: a new/changed validation "
+                          "branch reds that test instead of silently vanishing from the model.",
+                "fixed_representative_value": "not applicable -- excluded from the decision-cell "
+                                               "model entirely, not fixed to one representative input "
+                                               "the way the other two exclusions above are",
+                "sites": list(CLI_VALIDATION_REFUSAL_SITES),
+            },
         ],
+        "event_dimension_note": "P2.3 will join this static (mode -> event) matrix onto the "
+                                 "per-cell verdicts as a genuine cross-referenced column; this "
+                                 "measurement-phase side-table is not yet joined to individual "
+                                 "cells (critique SIGNIFICANT 3, deferred).",
         "functions_enumerated_exhaustively": [c.function for c in _all_chains()],
         "functions_hand_enumerated_and_driven": [r.function for r in _all_orchestrator_results()],
         "reachable_cell_count": len(cells),
@@ -1265,6 +1587,7 @@ def build_fixture() -> dict[str, Any]:
         "cells": cells,
         "unreachable_declared_leaves": unreachable_declared,
         "event_mode_matrix": event_mode_matrix(),
+        "rdr_leaf_traceability": list(RDR_UNCOVERED_LEAF_TRACEABILITY),
     }
 
 

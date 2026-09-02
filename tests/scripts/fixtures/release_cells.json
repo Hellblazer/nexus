@@ -153,8 +153,40 @@
         "name": "no_record_deploy_reason",
         "reason": "free-text CLI argument; argparse already enforces non-blank, and no downstream branch reads its content, only its presence.",
         "fixed_representative_value": "\"a representative reason\""
+      },
+      {
+        "name": "cli_argument_validation_refusals",
+        "reason": "critique CRITICAL ruling (T2 nexus/critique-nexus-j9z30-11-2026-09-01): argparse mutual-exclusion / validation refusals (parser.error(), exit code 2) are CLI-shape refusals, not release decisions -- Phase 2's table replaces release-gate DECISION logic, not argparse's own flag-combination validation. Made non-vacuous by scan_parser_error_call_sites(), asserted (test suite) to find EXACTLY this site list: a new/changed validation branch reds that test instead of silently vanishing from the model.",
+        "fixed_representative_value": "not applicable -- excluded from the decision-cell model entirely, not fixed to one representative input the way the other two exclusions above are",
+        "sites": [
+          {
+            "script": "check_engine_release_floor.py",
+            "message": "--paired-deploy and --paired-deploy-auto are mutually exclusive"
+          },
+          {
+            "script": "check_engine_release_floor.py",
+            "message": "--record-deploy-from-gate-report is the post-tag VERIFY's flag; it is mutually exclusive with --paired-deploy, --paired-deploy-auto, and --ledger-only"
+          },
+          {
+            "script": "check_engine_release_floor.py",
+            "message": "--no-record-deploy needs a REASON (why this box is not recording the tracker)"
+          },
+          {
+            "script": "check_engine_release_floor.py",
+            "message": "--no-record-deploy and --record-deploy-from-gate-report are mutually exclusive"
+          },
+          {
+            "script": "check_engine_release_floor.py",
+            "message": "--no-record-deploy applies to the bare post-tag VERIFY only; the pre-deploy modes never record"
+          },
+          {
+            "script": "check_engine_release_floor.py",
+            "message": "--ledger-only is mutually exclusive with --url, --paired-deploy, and --paired-deploy-auto"
+          }
+        ]
       }
     ],
+    "event_dimension_note": "P2.3 will join this static (mode -> event) matrix onto the per-cell verdicts as a genuine cross-referenced column; this measurement-phase side-table is not yet joined to individual cells (critique SIGNIFICANT 3, deferred).",
     "functions_enumerated_exhaustively": [
       "check_pin_currency",
       "check_source_ancestry",
@@ -167,15 +199,17 @@
       "check_floor_bare",
       "check_floor_paired",
       "check_floor_auto_paired",
-      "tracker_leg_dispatch",
-      "check_composite"
+      "main_dispatch",
+      "check_composite",
+      "precond_main_dispatch"
     ],
-    "reachable_cell_count": 75,
+    "reachable_cell_count": 89,
     "unreachable_declared_leaf_count": 0,
-    "total_combinations_considered": 932
+    "total_combinations_considered": 946
   },
   "cells": [
     {
+      "cell_id": "check_pin_currency::pin_currency_current_at_floor",
       "function": "check_pin_currency",
       "inputs": {
         "newest": "at_floor"
@@ -185,6 +219,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_pin_currency::pin_currency_current_below_floor",
       "function": "check_pin_currency",
       "inputs": {
         "newest": "below_floor"
@@ -194,6 +229,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_pin_currency::pin_currency_stale_pin",
       "function": "check_pin_currency",
       "inputs": {
         "newest": "above_floor"
@@ -203,6 +239,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_pin_currency::pin_currency_tags_unavailable",
       "function": "check_pin_currency",
       "inputs": {
         "newest": "unavailable"
@@ -212,6 +249,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_pin_currency::pin_currency_zero_tags",
       "function": "check_pin_currency",
       "inputs": {
         "newest": "none"
@@ -221,6 +259,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_source_ancestry::ancestry_clean",
       "function": "check_source_ancestry",
       "inputs": {
         "tag_exists": "true",
@@ -231,6 +270,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_source_ancestry::ancestry_drift",
       "function": "check_source_ancestry",
       "inputs": {
         "tag_exists": "true",
@@ -241,6 +281,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_source_ancestry::ancestry_diff_exception",
       "function": "check_source_ancestry",
       "inputs": {
         "tag_exists": "true",
@@ -251,6 +292,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_source_ancestry::ancestry_diff_nonzero",
       "function": "check_source_ancestry",
       "inputs": {
         "tag_exists": "true",
@@ -261,6 +303,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_source_ancestry::ancestry_tag_missing",
       "function": "check_source_ancestry",
       "inputs": {
         "tag_exists": "false",
@@ -271,6 +314,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_source_ancestry::ancestry_tag_unavailable",
       "function": "check_source_ancestry",
       "inputs": {
         "tag_exists": "unavailable",
@@ -281,6 +325,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_client_lag_ledger::ledger_acked",
       "function": "check_client_lag_ledger",
       "inputs": {
         "ledger": "acked_only"
@@ -290,6 +335,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_client_lag_ledger::ledger_additive_authorized",
       "function": "check_client_lag_ledger",
       "inputs": {
         "ledger": "additive"
@@ -299,6 +345,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_client_lag_ledger::ledger_clean",
       "function": "check_client_lag_ledger",
       "inputs": {
         "ledger": "empty"
@@ -308,6 +355,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_client_lag_ledger::ledger_blocked",
       "function": "check_client_lag_ledger",
       "inputs": {
         "ledger": "blocking"
@@ -317,6 +365,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_paired_preconditions::battery_armed",
       "function": "check_paired_preconditions",
       "inputs": {
         "tag_shape": "valid_prefix",
@@ -332,6 +381,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_paired_preconditions::battery_bad_prefix",
       "function": "check_paired_preconditions",
       "inputs": {
         "tag_shape": "invalid_prefix",
@@ -347,6 +397,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_paired_preconditions::battery_newest_mismatch",
       "function": "check_paired_preconditions",
       "inputs": {
         "tag_shape": "valid_prefix",
@@ -362,6 +413,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_paired_preconditions::battery_newest_none",
       "function": "check_paired_preconditions",
       "inputs": {
         "tag_shape": "valid_prefix",
@@ -377,6 +429,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_paired_preconditions::battery_not_published",
       "function": "check_paired_preconditions",
       "inputs": {
         "tag_shape": "valid_prefix",
@@ -392,6 +445,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_paired_preconditions::battery_tag_not_exists",
       "function": "check_paired_preconditions",
       "inputs": {
         "tag_shape": "valid_prefix",
@@ -407,6 +461,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_paired_preconditions::battery_too_old",
       "function": "check_paired_preconditions",
       "inputs": {
         "tag_shape": "valid_prefix",
@@ -422,6 +477,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_paired_preconditions::battery_unparseable_tag",
       "function": "check_paired_preconditions",
       "inputs": {
         "tag_shape": "valid_prefix",
@@ -437,6 +493,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_paired_preconditions::battery_version_mismatch",
       "function": "check_paired_preconditions",
       "inputs": {
         "tag_shape": "valid_prefix",
@@ -452,6 +509,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_paired_preconditions::battery_age_unavailable",
       "function": "check_paired_preconditions",
       "inputs": {
         "tag_shape": "valid_prefix",
@@ -467,6 +525,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_paired_preconditions::battery_exists_unavailable",
       "function": "check_paired_preconditions",
       "inputs": {
         "tag_shape": "valid_prefix",
@@ -482,6 +541,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_paired_preconditions::battery_newest_unavailable",
       "function": "check_paired_preconditions",
       "inputs": {
         "tag_shape": "valid_prefix",
@@ -497,6 +557,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_paired_preconditions::battery_published_unavailable",
       "function": "check_paired_preconditions",
       "inputs": {
         "tag_shape": "valid_prefix",
@@ -512,6 +573,7 @@
       "note": ""
     },
     {
+      "cell_id": "record_deploy_from_gate_report_leg::tracker_recorded",
       "function": "record_deploy_from_gate_report_leg",
       "inputs": {
         "outcome": "ok"
@@ -521,6 +583,7 @@
       "note": ""
     },
     {
+      "cell_id": "record_deploy_from_gate_report_leg::tracker_directory_error",
       "function": "record_deploy_from_gate_report_leg",
       "inputs": {
         "outcome": "directory_error"
@@ -530,6 +593,7 @@
       "note": ""
     },
     {
+      "cell_id": "record_deploy_from_gate_report_leg::tracker_gate_red",
       "function": "record_deploy_from_gate_report_leg",
       "inputs": {
         "outcome": "gate_red"
@@ -539,6 +603,7 @@
       "note": ""
     },
     {
+      "cell_id": "record_deploy_from_gate_report_leg::tracker_live_version_mismatch",
       "function": "record_deploy_from_gate_report_leg",
       "inputs": {
         "outcome": "live_version_mismatch"
@@ -548,6 +613,7 @@
       "note": ""
     },
     {
+      "cell_id": "record_deploy_from_gate_report_leg::tracker_managed_service_error",
       "function": "record_deploy_from_gate_report_leg",
       "inputs": {
         "outcome": "managed_service_error"
@@ -557,6 +623,7 @@
       "note": ""
     },
     {
+      "cell_id": "record_deploy_from_gate_report_leg::tracker_no_report_for_version",
       "function": "record_deploy_from_gate_report_leg",
       "inputs": {
         "outcome": "no_report_for_version"
@@ -566,6 +633,7 @@
       "note": ""
     },
     {
+      "cell_id": "record_deploy_from_gate_report_leg::tracker_schema_error",
       "function": "record_deploy_from_gate_report_leg",
       "inputs": {
         "outcome": "schema_error"
@@ -575,6 +643,7 @@
       "note": ""
     },
     {
+      "cell_id": "record_deploy_from_gate_report_leg::tracker_version_mismatch",
       "function": "record_deploy_from_gate_report_leg",
       "inputs": {
         "outcome": "version_mismatch"
@@ -584,6 +653,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_wire_contract_ledger::ledger_acked",
       "function": "check_wire_contract_ledger",
       "inputs": {
         "ledger": "acked_only"
@@ -593,6 +663,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_wire_contract_ledger::ledger_additive_authorized",
       "function": "check_wire_contract_ledger",
       "inputs": {
         "ledger": "additive"
@@ -602,6 +673,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_wire_contract_ledger::ledger_clean",
       "function": "check_wire_contract_ledger",
       "inputs": {
         "ledger": "empty"
@@ -611,6 +683,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_wire_contract_ledger::ledger_blocked",
       "function": "check_wire_contract_ledger",
       "inputs": {
         "ledger": "blocking"
@@ -620,6 +693,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_floor_bare::bare_pin_blocks",
       "function": "check_floor_bare",
       "inputs": {
         "pin_currency": "blocks",
@@ -630,6 +704,7 @@
       "note": "delegate to check_pin_currency; its own 5 leaves are enumerated separately. exit_code=2 is the representative chosen (newest tags unavailable) -- check_pin_currency's OTHER blocking leaf (stale pin) is exit_code=1, already covered by pin_currency_chain()'s own enumeration."
     },
     {
+      "cell_id": "check_floor_bare::bare_probe_unreachable",
       "function": "check_floor_bare",
       "inputs": {
         "pin_currency": "passes",
@@ -640,6 +715,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_floor_bare::bare_probe_stale_via_exception",
       "function": "check_floor_bare",
       "inputs": {
         "pin_currency": "passes",
@@ -650,6 +726,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_floor_bare::bare_probe_stale_via_success",
       "function": "check_floor_bare",
       "inputs": {
         "pin_currency": "passes",
@@ -660,6 +737,7 @@
       "note": "defensive-only per check_floor's own docstring: probe_managed_service fails closed on a below-floor release_version before ever returning a successful caps, so this branch is unreachable via the REAL sensor"
     },
     {
+      "cell_id": "check_floor_bare::bare_probe_current",
       "function": "check_floor_bare",
       "inputs": {
         "pin_currency": "passes",
@@ -670,6 +748,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_floor_paired::paired_battery_blocks",
       "function": "check_floor_paired",
       "inputs": {
         "battery": "blocks",
@@ -680,6 +759,7 @@
       "note": "delegate to _run_paired_precondition_battery (ledger + check_paired_preconditions); their own leaves are enumerated separately"
     },
     {
+      "cell_id": "check_floor_paired::paired_probe_unreachable",
       "function": "check_floor_paired",
       "inputs": {
         "battery": "passes",
@@ -690,6 +770,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_floor_paired::paired_probe_unverifiable_exception",
       "function": "check_floor_paired",
       "inputs": {
         "battery": "passes",
@@ -700,6 +781,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_floor_paired::paired_probe_ack_via_exception",
       "function": "check_floor_paired",
       "inputs": {
         "battery": "passes",
@@ -710,6 +792,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_floor_paired::paired_probe_unverifiable_success",
       "function": "check_floor_paired",
       "inputs": {
         "battery": "passes",
@@ -720,6 +803,7 @@
       "note": "defensive-only: probe_managed_service fails closed before returning an unparseable release_version on the real path"
     },
     {
+      "cell_id": "check_floor_paired::paired_probe_ack_via_success",
       "function": "check_floor_paired",
       "inputs": {
         "battery": "passes",
@@ -730,6 +814,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_floor_paired::paired_probe_current",
       "function": "check_floor_paired",
       "inputs": {
         "battery": "passes",
@@ -740,6 +825,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_floor_auto_paired::auto_probe_unreachable",
       "function": "check_floor_auto_paired",
       "inputs": {
         "probe": "unreachable"
@@ -749,6 +835,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_floor_auto_paired::auto_probe_unverifiable_exception",
       "function": "check_floor_auto_paired",
       "inputs": {
         "probe": "ms_error_not_below_floor"
@@ -758,6 +845,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_floor_auto_paired::auto_below_via_exception_battery_blocks",
       "function": "check_floor_auto_paired",
       "inputs": {
         "probe": "ms_error_below_floor",
@@ -768,6 +856,7 @@
       "note": "delegate to _paired_below_floor_path -> _run_paired_precondition_battery"
     },
     {
+      "cell_id": "check_floor_auto_paired::auto_below_via_exception_ack",
       "function": "check_floor_auto_paired",
       "inputs": {
         "probe": "ms_error_below_floor",
@@ -778,6 +867,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_floor_auto_paired::auto_current_pin_blocks",
       "function": "check_floor_auto_paired",
       "inputs": {
         "probe": "success_at_or_above_floor",
@@ -788,6 +878,7 @@
       "note": "delegate to check_pin_currency; exit_code=2 representative, see check_floor_bare_cells' matching note"
     },
     {
+      "cell_id": "check_floor_auto_paired::auto_current",
       "function": "check_floor_auto_paired",
       "inputs": {
         "probe": "success_at_or_above_floor",
@@ -798,6 +889,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_floor_auto_paired::auto_probe_unverifiable_success",
       "function": "check_floor_auto_paired",
       "inputs": {
         "probe": "success_unparseable"
@@ -807,6 +899,7 @@
       "note": "defensive-only, see check_floor_paired_explicit_cells' matching note"
     },
     {
+      "cell_id": "check_floor_auto_paired::auto_below_via_success_battery_blocks",
       "function": "check_floor_auto_paired",
       "inputs": {
         "probe": "success_below_floor",
@@ -817,6 +910,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_floor_auto_paired::auto_below_via_success_ack",
       "function": "check_floor_auto_paired",
       "inputs": {
         "probe": "success_below_floor",
@@ -827,35 +921,183 @@
       "note": ""
     },
     {
-      "function": "tracker_leg_dispatch",
+      "cell_id": "main_dispatch::main_bare_check_floor_blocks",
+      "function": "main_dispatch",
       "inputs": {
-        "report_dir": "resolved"
+        "mode": "bare",
+        "check_floor": "blocks"
+      },
+      "exit_code": 2,
+      "message_key": "main_bare_check_floor_blocks",
+      "note": ""
+    },
+    {
+      "cell_id": "main_dispatch::main_bare_ancestry_blocks",
+      "function": "main_dispatch",
+      "inputs": {
+        "mode": "bare",
+        "check_floor": "passes",
+        "ancestry": "blocks"
+      },
+      "exit_code": 2,
+      "message_key": "main_bare_ancestry_blocks",
+      "note": ""
+    },
+    {
+      "cell_id": "main_dispatch::main_bare_tracker_delegates",
+      "function": "main_dispatch",
+      "inputs": {
+        "mode": "bare",
+        "check_floor": "passes",
+        "ancestry": "passes",
+        "tracker": "resolved"
       },
       "exit_code": 0,
-      "message_key": "tracker_leg_delegates",
+      "message_key": "main_bare_tracker_delegates",
       "note": "delegate to record_deploy_from_gate_report_leg; its own 8 leaves are enumerated separately by tracker_outcome_chain"
     },
     {
-      "function": "tracker_leg_dispatch",
+      "cell_id": "main_dispatch::main_bare_tracker_opt_out",
+      "function": "main_dispatch",
       "inputs": {
-        "report_dir": "absent",
-        "no_record_deploy": "given"
+        "mode": "bare",
+        "check_floor": "passes",
+        "ancestry": "passes",
+        "tracker": "opt_out"
       },
       "exit_code": 0,
-      "message_key": "tracker_leg_opt_out",
+      "message_key": "main_bare_tracker_opt_out",
       "note": ""
     },
     {
-      "function": "tracker_leg_dispatch",
+      "cell_id": "main_dispatch::main_bare_tracker_refusal",
+      "function": "main_dispatch",
       "inputs": {
-        "report_dir": "absent",
-        "no_record_deploy": "absent"
+        "mode": "bare",
+        "check_floor": "passes",
+        "ancestry": "passes",
+        "tracker": "refusal"
       },
       "exit_code": 3,
-      "message_key": "tracker_leg_refusal",
+      "message_key": "main_bare_tracker_refusal",
       "note": ""
     },
     {
+      "cell_id": "main_dispatch::main_paired_explicit_check_floor_blocks",
+      "function": "main_dispatch",
+      "inputs": {
+        "mode": "paired_explicit",
+        "check_floor": "blocks"
+      },
+      "exit_code": 2,
+      "message_key": "main_paired_explicit_check_floor_blocks",
+      "note": ""
+    },
+    {
+      "cell_id": "main_dispatch::main_paired_explicit_ancestry_blocks",
+      "function": "main_dispatch",
+      "inputs": {
+        "mode": "paired_explicit",
+        "check_floor": "passes",
+        "ancestry": "blocks"
+      },
+      "exit_code": 2,
+      "message_key": "main_paired_explicit_ancestry_blocks",
+      "note": ""
+    },
+    {
+      "cell_id": "main_dispatch::main_paired_explicit_non_bare_return",
+      "function": "main_dispatch",
+      "inputs": {
+        "mode": "paired_explicit",
+        "check_floor": "passes",
+        "ancestry": "passes"
+      },
+      "exit_code": 0,
+      "message_key": "main_paired_explicit_non_bare_return",
+      "note": "the `if non_bare: return 0` early return (pre-deploy modes verify preconditions; there is no post-deploy report to record from yet)"
+    },
+    {
+      "cell_id": "main_dispatch::main_paired_auto_check_floor_blocks",
+      "function": "main_dispatch",
+      "inputs": {
+        "mode": "paired_auto",
+        "check_floor": "blocks"
+      },
+      "exit_code": 2,
+      "message_key": "main_paired_auto_check_floor_blocks",
+      "note": ""
+    },
+    {
+      "cell_id": "main_dispatch::main_paired_auto_ancestry_blocks",
+      "function": "main_dispatch",
+      "inputs": {
+        "mode": "paired_auto",
+        "check_floor": "passes",
+        "ancestry": "blocks"
+      },
+      "exit_code": 2,
+      "message_key": "main_paired_auto_ancestry_blocks",
+      "note": ""
+    },
+    {
+      "cell_id": "main_dispatch::main_paired_auto_non_bare_return",
+      "function": "main_dispatch",
+      "inputs": {
+        "mode": "paired_auto",
+        "check_floor": "passes",
+        "ancestry": "passes"
+      },
+      "exit_code": 0,
+      "message_key": "main_paired_auto_non_bare_return",
+      "note": ""
+    },
+    {
+      "cell_id": "main_dispatch::main_ledger_only_clean",
+      "function": "main_dispatch",
+      "inputs": {
+        "mode": "ledger_only",
+        "ledger": "empty"
+      },
+      "exit_code": 0,
+      "message_key": "main_ledger_only_clean",
+      "note": ""
+    },
+    {
+      "cell_id": "main_dispatch::main_ledger_only_blocked",
+      "function": "main_dispatch",
+      "inputs": {
+        "mode": "ledger_only",
+        "ledger": "blocking"
+      },
+      "exit_code": 1,
+      "message_key": "main_ledger_only_blocked",
+      "note": ""
+    },
+    {
+      "cell_id": "main_dispatch::main_ledger_only_additive",
+      "function": "main_dispatch",
+      "inputs": {
+        "mode": "ledger_only",
+        "ledger": "additive"
+      },
+      "exit_code": 0,
+      "message_key": "main_ledger_only_additive",
+      "note": ""
+    },
+    {
+      "cell_id": "main_dispatch::main_ledger_only_acked",
+      "function": "main_dispatch",
+      "inputs": {
+        "mode": "ledger_only",
+        "ledger": "acked_only"
+      },
+      "exit_code": 0,
+      "message_key": "main_ledger_only_acked",
+      "note": ""
+    },
+    {
+      "cell_id": "check_composite::composite_latest_release_tag_error",
       "function": "check_composite",
       "inputs": {
         "hand_table": "latest_release_tag_error"
@@ -865,6 +1107,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_composite::composite_is_ancestor_error",
       "function": "check_composite",
       "inputs": {
         "hand_table": "is_ancestor_error"
@@ -874,6 +1117,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_composite::composite_missing_commit",
       "function": "check_composite",
       "inputs": {
         "hand_table": "missing_commit"
@@ -883,6 +1127,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_composite::composite_both_vacuous",
       "function": "check_composite",
       "inputs": {
         "hand_table": "vacuous",
@@ -893,6 +1138,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_composite::composite_vacuous_table_ledger_blocks",
       "function": "check_composite",
       "inputs": {
         "hand_table": "vacuous",
@@ -903,6 +1149,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_composite::composite_vacuous_table_ledger_additive",
       "function": "check_composite",
       "inputs": {
         "hand_table": "vacuous",
@@ -913,6 +1160,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_composite::composite_vacuous_table_ledger_acked",
       "function": "check_composite",
       "inputs": {
         "hand_table": "vacuous",
@@ -923,6 +1171,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_composite::composite_table_satisfied_ledger_empty",
       "function": "check_composite",
       "inputs": {
         "hand_table": "satisfied",
@@ -933,6 +1182,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_composite::composite_table_satisfied_ledger_blocks",
       "function": "check_composite",
       "inputs": {
         "hand_table": "satisfied",
@@ -943,6 +1193,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_composite::composite_table_satisfied_ledger_additive",
       "function": "check_composite",
       "inputs": {
         "hand_table": "satisfied",
@@ -953,6 +1204,7 @@
       "note": ""
     },
     {
+      "cell_id": "check_composite::composite_table_satisfied_ledger_acked",
       "function": "check_composite",
       "inputs": {
         "hand_table": "satisfied",
@@ -960,6 +1212,28 @@
       },
       "exit_code": 0,
       "message_key": "composite_table_satisfied_ledger_acked",
+      "note": ""
+    },
+    {
+      "cell_id": "precond_main_dispatch::precond_main_explicit_tag_with_ack",
+      "function": "precond_main_dispatch",
+      "inputs": {
+        "engine_tag": "explicit",
+        "ack": "given"
+      },
+      "exit_code": 0,
+      "message_key": "precond_main_explicit_tag_with_ack",
+      "note": ""
+    },
+    {
+      "cell_id": "precond_main_dispatch::precond_main_default_tag_no_ack",
+      "function": "precond_main_dispatch",
+      "inputs": {
+        "engine_tag": "default",
+        "ack": "absent"
+      },
+      "exit_code": 1,
+      "message_key": "precond_main_default_tag_no_ack",
       "note": ""
     }
   ],
@@ -1104,6 +1378,50 @@
       "event": "post-deploy-verify",
       "reachable": false,
       "citation": "no invocation site found for this (mode, event) pairing"
+    }
+  ],
+  "rdr_leaf_traceability": [
+    {
+      "rdr_leaf": "FLOOR ancestry git OSError (research doc ~line 523)",
+      "cell_ids": [
+        "check_source_ancestry::ancestry_diff_exception"
+      ]
+    },
+    {
+      "rdr_leaf": "FLOOR ancestry git-nonzero (research doc ~line 530)",
+      "cell_ids": [
+        "check_source_ancestry::ancestry_diff_nonzero"
+      ]
+    },
+    {
+      "rdr_leaf": "FLOOR bare-mode unparseable release_version via parsed is None (research doc ~line 1099)",
+      "cell_ids": [
+        "check_floor_bare::bare_probe_stale_via_success"
+      ]
+    },
+    {
+      "rdr_leaf": "FLOOR tracker-leg ManagedServiceError re-read (research doc ~line 1172)",
+      "cell_ids": [
+        "record_deploy_from_gate_report_leg::tracker_managed_service_error"
+      ]
+    },
+    {
+      "rdr_leaf": "FLOOR paired battery newest-UNAVAILABLE (research doc ~line 701)",
+      "cell_ids": [
+        "check_paired_preconditions::battery_newest_unavailable"
+      ]
+    },
+    {
+      "rdr_leaf": "FLOOR paired battery newest-None (research doc ~line 708)",
+      "cell_ids": [
+        "check_paired_preconditions::battery_newest_none"
+      ]
+    },
+    {
+      "rdr_leaf": "PRECOND latest_release_tag RuntimeError (research doc ~line 236)",
+      "cell_ids": [
+        "check_composite::composite_latest_release_tag_error"
+      ]
     }
   ]
 }
