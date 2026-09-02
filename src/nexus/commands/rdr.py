@@ -11,11 +11,15 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
 import click
 import yaml
+
+from nexus.tables.load import TableLoadError, load_packaged_table
+from nexus.tables.resolve import resolve
 
 
 # ---------------------------------------------------------------------------
@@ -308,17 +312,25 @@ def lint(paths: tuple[Path, ...], root: Path | None) -> None:
 # set-status — code-enforced frontmatter flip (RDR-165/166 ledger-drift fix)
 # ---------------------------------------------------------------------------
 
-#: Status words recognised in the README index status cell, so the cell can be
-#: rewritten without assuming a fixed column position.
-_KNOWN_STATUSES: frozenset[str] = frozenset({
-    "draft", "open", "proposed", "accepted", "closed", "deferred", "superseded",
-    "scrapped", "abandoned", "revised", "locked", "final",
-})
-
-#: status -> the date-stamp frontmatter key it should carry.
+#: status -> the date-stamp frontmatter key it should carry. Unchanged by
+#: RDR-201 P1.4 — the table has no notion of date keys, so this stays a
+#: plain literal.
 _STATUS_DATE_KEY: dict[str, str] = {
     "accepted": "accepted_date",
     "closed": "closed_date",
+}
+
+#: Requested target status -> the rdr-lifecycle table's ``event`` dimension.
+#: ``draft`` is deliberately absent: it is ambiguous on its own (resume from
+#: ``deferred`` vs. a no-op from ``draft`` itself) and is resolved from
+#: (current, target) in :func:`set_status` instead (RDR-201 P1.4 audit
+#: residual, T2 nexus/plan-rdr-201-audit-round-3-residuals [23999] item 1).
+_TARGET_STATUS_TO_EVENT: dict[str, str] = {
+    "accepted": "accept",
+    "closed": "close",
+    "superseded": "supersede",
+    "abandoned": "abandon",
+    "deferred": "defer",
 }
 
 
@@ -381,12 +393,25 @@ def _rewrite_frontmatter_status(text: str, new_status: str, date: str) -> str:
     return "---" + fm + "---" + parts[2]
 
 
-def _update_readme_status_row(readme: Path, rdr_filename: str, new_status: str) -> bool:
+#: Extracts a cell's leading word, tolerant of markdown decoration
+#: (``**Scrapped 2026-05-19**`` -> ``Scrapped``) so a decorated README cell
+#: is still detected without requiring the full shape-aware rewrite (that is
+#: bead nexus-j9z30.7's job, per T2
+#: nexus/plan-rdr-201-enrichment-deltas [24001] finding 4).
+_README_CELL_LEADING_WORD = re.compile(r"[\*_]*([A-Za-z][A-Za-z-]*)")
+
+
+def _update_readme_status_row(
+    readme: Path, rdr_filename: str, new_status: str, status_domain: frozenset[str]
+) -> bool:
     """Update the README index-row status cell for *rdr_filename*.
 
     Returns True if a row was found and rewritten. Matches the row by the RDR
-    filename link and replaces the first cell whose content is a known status
-    word, so the rewrite is robust to the index table's column ordering.
+    filename link and replaces the first cell whose LEADING WORD (case-
+    insensitive, decoration-stripped) is a member of *status_domain* — the
+    rdr-lifecycle table's ``status`` dimension — so the rewrite is robust to
+    both bare cells (``Draft``) and decorated ones (``Closed (implemented)``)
+    without assuming a fixed column position.
     """
     if not readme.exists():
         return False
@@ -398,7 +423,9 @@ def _update_readme_status_row(readme: Path, rdr_filename: str, new_status: str) 
             continue
         cells = line.split("|")
         for i, cell in enumerate(cells):
-            if cell.strip().lower() in _KNOWN_STATUSES:
+            m = _README_CELL_LEADING_WORD.match(cell.strip())
+            leading_word = m.group(1).lower() if m else ""
+            if leading_word in status_domain:
                 cells[i] = f" {target_cell} "
                 changed = True
                 break
@@ -433,15 +460,37 @@ def set_status(
     instead of hand-editing frontmatter, closing the ledger-drift class where
     T2 was advanced to ``accepted``/``closed`` but the RDR file stayed ``draft``
     (RDR-165 / RDR-166). Pure filesystem; no T2 dependency.
+
+    RDR-201 P1.4: the requested *new_status* is resolved to the packaged
+    ``rdr-lifecycle`` state-machine table's ``event`` dimension (a small
+    explicit (current, target) -> event mapping, see
+    ``_TARGET_STATUS_TO_EVENT``); the file's current frontmatter status
+    binds ``status``. An illegal edge REFUSES with the table row's typed
+    reason (``illegal-transition`` / ``gate-not-passed`` /
+    ``successor-not-named``) instead of the old unconditional flip. The
+    table is missing or unparsable -> exit 2, no fallback to a hardcoded
+    list.
     """
     new_status = new_status.strip().lower()
-    if new_status not in _KNOWN_STATUSES:
+
+    try:
+        table = load_packaged_table("rdr-lifecycle.toml")
+    except (OSError, TableLoadError, tomllib.TOMLDecodeError) as exc:
         click.echo(
-            f"unknown status '{new_status}'. Valid statuses: "
-            f"{', '.join(sorted(_KNOWN_STATUSES))}",
+            f"cannot load the RDR lifecycle table: {type(exc).__name__}: {exc}",
             err=True,
         )
         sys.exit(2)
+
+    status_domain = frozenset(table.dimensions["status"].domain)
+    if new_status not in status_domain:
+        click.echo(
+            f"unknown status '{new_status}'. Valid statuses: "
+            f"{', '.join(sorted(status_domain))}",
+            err=True,
+        )
+        sys.exit(2)
+
     if root is not None:
         repo_root = str(root)
     else:
@@ -452,6 +501,53 @@ def set_status(
     rdr_file = _preamble_find_rdr_file(rdr_path, rdr_id)
     if rdr_file is None:
         click.echo(f"RDR not found for ID: {rdr_id} (in {rdr_path})", err=True)
+        sys.exit(1)
+
+    meta, _ = _preamble_parse_frontmatter(rdr_file)
+    current_status = str(meta.get("status") or "").strip().lower()
+
+    # `draft` is ambiguous on its own: resume-from-deferred vs. a no-op from
+    # draft itself. draft -> draft is the ONLY modeled self-loop in the
+    # table (RDR-201 P1.4 audit residual) — short-circuit before resolve().
+    if new_status == "draft" and current_status == "draft":
+        click.echo(f"{rdr_file.name} is already draft (no-op)")
+        return
+    event = "resume" if new_status == "draft" else _TARGET_STATUS_TO_EVENT[new_status]
+
+    superseded_by = str(meta.get("superseded_by") or "").strip()
+    assignment = {
+        "status": current_status,
+        "event": event,
+        # RDR-201 P1.4: this command has no T2 dependency and reads no gate
+        # result from anywhere today, so `gate` is bound to the literal
+        # "none" on every call rather than inventing a new gate-reading
+        # mechanism. Consequence: the `accept` event's `gate = "passed"`
+        # guard can never be satisfied through this CLI in Phase 1 — see
+        # the test module's GATE BINDING docstring note.
+        "gate": "none",
+        "successor": "named" if superseded_by else "absent",
+    }
+
+    resolution = resolve(table, assignment)
+    if resolution.refusal is not None:
+        # Evaluator-level defect (unknown-value / ambiguous-match / no-match):
+        # the checker's lint bucket should have made this unreachable for a
+        # well-formed table; treat it as a defect, not a business refusal.
+        click.echo(
+            f"cannot resolve transition for {rdr_file.name}: "
+            f"{resolution.refusal} {dict(resolution.detail)}",
+            err=True,
+        )
+        sys.exit(2)
+
+    row = resolution.row
+    assert row is not None  # exactly one of row/refusal is set (Resolution invariant)
+    if row.outcome_kind == "refuse":
+        click.echo(
+            f"{rdr_file.name}: refused ({row.outcome}) for "
+            f"(status={current_status!r}, event={event!r})",
+            err=True,
+        )
         sys.exit(1)
 
     if date is None:
@@ -468,7 +564,9 @@ def set_status(
         rdr_file.write_text(new_text, encoding="utf-8")
 
     readme = rdr_path / "README.md"
-    readme_updated = _update_readme_status_row(readme, rdr_file.name, new_status)
+    readme_updated = _update_readme_status_row(
+        readme, rdr_file.name, new_status, status_domain
+    )
 
     click.echo(f"set {rdr_file.name} status -> {new_status}")
     if readme_updated:
