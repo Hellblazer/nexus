@@ -437,6 +437,72 @@ def _update_readme_status_row(
     return changed
 
 
+def _default_t2_client() -> object:
+    """Construct the real T2 HTTP client used to read the gate result.
+
+    ``nexus.db.t2.T2Database`` is the same facade ``nx rdr preamble``
+    already uses (see ``_preamble_get_rdrs_from_t2``); this is a thin
+    factory rather than a direct construction inside
+    :func:`_gate_outcome_for` so tests can inject a fake by monkeypatching
+    the module-level ``_t2_client_factory`` without touching any T2
+    substrate (RDR-201 P1.4 follow-up — Sam, 2026-09-02: the accept
+    event's gate guard needs a real T2 read, not a hardcoded constant).
+    """
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
+    return T2Database(default_db_path())
+
+
+#: Injection seam for :func:`_gate_outcome_for` — production code never
+#: calls ``_default_t2_client`` directly, only through this indirection, so
+#: a test can monkeypatch it to a factory returning a fake client (any
+#: context manager exposing ``get(project=..., title=...) -> dict | None``,
+#: matching ``T2Database``'s facade ``get()``).
+_t2_client_factory = _default_t2_client
+
+
+def _gate_outcome_for(rdr_num: str, repo_name: str) -> tuple[str, str | None]:
+    """Read the T2 gate result for *rdr_num* and reduce it to the
+    rdr-lifecycle table's ``gate`` dimension value.
+
+    T2 project ``<repo>_rdr``, title ``<rdr_num>-gate-latest`` — the same
+    coordinates ``nx rdr preamble rdr-accept`` already prints as an
+    instruction. Parses the entry content's ``outcome:`` line: ``PASSED``
+    -> ``"passed"``, ``BLOCKED`` -> ``"blocked"``; a missing record, a
+    record with no ``outcome:`` line, or an unrecognised outcome value all
+    reduce to ``"none"``.
+
+    Returns ``(gate_value, note)``. *note* is ``None`` when the read
+    behaved normally (PASSED, BLOCKED, or a legitimately absent gate
+    record — no gate run yet is an ordinary ``"none"``, not a T2
+    failure); it carries a short, named reason when the record is
+    missing or T2 itself could not be reached, so the CLI's refusal
+    message can say why instead of a bare ``gate-not-passed``.
+    """
+    project = f"{repo_name}_rdr"
+    title = f"{rdr_num}-gate-latest"
+    try:
+        with _t2_client_factory() as client:
+            entry = client.get(project=project, title=title)
+    except Exception as exc:  # noqa: BLE001 — T2 unreachable is an expected, named failure mode here (connection errors, timeouts, ...); reduced to gate="none" with the exception surfaced in `note`, never silently swallowed and never re-raised past this CLI boundary.
+        return "none", f"T2 unreachable: {type(exc).__name__}: {exc}"
+
+    if entry is None:
+        return "none", f"no gate record found (T2 project {project!r}, title {title!r})"
+
+    content = entry.get("content", "") if isinstance(entry, dict) else ""
+    outcome = _preamble_parse_t2_field(content, "outcome")
+    if outcome is None:
+        return "none", f"gate record {title!r} has no `outcome:` field"
+    outcome_upper = outcome.strip().upper()
+    if outcome_upper == "PASSED":
+        return "passed", None
+    if outcome_upper == "BLOCKED":
+        return "blocked", None
+    return "none", f"gate record {title!r} outcome is {outcome!r} (expected PASSED or BLOCKED)"
+
+
 @rdr.command("set-status")
 @click.argument("rdr_id")
 @click.argument("new_status")
@@ -459,7 +525,7 @@ def set_status(
     The code-enforced half of the accept/close lifecycle: the skills call this
     instead of hand-editing frontmatter, closing the ledger-drift class where
     T2 was advanced to ``accepted``/``closed`` but the RDR file stayed ``draft``
-    (RDR-165 / RDR-166). Pure filesystem; no T2 dependency.
+    (RDR-165 / RDR-166).
 
     RDR-201 P1.4: the requested *new_status* is resolved to the packaged
     ``rdr-lifecycle`` state-machine table's ``event`` dimension (a small
@@ -469,7 +535,15 @@ def set_status(
     reason (``illegal-transition`` / ``gate-not-passed`` /
     ``successor-not-named``) instead of the old unconditional flip. The
     table is missing or unparsable -> exit 2, no fallback to a hardcoded
-    list.
+    list. Re-requesting the CURRENT status is a no-op (exit 0) for every
+    status, not only ``draft`` — ``rdr-accept``'s self-heal and repeated
+    ``rdr-close`` runs depend on this command being idempotent.
+
+    ``gate`` is read from T2 (project ``<repo>_rdr``, title
+    ``<id>-gate-latest``) ONLY for the ``accept`` event — see
+    :func:`_gate_outcome_for`. T2 unreachable, or no gate record yet,
+    both reduce to ``gate="none"``, which the table refuses as
+    ``gate-not-passed`` (never a silent pass).
     """
     new_status = new_status.strip().lower()
 
@@ -493,8 +567,9 @@ def set_status(
 
     if root is not None:
         repo_root = str(root)
+        repo_name = Path(repo_root).name
     else:
-        repo_root, _ = _preamble_resolve_repo()
+        repo_root, repo_name = _preamble_resolve_repo()
     rdr_dir = _preamble_rdr_dir(repo_root)
     rdr_path = Path(repo_root) / rdr_dir
 
@@ -506,25 +581,30 @@ def set_status(
     meta, _ = _preamble_parse_frontmatter(rdr_file)
     current_status = str(meta.get("status") or "").strip().lower()
 
-    # `draft` is ambiguous on its own: resume-from-deferred vs. a no-op from
-    # draft itself. draft -> draft is the ONLY modeled self-loop in the
-    # table (RDR-201 P1.4 audit residual) — short-circuit before resolve().
-    if new_status == "draft" and current_status == "draft":
-        click.echo(f"{rdr_file.name} is already draft (no-op)")
+    # Re-requesting the status the record already carries is a no-op for
+    # EVERY status (not only draft) — rdr-accept's self-heal and repeated
+    # rdr-close runs depend on set-status being idempotent (Sam,
+    # 2026-09-02). This also resolves draft's own ambiguity: draft ->
+    # draft is caught here before `event` is ever computed.
+    if new_status == current_status:
+        click.echo(f"{rdr_file.name} is already {new_status} (no-op)")
         return
     event = "resume" if new_status == "draft" else _TARGET_STATUS_TO_EVENT[new_status]
 
     superseded_by = str(meta.get("superseded_by") or "").strip()
+
+    gate_note: str | None = None
+    if event == "accept":
+        rdr_num_match = re.search(r"\d+", rdr_file.stem)
+        rdr_num = rdr_num_match.group(0) if rdr_num_match else rdr_file.stem
+        gate_value, gate_note = _gate_outcome_for(rdr_num, repo_name)
+    else:
+        gate_value = "none"
+
     assignment = {
         "status": current_status,
         "event": event,
-        # RDR-201 P1.4: this command has no T2 dependency and reads no gate
-        # result from anywhere today, so `gate` is bound to the literal
-        # "none" on every call rather than inventing a new gate-reading
-        # mechanism. Consequence: the `accept` event's `gate = "passed"`
-        # guard can never be satisfied through this CLI in Phase 1 — see
-        # the test module's GATE BINDING docstring note.
-        "gate": "none",
+        "gate": gate_value,
         "successor": "named" if superseded_by else "absent",
     }
 
@@ -543,11 +623,13 @@ def set_status(
     row = resolution.row
     assert row is not None  # exactly one of row/refusal is set (Resolution invariant)
     if row.outcome_kind == "refuse":
-        click.echo(
+        msg = (
             f"{rdr_file.name}: refused ({row.outcome}) for "
-            f"(status={current_status!r}, event={event!r})",
-            err=True,
+            f"(status={current_status!r}, event={event!r})"
         )
+        if gate_note:
+            msg += f" — {gate_note}"
+        click.echo(msg, err=True)
         sys.exit(1)
 
     if date is None:

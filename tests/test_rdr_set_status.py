@@ -8,10 +8,9 @@ agent-driven skill instruction that silently got skipped. ``rdr-close`` then
 BLOCKED on the stale file status and required manual reconciliation.
 
 This command makes the flip a single, deterministic, tested filesystem action
-(no T2 dependency) that the accept/close skills call instead of editing the
-frontmatter by hand. It rewrites the RDR file ``status:`` line (plus the
-matching ``accepted_date`` / ``closed_date`` key) and the README index-row
-status cell.
+that the accept/close skills call instead of editing the frontmatter by hand.
+It rewrites the RDR file ``status:`` line (plus the matching ``accepted_date``
+/ ``closed_date`` key) and the README index-row status cell.
 
 RDR-201 P1.4 (nexus-j9z30.4) rewires this command onto the packaged
 ``rdr-lifecycle`` state-machine table (``src/nexus/tables/rdr-lifecycle.toml``,
@@ -19,29 +18,29 @@ loaded via ``load_packaged_table`` so it is reachable from an installed
 wheel). The requested status becomes the table's ``event`` dimension via a
 small explicit (current, target) -> event mapping in ``rdr.py``; the file's
 current frontmatter status binds the ``status`` dimension. An illegal edge
-now refuses with the table row's typed refuse code instead of silently
+refuses with the table row's typed refuse code instead of silently
 succeeding — this is a deliberate behavior change from the old
 ``_KNOWN_STATUSES`` membership check, which allowed ANY status word to flip
-to ANY other (e.g. draft straight to closed, or re-accepting an
-already-accepted record).
+to ANY other (e.g. draft straight to closed).
 
-GATE BINDING (open decision, documented per the bead): this command has no
-T2 dependency (pure filesystem, per the docstring above) and does not read
-a gate result from anywhere today. Per the bead's explicit instruction not
-to invent a new gate-reading mechanism, the ``gate`` dimension is bound to
-the literal ``"none"`` on every call. Consequence: the ``accept`` event's
-guard (``gate = "passed"``) can never be satisfied through this CLI in
-Phase 1, so ``draft -> accepted`` now ALWAYS refuses with
-``gate-not-passed``. The RDR-201 MVV (bead .6) only requires
-``accepted -> closed`` to succeed and ``draft -> closed`` to refuse; it does
-not require the accept path to succeed through this CLI, so this is within
-Phase 1's stated acceptance bar. Wiring a real gate read (or a CLI flag fed
-by the ``rdr-accept`` skill, which already checks T2 before calling this
-command) is out of scope here and left as a follow-up.
+GATE BINDING: the ``accept`` event's ``gate`` dimension is read from T2
+(project ``<repo>_rdr``, title ``<id>-gate-latest``, the same coordinates
+``nx rdr preamble rdr-accept`` already prints) via ``_gate_outcome_for``,
+through the injectable ``_t2_client_factory`` seam — production code
+constructs a real ``T2Database``; tests monkeypatch the factory to a fake
+client so no test touches a live T2 substrate. A missing gate record and an
+unreachable T2 both reduce to ``gate="none"``, which the table refuses as
+``gate-not-passed`` — never a silent pass. No other event consults T2.
+
+IDEMPOTENCY: re-requesting the record's CURRENT status is a no-op (exit 0,
+file untouched) for every status, not only ``draft`` — the ``rdr-accept``
+self-heal path and repeated ``rdr-close`` runs depend on this (Sam,
+2026-09-02).
 """
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from click.testing import CliRunner
@@ -107,9 +106,80 @@ def _invoke(rdr_dir: Path, *args: str):
     )
 
 
+def _gate_coords(tmp_path: Path, num: int) -> tuple[str, str]:
+    """(project, title) `_gate_outcome_for` will look up for RDR *num* when
+    the CLI is invoked with ``--root`` pointing at *tmp_path* — repo_name is
+    derived from the root path's basename (``Path(repo_root).name``)."""
+    return f"{tmp_path.name}_rdr", f"{num}-gate-latest"
+
+
+def _gate_record(outcome: str) -> dict[str, Any]:
+    return {"content": f"outcome: {outcome}\n"}
+
+
+class _FakeT2Client:
+    """Test double for the injectable ``_t2_client_factory`` seam.
+
+    Satisfies the same minimal contract the real ``T2Database`` facade does:
+    a context manager exposing ``get(project=..., title=...) -> dict | None``.
+    """
+
+    def __init__(
+        self,
+        entries: dict[tuple[str, str], dict[str, Any]] | None = None,
+        *,
+        raise_on_get: Exception | None = None,
+    ) -> None:
+        self._entries = entries or {}
+        self._raise_on_get = raise_on_get
+
+    def __enter__(self) -> "_FakeT2Client":
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        return False
+
+    def get(
+        self, project: str | None = None, title: str | None = None, id: int | None = None
+    ) -> dict[str, Any] | None:
+        if self._raise_on_get is not None:
+            raise self._raise_on_get
+        return self._entries.get((project, title))
+
+
+def _install_fake_t2(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    entries: dict[tuple[str, str], dict[str, Any]] | None = None,
+    raise_on_get: Exception | None = None,
+) -> _FakeT2Client:
+    fake = _FakeT2Client(entries=entries, raise_on_get=raise_on_get)
+    monkeypatch.setattr(rdr_mod, "_t2_client_factory", lambda: fake)
+    return fake
+
+
 # ---------------------------------------------------------------------------
 # Legal transitions (succeed)
 # ---------------------------------------------------------------------------
+
+
+def test_draft_to_accepted_with_gate_passed_succeeds(tmp_path, monkeypatch):
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(rdr_dir, 200, "draft")
+    _write_readme(rdr_dir, 200, "Draft")
+    project, title = _gate_coords(tmp_path, 200)
+    _install_fake_t2(monkeypatch, entries={(project, title): _gate_record("PASSED")})
+
+    res = _invoke(rdr_dir, "200", "accepted", "--date", "2026-06-24")
+    assert res.exit_code == 0, res.output
+
+    text = f.read_text()
+    assert "status: accepted" in text
+    assert "status: draft" not in text
+    assert "accepted_date: 2026-06-24" in text
+    # body preserved
+    assert "## Problem Statement" in text
+    assert "## Decision" in text
 
 
 def test_accepted_to_closed_flips_file_and_adds_closed_date(tmp_path):
@@ -205,6 +275,21 @@ def test_draft_to_draft_is_noop(tmp_path):
     assert f.read_text() == before  # untouched
 
 
+def test_accepted_to_accepted_is_noop(tmp_path):
+    """Same-status re-run is a no-op for EVERY status, not only draft — the
+    rdr-accept self-heal path and repeated rdr-close runs depend on
+    set-status being idempotent (Sam, 2026-09-02). No T2 gate read happens
+    here: the no-op short-circuit fires before the event is even computed."""
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(rdr_dir, 204, "accepted", extra_fm="accepted_date: 2026-06-22\n")
+    before = f.read_text()
+
+    res = _invoke(rdr_dir, "204", "accepted", "--date", "2026-06-24")
+    assert res.exit_code == 0, res.output
+    assert "no-op" in res.output.lower()
+    assert f.read_text() == before  # untouched
+
+
 def test_command_works_with_no_docs_tables_dir_at_all(tmp_path):
     """The lifecycle table is PACKAGED (src/nexus/tables/), never read from a
     repo-relative docs/tables/ path — the command must work identically in a
@@ -239,8 +324,7 @@ def test_body_with_horizontal_rule_is_preserved(tmp_path):
     )
     _write_readme(rdr_dir, 205, "Draft")
 
-    # draft -> deferred: unconditional (no guard), unlike accept which is
-    # gate-guarded and always refuses in this phase (see module docstring).
+    # draft -> deferred: unconditional (no gate guard), unlike accept.
     res = _invoke(rdr_dir, "205", "deferred", "--date", "2026-06-24")
     assert res.exit_code == 0, res.output
 
@@ -268,42 +352,19 @@ def test_draft_to_closed_refuses_illegal_transition(tmp_path):
     assert f.read_text() == before  # untouched
 
 
-def test_draft_to_accepted_refuses_gate_not_passed(tmp_path):
-    """RDR-201 P1.4: ``set-status`` has no T2 dependency, so ``gate`` is
-    bound to the literal ``"none"`` on every call — the accept event's
-    ``gate = "passed"`` guard can never be satisfied through this CLI in
-    Phase 1. See the module docstring's GATE BINDING note."""
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 200, "draft")
-    before = f.read_text()
-
-    res = _invoke(rdr_dir, "200", "accepted", "--date", "2026-06-24")
-    assert res.exit_code != 0
-    assert "gate-not-passed" in res.output
-    assert f.read_text() == before  # untouched
-
-
-def test_accepted_to_accepted_refuses_illegal_transition(tmp_path):
-    """Re-running set-status with the current status as the target is no
-    longer a silent no-op for non-draft statuses — accepted has no self-loop
-    row in the table, so the accept event from an already-accepted record is
-    an illegal transition (draft->draft is the only modeled no-op)."""
-    rdr_dir = _rdr_dir(tmp_path)
-    f = _write_rdr(rdr_dir, 204, "accepted", extra_fm="accepted_date: 2026-06-22\n")
-    before = f.read_text()
-
-    res = _invoke(rdr_dir, "204", "accepted", "--date", "2026-06-24")
-    assert res.exit_code != 0
-    assert "illegal-transition" in res.output
-    assert f.read_text() == before  # untouched
-
-
-def test_deferred_to_accepted_refuses(tmp_path):
+def test_deferred_to_accepted_refuses(tmp_path, monkeypatch):
     """The ruling's sharpest edge: deferred resumes to draft only, never
-    directly to accepted."""
+    directly to accepted. Illegal by (status, event) alone — the table
+    refuses before the gate is even consulted, so no T2 read happens
+    (accept-otherwise's match includes `deferred`, an escape row)."""
     rdr_dir = _rdr_dir(tmp_path)
     f = _write_rdr(rdr_dir, 225, "deferred")
     before = f.read_text()
+    # No fake installed AND no monkeypatch of _t2_client_factory: if this
+    # transition incorrectly consulted T2, it would hang/error against the
+    # unpatched real client rather than refusing cleanly — proving the
+    # illegal-transition path never reaches the gate read.
+    _install_fake_t2(monkeypatch, raise_on_get=AssertionError("T2 must not be consulted"))
 
     res = _invoke(rdr_dir, "225", "accepted", "--date", "2026-06-24")
     assert res.exit_code != 0
@@ -319,6 +380,51 @@ def test_supersede_without_successor_refuses_successor_not_named(tmp_path):
     res = _invoke(rdr_dir, "226", "superseded", "--date", "2026-06-24")
     assert res.exit_code != 0
     assert "successor-not-named" in res.output
+    assert f.read_text() == before  # untouched
+
+
+def test_draft_to_accepted_with_gate_blocked_refuses(tmp_path, monkeypatch):
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(rdr_dir, 230, "draft")
+    before = f.read_text()
+    project, title = _gate_coords(tmp_path, 230)
+    _install_fake_t2(monkeypatch, entries={(project, title): _gate_record("BLOCKED")})
+
+    res = _invoke(rdr_dir, "230", "accepted", "--date", "2026-06-24")
+    assert res.exit_code != 0
+    assert "gate-not-passed" in res.output
+    assert f.read_text() == before  # untouched
+
+
+def test_draft_to_accepted_with_no_gate_record_refuses_and_names_it(tmp_path, monkeypatch):
+    """No T2 gate record at all -> gate-not-passed, and the message names
+    the missing record rather than a bare refusal."""
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(rdr_dir, 231, "draft")
+    before = f.read_text()
+    _install_fake_t2(monkeypatch, entries={})  # no matching record
+
+    res = _invoke(rdr_dir, "231", "accepted", "--date", "2026-06-24")
+    assert res.exit_code != 0
+    assert "gate-not-passed" in res.output
+    assert "no gate record found" in res.output
+    assert "231-gate-latest" in res.output
+    assert f.read_text() == before  # untouched
+
+
+def test_draft_to_accepted_t2_unreachable_refuses_and_says_so(tmp_path, monkeypatch):
+    """T2 itself cannot be reached (e.g. a ConnectionError from the client)
+    -> gate-not-passed, message names T2 as unreachable rather than
+    crashing the CLI or silently passing the gate."""
+    rdr_dir = _rdr_dir(tmp_path)
+    f = _write_rdr(rdr_dir, 232, "draft")
+    before = f.read_text()
+    _install_fake_t2(monkeypatch, raise_on_get=ConnectionError("connection refused"))
+
+    res = _invoke(rdr_dir, "232", "accepted", "--date", "2026-06-24")
+    assert res.exit_code != 0
+    assert "gate-not-passed" in res.output
+    assert "T2 unreachable" in res.output
     assert f.read_text() == before  # untouched
 
 
@@ -384,11 +490,8 @@ def test_readme_decorated_cell_leading_word_detected(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# _rewrite_frontmatter_status direct unit coverage (preserved from the old
-# CLI-level tests: the accept event's gate guard means "to accepted" is no
-# longer reachable through the public CLI in this phase — see the module
-# docstring's GATE BINDING note — but the pure rewrite helper's date-key
-# insertion/fill logic is still exercised directly).
+# _rewrite_frontmatter_status direct unit coverage (date-key insertion/fill
+# logic, independent of the CLI's transition-legality plumbing above).
 # ---------------------------------------------------------------------------
 
 
