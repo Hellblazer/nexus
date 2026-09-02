@@ -105,12 +105,14 @@ _FIXTURE_CACHE_PREFIXES: tuple[str, ...] = (
 #: Env var seam (nexus-pfuns round 2, item 3): unset (the default) means
 #: both real-config-dir guards below scan the ACTUAL ``Path.home()`` --
 #: unchanged production behavior. Set ONLY by
-#: ``tests/test_real_config_dir_guard_wiring.py``'s pytester sandbox
-#: subprocess, which points it at a throwaway tmp dir so that end-to-end
-#: wiring test can prove ``pytest_sessionfinish`` actually fires and
-#: fails the run WITHOUT ever touching the real
-#: ``~/.config/nexus/``. Never read anywhere else in the codebase --
-#: grep confirms this name is conftest.py-local.
+#: the two end-to-end wiring tests, each pointing it at a throwaway tmp
+#: dir so they can prove ``pytest_sessionfinish`` actually fires WITHOUT
+#: ever touching the real ``~/.config/nexus/``:
+#: ``tests/test_real_config_dir_guard_wiring.py`` (a ``pytester`` sandbox
+#: whose conftest hand-wires the hooks) and
+#: ``tests/test_pfuns_guard_wiring.py`` (a child ``pytest`` against THIS
+#: repo's real conftest, which is what proves the hooks are registered
+#: here at all). Read nowhere else in the codebase.
 _REAL_CONFIG_DIR_ENV_OVERRIDE = "NX_REAL_CONFIG_DIR_FOR_GUARD_TEST"
 
 
@@ -436,8 +438,10 @@ _AMBIENT_DAEMON_DIRS: tuple[str, ...] = ("logs/",)
 #: until 2026-09-02 (nexus-ist38), which made the whole benign-append split
 #: DEAD: every entry was looked up as ``"MODIFIED routing_log.jsonl"``, found
 #: in neither snapshot nor the append-only set, and reported as a state
-#: mutation. The two tests covering the split fed it BARE paths, so they
+#: mutation. The tests covering the split all fed it BARE paths, so they
 #: passed while the guard they exist for failed runs over a growing log.
+#: An entry that resolves to neither snapshot now raises rather than
+#: defaulting to "state" -- see :func:`_split_appends_from_state`.
 _DIFF_VERBS: tuple[str, ...] = ("ADDED ", "MODIFIED ", "REMOVED ")
 
 
@@ -473,6 +477,19 @@ def _split_appends_from_state(
     for entry in changed:
         rel = _rel_path_of_diff_entry(entry)
         b, a = before.get(rel), after.get(rel)
+        if b is None and a is None:
+            # Unreachable for a well-formed entry: _diff_config_dir_snapshots
+            # only emits paths drawn from one snapshot or the other, so
+            # "in neither" means the entry did not parse as a path -- which
+            # is exactly the signature of the unstripped-verb defect this
+            # function shipped with (nexus-ist38). Silently classifying it as
+            # state is what made that defect survive: it looked like a
+            # cautious default and was a dead classifier. Fail loud instead.
+            raise AssertionError(
+                f"real-config-dir guard: diff entry {entry!r} resolves to no "
+                f"path in either snapshot. _DIFF_VERBS={_DIFF_VERBS} may be "
+                "out of step with _diff_config_dir_snapshots's own prefixes."
+            )
         name = rel.rsplit("/", 1)[-1]
         if rel.startswith(_AMBIENT_DAEMON_DIRS):
             # Ambient daemon output: exempt from the state verdict in every

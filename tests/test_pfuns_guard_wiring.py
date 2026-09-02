@@ -1,27 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The nexus-pfuns real-config-dir guard, end to end (nexus-ist38).
 
-Every other test of this guard calls its helpers directly with hand-built
-snapshots. That is a test BELOW the production layer: it proves the
-classifier and says nothing about whether ``pytest_sessionfinish``
-actually reaches it, or whether the verdict reaches the process exit
-code. The gap was not hypothetical -- ``_split_appends_from_state``
-consumed ``_diff_config_dir_snapshots``'s ``"<VERB> <path>"`` entries as
-if they were bare paths, so the benign-append split was DEAD for the
-guard's whole life while six helper tests (all feeding bare paths) stayed
-green. A real run therefore reddened over a growing ``routing_log.jsonl``
-(measured twice on 2026-09-02 during an RDR-201 review), and the FAIL
-line was read as harmless because the observing pipe to ``tail`` masked
-the exit code it came with.
+``tests/test_real_config_dir_guard_wiring.py`` already drives this guard
+end to end, but through a ``pytester`` sandbox whose conftest HAND-WIRES
+the hooks: it proves the guard's logic fails a run, and cannot prove THIS
+repo's own ``tests/conftest.py`` registers those hooks, nor exercise the
+benign (rc 0) verdict, nor xdist. Every other test calls the helpers
+directly with hand-built snapshots -- below the production layer
+entirely.
 
-So these two cases drive the REAL thing: a child ``pytest`` process, this
-repo's real ``tests/conftest.py``, its real hooks, and the exit code the
-shell actually sees. ``_REAL_CONFIG_DIR_ENV_OVERRIDE`` points the guard
-at a throwaway home, so nothing here can read or write the operator's own
-``~/.config/nexus/`` -- the seam exists for exactly this test and, until
-now, had no caller.
+That gap was not hypothetical. ``_split_appends_from_state`` consumed
+``_diff_config_dir_snapshots``'s ``"<VERB> <path>"`` entries as if they
+were bare paths, so the benign-append split was DEAD for the guard's
+whole life while eleven helper tests (all feeding bare paths) stayed
+green, and real runs reddened over a growing ``routing_log.jsonl``
+(observed twice on 2026-09-02 during an RDR-201 review).
 
-Marked ``lint``: two child pytest sessions, roughly 20s, out of the hot loop.
+So these cases drive the REAL thing: a child ``pytest`` process, this
+repo's real conftest, its real hooks, and the exit code the shell
+actually sees -- the benign verdict included, serially and under ``-n``.
+``_REAL_CONFIG_DIR_ENV_OVERRIDE`` points the guard at a throwaway home,
+so nothing here can read or write the operator's own ``~/.config/nexus/``.
+
+Marked ``lint``: three child pytest sessions, roughly 30s, out of the hot loop.
 """
 from __future__ import annotations
 
@@ -82,11 +83,19 @@ def _run_inner(tmp_path: Path, mode: str, *pytest_args: str) -> tuple[int, str]:
     return proc.returncode, proc.stdout + proc.stderr
 
 
-def test_a_growing_append_only_log_does_not_redden_a_real_run(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "xdist_args",
+    [pytest.param(("-p", "no:xdist"), id="serial"), pytest.param(("-n", "2"), id="xdist")],
+)
+def test_a_growing_append_only_log_does_not_redden_a_real_run(
+    tmp_path: Path, xdist_args: tuple[str, ...],
+) -> None:
     """The regression nexus-ist38 filed: an append to ``routing_log.jsonl``
     is reported as a NOTE and the session still exits 0. Before the fix this
-    exited 1 with a FAIL, over a log file growing by one line."""
-    rc, out = _run_inner(tmp_path, "append", "-p", "no:xdist")
+    exited 1 with a FAIL, over a log file growing by one line. Parametrized
+    over both because the bead was filed on the ``-n auto`` case and the
+    serial case alone would leave that shape unproven."""
+    rc, out = _run_inner(tmp_path, "append", *xdist_args)
     assert "NOTE: nexus-pfuns" in out, out[-3000:]
     assert "FAIL: nexus-pfuns" not in out, out[-3000:]
     assert rc == 0, f"a growing append-only log must not fail the run (rc={rc})\n{out[-3000:]}"
