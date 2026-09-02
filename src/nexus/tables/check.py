@@ -243,6 +243,24 @@ def _overlap_participants(group: Group) -> list[Row]:
 
 
 def _check_overlap(group: Group, dims: list[str], dimensions: dict[str, Dimension]) -> list[Finding]:
+    """Flag ANY non-empty intersection among participants' accepted sets.
+
+    RDR-201 sec Background is explicit: intrastate "has no hit policy, so
+    overlap is a lint failure rather than something a priority order
+    resolves." A shared assignment between two participating rows IS an
+    overlap, full stop -- strict subsumption (a broader row whose accepted
+    set is a proper superset of a narrower row's) is NOT exempted. An
+    earlier revision of this function carved out strict subsumption as a
+    "layered precedence, broad rule + narrower override" pattern; that
+    carve-out has no basis in RDR-201's text (round-2 critique, T2
+    nexus/critique-nexus-j9z30-1-round2-2026-09-01 [24008]) and hid a real
+    three-way ambiguity in tests/fixtures/tables/release_decision_defect.toml
+    (at-or-above-floor is a strict superset of both planted overlap rows).
+    A layered "most specific wins" hit policy is a legitimate DESIGN for a
+    table author to want, but it is not what RDR-201 specifies, and adding
+    it is Sam's ruling / an RDR-201 amendment to make, not an implementer
+    default.
+    """
     findings: list[Finding] = []
     participants = _overlap_participants(group)
     accepted = {r.id: accepted_assignments(r, dims, dimensions) for r in participants}
@@ -251,14 +269,6 @@ def _check_overlap(group: Group, dims: list[str], dimensions: dict[str, Dimensio
         inter = left & right
         if not inter:
             continue
-        if left != right and (left <= right or right <= left):
-            continue  # STRICT subsumption (a broader row + a narrower row) is
-            # a different, non-overlap advisory, out of scope here. Two rows
-            # accepting the EXACT SAME assignment set (left == right) is not
-            # subsumption -- it is unconditional duplicate coverage, and IS
-            # an overlap (CRITICAL 1 / nexus-akmum: this is what let two
-            # rows sharing one bare match, or a non-bare escape mirroring an
-            # ordinary row's guard, pass silently).
         findings.append(
             Finding(
                 code=OVERLAP,

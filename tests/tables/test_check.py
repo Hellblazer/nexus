@@ -133,22 +133,50 @@ def test_rdr_lifecycle_fixed_after_removing_planted_defects():
 
 
 def test_release_decision_clean_has_no_findings_at_all():
-    """Fully enumerated, no escape row: proved with nothing to report."""
+    """Fully enumerated, no escape row: proved with nothing to report. This
+    fixture is a true disjoint partition -- every row's accepted set is
+    pairwise disjoint from every other row's, zero subsumption included --
+    so it stays at zero findings under the no-hit-policy overlap rule
+    (round-2 critique, T2 nexus/critique-nexus-j9z30-1-round2-2026-09-01
+    [24008], which verified this fixture sums to exactly the full 36-cell
+    product with zero pairwise intersection)."""
     table = load_table(FIXTURES / "release_decision_clean.toml")
     findings = check_table(table)
     assert findings == []
 
 
 def test_release_decision_defect_reports_planted_overlap_and_gap():
+    """Under RDR-201's no-hit-policy commitment (sec Background: intrastate
+    "has no hit policy, so overlap is a lint failure rather than something
+    a priority order resolves"), ANY non-empty intersection among
+    participants is an overlap -- including strict subsumption. This
+    fixture's own "at-or-above-floor" row (guard={cloud_vs_floor:
+    [equal,above]}, unconstrained mode/ledger) is a strict SUPERSET of both
+    planted rows (overlap-x-bare-or-paired, overlap-y-paired-or-auto), so
+    it participates in two more overlap pairs beyond the originally-planted
+    x-vs-y pair -- a real three-way ambiguity (round-2 critique, T2
+    nexus/critique-nexus-j9z30-1-round2-2026-09-01 [24008]): the cell
+    (cloud_vs_floor=equal, mode=paired, ledger=all-additive) is accepted by
+    all three rows, two of which emit conflicting verdicts."""
     table = load_table(FIXTURES / "release_decision_defect.toml")
     findings = check_table(table)
-    assert codes_for(findings, decision="decide") == sorted([COVERAGE_GAP, OVERLAP])
+    decide_findings = codes_for(findings, decision="decide")
+    assert decide_findings == sorted([COVERAGE_GAP, OVERLAP, OVERLAP, OVERLAP])
 
-    overlap = next(f for f in findings if f.code == OVERLAP)
-    assert {overlap.detail["row_a"], overlap.detail["row_b"]} == {
-        "overlap-x-bare-or-paired", "overlap-y-paired-or-auto",
+    overlaps = [f for f in findings if f.code == OVERLAP]
+    assert len(overlaps) == 3
+    pairs = {frozenset((f.detail["row_a"], f.detail["row_b"])) for f in overlaps}
+    assert pairs == {
+        frozenset({"at-or-above-floor", "overlap-x-bare-or-paired"}),
+        frozenset({"at-or-above-floor", "overlap-y-paired-or-auto"}),
+        frozenset({"overlap-x-bare-or-paired", "overlap-y-paired-or-auto"}),
     }
-    assert overlap.detail["intersection_count"] == 3  # equal x paired x ledger(3)
+    intersection_by_pair = {
+        frozenset((f.detail["row_a"], f.detail["row_b"])): f.detail["intersection_count"] for f in overlaps
+    }
+    assert intersection_by_pair[frozenset({"at-or-above-floor", "overlap-x-bare-or-paired"})] == 6
+    assert intersection_by_pair[frozenset({"at-or-above-floor", "overlap-y-paired-or-auto"})] == 6
+    assert intersection_by_pair[frozenset({"overlap-x-bare-or-paired", "overlap-y-paired-or-auto"})] == 3
 
     gap = next(f for f in findings if f.code == COVERAGE_GAP)
     assert gap.detail["missing_count"] == 2
@@ -382,7 +410,11 @@ def test_overlap_detected_when_group_has_no_guard_dimensions():
 # --------------------------------------------------------------------------
 # CRITICAL 2 (nexus-akmum): a non-bare escape row (one with a guard) must
 # participate in overlap detection like any ordinary row; only a BARE
-# escape (no guard at all) is exempt.
+# escape (no guard at all) is exempt. Per RDR-201 sec Background's
+# no-hit-policy commitment there is no carve-out for STRICT subsumption
+# either -- any non-empty intersection among participants is an overlap
+# (round-2 critique, T2 nexus/critique-nexus-j9z30-1-round2-2026-09-01
+# [24008]).
 
 
 def test_non_bare_escape_overlapping_ordinary_row_is_flagged():
@@ -398,6 +430,24 @@ def test_non_bare_escape_overlapping_ordinary_row_is_flagged():
     # A non-bare escape that overlaps is not also credited with closing
     # coverage cleanly.
     assert CLOSED_BY_ESCAPE not in {f.code for f in overlap_group_findings}
+
+
+def test_non_bare_escape_strict_superset_of_ordinary_row_is_flagged():
+    """The round-2 critique's own repro: an escape row's guard is a STRICT
+    SUPERSET of an ordinary row's guard (not an exact duplicate) -- the
+    more natural authoring mistake, a rescue guard written too broadly.
+    This must ALSO be flagged as overlap; there is no "layered precedence"
+    exemption in RDR-201's text."""
+    table = load_table(FIXTURES / "escape_overlap.toml")
+    findings = check_table(table)
+
+    superset_group_findings = [f for f in findings if f.group == {"event": "superset-case"}]
+    overlaps = [f for f in superset_group_findings if f.code == OVERLAP]
+    assert len(overlaps) == 1
+    overlap = overlaps[0]
+    assert {overlap.detail["row_a"], overlap.detail["row_b"]} == {"superset-ordinary", "superset-escape"}
+    assert overlap.detail["intersection_count"] == 1  # status=draft, the ordinary row's whole set
+    assert CLOSED_BY_ESCAPE not in {f.code for f in superset_group_findings}
 
 
 def test_non_bare_escape_disjoint_from_ordinary_row_is_clean():
