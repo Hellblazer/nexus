@@ -1,0 +1,1109 @@
+{
+  "header": {
+    "bead": "nexus-j9z30.11",
+    "scripts": [
+      "scripts/check_engine_release_floor.py",
+      "scripts/check_client_release_precondition.py"
+    ],
+    "source_research": "T2 nexus_rdr/201-research-4; T3 knowledge/analysis-deep-paired-release-state-space-rdr201-2026-09-01",
+    "dimensions": [
+      {
+        "name": "check_client_lag_ledger.ledger",
+        "domain": [
+          "empty",
+          "blocking",
+          "additive",
+          "acked_only"
+        ],
+        "description": ""
+      },
+      {
+        "name": "check_paired_preconditions.age_state",
+        "domain": [
+          "unavailable",
+          "too_old",
+          "fresh"
+        ],
+        "description": ""
+      },
+      {
+        "name": "check_paired_preconditions.newest_state",
+        "domain": [
+          "unavailable",
+          "none",
+          "mismatch",
+          "match"
+        ],
+        "description": ""
+      },
+      {
+        "name": "check_paired_preconditions.tag_exists",
+        "domain": [
+          "unavailable",
+          "false",
+          "true"
+        ],
+        "description": ""
+      },
+      {
+        "name": "check_paired_preconditions.tag_parse",
+        "domain": [
+          "unparseable",
+          "parseable"
+        ],
+        "description": ""
+      },
+      {
+        "name": "check_paired_preconditions.tag_published",
+        "domain": [
+          "unavailable",
+          "false",
+          "true"
+        ],
+        "description": ""
+      },
+      {
+        "name": "check_paired_preconditions.tag_shape",
+        "domain": [
+          "invalid_prefix",
+          "valid_prefix"
+        ],
+        "description": ""
+      },
+      {
+        "name": "check_paired_preconditions.version_match",
+        "domain": [
+          "mismatch",
+          "match"
+        ],
+        "description": ""
+      },
+      {
+        "name": "check_pin_currency.newest",
+        "domain": [
+          "unavailable",
+          "none",
+          "above_floor",
+          "at_floor",
+          "below_floor"
+        ],
+        "description": "newest_published_engine()'s outcome (F3): git-unavailable, an empty tag namespace, or a comparison against REQUIRED_ENGINE_VERSION."
+      },
+      {
+        "name": "check_source_ancestry.diff_result",
+        "domain": [
+          "exception",
+          "nonzero",
+          "drift",
+          "clean"
+        ],
+        "description": ""
+      },
+      {
+        "name": "check_source_ancestry.tag_exists",
+        "domain": [
+          "unavailable",
+          "false",
+          "true"
+        ],
+        "description": ""
+      },
+      {
+        "name": "check_wire_contract_ledger.ledger",
+        "domain": [
+          "empty",
+          "blocking",
+          "additive",
+          "acked_only"
+        ],
+        "description": ""
+      },
+      {
+        "name": "event",
+        "domain": [
+          "pre-tag",
+          "tag-push",
+          "deploy",
+          "post-deploy-verify"
+        ],
+        "description": "Finding 2's incident correction (T2 nexus_rdr/201-research-4): the 7.1.0 / v0.1.62 failure (commit 79fff05a9) was an UN-ENCODED event dimension, not a guard defect -- the fix changed a remedy string and prose, no decision logic. A table for this choreography needs an event column."
+      },
+      {
+        "name": "record_deploy_from_gate_report_leg.outcome",
+        "domain": [
+          "directory_error",
+          "schema_error",
+          "no_report_for_version",
+          "gate_red",
+          "version_mismatch",
+          "live_version_mismatch",
+          "managed_service_error",
+          "ok"
+        ],
+        "description": ""
+      }
+    ],
+    "excluded_dimensions": [
+      {
+        "name": "gate_report_directory_contents",
+        "reason": "open-ended file listing / JSON body deploy_tracker.py's discovery logic reads; not modeled beyond the 8 CLASSIFIED outcomes deploy_tracker.py itself already reduces it to (tracker_outcome_chain), which are driven by monkeypatching nexus.deploy_tracker.record_deploy_from_gate_report directly.",
+        "fixed_representative_value": "a directory holding exactly one green GateReport matching the live version (the 'ok' leaf's driven fixture)"
+      },
+      {
+        "name": "no_record_deploy_reason",
+        "reason": "free-text CLI argument; argparse already enforces non-blank, and no downstream branch reads its content, only its presence.",
+        "fixed_representative_value": "\"a representative reason\""
+      }
+    ],
+    "functions_enumerated_exhaustively": [
+      "check_pin_currency",
+      "check_source_ancestry",
+      "check_client_lag_ledger",
+      "check_paired_preconditions",
+      "record_deploy_from_gate_report_leg",
+      "check_wire_contract_ledger"
+    ],
+    "functions_hand_enumerated_and_driven": [
+      "check_floor_bare",
+      "check_floor_paired",
+      "check_floor_auto_paired",
+      "tracker_leg_dispatch",
+      "check_composite"
+    ],
+    "reachable_cell_count": 75,
+    "unreachable_declared_leaf_count": 0,
+    "total_combinations_considered": 932
+  },
+  "cells": [
+    {
+      "function": "check_pin_currency",
+      "inputs": {
+        "newest": "at_floor"
+      },
+      "exit_code": 0,
+      "message_key": "pin_currency_current_at_floor",
+      "note": ""
+    },
+    {
+      "function": "check_pin_currency",
+      "inputs": {
+        "newest": "below_floor"
+      },
+      "exit_code": 0,
+      "message_key": "pin_currency_current_below_floor",
+      "note": ""
+    },
+    {
+      "function": "check_pin_currency",
+      "inputs": {
+        "newest": "above_floor"
+      },
+      "exit_code": 1,
+      "message_key": "pin_currency_stale_pin",
+      "note": ""
+    },
+    {
+      "function": "check_pin_currency",
+      "inputs": {
+        "newest": "unavailable"
+      },
+      "exit_code": 2,
+      "message_key": "pin_currency_tags_unavailable",
+      "note": ""
+    },
+    {
+      "function": "check_pin_currency",
+      "inputs": {
+        "newest": "none"
+      },
+      "exit_code": 2,
+      "message_key": "pin_currency_zero_tags",
+      "note": ""
+    },
+    {
+      "function": "check_source_ancestry",
+      "inputs": {
+        "tag_exists": "true",
+        "diff_result": "clean"
+      },
+      "exit_code": 0,
+      "message_key": "ancestry_clean",
+      "note": ""
+    },
+    {
+      "function": "check_source_ancestry",
+      "inputs": {
+        "tag_exists": "true",
+        "diff_result": "drift"
+      },
+      "exit_code": 1,
+      "message_key": "ancestry_drift",
+      "note": ""
+    },
+    {
+      "function": "check_source_ancestry",
+      "inputs": {
+        "tag_exists": "true",
+        "diff_result": "exception"
+      },
+      "exit_code": 2,
+      "message_key": "ancestry_diff_exception",
+      "note": ""
+    },
+    {
+      "function": "check_source_ancestry",
+      "inputs": {
+        "tag_exists": "true",
+        "diff_result": "nonzero"
+      },
+      "exit_code": 2,
+      "message_key": "ancestry_diff_nonzero",
+      "note": ""
+    },
+    {
+      "function": "check_source_ancestry",
+      "inputs": {
+        "tag_exists": "false",
+        "diff_result": "exception"
+      },
+      "exit_code": 2,
+      "message_key": "ancestry_tag_missing",
+      "note": ""
+    },
+    {
+      "function": "check_source_ancestry",
+      "inputs": {
+        "tag_exists": "unavailable",
+        "diff_result": "exception"
+      },
+      "exit_code": 2,
+      "message_key": "ancestry_tag_unavailable",
+      "note": ""
+    },
+    {
+      "function": "check_client_lag_ledger",
+      "inputs": {
+        "ledger": "acked_only"
+      },
+      "exit_code": 0,
+      "message_key": "ledger_acked",
+      "note": ""
+    },
+    {
+      "function": "check_client_lag_ledger",
+      "inputs": {
+        "ledger": "additive"
+      },
+      "exit_code": 0,
+      "message_key": "ledger_additive_authorized",
+      "note": ""
+    },
+    {
+      "function": "check_client_lag_ledger",
+      "inputs": {
+        "ledger": "empty"
+      },
+      "exit_code": 0,
+      "message_key": "ledger_clean",
+      "note": ""
+    },
+    {
+      "function": "check_client_lag_ledger",
+      "inputs": {
+        "ledger": "blocking"
+      },
+      "exit_code": 1,
+      "message_key": "ledger_blocked",
+      "note": ""
+    },
+    {
+      "function": "check_paired_preconditions",
+      "inputs": {
+        "tag_shape": "valid_prefix",
+        "tag_parse": "parseable",
+        "tag_exists": "true",
+        "tag_published": "true",
+        "version_match": "match",
+        "newest_state": "match",
+        "age_state": "fresh"
+      },
+      "exit_code": 0,
+      "message_key": "battery_armed",
+      "note": ""
+    },
+    {
+      "function": "check_paired_preconditions",
+      "inputs": {
+        "tag_shape": "invalid_prefix",
+        "tag_parse": "unparseable",
+        "tag_exists": "unavailable",
+        "tag_published": "unavailable",
+        "version_match": "mismatch",
+        "newest_state": "unavailable",
+        "age_state": "unavailable"
+      },
+      "exit_code": 1,
+      "message_key": "battery_bad_prefix",
+      "note": ""
+    },
+    {
+      "function": "check_paired_preconditions",
+      "inputs": {
+        "tag_shape": "valid_prefix",
+        "tag_parse": "parseable",
+        "tag_exists": "true",
+        "tag_published": "true",
+        "version_match": "match",
+        "newest_state": "mismatch",
+        "age_state": "unavailable"
+      },
+      "exit_code": 1,
+      "message_key": "battery_newest_mismatch",
+      "note": ""
+    },
+    {
+      "function": "check_paired_preconditions",
+      "inputs": {
+        "tag_shape": "valid_prefix",
+        "tag_parse": "parseable",
+        "tag_exists": "true",
+        "tag_published": "true",
+        "version_match": "match",
+        "newest_state": "none",
+        "age_state": "unavailable"
+      },
+      "exit_code": 1,
+      "message_key": "battery_newest_none",
+      "note": ""
+    },
+    {
+      "function": "check_paired_preconditions",
+      "inputs": {
+        "tag_shape": "valid_prefix",
+        "tag_parse": "parseable",
+        "tag_exists": "true",
+        "tag_published": "false",
+        "version_match": "mismatch",
+        "newest_state": "unavailable",
+        "age_state": "unavailable"
+      },
+      "exit_code": 1,
+      "message_key": "battery_not_published",
+      "note": ""
+    },
+    {
+      "function": "check_paired_preconditions",
+      "inputs": {
+        "tag_shape": "valid_prefix",
+        "tag_parse": "parseable",
+        "tag_exists": "false",
+        "tag_published": "unavailable",
+        "version_match": "mismatch",
+        "newest_state": "unavailable",
+        "age_state": "unavailable"
+      },
+      "exit_code": 1,
+      "message_key": "battery_tag_not_exists",
+      "note": ""
+    },
+    {
+      "function": "check_paired_preconditions",
+      "inputs": {
+        "tag_shape": "valid_prefix",
+        "tag_parse": "parseable",
+        "tag_exists": "true",
+        "tag_published": "true",
+        "version_match": "match",
+        "newest_state": "match",
+        "age_state": "too_old"
+      },
+      "exit_code": 1,
+      "message_key": "battery_too_old",
+      "note": ""
+    },
+    {
+      "function": "check_paired_preconditions",
+      "inputs": {
+        "tag_shape": "valid_prefix",
+        "tag_parse": "unparseable",
+        "tag_exists": "unavailable",
+        "tag_published": "unavailable",
+        "version_match": "mismatch",
+        "newest_state": "unavailable",
+        "age_state": "unavailable"
+      },
+      "exit_code": 1,
+      "message_key": "battery_unparseable_tag",
+      "note": ""
+    },
+    {
+      "function": "check_paired_preconditions",
+      "inputs": {
+        "tag_shape": "valid_prefix",
+        "tag_parse": "parseable",
+        "tag_exists": "true",
+        "tag_published": "true",
+        "version_match": "mismatch",
+        "newest_state": "unavailable",
+        "age_state": "unavailable"
+      },
+      "exit_code": 1,
+      "message_key": "battery_version_mismatch",
+      "note": ""
+    },
+    {
+      "function": "check_paired_preconditions",
+      "inputs": {
+        "tag_shape": "valid_prefix",
+        "tag_parse": "parseable",
+        "tag_exists": "true",
+        "tag_published": "true",
+        "version_match": "match",
+        "newest_state": "match",
+        "age_state": "unavailable"
+      },
+      "exit_code": 2,
+      "message_key": "battery_age_unavailable",
+      "note": ""
+    },
+    {
+      "function": "check_paired_preconditions",
+      "inputs": {
+        "tag_shape": "valid_prefix",
+        "tag_parse": "parseable",
+        "tag_exists": "unavailable",
+        "tag_published": "unavailable",
+        "version_match": "mismatch",
+        "newest_state": "unavailable",
+        "age_state": "unavailable"
+      },
+      "exit_code": 2,
+      "message_key": "battery_exists_unavailable",
+      "note": ""
+    },
+    {
+      "function": "check_paired_preconditions",
+      "inputs": {
+        "tag_shape": "valid_prefix",
+        "tag_parse": "parseable",
+        "tag_exists": "true",
+        "tag_published": "true",
+        "version_match": "match",
+        "newest_state": "unavailable",
+        "age_state": "unavailable"
+      },
+      "exit_code": 2,
+      "message_key": "battery_newest_unavailable",
+      "note": ""
+    },
+    {
+      "function": "check_paired_preconditions",
+      "inputs": {
+        "tag_shape": "valid_prefix",
+        "tag_parse": "parseable",
+        "tag_exists": "true",
+        "tag_published": "unavailable",
+        "version_match": "mismatch",
+        "newest_state": "unavailable",
+        "age_state": "unavailable"
+      },
+      "exit_code": 2,
+      "message_key": "battery_published_unavailable",
+      "note": ""
+    },
+    {
+      "function": "record_deploy_from_gate_report_leg",
+      "inputs": {
+        "outcome": "ok"
+      },
+      "exit_code": 0,
+      "message_key": "tracker_recorded",
+      "note": ""
+    },
+    {
+      "function": "record_deploy_from_gate_report_leg",
+      "inputs": {
+        "outcome": "directory_error"
+      },
+      "exit_code": 3,
+      "message_key": "tracker_directory_error",
+      "note": ""
+    },
+    {
+      "function": "record_deploy_from_gate_report_leg",
+      "inputs": {
+        "outcome": "gate_red"
+      },
+      "exit_code": 3,
+      "message_key": "tracker_gate_red",
+      "note": ""
+    },
+    {
+      "function": "record_deploy_from_gate_report_leg",
+      "inputs": {
+        "outcome": "live_version_mismatch"
+      },
+      "exit_code": 3,
+      "message_key": "tracker_live_version_mismatch",
+      "note": ""
+    },
+    {
+      "function": "record_deploy_from_gate_report_leg",
+      "inputs": {
+        "outcome": "managed_service_error"
+      },
+      "exit_code": 3,
+      "message_key": "tracker_managed_service_error",
+      "note": ""
+    },
+    {
+      "function": "record_deploy_from_gate_report_leg",
+      "inputs": {
+        "outcome": "no_report_for_version"
+      },
+      "exit_code": 3,
+      "message_key": "tracker_no_report_for_version",
+      "note": ""
+    },
+    {
+      "function": "record_deploy_from_gate_report_leg",
+      "inputs": {
+        "outcome": "schema_error"
+      },
+      "exit_code": 3,
+      "message_key": "tracker_schema_error",
+      "note": ""
+    },
+    {
+      "function": "record_deploy_from_gate_report_leg",
+      "inputs": {
+        "outcome": "version_mismatch"
+      },
+      "exit_code": 3,
+      "message_key": "tracker_version_mismatch",
+      "note": ""
+    },
+    {
+      "function": "check_wire_contract_ledger",
+      "inputs": {
+        "ledger": "acked_only"
+      },
+      "exit_code": 0,
+      "message_key": "ledger_acked",
+      "note": ""
+    },
+    {
+      "function": "check_wire_contract_ledger",
+      "inputs": {
+        "ledger": "additive"
+      },
+      "exit_code": 0,
+      "message_key": "ledger_additive_authorized",
+      "note": ""
+    },
+    {
+      "function": "check_wire_contract_ledger",
+      "inputs": {
+        "ledger": "empty"
+      },
+      "exit_code": 0,
+      "message_key": "ledger_clean",
+      "note": ""
+    },
+    {
+      "function": "check_wire_contract_ledger",
+      "inputs": {
+        "ledger": "blocking"
+      },
+      "exit_code": 1,
+      "message_key": "ledger_blocked",
+      "note": ""
+    },
+    {
+      "function": "check_floor_bare",
+      "inputs": {
+        "pin_currency": "blocks",
+        "probe": "n/a"
+      },
+      "exit_code": 2,
+      "message_key": "bare_pin_blocks",
+      "note": "delegate to check_pin_currency; its own 5 leaves are enumerated separately. exit_code=2 is the representative chosen (newest tags unavailable) -- check_pin_currency's OTHER blocking leaf (stale pin) is exit_code=1, already covered by pin_currency_chain()'s own enumeration."
+    },
+    {
+      "function": "check_floor_bare",
+      "inputs": {
+        "pin_currency": "passes",
+        "probe": "unreachable"
+      },
+      "exit_code": 2,
+      "message_key": "bare_probe_unreachable",
+      "note": ""
+    },
+    {
+      "function": "check_floor_bare",
+      "inputs": {
+        "pin_currency": "passes",
+        "probe": "ms_error"
+      },
+      "exit_code": 1,
+      "message_key": "bare_probe_stale_via_exception",
+      "note": ""
+    },
+    {
+      "function": "check_floor_bare",
+      "inputs": {
+        "pin_currency": "passes",
+        "probe": "success_stale"
+      },
+      "exit_code": 1,
+      "message_key": "bare_probe_stale_via_success",
+      "note": "defensive-only per check_floor's own docstring: probe_managed_service fails closed on a below-floor release_version before ever returning a successful caps, so this branch is unreachable via the REAL sensor"
+    },
+    {
+      "function": "check_floor_bare",
+      "inputs": {
+        "pin_currency": "passes",
+        "probe": "success_current"
+      },
+      "exit_code": 0,
+      "message_key": "bare_probe_current",
+      "note": ""
+    },
+    {
+      "function": "check_floor_paired",
+      "inputs": {
+        "battery": "blocks",
+        "probe": "n/a"
+      },
+      "exit_code": 1,
+      "message_key": "paired_battery_blocks",
+      "note": "delegate to _run_paired_precondition_battery (ledger + check_paired_preconditions); their own leaves are enumerated separately"
+    },
+    {
+      "function": "check_floor_paired",
+      "inputs": {
+        "battery": "passes",
+        "probe": "unreachable"
+      },
+      "exit_code": 2,
+      "message_key": "paired_probe_unreachable",
+      "note": ""
+    },
+    {
+      "function": "check_floor_paired",
+      "inputs": {
+        "battery": "passes",
+        "probe": "ms_error_not_below_floor"
+      },
+      "exit_code": 2,
+      "message_key": "paired_probe_unverifiable_exception",
+      "note": ""
+    },
+    {
+      "function": "check_floor_paired",
+      "inputs": {
+        "battery": "passes",
+        "probe": "ms_error_below_floor"
+      },
+      "exit_code": 0,
+      "message_key": "paired_probe_ack_via_exception",
+      "note": ""
+    },
+    {
+      "function": "check_floor_paired",
+      "inputs": {
+        "battery": "passes",
+        "probe": "success_unparseable"
+      },
+      "exit_code": 2,
+      "message_key": "paired_probe_unverifiable_success",
+      "note": "defensive-only: probe_managed_service fails closed before returning an unparseable release_version on the real path"
+    },
+    {
+      "function": "check_floor_paired",
+      "inputs": {
+        "battery": "passes",
+        "probe": "success_below_floor"
+      },
+      "exit_code": 0,
+      "message_key": "paired_probe_ack_via_success",
+      "note": ""
+    },
+    {
+      "function": "check_floor_paired",
+      "inputs": {
+        "battery": "passes",
+        "probe": "success_at_or_above_floor"
+      },
+      "exit_code": 0,
+      "message_key": "paired_probe_current",
+      "note": ""
+    },
+    {
+      "function": "check_floor_auto_paired",
+      "inputs": {
+        "probe": "unreachable"
+      },
+      "exit_code": 2,
+      "message_key": "auto_probe_unreachable",
+      "note": ""
+    },
+    {
+      "function": "check_floor_auto_paired",
+      "inputs": {
+        "probe": "ms_error_not_below_floor"
+      },
+      "exit_code": 2,
+      "message_key": "auto_probe_unverifiable_exception",
+      "note": ""
+    },
+    {
+      "function": "check_floor_auto_paired",
+      "inputs": {
+        "probe": "ms_error_below_floor",
+        "battery": "blocks"
+      },
+      "exit_code": 1,
+      "message_key": "auto_below_via_exception_battery_blocks",
+      "note": "delegate to _paired_below_floor_path -> _run_paired_precondition_battery"
+    },
+    {
+      "function": "check_floor_auto_paired",
+      "inputs": {
+        "probe": "ms_error_below_floor",
+        "battery": "passes"
+      },
+      "exit_code": 0,
+      "message_key": "auto_below_via_exception_ack",
+      "note": ""
+    },
+    {
+      "function": "check_floor_auto_paired",
+      "inputs": {
+        "probe": "success_at_or_above_floor",
+        "pin_currency": "blocks"
+      },
+      "exit_code": 2,
+      "message_key": "auto_current_pin_blocks",
+      "note": "delegate to check_pin_currency; exit_code=2 representative, see check_floor_bare_cells' matching note"
+    },
+    {
+      "function": "check_floor_auto_paired",
+      "inputs": {
+        "probe": "success_at_or_above_floor",
+        "pin_currency": "passes"
+      },
+      "exit_code": 0,
+      "message_key": "auto_current",
+      "note": ""
+    },
+    {
+      "function": "check_floor_auto_paired",
+      "inputs": {
+        "probe": "success_unparseable"
+      },
+      "exit_code": 2,
+      "message_key": "auto_probe_unverifiable_success",
+      "note": "defensive-only, see check_floor_paired_explicit_cells' matching note"
+    },
+    {
+      "function": "check_floor_auto_paired",
+      "inputs": {
+        "probe": "success_below_floor",
+        "battery": "blocks"
+      },
+      "exit_code": 1,
+      "message_key": "auto_below_via_success_battery_blocks",
+      "note": ""
+    },
+    {
+      "function": "check_floor_auto_paired",
+      "inputs": {
+        "probe": "success_below_floor",
+        "battery": "passes"
+      },
+      "exit_code": 0,
+      "message_key": "auto_below_via_success_ack",
+      "note": ""
+    },
+    {
+      "function": "tracker_leg_dispatch",
+      "inputs": {
+        "report_dir": "resolved"
+      },
+      "exit_code": 0,
+      "message_key": "tracker_leg_delegates",
+      "note": "delegate to record_deploy_from_gate_report_leg; its own 8 leaves are enumerated separately by tracker_outcome_chain"
+    },
+    {
+      "function": "tracker_leg_dispatch",
+      "inputs": {
+        "report_dir": "absent",
+        "no_record_deploy": "given"
+      },
+      "exit_code": 0,
+      "message_key": "tracker_leg_opt_out",
+      "note": ""
+    },
+    {
+      "function": "tracker_leg_dispatch",
+      "inputs": {
+        "report_dir": "absent",
+        "no_record_deploy": "absent"
+      },
+      "exit_code": 3,
+      "message_key": "tracker_leg_refusal",
+      "note": ""
+    },
+    {
+      "function": "check_composite",
+      "inputs": {
+        "hand_table": "latest_release_tag_error"
+      },
+      "exit_code": 2,
+      "message_key": "composite_latest_release_tag_error",
+      "note": ""
+    },
+    {
+      "function": "check_composite",
+      "inputs": {
+        "hand_table": "is_ancestor_error"
+      },
+      "exit_code": 2,
+      "message_key": "composite_is_ancestor_error",
+      "note": ""
+    },
+    {
+      "function": "check_composite",
+      "inputs": {
+        "hand_table": "missing_commit"
+      },
+      "exit_code": 1,
+      "message_key": "composite_missing_commit",
+      "note": ""
+    },
+    {
+      "function": "check_composite",
+      "inputs": {
+        "hand_table": "vacuous",
+        "ledger": "empty"
+      },
+      "exit_code": 0,
+      "message_key": "composite_both_vacuous",
+      "note": ""
+    },
+    {
+      "function": "check_composite",
+      "inputs": {
+        "hand_table": "vacuous",
+        "ledger": "blocking"
+      },
+      "exit_code": 1,
+      "message_key": "composite_vacuous_table_ledger_blocks",
+      "note": ""
+    },
+    {
+      "function": "check_composite",
+      "inputs": {
+        "hand_table": "vacuous",
+        "ledger": "additive"
+      },
+      "exit_code": 0,
+      "message_key": "composite_vacuous_table_ledger_additive",
+      "note": ""
+    },
+    {
+      "function": "check_composite",
+      "inputs": {
+        "hand_table": "vacuous",
+        "ledger": "acked_only"
+      },
+      "exit_code": 0,
+      "message_key": "composite_vacuous_table_ledger_acked",
+      "note": ""
+    },
+    {
+      "function": "check_composite",
+      "inputs": {
+        "hand_table": "satisfied",
+        "ledger": "empty"
+      },
+      "exit_code": 0,
+      "message_key": "composite_table_satisfied_ledger_empty",
+      "note": ""
+    },
+    {
+      "function": "check_composite",
+      "inputs": {
+        "hand_table": "satisfied",
+        "ledger": "blocking"
+      },
+      "exit_code": 1,
+      "message_key": "composite_table_satisfied_ledger_blocks",
+      "note": ""
+    },
+    {
+      "function": "check_composite",
+      "inputs": {
+        "hand_table": "satisfied",
+        "ledger": "additive"
+      },
+      "exit_code": 0,
+      "message_key": "composite_table_satisfied_ledger_additive",
+      "note": ""
+    },
+    {
+      "function": "check_composite",
+      "inputs": {
+        "hand_table": "satisfied",
+        "ledger": "acked_only"
+      },
+      "exit_code": 0,
+      "message_key": "composite_table_satisfied_ledger_acked",
+      "note": ""
+    }
+  ],
+  "unreachable_declared_leaves": [],
+  "event_mode_matrix": [
+    {
+      "script": "check_engine_release_floor",
+      "mode": "bare",
+      "event": "pre-tag",
+      "reachable": true,
+      "citation": "AGENTS.md \u00a7 Cutting a release step 0: human bare invocation before the tag is cut."
+    },
+    {
+      "script": "check_engine_release_floor",
+      "mode": "bare",
+      "event": "tag-push",
+      "reachable": false,
+      "citation": "no invocation site found for this (mode, event) pairing"
+    },
+    {
+      "script": "check_engine_release_floor",
+      "mode": "bare",
+      "event": "deploy",
+      "reachable": false,
+      "citation": "AGENTS.md \u00a7 Engine-service release: the deploy relay 'runs on a different system, on Hal's side of the AGENTS.md bus' -- neither script is invoked there."
+    },
+    {
+      "script": "check_engine_release_floor",
+      "mode": "bare",
+      "event": "post-deploy-verify",
+      "reachable": true,
+      "citation": "check_floor's _print_paired_ack: 'POST-TAG VERIFY REQUIRED: re-run this script WITHOUT --paired-deploy once the deploy lands'."
+    },
+    {
+      "script": "check_engine_release_floor",
+      "mode": "--paired-deploy",
+      "event": "pre-tag",
+      "reachable": true,
+      "citation": "module docstring: the human names the tag BEFORE cutting the client tag; _DEFAULT_PAIRED_TAG_MAX_AGE_HOURS's docstring: 'deploy fires AT client-tag push -- a pairing older than this is not THIS release's partner'."
+    },
+    {
+      "script": "check_engine_release_floor",
+      "mode": "--paired-deploy",
+      "event": "tag-push",
+      "reachable": false,
+      "citation": "no invocation site found for this (mode, event) pairing"
+    },
+    {
+      "script": "check_engine_release_floor",
+      "mode": "--paired-deploy",
+      "event": "deploy",
+      "reachable": false,
+      "citation": "AGENTS.md \u00a7 Engine-service release: the deploy relay 'runs on a different system, on Hal's side of the AGENTS.md bus' -- neither script is invoked there."
+    },
+    {
+      "script": "check_engine_release_floor",
+      "mode": "--paired-deploy",
+      "event": "post-deploy-verify",
+      "reachable": false,
+      "citation": "no invocation site found for this (mode, event) pairing"
+    },
+    {
+      "script": "check_engine_release_floor",
+      "mode": "--paired-deploy-auto",
+      "event": "pre-tag",
+      "reachable": false,
+      "citation": "no invocation site found for this (mode, event) pairing"
+    },
+    {
+      "script": "check_engine_release_floor",
+      "mode": "--paired-deploy-auto",
+      "event": "tag-push",
+      "reachable": true,
+      "citation": "nexus-gc9ir module docstring: 'release.yml's own copy of this gate ... runs --paired-deploy-auto instead of bare' -- fired at tag push, unattended."
+    },
+    {
+      "script": "check_engine_release_floor",
+      "mode": "--paired-deploy-auto",
+      "event": "deploy",
+      "reachable": false,
+      "citation": "AGENTS.md \u00a7 Engine-service release: the deploy relay 'runs on a different system, on Hal's side of the AGENTS.md bus' -- neither script is invoked there."
+    },
+    {
+      "script": "check_engine_release_floor",
+      "mode": "--paired-deploy-auto",
+      "event": "post-deploy-verify",
+      "reachable": false,
+      "citation": "no invocation site found for this (mode, event) pairing"
+    },
+    {
+      "script": "check_engine_release_floor",
+      "mode": "--ledger-only",
+      "event": "pre-tag",
+      "reachable": true,
+      "citation": "T2 nexus_rdr/201-research-4: 'ci.yml:153 runs --ledger-only on every pull_request with base_ref main' -- before any tag exists."
+    },
+    {
+      "script": "check_engine_release_floor",
+      "mode": "--ledger-only",
+      "event": "tag-push",
+      "reachable": false,
+      "citation": "no invocation site found for this (mode, event) pairing"
+    },
+    {
+      "script": "check_engine_release_floor",
+      "mode": "--ledger-only",
+      "event": "deploy",
+      "reachable": false,
+      "citation": "AGENTS.md \u00a7 Engine-service release: the deploy relay 'runs on a different system, on Hal's side of the AGENTS.md bus' -- neither script is invoked there."
+    },
+    {
+      "script": "check_engine_release_floor",
+      "mode": "--ledger-only",
+      "event": "post-deploy-verify",
+      "reachable": false,
+      "citation": "no invocation site found for this (mode, event) pairing"
+    },
+    {
+      "script": "check_client_release_precondition",
+      "mode": "default",
+      "event": "pre-tag",
+      "reachable": true,
+      "citation": "T2 nexus_rdr/201-research-4: 'only callers are skill markdown (.claude/skills/engine-release/SKILL.md:193,212,427)', used to decide deploy-before-tag ordering per nexus-1emxn choreography (a)/(b), i.e. before the client tag exists."
+    },
+    {
+      "script": "check_client_release_precondition",
+      "mode": "default",
+      "event": "tag-push",
+      "reachable": false,
+      "citation": "no invocation site found for this (mode, event) pairing"
+    },
+    {
+      "script": "check_client_release_precondition",
+      "mode": "default",
+      "event": "deploy",
+      "reachable": false,
+      "citation": "AGENTS.md \u00a7 Engine-service release: the deploy relay 'runs on a different system, on Hal's side of the AGENTS.md bus' -- neither script is invoked there."
+    },
+    {
+      "script": "check_client_release_precondition",
+      "mode": "default",
+      "event": "post-deploy-verify",
+      "reachable": false,
+      "citation": "no invocation site found for this (mode, event) pairing"
+    }
+  ]
+}
