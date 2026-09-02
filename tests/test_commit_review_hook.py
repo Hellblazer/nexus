@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -75,11 +76,34 @@ def test_the_review_stanza_lives_inside_the_sentinel_block() -> None:
     assert begin < review < end
 
 
-def test_review_runs_after_the_indexer_not_before() -> None:
-    """Ordering is deliberate: the cheap local index should not wait on a
-    network dispatch that may take a minute."""
+def test_review_precedes_both_indexing_exit_guards() -> None:
+    """The review must not sit behind either `exit 0` (2 Critical, a461db0b7).
+
+    This replaces an earlier test that asserted the OPPOSITE order on a
+    rationale that was simply wrong -- both dispatches are backgrounded and
+    disowned, so running the review first delays the indexer by nothing.
+    What the old order did cost was correctness: the indexing stanza's
+    linked-worktree guard and its "indexer already running" guard both
+    `exit 0` above the indexer's own dispatch, so anything appended after
+    them inherited both exits and was silently skipped.
+    """
     body = _stanza_for("post-commit")
-    assert body.index("nx index repo") < body.index("nx review commit")
+    review_at = body.index("nx review commit")
+    for guard in ("LINKED-WORKTREE GUARD", "pgrep -f \"nx index repo"):
+        assert review_at < body.index(guard), (
+            f"the review stanza sits after the {guard!r} guard and will be "
+            "silently skipped whenever that guard fires"
+        )
+
+
+def test_stanza_anchor_exists() -> None:
+    """_stanza_for's insertion anchor must stay present in _STANZA.
+
+    If the REPO_TOP line is ever reworded, _stanza_for raises rather than
+    falling back to appending at the end -- which is exactly the placement
+    that produced the two Critical silent-skip defects.
+    """
+    assert 'REPO_TOP="$(git rev-parse --show-toplevel)"\n' in _STANZA
 
 
 def test_the_review_dispatch_is_detached() -> None:
@@ -163,3 +187,183 @@ def test_a_broken_nx_on_path_still_does_not_block_a_commit(
         env={"PATH": f"{shim_dir}:{os.environ['PATH']}"},
     )
     assert proc.returncode == 0, proc.stderr
+
+
+# ── the review branch actually firing ────────────────────────────────────────
+#
+# Every test above this point either sets NX_COMMIT_REVIEW=0 or inspects the
+# stanza as a string, so none of them ever executed the review branch. That
+# gap is exactly what let two silent-skip defects ship: the stanza had been
+# appended AFTER the indexing block's two `exit 0` guards, so the reviewer
+# never ran while an indexer was alive (measured at 64-131 minutes on this
+# repo) or in any linked worktree, and the only log line written said
+# INDEXING was skipped. These tests run the real hook with a fake `nx` and
+# assert the reviewer was actually invoked.
+
+
+@pytest.fixture
+def fake_home(tmp_path: Path) -> Path:
+    """An isolated HOME so the hook's log never lands in the real config dir."""
+    home = tmp_path / "home"
+    (home / ".config" / "nexus").mkdir(parents=True)
+    return home
+
+
+def _decoy_process(cmdline: str) -> subprocess.Popen:
+    """A live process whose COMMAND LINE is *cmdline*, for pgrep guards.
+
+    ``sh -c "sleep 25" "<name>"`` does not work: on macOS the $0 override
+    is not what ps reports, so pgrep -f never matches and the guard test
+    passes vacuously. bash's ``exec -a`` sets the real argv[0].
+    """
+    return subprocess.Popen(
+        ["bash", "-c", f'exec -a "{cmdline}" sleep 25'],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _nx_recorder(tmp_path: Path) -> tuple[Path, Path]:
+    """A fake ``nx`` on PATH that records its argv. Returns (bindir, logfile)."""
+    shim_dir = tmp_path / "recorder-bin"
+    shim_dir.mkdir()
+    calls = tmp_path / "nx-calls.txt"
+    (shim_dir / "nx").write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\n')
+    (shim_dir / "nx").chmod(0o755)
+    return shim_dir, calls
+
+
+def _commit_with_recorder(
+    repo: Path, shim_dir: Path, name: str, home: Path, extra_env=None
+) -> None:
+    """Commit with the recorder on PATH and an ISOLATED HOME.
+
+    HOME is mandatory, not optional. The hook appends to
+    ``$HOME/.config/nexus/index.log``, so a test that lets the review
+    branch run under the real HOME writes into the operator's actual
+    config dir. tests/conftest.py's _check_real_config_dir_mutations
+    guard catches it -- it caught exactly this while these tests were
+    being written.
+    """
+    (repo / name).write_text(name)
+    _git(repo, "add", name)
+    env = {"PATH": f"{shim_dir}:{os.environ['PATH']}", "HOME": str(home)}
+    env.update(extra_env or {})
+    proc = _git(repo, "commit", "-m", f"feat: {name}", env=env)
+    assert proc.returncode == 0, proc.stderr
+
+
+def _await_file(path: Path, timeout: float = 10.0) -> str:
+    """Wait for a DETACHED writer to produce *path*, then return its text.
+
+    The hook backgrounds and disowns its dispatch, so the commit returns
+    before the child has written anything. Asserting immediately after the
+    commit is a race that fails on a fast machine and passes on a slow one.
+    Returns "" on timeout so callers assert on content, not on this.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists() and path.read_text().strip():
+            return path.read_text()
+        time.sleep(0.05)
+    return path.read_text() if path.exists() else ""
+
+
+def test_a_normal_commit_actually_invokes_the_reviewer(
+    sandbox_repo: Path, tmp_path: Path, fake_home: Path
+) -> None:
+    """The positive case, which had no coverage at all."""
+    CliRunner().invoke(main, ["hooks", "install", str(sandbox_repo)])
+    shim_dir, calls = _nx_recorder(tmp_path)
+    _commit_with_recorder(sandbox_repo, shim_dir, "normal.txt", fake_home)
+
+    text = _await_file(calls)
+    assert "review commit" in text, f"reviewer not invoked; nx calls were:\n{text!r}"
+
+
+def test_the_reviewer_still_runs_while_an_indexer_is_active(
+    sandbox_repo: Path, tmp_path: Path, fake_home: Path
+) -> None:
+    """CRITICAL 1: the indexer's `exit 0` must not swallow the review.
+
+    A previous commit's indexer runs for 64-131 minutes on this repo, so
+    under that guard an ordinary burst of commits reviewed the first and
+    silently dropped every one after it -- the exact release-cut case the
+    review's own pgrep guard exists to handle.
+    """
+    CliRunner().invoke(main, ["hooks", "install", str(sandbox_repo)])
+    shim_dir, calls = _nx_recorder(tmp_path)
+
+    # A real process whose command line matches the indexer guard's pgrep
+    # pattern, and NOT the reviewer's.
+    decoy = _decoy_process(f"nx index repo {sandbox_repo}")
+    try:
+        # Prove the decoy is visible to the same matcher the hook uses,
+        # otherwise this test passes vacuously (nexus-moht0).
+        found = subprocess.run(
+            ["pgrep", "-f", f"nx index repo {sandbox_repo}"],
+            capture_output=True, text=True,
+        )
+        assert found.returncode == 0, "decoy indexer not visible to pgrep; test is vacuous"
+
+        _commit_with_recorder(sandbox_repo, shim_dir, "during-index.txt", fake_home)
+    finally:
+        decoy.terminate()
+        decoy.wait(timeout=10)
+
+    text = _await_file(calls)
+    assert "review commit" in text, f"reviewer skipped by the indexer guard; nx calls:\n{text!r}"
+    assert "index repo" not in text, "the indexer should still have been skipped"
+
+
+def test_the_reviewer_still_runs_in_a_linked_worktree(
+    sandbox_repo: Path, tmp_path: Path, fake_home: Path
+) -> None:
+    """CRITICAL 2: the linked-worktree `exit 0` must not swallow the review.
+
+    Worktree dispatch is this project's standard agent workflow, and hooks
+    live in the COMMON git dir, so every worktree commit went unreviewed
+    while the log line claimed only that INDEXING was skipped.
+    """
+    CliRunner().invoke(main, ["hooks", "install", str(sandbox_repo)])
+    shim_dir, calls = _nx_recorder(tmp_path)
+
+    wt = tmp_path / "linked-wt"
+    made = _git(sandbox_repo, "worktree", "add", "-q", "-b", "wt-branch", str(wt))
+    assert made.returncode == 0, made.stderr
+    # Non-vacuity: the hook must actually be reachable from the worktree,
+    # which is the property that makes this test meaningful at all.
+    assert (sandbox_repo / ".git" / "hooks" / "post-commit").exists()
+
+    _commit_with_recorder(wt, shim_dir, "in-worktree.txt", fake_home)
+
+    text = _await_file(calls)
+    assert "review commit" in text, f"reviewer skipped by the worktree guard; nx calls:\n{text!r}"
+    assert "index repo" not in text, "indexing a worktree is still correctly skipped"
+
+
+def test_a_second_concurrent_review_is_skipped_but_says_so(
+    sandbox_repo: Path, tmp_path: Path, fake_home: Path
+) -> None:
+    """The review's OWN pgrep guard may serialise, but never in silence.
+
+    A skipped review that logs nothing is indistinguishable from a review
+    that ran and found nothing (nexus-moht0).
+    """
+    CliRunner().invoke(main, ["hooks", "install", str(sandbox_repo)])
+    shim_dir, _ = _nx_recorder(tmp_path)
+
+    decoy = _decoy_process(f"nx review commit HEAD --repo {sandbox_repo}")
+    try:
+        found = subprocess.run(
+            ["pgrep", "-f", f"nx review commit .* --repo {sandbox_repo}"],
+            capture_output=True, text=True,
+        )
+        assert found.returncode == 0, "decoy reviewer not visible to pgrep; test is vacuous"
+        _commit_with_recorder(sandbox_repo, shim_dir, "concurrent.txt", fake_home)
+    finally:
+        decoy.terminate()
+        decoy.wait(timeout=10)
+
+    log = fake_home / ".config" / "nexus" / "index.log"
+    assert "SKIPPED (review already running)" in _await_file(log)

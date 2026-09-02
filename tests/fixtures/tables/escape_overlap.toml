@@ -10,8 +10,8 @@
 #   accepted]) is a STRICT SUPERSET of the ordinary row's guard
 #   (status=draft) -- the round-2 critique's repro, and the more natural
 #   authoring mistake (a rescue guard written too broadly). RDR-201 sec
-#   Background states intrastate "has no hit policy, so overlap is a lint
-#   failure rather than something a priority order resolves" -- there is
+#   Background states there is no hit policy, so an overlap is a lint
+#   failure rather than something a priority order resolves -- there is
 #   no textual basis for exempting strict subsumption, so this must ALSO
 #   be flagged as OVERLAP (T2 nexus/critique-nexus-j9z30-1-round2-2026-09-01
 #   [24008]).

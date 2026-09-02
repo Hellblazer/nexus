@@ -133,22 +133,53 @@ disown
 #: indexer, and ``nx review commit`` itself always exits 0. A post-commit
 #: hook that can fail is a footgun during a tag-push sequence that has to
 #: land in tight succession.
+#:
+#: PLACED BEFORE THE INDEXING GUARDS, and that position is the whole
+#: point (code review of a461db0b7, 2 Critical). The indexing stanza
+#: carries two ``exit 0`` guards -- the linked-worktree skip and the
+#: "an indexer for this repo is already running" pgrep -- and BOTH sit
+#: above the indexer's own dispatch. Appended after them, as this stanza
+#: first was, the review inherited both exits and was silently skipped:
+#:   * whenever a previous commit's indexer was still running, which on
+#:     this repo is measured at 64-131 minutes, so an ordinary burst of
+#:     commits would review the first and silently drop the rest -- the
+#:     exact release-cut case this stanza's own pgrep guard exists for;
+#:   * on every commit made in a linked worktree, which is this
+#:     project's standard agent-dispatch workflow.
+#: In both cases the only log line written mentioned INDEXING being
+#: skipped, so a human reading the log would see a hook that ran fine.
+#: A gate that skip-passes without saying so is the nexus-moht0 class.
+#:
+#: Ordering costs nothing: both dispatches are backgrounded and disowned,
+#: so running the review first does not delay the indexer by anything.
+#: The earlier ordering rationale ("do not make the cheap local index
+#: wait on a network dispatch") was simply wrong about that.
+#:
+#: Uses ``$HOME/.config/nexus/index.log`` literally rather than
+#: ``$NX_INDEX_LOG``: that variable is not assigned until AFTER the
+#: guards, i.e. after this block. The linked-worktree guard above writes
+#: its own line the same way, for the same reason.
 _REVIEW_STANZA = """\
-# PER-COMMIT REVIEW (nexus-jh86x). Origin: the intrastate comparison,
-# 2026-09-01 -- every production defect credited to that project's
-# decision-record apparatus was in fact found by a per-commit AI reviewer
-# with no visibility into the records; the apparatus only adjudicated.
+# PER-COMMIT REVIEW (nexus-jh86x). Reviews the commit just made, in the
+# background, and records findings in T2. Never blocks: see the bead for
+# why this fires per commit rather than on demand.
 # Opt out with NX_COMMIT_REVIEW=0 (env beats config), or persistently via
 # .nexus.yml#commit_review.enabled. Uninstall removes this with the rest
 # of the stanza.
 if [ "$NX_COMMIT_REVIEW" != "0" ]; then
+  _NX_REVIEW_LOG="$HOME/.config/nexus/index.log"
   # Serialise a burst (release cut = commit + back-merge + fix-forward in
-  # quick succession) rather than firing N concurrent children.
-  if ! pgrep -f "nx review commit .* --repo $REPO_TOP" > /dev/null 2>&1; then
+  # quick succession) rather than firing N concurrent children. Unlike the
+  # indexer's guard below, a hit here is LOGGED: a skipped review that
+  # says nothing is indistinguishable from a review that found nothing.
+  if pgrep -f "nx review commit .* --repo $REPO_TOP" > /dev/null 2>&1; then
+    echo "=== nx review post-commit SKIPPED (review already running) $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
+      >> "$_NX_REVIEW_LOG"
+  else
     echo "=== nx review post-commit $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
-      >> "$NX_INDEX_LOG"
+      >> "$_NX_REVIEW_LOG"
     nx review commit "$(git rev-parse HEAD)" --repo "$REPO_TOP" \\
-      >> "$NX_INDEX_LOG" 2>&1 &
+      >> "$_NX_REVIEW_LOG" 2>&1 &
     disown
   fi
 fi
@@ -167,7 +198,18 @@ def _stanza_for(hook_name: str) -> str:
     """
     if hook_name != "post-commit":
         return _STANZA
-    return _STANZA.replace(SENTINEL_END, _REVIEW_STANZA + SENTINEL_END)
+    # Insert immediately after REPO_TOP is assigned and BEFORE the two
+    # indexing ``exit 0`` guards -- see _REVIEW_STANZA's own note. The
+    # anchor is the REPO_TOP line because that is the one thing the review
+    # block needs and the last line guaranteed to precede every guard.
+    anchor = 'REPO_TOP="$(git rev-parse --show-toplevel)"\n'
+    if anchor not in _STANZA:  # pragma: no cover - guarded by test_stanza_anchor_exists
+        raise RuntimeError(
+            "the post-commit review stanza's anchor line is gone from _STANZA; "
+            "re-derive the insertion point rather than appending at the end, "
+            "which is what silently disabled the reviewer behind two exit 0 guards"
+        )
+    return _STANZA.replace(anchor, anchor + _REVIEW_STANZA, 1)
 
 
 # ── git helpers ───────────────────────────────────────────────────────────────

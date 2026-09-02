@@ -4452,3 +4452,71 @@ class TestClaudeDispatchPerOperatorSchemaCheapTier:
         )
 
         jsonschema.validate(result, schema)
+
+
+class TestIsolatedHermeticChild:
+    """``isolated=True`` must reach argv, and must stay opt-in (nexus-jh86x).
+
+    ``--strict-mcp-config`` keeps ambient MCP SERVERS out of the child but
+    does NOT stop it running the caller's SessionStart hooks: eight were
+    measured firing in a tool-free child on 2026-09-02, injecting the
+    conexus skills preamble, the beads workflow context and the ready-bead
+    list into a dispatch with no tools to use any of it. For the
+    per-commit reviewer that is a correctness break, not a cost nuisance --
+    it must review a diff WITHOUT seeing the decision record.
+
+    Both directions are pinned here because the code review of a461db0b7
+    found the flag shipped with zero assertions anywhere: a regression
+    dropping it would have passed every other test while silently
+    reintroducing the leak the commit was written to close. The
+    cross-cutting question of whether every operator should be isolated is
+    nexus-11nm2.
+    """
+
+    @staticmethod
+    async def _argv_for(**kwargs) -> list:
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kw):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA, **kwargs)
+        return list(captured[0])
+
+    @pytest.mark.asyncio
+    async def test_isolated_true_emits_empty_setting_sources(self) -> None:
+        argv = await self._argv_for(isolated=True)
+        assert "--setting-sources" in argv, (
+            "isolated=True must pass --setting-sources so the child loads no "
+            "settings file and therefore runs none of the caller's hooks"
+        )
+        assert argv[argv.index("--setting-sources") + 1] == "", (
+            "the value must be EMPTY -- any source loads that file's hooks"
+        )
+
+    @pytest.mark.asyncio
+    async def test_default_leaves_argv_untouched(self) -> None:
+        """Byte-identical argv for the 18 pre-existing call sites."""
+        assert "--setting-sources" not in await self._argv_for()
+
+    @pytest.mark.asyncio
+    async def test_isolated_false_is_explicitly_a_noop(self) -> None:
+        assert "--setting-sources" not in await self._argv_for(isolated=False)
+
+    @pytest.mark.asyncio
+    async def test_isolation_does_not_disturb_the_mcp_flags(self) -> None:
+        """The two mechanisms are independent and must both survive.
+
+        --strict-mcp-config covers servers, --setting-sources covers hooks.
+        A fix for one that quietly dropped the other would reopen the gap
+        it was meant to close.
+        """
+        argv = await self._argv_for(isolated=True)
+        assert "--strict-mcp-config" in argv
+        assert "--allowedTools" not in argv
+        assert "--mcp-config" not in argv

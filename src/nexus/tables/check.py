@@ -384,9 +384,9 @@ def _overlap_participants(group: Group) -> list[Row]:
 def _check_overlap(group: Group, dims: list[str], dimensions: dict[str, Dimension]) -> list[Finding]:
     """Flag ANY non-empty intersection among participants' accepted sets.
 
-    RDR-201 sec Background is explicit: intrastate "has no hit policy, so
+    RDR-201 sec Background is explicit: there is no hit policy, so an
     overlap is a lint failure rather than something a priority order
-    resolves." A shared assignment between two participating rows IS an
+    resolves. A shared assignment between two participating rows IS an
     overlap, full stop -- strict subsumption (a broader row whose accepted
     set is a proper superset of a narrower row's) is NOT exempted. An
     earlier revision of this function carved out strict subsumption as a

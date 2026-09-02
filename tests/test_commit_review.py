@@ -1,12 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Contract tests for the per-commit automated review (nexus-jh86x).
 
-Origin: the intrastate comparison (2026-09-01). Every production defect
-credited to intrastate's decision-record apparatus was in fact found by
-``roborev``, a per-commit AI reviewer on a post-commit hook with NO
-visibility into the records; the apparatus only adjudicated. This module
-pins the nexus equivalent.
-
 The dispatch is INJECTED at every seam here. That is deliberate and it is
 the RDR-201 post-mortem's own lesson applied: a rule proven below the
 layer that uses it is not proven, so the tests that matter feed
@@ -69,8 +63,8 @@ def tiny_repo(tmp_path: Path) -> Path:
 # ── the verdict vocabulary ────────────────────────────────────────────────────
 
 
-def test_verdict_vocabulary_is_the_three_intrastate_values() -> None:
-    """FIX-NOW / FILE / DROP, borrowed as-is from intrastate's triage."""
+def test_verdict_vocabulary_is_the_three_declared_values() -> None:
+    """FIX-NOW / FILE / DROP, and nothing else."""
     assert VERDICTS == ("FIX-NOW", "FILE", "DROP")
 
 
@@ -134,6 +128,42 @@ def test_commit_diff_on_an_unknown_sha_raises(tiny_repo: Path) -> None:
         commit_diff(tiny_repo, "0" * 40, max_bytes=1000)
 
 
+def test_the_commit_body_never_reaches_the_reviewer(tmp_path: Path) -> None:
+    """ANTI-LEAK: the diff carries the subject, never the body.
+
+    Raised by the substantive critique as a load-bearing property that was
+    shipped untested. Commit bodies in this repo routinely cite bead ids,
+    RDR numbers and design rationale -- exactly the decision-record context
+    the reviewer is supposed to be blind to. `git show --format=%H%n%s%n%an`
+    selects the subject (%s) and not the body (%b); a well-meant edit to
+    %B or an added %b would silently pipe the design record into a child
+    whose whole value is not having seen it.
+    """
+    repo = tmp_path / "bodyleak"
+    repo.mkdir()
+    _run(["git", "init", "-q", "-b", "main"], repo)
+    _run(["git", "config", "user.email", "t@example.invalid"], repo)
+    _run(["git", "config", "user.name", "Test"], repo)
+    (repo / "x.py").write_text("x = 1\n")
+    _run(["git", "add", "x.py"], repo)
+    _run(
+        [
+            "git", "commit", "-q",
+            "-m", "feat: subject line is fine",
+            "-m", "SECRET_BODY_MARKER: per RDR-201 and bead nexus-j9z30 the design says X",
+        ],
+        repo,
+    )
+    sha = _run(["git", "rev-parse", "HEAD"], repo).strip()
+    text, _ = commit_diff(repo, sha, max_bytes=100_000)
+
+    assert "subject line is fine" in text, "the subject should be present"
+    assert "SECRET_BODY_MARKER" not in text, (
+        "the commit BODY leaked into the reviewer's prompt; it carries bead "
+        "and RDR references the reviewer must not see"
+    )
+
+
 def test_build_prompt_marks_a_truncated_diff(tiny_repo: Path) -> None:
     full = build_prompt("abc1234", "diff --git a b", truncated=False)
     cut = build_prompt("abc1234", "diff --git a b", truncated=True)
@@ -186,19 +216,25 @@ def test_config_defaults_to_the_ruled_cap() -> None:
     assert cfg.max_budget_usd == 0.25
 
 
-def test_the_default_model_is_the_cheap_tier_alias() -> None:
+def test_the_default_model_is_the_strong_tier_alias() -> None:
     """Pin the literal to the tier table it was copied from.
 
-    ``config.py`` cannot import ``model_tiers`` -- that module is under a
-    repo-wide guard allowing exactly two production consumers, whose other
-    assertions (env-gating) do not fit this call. So the coupling is held
-    here instead, where importing it is free, and a future re-point of the
-    cheap alias fails this test rather than silently leaving the reviewer
-    on a stale model.
+    STRONG, not cheap. model_tiers splits cheap for the mechanical and
+    structural operators and strong for the ones that synthesize or judge,
+    pinning aggregate/summarize to strong for want of a quality proxy. A
+    code reviewer judges, and no quality proxy exists for "did it find the
+    real defect", so strong is what the doctrine already implies. An
+    earlier version defaulted to cheap on one planted defect that both
+    tiers caught -- an N=1 result standing in for the pre-registered
+    multi-pair A/B the tier doctrine actually requires.
+
+    ``config.py`` cannot import ``model_tiers`` (repo-wide two-consumer
+    guard whose env-gating assertions do not fit this call), so the
+    coupling is held here, where importing it is free.
     """
     from nexus.operators.model_tiers import resolve_model_for_tier
 
-    assert COMMIT_REVIEW_DEFAULT_MODEL == resolve_model_for_tier("cheap")
+    assert COMMIT_REVIEW_DEFAULT_MODEL == resolve_model_for_tier("strong")
 
 
 def test_the_reviewer_never_defaults_to_the_inherited_model() -> None:
@@ -248,6 +284,11 @@ def test_review_commit_writes_one_record_with_typed_findings(tiny_repo: Path) ->
         assert "def f()" in prompt, "the reviewer must actually see the diff"
         assert kwargs["max_budget_usd"] == 0.25
         assert kwargs.get("allowed_tools") is None, "the child must stay tool-free"
+        # isolated=True is a CORRECTNESS fix, not a cost one: without it
+        # the child boots the caller's SessionStart hooks and sees the bead
+        # board it is supposed to be blind to. Untested, a regression
+        # dropping it would pass every other assertion here.
+        assert kwargs["isolated"] is True, "the reviewer's child must be hermetic"
         return {
             "findings": [
                 {"verdict": "FIX-NOW", "summary": "no docstring", "reason": "house style"}
@@ -425,32 +466,33 @@ def test_every_verdict_in_the_vocabulary_survives_the_round_trip() -> None:
 
 
 def test_census_counts_across_records_built_by_the_renderer() -> None:
-    """The census consumes stored records, so build them with the renderer."""
+    """The census consumes stored records, so build them with the renderer.
+
+    Rows carry real titles because the records share the ``nexus`` project
+    with thousands of unrelated entries (Sam's ruling, 2026-09-02) and the
+    census selects them by title prefix. A fixture without titles would
+    prove the counter and skip the filter that stands in front of it.
+    """
+
+    def _row(sha: str, subject: str, findings: list[Finding]) -> dict:
+        return {
+            "title": record_title(sha),
+            "content": render_record(
+                sha=sha, subject=subject, findings=findings, cost_usd=0.01
+            ),
+        }
 
     class FakeMemory:
         def get_all(self, project):
             assert project == REVIEW_PROJECT
             return [
-                {
-                    "content": render_record(
-                        sha="a" * 12,
-                        subject="one",
-                        findings=[Finding("FIX-NOW", "s", "r")],
-                        cost_usd=0.01,
-                    )
-                },
-                {
-                    "content": render_record(
-                        sha="b" * 12,
-                        subject="two",
-                        findings=[
-                            Finding("DROP", "s", "r"),
-                            Finding("FILE", "s", "r"),
-                        ],
-                        cost_usd=0.01,
-                    )
-                },
-                {"content": render_record(sha="c" * 12, subject="clean", findings=[], cost_usd=0.0)},
+                _row("a" * 40, "one", [Finding("FIX-NOW", "s", "r")]),
+                _row("b" * 40, "two", [Finding("DROP", "s", "r"), Finding("FILE", "s", "r")]),
+                _row("c" * 40, "clean", []),
+                # A NEIGHBOUR in the same project that is not a review. The
+                # prefix filter must drop it; counted, it would read as a
+                # commit that was reviewed and found clean.
+                {"title": "continuation-state.md", "content": "unrelated note"},
             ]
 
     class FakeDB:
@@ -460,7 +502,7 @@ def test_census_counts_across_records_built_by_the_renderer() -> None:
     assert totals["FIX-NOW"] == 1
     assert totals["FILE"] == 1
     assert totals["DROP"] == 1
-    assert totals["_records"] == 3
+    assert totals["_records"] == 3, "the non-review neighbour must not be counted"
     assert totals["_clean"] == 1
 
 
@@ -482,3 +524,105 @@ def test_an_out_of_vocabulary_verdict_from_the_model_is_not_written(
     )
     assert result.row_id is None
     assert written == []
+
+
+# ── SessionStart delivery (Sam's ruling, 2026-09-02) ──────────────────────────
+
+
+class TestSessionStartNotice:
+    """FIX-NOW findings must be pushed at a human, not merely stored.
+
+    Without this the reviewer was theatre: a verdict meaning "fix before
+    this work goes further" landed in T2 and a log file, and nothing
+    surfaced it until somebody thought to look.
+    """
+
+    @staticmethod
+    def _rows(*specs) -> list[dict]:
+        from datetime import datetime, timedelta, timezone
+
+        out = []
+        for sha, verdict, age_days in specs:
+            findings = [Finding(verdict, "s", "r")] if verdict else []
+            when = datetime.now(timezone.utc) - timedelta(days=age_days)
+            out.append({
+                "title": record_title(sha),
+                "timestamp": when.isoformat(),
+                "content": render_record(
+                    sha=sha, subject="s", findings=findings, cost_usd=0.0
+                ),
+            })
+        return out
+
+    def _notice(self, monkeypatch: pytest.MonkeyPatch, rows: list[dict]) -> str:
+        import contextlib
+
+        from nexus import hooks as hooks_mod
+
+        class FakeMemory:
+            def get_all(self, project):
+                return rows
+
+        class FakeDB:
+            memory = FakeMemory()
+
+        @contextlib.contextmanager
+        def fake_handle():
+            yield FakeDB()
+
+        monkeypatch.setattr("nexus.commands._helpers.t2_handle", fake_handle)
+        return hooks_mod._pending_fix_now_notice()
+
+    def test_reports_recent_fix_now_commits(self, monkeypatch) -> None:
+        notice = self._notice(monkeypatch, self._rows(("a" * 40, "FIX-NOW", 1)))
+        assert "FIX-NOW" in notice
+        assert "1 commit" in notice
+
+    def test_counts_commits_not_findings(self, monkeypatch) -> None:
+        """Two FIX-NOWs on one commit is ONE thing to go and look at."""
+        from datetime import datetime, timedelta, timezone
+
+        when = datetime.now(timezone.utc) - timedelta(days=1)
+        rows = [{
+            "title": record_title("a" * 40),
+            "timestamp": when.isoformat(),
+            "content": render_record(
+                sha="a" * 40, subject="s",
+                findings=[Finding("FIX-NOW", "x", "r"), Finding("FIX-NOW", "y", "r")],
+                cost_usd=0.0,
+            ),
+        }]
+        assert "1 commit" in self._notice(monkeypatch, rows)
+
+    def test_silent_when_nothing_is_outstanding(self, monkeypatch) -> None:
+        assert self._notice(monkeypatch, self._rows(("a" * 40, None, 1))) == ""
+
+    def test_silent_when_there_are_no_records_at_all(self, monkeypatch) -> None:
+        assert self._notice(monkeypatch, []) == ""
+
+    def test_old_findings_roll_off(self, monkeypatch) -> None:
+        """Bounded on purpose: an unbounded nag becomes the thing people
+        learn to scroll past, which is the failure this notice prevents."""
+        assert self._notice(monkeypatch, self._rows(("a" * 40, "FIX-NOW", 30))) == ""
+
+    def test_other_verdicts_do_not_nag(self, monkeypatch) -> None:
+        rows = self._rows(("a" * 40, "DROP", 1), ("b" * 40, "FILE", 1))
+        assert self._notice(monkeypatch, rows) == ""
+
+    def test_non_review_entries_in_the_project_are_ignored(self, monkeypatch) -> None:
+        """The records share the nexus project with thousands of notes."""
+        rows = [{"title": "continuation-state.md", "content": "Verdicts: FIX-NOW=9"}]
+        assert self._notice(monkeypatch, rows) == ""
+
+    def test_a_t2_failure_never_breaks_session_start(self, monkeypatch) -> None:
+        import contextlib
+
+        from nexus import hooks as hooks_mod
+
+        @contextlib.contextmanager
+        def exploding_handle():
+            raise RuntimeError("T2 unreachable")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr("nexus.commands._helpers.t2_handle", exploding_handle)
+        assert hooks_mod._pending_fix_now_notice() == ""

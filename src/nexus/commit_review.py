@@ -1,38 +1,46 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Per-commit automated review (bead nexus-jh86x).
 
-Origin, and the reason this exists at all: the intrastate comparison of
-2026-09-01. All five headline "the decision-record apparatus caught this
-production defect" examples in that project trace, in its own triage
-files, to ``roborev`` -- a per-commit AI reviewer fired from a post-commit
-hook, running on a repo-sandboxed prompt with NO visibility into the
-116k-line decision archive. The archive adjudicated findings it did not
-discover. The reviewer was the cheapest instrument in either stack and the
-one with the clearest measured yield, so it is the half worth copying.
+Reviews one commit with a tool-free ``claude -p`` over its diff and
+records typed findings in T2. Nothing is auto-applied and nothing is
+auto-filed: triage is a human act.
 
 Shape, deliberately narrow:
 
-- **Tool-free.** ``allowed_tools`` is never passed, which keeps
-  ``claude_dispatch``'s stateless-operator contract. That is not only a
-  fidelity point (roborev sees the diff and nothing else); per the T1
-  sub-agent contract in AGENTS.md a dispatch mints a T1 session only when
-  it grants tool access (nexus-bjltu), so a tool-free child leaves no
-  per-commit session behind.
-- **Never blocks.** Every failure path returns a
-  :class:`ReviewResult` carrying ``skipped_reason``. Nothing in this
-  module raises out to its caller once ``review_commit`` is entered. A
-  post-commit hook that can block is a footgun during a tag-push
-  sequence, which has to land in tight succession.
-- **Never edits.** Findings are recorded and reported. Triage is a human
-  act; intrastate's own measurement is that only 19% of production-class
-  findings warranted an immediate fix.
+- **Tool-free, and hermetic.** ``allowed_tools`` is never passed and the
+  dispatch is ``isolated``, so the child sees the diff and nothing else --
+  not the bead board, not the RDR corpus, not prior reviews. That
+  independence is the whole value: a reviewer that has read the design
+  record tends to agree with it. Per the T1 sub-agent contract in
+  AGENTS.md a dispatch mints a T1 session only when it grants tool access
+  (nexus-bjltu), so a tool-free child also leaves nothing behind.
+- **Never blocks.** Every failure path returns a :class:`ReviewResult`
+  carrying ``skipped_reason``; nothing here raises out to its caller once
+  :func:`review_commit` is entered. A post-commit hook that can block is a
+  footgun during a tag-push sequence, which has to land in tight
+  succession.
+- **Never edits.** Findings are recorded and reported, never applied.
 
-The verdict vocabulary is borrowed as-is from intrastate's triage:
-FIX-NOW / FILE / DROP. It is deliberately NOT an RDR-201 checked table --
-that machinery earns its place where a vocabulary has drifted across many
-consumers, and this one has a single producer (the dispatch schema) and a
-single consumer (``nx census reviews``). Revisit if a second consumer
-appears.
+Expect an instrument that mostly comments on test quality and
+occasionally catches a design error, and treat that as the success case.
+Nothing about its value here has been measured yet: as of 2026-09-02 the
+observed yield is one finding on a deliberately planted defect in a
+throwaway repo, which shows the pipeline works and says nothing about
+real commits. If the FIX-NOW rate turns out to be dominated by noise, the
+honest response is to narrow or retire this, not to habituate people to
+ignoring a verdict whose whole meaning is "fix before the work goes
+further".
+
+The verdict vocabulary is FIX-NOW / FILE / DROP. It is deliberately NOT
+an RDR-201 checked table: that checker proves COVERAGE and OVERLAP over
+declared guard dimensions, and this is a flat three-value enum with no
+guard dimensions at all, so a table would have nothing to prove about it.
+Enforcement lives where the values enter the system -- the dispatch
+``json_schema`` constrains the model's output and :func:`parse_findings`
+re-checks it, because a schema-conformant model can be swapped for one
+that is not. Reach for a table if these verdicts ever gain a guard (a
+severity, a scope, an "applies only when"), since that is when coverage
+becomes a real question.
 """
 from __future__ import annotations
 
@@ -48,19 +56,22 @@ from nexus.config import CommitReviewConfig
 
 _log = structlog.get_logger(__name__)
 
-#: intrastate's triage vocabulary, borrowed verbatim. A verdict outside
-#: this set is a defect rather than a new case.
+#: A verdict outside this set is a defect rather than a new case.
 VERDICTS: Final[tuple[str, ...]] = ("FIX-NOW", "FILE", "DROP")
 
-#: T2 project namespace for review records.
+#: T2 project for review records, and the title prefix that identifies
+#: them within it.
 #:
-#: DEVIATION from the bead's stated design, recorded rather than silent:
-#: the bead said ``project nexus``. That project already carries 2265+
-#: entries, and a per-commit writer would flood both it and every
-#: ``memory_get -p nexus`` listing, while making the census scan the lot.
-#: A dedicated namespace makes ``nx census reviews`` an exact read and
-#: keeps per-commit noise out of the project namespace humans browse.
-REVIEW_PROJECT: Final = "nexus_commit_review"
+#: Sam ruled the shared ``nexus`` project on 2026-09-02, over a dedicated
+#: namespace this first shipped with. Consequence, handled rather than
+#: ignored: the project carries thousands of entries, so nothing may
+#: assume a whole-project read is all reviews -- :data:`RECORD_PREFIX` is
+#: what selects them, and the census filters on it.
+REVIEW_PROJECT: Final = "nexus"
+
+#: Title prefix for review records. The census and the SessionStart notice
+#: both select on it, so it is a constant, not a repeated literal.
+RECORD_PREFIX: Final = "review-"
 
 #: Output contract for the dispatch. ``claude_dispatch`` passes this to
 #: ``--json-schema``, so the enum is enforced at the boundary;
@@ -127,7 +138,7 @@ def record_title(sha: str) -> str:
     collision-safe well past this repo's size, while staying short enough
     to read in a title listing.
     """
-    return f"review-{sha[:12]}"
+    return f"{RECORD_PREFIX}{sha[:12]}"
 
 
 def commit_diff(repo: Path, sha: str, *, max_bytes: int) -> tuple[str, bool]:
@@ -182,8 +193,8 @@ def build_prompt(sha: str, diff_text: str, *, truncated: bool) -> str:
 
     Repo-sandboxed by construction: the child gets this text and no tools,
     so it cannot consult the RDR corpus, the bead board, or prior reviews.
-    That is the property that made roborev's findings independent evidence
-    rather than an echo of the design record.
+    That is what keeps a finding independent evidence rather than an echo
+    of the design record.
     """
     truncation_note = (
         "\nNOTE: this diff was TRUNCATED to fit a size cap. You are seeing a "
@@ -401,8 +412,19 @@ async def review_commit(
         truncated=truncated,
     )
 
-    if put is None:  # pragma: no cover - exercised via the CLI path
-        raise CommitReviewError("no T2 writer supplied")  # unreachable from the CLI
+    if put is None:
+        # Returns, never raises. The docstring's "never raises" has to hold
+        # on EVERY path or it is not a contract, and this one was a bare
+        # ``raise`` reachable by any non-CLI caller (code review of
+        # a461db0b7, Important #3). Only review_cmd.py's outer try/except
+        # was holding the never-blocks-a-commit guarantee up here.
+        _log.warning("commit_review_no_writer", sha=sha[:12])
+        return ReviewResult(
+            sha=sha,
+            findings=findings,
+            skipped_reason="no T2 writer supplied",
+            truncated=truncated,
+        )
 
     try:
         row_id = put(

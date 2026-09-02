@@ -3676,9 +3676,9 @@ nx review show [REV] [--repo PATH]
 | `commit [REV]` | Review REV (default `HEAD`) and record findings in T2. **Always exits 0** — a hook that can fail a commit is a footgun during a tag-push sequence |
 | `show [REV]` | Print the stored review record for REV |
 
-The reviewer is a **tool-free** `claude -p` dispatch over `git show REV` alone. It cannot read the RDR corpus, the bead board, or prior reviews — that independence is the point. Origin: the 2026-09-01 intrastate comparison found that every production defect credited to that project's 116k-line decision-record apparatus was in fact discovered by a per-commit AI reviewer with no visibility into the records; the apparatus only adjudicated findings it did not discover.
+The reviewer is a **tool-free** `claude -p` dispatch over `git show REV` alone. It cannot read the RDR corpus, the bead board, or prior reviews, and that independence is the point: a reviewer that has read the design record tends to agree with it.
 
-Findings carry one of three verdicts, borrowed as-is from intrastate's triage vocabulary:
+Findings carry one of three verdicts:
 
 | Verdict | Meaning |
 |---------|---------|
@@ -3686,9 +3686,11 @@ Findings carry one of three verdicts, borrowed as-is from intrastate's triage vo
 | `FILE` | A real issue worth tracking, but not urgent |
 | `DROP` | An observation considered and explicitly set aside |
 
-Nothing is auto-applied and nothing is auto-filed. Triage is a human act — intrastate's own measurement is that only 19% of production-class findings warranted an immediate fix.
+Nothing is auto-applied and nothing is auto-filed. Triage is a human act. Expect an instrument that mostly comments on test quality and occasionally catches a design error; if its FIX-NOW rate turns out to be dominated by noise, narrow or retire it rather than learning to ignore it.
 
-Records land in T2 project `nexus_commit_review`, titled `review-<12-hex>`, with a default 90-day TTL. Count them with [`nx census reviews`](#nx-census).
+Records land in T2 project `nexus`, titled `review-<12-hex>`, with a default 90-day TTL. Count them with [`nx census reviews`](#nx-census).
+
+**Findings are surfaced, not merely stored.** SessionStart reports how many commits in the last 7 days carry `FIX-NOW` findings, because a verdict meaning "fix before this work goes further" that nobody sees is theatre. It counts commits rather than findings (two `FIX-NOW`s on one commit is one thing to look at), and the window is bounded on purpose: there is no "resolved" state on a review record, so an unbounded count would become the line people learn to scroll past.
 
 **Configuration** (`.nexus.yml#commit_review`, all optional):
 

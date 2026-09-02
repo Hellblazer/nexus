@@ -257,7 +257,7 @@ COMMIT_REVIEW_DEFAULT_BUDGET_USD = 0.25
 #: Opus review aborts on the $0.25 cap however small the commit, which is
 #: exactly what the first live run did.
 #:
-#: This value is the ``cheap`` tier's alias from
+#: This value is the ``strong`` tier's alias from
 #: ``nexus.operators.model_tiers``. It is a literal rather than an import
 #: because that module is under a repo-wide "consulted by nothing outside
 #: two allowlisted files" guard whose other assertions (env-gating) do not
@@ -265,20 +265,29 @@ COMMIT_REVIEW_DEFAULT_BUDGET_USD = 0.25
 #: instead, so the table stays the single source of truth and this cannot
 #: drift from it silently.
 #:
-#: Measured on the same planted off-by-one: haiku and sonnet BOTH report
-#: it FIX-NOW and both finish under the cap. Cheap wins on the tie.
-COMMIT_REVIEW_DEFAULT_MODEL = "haiku"
+#: STRONG, not cheap, and the first version of this constant got that
+#: wrong. It was set to the cheap alias on the strength of one planted
+#: off-by-one that both tiers caught, with the tie broken on price. The
+#: substantive critique named that for what it was: an N=1 result
+#: standing in for this repo's own tier doctrine, which requires a
+#: pre-registered multi-pair A/B before a tier flip (RDR-196 .p2a/.p2c),
+#: and which has already refuted a "cheap wins" generalization elsewhere.
+#:
+#: The doctrine also answers the question directly without any new
+#: measurement: ``model_tiers`` splits cheap for the mechanical and
+#: structural operators, strong for the ones that SYNTHESIZE OR JUDGE,
+#: and pins ``aggregate``/``summarize`` to strong for want of a quality
+#: proxy. A code reviewer judges, and no quality proxy exists for
+#: "did it find the real defect". So strong is the default the doctrine
+#: already implies, and cheap is the thing that would need evidence.
+#: Cost is not the constraint either way: sonnet was measured completing
+#: this same review well under the cap.
+COMMIT_REVIEW_DEFAULT_MODEL = "sonnet"
 
 
 @dataclass(frozen=True)
 class CommitReviewConfig:
     """Settings for the per-commit automated review (bead nexus-jh86x).
-
-    Origin: the intrastate comparison, 2026-09-01. Every production defect
-    credited to that project's decision-record apparatus was in fact found
-    by a per-commit AI reviewer running on a repo-sandboxed prompt with no
-    visibility into the records at all; the apparatus only adjudicated
-    what the reviewer had already found.
 
     - ``enabled``: master switch. See :data:`COMMIT_REVIEW_ENV_VAR`.
     - ``max_budget_usd``: per-dispatch hard cap.

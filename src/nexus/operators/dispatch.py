@@ -1254,10 +1254,9 @@ async def claude_dispatch(
     # no tools to act on any of it.
     #
     # For the per-commit reviewer this is a CORRECTNESS break, not just
-    # cost: the whole point of copying intrastate's roborev is a child that
-    # reviews a diff with NO visibility into the decision-record
-    # apparatus. A child that boots with the bead board in its context is
-    # not that reviewer.
+    # cost: that reviewer's value depends on judging a diff with NO
+    # visibility into the decision record. A child that boots with the
+    # bead board in its context is not that reviewer.
     #
     # Opt-in, exactly like ``model`` above: ``isolated=False`` (the
     # default, and every pre-existing call site) leaves argv byte-identical.

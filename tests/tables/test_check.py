@@ -149,9 +149,9 @@ def test_release_decision_clean_has_no_findings_at_all():
 
 
 def test_release_decision_defect_reports_planted_overlap_and_gap():
-    """Under RDR-201's no-hit-policy commitment (sec Background: intrastate
-    "has no hit policy, so overlap is a lint failure rather than something
-    a priority order resolves"), ANY non-empty intersection among
+    """Under RDR-201's no-hit-policy commitment (sec Background: there is
+    no hit policy, so an overlap is a lint failure rather than something
+    a priority order resolves), ANY non-empty intersection among
     participants is an overlap -- including strict subsumption. This
     fixture's own "at-or-above-floor" row (guard={cloud_vs_floor:
     [equal,above]}, unconstrained mode/ledger) is a strict SUPERSET of both
