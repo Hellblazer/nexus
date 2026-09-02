@@ -69,32 +69,66 @@ ambiguity the rule must not manufacture. (Found while building this module:
 6 of the corpus's apparent duplicates were exactly this before the basename
 fix landed.)
 
+**Repo scoping is load-bearing, not optional** (CRITICAL fix, code-review +
+critique, 2026-09-01): the SAME catalog holds other repos' RDR registrations
+under other owners — measured live, `/Users/hal.hildebrand/git/ART` is
+registered `content_type="rdr"` in this same catalog under a different owner
+— so a same-basename collision across repos is real, not hypothetical. Repo
+identity is `rdr_source_prefix(repo_root)`, a `file://` prefix anchored on
+`docs/rdr/` (the exact directory `nx index rdr` walks) — **not the bare repo
+root**: a nested agent-worktree checkout
+(`<repo_root>/.claude/worktrees/<name>/docs/rdr/…`, a real fragmentation
+source found live in this repo's own catalog) sits inside the repo root's
+own path but is a different `docs/rdr/` directory and must not be treated
+as in-repo. A bare-root prefix would wrongly admit it; the `docs/rdr/`-
+anchored one does not.
+
 **Resolution rule**, given the candidate registrations sharing one identity
 key, in order:
 
 1. `content_type == "rdr"` beats the legacy `"prose"` registration — when at
    least one `"rdr"` candidate exists, only `"rdr"` candidates survive to
    step 2.
-2. Among the survivors, the one registered under the CURRENT repo owner (the
-   owner id `nx index rdr` registers new content under today — resolved via
+2. ADMISSION (unconditional — applies to a single surviving candidate too,
+   not only a tie): a candidate is admitted only when it is verifiably THIS
+   repo's own — its owner is the CURRENT repo owner (the owner id
+   `nx index rdr` registers new content under today — resolved via
    `_repo_identity`'s `repo_hash` → `CatalogReader.owner_for_repo`, see
-   `current_rdr_owner`) wins.
-3. Zero matches or more than one match at step 2 is UNRESOLVABLE: no guess,
-   no silent pick. `resolve_canonical_tumbler` logs a structlog
-   `rdr_tumbler_unresolvable` warning naming every surviving candidate and
-   returns `None` — the caller creates no edge for that record.
+   `current_rdr_owner`) OR its `source_uri` sits under this repo's own
+   `rdr_source_prefix`. A candidate that fails BOTH checks is never a
+   winner, however few other candidates exist — the bug this closes: the
+   original single-candidate fast path accepted a lone registration
+   unconditionally, so a same-basename document from a different repo (the
+   `ART` shape above) or a stale nested-worktree copy could be silently
+   resolved as canonical with no warning.
+3. WINNER SELECTION among admitted candidates: the one under the current
+   owner wins when unique; otherwise a single admitted candidate still
+   resolves unambiguously (the common case: a legacy registration under a
+   stale owner that `source_uri` nonetheless confirms is this repo's own
+   file — roughly 150 of this repo's 184 RDR-shaped documents have never
+   been re-indexed under the current owner and resolve this way). Zero
+   admitted candidates, or two or more with no unique current-owner match,
+   is UNRESOLVABLE: no guess, no silent pick. `resolve_canonical_tumbler`
+   logs a structlog `rdr_tumbler_unresolvable` warning naming every
+   surviving candidate and returns `None` — the caller creates no edge for
+   that record.
 
-A group with exactly one candidate resolves directly (nothing to
-disambiguate) regardless of its `content_type` — an RDR that has never been
-re-indexed under the modern scheme is still unambiguous, just old.
+`resolve_all` is the single authority that runs this rule over a full
+catalog fetch (group → resolve, one entry point) — every caller needing a
+full-catalog resolution routes through it rather than re-deriving the loop;
+`scripts/collapse_rdr_registrations.py`'s `build_plan` calls it directly.
 
 `scripts/collapse_rdr_registrations.py` is the `nx`-free reporting/collapse
-tool built on this rule: `--dry-run` (the default) lists, per RDR, every
-registration found and which one the rule keeps; `--apply` sets `alias_of`
-on the losing registrations via the whitelisted `CatalogWriter.update` RPC
-(never `HttpCatalogClient.set_alias` directly — that method is not in
-`CATALOG_WRITE_OPS`). Per bead nexus-j9z30.20, `--apply` has never been run
-against the live catalog.
+tool built on this rule: it fetches `content_type="rdr"`/`"prose"` and
+scopes every entry by `rdr_source_prefix` BEFORE grouping (never relies on
+the caller to have pre-filtered); `--dry-run` (the default) then lists, per
+RDR, every admitted registration found and which one the rule keeps;
+`--apply` sets `alias_of` on the losing registrations via the whitelisted
+`CatalogWriter.update` RPC (never `HttpCatalogClient.set_alias` directly —
+that method is not in `CATALOG_WRITE_OPS`). **Bead nexus-j9z30.20 ships the
+resolution rule and the dry-run/report tool ONLY** — `--apply` has never
+been run against the live catalog, and whether/when to run it live is a
+SEPARATE follow-up decision this bead does not schedule or imply.
 
 ## Adding a new source-URI scheme
 

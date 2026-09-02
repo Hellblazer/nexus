@@ -9,7 +9,10 @@ touches the wire itself (fetching is the caller's job, e.g. via
 the rule; these tests build a small fixture "catalog" as a plain list of
 ``CatalogEntry`` objects, matching the Finding-4 fragmentation shape
 (the same on-disk RDR registered under multiple owners, and/or under both
-the legacy ``prose`` and current ``rdr`` content types).
+the legacy ``prose`` and current ``rdr`` content types) plus the
+cross-repo collision shape found live in this repo's own catalog during
+the nexus-j9z30.20 fix round (a same-basename RDR document registered
+under an entirely different repo/owner, e.g. ``/Users/hal.hildebrand/git/ART``).
 """
 from __future__ import annotations
 
@@ -20,11 +23,24 @@ from nexus.catalog.rdr_canonical import (
     current_rdr_owner,
     group_rdr_candidates,
     rdr_key_of,
+    rdr_source_prefix,
     resolve_all,
     resolve_canonical_tumbler,
 )
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry
+
+CURRENT_OWNER = Tumbler.parse("1.1")
+OTHER_OWNER_A = Tumbler.parse("1.10")
+OTHER_OWNER_B = Tumbler.parse("1.20")
+FOREIGN_OWNER = Tumbler.parse("1.2")  # e.g. the live ART registration's owner
+
+# This repo's own docs/rdr/ tree, and a foreign repo's, for source_uri scoping.
+THIS_REPO_PREFIX = "file:///repo/nexus/docs/rdr/"
+FOREIGN_REPO_PREFIX = "file:///repo/ART/docs/rdr/"
+# A nested agent-worktree copy -- inside the repo root's own path, but NOT
+# under THIS_REPO_PREFIX (a different docs/rdr/ directory entirely).
+WORKTREE_NESTED_PREFIX = "file:///repo/nexus/.claude/worktrees/agent-x/docs/rdr/"
 
 
 def _entry(
@@ -33,6 +49,7 @@ def _entry(
     content_type: str = "rdr",
     file_path: str = "docs/rdr/rdr-201-closed-vocabularies-as-checked-tables.md",
     title: str = "",
+    source_uri: str = "",
 ) -> CatalogEntry:
     """Minimal CatalogEntry fixture — only the fields this rule reads vary."""
     return CatalogEntry(
@@ -47,12 +64,8 @@ def _entry(
         chunk_count=1,
         head_hash="",
         indexed_at="2026-09-01T00:00:00Z",
+        source_uri=source_uri,
     )
-
-
-CURRENT_OWNER = Tumbler.parse("1.1")
-OTHER_OWNER_A = Tumbler.parse("1.10")
-OTHER_OWNER_B = Tumbler.parse("1.20")
 
 
 class TestRdrKeyOf:
@@ -68,8 +81,18 @@ class TestRdrKeyOf:
         assert rdr_key_of(e) == "rdr-058-pipeline-orchestration"
 
     def test_extracts_from_title_when_no_file_path(self) -> None:
+        """Deliberately narrow fallback (code-review 2026-09-01, item 3): only
+        reached when file_path is empty. Kept rather than dropped because a
+        handful of legacy entries genuinely carry no file_path -- refusing
+        to key them at all would silently drop them from every report."""
         e = _entry("1.1.5", file_path="", title="RDR-052: something")
         assert rdr_key_of(e) == "rdr-052"
+
+    def test_title_fallback_not_reached_when_file_path_present_but_unrecognisable(self) -> None:
+        """The title fallback is file_path-empty ONLY -- a present-but-wrong-shaped
+        file_path returns None directly, even if the title WOULD have matched."""
+        e = _entry("1.1.5", file_path="docs/architecture.md", title="RDR-052: something")
+        assert rdr_key_of(e) is None
 
     def test_none_when_no_pattern_present(self) -> None:
         e = _entry("1.1.5", file_path="docs/architecture.md", title="Architecture")
@@ -104,6 +127,26 @@ class TestRdrKeyOf:
         rdr = _entry("1.1.1", file_path="docs/rdr/rdr-200-nx-answer-continuation-mode.md")
         prereg = _entry("1.1.2", file_path="docs/rdr/rdr-200-phase1-prereg.md")
         assert rdr_key_of(rdr) != rdr_key_of(prereg)
+
+
+class TestRdrSourcePrefix:
+    def test_anchored_on_docs_rdr_not_bare_repo_root(self, tmp_path) -> None:
+        repo = tmp_path / "nexus"
+        repo.mkdir()
+        prefix = rdr_source_prefix(repo)
+        assert prefix == f"file://{repo.resolve()}/docs/rdr/"
+
+    def test_worktree_nested_copy_does_not_match(self, tmp_path) -> None:
+        """A nested agent-worktree checkout sits INSIDE the repo root's own
+        path but is a DIFFERENT docs/rdr/ -- a bare-root prefix would wrongly
+        match it; the docs/rdr/-anchored prefix must not."""
+        repo = tmp_path / "nexus"
+        repo.mkdir()
+        prefix = rdr_source_prefix(repo)
+        worktree_source_uri = f"file://{repo}/.claude/worktrees/agent-x/docs/rdr/rdr-143-x.md"
+        assert not worktree_source_uri.startswith(prefix)
+        real_source_uri = f"file://{repo}/docs/rdr/rdr-143-x.md"
+        assert real_source_uri.startswith(prefix)
 
 
 class TestGroupRdrCandidates:
@@ -141,35 +184,92 @@ class TestGroupRdrCandidates:
         }
         assert all(len(v) == 1 for v in groups.values())
 
+    def test_grouping_itself_is_not_repo_scoped(self) -> None:
+        """group_rdr_candidates groups purely by basename identity -- a
+        same-basename cross-repo collision lands in the SAME group here;
+        repo scoping is resolve_canonical_tumbler's job, exercised below."""
+        this_repo = _entry(
+            "1.1.1", file_path="docs/rdr/rdr-005-x.md", source_uri=THIS_REPO_PREFIX + "rdr-005-x.md",
+        )
+        foreign_repo = _entry(
+            "1.2.1", file_path="docs/rdr/rdr-005-x.md", source_uri=FOREIGN_REPO_PREFIX + "rdr-005-x.md",
+        )
+        groups = group_rdr_candidates([this_repo, foreign_repo])
+        assert len(groups["rdr-005-x"]) == 2
+
 
 class TestResolveCanonicalTumbler:
     def test_duplicate_owner_registrations_resolve_to_current_owner(self) -> None:
-        """Finding 4: one RDR registered twice under two owner ids."""
+        """Finding 4: one RDR registered twice under two owner ids, both
+        genuinely this repo's file (same source_uri under this repo's
+        docs/rdr/) -- the current owner's copy wins."""
         candidates = [
-            _entry("1.10.42", content_type="rdr"),
-            _entry("1.1.99", content_type="rdr"),  # under CURRENT_OWNER
+            _entry("1.10.42", content_type="rdr", source_uri=THIS_REPO_PREFIX + "rdr-x.md"),
+            _entry("1.1.99", content_type="rdr", source_uri=THIS_REPO_PREFIX + "rdr-x.md"),  # current owner
         ]
-        resolved = resolve_canonical_tumbler(candidates, CURRENT_OWNER)
+        resolved = resolve_canonical_tumbler(candidates, CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
         assert resolved == Tumbler.parse("1.1.99")
 
     def test_prose_and_rdr_resolves_to_the_rdr_registration(self) -> None:
-        """Finding 4: stale legacy prose registration beside the current rdr one."""
-        prose = _entry("1.10.7", content_type="prose")
-        rdr = _entry("1.20.7", content_type="rdr")  # NOT under CURRENT_OWNER
-        resolved = resolve_canonical_tumbler([prose, rdr], CURRENT_OWNER)
+        """Finding 4: stale legacy prose registration beside the current rdr
+        one -- the rdr registration wins even though it is not itself under
+        the current owner, because it is admitted via source_uri."""
+        prose = _entry("1.10.7", content_type="prose", source_uri=THIS_REPO_PREFIX + "rdr-x.md")
+        rdr = _entry("1.20.7", content_type="rdr", source_uri=THIS_REPO_PREFIX + "rdr-x.md")  # NOT current owner
+        resolved = resolve_canonical_tumbler([prose, rdr], CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
         assert resolved == rdr.tumbler
 
-    def test_single_candidate_resolves_without_owner_check(self) -> None:
-        lone = _entry("1.10.3", content_type="prose")  # never reindexed, not under CURRENT_OWNER
-        assert resolve_canonical_tumbler([lone], CURRENT_OWNER) == lone.tumbler
+    def test_single_candidate_under_repo_source_uri_resolves(self) -> None:
+        """A lone legacy registration (never reindexed, wrong owner) that
+        source_uri nonetheless confirms is THIS repo's own file resolves."""
+        lone = _entry("1.10.3", content_type="prose", source_uri=THIS_REPO_PREFIX + "rdr-x.md")
+        resolved = resolve_canonical_tumbler([lone], CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
+        assert resolved == lone.tumbler
+
+    def test_single_candidate_from_a_different_repo_is_unresolvable(self) -> None:
+        """CRITICAL fix (nexus-j9z30.20 fix round): a lone candidate that is
+        NEITHER under the current owner NOR under this repo's source_uri
+        prefix must be UNRESOLVABLE, never silently accepted just because
+        it is the only candidate found. Live-measured shape:
+        /Users/hal.hildebrand/git/ART is registered content_type="rdr"
+        under a DIFFERENT owner in the SAME catalog, and could share a
+        basename with one of this repo's own RDRs."""
+        art_entry = _entry(
+            "1.2.400",
+            content_type="rdr",
+            file_path="docs/rdr/rdr-005-shared-basename.md",
+            source_uri=FOREIGN_REPO_PREFIX + "rdr-005-shared-basename.md",
+        )
+        with structlog.testing.capture_logs() as logs:
+            resolved = resolve_canonical_tumbler(
+                [art_entry], CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX, rdr_key="rdr-005-shared-basename",
+            )
+        assert resolved is None
+        warnings = [e for e in logs if e["event"] == UNRESOLVABLE_EVENT]
+        assert len(warnings) == 1
+        assert warnings[0]["rdr_key"] == "rdr-005-shared-basename"
+        assert warnings[0]["candidates"] == ["1.2.400"]
+        assert warnings[0]["plausible_count"] == 0
+
+    def test_worktree_nested_singleton_is_unresolvable_when_it_is_the_only_candidate(self) -> None:
+        """A stale agent-worktree-nested registration is not admitted by
+        source_uri (WORKTREE_NESTED_PREFIX != THIS_REPO_PREFIX) and, if it
+        somehow ends up the only candidate for a key, must not resolve."""
+        stale = _entry(
+            "1.10.4143", content_type="prose", source_uri=WORKTREE_NESTED_PREFIX + "rdr-143-x.md",
+        )
+        resolved = resolve_canonical_tumbler([stale], CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
+        assert resolved is None
 
     def test_unresolvable_pair_warns_naming_both_candidates_and_returns_none(self) -> None:
         candidates = [
-            _entry("1.10.5", content_type="rdr"),
-            _entry("1.20.5", content_type="rdr"),
+            _entry("1.10.5", content_type="rdr", source_uri=THIS_REPO_PREFIX + "rdr-x.md"),
+            _entry("1.20.5", content_type="rdr", source_uri=THIS_REPO_PREFIX + "rdr-x.md"),
         ]
         with structlog.testing.capture_logs() as logs:
-            resolved = resolve_canonical_tumbler(candidates, CURRENT_OWNER, rdr_key="rdr-201")
+            resolved = resolve_canonical_tumbler(
+                candidates, CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX, rdr_key="rdr-201",
+            )
         assert resolved is None
         warnings = [e for e in logs if e["event"] == UNRESOLVABLE_EVENT]
         assert len(warnings) == 1
@@ -179,7 +279,7 @@ class TestResolveCanonicalTumbler:
 
     def test_no_candidates_returns_none_without_warning(self) -> None:
         with structlog.testing.capture_logs() as logs:
-            resolved = resolve_canonical_tumbler([], CURRENT_OWNER)
+            resolved = resolve_canonical_tumbler([], CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
         assert resolved is None
         assert logs == []
 
@@ -188,25 +288,37 @@ class TestResolveCanonicalTumbler:
         happen given the (owner, source_uri) uniqueness the engine enforces,
         but the rule must not guess if it ever does)."""
         candidates = [
-            _entry("1.1.5", content_type="rdr"),
-            _entry("1.1.6", content_type="rdr"),
+            _entry("1.1.5", content_type="rdr", source_uri=THIS_REPO_PREFIX + "rdr-x.md"),
+            _entry("1.1.6", content_type="rdr", source_uri=THIS_REPO_PREFIX + "rdr-x.md"),
         ]
         with structlog.testing.capture_logs() as logs:
-            resolved = resolve_canonical_tumbler(candidates, CURRENT_OWNER)
+            resolved = resolve_canonical_tumbler(candidates, CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
         assert resolved is None
         assert any(e["event"] == UNRESOLVABLE_EVENT for e in logs)
+
+    def test_empty_repo_source_prefix_degrades_to_owner_only_matching(self) -> None:
+        """repo_source_prefix="" (a caller with no repo root to scope
+        against) never means accept-everything -- it just removes the
+        source_uri admission signal, leaving owner-match as the only one."""
+        lone_wrong_owner = _entry("1.10.3", content_type="prose", source_uri=THIS_REPO_PREFIX + "rdr-x.md")
+        resolved = resolve_canonical_tumbler([lone_wrong_owner], CURRENT_OWNER, repo_source_prefix="")
+        assert resolved is None
+
+        lone_current_owner = _entry("1.1.3", content_type="prose", source_uri="")
+        resolved2 = resolve_canonical_tumbler([lone_current_owner], CURRENT_OWNER, repo_source_prefix="")
+        assert resolved2 == lone_current_owner.tumbler
 
 
 class TestResolveAll:
     def test_resolves_every_group_independently(self) -> None:
         entries = [
-            _entry("1.10.1", content_type="rdr", file_path="docs/rdr/rdr-201-a.md"),
-            _entry("1.1.1", content_type="rdr", file_path="docs/rdr/rdr-201-a.md"),
-            _entry("1.20.2", content_type="rdr", file_path="docs/rdr/rdr-052-b.md"),
-            _entry("1.30.2", content_type="rdr", file_path="docs/rdr/rdr-052-b.md"),
+            _entry("1.10.1", content_type="rdr", file_path="docs/rdr/rdr-201-a.md", source_uri=THIS_REPO_PREFIX + "rdr-201-a.md"),
+            _entry("1.1.1", content_type="rdr", file_path="docs/rdr/rdr-201-a.md", source_uri=THIS_REPO_PREFIX + "rdr-201-a.md"),
+            _entry("1.20.2", content_type="rdr", file_path="docs/rdr/rdr-052-b.md", source_uri=THIS_REPO_PREFIX + "rdr-052-b.md"),
+            _entry("1.30.2", content_type="rdr", file_path="docs/rdr/rdr-052-b.md", source_uri=THIS_REPO_PREFIX + "rdr-052-b.md"),
         ]
         with structlog.testing.capture_logs() as logs:
-            result = resolve_all(entries, CURRENT_OWNER)
+            result = resolve_all(entries, CURRENT_OWNER, repo_source_prefix=THIS_REPO_PREFIX)
         assert result["rdr-201-a"] == Tumbler.parse("1.1.1")
         assert result["rdr-052-b"] is None
         assert any(e["event"] == UNRESOLVABLE_EVENT and e["rdr_key"] == "rdr-052-b" for e in logs)

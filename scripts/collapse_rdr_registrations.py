@@ -16,15 +16,29 @@ to the single canonical tumbler.
 binary), invoked directly (``python scripts/collapse_rdr_registrations.py``
 or, once installed, ``uv run python scripts/...``).
 
+**Repo scoping is mandatory, not optional** (code-review/critique fix
+round, 2026-09-01): every document fetched here is filtered to THIS repo's
+own ``docs/rdr/`` tree (:func:`nexus.catalog.rdr_canonical.rdr_source_prefix`)
+before ``build_plan`` groups or resolves anything — the SAME catalog holds
+other repos' RDR registrations under other owners (measured live: ``ART``
+is registered ``content_type="rdr"`` in this catalog too), and an
+unscoped fetch can silently resolve THIS repo's RDR to a DIFFERENT repo's
+tumbler with no warning if the basenames collide. This is enforced inside
+``build_plan`` itself, not left to the caller to remember.
+
 **--dry-run is the default and does not require --apply to be absent** —
 there is no way to write without explicitly passing ``--apply``. Per bead
 nexus-j9z30.20, ``--apply`` MUST NOT be run against the live catalog in
-this bead; that is future work once the dry-run plan below has been
-reviewed. ``--apply`` writes go through :meth:`CatalogWriter.update`
-(the whitelisted RPC, ``CATALOG_WRITE_OPS``) with an ``alias_of`` field —
-the same wire shape :meth:`HttpCatalogClient.set_alias` sends, but reached
-through the sanctioned writer proxy rather than a raw client (``set_alias``
-itself is not in the write whitelist).
+this bead — that bead ships the resolution rule and this dry-run/report
+tool ONLY. Whether and when to run ``--apply`` against the live catalog is
+a SEPARATE decision for a follow-up bead (nexus-j9z30.20's coordinator
+tracks this — see the fix-round T2 critique/code-review records), not
+something this bead schedules or implies. ``--apply`` writes go through
+:meth:`CatalogWriter.update` (the whitelisted RPC, ``CATALOG_WRITE_OPS``)
+with an ``alias_of`` field — the same wire shape
+:meth:`HttpCatalogClient.set_alias` sends, but reached through the
+sanctioned writer proxy rather than a raw client (``set_alias`` itself is
+not in the write whitelist).
 """
 from __future__ import annotations
 
@@ -37,7 +51,8 @@ from nexus.catalog.catalog_protocol import CatalogReader, CatalogWriter
 from nexus.catalog.rdr_canonical import (
     current_rdr_owner,
     group_rdr_candidates,
-    resolve_canonical_tumbler,
+    rdr_source_prefix,
+    resolve_all,
 )
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry
@@ -66,17 +81,27 @@ class RdrPlanRow:
 def build_plan(
     entries: list[CatalogEntry],
     current_owner: Tumbler,
+    *,
+    repo_source_prefix: str,
 ) -> list[RdrPlanRow]:
-    """Group *entries* per RDR and resolve each to its canonical tumbler.
+    """Scope, group, and resolve *entries* into a per-RDR collapse plan.
 
+    *entries* is filtered to *repo_source_prefix* FIRST (an entry whose
+    ``source_uri`` does not start with it is dropped before grouping —
+    this repo's plan must never even consider another repo's registration,
+    not merely refuse to pick it). Resolution itself routes through
+    :func:`nexus.catalog.rdr_canonical.resolve_all` — the single authority
+    for the canonical-tumbler rule; this function does not re-derive it.
     Rows are sorted by ``rdr_key`` for a stable, readable report.
     """
-    groups = group_rdr_candidates(entries)
+    scoped = [e for e in entries if e.source_uri.startswith(repo_source_prefix)] if repo_source_prefix else list(entries)
+    groups = group_rdr_candidates(scoped)
+    resolved = resolve_all(scoped, current_owner, repo_source_prefix=repo_source_prefix)
     rows = [
         RdrPlanRow(
             rdr_key=key,
             candidates=sorted(candidates, key=lambda c: str(c.tumbler)),
-            canonical=resolve_canonical_tumbler(candidates, current_owner, rdr_key=key),
+            canonical=resolved[key],
         )
         for key, candidates in groups.items()
     ]
@@ -93,7 +118,7 @@ def format_plan(rows: list[RdrPlanRow], *, current_owner: Tumbler) -> str:
     lines.append("")
     for row in rows:
         if row.canonical is None:
-            lines.append(f"{row.rdr_key}: UNRESOLVABLE ({len(row.candidates)} candidates, no single owner match)")
+            lines.append(f"{row.rdr_key}: UNRESOLVABLE ({len(row.candidates)} candidates, no single in-repo match)")
         else:
             lines.append(f"{row.rdr_key}: canonical={row.canonical}")
         for c in row.candidates:
@@ -124,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--repo-root", type=Path, default=Path.cwd(),
-        help="Repo root to derive the current owner from (default: cwd). Ignored when --owner is given.",
+        help="Repo root to derive the current owner AND the repo-scoping source_uri prefix from (default: cwd).",
     )
     parser.add_argument(
         "--owner", type=str, default="",
@@ -133,8 +158,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--apply", action="store_true",
         help="Actually collapse duplicates by setting alias_of on losing registrations. "
-             "DO NOT pass this against the live catalog for bead nexus-j9z30.20 — dry-run "
-             "(the default, no flag needed) only prints the plan and writes nothing.",
+             "DO NOT pass this against the live catalog for bead nexus-j9z30.20 -- whether "
+             "and when to run --apply live is a separate follow-up decision, not part of "
+             "this bead. Dry-run (the default, no flag needed) only prints the plan and "
+             "writes nothing.",
     )
     args = parser.parse_args(argv)
 
@@ -154,11 +181,12 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
+    prefix = rdr_source_prefix(args.repo_root)
     entries = [
         *cat.all_documents(content_type="rdr"),
         *cat.all_documents(content_type="prose"),
     ]
-    rows = build_plan(entries, current_owner)
+    rows = build_plan(entries, current_owner, repo_source_prefix=prefix)
     print(format_plan(rows, current_owner=current_owner))
 
     if args.apply:
