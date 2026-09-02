@@ -169,3 +169,23 @@ Unchanged from Phase 1 prereg §6.
   Phase 1b. Judge stays `claude-opus-5`. Arms save the raw `nx_answer`
   return alongside the answer (`qNN.raw.json`) so the §5 retrieval-reach
   measurement is taken from the recorded trace, not re-run.
+- 2026-09-01 (after the first caller-only pass, before any caller-only
+  verdict was tallied) — **Caller-only arm re-run for q14-q24 under an
+  explicit MCP-only tool restriction.** The first pass's agent for
+  q13-q24 disclosed that q14-q24 were answered from direct repository
+  reads (Bash grep/sed over source, RDRs and docs) and from injected
+  session memory, not from the indexed corpus through the retrieval
+  tools. That is not the arm the protocol defines (flat search over the
+  same corpus the plan-based arms retrieve from), and it hands the arm a
+  filesystem the other two arms do not have. The q01-q12 agent stayed
+  on MCP tools only; q13 used the paper corpus only. The eleven affected
+  answers are preserved as `calleronly-unconstrained/` in the gate
+  artifacts and are NOT judged; q14-q24 are re-run with Bash/Read/Grep,
+  T1/T2 and injected memory forbidden as evidence, and only those
+  re-run answers enter the caller-only pairs. The re-run brief is the
+  original brief plus the restriction; nothing else changed. Judges
+  already dispatched on the first-pass caller-only pairs for q14-q24
+  have those verdicts discarded unread. Whether Phase 1's caller-only
+  arm stayed on MCP tools cannot be re-verified (its subagent
+  transcripts are gone); Phase 1b records the restriction explicitly so
+  the comparison to Phase 1 carries that caveat.
