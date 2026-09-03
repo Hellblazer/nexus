@@ -1624,11 +1624,29 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
             + (f" ({err})" if err else "")
         ), False
     blocks: list[str] = []
-    for i, (doc_id, body) in enumerate(zip(ids, contents), start=1):
-        body = (body or "").strip()
+    for i, (doc_id, raw) in enumerate(zip(ids, contents), start=1):
+        # nexus-c0sdc: store_get_many truncates at _TIDY_MAX_CHARS_PER_ENTRY and
+        # appends a bare "…" with no marker. The tool-free child then sees an
+        # ellipsis mid-sentence and correctly concludes the ENTRY is broken —
+        # so tidy told operators to re-ingest healthy 6-9 KB documents. Silent
+        # truncation is against house doctrine (nexus-2xjge) and it inverts
+        # tidy's purpose for exactly the entries most worth consolidating: the
+        # long, dense ones are the ones that get cut. Detect the cut on the RAW
+        # body (before strip(), which would change the length) and say so.
+        raw = raw or ""
+        display_truncated = (
+            len(raw) == _TIDY_MAX_CHARS_PER_ENTRY + 1 and raw.endswith("…")
+        )
+        body = raw.strip()
         if not body:
             continue
-        blocks.append(f"--- Entry {i} (id={doc_id}) ---\n{body}")
+        header = f"--- Entry {i} (id={doc_id})"
+        if display_truncated:
+            header += (
+                f" [TRUNCATED FOR DISPLAY at {_TIDY_MAX_CHARS_PER_ENTRY} chars"
+                " — a display limit, NOT a defect in the stored entry]"
+            )
+        blocks.append(f"{header} ---\n{body}")
     if not blocks:
         return "", 0, (
             f"matched and hydrated {len(ids)} entries but every body was EMPTY"
@@ -9370,7 +9388,15 @@ async def nx_tidy(
     if n_entries:
         entries_section = (
             f"\n\nHere are the {n_entries} retrieved entries to consolidate. "
-            "Work ONLY from these entries; do NOT call any tools:\n\n"
+            "Work ONLY from these entries; do NOT call any tools.\n\n"
+            # nexus-c0sdc: without this the child reads a display ellipsis as
+            # evidence the stored entry is corrupt and recommends re-ingesting
+            # perfectly healthy documents.
+            "An entry whose header says TRUNCATED FOR DISPLAY was shortened by "
+            "the retrieval layer to fit this prompt. That is a DISPLAY LIMIT, "
+            "never a data defect: the stored entry is intact. Do NOT report "
+            "such an entry as truncated, corrupt, or cut off, and do NOT "
+            "recommend re-ingesting it. Judge only the content you can see.\n\n"
             f"{entries_block}"
         )
     elif genuine_miss:
