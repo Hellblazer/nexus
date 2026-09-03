@@ -184,6 +184,7 @@ def test_live_pyproject_dependencies_all_parse() -> None:
 # together, on a green ``-m slow`` MinerU run and shakedown.
 _SHAPE_SENSITIVE: dict[str, str] = {
     "mineru": "MinerU markdown shape locks tests/test_pdf_subsystem.py's slow fixtures and the visual-marker regexes",
+    "docling": "docling is the auto-mode formula screen and the fallback extractor; its table export and markdown shape are gated by the MVV and shakedown",
 }
 
 _LOCK = _REPO_ROOT / "uv.lock"

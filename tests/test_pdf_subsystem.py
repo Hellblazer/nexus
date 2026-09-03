@@ -439,6 +439,7 @@ class TestFormulaPreservationOnRealPdf:
     # this drift exactly. page_count 33, formula_count 44, $$ 8 and \frac 12
     # all held, which identifies it as the marker pass, not extraction.
     _EXPECTED_TEXT_LENGTH = 58843           # full extracted text
+    _EXPECTED_EFFICIENT_COUNT = 27          # "efficient" occurrences; 0 under MinerU 3.4.5
     _EXPECTED_PAGE_COUNT = 33               # PyMuPDF page count
 
     # The canonical false-positive-rate formula from the paper, in the exact
@@ -569,6 +570,17 @@ class TestFormulaPreservationOnRealPdf:
         assert text.count("$$") == self._EXPECTED_DOLLAR_DOLLAR_COUNT
         assert text.count(r"\frac") == self._EXPECTED_FRAC_COUNT
         assert _count_formula_markers(text) == self._EXPECTED_REGEX_MARKERS
+
+        # Ligatures survive. MinerU 3.4.5 collapsed every "ff" to "f"
+        # ("efficient" -> "eficient", 67 words in this paper, 0 left), which
+        # no formula metric could see; the bump was refused on it. Locked
+        # exactly so the next attempt fails here, not in a user's search.
+        assert text.count("efficient") == self._EXPECTED_EFFICIENT_COUNT, (
+            f"'efficient' occurs {text.count('efficient')} times; locked at "
+            f"{self._EXPECTED_EFFICIENT_COUNT}. A drop means the extractor is "
+            f"mangling the ff ligature again (MinerU 3.4.5 class)."
+        )
+        assert "eficient" not in text
 
         # Verbatim snippet — the bloom-filter false-positive-rate formula.
         # If the symbolic content of the canonical formula in this paper

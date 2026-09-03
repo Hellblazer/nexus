@@ -17,7 +17,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   set, not only major jumps, and now actually runs weekly; and the developer
   reinstall constrains to `uv.lock` so the box matches the gates. Bumping
   MinerU or docling is a deliberate lock-and-cap change on a green slow-gate
-  run.
+  run. First such pass, same day: docling moves to 2.125.0 (cap `<2.126`),
+  the version every fresh install has run since mid-August, gated by the
+  unit suite, fresh-install MVV and shakedown; mineru stays at exactly
+  3.1.11 (cap `<3.1.12`), because both candidates were gated and refused:
+  3.4.5 collapses every "ff" ligature ("efficient" becomes "eficient", 67
+  words to 0 in one fixture paper) and 3.1.15 wraps plain text as inline
+  math and splits a word. The slow MinerU test now locks the ligature
+  count. A PDF indexed on a fresh install between 2026-08-14 and this
+  release ran 3.4.5 and carries the mangled words until re-indexed.
 - PDF indexing dropped every table (nexus-jd8fi). `pdf.mineru_table_enable`
   defaulted to `false`, and the MinerU server was spawned with
   `MINERU_TABLE_ENABLE` exported, which MinerU lets override the per-request
