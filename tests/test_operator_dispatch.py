@@ -2463,6 +2463,30 @@ class TestTimeoutPartialCapture:
 
 
 import sys  # noqa: E402 - deferred: only needed by the real-subprocess tests below
+import time  # noqa: E402 - deferred: only needed by the real-subprocess tests below
+
+
+def _wait_for_file_snippet(path: "pathlib.Path | str", max_wait: float = 30.0) -> str:
+    """Python source (as a string, embedded into a fake-child script) that
+    blocks until *path* exists, polling at a fine (20ms) interval, and
+    exits(1) if *max_wait* elapses first (a true hang in the fixture
+    itself, never a silent pytest stall).
+
+    nexus-tx5hd code-review round (flake risk): gates a fake child's
+    writes on an explicit signal the TEST controls, rather than the
+    child racing its own independent ``time.sleep()`` against a real
+    subprocess spawn's variable startup latency (this repo's own
+    documented macOS dyld-exec-stall class under ``-n auto``). The
+    child's import/startup time now overlaps harmlessly with this poll
+    instead of competing against a tight timeout budget.
+    """
+    return (
+        f"_deadline = time.time() + {max_wait}\n"
+        f"while not os.path.exists({str(path)!r}):\n"
+        f"    if time.time() > _deadline:\n"
+        f"        sys.exit(1)\n"
+        f"    time.sleep(0.02)\n"
+    )
 
 
 def _real_create_subprocess_exec_side_effect(script_path: str):
@@ -2542,6 +2566,289 @@ class TestRealSubprocessDrain:
         assert err.event_count >= 2, (
             f"expected at least the 2 stream_event lines to have parsed "
             f"before the kill, got event_count={err.event_count}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_real_child_stderr_flood_before_stdout_does_not_deadlock(
+        self, tmp_path,
+    ) -> None:
+        """nexus-tx5hd critic finding #1 (T2 [24197], SHIP-BLOCKER): a REAL
+        child that writes more than one pipe-buffer's worth of stderr
+        (>64KiB; ``--verbose`` is REQUIRED for stream-json, so a real CLI
+        can emit substantial diagnostic stderr) BEFORE its first stdout
+        byte must not deadlock phase 1. A phase 1 that reads ONLY
+        proc.stdout would leave a child blocked on write() to a full,
+        undrained stderr pipe -- it would never reach its first stdout
+        byte at all, so phase 1 would time out UNCONDITIONALLY regardless
+        of the timeout value, a deadlock the old single-phase concurrent
+        ``asyncio.gather(stdout, stderr)`` drain did not have. This
+        dispatch must succeed FAST (an explicit upper wall-clock bound,
+        not merely 'eventually') once stderr is drained continuously
+        across both phases -- it should never need the kill path at
+        all."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        script = tmp_path / "fake_claude_stderr_flood.py"
+        script.write_text(
+            "import json, sys\n"
+            "sys.stderr.write('x' * 200000)\n"  # > one pipe buffer (~64KiB)
+            "sys.stderr.flush()\n"
+            "sys.stdout.write(json.dumps({'type': 'result', 'is_error': False,"
+            " 'result': 'ok', 'structured_output': {'result': 'ok'},"
+            " 'total_cost_usd': 0.0}) + chr(10))\n"
+            "sys.stdout.flush()\n"
+        )
+
+        TIMEOUT = 5.0
+        t0 = time.monotonic()
+        with patch(
+            "asyncio.create_subprocess_exec",
+            side_effect=_real_create_subprocess_exec_side_effect(str(script)),
+        ):
+            result = await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=TIMEOUT)
+        elapsed = time.monotonic() - t0
+
+        assert result == {"result": "ok"}
+        assert elapsed < TIMEOUT, (
+            f"elapsed {elapsed:.2f}s should be well under the {TIMEOUT}s "
+            f"budget -- stderr being drained concurrently means this "
+            f"dispatch never needs the kill path at all; a bound anywhere "
+            f"near TIMEOUT means the deadlock is back"
+        )
+
+    @pytest.mark.asyncio
+    async def test_real_child_stderr_flood_then_hangs_forever_cleanup_is_bounded(
+        self, tmp_path,
+    ) -> None:
+        """nexus-tx5hd code-review round (SHIP-BLOCKER addendum): the
+        compound scenario the reviewer actually reproduced at 40s+ --
+        a real child SIGKILL'd while it had just been unblocked from a
+        stderr flood, immediately before hanging forever with no stdout
+        at all. ``Process.wait()`` can stall well past process death on
+        this platform because asyncio's subprocess transport gates it on
+        every pipe reporting EOF, not merely on the process having been
+        reaped (see ``_TIMEOUT_CLEANUP_GRACE_SECONDS``'s docstring). This
+        must still return -- raising ``OperatorTimeoutError`` -- within a
+        FIXED, small bound: *timeout* plus the cleanup grace period plus
+        a safety margin, never an unbounded or platform-dependent
+        hang."""
+        from nexus.operators.dispatch import (
+            _TIMEOUT_CLEANUP_GRACE_SECONDS,
+            OperatorTimeoutError,
+            claude_dispatch,
+        )
+
+        script = tmp_path / "fake_claude_stderr_flood_then_hangs.py"
+        script.write_text(
+            "import sys, time\n"
+            "sys.stderr.write('x' * 200000)\n"  # > one pipe buffer (~64KiB)
+            "sys.stderr.flush()\n"
+            "time.sleep(60)\n"  # never writes a single stdout byte
+        )
+
+        TIMEOUT = 1.5
+        t0 = time.monotonic()
+        with patch(
+            "asyncio.create_subprocess_exec",
+            side_effect=_real_create_subprocess_exec_side_effect(str(script)),
+        ):
+            with pytest.raises(OperatorTimeoutError):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=TIMEOUT)
+        elapsed = time.monotonic() - t0
+
+        upper_bound = TIMEOUT + _TIMEOUT_CLEANUP_GRACE_SECONDS + 3.0
+        assert elapsed < upper_bound, (
+            f"elapsed {elapsed:.2f}s exceeded the bounded-cleanup ceiling "
+            f"of {upper_bound:.2f}s ({TIMEOUT}s timeout + "
+            f"{_TIMEOUT_CLEANUP_GRACE_SECONDS}s grace + 3.0s margin) -- "
+            f"the post-SIGKILL cleanup is hanging again"
+        )
+
+    @pytest.mark.asyncio
+    async def test_real_child_that_stalls_before_first_event_still_completes(
+        self, tmp_path,
+    ) -> None:
+        """nexus-tx5hd: a REAL child that stalls (simulating cold-start /
+        hook-injection cost) BEFORE writing anything, then streams and
+        completes -- sized so the STALL plus the POST-FIRST-EVENT work
+        together exceed the caller's declared ``timeout``, but each half
+        individually stays under it. Under a single spawn-anchored
+        timeout budget this dispatch would be killed before the result
+        event ever arrived (nexus-tx5hd's observed failure mode); with
+        the budget re-anchored at the first observed byte of output, it
+        must complete successfully.
+
+        nexus-tx5hd code-review round (flake risk): the child's writes
+        are gated on two files the TEST creates (``go1``/``go2``), not
+        on the child's own independent ``time.sleep()`` -- the ONLY
+        real-time components are the test's own two controlled
+        ``asyncio.sleep()`` calls between creating those files, which do
+        not compete with the child process's variable spawn/import
+        latency (that latency now overlaps harmlessly with the child's
+        file-poll instead of eating into a tight budget)."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        go1 = tmp_path / "go1"
+        go2 = tmp_path / "go2"
+        script = tmp_path / "fake_claude_stalls_then_streams.py"
+        script.write_text(
+            "import json, os, sys, time\n"
+            "def emit(obj):\n"
+            "    sys.stdout.write(json.dumps(obj) + chr(10))\n"
+            "    sys.stdout.flush()\n"
+            + _wait_for_file_snippet(go1)
+            + "emit({'type': 'stream_event', 'event': {'type': 'content_block_delta',"
+            " 'delta': {'type': 'text_delta', 'text': 'ok'}}})\n"
+            + _wait_for_file_snippet(go2)
+            + "emit({'type': 'result', 'is_error': False, 'result': 'ok',"
+            " 'structured_output': {'result': 'ok'}, 'total_cost_usd': 0.0})\n"
+        )
+
+        # STALL is the ONLY real-time quantity in this test, entirely
+        # under the test's own control (the child never sleeps on its
+        # own clock). TIMEOUT gives each phase a full extra STALL of
+        # slack beyond the deliberate delay -- generous headroom against
+        # this repo's documented real-subprocess spawn jitter under
+        # -n auto (the macOS dyld-exec-stall class) -- while
+        # 2*STALL > TIMEOUT still demonstrates the two-phase budget: a
+        # single spawn-anchored TIMEOUT would have killed this dispatch
+        # before go2 was ever created.
+        STALL = 2.0
+        TIMEOUT = 3.0
+
+        with patch(
+            "asyncio.create_subprocess_exec",
+            side_effect=_real_create_subprocess_exec_side_effect(str(script)),
+        ):
+            task = asyncio.ensure_future(
+                claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=TIMEOUT)
+            )
+            await asyncio.sleep(STALL)
+            go1.touch()
+            await asyncio.sleep(STALL)
+            go2.touch()
+            result = await task
+
+        assert result == {"result": "ok"}
+
+    @pytest.mark.asyncio
+    async def test_real_child_many_events_never_completes_fails_near_timeout_not_2x(
+        self, tmp_path,
+    ) -> None:
+        """nexus-tx5hd critic point 3 (T2 [24197]): shaped like the actual
+        observed failure -- a real child that streams dozens to hundreds
+        of NDJSON events continuously and never reaches a terminal
+        result event. With NO stall before the first byte, phase 1
+        resolves almost instantly, so phase 2's own budget governs
+        nearly the whole run: total wall time must land close to
+        *timeout*, not up to 2x it (the worst case only applies to a
+        child that ALSO stalls right up to the phase-1 edge, which this
+        one does not)."""
+        from nexus.operators.dispatch import claude_dispatch, OperatorTimeoutError
+
+        script = tmp_path / "fake_claude_many_events.py"
+        script.write_text(
+            "import json, sys, time\n"
+            "def emit(obj):\n"
+            "    sys.stdout.write(json.dumps(obj) + chr(10))\n"
+            "    sys.stdout.flush()\n"
+            "for i in range(500):\n"
+            "    emit({'type': 'stream_event', 'event': {'type': 'content_block_delta',"
+            " 'delta': {'type': 'text_delta', 'text': 'chunk%d ' % i}}})\n"
+            "    time.sleep(0.02)\n"  # pacing only, not a critical race
+            "time.sleep(60)\n"  # the loop above never reaches a result event either
+        )
+
+        TIMEOUT = 1.5
+        t0 = time.monotonic()
+        with patch(
+            "asyncio.create_subprocess_exec",
+            side_effect=_real_create_subprocess_exec_side_effect(str(script)),
+        ):
+            with pytest.raises(OperatorTimeoutError) as exc_info:
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=TIMEOUT)
+        elapsed = time.monotonic() - t0
+
+        err = exc_info.value
+        assert err.partial_text != ""
+        assert err.event_count >= 10, (
+            f"expected dozens of streamed events before the kill, got "
+            f"event_count={err.event_count}"
+        )
+        assert elapsed < 1.5 * TIMEOUT, (
+            f"elapsed {elapsed:.2f}s should be close to the {TIMEOUT}s "
+            f"budget (continuous streaming from the start means phase 1 "
+            f"resolves almost instantly), not up to 2x it -- got "
+            f"{elapsed:.2f}s"
+        )
+
+
+class TestClaudeDispatchDeadline:
+    """nexus-tx5hd critic point 2 (T2 [24197]): claude_dispatch's optional
+    ``deadline`` kwarg caps each phase's effective budget to
+    ``min(timeout, deadline - now)`` -- the dispatch.py-CONTRACT-ONLY
+    half of the fix (runner.py's own accounting is nexus-5dszx, a
+    parallel change). Mocked, like the rest of this file's timeout
+    tests -- this is arithmetic over ``time.monotonic()``, not a real-
+    process concern."""
+
+    @pytest.mark.asyncio
+    async def test_deadline_caps_phase_timeout_below_bare_timeout(self) -> None:
+        """A *deadline* already close in the future must cap the
+        wait_for budget passed to the drain, even though *timeout*
+        itself is large -- proven by observing the timeout actually
+        used, not by racing a real clock."""
+        import nexus.operators.dispatch as _dispatch_mod
+
+        captured_timeouts: list[float] = []
+        real_wait_for = asyncio.wait_for
+
+        async def _spy_wait_for(coro, timeout, *args, **kwargs):
+            captured_timeouts.append(timeout)
+            return await real_wait_for(coro, timeout, *args, **kwargs)
+
+        proc = _make_proc()
+
+        async def hang(n: int = -1) -> bytes:
+            await asyncio.sleep(999)
+            return b""  # pragma: no cover — unreachable
+
+        proc.stdout.read = hang
+
+        deadline = time.monotonic() + 0.05
+        with (
+            patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
+            patch("asyncio.wait_for", side_effect=_spy_wait_for),
+        ):
+            with pytest.raises(_dispatch_mod.OperatorTimeoutError):
+                await _dispatch_mod.claude_dispatch(
+                    "prompt", _SIMPLE_SCHEMA, timeout=300.0, deadline=deadline,
+                )
+
+        assert captured_timeouts, "asyncio.wait_for was never called"
+        # The FIRST wait_for is phase 1's first_byte.wait() -- its budget
+        # must be capped near the ~0.05s remaining-until-deadline, nowhere
+        # near the bare 300s timeout.
+        assert captured_timeouts[0] < 1.0, (
+            f"phase 1's timeout {captured_timeouts[0]} was not capped by "
+            f"the deadline -- got a value close to the bare 300s timeout"
+        )
+
+    def test_effective_phase_timeout_helper(self) -> None:
+        """Direct unit coverage of the pure arithmetic helper: None
+        deadline is a no-op; a future deadline caps below timeout; a
+        past deadline floors at 0.0, never negative."""
+        from nexus.operators.dispatch import _effective_phase_timeout
+
+        assert _effective_phase_timeout(300.0, None) == 300.0
+
+        now = time.monotonic()
+        assert _effective_phase_timeout(300.0, now + 5.0) == pytest.approx(5.0, abs=0.5)
+        assert _effective_phase_timeout(2.0, now + 5.0) == 2.0, (
+            "timeout smaller than the remaining deadline window must win"
+        )
+        assert _effective_phase_timeout(300.0, now - 5.0) == 0.0, (
+            "a deadline already in the past must floor at 0.0, never go negative"
         )
 
 

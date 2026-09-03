@@ -16,6 +16,7 @@ import json
 import math
 import os
 import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -117,6 +118,23 @@ _LOG_STREAM_CAP: int = 8000
 #: happened to be exactly that long — the same ambiguity the "no output on
 #: stdout or stderr" sentinel exists to prevent, one field over.
 _TRUNCATION_MARKER: str = "...[truncated]"
+
+#: nexus-tx5hd critic (code-review round): bound on the post-SIGKILL
+#: cleanup (proc.wait() + reaping the stdout/stderr drain tasks) in the
+#: timeout except-block. Reproduced live: a real child SIGKILL'd while
+#: blocked deep inside a write() to an undrained pipe can leave
+#: asyncio's subprocess transport waiting 40s+ for a pipe-EOF
+#: notification that the platform never delivers promptly (macOS
+#: kqueue quirk; ``BaseSubprocessTransport._try_finish()`` gates
+#: ``Process.wait()`` on ALL pipe transports reporting
+#: ``connection_lost``, not merely on the process having been reaped) --
+#: independent of whether the process is, in fact, already dead. This
+#: constant turns an unbounded/platform-dependent hang into a fixed,
+#: small addition to the timeout exception's own latency: on grace
+#: expiry the cleanup gives up, force-cancels whatever drain tasks are
+#: still outstanding, and proceeds to raise with whatever partial
+#: content had already been captured.
+_TIMEOUT_CLEANUP_GRACE_SECONDS: float = 5.0
 
 __all__ = [
     "claude_dispatch",
@@ -378,30 +396,50 @@ def _build_dispatch_env(
     return base
 
 
-async def _drain_pipe(pipe: asyncio.StreamReader | None) -> bytes:
-    """Read whatever bytes are currently buffered in *pipe*.
+def _effective_phase_timeout(timeout: float, deadline: float | None) -> float:
+    """Per-phase budget for claude_dispatch's two-phase timeout
+    (nexus-tx5hd critic point 2, T2 [24197]).
 
-    Used by the timeout path (nexus-1at5) AFTER the subprocess has
-    been killed and reaped. The writer is dead, so ``read()`` returns
-    EOF immediately for whatever was buffered without blocking.
-    Returns an empty ``bytes`` on any error so the caller can still
-    raise the timeout exception cleanly.
+    ``None`` deadline is a no-op: returns *timeout* unchanged, so every
+    pre-critic call site (none of which passes ``deadline``) sees
+    byte-identical behaviour. When *deadline* is set (an ABSOLUTE
+    ``time.monotonic()`` timestamp), the phase gets the SMALLER of its
+    own *timeout* and whatever time remains until the deadline -- never
+    negative (a deadline already in the past yields ``0.0``, which
+    ``asyncio.wait_for`` accepts and fires on essentially immediately,
+    the same convention ``plans/runner.py``'s own pre-existing
+    ``max(0.0, deadline - time.monotonic())`` call sites already use).
+    Called fresh at the START of EACH phase, not once for both, so
+    phase 2 sees whatever budget phase 1 actually consumed.
     """
-    if pipe is None:
-        return b""
+    if deadline is None:
+        return timeout
+    return max(0.0, min(timeout, deadline - time.monotonic()))
+
+
+async def _reap_drain_task(task: "asyncio.Task[None]") -> None:
+    """Best-effort: let a (possibly still-running) drain task finish on
+    its own now that the child has been killed and reaped -- the pipe's
+    write end is closed, so the task's own read-loop should hit EOF and
+    return almost immediately. NOT a cancel-first strategy: cancelling a
+    task mid-read discards nothing already appended to its accumulator
+    (nexus-h33x8.6 a3's accumulator-survives-cancellation property still
+    holds here), but a bare cancel skips whatever final buffered chunk
+    the transport had already delivered and the task simply hadn't
+    looped around to append yet. Any exception the task ends with
+    (including a CancelledError propagated in from an outer wait_for's
+    own cancellation) is swallowed -- the accumulated chunks are what
+    this path exists to recover, not this call's own outcome. The
+    OUTER caller (claude_dispatch's timeout except-block) bounds the
+    total time this can consume via ``_TIMEOUT_CLEANUP_GRACE_SECONDS``;
+    this function itself does not bound anything on its own.
+    """
+    if task.done():
+        return
     try:
-        return await pipe.read()
-    except Exception:  # noqa: BLE001 - subprocess pipe failure; logged DEBUG with exc_info, returns empty bytes
-        # nexus-8g79.8: empty bytes is the right return shape (caller
-        # treats it as "no output"), but the silent swallow hides
-        # subprocess pipe failures (OOM kill, fd exhaustion, broken
-        # pipe). DEBUG-with-exc_info preserves the API contract while
-        # making the cause discoverable.
-        import structlog  # noqa: PLC0415 - deferred to call time
-        structlog.get_logger(__name__).debug(
-            "operator_pipe_read_failed", exc_info=True,
-        )
-        return b""
+        await task
+    except Exception:  # noqa: BLE001 - best-effort task reap; the accumulated chunks are what matters, not this outcome
+        pass
 
 
 def _capped_text(text: str) -> str:
@@ -983,6 +1021,7 @@ async def claude_dispatch(
     operator: str | None = None,
     max_budget_usd: float | None = None,
     isolated: bool = True,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Dispatch a single operator call to claude -p, fully async.
 
@@ -990,14 +1029,39 @@ async def claude_dispatch(
         prompt: The full prompt text, delivered via stdin.
         json_schema: JSON Schema the model output must conform to.
             Passed via --output-format json and --json-schema flag.
-        timeout: Seconds before the subprocess is killed. Default 300s
-            (5 min) — the analytical workloads these tools run
-            (audit, enrich, summarise, extract) can legitimately
-            take minutes. Callers that know their input is short
-            should override lower; callers running heavy audits
-            override up (``nx_plan_audit`` / ``nx_tidy`` use 600s).
-            The prior 60s default produced a lot of false timeouts
-            on real workloads.
+        timeout: Seconds allowed for EACH of two sequential phases
+            (nexus-tx5hd): time-to-first-byte-of-output, then time from
+            that first byte to completion. Re-anchoring the second phase
+            at the first observed byte rather than at spawn means a slow
+            cold start (model init; formerly the caller's inherited
+            SessionStart hooks, default-suppressed since nexus-11nm2)
+            cannot by itself exhaust the budget meant for the turn's own
+            processing. Worst case total wall time is therefore up to
+            2x *timeout*, not *timeout*. Default 300s (5 min) — the
+            analytical workloads these tools run (audit, enrich,
+            summarise, extract) can legitimately take minutes. Callers
+            that know their input is short should override lower;
+            callers running heavy audits override up (``nx_plan_audit``
+            / ``nx_tidy`` use 600s). The prior 60s default produced a
+            lot of false timeouts on real workloads.
+        deadline: Optional ABSOLUTE ``time.monotonic()`` timestamp
+            (nexus-tx5hd critic point 2, T2 [24197]). When set, EACH
+            phase's effective budget becomes ``min(timeout, max(0.0,
+            deadline - time.monotonic()))``, recomputed fresh at the
+            start of that phase -- so a caller enforcing a hard
+            wall-clock ceiling (e.g. ``nx_answer``'s ``budget_seconds``,
+            threaded through ``plans/runner.py``) is respected even
+            under the two-phase budget above: without this, a caller
+            that pre-computed ``timeout = deadline - now()`` and passed
+            that as the bare ``timeout`` kwarg could see the dispatch
+            overrun the deadline by up to *timeout* again (the 2x
+            worst case applied on top of an already-deadline-sized
+            budget). ``None`` (default) is a no-op -- both phases just
+            use *timeout* directly, byte-identical to every pre-tx5hd-
+            critic call site. This is a dispatch.py-CONTRACT-ONLY
+            change: no existing caller passes it yet (runner.py's own
+            budget-accounting fix is nexus-5dszx, a parallel change);
+            the two are designed to merge without conflict.
         allowed_tools: Opt-in tool allowlist (nexus-mawqw). When set,
             ``--allowedTools <comma-joined>`` is passed so the child
             ``claude -p`` may call those tools (built-ins like ``Read`` /
@@ -1312,6 +1376,14 @@ async def claude_dispatch(
     # child's stdin is redirected from that file at exec time, not written
     # into a pipe afterward.
     prompt_path: Path | None = None
+    # nexus-tx5hd critic point 4 (T2 [24197]): declared here, BEFORE the
+    # try, so the universal `finally:` below can always read them --
+    # including on a spawn failure, where the try body never reaches the
+    # point that would otherwise set them. Both stay ``None`` on that
+    # path, which the finally's own latency log already treats as "no
+    # measurement" rather than raising.
+    _dispatch_spawn_at: float | None = None
+    _first_event_at: float | None = None
     try:
         prompt_path = _write_prompt_file(prompt)
         proc = await _spawn_with_prompt_file(
@@ -1322,6 +1394,7 @@ async def claude_dispatch(
             start_new_session=True,
             env=env,
         )
+        _dispatch_spawn_at = time.monotonic()
 
         # nexus-h33x8.6 a3: NOT proc.communicate(). See _drain_stream's
         # docstring for why -- communicate()'s internal read(-1) loop
@@ -1332,8 +1405,53 @@ async def claude_dispatch(
         # leaves whatever was appended intact.
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
+        first_byte = asyncio.Event()
 
-        async def _run_io() -> None:
+        async def _drain_stdout_and_signal() -> None:
+            # nexus-tx5hd critic point 1 (T2 [24197], SHIP-BLOCKER): this
+            # is now a PERSISTENT background task, started immediately
+            # after spawn alongside stderr's own drain task below --
+            # NOT a phase-scoped, stdout-only reader. The earlier draft
+            # read only proc.stdout during phase 1; a real child with
+            # ``--verbose`` (required for stream-json) that writes more
+            # than one pipe buffer (~64KiB) of stderr before its first
+            # stdout byte would then block on write() with nobody
+            # reading stderr -- phase 1 timed out UNCONDITIONALLY
+            # regardless of the timeout value, a deadlock the OLD
+            # single-phase concurrent ``asyncio.gather(stdout, stderr)``
+            # drain never had. Draining both pipes continuously from
+            # spawn onward removes the trigger entirely.
+            #
+            # ``first_byte`` fires on the FIRST REAL chunk (the "first
+            # model event" signal phase 1 gates on) -- and, via the
+            # ``finally:`` below, also on plain EOF with nothing at all
+            # (a child that dies before writing anything) or on this
+            # task being cancelled, so phase 1 never waits out its full
+            # budget for a stdout that was simply never going to have
+            # anything.
+            nonlocal _first_event_at
+            try:
+                while True:
+                    chunk = await proc.stdout.read(65536)
+                    if not chunk:
+                        return
+                    stdout_chunks.append(chunk)
+                    if _first_event_at is None:
+                        _first_event_at = time.monotonic()
+                    first_byte.set()
+            finally:
+                first_byte.set()
+
+        # Both pipes drained from spawn onward, for the ENTIRE dispatch
+        # lifetime -- not phase-scoped. nexus-vzy2v: stdin is no longer
+        # fed here -- the prompt was already written to disk and
+        # redirected into the child's stdin at spawn time
+        # (_spawn_with_prompt_file), so there is no writer left to run
+        # concurrently with these drains.
+        stdout_task: "asyncio.Task[None]" = asyncio.ensure_future(_drain_stdout_and_signal())
+        stderr_task: "asyncio.Task[None]" = asyncio.ensure_future(_drain_stream(proc.stderr, stderr_chunks))
+
+        async def _finish_io() -> None:
             # nexus-h33x8.6 review round 2 (code-review on dca12e1e3):
             # proc.wait() MUST be inside this wait_for-guarded coroutine,
             # not after it -- mirrors CPython's own Process.communicate()
@@ -1346,18 +1464,29 @@ async def claude_dispatch(
             # firing -- a real deadlock, not merely a slow path (verified:
             # a fake proc whose streams EOF immediately but whose wait()
             # never returns hung the caller indefinitely pre-fix).
-            # nexus-vzy2v: stdin is no longer fed here -- the prompt was
-            # already written to disk and redirected into the child's
-            # stdin at spawn time (_spawn_with_prompt_file), so there is
-            # no writer left to run concurrently with the drains.
-            await asyncio.gather(
-                _drain_stream(proc.stdout, stdout_chunks),
-                _drain_stream(proc.stderr, stderr_chunks),
-            )
+            await asyncio.gather(stdout_task, stderr_task)
             await proc.wait()
 
         try:
-            await asyncio.wait_for(_run_io(), timeout=timeout)
+            # nexus-tx5hd: two sequential budgets inside the SAME try --
+            # a TimeoutError from EITHER phase falls into the one
+            # except-block below (kill + drain + reconstruct + raise),
+            # so nothing is duplicated. PHASE 1 bounds time-to-first-
+            # byte; PHASE 2 gets a FRESH budget from that point for the
+            # rest of the turn. Worst-case total wall time is therefore
+            # up to 2x *timeout* for a child that stalls right up to the
+            # phase-1 edge and then also takes the full phase-2 budget
+            # (bounded to the *deadline*, when the caller passed one --
+            # see ``_effective_phase_timeout``) -- an accepted trade
+            # against a cold start no longer being able to consume the
+            # turn's own processing budget before a single model event
+            # streams.
+            await asyncio.wait_for(
+                first_byte.wait(), timeout=_effective_phase_timeout(timeout, deadline),
+            )
+            await asyncio.wait_for(
+                _finish_io(), timeout=_effective_phase_timeout(timeout, deadline),
+            )
         except asyncio.TimeoutError:
             # Search review I-6: reach the whole process group so any claude
             # children (nested planners, tool subprocesses) get reaped too.
@@ -1373,22 +1502,46 @@ async def claude_dispatch(
                     proc.kill()
                 except Exception:  # noqa: BLE001 - best-effort process reap during cleanup; non-fatal
                     pass
-            # Reap the leader so the asyncio transport closes cleanly.
+
+            async def _post_kill_cleanup() -> None:
+                # Reap the leader so the asyncio transport closes cleanly,
+                # then let the SAME two persistent drain tasks finish on
+                # their own -- NOT a fresh independent read from this
+                # frame, which would race a still-running task reading
+                # the SAME StreamReader concurrently (asyncio explicitly
+                # forbids two readers on one StreamReader at once).
+                # Whatever each task already appended before stopping is
+                # preserved regardless (accumulator survives
+                # cancellation, same property the pre-existing drain
+                # already relies on).
+                try:
+                    await proc.wait()
+                except Exception:  # noqa: BLE001 - best-effort cancel cleanup before drain-and-raise; non-fatal
+                    pass
+                await _reap_drain_task(stdout_task)
+                await _reap_drain_task(stderr_task)
+
+            # nexus-tx5hd code-review round (SHIP-BLOCKER): a real child
+            # SIGKILL'd while blocked deep in a write() to an undrained
+            # pipe can leave asyncio's subprocess transport waiting on a
+            # pipe-EOF notification the platform never delivers promptly
+            # -- reproduced live at 40s+ even though the process was
+            # already dead. Bound the WHOLE cleanup so this exception
+            # path always returns in fixed, small time regardless of
+            # that platform quirk, rather than hanging on
+            # ``proc.wait()``/task-reap indefinitely.
             try:
-                await proc.wait()
-            except Exception:  # noqa: BLE001 - best-effort cancel cleanup before drain-and-raise; non-fatal
-                pass
-            # nexus-1at5 / nexus-h33x8.6 a3: stdout_chunks/stderr_chunks
-            # already hold every chunk _drain_stream consumed before
-            # cancellation (unlike the old communicate()-based drain,
-            # cancellation does not discard them). One more read mops up
-            # a final chunk that may have still been sitting in the
-            # StreamReader's internal buffer (arrived but not yet
-            # delivered to _drain_stream) when the writer died -- after
-            # kill+wait the writer is dead, so this drains cleanly
-            # without blocking.
-            stdout_chunks.append(await _drain_pipe(proc.stdout))
-            stderr_chunks.append(await _drain_pipe(proc.stderr))
+                await asyncio.wait_for(
+                    _post_kill_cleanup(), timeout=_TIMEOUT_CLEANUP_GRACE_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                _log.warning(
+                    "operator_dispatch_kill_cleanup_grace_exceeded",
+                    grace_seconds=_TIMEOUT_CLEANUP_GRACE_SECONDS,
+                )
+                for _t in (stdout_task, stderr_task):
+                    if not _t.done():
+                        _t.cancel()
             partial_stdout = b"".join(stdout_chunks)
             partial_stderr = b"".join(stderr_chunks)
             # Reconstruct readable partial content from the NDJSON so far,
@@ -1650,6 +1803,32 @@ async def claude_dispatch(
             return structured
         return parsed
     finally:
+        # nexus-tx5hd critic point 4 (T2 [24197]): cheap instrumentation
+        # for "measure child time-to-first-model-event vs timeout" --
+        # the bead's own open question. This is the ONE choke point that
+        # already runs on every dispatch outcome (success, harness
+        # failure, timeout, even a spawn failure that never got this
+        # far), so a single debug-level line here covers every path
+        # rather than duplicating the field across several conditional
+        # warning lines elsewhere in this function, none of which fire
+        # unconditionally. ``None`` when spawn itself failed (no process
+        # to time) or when the child never wrote a single byte before
+        # the dispatch ended (killed at the phase-1 edge with nothing
+        # ever received). This commit only wires the number through --
+        # a live measurement run against real gate-wave conditions is
+        # deferred to the next gate run, per the coordinator's explicit
+        # "cheap one" framing.
+        _first_event_latency_s = (
+            (_first_event_at - _dispatch_spawn_at)
+            if (_first_event_at is not None and _dispatch_spawn_at is not None)
+            else None
+        )
+        _log.debug(
+            "operator_dispatch_first_event_latency",
+            first_event_latency_s=_first_event_latency_s,
+            operator=operator,
+            model=model,
+        )
         # nexus-bjltu Significant #1: close the minted session (if any)
         # now that the subprocess that owned it is gone. No-op when this
         # dispatch never minted (tool-free, or a failed mint).
