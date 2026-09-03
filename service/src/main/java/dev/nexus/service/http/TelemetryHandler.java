@@ -391,12 +391,18 @@ public final class TelemetryHandler implements HttpHandler {
             String model          = optStrNull(step, "model");
             Integer inputTokens   = optInt(step, "input_tokens");
             Integer outputTokens  = optInt(step, "output_tokens");
+            // nexus-ndoke: a CACHED prompt reports input_tokens=2 with the real
+            // size in one of these. Absent stays null — a stored 0 would read as
+            // "used no cached input", a claim the run never made.
+            Integer cacheRead     = optInt(step, "cache_read_input_tokens");
+            Integer cacheCreation = optInt(step, "cache_creation_input_tokens");
             Double stepCostUsd    = optDoubleNull(step, "cost_usd");
             int elapsedMs         = optInt(step, "elapsed_ms", 0);
             boolean ok            = requireBool(step, "ok");
             List<Integer> bundledSteps = parseBundledSteps(step.get("bundled_steps"));
             steps.add(new TelemetryRepository.StepInput(stepIndex, operator, source, model,
-                inputTokens, outputTokens, stepCostUsd, elapsedMs, ok, bundledSteps));
+                inputTokens, outputTokens, cacheRead, cacheCreation,
+                stepCostUsd, elapsedMs, ok, bundledSteps));
         }
         return steps;
     }

@@ -972,6 +972,23 @@
          hygiene-001's own <include> comments for the identical reasoning). -->
     <include file="db/changelog/taxonomy-015-doc-count-lock-mode.xml"/>
 
+    <!-- nexus-ndoke — nx_answer_steps gains cache_read_input_tokens and
+         cache_creation_input_tokens. The Anthropic usage envelope reports
+         CACHED input separately, so a cached prompt records input_tokens=2
+         with the real size in one of these two fields; telemetry-007 had no
+         column for either, so input_tokens reads 2 on essentially every step
+         and every per-plan cost aggregate over these rows is a mixture of
+         cache-warm and cache-cold runs that nothing recorded can separate
+         (RDR-196's own numbers included). The client ALREADY parses both
+         fields (DispatchUsage) and discards them at the persistence boundary,
+         so this is plumbing rather than new instrumentation. Depends only on
+         telemetry-007-nx-answer-steps.xml, which creates the table. Placed
+         after taxonomy-015-doc-count-lock-mode.xml (current tail) and before
+         the grants-nexus-svc.xml runAlways block, matching the established
+         late-append convention (D0.1; see taxonomy-013's / taxonomy-014's /
+         taxonomy-015's own <include> comments for the identical reasoning). -->
+    <include file="db/changelog/telemetry-008-step-cache-tokens.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

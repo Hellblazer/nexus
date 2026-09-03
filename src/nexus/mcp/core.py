@@ -6709,6 +6709,17 @@ def _step_record_to_wire(step: Any) -> dict[str, Any]:
         "model":         step.model,
         "input_tokens":  step.input_tokens,
         "output_tokens": step.output_tokens,
+        # nexus-ndoke: input_tokens is 2 on a CACHED prompt — the real size is
+        # in one of these two. Omitting them is what made every per-plan cost
+        # aggregate a mixture of cache-warm and cache-cold runs. getattr with a
+        # None default so a StepRecord from an older in-flight object (or a
+        # test double built before these fields existed) serialises as absent
+        # rather than raising: absent is the engine's nullable column, and a
+        # telemetry write must never crash its caller.
+        "cache_read_input_tokens":
+            getattr(step, "cache_read_input_tokens", None),
+        "cache_creation_input_tokens":
+            getattr(step, "cache_creation_input_tokens", None),
         "cost_usd":      step.cost_usd,
         "elapsed_ms":    step.elapsed_ms,
         "ok":            step.ok,

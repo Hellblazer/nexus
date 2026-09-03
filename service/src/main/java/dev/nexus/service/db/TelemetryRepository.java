@@ -897,6 +897,8 @@ public final class TelemetryRepository {
                              String model,
                              Integer inputTokens,
                              Integer outputTokens,
+                             Integer cacheReadInputTokens,
+                             Integer cacheCreationInputTokens,
                              Double costUsd,
                              int elapsedMs,
                              boolean ok,
@@ -1003,6 +1005,12 @@ public final class TelemetryRepository {
                         .set(NX_ANSWER_STEPS.MODEL, s.model())
                         .set(NX_ANSWER_STEPS.INPUT_TOKENS, s.inputTokens())
                         .set(NX_ANSWER_STEPS.OUTPUT_TOKENS, s.outputTokens())
+                        // nexus-ndoke: input_tokens is 2 on a cached prompt — the
+                        // real size lives in one of these two. Without them every
+                        // per-plan cost aggregate mixes cache-warm and cache-cold
+                        // runs with nothing recorded that can separate them.
+                        .set(NX_ANSWER_STEPS.CACHE_READ_INPUT_TOKENS, s.cacheReadInputTokens())
+                        .set(NX_ANSWER_STEPS.CACHE_CREATION_INPUT_TOKENS, s.cacheCreationInputTokens())
                         .set(NX_ANSWER_STEPS.COST_USD,
                             s.costUsd() != null ? BigDecimal.valueOf(s.costUsd()) : null)
                         .set(NX_ANSWER_STEPS.ELAPSED_MS, s.elapsedMs())

@@ -3949,6 +3949,11 @@ class TestStructuredEnvelopeStepBreakdown:
         assert result["steps"][0] == {
             "step_index": 0, "operator": "search", "source": "sql",
             "model": None, "input_tokens": 0, "output_tokens": 0,
+            # nexus-ndoke: a "sql" step runs no prompt, so it has no cache
+            # dimension at all. None, never 0 — a 0 here would be a claim that
+            # this step used no cached input, which it never measured.
+            "cache_read_input_tokens": None,
+            "cache_creation_input_tokens": None,
             "cost_usd": 0.0, "elapsed_ms": 50, "ok": True, "bundled_steps": [],
         }
         assert result["steps"][1]["operator"] == "summarize"

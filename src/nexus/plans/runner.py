@@ -348,6 +348,19 @@ class StepRecord:
     model: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    #: nexus-ndoke. The Anthropic usage envelope reports CACHED input
+    #: separately: a cached prompt records ``input_tokens=2`` with the real
+    #: size in ``cache_creation_input_tokens`` (cold) or
+    #: ``cache_read_input_tokens`` (warm). Measured: cold 2/26068/0, warm
+    #: 2/-/16324. Without these, ``input_tokens`` is 2 on essentially every
+    #: recorded step and every per-plan cost aggregate mixes cache-warm and
+    #: cache-cold runs with nothing recorded that can separate them.
+    #: ``DispatchUsage`` already parses both; they were dropped at the
+    #: persistence boundary. ``None`` (never 0) for absence, matching the
+    #: sibling token fields: a stored 0 reads as "used no cached input",
+    #: which is a measurement claim the run never made.
+    cache_read_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
     cost_usd: float | None = None
     elapsed_ms: int = 0
     ok: bool = True
@@ -1853,13 +1866,23 @@ async def plan_run(
             in_tok, out_tok, cost = (
                 usage.input_tokens, usage.output_tokens, usage.cost_usd,
             )
+            # nexus-ndoke: carried through verbatim from the same envelope,
+            # never re-derived and never defaulted to 0 — see StepRecord.
+            cache_read = usage.cache_read_input_tokens
+            cache_creation = usage.cache_creation_input_tokens
         elif source == "sql":
             model, in_tok, out_tok, cost = None, 0, 0, 0.0
+            # A SQL step runs no prompt, so there is no cache dimension at all.
+            # 0 here would be a claim about caching; None is the absence of one.
+            cache_read = cache_creation = None
         else:
             model, in_tok, out_tok, cost = None, None, None, None
+            cache_read = cache_creation = None
         step_records.append(StepRecord(
             step_index=step_index, operator=operator, source=source,
             model=model, input_tokens=in_tok, output_tokens=out_tok,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_creation,
             cost_usd=cost, elapsed_ms=elapsed_ms, ok=ok,
             bundled_steps=list(bundled_steps) if bundled_steps else [],
         ))
