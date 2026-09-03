@@ -146,19 +146,30 @@ def _bucketize_durations(durations_ms: "list[int]") -> dict[str, int]:
     return buckets
 
 
-#: Literal, code-templated substring identifying nx_answer's single-step-
-#: guard reroute to ``query()`` (nexus-x79ne / RDR-200 Phase 1b-1c gate:
+#: Code-templated header identifying nx_answer's single-step-guard
+#: reroute to ``query()`` (nexus-x79ne / RDR-200 Phase 1b-1c gate:
 #: q06/q08/q19, both arms, plan_id 471, ``step_count == 1`` — a REAL
 #: ``query()`` call that ran to completion and returned a well-formed
 #: document listing, never reduced). This shape carries ``step_count >
 #: 0``, so without a dedicated check it lands in executed_ok/executed_
 #: failed (no "Error:"/exhaustion prefix, no per-step ``ok=False``
-#: signal) — reading as a normal success. Both of ``query()``'s text
-#: renderers emit this substring verbatim in their header (core.py:
-#: ``"Found {N} documents (from {M} chunks across {K} collections)"`` /
-#: ``"Found {N} documents (from {M} across {K} collections)"``) and no
-#: other core.py-emitted string does.
-_QUERY_LISTING_REROUTE_MARKER = "documents (from"
+#: signal) — reading as a normal success.
+#:
+#: ANCHORED to the start of ``final_text`` (code review, T2 [24198]): a
+#: bare ``in`` substring match let a genuine synthesized answer that
+#: happens to discuss "several documents (from the 2023 filing)"
+#: misclassify. core.py's plain-corpus ``query()`` renderer (the ONLY
+#: variant nx_answer's single-step guard can reach — it never passes
+#: catalog-routing params) always emits this header as line 1, verbatim
+#: (``"Found {N} documents (from {M} chunks across {K} collections)"``);
+#: the catalog-routed variant is a DIFFERENT, unreachable-from-nx_answer
+#: code path whose header is preceded by a routing-note line, so
+#: anchoring to start-of-string costs nothing here. Checked together
+#: with ``step_count == 1`` in :func:`_classify_degenerate_row` — every
+#: gate-artifact instance of this shape carries it (the single-step
+#: guard is the ONLY producer of this header, and it always records
+#: exactly one step).
+_QUERY_LISTING_REROUTE_HEADER_RE = _re.compile(r"^Found \d+ documents \(from ")
 
 #: Prefix of a budget WARNING line (RDR-196 .p3c) — distinct from
 #: ``NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX``'s ``"[budget exhausted"``:
@@ -208,7 +219,9 @@ def _is_budget_warning_only_body(final_text: str) -> bool:
     """True when *final_text* is one or more ``[budget warning (...):
     ...]`` lines and NOTHING ELSE (nexus-x79ne: the run proceeded past
     the warning — every recorded over-cap line "ran anyway" — but
-    produced no answer at all; RDR-200 Phase 1b/1c q01/q13/q15/q22).
+    produced no answer at all; RDR-200 Phase 1b q01 x2/q03/q13/q15,
+    Phase 1c q01a1/q13a1/q22a1/q22a2 — code review, T2 [24198]:
+    corrects the citation, which previously named q22 without q03).
 
     A warning followed by a real answer does NOT match: the remainder
     after stripping every leading warning line is non-empty, which is
@@ -242,27 +255,45 @@ def _classify_degenerate_row(row: dict) -> str:
     nexus-x79ne (RDR-200 Phase 1b/1c gate): three well-formed-but-
     structurally-empty body shapes accounted for 9 of 24 gate questions
     while the pre-fix server-side field reported 1 (``planner_error``
-    only) — checked FIRST, before the ``step_count == 0``-only classes
-    below, because they are reachable on ANY row (see
-    :data:`_WELL_FORMED_DEGENERATE_CLASSES` and
-    :func:`_split_four_way`, which is what actually widens the routing
-    for the ``step_count > 0`` case — this function alone cannot, since
-    it is only ever called on a row already selected for classification).
+    only) — reachable on ANY row, not only ``step_count == 0`` ones (see
+    :data:`_WELL_FORMED_DEGENERATE_CLASSES` and :func:`_split_four_way`,
+    which is what actually widens the routing for the ``step_count > 0``
+    case — this function alone cannot, since it is only ever called on a
+    row already selected for classification).
+
+    ORDERING (code review, T2 [24198] — Important, falsified live): the
+    pre-existing ``"[redacted]"``/``"Planner error:"``/``"Error:"``
+    checks run FIRST, before the three new heuristics below. A row like
+    ``{"final_text": "Error: no evidence was provided by the upstream
+    retrieval service (timeout)", "step_count": 0}`` genuinely contains
+    the empty-hydration phrase "no evidence was provided" as a
+    substring — checking the heuristics first misclassified it
+    ``empty_hydration`` instead of ``error``, and (via the widened
+    ``_split_four_way``) diverted an ``step_count > 0`` row shaped like
+    it straight into ``degenerate`` WITHOUT ever reaching
+    :func:`_row_is_failed`. The three new heuristics are all narrow
+    enough (a code-templated header, a code-templated warning-line
+    prefix, an explicit refusal-phrase list) that none of them can
+    plausibly fire on real error/redaction text, so this reordering
+    costs nothing in the other direction.
     """
     final_text = str(row.get("final_text") or "")
     question = str(row.get("question") or "")
-    if _is_budget_warning_only_body(final_text):
-        return "budget_warning_only"
-    if _QUERY_LISTING_REROUTE_MARKER in final_text:
-        return "query_listing_reroute"
-    if any(phrase in final_text.strip().lower() for phrase in _EMPTY_HYDRATION_PHRASES):
-        return "empty_hydration"
     if final_text == "[redacted]" or question == "[redacted]":
         return "redacted"
     if final_text.startswith("Planner error:"):
         return "planner_error"
     if final_text.startswith("Error:"):
         return "error"
+    if _is_budget_warning_only_body(final_text):
+        return "budget_warning_only"
+    if (
+        int(row.get("step_count") or 0) == 1
+        and _QUERY_LISTING_REROUTE_HEADER_RE.match(final_text) is not None
+    ):
+        return "query_listing_reroute"
+    if any(phrase in final_text.strip().lower() for phrase in _EMPTY_HYDRATION_PHRASES):
+        return "empty_hydration"
     return "other"
 
 

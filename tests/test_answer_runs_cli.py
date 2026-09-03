@@ -1546,7 +1546,16 @@ class TestDegenerateBodyShapes:
         row = {"final_text": final_text, "question": "q", "step_count": 1}
         assert _classify_degenerate_row(row) == "query_listing_reroute"
 
-    def test_service_mode_listing_header_classifies_as_listing_reroute(self) -> None:
+    def test_catalog_routed_header_not_first_line_does_not_match(self) -> None:
+        """The catalog-routed ``query()`` variant (only reachable when a
+        caller passes author/content_type/subtree/follow_links -- nx_
+        answer's single-step guard never does) prefixes the header with
+        a routing-note line, so the header is NOT ``final_text``'s first
+        line. Anchoring to start-of-string (code review, T2 [24198])
+        deliberately excludes this shape: it is unreachable from
+        nx_answer, so a false negative here costs nothing, and NOT
+        anchoring is what let a real answer discussing documents
+        misclassify."""
         from nexus.commands.answer_runs import _classify_degenerate_row
 
         final_text = (
@@ -1555,7 +1564,38 @@ class TestDegenerateBodyShapes:
             "1. [0.0500] RDR-070\n   rdr__1-1\n   snippet\n"
         )
         row = {"final_text": final_text, "question": "q", "step_count": 1}
-        assert _classify_degenerate_row(row) == "query_listing_reroute"
+        assert _classify_degenerate_row(row) == "other"
+
+    def test_risky_substring_mid_sentence_does_not_match(self) -> None:
+        """Anti-false-positive, the exact risky substring named in code
+        review (T2 [24198]): a real synthesized answer that happens to
+        contain "documents (from" mid-sentence, at step_count == 1 (so
+        the step_count gate alone would not have saved it), must not
+        classify as a listing reroute -- the anchor is what saves it."""
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        row = {
+            "final_text": (
+                "The company disclosed several documents (from the 2023 "
+                "filing) describing its liquidity position."
+            ),
+            "question": "q", "step_count": 1,
+        }
+        assert _classify_degenerate_row(row) == "other"
+
+    def test_correct_header_at_wrong_step_count_does_not_match(self) -> None:
+        """The single-step guard is the ONLY producer of this header and
+        it always records step_count == 1 -- a header-shaped final_text
+        at any other step_count cannot be a real listing reroute (it
+        would mean plan_run itself somehow emitted this exact string as
+        a later step's own text_key value, an unrelated coincidence)."""
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        row = {
+            "final_text": "Found 2 documents (from 6 across 1 collections)\n",
+            "question": "q", "step_count": 2,
+        }
+        assert _classify_degenerate_row(row) == "other"
 
     def test_listing_reroute_row_lands_in_degenerate_not_executed_ok(self) -> None:
         """The structural fix: step_count == 1 must not by itself route
@@ -1684,6 +1724,61 @@ class TestDegenerateBodyShapes:
         ok, failed, handed_off, degenerate, reports = _split_four_way([row])
         assert ok == [] and failed == []
         assert [r["id"] for r in degenerate.get("empty_hydration", [])] == [3]
+
+    # ── ordering: error/redacted/planner_error must win over the three
+    #    new heuristics (code review, T2 [24198] Important, falsified
+    #    live) ──────────────────────────────────────────────────────────
+
+    def test_error_text_containing_a_risky_phrase_still_classifies_error(
+        self,
+    ) -> None:
+        """The exact code-review repro: an "Error:"-prefixed final_text
+        that genuinely contains the empty-hydration phrase "no evidence
+        was provided" as a substring must classify as ``error``, never
+        ``empty_hydration`` -- the error-family checks must run FIRST."""
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        row = {
+            "final_text": (
+                "Error: no evidence was provided by the upstream "
+                "retrieval service (timeout)"
+            ),
+            "question": "q", "step_count": 0,
+        }
+        assert _classify_degenerate_row(row) == "error"
+
+    def test_error_text_with_step_count_reaches_row_is_failed_not_degenerate(
+        self,
+    ) -> None:
+        """Consequence for the widened _split_four_way: a step_count > 0
+        row shaped like the repro above must land in executed_failed via
+        _row_is_failed, never bypass it into degenerate."""
+        from nexus.commands.answer_runs import _split_four_way
+
+        row = {
+            "id": 20, "question": "q", "plan_id": 5,
+            "matched_confidence": 0.7, "step_count": 3,
+            "final_text": (
+                "Error: no evidence was provided by the upstream "
+                "retrieval service (timeout)"
+            ),
+            "cost_usd": 0.01, "duration_ms": 500,
+            "created_at": "2026-09-01T00:00:00Z", "steps": [],
+        }
+        ok, failed, handed_off, degenerate, reports = _split_four_way([row])
+        assert degenerate == {}
+        assert [r["id"] for r in failed] == [20]
+        assert ok == []
+
+    def test_redacted_text_wins_over_risky_substrings(self) -> None:
+        """A trace=False redacted row is always exactly '[redacted]' in
+        practice, so this cannot actually collide -- pinned anyway as a
+        structural guard against a future heuristic addition that DOES
+        collide with the literal string."""
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        row = {"final_text": "[redacted]", "question": "q", "step_count": 0}
+        assert _classify_degenerate_row(row) == "redacted"
 
     # ── the fixed field: nine questions worth of degenerate rows are all
     #    counted, not just the pre-existing planner_error class ──────────
