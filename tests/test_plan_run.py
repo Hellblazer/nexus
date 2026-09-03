@@ -3270,3 +3270,77 @@ class TestPartialStepRecordsOnException(object):
         assert step_records is not None
         assert len(step_records) == 1
         assert step_records[0].step_index == 0
+
+
+# ── operator hydration carries the display-truncation marker (nexus-lugwx) ──
+
+
+class TestHydrationCarriesDisplayTruncationMarker:
+    """nexus-lugwx: ``store_get_many`` cuts each document at
+    ``max_chars_per_doc``. Before this bead it appended a bare ellipsis, so a
+    tool-free operator read the mid-sentence cut as a broken document (the
+    nexus-c0sdc defect, first fixed for nx_tidy alone). The marker now lives
+    at the cut inside store_get_many, so BOTH runner paths carry it without
+    re-detecting anything: ``ids``-in-args auto-hydration, and the explicit
+    ``store_get_many`` step feeding ``inputs: $stepN.contents`` (the shape
+    every built-in plan uses). The stub reproduces store_get_many's REAL
+    shape via the same helper it uses, so it stays honest if that changes.
+    """
+
+    @staticmethod
+    def _stub(monkeypatch, bodies: list[str]) -> None:
+        from nexus.mcp import core as mcp_core
+
+        def fake_store_get_many(*, ids, collections, structured, max_chars_per_doc=4000):
+            cut = [
+                b[:max_chars_per_doc] + "…"
+                + mcp_core.display_truncation_marker(max_chars_per_doc)
+                if len(b) > max_chars_per_doc else b
+                for b in bodies
+            ]
+            return {"contents": cut, "missing": []}
+
+        monkeypatch.setattr(mcp_core, "store_get_many", fake_store_get_many)
+
+    def test_ids_branch_summarize_content_carries_marker(self, monkeypatch):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        self._stub(monkeypatch, ["word " * 1500])  # 7500 chars, cut
+        tool, args = _hydrate_operator_args("summarize", {"ids": ["a"]})
+        assert tool == "operator_summarize"
+        assert "TRUNCATED FOR DISPLAY" in args["content"]
+        assert "NOT a defect" in args["content"]
+
+    def test_ids_branch_marker_rides_inside_json_items(self, monkeypatch):
+        """rank/compare/filter receive a JSON list; the marker must ride
+        inside the item string, where the model reads it."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        self._stub(monkeypatch, ["x" * 9000, "short"])
+        _, args = _hydrate_operator_args("rank", {"ids": ["a", "b"], "criterion": "c"})
+        items = json.loads(args["items"])
+        assert len(items) == 2
+        assert "TRUNCATED FOR DISPLAY" in items[0]
+        assert "TRUNCATED FOR DISPLAY" not in items[1]
+
+    def test_inputs_branch_preserves_marker_from_explicit_step(self, monkeypatch):
+        """The built-in plans' shape: an explicit store_get_many step, then
+        ``inputs: $stepN.contents`` on the operator. The runner must pass the
+        marked text through unchanged on this path too."""
+        from nexus.mcp import core as mcp_core
+        from nexus.plans.runner import _hydrate_operator_args
+
+        marked = "x" * 4000 + "…" + mcp_core.display_truncation_marker(4000)
+        _, args = _hydrate_operator_args("summarize", {"inputs": [marked, "short"]})
+        assert "TRUNCATED FOR DISPLAY" in args["content"]
+        _, args = _hydrate_operator_args("compare", {"inputs": [marked], "focus": "f"})
+        assert "TRUNCATED FOR DISPLAY" in json.loads(args["items"])[0]
+
+    def test_short_document_is_not_marked(self, monkeypatch):
+        """Marking an intact document would teach the model to discount a
+        real truncation it should report."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        self._stub(monkeypatch, ["a complete short note."])
+        _, args = _hydrate_operator_args("summarize", {"ids": ["a"]})
+        assert args["content"] == "a complete short note."

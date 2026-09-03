@@ -1625,17 +1625,18 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
         ), False
     blocks: list[str] = []
     for i, (doc_id, raw) in enumerate(zip(ids, contents), start=1):
-        # nexus-c0sdc: store_get_many truncates at _TIDY_MAX_CHARS_PER_ENTRY and
-        # appends a bare "…" with no marker. The tool-free child then sees an
-        # ellipsis mid-sentence and correctly concludes the ENTRY is broken —
-        # so tidy told operators to re-ingest healthy 6-9 KB documents. Silent
-        # truncation is against house doctrine (nexus-2xjge) and it inverts
-        # tidy's purpose for exactly the entries most worth consolidating: the
-        # long, dense ones are the ones that get cut. Detect the cut on the RAW
-        # body (before strip(), which would change the length) and say so.
+        # nexus-c0sdc: store_get_many truncates at _TIDY_MAX_CHARS_PER_ENTRY.
+        # Before nexus-lugwx it appended a bare "…" with no marker, so the
+        # tool-free child saw an ellipsis mid-sentence and concluded the
+        # ENTRY was broken — tidy told operators to re-ingest healthy 6-9 KB
+        # documents. Silent truncation is against house doctrine
+        # (nexus-2xjge) and it inverts tidy's purpose for exactly the entries
+        # most worth consolidating. The body now carries the marker from the
+        # cut itself; the header repeats it so the prompt's caveat has a
+        # header to point at.
         raw = raw or ""
-        display_truncated = (
-            len(raw) == _TIDY_MAX_CHARS_PER_ENTRY + 1 and raw.endswith("…")
+        display_truncated = raw.endswith(
+            display_truncation_marker(_TIDY_MAX_CHARS_PER_ENTRY)
         )
         body = raw.strip()
         if not body:
@@ -4201,6 +4202,18 @@ def _fallback_get_by_ids_individually(
     return id_to_entry
 
 
+def display_truncation_marker(cap: int) -> str:
+    """The suffix ``store_get_many`` appends after the ellipsis when it cuts a
+    document at ``cap`` chars (nexus-lugwx). Self-describing where the model
+    reads it, so a cut is never mistaken for a defect in the stored document.
+    Callers that want to know whether a body was cut test ``endswith`` on
+    this, never on the ellipsis alone."""
+    return (
+        f" [TRUNCATED FOR DISPLAY at {cap} chars"
+        " — a display limit, NOT a defect in the stored document]"
+    )
+
+
 @mcp.tool(
     title="Batch-Retrieve Documents",
     annotations={"readOnlyHint": True},
@@ -4229,7 +4242,9 @@ def store_get_many(
             in parallel-stream form a list aligned 1:1 with the outer
             ``ids`` length performs per-stream collection routing
             (each id in stream i is hydrated from ``collections[i]``).
-        max_chars_per_doc: Per-document truncation cap (default 4 KB).
+        max_chars_per_doc: Per-document truncation cap (default 4 KB). A cut
+            body ends in an ellipsis plus ``display_truncation_marker(cap)``
+            so a reader never mistakes the cut for a defect (nexus-lugwx).
         structured: Return ``{contents, missing}`` dict when True;
             human-readable string when False.
         limit_per_source: Cap input IDs before hydration (RDR-097 P1.0).
@@ -4422,7 +4437,14 @@ def store_get_many(
 
             body = str(entry.get("content") or "")
             if max_chars_per_doc > 0 and len(body) > max_chars_per_doc:
-                body = body[:max_chars_per_doc] + "…"
+                # nexus-lugwx: say so AT the cut. A bare ellipsis reads as a
+                # broken document to every tool-free consumer downstream
+                # (nx_tidy, the plan runner's operators); marking here means
+                # no caller has to re-detect the cut (nexus-2xjge doctrine).
+                body = (
+                    body[:max_chars_per_doc] + "…"
+                    + display_truncation_marker(max_chars_per_doc)
+                )
             contents.append(body)
 
         if structured:
