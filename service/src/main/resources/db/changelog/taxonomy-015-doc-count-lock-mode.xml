@@ -31,15 +31,44 @@
 
         WHY FOR UPDATE WAS THE PROBLEM. The persisted-CTE INSERT carries an FK
         to nexus.topics, so PostgreSQL takes an implicit FOR KEY SHARE on each
-        referenced topics row as each row is inserted. FOR KEY SHARE conflicts
-        with exactly one row-lock mode: FOR UPDATE. Two concurrent callers over
-        an overlapping topic set therefore BOTH hold FOR KEY SHARE on the shared
-        rows before either statement finishes, and then each one's AFTER trigger
-        asks for FOR UPDATE on those same rows — a lock UPGRADE that each
-        transaction can only complete once the other releases. Ordering the
-        INSERT cannot help: the shared locks are already held by both parties
-        before any upgrade is attempted. That is why variant A above still
-        deadlocked.
+        referenced topics row. FOR KEY SHARE conflicts with exactly one
+        row-lock mode: FOR UPDATE. Two concurrent callers over an overlapping
+        topic set therefore BOTH hold FOR KEY SHARE on the shared rows before
+        either statement finishes, and then each one's AFTER trigger asks for
+        FOR UPDATE on those same rows — a lock UPGRADE that each transaction
+        can only complete once the other releases. Ordering the INSERT cannot
+        help: the shared locks are already held by both parties before any
+        upgrade is attempted. That is why variant A above still deadlocked.
+
+        WHEN the KEY SHARE is taken, precisely (correction, conexus-13
+        2026-09-02 — an earlier version of this note said "as each row is
+        inserted", which is wrong and matters for anyone trying to REPRODUCE
+        this). PostgreSQL implements an immediate FK as an AFTER ROW trigger
+        queued per row and fired at the END of the statement, so the RI checks
+        take their KEY SHARE locks in a tail immediately before the AFTER
+        STATEMENT trigger runs — not interleaved with the inserts. The
+        contention window is therefore that RI tail, not the whole insert,
+        which is far narrower than the wrong version implies.
+
+        WHAT THAT PREDICTS, AND IT WAS MEASURED BOTH WAYS. Two statements must
+        end within that tail of each other. In-process against a local PG they
+        routinely do: 10-13 retries per 20 rounds through the real call path.
+        Across a WAN they essentially never do: conexus-13 measured NINE
+        natural variants against the live cloud (edge and direct-DB, 2-4
+        writers, 7 to 24,000 rows per statement, equal and differing set sizes,
+        fresh rows per round, pre-connected) and every one read ZERO on both
+        CloudWatch deadlock_retry and pg_stat_database.deadlocks — with large
+        statements the second writer simply waited out the first. Forcing the
+        precondition (each writer holds FOR KEY SHARE on its topics in the same
+        transaction before the barrier, then calls the function) reproduces it
+        immediately: 20/20 rounds 40P01, deadlocks delta exactly 20, on live
+        0.1.94.
+
+        NONE OF THIS CHANGES THE REMEDY. The conflict is still KEY SHARE vs
+        FOR UPDATE and FOR NO KEY UPDATE still does not conflict with KEY
+        SHARE, so the fix below is unaffected. What the timing changes is how
+        you PROVE it: a natural-timing probe that reads zero is not evidence
+        the fix worked, because it read zero before the fix too.
 
         WHY FOR NO KEY UPDATE IS BOTH SUFFICIENT AND CORRECT. The trigger's
         whole purpose is an UPDATE of topics.doc_count, a NON-KEY column. A

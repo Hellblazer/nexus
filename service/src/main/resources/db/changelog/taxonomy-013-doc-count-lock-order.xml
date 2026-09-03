@@ -205,6 +205,19 @@
     belt it added absorbed the result until it exhausted in production on
     2026-09-02.
 
+    TIMING FOOTNOTE (conexus-13, 2026-09-02). The paragraph above this
+    correction says the FK's KEY SHARE is taken "AS EACH inserted row is
+    processed". That is wrong, and it matters only for REPRODUCING the
+    deadlock, not for the diagnosis. PostgreSQL implements an immediate FK as
+    an AFTER ROW trigger queued per row and fired at the END of the statement,
+    so the RI checks take their locks in a tail immediately before the AFTER
+    STATEMENT trigger — not interleaved with the inserts. The contention
+    window is that tail. Measured consequence: two statements must end within
+    it, which happens routinely in-process against a local PG (10-13 retries
+    per 20 rounds) and essentially never across a WAN (nine natural variants
+    against the live cloud, all zero on two independent instruments). Forcing
+    the precondition reproduces it at once: 20/20 rounds on live 0.1.94.
+
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
