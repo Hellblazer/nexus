@@ -406,7 +406,20 @@ from __future__ import annotations
 #: lead with [additive], so the engine was tagged, deployed and cloud-gated
 #: GREEN before this client tag (nexus-1emxn choreography (a)) — no refusal
 #: window can open.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 94)
+#: ->(0,1,95) 2026-09-03: fix-delivery rule — the engine carries the
+#: topics.doc_count trigger lock-mode fix (nexus-6n51g: FOR NO KEY UPDATE
+#: instead of FOR UPDATE, closing the deadlock that exhausted the
+#: DeadlockRetry belt in production on 2026-09-02 with 14 HTTP 500s on
+#: assign_from_chashes) and AWT out of the native image (nexus-223oj).
+#: Local-mode installs receive engine fixes ONLY via this pin, so a
+#: production deadlock fix moves the floor. Deployed and cloud-gated
+#: BEFORE this bump: redeploy Success 01:53:49Z, STEP-6 green
+#: (gate-report-20260903T021408Z-v011.json, parity 113/113 zero movement),
+#: cloud-client-path gate 4/4, and the fix verified in production by the
+#: forced-precondition probe going 20/20 40P01 on v0.1.94 -> 0/20 on
+#: v0.1.95. One Liquibase changeset pair, so the PITR fork walk WAS run
+#: (fork census == live census row-for-row) rather than skipped.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 95)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

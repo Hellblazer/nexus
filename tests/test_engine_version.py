@@ -463,7 +463,15 @@ class TestRequiredEngineVersion:
         # changesets in the delta — no fork walk; both wire-ledger entries
         # are [additive], so the engine deployed and cloud-gated GREEN
         # BEFORE this client tag (1emxn (a)).
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 94)
+        # ->(0,1,95) 2026-09-03: fix-delivery rule — the doc_count trigger
+        # lock-mode fix (nexus-6n51g) closing the production deadlock that
+        # exhausted the DeadlockRetry belt, plus AWT out of the native image
+        # (nexus-223oj). Deployed and cloud-gated BEFORE this bump (STEP-6
+        # green, cloud-client-path 4/4, forced probe 20/20 -> 0/20 in
+        # production). UNLIKE the recent entries above, this delta DOES carry
+        # Liquibase changesets (taxonomy-015), so the PITR fork walk was run
+        # rather than skipped — fork census matched live row-for-row.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 95)
 
 
 class TestParseEngineVersion:
