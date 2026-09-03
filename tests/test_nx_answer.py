@@ -4046,6 +4046,117 @@ class TestNxAnswerBudgetUsdEnforcement:
         )
 
 
+class TestNxAnswerDroppedReduceStepsEnvelope:
+    """nexus-4h0oh follow-up (code-review T2 [24199]):
+    ``PlanResult.dropped_reduce_steps`` never reached the ``nx_answer``
+    caller. Thread it into the structured envelope the same way
+    ``budget_warnings`` is threaded (a closure-scoped accumulator
+    ``_result`` reads directly, never a per-call-site parameter) --
+    always present, ``[]`` when empty -- and into the text-mode return
+    as a one-line notice when non-empty."""
+
+    @pytest.mark.asyncio
+    async def test_dropped_reduce_steps_surfaces_in_structured_envelope(
+        self, tmp_path,
+    ):
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(
+            steps=[{"text": "final answer"}],
+            dropped_reduce_steps=[2, 4],
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            text_result = await nx_answer("q")
+            struct_result = await nx_answer("q", structured=True)
+
+        assert isinstance(struct_result, dict)
+        assert struct_result["dropped_reduce_steps"] == [2, 4]
+        assert isinstance(text_result, str)
+        assert "2" in text_result and "4" in text_result
+        assert "final answer" in text_result, (
+            "the notice must not replace the real answer, only precede it"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_dropped_reduce_steps_yields_empty_list_and_no_notice(
+        self, tmp_path,
+    ):
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(steps=[{"text": "final answer"}])
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            text_result = await nx_answer("q")
+            struct_result = await nx_answer("q", structured=True)
+
+        assert struct_result["dropped_reduce_steps"] == []
+        assert "dropped reduce" not in text_result.lower()
+        assert text_result == "final answer"
+
+    @pytest.mark.asyncio
+    async def test_dropped_reduce_steps_coexists_with_budget_warning(
+        self, tmp_path,
+    ):
+        """Both notices must survive together -- the marker-convergence
+        rule that governs budget_warnings/exhaustion co-occurrence must
+        extend to this new line, not silently drop one when both fire."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(
+            steps=[{"text": "the real answer"}],
+            dropped_reduce_steps=[2],
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            text_result = await nx_answer("q", budget_usd=0.05)
+            struct_result = await nx_answer(
+                "q", budget_usd=0.05, structured=True,
+            )
+
+        assert "budget warning (over-cap)" in text_result
+        assert "2" in text_result
+        assert "the real answer" in text_result
+        assert struct_result["dropped_reduce_steps"] == [2]
+        over_cap_entries = [
+            w for w in struct_result["budget_warnings"] if w["kind"] == "over-cap"
+        ]
+        assert len(over_cap_entries) == 1
+
+
 class TestNxAnswerClassifyPlanPrefixedOperatorNames:
     """nexus-h33x8.6 a4 fold-in (found in passing, dev notes
     nx-answer-a3-a1-dev-notes-2026-08-19): ``_nx_answer_classify_plan``

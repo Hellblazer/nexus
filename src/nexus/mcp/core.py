@@ -7853,6 +7853,19 @@ async def nx_answer(
     #: can take after a warning is emitted carries all of them, in both
     #: shapes.
     _budget_warning_entries: "list[dict[str, str]]" = []
+    #: nexus-4h0oh follow-up (code-review T2 [24199]): 1-indexed plan-
+    #: step positions from a real ``PlanResult.dropped_reduce_steps``
+    #: (see that field's own docstring in ``plans/runner.py``) — read by
+    #: ``_result``'s closure directly, the SAME "closure-scoped
+    #: accumulator, never a per-call-site parameter" pattern
+    #: ``_budget_warning_entries`` above uses, so every exit path this
+    #: call can take after a real ``plan_run`` call carries it without
+    #: threading a new kwarg through every one of ``_result``'s many
+    #: call sites. Stays ``[]`` on every path that never reaches a real
+    #: ``PlanResult`` (single-step fast path, any error before Step 4,
+    #: a stub result) — the same "no plan_run, nothing to drop" reading
+    #: ``step_records``'s own default in ``_result`` already gives.
+    _dropped_reduce_steps: "list[int]" = []
 
     # RDR-137 followup (nexus-n1908): normalize a malformed comma-list
     # scope to broad search (with a warning) so it doesn't filter
@@ -7927,12 +7940,32 @@ async def nx_answer(
             _pre_cap_chars - _TEXT_RESULT_CAP_CHARS
             if _pre_cap_chars > _TEXT_RESULT_CAP_CHARS else None
         )
-        if not _budget_warning_text:
+        # nexus-4h0oh follow-up (code-review T2 [24199]): a one-line
+        # text-mode notice naming the discarded parallel-branch step
+        # positions, read from the SAME closure-scoped accumulator
+        # pattern as `_budget_warning_entries` above (see
+        # `_dropped_reduce_steps`'s own declaration). Folded into the
+        # SAME prepend/append composition as the budget-warning line so
+        # the two notices stack correctly and neither displaces the
+        # exhaustion marker's required leading position — generalising
+        # the existing two-branch logic rather than duplicating it.
+        _dropped_reduce_text = (
+            "[dropped reduce-step branches (evidence retrieved and "
+            "reduced but never referenced by the final step): "
+            + ", ".join(str(i) for i in _dropped_reduce_steps) + "]"
+            if _dropped_reduce_steps else None
+        )
+        _extra_lines = [
+            line for line in (_budget_warning_text, _dropped_reduce_text)
+            if line
+        ]
+        _extra_text = "\n".join(_extra_lines) if _extra_lines else None
+        if not _extra_text:
             _text = text
         elif text.startswith(NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX):
-            _text = f"{text}\n{_budget_warning_text}"
+            _text = f"{text}\n{_extra_text}"
         else:
-            _text = f"{_budget_warning_text}\n{text}"
+            _text = f"{_extra_text}\n{text}"
         if not structured:
             return _text
         # RDR-196 .p1e (nexus-nyry9.11): per-step breakdown in the
@@ -7985,6 +8018,15 @@ async def nx_answer(
             # `budget_exhausted_at_step` above and the same empty-list
             # convention as `chunks`.
             "budget_warnings": list(_budget_warning_entries),
+            # nexus-4h0oh follow-up (code-review T2 [24199]): 1-indexed
+            # plan-step positions of executed operator ("reduce") steps
+            # whose output the terminal step never referenced — see
+            # `_dropped_reduce_steps`'s own declaration and
+            # `PlanResult.dropped_reduce_steps`'s docstring in
+            # plans/runner.py for the full contract. Always present,
+            # ``[]`` (not None) when empty, same convention as
+            # `budget_warnings`/`chunks` above.
+            "dropped_reduce_steps": list(_dropped_reduce_steps),
             # RDR-196 Phase 3 Step 1 (nexus-nyry9.20): the Step 1 plan-
             # choice decision, when it ran (None on force_dynamic, a
             # plan-miss, or any error path before Step 1's hit branch —
@@ -8959,6 +9001,19 @@ async def nx_answer(
             step_count=len(_exc_step_records),
             step_records=_exc_step_records,
         )
+    # nexus-4h0oh follow-up (code-review T2 [24199]): set the closure
+    # accumulator IMMEDIATELY after a successful plan_run call, BEFORE
+    # ``_budget_exhausted_response(result)`` below has a chance to
+    # build (and return) an envelope via ``_result`` — a partial run
+    # that got budget-cut can still carry real dropped_reduce_steps
+    # from the steps that DID execute, and that envelope must not read
+    # a stale empty accumulator. Defensive isinstance check, same
+    # landmine as ``_result_step_records``'s own comment below (a
+    # MagicMock test double's unconfigured attribute access is a
+    # truthy non-list MagicMock, not a raise).
+    _dropped_reduce_steps = getattr(result, "dropped_reduce_steps", None)
+    if not isinstance(_dropped_reduce_steps, list):
+        _dropped_reduce_steps = []
     # nexus-yg49g: the success record USED to be here — before final_text is
     # even extracted (below) and ~60 lines before the empty-retrieval guard that
     # already knows the run produced nothing. It could not have been right: at
@@ -9170,6 +9225,14 @@ async def nx_answer(
         _result_step_records = getattr(result, "step_records", None)
         if not isinstance(_result_step_records, list):
             _result_step_records = []
+        # nexus-4h0oh follow-up (code-review T2 [24199]): same closure-
+        # accumulator refresh as the primary plan_run call above — this
+        # fallback re-run REPLACES `result`, so `_dropped_reduce_steps`
+        # must be re-derived from it too, not left stale from the
+        # discarded prefix-only run.
+        _dropped_reduce_steps = getattr(result, "dropped_reduce_steps", None)
+        if not isinstance(_dropped_reduce_steps, list):
+            _dropped_reduce_steps = []
         _budget_response = _budget_exhausted_response(result)
         if _budget_response is not None:
             return _budget_response
