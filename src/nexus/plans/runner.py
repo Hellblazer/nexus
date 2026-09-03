@@ -1353,6 +1353,40 @@ def _is_tumbler_shaped(value: str) -> bool:
     return bool(_TUMBLER_ID_RE.match(value))
 
 
+#: nexus-mm5tx follow-up (code-review T2 [24199]): fixed, machine-
+#: recognisable prefix for the short-circuit result text emitted when
+#: an operator's hydrated evidence filters to zero items (either the
+#: ids-auto-hydration branch or the nexus-yis0 pass-through branch).
+#: A downstream classifier (e.g. answer-runs) keys on this constant
+#: instead of parsing an operator's own free-text refusal prose —
+#: compare's "No comparison performed" was the live q12 symptom this
+#: closes. Kept as a bare prefix (not a full templated sentence) so a
+#: caller can reliably ``str.startswith`` it regardless of which
+#: operator or how many items were filtered.
+_NO_EVIDENCE_RESULT_PREFIX = "No evidence to reduce:"
+
+
+def _no_evidence_result_text(*, tool: str, filtered_count: int) -> str:
+    """Build the short-circuit result text for a zero-evidence hydration.
+
+    *filtered_count* is the number of hydrated items that were
+    attempted and came back empty (never a fabricated 0 when the count
+    is genuinely unknown — every call site below only calls this when
+    it has a real count in scope). Step-index attribution is
+    deliberately NOT baked into this text: neither
+    ``_hydrate_operator_args`` nor ``_default_dispatcher`` knows the
+    plan-step index (the same limitation documented on
+    ``PlanRunOperatorArgMissingError``'s call site), and ``plan_run``'s
+    own per-step ``nx_answer_step_start``/``nx_answer_step_complete``
+    structlog events already carry it — a caller correlates by log
+    timestamp/step context rather than by re-parsing this string.
+    """
+    return (
+        f"{_NO_EVIDENCE_RESULT_PREFIX} tool={tool}, "
+        f"{filtered_count} hydrated item(s) filtered to 0 before dispatch"
+    )
+
+
 def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
     """Resolve document tumblers to T3 content via the catalog manifest
     (nexus-mm5tx / nexus-zekpl class).
@@ -1376,6 +1410,22 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
     from nexus.mcp_infra import get_catalog as _get_catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     cat = _get_catalog()
+    if cat is None:
+        # code-review finding (T2 [24200]): get_catalog() is documented
+        # to return None when the catalog isn't initialized. An
+        # unguarded .get_manifests() call here would raise
+        # AttributeError, which _is_operator_error does not recognize —
+        # it would escape both the isolated dispatch path and the
+        # bundle-composition path (which sits outside any try/except)
+        # and crash the whole plan_run. Mirror core.py's own
+        # `if cat is None:` guard (e.g. query()'s catalog-param branch)
+        # and degrade to the same empty-content shape the zero-
+        # manifest-rows case below already returns.
+        _log.warning(
+            "hydrate_tumbler_ids_catalog_unavailable",
+            tumbler_count=len(tumbler_ids),
+        )
+        return {"contents": ["" for _ in tumbler_ids], "missing": list(tumbler_ids)}
     manifests = cat.get_manifests(tumbler_ids)
 
     flat_ids: list[str] = []
@@ -1385,6 +1435,16 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
         rows = manifests.get(doc_id) or []
         for row in sorted(rows, key=lambda r: r.position):
             if not row.collection:
+                # code-review finding (T2 [24200]): log the skip rather
+                # than dropping it silently, mirroring the sibling
+                # drop-path logging convention elsewhere in this
+                # function family (e.g. auto_hydration_overflow) — a
+                # developer debugging thin document content should not
+                # have to guess why a chunk went missing.
+                _log.warning(
+                    "hydrate_tumbler_ids_row_missing_collection",
+                    doc_id=doc_id, chash=row.chash, position=row.position,
+                )
                 continue
             flat_ids.append(row.chash)
             flat_collections.append(row.collection)
@@ -1429,6 +1489,38 @@ def _hydrate_operator_args(
     from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     resolved_tool = _OPERATOR_TOOL_MAP.get(tool, tool)
+
+    # nexus-mm5tx follow-up (code-review T2 [24199]): an EXPLICIT plan
+    # step whose tool is literally "store_get_many" is a DIFFERENT code
+    # path from the operator ids-auto-hydration branch below —
+    # "store_get_many" is never in _OPERATOR_RESOLVED_TOOLS, so the
+    # tumbler routing added just above for the operator path never
+    # fired for it. This is gate q12's ACTUAL repro shape: an explicit
+    # store_get_many step hydrates tumbler ids to "" directly, and the
+    # nexus-yis0 pass-through further down then filters those to
+    # items == [], and compare refuses. Route the SAME way: when the
+    # step's own ids are confidently tumbler-shaped, precompute the
+    # {contents, missing} result via the catalog manifest and stash it
+    # under a marker _default_dispatcher checks immediately after
+    # calling this function — short-circuiting the real store_get_many
+    # dispatch entirely, matching store_get_many's own documented
+    # structured=True return shape so no caller sees a difference.
+    # store_get_many is never a bundleable operator (BUNDLEABLE_OPERATORS
+    # doesn't include it), so this never fires inside the bundle-
+    # composition path.
+    if resolved_tool == "store_get_many" and "ids" in args:
+        ids = args["ids"]
+        id_list_raw = ids if isinstance(ids, list) else [ids]
+        if id_list_raw and all(_is_tumbler_shaped(str(i)) for i in id_list_raw):
+            _log.info(
+                "store_get_many_tumbler_route",
+                tool=tool, id_count=len(id_list_raw),
+            )
+            return resolved_tool, {
+                "_precomputed_result": _hydrate_tumbler_ids(
+                    [str(i) for i in id_list_raw],
+                ),
+            }
 
     if resolved_tool in _OPERATOR_RESOLVED_TOOLS and "ids" in args:
         ids = args["ids"]
@@ -1502,6 +1594,16 @@ def _hydrate_operator_args(
             args.setdefault("inputs", json.dumps(non_empty))
         if truncation_metadata is not None:
             args["_truncation_metadata"] = truncation_metadata
+        # nexus-mm5tx follow-up (code-review T2 [24199]): every id
+        # hydrated to empty content -- dispatching claude -p on an
+        # empty prompt wastes a real subprocess call and returns free-
+        # text refusal prose a caller can only detect by parsing
+        # English. Short-circuit BEFORE dispatch instead; see
+        # _default_dispatcher for where this marker is consumed.
+        if not non_empty:
+            args["_zero_evidence_text"] = _no_evidence_result_text(
+                tool=tool, filtered_count=len(contents),
+            )
 
     if resolved_tool == "operator_extract" and "template" in args and "fields" not in args:
         template = args.pop("template")
@@ -1519,6 +1621,7 @@ def _hydrate_operator_args(
     target_key = _INPUTS_TARGET.get(resolved_tool)
     if target_key and "inputs" in args and target_key not in args:
         value = args.pop("inputs")
+        _passthrough_count = len(value) if isinstance(value, list) else (1 if value else 0)
         if isinstance(value, list):
             # nexus-mm5tx (nexus-1lfk8 critique addendum): the inline
             # ids-auto-hydration branch above already filters falsy
@@ -1539,6 +1642,14 @@ def _hydrate_operator_args(
             if target_key == "items":
                 value = json.dumps(value)
         args[target_key] = value
+        # nexus-mm5tx follow-up (code-review T2 [24199]): same zero-
+        # evidence short-circuit as the ids-auto-hydration branch above
+        # — see _default_dispatcher for where this marker is consumed.
+        _final_empty = value in ("", "[]") or (isinstance(value, list) and not value)
+        if _final_empty:
+            args.setdefault("_zero_evidence_text", _no_evidence_result_text(
+                tool=tool, filtered_count=_passthrough_count,
+            ))
 
     if resolved_tool == "operator_summarize" and isinstance(args.get("content"), list):
         args["content"] = "\n\n".join(str(x) for x in args["content"] if x)
@@ -1597,6 +1708,32 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
 
     # Auto-hydration + arg normalization: shared with the bundle path.
     resolved_tool, args = _hydrate_operator_args(tool, args)
+
+    # nexus-mm5tx follow-up (code-review T2 [24199]): an explicit
+    # store_get_many step with tumbler-shaped ids was resolved via the
+    # catalog manifest inside _hydrate_operator_args, which returns the
+    # already-complete {contents, missing} result under this marker
+    # rather than mutating args for a real dispatch — return it
+    # directly, skipping the real store_get_many call entirely.
+    _precomputed_result = args.pop("_precomputed_result", None)
+    if _precomputed_result is not None:
+        return _precomputed_result
+
+    # nexus-mm5tx follow-up (code-review T2 [24199]): hydration filtered
+    # this operator's evidence to zero items (either the ids-auto-
+    # hydration branch or the nexus-yis0 pass-through branch inside
+    # _hydrate_operator_args). Short-circuit BEFORE any model-tiering /
+    # kwargs-filtering / real dispatch work below — a claude -p call on
+    # an empty prompt is pure waste and its free-text refusal ("No
+    # comparison performed") is not machine-classifiable the way this
+    # fixed marker is.
+    _zero_evidence_text = args.pop("_zero_evidence_text", None)
+    if _zero_evidence_text is not None:
+        _log.info(
+            "nx_answer_zero_evidence_short_circuit",
+            tool=tool, resolved_tool=resolved_tool,
+        )
+        return {"text": _zero_evidence_text}
 
     # RDR-196 .p2d (nexus-nyry9.17): DEFAULT-ON per-operator tiering, plus
     # the .p2c measurement override and a kill switch — a 3-way branch on
@@ -2251,6 +2388,24 @@ async def plan_run(
                     # including bundle-aware metadata propagation); the
                     # structlog warning still fires from _hydrate.
                     b_prepared.pop("_truncation_metadata", None)
+                    # nexus-mm5tx follow-up (code-review T2 [24199]):
+                    # strip the zero-evidence marker so it never leaks
+                    # into the bundled prompt, same as the truncation
+                    # marker above. KNOWN LIMITATION, disclosed rather
+                    # than silently absorbed: unlike the isolated
+                    # dispatch path (_default_dispatcher), the bundle
+                    # path does NOT skip dispatch for a step with zero
+                    # evidence — composing a fused multi-step prompt
+                    # with one step excluded is out of scope here (the
+                    # composer has no per-step exclusion mechanism, and
+                    # q12's actual repro is on the isolated path — a
+                    # bare store_get_many step never bundles). Warn so
+                    # this is at least observable.
+                    if b_prepared.pop("_zero_evidence_text", None) is not None:
+                        _log.warning(
+                            "nx_answer_zero_evidence_in_bundle_not_short_circuited",
+                            step_index=bi, tool=btool,
+                        )
                     bundle_steps.append(OperatorBundleStep(
                         plan_index=bi, tool=btool, args=b_prepared,
                         source_collections=source_collections,

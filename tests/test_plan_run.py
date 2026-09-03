@@ -2015,6 +2015,239 @@ class TestTumblerAwareHydration:
         mock_hydrate.assert_not_called()
         assert args["content"] == ""
 
+    def test_get_catalog_none_degrades_instead_of_raising(self):
+        """Code-review finding (T2 [24200]): _get_catalog() is
+        documented to return None when the catalog isn't initialized.
+        An unguarded call would raise AttributeError from inside
+        _hydrate_tumbler_ids, which _is_operator_error does not
+        recognize -- it would escape both the isolated dispatch path
+        and the bundle-composition path (which sits outside any
+        try/except) and crash the whole plan_run. Mirror core.py's
+        `if cat is None: return "Error: ..."` guard and degrade to the
+        same empty-content shape the zero-manifest-rows case already
+        returns."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=None,
+        ), patch(
+            "nexus.mcp.core.store_get_many",
+        ) as mock_hydrate:
+            tool, args = _hydrate_operator_args(
+                "summarize", {"ids": ["1.1.5", "1.1.6"]},
+            )
+        assert tool == "operator_summarize"
+        mock_hydrate.assert_not_called()
+        assert args["content"] == ""
+
+    def test_manifest_row_missing_collection_is_logged_not_silent(self):
+        """Code-review finding (T2 [24200]): a manifest row with no
+        stamped collection was silently skipped. Log it, mirroring the
+        sibling drop-path logging convention (auto_hydration_overflow
+        etc.) -- an operator dev debugging why a document's content is
+        thin should not have to guess."""
+        import structlog.testing
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.catalog.types import ManifestRow
+        from nexus.plans.runner import _hydrate_operator_args
+
+        manifests = {
+            "1.1.5": [
+                ManifestRow(position=0, chash="a" * 64, collection=None),
+                ManifestRow(position=1, chash="b" * 64,
+                            collection="knowledge__x__voyage-context-3__v1"),
+            ],
+        }
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
+        fake_hydrated = {"contents": ["chunk B body"], "missing": []}
+        with structlog.testing.capture_logs() as captured, patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ) as mock_hydrate:
+            tool, args = _hydrate_operator_args(
+                "summarize", {"ids": ["1.1.5"]},
+            )
+        assert tool == "operator_summarize"
+        # Only the row WITH a collection is hydrated.
+        assert mock_hydrate.call_args.kwargs["ids"] == ["b" * 64]
+        assert args["content"] == "chunk B body"
+        warnings = [
+            e for e in captured
+            if e.get("event") == "hydrate_tumbler_ids_row_missing_collection"
+        ]
+        assert len(warnings) == 1, f"expected one warning, got {captured}"
+        assert warnings[0]["doc_id"] == "1.1.5"
+        assert warnings[0]["chash"] == "a" * 64
+
+
+class TestStoreGetManyExplicitStepTumblerRouting:
+    """Code-review follow-up (T2 [24199]): an EXPLICIT ``store_get_many``
+    plan step (``tool: store_get_many``) is a different code path from
+    the operator ids-auto-hydration branch inside
+    ``_hydrate_operator_args`` -- ``store_get_many`` is never in
+    ``_OPERATOR_RESOLVED_TOOLS``, so the tumbler-routing added for
+    nexus-mm5tx never fired for it. This is gate q12's ACTUAL repro
+    shape: an explicit store_get_many step hydrates tumbler ids to
+    empty strings, and the nexus-yis0 pass-through then filters those
+    to ``items == []``, and compare refuses.
+    """
+
+    @pytest.mark.asyncio
+    async def test_explicit_store_get_many_step_hydrates_tumbler_ids(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.catalog.types import ManifestRow
+        from nexus.plans.runner import _default_dispatcher
+
+        manifests = {
+            "1.1.5": [
+                ManifestRow(position=0, chash="a" * 64,
+                            collection="knowledge__x__voyage-context-3__v1"),
+            ],
+        }
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
+        fake_hydrated = {"contents": ["chunk A body"], "missing": []}
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ) as mock_hydrate:
+            result = await _default_dispatcher(
+                "store_get_many",
+                {"ids": ["1.1.5"], "collections": "knowledge"},
+            )
+        assert result == {"contents": ["chunk A body"], "missing": []}
+        call_kwargs = mock_hydrate.call_args.kwargs
+        assert call_kwargs["ids"] == ["a" * 64]
+        assert call_kwargs["collections"] == [
+            "knowledge__x__voyage-context-3__v1",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_explicit_store_get_many_step_chash_ids_unaffected(self):
+        """Regression: a chash-id store_get_many step must still reach
+        the real store_get_many dispatch unchanged."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _default_dispatcher
+
+        with patch(
+            "nexus.mcp_infra.get_catalog",
+        ) as mock_get_catalog, patch(
+            "nexus.mcp.core.store_get_many",
+            return_value={"contents": ["x"], "missing": []},
+        ) as mock_hydrate:
+            result = await _default_dispatcher(
+                "store_get_many",
+                {"ids": ["a" * 64], "collections": "knowledge"},
+            )
+        mock_get_catalog.assert_not_called()
+        mock_hydrate.assert_called_once()
+        assert result == {"contents": ["x"], "missing": []}
+
+
+# ── nexus-mm5tx follow-up: zero-evidence short-circuit (T2 [24199]) ────────
+
+
+class TestZeroEvidenceShortCircuit:
+    """Code-review follow-up (T2 [24199]): when hydration filters an
+    operator's evidence down to zero items, dispatch must never reach
+    claude -p at all -- return a fixed, machine-recognisable result
+    text instead, so the answer-runs classifier can key on a constant
+    rather than parsing an operator's free-text refusal prose (e.g.
+    compare's "No comparison performed", the actual live q12 symptom).
+    """
+
+    def test_ids_branch_sets_marker_when_all_empty(self):
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _NO_EVIDENCE_RESULT_PREFIX, _hydrate_operator_args
+
+        with patch(
+            "nexus.mcp.core.store_get_many",
+            return_value={"contents": ["", ""]},
+        ):
+            _, args = _hydrate_operator_args("compare", {"ids": ["a", "b"]})
+        assert "_zero_evidence_text" in args
+        assert args["_zero_evidence_text"].startswith(_NO_EVIDENCE_RESULT_PREFIX)
+
+    def test_ids_branch_no_marker_when_some_content(self):
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        with patch(
+            "nexus.mcp.core.store_get_many",
+            return_value={"contents": ["real body", ""]},
+        ):
+            _, args = _hydrate_operator_args("compare", {"ids": ["a", "b"]})
+        assert "_zero_evidence_text" not in args
+
+    def test_yis0_branch_sets_marker_when_all_empty(self):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        _, args = _hydrate_operator_args("compare", {"inputs": ["", ""]})
+        assert "_zero_evidence_text" in args
+
+    def test_yis0_branch_no_marker_when_some_content(self):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        _, args = _hydrate_operator_args("compare", {"inputs": ["a", ""]})
+        assert "_zero_evidence_text" not in args
+
+    @pytest.mark.asyncio
+    async def test_ids_branch_all_empty_short_circuits_before_dispatch(self):
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _NO_EVIDENCE_RESULT_PREFIX, _default_dispatcher
+
+        with patch(
+            "nexus.mcp.core.store_get_many",
+            return_value={"contents": ["", "", ""]},
+        ), patch(
+            "nexus.mcp.core.operator_compare",
+        ) as mock_compare:
+            result = await _default_dispatcher(
+                "compare", {"ids": ["c1", "c2", "c3"], "focus": "diffs"},
+            )
+        mock_compare.assert_not_called()
+        assert result["text"].startswith(_NO_EVIDENCE_RESULT_PREFIX)
+
+    @pytest.mark.asyncio
+    async def test_yis0_passthrough_all_empty_short_circuits_before_dispatch(self):
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _NO_EVIDENCE_RESULT_PREFIX, _default_dispatcher
+
+        with patch("nexus.mcp.core.operator_compare") as mock_compare:
+            result = await _default_dispatcher(
+                "compare", {"inputs": ["", "", ""], "focus": "diffs"},
+            )
+        mock_compare.assert_not_called()
+        assert result["text"].startswith(_NO_EVIDENCE_RESULT_PREFIX)
+
+    @pytest.mark.asyncio
+    async def test_non_empty_content_dispatches_normally(self):
+        from unittest.mock import AsyncMock, patch
+
+        from nexus.plans.runner import _default_dispatcher
+
+        with patch(
+            "nexus.mcp.core.operator_compare",
+            new=AsyncMock(return_value={"text": "real comparison"}),
+        ) as mock_compare:
+            result = await _default_dispatcher(
+                "compare", {"inputs": ["a", "b"], "focus": "diffs"},
+            )
+        mock_compare.assert_called_once()
+        assert result == {"text": "real comparison"}
+
 
 @pytest.mark.asyncio
 async def test_bundle_path_strips_truncation_marker_before_composition(monkeypatch) -> None:
