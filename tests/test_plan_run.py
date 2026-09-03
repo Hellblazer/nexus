@@ -1794,6 +1794,228 @@ class TestHydrateInputsTranslation:
         assert args["groups"] == json.dumps(groups_list)
 
 
+# ── nexus-mm5tx: yis0 pass-through falsy filtering ──────────────────────────
+
+
+class TestYis0PassthroughFalsyFiltering:
+    """nexus-mm5tx (nexus-1lfk8 critique addendum, T2 [23962]): the
+    nexus-yis0 ``inputs`` -> operator-arg-name pass-through branch (fed
+    by a prior EXPLICIT ``store_get_many``-shaped step's ``contents``,
+    referenced via ``inputs: $stepN.contents`` -- distinct from the
+    inline ``ids``-auto-hydration branch a few lines above it, which
+    already filters via ``non_empty = [c for c in contents if c]``)
+    copied a list verbatim with NO falsy filtering. A tumbler/chash
+    mismatch upstream (nexus-zekpl class) can hand this branch a list
+    of empty strings; gate q12's compare step took exactly this path
+    and received ten empty strings, refusing with 'No comparison
+    performed' instead of surfacing the emptiness loudly.
+    """
+
+    def test_empty_strings_are_filtered_from_list_passthrough(self):
+        import structlog.testing
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        with structlog.testing.capture_logs() as captured:
+            tool, args = _hydrate_operator_args(
+                "compare", {"inputs": ["a body", "", "b body", ""]},
+            )
+        assert tool == "operator_compare"
+        assert args["items"] == json.dumps(["a body", "b body"])
+        warnings = [
+            e for e in captured
+            if e.get("event") == "yis0_passthrough_empty_filtered"
+        ]
+        assert len(warnings) == 1, f"expected one warning, got {captured}"
+        assert warnings[0]["original_count"] == 4
+        assert warnings[0]["kept_count"] == 2
+
+    def test_all_empty_list_passthrough_yields_empty_items_and_warns(self):
+        """The degenerate case from the live q12 repro: EVERY hydrated
+        content is empty. Filtering must still fire -- the operator
+        then receives an empty items list (surfacing loudly downstream
+        as 'No comparison performed') rather than ten literal empty
+        strings passed through as if they were real content."""
+        import structlog.testing
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        with structlog.testing.capture_logs() as captured:
+            tool, args = _hydrate_operator_args(
+                "compare", {"inputs": ["" for _ in range(10)]},
+            )
+        assert tool == "operator_compare"
+        assert args["items"] == json.dumps([])
+        warnings = [
+            e for e in captured
+            if e.get("event") == "yis0_passthrough_empty_filtered"
+        ]
+        assert len(warnings) == 1
+        assert warnings[0]["original_count"] == 10
+        assert warnings[0]["kept_count"] == 0
+
+    def test_no_warning_when_nothing_filtered(self):
+        """The common, healthy case (no empty entries) must not emit
+        the filtering warning -- it is a signal, not routine noise."""
+        import structlog.testing
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        with structlog.testing.capture_logs() as captured:
+            tool, args = _hydrate_operator_args(
+                "compare", {"inputs": ["a", "b"]},
+            )
+        assert args["items"] == json.dumps(["a", "b"])
+        warnings = [
+            e for e in captured
+            if e.get("event") == "yis0_passthrough_empty_filtered"
+        ]
+        assert warnings == []
+
+    def test_scalar_inputs_passthrough_unaffected(self):
+        """A scalar (non-list) ``inputs`` value (summarize's content
+        string case) is untouched by the filtering -- filtering only
+        applies to list-valued pass-through."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "summarize", {"inputs": "already a string"},
+        )
+        assert tool == "operator_summarize"
+        assert args == {"content": "already a string"}
+
+
+# ── nexus-mm5tx: tumbler-aware auto-hydration ───────────────────────────────
+
+
+class TestTumblerAwareHydration:
+    """nexus-mm5tx (nexus-zekpl class, live twice in the RDR-200 gate
+    waves 2026-09-01): ``search_metadata_scoped`` / ``search_graph_hop``
+    / ``search_aspect_scoped`` return DOCUMENT-level results keyed by
+    catalog TUMBLER (``store.owner.document``), not T3 chash. The
+    inline ``ids``-auto-hydration branch of ``_hydrate_operator_args``
+    is chash-keyed (``store_get_many``) -- fed a tumbler id list
+    directly, every lookup misses and every content string hydrates to
+    ``""``. This resolves each tumbler's ``document_chunks`` manifest
+    via the catalog (chash + collection per chunk, position-ordered),
+    batch-hydrates the real chashes through the existing
+    ``store_get_many``, and reassembles each document's content by
+    joining its own chunks back together in order.
+    """
+
+    def test_tumbler_ids_route_through_catalog_manifest(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.catalog.types import ManifestRow
+        from nexus.plans.runner import _hydrate_operator_args
+
+        manifests = {
+            "1.1.5": [
+                ManifestRow(position=0, chash="a" * 64,
+                            collection="knowledge__x__voyage-context-3__v1"),
+                ManifestRow(position=1, chash="b" * 64,
+                            collection="knowledge__x__voyage-context-3__v1"),
+            ],
+            "1.1.6": [
+                ManifestRow(position=0, chash="c" * 64,
+                            collection="knowledge__x__voyage-context-3__v1"),
+            ],
+        }
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
+        fake_hydrated = {
+            "contents": ["chunk A body", "chunk B body", "chunk C body"],
+            "missing": [],
+        }
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ) as mock_hydrate:
+            tool, args = _hydrate_operator_args(
+                "summarize", {"ids": ["1.1.5", "1.1.6"]},
+            )
+        assert tool == "operator_summarize"
+        assert args["content"] == (
+            "chunk A body\n\nchunk B body\n\nchunk C body"
+        )
+        # store_get_many must see the real CHASHES, never the original
+        # tumbler ids.
+        call_kwargs = mock_hydrate.call_args.kwargs
+        assert call_kwargs["ids"] == ["a" * 64, "b" * 64, "c" * 64]
+        assert call_kwargs["collections"] == [
+            "knowledge__x__voyage-context-3__v1",
+        ] * 3
+
+    def test_chash_shaped_ids_bypass_tumbler_route(self):
+        """A normal chash id list (64-hex) must not be mis-routed
+        through the tumbler/manifest path -- it goes straight to
+        store_get_many exactly as before nexus-mm5tx."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        chash_ids = ["a" * 64, "b" * 64]
+        with patch(
+            "nexus.mcp_infra.get_catalog",
+        ) as mock_get_catalog, patch(
+            "nexus.mcp.core.store_get_many",
+            return_value={"contents": ["x", "y"]},
+        ) as mock_hydrate:
+            tool, args = _hydrate_operator_args(
+                "summarize", {"ids": chash_ids},
+            )
+        assert tool == "operator_summarize"
+        assert args["content"] == "x\n\ny"
+        mock_get_catalog.assert_not_called()
+        mock_hydrate.assert_called_once()
+        assert mock_hydrate.call_args.kwargs["ids"] == chash_ids
+
+    def test_mixed_ids_bypass_tumbler_route(self):
+        """A mixed ids list (some tumbler-shaped, some not) is not
+        confidently tumbler-shaped -- falls back to the direct
+        store_get_many path unchanged, rather than guessing."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        mixed_ids = ["1.1.5", "a" * 64]
+        with patch(
+            "nexus.mcp_infra.get_catalog",
+        ) as mock_get_catalog, patch(
+            "nexus.mcp.core.store_get_many",
+            return_value={"contents": ["x", "y"]},
+        ):
+            _, args = _hydrate_operator_args("summarize", {"ids": mixed_ids})
+        mock_get_catalog.assert_not_called()
+        assert args["content"] == "x\n\ny"
+
+    def test_tumbler_with_no_manifest_rows_yields_empty_content(self):
+        """A tumbler the catalog has no manifest for (deleted /
+        never-chunked document) hydrates to empty content -- the outer
+        non_empty filter then drops it, same as any other empty
+        hydration result."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: {"1.1.5": []})
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many",
+        ) as mock_hydrate:
+            tool, args = _hydrate_operator_args(
+                "summarize", {"ids": ["1.1.5"]},
+            )
+        assert tool == "operator_summarize"
+        # No chashes to hydrate -- store_get_many is never called for an
+        # all-empty-manifest batch.
+        mock_hydrate.assert_not_called()
+        assert args["content"] == ""
+
+
 @pytest.mark.asyncio
 async def test_bundle_path_strips_truncation_marker_before_composition(monkeypatch) -> None:
     """RDR-093 Phase 1+2 review observation: the bundle-path strip

@@ -1243,6 +1243,75 @@ _INPUTS_TARGET: dict[str, str] = {
 }
 
 
+#: nexus-mm5tx (nexus-zekpl class): a catalog tumbler is 3+ dot-separated
+#: non-negative integers (``store.owner.document[.chunk]``); a T3 chash is
+#: 64 lowercase hex characters. A real sha256 chash containing only
+#: decimal digits is astronomically unlikely (1 in 16**64), so this
+#: heuristic has no practical false positive against real data.
+_TUMBLER_ID_RE = re.compile(r"^\d+(?:\.\d+){2,}$")
+
+
+def _is_tumbler_shaped(value: str) -> bool:
+    """True when *value* looks like a catalog document tumbler rather
+    than a T3 chunk chash. See :data:`_TUMBLER_ID_RE`."""
+    return bool(_TUMBLER_ID_RE.match(value))
+
+
+def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
+    """Resolve document tumblers to T3 content via the catalog manifest
+    (nexus-mm5tx / nexus-zekpl class).
+
+    ``search_metadata_scoped`` / ``search_graph_hop`` /
+    ``search_aspect_scoped`` return document-level results keyed by
+    TUMBLER, not chash — feeding those ids straight into the chash-keyed
+    ``store_get_many`` hydrates every row to an empty string. This
+    resolves each tumbler's ``document_chunks`` manifest via the catalog
+    (chash + collection per chunk, position-ordered), batch-hydrates
+    every real chash through the existing ``store_get_many``, then
+    reassembles each document's content by joining its own chunks back
+    together in order — the full document, not just one matched
+    snippet.
+
+    Returns the same ``{contents, missing}`` shape ``store_get_many``
+    returns (aligned 1:1 with *tumbler_ids*), so it slots into the same
+    ``non_empty`` filtering the caller already does for the chash path.
+    """
+    from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.mcp_infra import get_catalog as _get_catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+    cat = _get_catalog()
+    manifests = cat.get_manifests(tumbler_ids)
+
+    flat_ids: list[str] = []
+    flat_collections: list[str] = []
+    owner: list[str] = []
+    for doc_id in tumbler_ids:
+        rows = manifests.get(doc_id) or []
+        for row in sorted(rows, key=lambda r: r.position):
+            if not row.collection:
+                continue
+            flat_ids.append(row.chash)
+            flat_collections.append(row.collection)
+            owner.append(doc_id)
+
+    if not flat_ids:
+        return {"contents": ["" for _ in tumbler_ids], "missing": list(tumbler_ids)}
+
+    hydrated = mcp_core.store_get_many(
+        ids=flat_ids, collections=flat_collections, structured=True,
+    )
+    chunk_contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
+
+    per_doc: dict[str, list[str]] = {doc_id: [] for doc_id in tumbler_ids}
+    for doc_id, content in zip(owner, chunk_contents):
+        if content:
+            per_doc[doc_id].append(content)
+
+    contents = ["\n\n".join(per_doc[doc_id]) for doc_id in tumbler_ids]
+    missing = [doc_id for doc_id in tumbler_ids if not per_doc[doc_id]]
+    return {"contents": contents, "missing": missing}
+
+
 def _hydrate_operator_args(
     tool: str, args: dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
@@ -1268,9 +1337,25 @@ def _hydrate_operator_args(
     if resolved_tool in _OPERATOR_RESOLVED_TOOLS and "ids" in args:
         ids = args["ids"]
         collections = args.get("collections", "knowledge")
-        hydrated = mcp_core.store_get_many(
-            ids=ids, collections=collections, structured=True,
-        )
+        id_list_raw = ids if isinstance(ids, list) else [ids]
+        # nexus-mm5tx (nexus-zekpl class): a tumbler-only id list is
+        # document-level output from search_metadata_scoped /
+        # search_graph_hop / search_aspect_scoped — route it through
+        # the catalog manifest instead of the chash-keyed
+        # store_get_many, which would hydrate every id to "".  A mixed
+        # or empty list is not confidently tumbler-shaped and falls
+        # through to the direct path unchanged.
+        if id_list_raw and all(_is_tumbler_shaped(str(i)) for i in id_list_raw):
+            _log.info(
+                "auto_hydration_tumbler_route",
+                tool=tool, resolved_tool=resolved_tool,
+                id_count=len(id_list_raw),
+            )
+            hydrated = _hydrate_tumbler_ids([str(i) for i in id_list_raw])
+        else:
+            hydrated = mcp_core.store_get_many(
+                ids=ids, collections=collections, structured=True,
+            )
         contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
         non_empty = [c for c in contents if c]
         original_count = len(non_empty)
@@ -1338,8 +1423,25 @@ def _hydrate_operator_args(
     target_key = _INPUTS_TARGET.get(resolved_tool)
     if target_key and "inputs" in args and target_key not in args:
         value = args.pop("inputs")
-        if target_key == "items" and isinstance(value, list):
-            value = json.dumps(value)
+        if isinstance(value, list):
+            # nexus-mm5tx (nexus-1lfk8 critique addendum): the inline
+            # ids-auto-hydration branch above already filters falsy
+            # content (``non_empty = [c for c in contents if c]``); this
+            # pass-through branch did not, so a tumbler/chash mismatch
+            # upstream (nexus-zekpl class) could hand an operator a list
+            # of literal empty strings verbatim. Filter here too, and
+            # warn loudly when anything was dropped — gate q12's compare
+            # step took exactly this path with ten empty strings.
+            original_count = len(value)
+            value = [v for v in value if v]
+            if len(value) != original_count:
+                _log.warning(
+                    "yis0_passthrough_empty_filtered",
+                    tool=tool, resolved_tool=resolved_tool,
+                    original_count=original_count, kept_count=len(value),
+                )
+            if target_key == "items":
+                value = json.dumps(value)
         args[target_key] = value
 
     if resolved_tool == "operator_summarize" and isinstance(args.get("content"), list):
