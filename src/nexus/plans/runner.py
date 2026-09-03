@@ -414,6 +414,19 @@ class PlanResult:
     #: chance to run" without re-deriving it from ``len(steps)`` vs
     #: ``total_planned_steps``.
     continuation_cut_applied: bool = False
+    #: nexus-ivv4d code-review follow-up (T2 [24198]): one
+    #: ``{step_index, tool, corpus, query}`` dict per ISOLATED dispatch
+    #: whose tool is in :data:`_CORPUS_QUERY_TOOLS`, captured with the
+    #: fully RESOLVED args — after the plan/scope/caller-scope/default
+    #: corpus fall-through (``_apply_scope_to_args`` ->
+    #: ``_apply_caller_scope_to_args`` -> ``_apply_default_corpus_to_args``)
+    #: has already run. A plan template that leaves ``corpus`` unset
+    #: shows the runner's OWN fill-in here, not an empty string — the
+    #: static ``plan_json`` a caller could re-parse instead only ever
+    #: shows what the plan AUTHOR wrote, not what actually dispatched.
+    #: In-process only, same precedent as :attr:`step_records` — no
+    #: wire/telemetry shape carries this.
+    resolved_step_args: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ── Embedding-domain mapping ────────────────────────────────────────────────
@@ -459,6 +472,16 @@ _RETRIEVAL_TOOLS: frozenset[str] = frozenset(
      "search_metadata_scoped", "search_topic_scoped", "search_graph_hop",
      "search_aspect_scoped"},
 )
+
+#: :data:`_RETRIEVAL_TOOLS` minus ``store_get_many`` (nexus-ivv4d code
+#: review, T2 [24198]): the corpus/query provenance capture below
+#: (``resolved_step_args``) exists to answer "what did this retrieval
+#: step search" — ``store_get_many`` is a hydration call keyed on
+#: ``ids``/``collections`` from a PRIOR step's output, never a
+#: ``corpus``/``query`` argument of its own, so including it would
+#: render a step basis line of ``corpus='' query=''`` that looks like a
+#: missing-scope defect rather than the tool simply having no such args.
+_CORPUS_QUERY_TOOLS: frozenset[str] = _RETRIEVAL_TOOLS - {"store_get_many"}
 
 #: Args keys that may carry a collection name. The runner extracts
 #: candidates from these to validate the cross-embedding guard, and
@@ -1822,6 +1845,9 @@ async def plan_run(
     #: segment. See StepRecord's own docstring for the source/model/cost
     #: attribution rules.
     step_records: list[StepRecord] = []
+    #: nexus-ivv4d code-review follow-up (T2 [24198]). See
+    #: :attr:`PlanResult.resolved_step_args`'s own docstring.
+    resolved_step_args: list[dict[str, Any]] = []
     #: RDR-200 .p1c (nexus-4e75w.5): set True the moment the
     #: ``continuation_cut_at_step`` pre-segment check actually stops
     #: dispatch. See ``continuation_cut_at_step``'s own docstring
@@ -2309,6 +2335,21 @@ async def plan_run(
             # ``threshold`` set by the plan author always wins.
             resolved = _apply_mode_to_args(tool, resolved)
 
+            # nexus-ivv4d code-review follow-up (T2 [24198]): capture the
+            # FULLY RESOLVED corpus/query — after every fall-through above
+            # has run — before dispatch, so a caller reading
+            # PlanResult.resolved_step_args afterward sees what actually
+            # searched even when the step errors or returns zero evidence
+            # (a result envelope's own "collections" field is empty in
+            # exactly that case, so it can never substitute for this).
+            if tool in _CORPUS_QUERY_TOOLS:
+                resolved_step_args.append({
+                    "step_index": index,
+                    "tool": tool,
+                    "corpus": resolved.get("corpus", ""),
+                    "query": resolved.get("query") or resolved.get("question") or "",
+                })
+
             # nexus-h33x8.6 a4: an active deadline threads the REMAINING
             # budget into an operator step's own ``timeout`` kwarg (dropped
             # harmlessly by the dispatcher for non-operator tools that don't
@@ -2452,4 +2493,5 @@ async def plan_run(
         total_planned_steps=len(steps),
         step_records=step_records,
         continuation_cut_applied=continuation_cut_applied,
+        resolved_step_args=resolved_step_args,
     )

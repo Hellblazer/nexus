@@ -87,6 +87,86 @@ async def test_run_resolves_caller_var_in_args() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolved_step_args_captures_runtime_corpus_not_template(
+) -> None:
+    """nexus-ivv4d code review follow-up (T2 [24198]): PlanResult.
+    resolved_step_args must carry the FULLY RESOLVED corpus/query — the
+    plan template here leaves corpus unset entirely, so a caller reading
+    it back must see the runner's own ``_PLAN_STEP_DEFAULT_CORPUS``
+    fall-through, not an empty string."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "$intent"}},
+        ],
+        "required_bindings": ["intent"],
+    }
+    disp = _FakeDispatcher([{"text": "ok"}])
+    result = await plan_run(
+        _match(plan), {"intent": "how does X work"}, dispatcher=disp,
+    )
+
+    assert result.resolved_step_args == [
+        {
+            "step_index": 0, "tool": "search",
+            "corpus": _PLAN_STEP_DEFAULT_CORPUS, "query": "how does X work",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resolved_step_args_excludes_store_get_many() -> None:
+    """store_get_many carries no corpus/query args of its own -- a
+    step_index entry for it would read as a spurious ``corpus=''
+    query=''`` rather than "not applicable"."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "$intent", "corpus": "rdr"}},
+            {"tool": "store_get_many", "args": {"ids": "$step1.ids"}},
+        ],
+        "required_bindings": ["intent"],
+    }
+    disp = _FakeDispatcher([
+        {"ids": ["a"], "collections": ["rdr__1-1"]},
+        {"contents": {"a": "text"}, "missing": []},
+    ])
+    result = await plan_run(
+        _match(plan), {"intent": "how does X work"}, dispatcher=disp,
+    )
+
+    assert len(result.resolved_step_args) == 1
+    assert result.resolved_step_args[0]["tool"] == "search"
+
+
+@pytest.mark.asyncio
+async def test_resolved_step_args_excludes_operator_steps() -> None:
+    """An operator step (summarize/rank/...) has no corpus/query args --
+    only tools in _CORPUS_QUERY_TOOLS are captured."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "$intent", "corpus": "rdr"}},
+            {"tool": "summarize", "args": {"content": "$step1.ids"}},
+        ],
+        "required_bindings": ["intent"],
+    }
+    disp = _FakeDispatcher([
+        {"ids": ["a"], "collections": ["rdr__1-1"]},
+        {"text": "a summary"},
+    ])
+    result = await plan_run(
+        _match(plan), {"intent": "how does X work"}, dispatcher=disp,
+    )
+
+    assert len(result.resolved_step_args) == 1
+    assert result.resolved_step_args[0]["step_index"] == 0
+
+
+@pytest.mark.asyncio
 async def test_run_caller_binding_overrides_default() -> None:
     """default_bindings + caller_bindings: caller wins on conflict."""
     from nexus.plans.runner import plan_run

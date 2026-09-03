@@ -6466,14 +6466,18 @@ def _plan_retrieval_step_basis(plan_json: str | dict | None) -> list[dict[str, A
     steps = plan.get("steps")
     if not isinstance(steps, list):
         return []
-    from nexus.plans.runner import _RETRIEVAL_TOOLS  # noqa: PLC0415 — deferred; matches this module's convention
+    from nexus.plans.runner import _CORPUS_QUERY_TOOLS  # noqa: PLC0415 — deferred; matches this module's convention
 
     basis: list[dict[str, Any]] = []
     for index, step in enumerate(steps):
         if not isinstance(step, dict):
             continue
         tool = step.get("tool")
-        if not isinstance(tool, str) or tool not in _RETRIEVAL_TOOLS:
+        # nexus-x79ne code review (T2 [24198]): excludes ``store_get_many``
+        # — a hydration call with no corpus/query args of its own, whose
+        # inclusion here rendered a misleading ``corpus='' query=''`` line
+        # that reads as a missing-scope defect rather than "not applicable".
+        if not isinstance(tool, str) or tool not in _CORPUS_QUERY_TOOLS:
             continue
         args = step.get("args") if isinstance(step.get("args"), dict) else {}
         corpus = args.get("corpus", "")
@@ -6503,6 +6507,48 @@ def _render_retrieval_step_basis_text(plan_json: str | dict | None) -> str:
         f"step{b['step']}={b['tool']}(corpus={b['corpus']!r}, query={b['query']!r})"
         for b in basis
     )
+
+
+def _render_zero_evidence_step_basis_text(
+    *, resolved_step_args: "list[dict[str, Any]] | None", plan_json: str | dict | None,
+) -> str:
+    """Prefer the RUNNER'S resolved corpus/query per step over the static
+    plan template (nexus-ivv4d code review, T2 [24198]).
+
+    A plan template that leaves ``corpus`` unset does not mean "no
+    corpus" — the runner fills it in at dispatch time via a
+    plan-scope -> caller-scope -> ``_PLAN_STEP_DEFAULT_CORPUS``
+    fall-through (``nexus.plans.runner``: ``_apply_scope_to_args`` ->
+    ``_apply_caller_scope_to_args`` -> ``_apply_default_corpus_to_args``).
+    :func:`_render_retrieval_step_basis_text` reading the STATIC template
+    alone rendered ``corpus=''`` for exactly the corpus-scoping-failure
+    class this diagnostic exists to expose — the runner's own
+    ``PlanResult.resolved_step_args`` (captured post-fall-through, at
+    dispatch time, before the tool call — a zero-evidence result
+    envelope's own ``collections`` field is empty in exactly this case,
+    so it can never substitute) is the ground truth when available.
+
+    Falls back to the static-template renderer only when
+    *resolved_step_args* is empty/``None`` — e.g. a ``PlanResult`` from
+    before this field existed, or a run whose only steps were
+    operator/bundle steps with no isolated corpus/query-shaped dispatch
+    at all.
+
+    Defensive ``isinstance`` check (not a bare truthy/``None`` check,
+    same posture as ``_budget_exhausted_response``'s own guard): a bare
+    ``MagicMock``'s unconfigured ``.resolved_step_args`` attribute is
+    itself a (truthy, non-``None``, non-iterable-as-a-list) ``MagicMock``
+    — a test double built before this field existed must fall back
+    cleanly, never raise.
+    """
+    if isinstance(resolved_step_args, list) and resolved_step_args:
+        return "; ".join(
+            f"step{a.get('step_index')}={a.get('tool', '')}"
+            f"(corpus={str(a.get('corpus') or '')!r}, "
+            f"query={str(a.get('query') or '')!r})"
+            for a in resolved_step_args
+        )
+    return _render_retrieval_step_basis_text(plan_json)
 
 
 #: Common English stop-words stripped when synthesizing a grown plan's
@@ -9215,12 +9261,17 @@ async def nx_answer(
         # so WHICH plan-side factor produced the miss is readable from the
         # return text (and, since it feeds final_text below, the telemetry
         # row) instead of requiring a separate artifact correlation pass.
+        # nexus-ivv4d code review (T2 [24198]): prefer the runner's
+        # RESOLVED corpus/query (result.resolved_step_args) over the
+        # static plan template — a template that leaves corpus unset
+        # otherwise renders corpus='' for exactly the corpus-scoping
+        # failure class this diagnostic exists to expose.
         no_match = (
             f"No matching evidence found for {question!r}"
             + (f" in scope {scope!r}" if scope else "")
             + f". The plan's retrieval steps returned zero results "
             f"(plan_id={best.plan_id}, basis: "
-            f"{_render_retrieval_step_basis_text(best.plan_json)}) — "
+            f"{_render_zero_evidence_step_basis_text(resolved_step_args=getattr(result, 'resolved_step_args', None), plan_json=best.plan_json)}) — "
             "rephrase the question, correct/widen the scope, or use "
             "search/query directly."
         )
