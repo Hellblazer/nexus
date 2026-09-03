@@ -193,6 +193,10 @@ public final class TaxonomyCentroidRepository {
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours.
             PgSession.setSearchStatementTimeout(ctx);
+            // nexus-6nkn3: a custom plan per execution so the planner sees the
+            // collection set's selectivity (a cached generic HNSW plan on a tiny
+            // collection ran ~30s and returned EMPTY in production).
+            PgSession.setSearchPlanCacheMode(ctx);
             return ctx.fetch(
                 "SELECT topic_id, (" + embeddingCol + " <=> ?::vector) AS distance FROM "
                 + centroidTable(dim)

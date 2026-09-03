@@ -1104,6 +1104,10 @@ public final class PgVectorRepository {
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours.
             PgSession.setSearchStatementTimeout(ctx);
+            // nexus-6nkn3: a custom plan per execution so the planner sees the
+            // collection set's selectivity (a cached generic HNSW plan on a tiny
+            // collection ran ~30s and returned EMPTY in production).
+            PgSession.setSearchPlanCacheMode(ctx);
             return rawVectorFetch(ctx, sql.toString(), binds.toArray());
         });
 
@@ -1409,6 +1413,10 @@ public final class PgVectorRepository {
             // rather than per branch: a branch without HNSW is still a scan that
             // can pin xmin (substantive-critic finding, 2026-09-02).
             PgSession.setSearchStatementTimeout(ctx);
+            // nexus-6nkn3: a custom plan per execution so the planner sees the
+            // collection set's selectivity (a cached generic HNSW plan on a tiny
+            // collection ran ~30s and returned EMPTY in production).
+            PgSession.setSearchPlanCacheMode(ctx);
 
             List<String> gateChashes = rawVectorFetch(
                 ctx, "SELECT encode(chash, 'hex') AS chash FROM " + table + gateSql + " LIMIT ?",
@@ -2252,6 +2260,10 @@ public final class PgVectorRepository {
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours.
             PgSession.setSearchStatementTimeout(ctx);
+            // nexus-6nkn3: a custom plan per execution so the planner sees the
+            // collection set's selectivity (a cached generic HNSW plan on a tiny
+            // collection ran ~30s and returned EMPTY in production).
+            PgSession.setSearchPlanCacheMode(ctx);
             return ctx.selectFrom(fn).fetch();
         });
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
@@ -2280,6 +2292,10 @@ public final class PgVectorRepository {
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours.
             PgSession.setSearchStatementTimeout(ctx);
+            // nexus-6nkn3: a custom plan per execution so the planner sees the
+            // collection set's selectivity (a cached generic HNSW plan on a tiny
+            // collection ran ~30s and returned EMPTY in production).
+            PgSession.setSearchPlanCacheMode(ctx);
             return ctx.selectFrom(fn).fetch();
         });
         List<Map<String, Object>> rows = new ArrayList<>(result.size());

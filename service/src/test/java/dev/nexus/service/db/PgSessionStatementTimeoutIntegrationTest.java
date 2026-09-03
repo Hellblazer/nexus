@@ -13,6 +13,8 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -101,5 +103,76 @@ class PgSessionStatementTimeoutIntegrationTest {
             }
         }
         return null;
+    }
+
+    /** nexus-6nkn3: the plan-cache mode lands for the transaction and reverts. */
+    @Test
+    void planCacheModeIsForcedCustomForTheTransactionAndRevertsOnRollback() throws Exception {
+        try (Connection c = pg.createConnection("")) {
+            c.setAutoCommit(false);
+            DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+            String before = ctx.resultQuery("SELECT current_setting('plan_cache_mode')")
+                               .fetchOne(0, String.class);
+            assertThat(before).isEqualTo("auto");
+            PgSession.setSearchPlanCacheMode(ctx);
+            assertThat(ctx.resultQuery("SELECT current_setting('plan_cache_mode')")
+                          .fetchOne(0, String.class)).isEqualTo("force_custom_plan");
+            c.rollback();
+            assertThat(ctx.resultQuery("SELECT current_setting('plan_cache_mode')")
+                          .fetchOne(0, String.class)).isEqualTo(before);
+        }
+    }
+
+    /**
+     * nexus-6nkn3, the claim itself: the GUC governs the plan choice of a
+     * pgjdbc SERVER-SIDE prepared statement executed past the promotion
+     * threshold (prepareThreshold=5). Postgres counts each prepared
+     * statement's plans in {@code pg_prepared_statements.generic_plans /
+     * custom_plans}: under force_custom_plan the generic counter must stay
+     * at zero; force_generic_plan is the control that proves the counter
+     * moves, so a passing zero is not vacuous.
+     */
+    @Test
+    void forceCustomPlanGovernsAServerSidePreparedStatementPastThePromotionThreshold()
+            throws Exception {
+        assertThat(planCounts("force_custom_plan")).satisfies(c -> {
+            assertThat(c[0]).as("generic_plans under force_custom_plan").isZero();
+            // pgjdbc runs the first four executions as UNNAMED statements (untracked)
+            // and names the server-side statement from the fifth: only the
+            // post-promotion executions appear here, and every one must be custom.
+            assertThat(c[1]).as("custom_plans under force_custom_plan").isGreaterThanOrEqualTo(1);
+        });
+        assertThat(planCounts("force_generic_plan")[0])
+            .as("generic_plans under force_generic_plan (control)")
+            .isGreaterThan(0);
+    }
+
+    /** {generic_plans, custom_plans} for one statement executed 8x on one connection. */
+    private long[] planCounts(String mode) throws Exception {
+        try (Connection c = pg.createConnection("")) {
+            c.setAutoCommit(false);
+            DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+            PgSession.setLocal(ctx, "plan_cache_mode", mode);
+            // Same PreparedStatement object, 8 executions: pgjdbc switches to a
+            // named server-side statement at the 5th and Postgres tracks its plans.
+            try (PreparedStatement ps = c.prepareStatement(
+                     "SELECT count(*) FROM pg_class WHERE relname = ?")) {
+                for (int i = 0; i < 8; i++) {
+                    ps.setString(1, "pg_class");
+                    try (ResultSet rs = ps.executeQuery()) {
+                        rs.next();
+                    }
+                }
+            }
+            try (PreparedStatement q = c.prepareStatement(
+                     "SELECT coalesce(sum(generic_plans),0), coalesce(sum(custom_plans),0)"
+                     + " FROM pg_prepared_statements WHERE statement LIKE '%pg_class WHERE relname%'");
+                 ResultSet rs = q.executeQuery()) {
+                rs.next();
+                long[] out = {rs.getLong(1), rs.getLong(2)};
+                c.rollback();
+                return out;
+            }
+        }
     }
 }

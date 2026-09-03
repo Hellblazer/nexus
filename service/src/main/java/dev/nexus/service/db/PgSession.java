@@ -32,7 +32,8 @@ public final class PgSession {
         "hnsw.iterative_scan",
         "hnsw.ef_search",
         "pg_trgm.word_similarity_threshold",
-        "statement_timeout"
+        "statement_timeout",
+        "plan_cache_mode"
     );
 
     /**
@@ -141,6 +142,35 @@ public final class PgSession {
     /** Explicit-bound form, for tests that need a bound shorter than the env-resolved one. */
     static void setSearchStatementTimeout(DSLContext ctx, int timeoutMs) {
         setLocal(ctx, "statement_timeout", Integer.toString(timeoutMs));
+    }
+
+    /**
+     * Force a CUSTOM plan for every statement in this transaction
+     * (nexus-6nkn3). The vector-ranked statements are parameterised on the
+     * collection set, and their right plan depends on that set's
+     * selectivity: a 176-row collection wants the pk scan (0.6s), a large
+     * one wants the HNSW-ordered scan. pgjdbc switches a prepared statement
+     * to a GENERIC plan after five executions on each pooled connection, and
+     * a generic plan cannot see selectivity. Measured in production
+     * 2026-09-03: a generic HNSW-ordered plan built under stale stats,
+     * applied to a 176-row collection under iterative scan, removed 22,932
+     * rows by filter, admitted NONE, ran ~30s cold and returned EMPTY,
+     * while the custom plan on the same statement took 0.6s. Paired with
+     * {@link #setSearchStatementTimeout} at every vector-ranked site; the
+     * pairing is pinned by {@code HnswServingGucParityTest}.
+     *
+     * <p>This removes the TRIGGER (a stale generic plan), not the CLASS: an
+     * HNSW-ordered scan under a filter selective enough to exhaust
+     * {@code hnsw.max_scan_tuples} with too few admitted rows still
+     * under-returns, or returns empty, silently. That is nexus-bq06h, open.
+     *
+     * <p>Reaches the combined-query SQL functions ({@code search_*_scoped},
+     * {@code search_graph_hop}) only because they are inlinable (STABLE,
+     * SECURITY INVOKER, not STRICT — pinned by {@code CombinedQueryParityTest});
+     * a non-inlinable function body plans on its own and would not see this.
+     */
+    public static void setSearchPlanCacheMode(DSLContext ctx) {
+        setLocal(ctx, "plan_cache_mode", "force_custom_plan");
     }
 
     /**

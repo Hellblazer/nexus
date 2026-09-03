@@ -50,14 +50,16 @@ class HnswServingGucParityTest {
                 int iter = count(body, "\"hnsw.iterative_scan\"");
                 int ef = count(body, "setHnswEfSearch(");
                 int timeout = count(body, "setSearchStatementTimeout(");
+                int planMode = count(body, "setSearchPlanCacheMode(");
                 if (p.getFileName().toString().equals("PgSession.java")) {
                     continue; // the definitions themselves
                 }
                 iterativeSites += iter;
-                if (iter != ef || iter != timeout) {
+                if (iter != ef || iter != timeout || iter != planMode) {
                     unpaired.add(p.getFileName() + ": " + iter
                         + " iterative_scan site(s) vs " + ef + " setHnswEfSearch call(s) vs "
-                        + timeout + " setSearchStatementTimeout call(s)");
+                        + timeout + " setSearchStatementTimeout call(s) vs "
+                        + planMode + " setSearchPlanCacheMode call(s)");
                 }
             }
         } catch (IOException e) {
@@ -119,7 +121,8 @@ class HnswServingGucParityTest {
                     }
                     fetchingBlocks++;
                     int bound = block.indexOf("setSearchStatementTimeout(");
-                    if (bound < 0 || bound > fetch) {
+                    int plan = block.indexOf("setSearchPlanCacheMode(");
+                    if (bound < 0 || bound > fetch || plan < 0 || plan > fetch) {
                         unbounded.add(p.getFileName() + " @" + lineOf(body, at));
                     }
                 }
@@ -128,8 +131,9 @@ class HnswServingGucParityTest {
             throw new UncheckedIOException(e);
         }
         assertThat(unbounded)
-            .as("withTenant blocks that rawVectorFetch without first calling "
-                + "PgSession.setSearchStatementTimeout (nexus-g17tf)")
+            .as("withTenant blocks that rawVectorFetch without first calling both "
+                + "PgSession.setSearchStatementTimeout (nexus-g17tf) and "
+                + "PgSession.setSearchPlanCacheMode (nexus-6nkn3)")
             .isEmpty();
         // Non-vacuity: the two raw-SQL search blocks (searchWithTokens and
         // hybridSearch) must be visible. The combined-query paths fetch through
