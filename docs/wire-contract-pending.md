@@ -59,6 +59,9 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
+- `b319141c8` -- bead nexus-ndoke -- engine tag `engine-service-v0.1.96` -- [additive] nx_answer_steps gains `cache_read_input_tokens` + `cache_creation_input_tokens`. NOTE THE TAG ABOVE IS NOT CUT YET: v0.1.95 was already cut, published and gated when this landed, so it cannot carry this engine half; v0.1.96 is the next cut and is named here as the intended carrier, not as an existing tag. Engine half: telemetry-008 (two NULLABLE INTEGER columns on `nexus.nx_answer_steps`), `TelemetryRepository.StepInput` + its jOOQ insert, and `TelemetryHandler.parseSteps` reading two new optional JSON keys. Client half in the same commit: `StepRecord` carries both fields, `plan_run` populates them VERBATIM from the same `DispatchUsage` that already parsed them, and `_step_record_to_wire` emits them. Direction safety, both directions: NEW client + OLD engine = the two extra JSON keys are ignored, because `TelemetryHandler`'s mapper is configured `FAIL_ON_UNKNOWN_PROPERTIES=false` and `parseSteps` reads named keys off a Map, so an unrecognised key is never an error; rows record exactly as they do today, minus columns that engine has no place for. OLD client + NEW engine = the keys are never sent, `optInt` returns null, both columns store NULL, which is the designed absence value rather than a degraded one. THE DEPLOY CARRIES A LIQUIBASE CHANGESET, so the PITR-fork walk rehearsal is in its path: an ADD COLUMN on an existing table, no data movement, no backfill, no rewrite. Rows written before the changeset stay NULL and are correctly unattributable rather than silently reading as cache-cold.
+
+
 
 ## Shipped
 
