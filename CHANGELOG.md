@@ -26,6 +26,36 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   torn from its column name (real tables run 2200 to 5000 chars against
   the 1500-char window). Documents indexed before this need a re-index
   to pick up their tables.
+- `store_get_many` cut long documents at the display cap with a bare
+  ellipsis, so every tool-free reader downstream (nx_tidy, the plan
+  runner's operators) reported healthy entries as truncated and asked for
+  re-ingestion. The cut now carries a "TRUNCATED FOR DISPLAY, not a defect"
+  marker at the point it happens (nexus-lugwx, generalising nexus-c0sdc).
+- Plan runner: document tumblers returned by the metadata-, topic-, graph-
+  and aspect-scoped searches hydrated to empty strings on both the operator
+  auto-hydration path and an explicit `store_get_many` step; they now
+  resolve through the catalog manifest. An operator whose evidence filters
+  to nothing no longer dispatches a model call and returns a fixed
+  "No evidence to reduce" result instead (nexus-mm5tx).
+- Plan runner: parallel reduce steps with no fan-in were reduced, paid for,
+  and discarded silently. They are now detected and reported in
+  `nx_answer`'s envelope as `dropped_reduce_steps`, with a one-line notice
+  in text mode (nexus-4h0oh).
+- `nx_answer`: the zero-evidence fallback now names the matched plan and each
+  retrieval step's tool, resolved corpus and query, in the return and the
+  telemetry row (nexus-ivv4d); the continuation text instruction carries
+  collection and distance per evidence item (nexus-kim0o).
+- `nx answer-runs` under-counted degenerate runs about 9x: the listing
+  reroute, budget-warning-only and empty-hydration bodies are now
+  classified, with error rows checked first and the reroute header anchored
+  to the first line (nexus-x79ne).
+- Operator dispatch: a child's cold start no longer consumes the processing
+  budget (the timeout now runs in two phases, first output then the rest,
+  bounded by an optional absolute deadline); both pipes are drained from
+  spawn so a verbose child can no longer deadlock the dispatch, and post-kill
+  cleanup is bounded rather than waiting on pipe EOF (nexus-tx5hd). A real
+  killed-child test now proves the partial-output drain recovers streamed
+  output (nexus-q4o43).
 
 ## [7.28.0] - 2026-09-03
 
