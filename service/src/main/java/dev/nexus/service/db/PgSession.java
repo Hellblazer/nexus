@@ -33,7 +33,11 @@ public final class PgSession {
         "hnsw.ef_search",
         "pg_trgm.word_similarity_threshold",
         "statement_timeout",
-        "plan_cache_mode"
+        "plan_cache_mode",
+        "enable_indexscan",
+        "enable_seqscan",
+        "enable_bitmapscan",
+        "enable_sort"
     );
 
     /**
@@ -171,6 +175,29 @@ public final class PgSession {
      */
     public static void setSearchPlanCacheMode(DSLContext ctx) {
         setLocal(ctx, "plan_cache_mode", "force_custom_plan");
+    }
+
+    /**
+     * Exact-ordering fallback (nexus-bq06h): disable index scans for the rest
+     * of this transaction so the re-run of a vector-ranked statement orders
+     * the FILTERED rows exactly instead of walking the shared HNSW index.
+     * Used only after the index-ordered attempt returned NOTHING: an HNSW scan
+     * under a selective filter can exhaust {@code hnsw.max_scan_tuples}
+     * admitting no row and return empty, silently (measured in production
+     * 2026-09-03: 176-row collection, 22,932 removed by filter, 0 admitted).
+     *
+     * <p>Bitmap scans stay ON: pgvector's HNSW cannot serve a bitmap scan, so
+     * the planner's exact alternatives are a bitmap scan on the primary key's
+     * (tenant, collection) prefix, proportional to the collection set, or a
+     * sequential scan when that is cheaper, then a sort. Seq scan and sort are
+     * re-enabled outright so a session that penalised them to force the index
+     * cannot leave the fallback with no exact plan.
+     */
+    public static void disableIndexScanForExactFallback(DSLContext ctx) {
+        setLocal(ctx, "enable_indexscan", "off");
+        setLocal(ctx, "enable_bitmapscan", "on");
+        setLocal(ctx, "enable_seqscan", "on");
+        setLocal(ctx, "enable_sort", "on");
     }
 
     /**

@@ -1108,7 +1108,8 @@ public final class PgVectorRepository {
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
             PgSession.setSearchPlanCacheMode(ctx);
-            return rawVectorFetch(ctx, sql.toString(), binds.toArray());
+            return exactOnUnderReturn(ctx, nResults,
+                    () -> rawVectorFetch(ctx, sql.toString(), binds.toArray()));
         });
 
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
@@ -1474,7 +1475,7 @@ public final class PgVectorRepository {
             b.add(vecLit);
             b.addAll(gateBinds);
             b.add(nResults);
-            return rawVectorFetch(ctx, sql, b.toArray());
+            return exactOnUnderReturn(ctx, nResults, () -> rawVectorFetch(ctx, sql, b.toArray()));
         });
 
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
@@ -3263,6 +3264,43 @@ public final class PgVectorRepository {
     }
 
     // -- Internal helpers -------------------------------------------------------
+
+    /**
+     * nexus-bq06h: run an index-ordered vector fetch and, if it returned NO
+     * rows, run it AGAIN with index scans disabled for the transaction so the
+     * filtered rows are ordered exactly. An HNSW scan under a selective filter
+     * (one small collection on the shared index, a narrow metadata predicate)
+     * can exhaust {@code hnsw.max_scan_tuples} admitting nothing and return
+     * EMPTY, silently. Empty is the trigger, not "fewer than asked": a filter
+     * that genuinely matches fewer rows than {@code nResults} is the common,
+     * correct case and must not pay a second scan on every call
+     * (substantive-critic, 2026-09-03). A short-but-non-empty starved result
+     * is a known residual of this minimum fix, as is the re-run's own
+     * statement_timeout budget: a call that starves AND whose exact re-run is
+     * slow can take up to two bounds, never unbounded.
+     */
+    private static <R extends Result<? extends Record>> R exactOnUnderReturn(
+            DSLContext ctx, int nResults, java.util.function.Supplier<R> fetch) {
+        R first = fetch.get();
+        if (!first.isEmpty()) {
+            return first;
+        }
+        PgSession.disableIndexScanForExactFallback(ctx);
+        R exact = fetch.get();
+        EXACT_FALLBACKS.incrementAndGet();
+        log.info("event=vector_exact_fallback indexed_rows={} exact_rows={} n_results={}",
+                 first.size(), exact.size(), nResults);
+        return exact;
+    }
+
+    /** Count of exact re-runs (nexus-bq06h): an absorption counter, so the belt is measurable. */
+    private static final java.util.concurrent.atomic.AtomicLong EXACT_FALLBACKS =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** Package-visible for tests, same shape as {@code DeadlockRetry.retryAttemptCount()}. */
+    public static long exactFallbackCount() {
+        return EXACT_FALLBACKS.get();
+    }
 
     /**
      * RDR-191 Phase 4 (nexus-o8dil.16): thin wrapper over {@link DimTables#CHUNKS_TABLE_NAME}
