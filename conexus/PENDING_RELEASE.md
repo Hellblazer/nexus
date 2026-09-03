@@ -29,12 +29,7 @@ mechanize, it matters enough to ship.
 ---
 
 
-## Awaiting the next release or plugin cut (pinned: v7.27.0)
+## Awaiting the next release or plugin cut (pinned: v7.28.0)
 
-Nothing pending. v7.27.0 advanced the pin, so everything previously
-listed here is live in installed sessions: the rdr_hook.py filter fix
-and reconciler deletion (nexus-e19sa), the rdr-audit closed-vocabulary
-scan docs (nexus-j9z30.8), the rdr-close abandoned/superseded_by flows
-(nexus-j9z30.4), the two builtin plan corpus widenings (nexus-rl59s),
-the two skill descriptions of nx_answer's return shapes and the
-nx_answer_report auto-approve entry (nexus-4e75w.4, nexus-4e75w.5).
+Nothing pending. v7.28.0 advanced the pin with no plugin-surface change
+since v7.27.0.
