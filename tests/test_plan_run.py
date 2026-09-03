@@ -2367,6 +2367,204 @@ class TestPlanRunBundledAggregateCount:
             assert isinstance(agg.get("summary"), str)
 
 
+# ── nexus-4h0oh: dropped reduce-step (fan-in) detection ─────────────────────
+
+
+class TestDiscardedReduceSteps:
+    """nexus-4h0oh: a plan whose terminal step does not depend on every
+    prior reduce (operator) step silently discards those branches --
+    ``PlanResult.final`` is always ``step_outputs[-1]``, so N independent
+    search+summarize branches with no fan-in step folding them back
+    together means N-1 branches were retrieved, reduced, and paid for,
+    then never surfaced. RDR-200 Phase 1c q23/q24 hit this live: three
+    independent summarize steps under 'return only the final step'
+    dropped two of three.
+
+    Smallest-change choice: WARN (structlog + a ``PlanResult`` field),
+    never REFUSE -- a plan whose terminal step genuinely only needs one
+    branch (a filter chain, a single-path pipeline) is not a bug, and a
+    hard refusal would break every plan that happens to retrieve more
+    than it reduces. Visibility, not enforcement.
+    """
+
+    def _op_names(self, names: set[str]):
+        return lambda t: t in names
+
+    def _tool(self, step: dict) -> str:
+        return step.get("tool", "")
+
+    def test_unit_no_fan_in_flags_both_earlier_branches(self):
+        """Direct unit test of the detection helper (no dispatch)."""
+        from nexus.plans.runner import _discarded_reduce_steps
+
+        steps = [
+            {"tool": "search", "args": {"query": "a"}},
+            {"tool": "summarize", "args": {"content": "$step1.text"}},
+            {"tool": "search", "args": {"query": "b"}},
+            {"tool": "summarize", "args": {"content": "$step3.text"}},
+            {"tool": "search", "args": {"query": "c"}},
+            {"tool": "summarize", "args": {"content": "$step5.text"}},
+        ]
+        step_outputs = [{"text": f"out{i}"} for i in range(6)]
+        dropped = _discarded_reduce_steps(
+            steps, step_outputs,
+            extract_tool=self._tool,
+            is_operator_tool=self._op_names({"summarize"}),
+        )
+        # 0-based indices of the two discarded summarize branches.
+        assert dropped == [1, 3]
+
+    def test_unit_fan_in_step_clears_every_branch(self):
+        """A terminal compare step referencing every branch leaves
+        nothing dropped."""
+        from nexus.plans.runner import _discarded_reduce_steps
+
+        steps = [
+            {"tool": "search", "args": {"query": "a"}},
+            {"tool": "summarize", "args": {"content": "$step1.text"}},
+            {"tool": "search", "args": {"query": "b"}},
+            {"tool": "summarize", "args": {"content": "$step3.text"}},
+            {"tool": "compare",
+             "args": {"items": ["$step2.text", "$step4.text"]}},
+        ]
+        step_outputs = [{"text": f"out{i}"} for i in range(5)]
+        dropped = _discarded_reduce_steps(
+            steps, step_outputs,
+            extract_tool=self._tool,
+            is_operator_tool=self._op_names({"summarize", "compare"}),
+        )
+        assert dropped == []
+
+    def test_unit_bundled_intermediate_output_is_never_flagged(self):
+        """A reduce step whose recorded output is the bundle-
+        intermediate sentinel was consumed inline by the next operator
+        in its own bundle -- it was not dropped, just fused."""
+        from nexus.plans.bundle import BUNDLED_INTERMEDIATE
+        from nexus.plans.runner import _discarded_reduce_steps
+
+        steps = [
+            {"tool": "extract", "args": {"inputs": "x"}},
+            {"tool": "summarize", "args": {"inputs": "$step1.contents"}},
+        ]
+        step_outputs = [dict(BUNDLED_INTERMEDIATE), {"text": "final"}]
+        dropped = _discarded_reduce_steps(
+            steps, step_outputs,
+            extract_tool=self._tool,
+            is_operator_tool=self._op_names({"extract", "summarize"}),
+        )
+        assert dropped == []
+
+    def test_unit_no_step_outputs_returns_empty(self):
+        from nexus.plans.runner import _discarded_reduce_steps
+
+        dropped = _discarded_reduce_steps(
+            [], [], extract_tool=self._tool,
+            is_operator_tool=self._op_names(set()),
+        )
+        assert dropped == []
+
+    @pytest.mark.asyncio
+    async def test_plan_run_no_fan_in_populates_result_field_and_warns(self) -> None:
+        """Full plan_run() integration: the field is 1-indexed (matching
+        ``budget_exhausted_at_step``'s convention) and a single
+        structured warning event fires naming the dropped positions."""
+        import structlog.testing
+
+        from nexus.plans.runner import plan_run
+
+        plan = {
+            "steps": [
+                {"tool": "search", "args": {"query": "a"}},
+                {"tool": "summarize", "args": {"content": "$step1.text"}},
+                {"tool": "search", "args": {"query": "b"}},
+                {"tool": "summarize", "args": {"content": "$step3.text"}},
+            ],
+        }
+        disp = _FakeDispatcher([
+            {"text": "search-a"}, {"text": "summary-a"},
+            {"text": "search-b"}, {"text": "summary-b"},
+        ])
+        with structlog.testing.capture_logs() as captured:
+            result = await plan_run(_match(plan), {}, dispatcher=disp)
+
+        assert result.dropped_reduce_steps == [2]
+        warnings = [
+            e for e in captured
+            if e.get("event") == "nx_answer_discarded_reduce_steps"
+        ]
+        assert len(warnings) == 1, f"expected one warning, got {captured}"
+        assert warnings[0]["dropped_step_indices"] == [2]
+        assert warnings[0]["terminal_step"] == 4
+
+    @pytest.mark.asyncio
+    async def test_plan_run_fan_in_clears_result_field_and_no_warning(self) -> None:
+        import structlog.testing
+
+        from nexus.plans.runner import plan_run
+
+        plan = {
+            "steps": [
+                {"tool": "search", "args": {"query": "a"}},
+                {"tool": "summarize", "args": {"content": "$step1.text"}},
+                {"tool": "search", "args": {"query": "b"}},
+                {"tool": "summarize", "args": {"content": "$step3.text"}},
+                {"tool": "compare",
+                 "args": {"items": ["$step2.text", "$step4.text"]}},
+            ],
+        }
+        disp = _FakeDispatcher([
+            {"text": "search-a"}, {"text": "summary-a"},
+            {"text": "search-b"}, {"text": "summary-b"},
+            {"text": "cmp"},
+        ])
+        with structlog.testing.capture_logs() as captured:
+            result = await plan_run(_match(plan), {}, dispatcher=disp)
+
+        assert result.dropped_reduce_steps == []
+        warnings = [
+            e for e in captured
+            if e.get("event") == "nx_answer_discarded_reduce_steps"
+        ]
+        assert warnings == []
+
+    @pytest.mark.asyncio
+    async def test_plan_run_no_operator_steps_clears_result_field(self) -> None:
+        """A plan with no reduce steps at all (plain retrieval) never
+        flags anything -- this must not regress the common case."""
+        from nexus.plans.runner import plan_run
+
+        plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+        disp = _FakeDispatcher([{"text": "r"}])
+        result = await plan_run(_match(plan), {}, dispatcher=disp)
+        assert result.dropped_reduce_steps == []
+
+    @pytest.mark.asyncio
+    async def test_plan_run_continuation_cut_never_flags_unexecuted_steps(self) -> None:
+        """A continuation stop-before-cut that halts the run early must
+        not report never-dispatched steps as 'dropped' -- that is a
+        different, already-visible condition
+        (``continuation_cut_applied`` / ``budget_exhausted_at_step``)."""
+        from nexus.plans.runner import plan_run
+
+        plan = {
+            "steps": [
+                {"tool": "search", "args": {"query": "a"}},
+                {"tool": "summarize", "args": {"content": "$step1.text"}},
+                {"tool": "search", "args": {"query": "b"}},
+                {"tool": "summarize", "args": {"content": "$step3.text"}},
+            ],
+        }
+        disp = _FakeDispatcher([
+            {"text": "search-a"}, {"text": "summary-a"},
+        ])
+        result = await plan_run(
+            _match(plan), {}, dispatcher=disp, continuation_cut_at_step=2,
+        )
+        assert result.continuation_cut_applied is True
+        assert len(result.steps) == 2
+        assert result.dropped_reduce_steps == []
+
+
 # ── nx_answer step progress logs (nexus-0qi9) ───────────────────────────────
 
 

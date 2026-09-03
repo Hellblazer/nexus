@@ -427,6 +427,20 @@ class PlanResult:
     #: In-process only, same precedent as :attr:`step_records` — no
     #: wire/telemetry shape carries this.
     resolved_step_args: list[dict[str, Any]] = field(default_factory=list)
+    #: nexus-4h0oh (RDR-200 Phase 1c): 1-indexed plan-step positions
+    #: (matching :attr:`budget_exhausted_at_step`'s convention) of
+    #: executed operator ("reduce") steps whose output is never
+    #: referenced, directly or transitively, by the plan's terminal
+    #: step — evidence the runner retrieved, reduced, and paid for,
+    #: then silently discarded because no fan-in step folded the
+    #: parallel branches back together. Empty when every reduce step
+    #: feeds the terminal step (the common case), the plan has no
+    #: reduce steps, or the run produced no output at all. Visibility
+    #: only: the runner WARNS (structlog ``nx_answer_discarded_reduce_
+    #: steps``) rather than refusing the run — see
+    #: :func:`_discarded_reduce_steps`'s docstring for the "smallest
+    #: change that makes the loss visible" rationale.
+    dropped_reduce_steps: list[int] = field(default_factory=list)
 
 
 # ── Embedding-domain mapping ────────────────────────────────────────────────
@@ -1113,6 +1127,88 @@ def _scan_var_refs(value: Any, found: set[str]) -> None:
         m = _VAR_RE.match(value)
         if m is not None:
             found.add(m.group(1))
+
+
+def _scan_step_refs(value: Any, found: set[int]) -> None:
+    """Collect every ``$stepN.<field>`` 0-based step index referenced by
+    *value* into *found*, IN PLACE.
+
+    Mirrors :func:`_resolve_value`'s own traversal exactly (see
+    :func:`_scan_var_refs`'s docstring for the same rationale) — list
+    elements are recursed into, a string is checked only when it is
+    EXACTLY a ``$stepN.field`` token, and dict values are NOT recursed
+    into.
+    """
+    if isinstance(value, list):
+        for item in value:
+            _scan_step_refs(item, found)
+        return
+    if isinstance(value, str):
+        m = _STEPREF_RE.match(value)
+        if m is not None:
+            found.add(int(m.group(1)) - 1)
+
+
+def _discarded_reduce_steps(
+    steps: list[dict[str, Any]],
+    step_outputs: list[dict[str, Any]],
+    *,
+    extract_tool: "Callable[[dict[str, Any]], str]",
+    is_operator_tool: "Callable[[str], bool]",
+) -> list[int]:
+    """0-based indices of executed operator ("reduce") steps whose
+    output is never referenced, directly or transitively, by the plan's
+    terminal (last-executed) step (nexus-4h0oh).
+
+    A parallel branch with no fan-in step folding it back in is exactly
+    this: the runner retrieved and reduced the content, paid the real
+    ``claude -p`` cost for it, and then ``PlanResult.final`` — always
+    ``step_outputs[-1]`` — never surfaces it. RDR-200 Phase 1c q23/q24
+    hit this live: three independent summarize steps under "return only
+    the final step" dropped two of three.
+
+    Computed by a backward reachability walk from the terminal step
+    through ``$stepN.<field>`` references in each step's ORIGINAL
+    (unresolved) ``args`` — the same reference shape
+    :func:`_resolve_value` substitutes, scanned via
+    :func:`_scan_step_refs`.
+
+    Excludes:
+      * the terminal step itself (trivially reachable from itself);
+      * any step whose recorded output is the bundle-intermediate
+        sentinel (``_bundled_intermediate``) — its content WAS
+        consumed, inline, by the next operator in its own bundle, not
+        dropped;
+      * anything past what actually executed — a budget/continuation
+        cut ending the run early is a different, already-visible
+        condition (``PlanResult.budget_exhausted_at_step`` /
+        ``continuation_cut_applied``), not evidence loss.
+    """
+    if not step_outputs:
+        return []
+    terminal_index = len(step_outputs) - 1
+    reachable: set[int] = set()
+    frontier = [terminal_index]
+    while frontier:
+        idx = frontier.pop()
+        if idx in reachable or idx < 0 or idx >= len(step_outputs):
+            continue
+        reachable.add(idx)
+        refs: set[int] = set()
+        # _resolve_args applies _resolve_value PER ARG VALUE (see its
+        # own body: ``{key: _resolve_value(val, ...) for key, val in
+        # args.items()}``) — mirror that here rather than scanning the
+        # whole args dict as one value, since _scan_step_refs (like
+        # _resolve_value) does not recurse into dicts.
+        for _arg_value in (steps[idx].get("args", {}) or {}).values():
+            _scan_step_refs(_arg_value, refs)
+        frontier.extend(r for r in refs if r not in reachable)
+    reduce_indices = {
+        i for i in range(len(step_outputs))
+        if is_operator_tool(extract_tool(steps[i]))
+        and not step_outputs[i].get("_bundled_intermediate")
+    }
+    return sorted(reduce_indices - reachable)
 
 
 def _validate_var_refs(
@@ -2587,6 +2683,26 @@ async def plan_run(
         exc.step_records = list(step_records)
         raise
 
+    # nexus-4h0oh: computed over the EXECUTED prefix only (step_outputs),
+    # never the full parsed `steps` — a budget/continuation cut ending the
+    # run early is a different, already-visible condition and must not be
+    # reported as discarded evidence (see _discarded_reduce_steps's own
+    # docstring). WARN, never refuse — visibility is the fix; see the
+    # PlanResult field's docstring for why.
+    _dropped_reduce_steps = [
+        i + 1 for i in _discarded_reduce_steps(
+            steps, step_outputs,
+            extract_tool=_extract_tool, is_operator_tool=is_operator_tool,
+        )
+    ]
+    if _dropped_reduce_steps:
+        _log.warning(
+            "nx_answer_discarded_reduce_steps",
+            dropped_step_indices=_dropped_reduce_steps,
+            terminal_step=len(step_outputs),
+            total_steps=len(steps),
+        )
+
     return PlanResult(
         steps=step_outputs,
         final=step_outputs[-1] if step_outputs else None,
@@ -2596,4 +2712,5 @@ async def plan_run(
         step_records=step_records,
         continuation_cut_applied=continuation_cut_applied,
         resolved_step_args=resolved_step_args,
+        dropped_reduce_steps=_dropped_reduce_steps,
     )
