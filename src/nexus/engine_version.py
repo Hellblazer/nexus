@@ -419,7 +419,7 @@ from __future__ import annotations
 #: forced-precondition probe going 20/20 40P01 on v0.1.94 -> 0/20 on
 #: v0.1.95. One Liquibase changeset pair, so the PITR fork walk WAS run
 #: (fork census == live census row-for-row) rather than skipped.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 95)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 98)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
