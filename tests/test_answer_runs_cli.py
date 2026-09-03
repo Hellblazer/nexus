@@ -1522,6 +1522,234 @@ class TestFourWaySplit:
         assert len(reports) == 1
 
 
+class TestDegenerateBodyShapes:
+    """nexus-x79ne: three well-formed-but-structurally-empty body shapes
+    the RDR-200 Phase 1b/1c gate found invisible to ``degenerate_count``
+    (9 of 24 gate questions produced one of these; the server-side field
+    reported 1). Each returns a real, non-``Error:``-prefixed string, so
+    :func:`_row_is_failed` reads it as a plain success -- unlike the
+    zero-evidence guard (nexus-ivv4d) these never even reach
+    ``_classify_degenerate_row`` under the OLD ``step_count == 0`` gate,
+    since the listing-reroute shape carries ``step_count == 1`` (a real
+    ``query()`` call ran to completion, it was simply never reduced).
+    """
+
+    # ── query()-listing reroute (q06/q08/q19 both arms, step_count == 1) ──
+
+    def test_local_mode_listing_header_classifies_as_listing_reroute(self) -> None:
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        final_text = (
+            "Found 3 documents (from 12 chunks across 2 collections)\n\n"
+            "1. [0.1234] Some Title\n   knowledge__dt-papers\n   snippet\n"
+        )
+        row = {"final_text": final_text, "question": "q", "step_count": 1}
+        assert _classify_degenerate_row(row) == "query_listing_reroute"
+
+    def test_service_mode_listing_header_classifies_as_listing_reroute(self) -> None:
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        final_text = (
+            "[Catalog routing: content_type='rdr'] -> 3 collections]\n"
+            "Found 5 documents (from 9 across 3 collections)\n\n"
+            "1. [0.0500] RDR-070\n   rdr__1-1\n   snippet\n"
+        )
+        row = {"final_text": final_text, "question": "q", "step_count": 1}
+        assert _classify_degenerate_row(row) == "query_listing_reroute"
+
+    def test_listing_reroute_row_lands_in_degenerate_not_executed_ok(self) -> None:
+        """The structural fix: step_count == 1 must not by itself route
+        a listing-reroute row into executed_ok. Before this bead
+        ``_split_four_way`` never even called the classifier for a
+        step_count > 0 row."""
+        from nexus.commands.answer_runs import _split_four_way
+
+        row = {
+            "id": 1, "question": "q", "plan_id": 471,
+            "matched_confidence": 0.486, "step_count": 1,
+            "final_text": "Found 10 documents (from 25 across 4 collections)\n",
+            "cost_usd": 0.0, "duration_ms": 2_100,
+            "created_at": "2026-09-01T00:00:00Z", "steps": [],
+        }
+        ok, failed, handed_off, degenerate, reports = _split_four_way([row])
+        assert ok == [] and failed == []
+        assert [r["id"] for r in degenerate.get("query_listing_reroute", [])] == [1]
+
+    def test_a_genuine_answer_that_merely_mentions_documents_does_not_match(
+        self,
+    ) -> None:
+        """Anti-false-positive: the marker is the code-templated header
+        substring ``"documents (from"``, not a bare mention of the word
+        "documents" -- a real synthesized answer discussing document
+        counts in different phrasing must not be swept into this class."""
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        row = {
+            "final_text": "The corpus has 40 documents total, drawn from three RDRs.",
+            "question": "q", "step_count": 3,
+        }
+        assert _classify_degenerate_row(row) == "other"
+
+    # ── budget-warning-only body with no answer (q01/q13/q15/q22) ─────────
+
+    def test_single_warning_line_no_answer_classifies_as_budget_warning_only(
+        self,
+    ) -> None:
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        row = {
+            "final_text": "[budget warning (cost): $0.9043 estimated, $0.4389 remaining]\n",
+            "question": "q", "step_count": 0,
+        }
+        assert _classify_degenerate_row(row) == "budget_warning_only"
+
+    def test_multiple_warning_lines_no_answer_classifies_as_budget_warning_only(
+        self,
+    ) -> None:
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        row = {
+            "final_text": (
+                "[budget warning (cost): $0.7163 estimated, $0.2 remaining]\n"
+                "[budget warning (time): 45s estimated, 10s remaining]\n"
+            ),
+            "question": "q", "step_count": 0,
+        }
+        assert _classify_degenerate_row(row) == "budget_warning_only"
+
+    def test_warning_followed_by_a_real_answer_is_not_budget_warning_only(
+        self,
+    ) -> None:
+        """A warned-but-successful run (the documented common case --
+        every recorded over-cap line 'ran anyway') must NOT classify as
+        degenerate: the composed text has a real answer after the
+        warning line(s)."""
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        row = {
+            "final_text": (
+                "[budget warning (cost): $0.9043 estimated, $0.4389 remaining]\n"
+                "The bge-768 embedder was chosen for its balance of recall "
+                "and index size; see RDR-134 section 3."
+            ),
+            "question": "q", "step_count": 4,
+        }
+        assert _classify_degenerate_row(row) == "other"
+
+    def test_budget_warning_only_row_lands_in_degenerate(self) -> None:
+        from nexus.commands.answer_runs import _split_four_way
+
+        row = {
+            "id": 2, "question": "q", "plan_id": 0,
+            "matched_confidence": None, "step_count": 0,
+            "final_text": "[budget warning (cost): $0.90 estimated, $0.40 remaining]\n",
+            "cost_usd": None, "duration_ms": 500,
+            "created_at": "2026-09-01T00:00:00Z", "steps": [],
+        }
+        ok, failed, handed_off, degenerate, reports = _split_four_way([row])
+        assert ok == [] and failed == []
+        assert [r["id"] for r in degenerate.get("budget_warning_only", [])] == [2]
+
+    # ── empty-hydration body (q12 both arms, operator_compare on ten
+    #    empty strings) ──────────────────────────────────────────────────
+
+    def test_no_comparison_performed_classifies_as_empty_hydration(self) -> None:
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        row = {
+            "final_text": "No comparison performed: the provided items were empty.",
+            "question": "q", "step_count": 4,
+        }
+        assert _classify_degenerate_row(row) == "empty_hydration"
+
+    def test_nothing_to_summarize_classifies_as_empty_hydration(self) -> None:
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        row = {
+            "final_text": "There is nothing to summarize from the given content.",
+            "question": "q", "step_count": 3,
+        }
+        assert _classify_degenerate_row(row) == "empty_hydration"
+
+    def test_empty_hydration_row_lands_in_degenerate(self) -> None:
+        from nexus.commands.answer_runs import _split_four_way
+
+        row = {
+            "id": 3, "question": "q", "plan_id": 12,
+            "matched_confidence": 0.7, "step_count": 4,
+            "final_text": "No comparison performed.",
+            "cost_usd": 0.03, "duration_ms": 3_000,
+            "created_at": "2026-09-01T00:00:00Z", "steps": [],
+        }
+        ok, failed, handed_off, degenerate, reports = _split_four_way([row])
+        assert ok == [] and failed == []
+        assert [r["id"] for r in degenerate.get("empty_hydration", [])] == [3]
+
+    # ── the fixed field: nine questions worth of degenerate rows are all
+    #    counted, not just the pre-existing planner_error class ──────────
+
+    def test_four_way_split_now_counts_all_three_new_shapes_plus_the_old_ones(
+        self,
+    ) -> None:
+        """Regression for the bead's own headline number: 9 of 24 gate
+        questions produced a degenerate body; the pre-fix field reported
+        1 (planner_error only). Six distinct classes, one row each,
+        must all land in ``degenerate``."""
+        from nexus.commands.answer_runs import _split_four_way
+
+        rows = [
+            {
+                "id": 10, "question": "q", "plan_id": 1, "matched_confidence": 0.5,
+                "step_count": 1,
+                "final_text": "Found 2 documents (from 6 across 1 collections)\n",
+                "cost_usd": 0.0, "duration_ms": 100,
+                "created_at": "2026-09-01T00:00:00Z", "steps": [],
+            },
+            {
+                "id": 11, "question": "q", "plan_id": 0, "matched_confidence": None,
+                "step_count": 0,
+                "final_text": "[budget warning (cost): $0.9 estimated, $0.1 remaining]\n",
+                "cost_usd": None, "duration_ms": 50,
+                "created_at": "2026-09-01T00:00:01Z", "steps": [],
+            },
+            {
+                "id": 12, "question": "q", "plan_id": 8, "matched_confidence": 0.6,
+                "step_count": 4,
+                "final_text": "No comparison performed.",
+                "cost_usd": 0.02, "duration_ms": 200,
+                "created_at": "2026-09-01T00:00:02Z", "steps": [],
+            },
+            {
+                "id": 13, "question": "q", "plan_id": 9, "matched_confidence": 0.6,
+                "step_count": 0,
+                "final_text": "Planner error: timed out after 150s",
+                "cost_usd": None, "duration_ms": 150_000,
+                "created_at": "2026-09-01T00:00:03Z", "steps": [],
+            },
+            {
+                "id": 14, "question": "q", "plan_id": 3, "matched_confidence": 0.6,
+                "step_count": 0,
+                "final_text": "Error: boom",
+                "cost_usd": None, "duration_ms": 10,
+                "created_at": "2026-09-01T00:00:04Z", "steps": [],
+            },
+            {
+                "id": 15, "question": "q", "plan_id": 4, "matched_confidence": 0.6,
+                "step_count": 0,
+                "final_text": "some unrecognized zero-step body",
+                "cost_usd": None, "duration_ms": 10,
+                "created_at": "2026-09-01T00:00:05Z", "steps": [],
+            },
+        ]
+        ok, failed, handed_off, degenerate, reports = _split_four_way(rows)
+        assert ok == [] and failed == [] and handed_off == [] and reports == []
+        assert sum(len(v) for v in degenerate.values()) == 6
+        assert set(degenerate.keys()) == {
+            "query_listing_reroute", "budget_warning_only", "empty_hydration",
+            "planner_error", "error", "other",
+        }
+
+
 class TestMarkerCollisionHardening:
     """RDR-200 marker-collision hardening (critic-F3, T2 [23952]): a
     row whose ``final_text`` merely STARTS WITH the marker prefix (an

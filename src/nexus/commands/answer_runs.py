@@ -146,9 +146,86 @@ def _bucketize_durations(durations_ms: "list[int]") -> dict[str, int]:
     return buckets
 
 
+#: Literal, code-templated substring identifying nx_answer's single-step-
+#: guard reroute to ``query()`` (nexus-x79ne / RDR-200 Phase 1b-1c gate:
+#: q06/q08/q19, both arms, plan_id 471, ``step_count == 1`` — a REAL
+#: ``query()`` call that ran to completion and returned a well-formed
+#: document listing, never reduced). This shape carries ``step_count >
+#: 0``, so without a dedicated check it lands in executed_ok/executed_
+#: failed (no "Error:"/exhaustion prefix, no per-step ``ok=False``
+#: signal) — reading as a normal success. Both of ``query()``'s text
+#: renderers emit this substring verbatim in their header (core.py:
+#: ``"Found {N} documents (from {M} chunks across {K} collections)"`` /
+#: ``"Found {N} documents (from {M} across {K} collections)"``) and no
+#: other core.py-emitted string does.
+_QUERY_LISTING_REROUTE_MARKER = "documents (from"
+
+#: Prefix of a budget WARNING line (RDR-196 .p3c) — distinct from
+#: ``NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX``'s ``"[budget exhausted"``:
+#: a warning lets execution proceed; an exhaustion halts it. Both are
+#: emitted by ``nx_answer``'s single ``_result`` closure (core.py).
+_BUDGET_WARNING_LINE_PREFIX = "[budget warning ("
+
+#: Heuristic phrases an LLM operator step emits when it was fed entirely
+#: empty/placeholder hydrated content (nexus-x79ne, RDR-200 Phase 1b q12
+#: both arms: ``operator_compare`` received ten empty strings). NOT a
+#: deterministic code-level marker — verified against
+#: ``nexus.mcp.operator_requests``'s ``build_*_request`` builders: none
+#: of them short-circuit on empty input, every one always dispatches to
+#: ``claude -p``, so the model always produces free text. Heuristic, like
+#: :func:`_row_is_failed`'s own documented blind spot: a model phrasing
+#: this differently is invisible to this list. Kept broad enough to
+#: catch the gate-artifact class without over-matching a real
+#: comparative answer that happens to discuss an absence of differences
+#: (checked as a substring of the FULL final_text, not an exact match).
+_EMPTY_HYDRATION_PHRASES: tuple[str, ...] = (
+    "no comparison performed",
+    "nothing to compare",
+    "no items to compare",
+    "no items were provided",
+    "no content was provided",
+    "nothing to summarize",
+    "no content to summarize",
+    "empty input",
+    "no evidence was provided",
+    "no evidence provided",
+)
+
+#: The subset of :func:`_classify_degenerate_row`'s return values that
+#: are reachable regardless of ``step_count`` (nexus-x79ne). Unlike the
+#: pre-existing ``redacted``/``planner_error``/``error``/``other``
+#: classes — which stay scoped to ``step_count == 0`` rows exactly as
+#: before this bead — a row matching one of these three lands in
+#: ``degenerate`` even when it executed real steps, because the shape
+#: itself (a well-formed listing / a warning-only body / an empty-
+#: hydration refusal) IS the degenerate signal, not the step count.
+_WELL_FORMED_DEGENERATE_CLASSES: frozenset[str] = frozenset({
+    "query_listing_reroute", "empty_hydration", "budget_warning_only",
+})
+
+
+def _is_budget_warning_only_body(final_text: str) -> bool:
+    """True when *final_text* is one or more ``[budget warning (...):
+    ...]`` lines and NOTHING ELSE (nexus-x79ne: the run proceeded past
+    the warning — every recorded over-cap line "ran anyway" — but
+    produced no answer at all; RDR-200 Phase 1b/1c q01/q13/q15/q22).
+
+    A warning followed by a real answer does NOT match: the remainder
+    after stripping every leading warning line is non-empty, which is
+    the documented common case (a warned-but-successful run) and must
+    stay out of ``degenerate``.
+    """
+    remainder = final_text
+    matched = False
+    while remainder.startswith(_BUDGET_WARNING_LINE_PREFIX):
+        matched = True
+        newline_idx = remainder.find("\n")
+        remainder = remainder[newline_idx + 1:] if newline_idx != -1 else ""
+    return matched and remainder.strip() == ""
+
+
 def _classify_degenerate_row(row: dict) -> str:
-    """Sub-classify a ``step_count == 0`` row from fields visible on the
-    row itself.
+    """Sub-classify a row from fields visible on the row itself.
 
     NOT the per-id source disposition (dead code / live-fixed / harness
     artifact) the nx-answer-degenerate-row-taxonomy census recorded (T2
@@ -161,9 +238,25 @@ def _classify_degenerate_row(row: dict) -> str:
     ``trace=False`` redaction class, not errors — so "degenerate" must
     never be rendered as a synonym for "broken"; the ``redacted`` class
     exists specifically so this command doesn't imply that.
+
+    nexus-x79ne (RDR-200 Phase 1b/1c gate): three well-formed-but-
+    structurally-empty body shapes accounted for 9 of 24 gate questions
+    while the pre-fix server-side field reported 1 (``planner_error``
+    only) — checked FIRST, before the ``step_count == 0``-only classes
+    below, because they are reachable on ANY row (see
+    :data:`_WELL_FORMED_DEGENERATE_CLASSES` and
+    :func:`_split_four_way`, which is what actually widens the routing
+    for the ``step_count > 0`` case — this function alone cannot, since
+    it is only ever called on a row already selected for classification).
     """
     final_text = str(row.get("final_text") or "")
     question = str(row.get("question") or "")
+    if _is_budget_warning_only_body(final_text):
+        return "budget_warning_only"
+    if _QUERY_LISTING_REROUTE_MARKER in final_text:
+        return "query_listing_reroute"
+    if any(phrase in final_text.strip().lower() for phrase in _EMPTY_HYDRATION_PHRASES):
+        return "empty_hydration"
     if final_text == "[redacted]" or question == "[redacted]":
         return "redacted"
     if final_text.startswith("Planner error:"):
@@ -329,21 +422,34 @@ def _split_four_way(
     rows: "list[dict]",
 ) -> "tuple[list[dict], list[dict], list[dict], dict[str, list[dict]], list[dict]]":
     """Split *rows* (a fetched PAGE, not the whole filtered set) into
-    executed-ok, executed-failed, handed-off, and degenerate
-    (``step_count == 0``, itself grouped by
-    :func:`_classify_degenerate_row`) — RDR-200 §Telemetry's four-way
-    run split (nexus-4e75w.5). A row carrying the continuation REPORT
-    marker is a report EVENT, not a run: it is returned separately
-    (*report_events*, for :func:`_continuation_pairing_stats` to pair
-    against the handed-off rows) and never lands in any of the four run
-    buckets — it can never double-count a run or misclassify as
-    ``degenerate`` on its own ``step_count == 0``.
+    executed-ok, executed-failed, handed-off, and degenerate — RDR-200
+    §Telemetry's four-way run split (nexus-4e75w.5), widened by
+    nexus-x79ne. A row carrying the continuation REPORT marker is a
+    report EVENT, not a run: it is returned separately (*report_events*,
+    for :func:`_continuation_pairing_stats` to pair against the
+    handed-off rows) and never lands in any of the four run buckets — it
+    can never double-count a run or misclassify as ``degenerate`` on its
+    own ``step_count == 0``.
 
     Marker checks run BEFORE the ``step_count`` branch precisely because
     a handoff can legitimately carry ``step_count == 0`` (a cut at the
     very first plan step — an all-operator-suffix plan) — without
     checking the marker first, such a row would misclassify as
     degenerate instead of handed-off.
+
+    nexus-x79ne: :func:`_classify_degenerate_row` now runs on EVERY row
+    reaching this point, not only ``step_count == 0`` ones — the RDR-200
+    Phase 1b/1c gate found three well-formed-but-structurally-empty body
+    shapes (a query()-listing reroute, a budget-warning-only body, an
+    empty-hydration refusal) that carry ``step_count > 0`` and, gated on
+    the OLD ``step_count == 0``-only call, never reached classification
+    at all — the server-side ``degenerate_count`` read 1 where the gate
+    artifacts showed 9. Only the THREE classes in
+    :data:`_WELL_FORMED_DEGENERATE_CLASSES` divert a row here; a
+    ``step_count > 0`` row classified ``redacted``/``planner_error``/
+    ``error``/``other`` (impossible for the first three by construction,
+    but ``redacted`` can legitimately co-occur with real executed steps)
+    proceeds through the UNCHANGED executed/failed split.
 
     Returns ``(executed_ok, executed_failed, handed_off,
     degenerate_by_class, report_events)``.
@@ -360,10 +466,12 @@ def _split_four_way(
         if _row_is_handed_off(r):
             handed_off.append(r)
             continue
-        if int(r.get("step_count") or 0) > 0:
+        cls = _classify_degenerate_row(r)
+        if cls in _WELL_FORMED_DEGENERATE_CLASSES:
+            degenerate.setdefault(cls, []).append(r)
+        elif int(r.get("step_count") or 0) > 0:
             (executed_failed if _row_is_failed(r) else executed_ok).append(r)
         else:
-            cls = _classify_degenerate_row(r)
             degenerate.setdefault(cls, []).append(r)
     return executed_ok, executed_failed, handed_off, degenerate, report_events
 
