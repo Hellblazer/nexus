@@ -117,7 +117,11 @@ class PDFConfig:
     #: demand when it routes a document to MinerU and none is running.
     #: False = operator manages the server out-of-band (launchctl, remote).
     mineru_autostart: bool = True
-    mineru_table_enable: bool = False
+    #: nexus-jd8fi: tables MinerU does not recognise as text come out as
+    #: ``![](images/<sha>.jpg)``, so a document indexed with this off carries
+    #: no tabular values at all. On by default; RDR-046 RF-2 chose off for one
+    #: equation-dense corpus on the belief tables would degrade to plain text.
+    mineru_table_enable: bool = True
     mineru_page_batch: int = 1
     # RDR-148 Gap 6: hard RLIMIT_AS address-space ceiling (MB) applied to the
     # MinerU worker. 0 = disabled (rely on the OS OOM-killer / jetsam). Opt-in
@@ -145,7 +149,7 @@ def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
         extractor=extractor,
         mineru_server_url=pdf.get("mineru_server_url", "http://127.0.0.1:8010"),
         mineru_autostart=bool(pdf.get("mineru_autostart", True)),
-        mineru_table_enable=bool(pdf.get("mineru_table_enable", False)),
+        mineru_table_enable=bool(pdf.get("mineru_table_enable", True)),
         mineru_page_batch=max(1, int(pdf.get("mineru_page_batch", 1))),
         mineru_memory_ceiling_mb=max(0, int(pdf.get("mineru_memory_ceiling_mb", 0))),
         mineru_page_timeout_s=max(1, int(pdf.get("mineru_page_timeout_s", 180))),
@@ -1274,7 +1278,7 @@ _DEFAULTS: dict[str, Any] = {
     "pdf": {
         "extractor": "auto",
         "mineru_server_url": "http://127.0.0.1:8010",
-        "mineru_table_enable": False,
+        "mineru_table_enable": True,
         "mineru_page_batch": 1,
     },
     "taxonomy": {

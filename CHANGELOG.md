@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- PDF indexing dropped every table (nexus-jd8fi). `pdf.mineru_table_enable`
+  defaulted to `false`, and the MinerU server was spawned with
+  `MINERU_TABLE_ENABLE` exported, which MinerU lets override the per-request
+  flag; every table came out as `![](images/<sha>.jpg)` and no tabular value
+  was indexed. Measured on the Pangram 4 Technical Report: pages 18-21 gave
+  0 tables and 4515 chars off, 6 tables and 13890 chars on. The default is now
+  `true`, the env var is no longer exported so each request's flag governs,
+  and any remaining image reference (a figure, or a table MinerU could not
+  read) is indexed as a caption-anchored marker such as
+  `[Table 6 not extracted as text; values not indexed]` instead of an empty
+  line. MinerU-extracted tables now populate `table_regions`, so their chunks
+  carry `chunk_type=table_page` as docling's already did. `PDFChunker` is
+  table-aware: a table that fits the window moves whole into the next
+  chunk, an oversized one breaks after a complete row and each
+  continuation chunk repeats the header row, so a cell value is never
+  torn from its column name (real tables run 2200 to 5000 chars against
+  the 1500-char window). Documents indexed before this need a re-index
+  to pick up their tables.
+
 ## [7.28.0] - 2026-09-03
 
 Engine identity: `engine-service-v0.1.98` (was v0.1.95). Three engine cuts

@@ -432,7 +432,13 @@ class TestFormulaPreservationOnRealPdf:
     # runs / 3576 chars. page_count 33, formula_count 44, $$ 8 and \frac 12 all
     # still hold exactly, which is what identifies this as a normalizer change
     # rather than an extraction change.
-    _EXPECTED_TEXT_LENGTH = 59573           # full extracted text
+    # 59573 -> 58843 (nexus-jd8fi). The 18 ``![](images/<sha>.jpg)`` figure
+    # references in this paper became 18 ``[Figure N is an image; not indexed
+    # as text]`` markers; measured per page, the raw MinerU text summed to
+    # 59557 and the marked text to 58827, a 730-char difference that matches
+    # this drift exactly. page_count 33, formula_count 44, $$ 8 and \frac 12
+    # all held, which identifies it as the marker pass, not extraction.
+    _EXPECTED_TEXT_LENGTH = 58843           # full extracted text
     _EXPECTED_PAGE_COUNT = 33               # PyMuPDF page count
 
     # The canonical false-positive-rate formula from the paper, in the exact
@@ -573,3 +579,36 @@ class TestFormulaPreservationOnRealPdf:
             f"the formula is still being extracted correctly before "
             f"updating the snippet."
         )
+
+    _TABLE_FIXTURE = Path(__file__).parent / "fixtures" / "virgo.pdf"
+
+    @pytest.mark.slow
+    def test_mineru_path_indexes_table_values_as_text(self) -> None:
+        """nexus-jd8fi: a table in a real PDF comes out of the MinerU path as
+        text a reader can search, not as an image reference.
+
+        ``virgo.pdf`` page 15 carries "Table 1: Threat Model and Mitigations
+        in Private Virtual Tree Networks", whose cells ("Replay Attack",
+        "Nonce or timestamp binding") occur nowhere in the running prose.
+        Measured 2026-09-03 with MinerU 3.1.11, tables on: one ``<table>``
+        block, zero image references on that page. The pre-fix default
+        rendered the same table as ``![](images/<sha>.jpg)``, so the two
+        cell strings were unretrievable from the indexed document.
+
+        Same skip contract as ``test_mineru_path_preserves_formulas``.
+        """
+        mineru_importorskip()
+        from nexus.pdf_extractor import PDFExtractor
+
+        result = PDFExtractor().extract(self._TABLE_FIXTURE, extractor="mineru")
+        assert result.metadata["extraction_method"] == "mineru"
+        text = result.text
+        assert "<table>" in text
+        assert "Replay Attack" in text
+        assert "Nonce or timestamp binding" in text
+        # No bare image reference survives: every visual MinerU did not render
+        # as text is a marker naming the hole.
+        assert "![](" not in text
+        # The table's page is tagged for the chunker (1-based page 15).
+        pages = {r["page"] for r in result.metadata["table_regions"]}
+        assert 15 in pages, pages

@@ -82,7 +82,7 @@ try:
         pdf_bytes_list=[Path(pdf_path).read_bytes()],
         p_lang_list=["en"],
         formula_enable=True,
-        table_enable=True,  # Note: server path uses config (default False) — see RDR-046 RF-2
+        table_enable=True,  # subprocess path always extracts tables; server path sends pdf.mineru_table_enable (default True, nexus-jd8fi)
         start_page_id=start,
         end_page_id=end,
     )
@@ -439,6 +439,67 @@ def _unwrap_mineru_font_tags(md: str) -> str:
     indexed chunks need a re-index to pick up the clean text.
     """
     return _MINERU_FONT_TAG_RE.sub("", md)
+
+
+_MD_IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
+_VISUAL_LABEL_RE = re.compile(r"^\s*((?:Table|Figure|Fig\.?)\s*[A-Za-z]?\d+[a-z]?|(?:Table|Figure)\s+[IVXLC]+)\b")
+
+
+def _visual_label(entry: dict, kind: str) -> str:
+    """``"Table 6"`` / ``"Figure 5"`` from the entry's first caption, else the bare kind."""
+    captions = entry.get("table_caption") or entry.get("image_caption") or []
+    for caption in captions:
+        m = _VISUAL_LABEL_RE.match(caption or "")
+        if m:
+            return m.group(1).strip()
+    return kind
+
+
+def _mark_unextracted_visuals(md: str, content_list: list[dict]) -> str:
+    """Replace MinerU image references with a text marker that names the hole.
+
+    nexus-jd8fi: MinerU renders every figure, and every table it did not
+    recognise as text, as ``![](images/<sha>.jpg)``. Indexed as-is that is
+    a content-free line: a retrieval-only reader sees running prose with no
+    signal that a table or figure sat there and reconstructs the paper
+    around the gap. The Pangram 4 report indexed with tables off carried
+    zero tabular values and nothing said so.
+
+    Each reference becomes a bracketed marker anchored to the visual's own
+    caption label, from the ``content_list`` entry whose ``img_path``
+    matches: ``[Table 6 not extracted as text; values not indexed]`` for a
+    table without a ``table_body``, ``[Figure 5 is an image; not indexed as
+    text]`` for a figure. A reference with no ``content_list`` entry (the
+    entry was dropped, or the image was never in the layout) gets the
+    generic ``[image not indexed as text]``. Tables MinerU did extract are
+    already HTML in *md* and carry no image reference, so they pass through.
+
+    The marker is text the embedder sees, so a query for "Table 6" lands on
+    the chunk that says the values are absent instead of on nothing.
+    """
+    if not md or "![" not in md:
+        return md
+    by_path: dict[str, dict] = {}
+    for entry in content_list:
+        img_path = entry.get("img_path")
+        if img_path:
+            by_path[img_path] = entry
+            by_path[img_path.rsplit("/", 1)[-1]] = entry
+
+    def _repl(m: re.Match) -> str:
+        ref = m.group(1)
+        entry = by_path.get(ref) or by_path.get(ref.rsplit("/", 1)[-1])
+        if entry is None:
+            return "[image not indexed as text]"
+        match entry.get("type"):
+            case "table":
+                return f"[{_visual_label(entry, 'Table')} not extracted as text; values not indexed]"
+            case "image":
+                return f"[{_visual_label(entry, 'Figure')} is an image; not indexed as text]"
+            case _:
+                return "[image not indexed as text]"
+
+    return _MD_IMAGE_REF_RE.sub(_repl, md)
 
 
 @dataclass
@@ -1268,6 +1329,12 @@ class PDFExtractor:
         # would silently overstate MinerU's actual coverage.
         degraded_pages: list[int] = []
 
+        def _rebase_page_idx(content_list: list[dict], batch_start: int) -> None:
+            # MinerU numbers ``page_idx`` from the start of the batch it parsed.
+            for entry in content_list:
+                if "page_idx" in entry and "doc_page_idx" not in entry:
+                    entry["doc_page_idx"] = batch_start + entry["page_idx"]
+
         def _append_page(
             page: int, md: str, content_list: list[dict], pdf_info: list[dict],
         ) -> None:
@@ -1279,6 +1346,7 @@ class PDFExtractor:
             if on_page is not None:
                 on_page(page, md, {"page_number": page + 1, "text_length": len(md)})
             md_parts.append(md)
+            _rebase_page_idx(content_list, page)
             all_content_list.extend(content_list)
             all_pdf_info.extend(pdf_info)
             per_page_lengths.append((page, len(md)))
@@ -1292,6 +1360,7 @@ class PDFExtractor:
             if on_page is not None:
                 on_page(s, md, {"page_number": s + 1, "text_length": len(md)})
             md_parts.append(md)
+            _rebase_page_idx(content_list, s)
             all_content_list.extend(content_list)
             all_pdf_info.extend(pdf_info)
             per_page = len(md) // batch_pages
@@ -1339,6 +1408,7 @@ class PDFExtractor:
             # Success. Normalize before measuring length so per_page_lengths is
             # consistent with the stored normalized text.
             md = _unwrap_mineru_font_tags(_normalize_mineru_latex(md))
+            md = _mark_unextracted_visuals(md, content_list)
             if span <= 1:
                 _append_page(s, md, content_list, pdf_info)
             else:
@@ -1989,6 +2059,16 @@ class PDFExtractor:
         extraction_method = (
             "mineru+docling-degraded" if degraded_page_count > 0 else "mineru"
         )
+        # nexus-jd8fi: tables MinerU rendered as text, keyed by the page they
+        # sit on, so PDFChunker tags their chunks ``table_page`` exactly as it
+        # does for docling. ``page_idx`` in a MinerU content_list is relative
+        # to the batch that produced it; _extract_with_mineru rebases it to
+        # the document before it lands here (``doc_page_idx``).
+        table_regions = [
+            {"page": e.get("doc_page_idx", e.get("page_idx", 0)) + 1, "html": e["table_body"]}
+            for e in content_list
+            if e.get("type") == "table" and e.get("table_body")
+        ]
         return ExtractionResult(
             text=md_text,
             metadata={
@@ -1997,7 +2077,7 @@ class PDFExtractor:
                 "format": "markdown",
                 "formula_count": formula_count,
                 "page_boundaries": page_boundaries,
-                "table_regions": [],
+                "table_regions": table_regions,
                 "docling_title": "",
                 "pdf_title": "",
                 "pdf_author": "",

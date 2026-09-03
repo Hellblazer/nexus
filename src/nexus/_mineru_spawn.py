@@ -62,11 +62,15 @@ def _mineru_output_root() -> Path:
 
 def _server_env(output_root: Path) -> dict[str, str]:
     """Build environment variables for the mineru-api subprocess."""
-    from nexus.config import get_mineru_table_enable  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
     env = os.environ.copy()
+    # nexus-jd8fi: MINERU_TABLE_ENABLE is deliberately NOT exported. MinerU's
+    # ``get_table_enable`` lets that env var override the per-request
+    # ``table_enable`` form field, so exporting it froze the config value
+    # read at spawn time into the server for its whole life and made the
+    # flag the extractor sends with every request a no-op. Not set means
+    # each request's own ``table_enable`` governs.
+    env.pop("MINERU_TABLE_ENABLE", None)
     env.update({
-        "MINERU_TABLE_ENABLE": str(get_mineru_table_enable()).lower(),
         "MINERU_PROCESSING_WINDOW_SIZE": "8",
         # UNIT IS GB, not MB: mineru's get_vram() returns this value raw and
         # its auto-detect paths all convert bytes -> GB before comparing
