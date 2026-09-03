@@ -2462,6 +2462,89 @@ class TestTimeoutPartialCapture:
         assert event_count == len(pre_result_lines)
 
 
+import sys  # noqa: E402 - deferred: only needed by the real-subprocess tests below
+
+
+def _real_create_subprocess_exec_side_effect(script_path: str):
+    """Return a ``side_effect`` for ``patch("asyncio.create_subprocess_exec")``
+    that ignores the ``("claude", "-p", ...)`` argv ``claude_dispatch``
+    hardcodes and instead really execs *script_path* under this same
+    interpreter (``sys.executable``), forwarding every kwarg
+    ``claude_dispatch`` passes (``stdin``/``stdout``/``stderr``/``env``/
+    ``start_new_session``) unchanged to the REAL, unpatched
+    ``asyncio.create_subprocess_exec`` -- captured as a closure variable
+    BEFORE the patch is installed, so the call inside this side_effect
+    does not recurse into the mock that replaces the same module
+    attribute for the duration of the ``with patch(...)`` block.
+
+    Exists for nexus-q4o43 / nexus-tx5hd: those beads' concern is real OS
+    process/pipe/kill semantics (SIGKILL via a real process group, a real
+    ``StreamReader`` draining a real pipe under cancellation) that a
+    ``MagicMock``-based ``_make_proc`` (used by every other test in this
+    file) cannot exercise by construction -- mirrors the precedent in
+    ``tests/test_process_group_safety.py::TestRealSubprocess``.
+    """
+    real_create_subprocess_exec = asyncio.create_subprocess_exec
+
+    async def _side_effect(*_args: object, **kwargs: object) -> "asyncio.subprocess.Process":
+        return await real_create_subprocess_exec(sys.executable, script_path, **kwargs)
+
+    return _side_effect
+
+
+class TestRealSubprocessDrain:
+    """nexus-q4o43 / nexus-tx5hd: verify the nexus-1at5 timeout drain and
+    the operator timeout budget against a REAL OS child process -- not
+    the ``MagicMock``-based ``_make_proc`` every other test in this file
+    uses. A real killed child exercises real pipe/StreamReader/killpg
+    semantics a mock cannot fake wrong (or right) by construction."""
+
+    @pytest.mark.asyncio
+    async def test_real_killed_child_mid_stream_recovers_partial_output(
+        self, tmp_path,
+    ) -> None:
+        """nexus-q4o43: a REAL child that streams several valid stream-json
+        NDJSON events and then hangs (never emits the terminal ``result``
+        event) must, once SIGKILL'd on timeout, leave a NON-EMPTY
+        reconstructed ``partial_text`` on the raised
+        ``OperatorTimeoutError`` -- proving the nexus-1at5 drain actually
+        recovers something from a real killed process, not only from a
+        mock fixture engineered to hand it bytes."""
+        from nexus.operators.dispatch import claude_dispatch, OperatorTimeoutError
+
+        script = tmp_path / "fake_claude_streams_then_hangs.py"
+        script.write_text(
+            "import json, sys, time\n"
+            "def emit(obj):\n"
+            "    sys.stdout.write(json.dumps(obj) + chr(10))\n"
+            "    sys.stdout.flush()\n"
+            "emit({'type': 'system', 'subtype': 'init'})\n"
+            "emit({'type': 'stream_event', 'event': {'type': 'content_block_delta',"
+            " 'delta': {'type': 'text_delta', 'text': 'partial '}}})\n"
+            "emit({'type': 'stream_event', 'event': {'type': 'content_block_delta',"
+            " 'delta': {'type': 'text_delta', 'text': 'answer text'}}})\n"
+            "time.sleep(60)\n"  # never reaches a terminal 'result' event
+        )
+
+        with patch(
+            "asyncio.create_subprocess_exec",
+            side_effect=_real_create_subprocess_exec_side_effect(str(script)),
+        ):
+            with pytest.raises(OperatorTimeoutError) as exc_info:
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=2.0)
+
+        err = exc_info.value
+        assert err.partial_text != "", (
+            "the real killed child's reconstructed partial_text is empty -- "
+            "this is exactly the vacuous-drain state nexus-q4o43 flags"
+        )
+        assert "partial answer text" in err.partial_text
+        assert err.event_count >= 2, (
+            f"expected at least the 2 stream_event lines to have parsed "
+            f"before the kill, got event_count={err.event_count}"
+        )
+
+
 # ── MCP operator tools ─────────────────────────────────────────────────────
 
 @pytest.fixture
