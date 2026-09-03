@@ -743,6 +743,107 @@ class TestRunRecording:
         assert warn.call_args.args[0] == "nx_answer_runs"
 
 
+# ── Zero-evidence fallback provenance (nexus-ivv4d) ────────────────────────
+
+
+class TestZeroEvidenceFallbackProvenance:
+    """nexus-ivv4d: the zero-evidence fallback ("No matching evidence
+    found ... retrieval steps returned zero results") is the ONE outcome
+    where the matched plan's own parameters (plan_id, each retrieval
+    step's tool/corpus/query) ARE the finding — RDR-200 Phase 1c found it
+    recorded none of them, unlike every other degenerate shape which
+    leaks at least step vocabulary or collections. Both the returned
+    text and the telemetry row's ``final_text`` share the same string
+    (``no_match`` in the guard), so asserting on the returned text also
+    covers the telemetry row.
+    """
+
+    @pytest.mark.asyncio
+    async def test_zero_evidence_message_names_plan_id_and_step_basis(self):
+        from nexus.mcp.core import nx_answer
+
+        plan_json = json.dumps({
+            "steps": [
+                {"tool": "search", "args": {"query": "widget frobnication", "corpus": "rdr"}},
+                {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
+            ],
+        })
+
+        def fake_match(question, **kwargs):
+            return [_make_match(plan_id=42, confidence=0.60, plan_json=plan_json)]
+
+        plan_run_result = MagicMock()
+        plan_run_result.steps = [
+            {"ids": [], "collections": [], "distances": []},
+            {"text": "nothing to summarize"},
+        ]
+        plan_run_result.step_records = []
+
+        library = MagicMock()
+        db_stub = MagicMock(plans=library)
+        db_stub.conn = MagicMock()
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
+             patch("nexus.plans.runner.plan_run",
+                   AsyncMock(return_value=plan_run_result)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            result = await nx_answer(question="what is widget frobnication")
+
+        assert "No matching evidence found" in result
+        assert "plan_id=42" in result, result
+        assert "search" in result and "rdr" in result and "widget frobnication" in result
+
+    @pytest.mark.asyncio
+    async def test_zero_evidence_provenance_lands_in_telemetry_row(self):
+        """The recorded ``final_text`` for the telemetry row must carry the
+        same provenance as the returned text — not just the user-facing
+        string."""
+        from nexus.mcp.core import nx_answer
+
+        two_step_plan_json = json.dumps({
+            "steps": [
+                {"tool": "search", "args": {"query": "distributed consensus", "corpus": "docs"}},
+                {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
+            ],
+        })
+
+        def fake_match_multi(question, **kwargs):
+            return [_make_match(plan_id=99, confidence=0.60, plan_json=two_step_plan_json)]
+
+        plan_run_result = MagicMock()
+        plan_run_result.steps = [
+            {"ids": [], "collections": []},
+            {"text": "nothing"},
+        ]
+        plan_run_result.step_records = []
+
+        library = MagicMock()
+        db_stub = MagicMock(plans=library)
+        db_stub.conn = MagicMock()
+
+        seen: dict = {}
+
+        def _spy(*args, **kwargs):
+            seen.update(kwargs)
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match_multi), \
+             patch("nexus.plans.runner.plan_run",
+                   AsyncMock(return_value=plan_run_result)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
+             patch("nexus.mcp.core._nx_answer_record_run", side_effect=_spy):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="tell me about distributed consensus")
+
+        assert "99" in seen.get("final_text", "")
+        assert "distributed consensus" in seen.get("final_text", "")
+        assert "docs" in seen.get("final_text", "")
+
+
 # ── Plan-run use_count / success_count / failure_count telemetry ──────────────
 
 

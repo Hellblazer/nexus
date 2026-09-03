@@ -6431,6 +6431,80 @@ def _nx_answer_is_empty_retrieval(steps: "list") -> bool:
     return had_retrieval and total_evidence == 0
 
 
+def _plan_retrieval_step_basis(plan_json: str | dict | None) -> list[dict[str, Any]]:
+    """Render *plan_json*'s retrieval-shaped steps as ``{step, tool,
+    corpus, query}`` dicts, in step order.
+
+    nexus-ivv4d (RDR-200 Phase 1c): the zero-evidence fallback is the one
+    outcome where the matched plan's own parameters — which corpus each
+    retrieval step scoped to, what it searched for — ARE the finding, and
+    the return carried none of them. Every other degenerate shape leaks
+    at least step vocabulary (a budget-warning ``basis:`` string) or
+    collections (a listing reroute); this renders the same kind of
+    signal for the zero-evidence path specifically.
+
+    Reads the STEP DECLARATIONS from the matched plan template (unresolved
+    ``$binding`` placeholders included) rather than the executed runner
+    output — a zero-evidence run's step outputs carry no corpus/query
+    fields at all (that is the defect), so the template is the only place
+    this information exists. ``query`` is read from either the ``query``
+    (``search``-shaped tools) or ``question`` (``query``-shaped tool) args
+    key. Best-effort: any malformed ``plan_json`` yields ``[]`` rather than
+    raising — this is diagnostic text, never load-bearing.
+    """
+    if isinstance(plan_json, str):
+        try:
+            plan = json.loads(plan_json)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    elif isinstance(plan_json, dict):
+        plan = plan_json
+    else:
+        return []
+    if not isinstance(plan, dict):
+        return []
+    steps = plan.get("steps")
+    if not isinstance(steps, list):
+        return []
+    from nexus.plans.runner import _RETRIEVAL_TOOLS  # noqa: PLC0415 — deferred; matches this module's convention
+
+    basis: list[dict[str, Any]] = []
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        tool = step.get("tool")
+        if not isinstance(tool, str) or tool not in _RETRIEVAL_TOOLS:
+            continue
+        args = step.get("args") if isinstance(step.get("args"), dict) else {}
+        corpus = args.get("corpus", "")
+        query = args.get("query")
+        if query is None:
+            query = args.get("question", "")
+        basis.append({
+            "step": index,
+            "tool": tool,
+            "corpus": str(corpus) if corpus is not None else "",
+            "query": str(query) if query is not None else "",
+        })
+    return basis
+
+
+def _render_retrieval_step_basis_text(plan_json: str | dict | None) -> str:
+    """Human-readable ``step0=search(corpus='rdr', query='...')`` join of
+    :func:`_plan_retrieval_step_basis`, for the zero-evidence fallback
+    message (nexus-ivv4d). Returns a named placeholder rather than an
+    empty string when the plan has no retrieval-shaped steps, so the
+    absence itself is visible rather than reading as an omission bug.
+    """
+    basis = _plan_retrieval_step_basis(plan_json)
+    if not basis:
+        return "(no retrieval-shaped steps in plan)"
+    return "; ".join(
+        f"step{b['step']}={b['tool']}(corpus={b['corpus']!r}, query={b['query']!r})"
+        for b in basis
+    )
+
+
 #: Common English stop-words stripped when synthesizing a grown plan's
 #: ``name`` from the question. Kept narrow on purpose; aggressive
 #: filtering drops the content words R10 needs for match-text signal.
@@ -9137,10 +9211,16 @@ async def nx_answer(
         # telemetry: _nx_answer_record_run below stores the final_text, and the
         # structured event above marks this branch specifically.
         _nx_answer_record_outcome(best.plan_id, success=False)
+        # nexus-ivv4d: name plan_id + each retrieval step's tool/corpus/query
+        # so WHICH plan-side factor produced the miss is readable from the
+        # return text (and, since it feeds final_text below, the telemetry
+        # row) instead of requiring a separate artifact correlation pass.
         no_match = (
             f"No matching evidence found for {question!r}"
             + (f" in scope {scope!r}" if scope else "")
-            + ". The plan's retrieval steps returned zero results — "
+            + f". The plan's retrieval steps returned zero results "
+            f"(plan_id={best.plan_id}, basis: "
+            f"{_render_retrieval_step_basis_text(best.plan_json)}) — "
             "rephrase the question, correct/widen the scope, or use "
             "search/query directly."
         )
