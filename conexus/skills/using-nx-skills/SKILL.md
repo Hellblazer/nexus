@@ -18,7 +18,7 @@ Before any multi-agent pipeline:
 3. If "No matching plans.", route normally
 
 After a successful pipeline:
-- Retrieval pipelines grow the plan library on their own through `nx_answer`; no manual save is needed. Only `plan_save` a genuinely reusable retrieval plan, and it requires a `verb` (research / analyze / query / review / …): `mcp__plugin_conexus_nexus__plan_save(query="<question>", plan_json={...}, verb="<verb>", tags="<ops>")`. Implementation, pipeline, and phased-execution plans do not go here; they live in beads and T2 memory. A verb-less save is refused because it pollutes the verb-dimensional plan-match library.
+- Retrieval pipelines grow the plan library on their own through `nx_answer`; no manual save is needed. Only `plan_save` a genuinely reusable retrieval plan, and it requires a `verb` (research / analyze / query / review / …): `mcp__plugin_conexus_nexus__plan_save(query="<question>", plan_json={...}, verb="<verb>", tags="<ops>")`. Implementation, pipeline, and phased-execution plans do NOT go here; they live in beads and T2 memory. A verb-less save is refused because it pollutes the verb-dimensional plan-match library.
 
 ## Routing
 
@@ -50,7 +50,7 @@ Quality gates:
 - ranking or comparing across many documents ("which of these papers does Y best")
 - RDR research phases, where the deliverable is a synthesis and minutes are acceptable
 
-Do not use it for file:line answers (Serena or Grep), anything already in a local RDR, bead, or T2 memory, or single-fact lookups (`search` / `query`, seconds; mean about 8s).
+Do NOT use it for file:line answers (Serena or Grep), anything already in a local RDR, bead, or T2 memory, or single-fact lookups (`search` / `query`, seconds; mean about 8s).
 
 Measured cost (n=142 executed runs, 2026-04 to 2026-08; T2 `nexus/nx-answer-capability-analysis-2026-08-19`): p50 80s, p95 217s, max 371s; 0.7% finish under 5s. 35% miss the plan gate and pay about 53s more (p50) for an inline planner. A call can hit its 300s timeout and return nothing. Budget minutes, not seconds. The trade is worth it when the alternative is twenty minutes of reading, and not when it is one grep.
 
