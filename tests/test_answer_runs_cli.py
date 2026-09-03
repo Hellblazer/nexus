@@ -1711,6 +1711,31 @@ class TestDegenerateBodyShapes:
         }
         assert _classify_degenerate_row(row) == "empty_hydration"
 
+    def test_runner_zero_evidence_constant_classifies_deterministically(self) -> None:
+        """nexus-mm5tx's runner short-circuit emits a fixed prefix instead of
+        dispatching a model, so this classifier can key on a constant rather
+        than on operator prose. The constant is imported, not retyped: if the
+        runner renames it, this test moves with it."""
+        from nexus.commands.answer_runs import _classify_degenerate_row
+        from nexus.plans.runner import _no_evidence_result_text
+
+        row = {
+            "final_text": _no_evidence_result_text(tool="operator_compare", filtered_count=10),
+            "question": "q", "step_count": 4,
+        }
+        assert _classify_degenerate_row(row) == "empty_hydration"
+
+    def test_zero_evidence_constant_is_not_matched_mid_text(self) -> None:
+        """A real answer that merely quotes the phrase is not a short-circuit;
+        the constant is a first-line prefix by contract."""
+        from nexus.commands.answer_runs import _classify_degenerate_row
+
+        row = {
+            "final_text": "The runner logs 'No evidence to reduce:' when inputs are empty; here they were not.",
+            "question": "q", "step_count": 4,
+        }
+        assert _classify_degenerate_row(row) == "other"
+
     def test_empty_hydration_row_lands_in_degenerate(self) -> None:
         from nexus.commands.answer_runs import _split_four_way
 

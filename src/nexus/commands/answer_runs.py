@@ -292,6 +292,13 @@ def _classify_degenerate_row(row: dict) -> str:
         and _QUERY_LISTING_REROUTE_HEADER_RE.match(final_text) is not None
     ):
         return "query_listing_reroute"
+    # nexus-mm5tx: the runner's zero-evidence short-circuit never reaches a
+    # model; it returns this fixed prefix, so the match is exact, not a
+    # phrase heuristic. Prefix-anchored: a real answer quoting the phrase
+    # mid-text is not a short-circuit.
+    from nexus.plans.runner import _NO_EVIDENCE_RESULT_PREFIX  # noqa: PLC0415 - deferred: heavy import, keep CLI startup fast
+    if final_text.startswith(_NO_EVIDENCE_RESULT_PREFIX):
+        return "empty_hydration"
     if any(phrase in final_text.strip().lower() for phrase in _EMPTY_HYDRATION_PHRASES):
         return "empty_hydration"
     return "other"
