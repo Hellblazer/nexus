@@ -190,6 +190,9 @@ public final class TaxonomyCentroidRepository {
             // PgSession.DEFAULT_EF_SEARCH_FLOOR) — centroid tables share the
             // same one-index-all-tenants + RLS-after-scan shape as chunks.
             PgSession.setHnswEfSearch(ctx, nResults);
+            // nexus-g17tf: bound the statement so an orphaned or pathological
+            // scan cancels (57014) instead of pinning xmin for hours.
+            PgSession.setSearchStatementTimeout(ctx);
             return ctx.fetch(
                 "SELECT topic_id, (" + embeddingCol + " <=> ?::vector) AS distance FROM "
                 + centroidTable(dim)

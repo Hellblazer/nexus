@@ -82,4 +82,34 @@ class PgSessionEfSearchTest {
         assertThat(PgSession.efSearchFor(0, 1)).isEqualTo(1);
         assertThat(PgSession.efSearchFor(-3, 1)).isEqualTo(1);
     }
+
+    // ── NX_SEARCH_STATEMENT_TIMEOUT_MS parse (nexus-g17tf) ──────────────────
+
+    @Test
+    void unsetTimeoutYieldsTheEdgeSizedDefault() {
+        assertThat(PgSession.searchStatementTimeoutMs(null))
+            .isEqualTo(PgSession.DEFAULT_SEARCH_STATEMENT_TIMEOUT_MS)
+            .isEqualTo(30_000);
+        assertThat(PgSession.searchStatementTimeoutMs(" ")).isEqualTo(30_000);
+    }
+
+    @Test
+    void timeoutOverrideParses() {
+        assertThat(PgSession.searchStatementTimeoutMs(" 5000 ")).isEqualTo(5000);
+        assertThat(PgSession.searchStatementTimeoutMs("1")).isEqualTo(1);
+    }
+
+    @Test
+    void zeroTimeoutIsRefusedBecauseItDisablesTheBound() {
+        assertThatThrownBy(() -> PgSession.searchStatementTimeoutMs("0"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("DISABLE");
+        assertThatThrownBy(() -> PgSession.searchStatementTimeoutMs("-1"))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> PgSession.searchStatementTimeoutMs("600001"))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> PgSession.searchStatementTimeoutMs("30s"))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("NX_SEARCH_STATEMENT_TIMEOUT_MS");
+    }
 }

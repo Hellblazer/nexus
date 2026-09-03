@@ -142,7 +142,7 @@ public final class VersionHandler implements HttpHandler {
      * map to {@code null}: an unstamped engine is, by definition, not a tagged
      * release, so a version-pin consumer (RDR-002 ez5.4) must fail closed.
      */
-    static String resolveReleaseVersion() {
+    public static String resolveReleaseVersion() {
         try (InputStream in = VersionHandler.class.getResourceAsStream(RELEASE_PROPERTIES)) {
             if (in != null) {
                 Properties props = new Properties();

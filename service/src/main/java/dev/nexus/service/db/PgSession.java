@@ -31,7 +31,8 @@ public final class PgSession {
     private static final Set<String> ALLOWED_GUCS = Set.of(
         "hnsw.iterative_scan",
         "hnsw.ef_search",
-        "pg_trgm.word_similarity_threshold"
+        "pg_trgm.word_similarity_threshold",
+        "statement_timeout"
     );
 
     /**
@@ -65,7 +66,81 @@ public final class PgSession {
     private static final int EF_SEARCH_FLOOR =
         efSearchFloor(System.getenv("NX_HNSW_EF_SEARCH"));
 
+    /**
+     * Server-side bound on a vector-ranked statement (nexus-g17tf). Sized to
+     * the edge's 30s time-to-first-byte budget: a bound LONGER than the edge's
+     * guarantees the client has already given up while the backend keeps
+     * burning CPU and holding its snapshot -- the measured shape was a search
+     * backend running 8.9h after its container was removed, pinning xmin so
+     * autovacuum reclaimed nothing database-wide. A CPU-bound backend never
+     * notices a dead client between socket writes; only the timer reaches it.
+     */
+    static final int DEFAULT_SEARCH_STATEMENT_TIMEOUT_MS = 30_000;
+
+    /** Upper bound on the override: past this the edge has long since 504'd. */
+    static final int SEARCH_STATEMENT_TIMEOUT_MAX_MS = 600_000;
+
+    /**
+     * Env-resolved bound ({@code NX_SEARCH_STATEMENT_TIMEOUT_MS}), same
+     * precedent as {@link #EF_SEARCH_FLOOR}: read once at class load,
+     * validated at boot by {@link #startupSearchStatementTimeoutMs()}.
+     */
+    private static final int SEARCH_STATEMENT_TIMEOUT_MS =
+        searchStatementTimeoutMs(System.getenv("NX_SEARCH_STATEMENT_TIMEOUT_MS"));
+
     private PgSession() {
+    }
+
+    /**
+     * Parse the {@code NX_SEARCH_STATEMENT_TIMEOUT_MS} override. Null/blank
+     * means the default; anything else must be an integer in
+     * [1, {@link #SEARCH_STATEMENT_TIMEOUT_MAX_MS}]. Zero is refused
+     * explicitly: to Postgres {@code statement_timeout=0} means DISABLED,
+     * which is exactly the unbounded state this setting exists to end.
+     */
+    static int searchStatementTimeoutMs(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return DEFAULT_SEARCH_STATEMENT_TIMEOUT_MS;
+        }
+        int ms;
+        try {
+            ms = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                "NX_SEARCH_STATEMENT_TIMEOUT_MS must be an integer, got: " + raw, e);
+        }
+        if (ms < 1 || ms > SEARCH_STATEMENT_TIMEOUT_MAX_MS) {
+            throw new IllegalArgumentException(
+                "NX_SEARCH_STATEMENT_TIMEOUT_MS must be in 1.." + SEARCH_STATEMENT_TIMEOUT_MAX_MS
+                + " (0 would DISABLE the bound), got: " + ms);
+        }
+        return ms;
+    }
+
+    /**
+     * Boot-time touch for {@code NX_SEARCH_STATEMENT_TIMEOUT_MS}, for the same
+     * class-init reason as {@link #startupEfSearchFloor()}.
+     *
+     * @return the resolved bound in milliseconds, for the boot log line
+     */
+    public static int startupSearchStatementTimeoutMs() {
+        return SEARCH_STATEMENT_TIMEOUT_MS;
+    }
+
+    /**
+     * Bound every statement in this transaction to the serving timeout
+     * (nexus-g17tf). Paired with {@link #setHnswEfSearch} at every
+     * vector-ranked call site; the pairing is pinned by
+     * {@code HnswServingGucParityTest}. Postgres raises SQLSTATE 57014
+     * ({@code query_canceled}) when the bound is hit.
+     */
+    public static void setSearchStatementTimeout(DSLContext ctx) {
+        setSearchStatementTimeout(ctx, SEARCH_STATEMENT_TIMEOUT_MS);
+    }
+
+    /** Explicit-bound form, for tests that need a bound shorter than the env-resolved one. */
+    static void setSearchStatementTimeout(DSLContext ctx, int timeoutMs) {
+        setLocal(ctx, "statement_timeout", Integer.toString(timeoutMs));
     }
 
     /**

@@ -1101,6 +1101,9 @@ public final class PgVectorRepository {
             // cannot recover neighbors the ef-bounded traversal already pruned
             // (cross-tenant crowd-out; see PgSession.DEFAULT_EF_SEARCH_FLOOR).
             PgSession.setHnswEfSearch(ctx, nResults);
+            // nexus-g17tf: bound the statement so an orphaned or pathological
+            // scan cancels (57014) instead of pinning xmin for hours.
+            PgSession.setSearchStatementTimeout(ctx);
             return rawVectorFetch(ctx, sql.toString(), binds.toArray());
         });
 
@@ -1400,6 +1403,12 @@ public final class PgVectorRepository {
             // default - typo-probe candidates sit at ~0.9 and pass, no-signal rows at ~0.1
             // do not. Pinned per-transaction so the gate is independent of cluster config.
             PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
+            // nexus-g17tf: bound EVERY statement in this transaction — the gate
+            // probe (a <% trigram heap-recheck), the selective chash rank, and the
+            // dense HNSW rank all inherit it. Set here, before the first fetch,
+            // rather than per branch: a branch without HNSW is still a scan that
+            // can pin xmin (substantive-critic finding, 2026-09-02).
+            PgSession.setSearchStatementTimeout(ctx);
 
             List<String> gateChashes = rawVectorFetch(
                 ctx, "SELECT encode(chash, 'hex') AS chash FROM " + table + gateSql + " LIMIT ?",
@@ -2240,6 +2249,9 @@ public final class PgVectorRepository {
             // nexus-4ktfm: crowd-out headroom — the combined-query SQL functions run
             // inside this same transaction, so the GUC governs their HNSW scans.
             PgSession.setHnswEfSearch(ctx, nResults);
+            // nexus-g17tf: bound the statement so an orphaned or pathological
+            // scan cancels (57014) instead of pinning xmin for hours.
+            PgSession.setSearchStatementTimeout(ctx);
             return ctx.selectFrom(fn).fetch();
         });
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
@@ -2265,6 +2277,9 @@ public final class PgVectorRepository {
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             // nexus-4ktfm: same crowd-out headroom as runCombinedQuery.
             PgSession.setHnswEfSearch(ctx, nResults);
+            // nexus-g17tf: bound the statement so an orphaned or pathological
+            // scan cancels (57014) instead of pinning xmin for hours.
+            PgSession.setSearchStatementTimeout(ctx);
             return ctx.selectFrom(fn).fetch();
         });
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
