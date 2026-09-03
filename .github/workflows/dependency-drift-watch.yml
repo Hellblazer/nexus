@@ -1,0 +1,37 @@
+name: Dependency drift watch (weekly)
+
+# nexus-jd8fi drift (2026-09-03). scripts/check_dependency_drift.py existed
+# since the 2026-08-14 gap audit and was scheduled nowhere, so the question
+# it asks ("what would a fresh PyPI resolution change?") was never asked:
+# mineru drifted 3.1.11 -> 3.4.5 and docling 2.76.0 -> 2.125.0 under every
+# fresh install while uv.lock and every gate stayed put. This is the
+# schedule. It runs `uv lock --upgrade --dry-run` (never writes the lock),
+# exits 1 on a leading-component bump or any change in the shape-sensitive
+# set, and the failure lands in the scheduled-failure watch like every
+# other weekly.
+#
+# CI-cost discipline (CLAUDE.md DIRECTIVES): one ubuntu job, no build, no
+# tests, seconds of runtime. Weekly + manual dispatch only.
+
+on:
+  schedule:
+    - cron: "23 11 * * 1"   # 11:23 UTC Mondays, staggered off the 10:17 / 10:47 Monday slots
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-drift-watch
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    name: fresh-resolution drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Ask what a fresh PyPI resolution would change
+        run: uv run --no-sync --python 3.12 python scripts/check_dependency_drift.py

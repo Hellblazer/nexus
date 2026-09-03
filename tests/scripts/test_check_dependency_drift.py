@@ -14,6 +14,7 @@ never a specific rc, since live upstream drift is expected to fluctuate.
 """
 from __future__ import annotations
 
+import importlib
 import json
 import subprocess
 
@@ -83,6 +84,39 @@ class TestMajorBumpDetection:
     def test_multiple_minor_and_patch_components_do_not_confuse_leading_component(self):
         report = drift.parse_dry_run_output("Update rpds-py v0.30.0 -> v0.31.9\n")
         assert report.major_bumps == ()
+
+
+class TestShapeSensitiveDetection:
+    """nexus-jd8fi drift: a minor bump of a fixture-locked package is a finding."""
+
+    def test_mineru_minor_bump_is_flagged(self):
+        report = drift.parse_dry_run_output("Update mineru v3.1.11 -> v3.4.5\n")
+        assert report.major_bumps == ()
+        assert [f.name for f in report.shape_sensitive_updates] == ["mineru"]
+        assert not report.ok
+
+    def test_docling_patch_bump_is_flagged(self):
+        report = drift.parse_dry_run_output("Update docling v2.76.0 -> v2.76.1\n")
+        assert not report.ok
+
+    def test_unlisted_minor_bump_stays_clean(self):
+        report = drift.parse_dry_run_output("Update accelerate v1.13.0 -> v1.14.0\n")
+        assert report.shape_sensitive_updates == ()
+        assert report.ok
+
+    def test_render_names_the_shape_sensitive_package_and_the_remedy(self):
+        report = drift.parse_dry_run_output("Update mineru v3.1.11 -> v3.4.5\n")
+        body = drift.render_report(report)
+        assert "mineru: 3.1.11 -> 3.4.5" in body
+        assert "shape-sensitive" in body
+        assert "_SHAPE_SENSITIVE" in body
+
+    def test_set_mirrors_the_lint_table(self):
+        """The lint holds the cap; the watch reports the pressure. A package
+        the lint pins must be one the watch reports, or a bump lands with
+        no warning between weekly runs."""
+        lint = importlib.import_module("tests.test_dependency_bounds_lint")
+        assert set(lint._SHAPE_SENSITIVE) <= drift.SHAPE_SENSITIVE
 
 
 class TestReportRendering:

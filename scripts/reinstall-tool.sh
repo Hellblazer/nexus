@@ -203,7 +203,27 @@ fi
 _build_args=(--source "$SOURCE")
 [ -n "$EXTRAS" ] && _build_args+=(--extras "$EXTRAS")
 
+# nexus-jd8fi drift: install what the lock says, not what PyPI says today.
+# Without this the generation resolved mineru 3.4.5 and docling 2.125.0 while
+# uv.lock and every gate on this box ran 3.1.11 and 2.76.0. `uv export` of
+# the committed lock (frozen: never re-resolves) becomes a constraints file;
+# the builder hands it to `uv pip install -c`. Only a checkout carries a lock.
+CONSTRAINTS_FILE=""
+if [ -f "$SOURCE/uv.lock" ]; then
+    CONSTRAINTS_FILE="$(mktemp "${TMPDIR:-/tmp}/nx-constraints.XXXXXX")"
+    if uv export --frozen --no-hashes --no-emit-project --no-dev --directory "$SOURCE" \
+            > "$CONSTRAINTS_FILE" 2>/dev/null; then
+        _build_args+=(--constraints "$CONSTRAINTS_FILE")
+        echo "Constraining to uv.lock ($(grep -c '==' "$CONSTRAINTS_FILE") pins)"
+    else
+        echo "reinstall-tool: uv export of $SOURCE/uv.lock failed; refusing an unconstrained install" >&2
+        rm -f "$CONSTRAINTS_FILE"
+        exit 1
+    fi
+fi
+
 GEN="$("$_INSTALL/install_generation.sh" "${_build_args[@]}")"
+[ -n "$CONSTRAINTS_FILE" ] && rm -f "$CONSTRAINTS_FILE"
 nx_flip_current "$GEN" "$TOOLS_DIR"
 nx_write_shims "$GEN" "$BIN_DIR"
 

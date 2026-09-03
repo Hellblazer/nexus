@@ -169,3 +169,48 @@ def test_live_pyproject_dependencies_all_parse() -> None:
     deps = _load_runtime_dependencies()
     for dep in deps:
         Requirement(dep)  # raises InvalidRequirement on malformed strings
+
+
+# ── Shape-sensitive dependencies confine to the locked minor ──────────────────
+#
+# nexus-jd8fi drift (2026-09-03). An upper bound at the next MAJOR is the right
+# shape for most dependencies, but for a package whose OUTPUT the fixtures lock
+# (MinerU markdown, the bloom-filter text length, the virgo table) a minor bump
+# is a behaviour change nothing gated: ``mineru>=3.1.11,<4`` admitted 3.4.5,
+# every fresh install got it from 2026-08-14 on, and uv.lock plus every test
+# stayed on 3.1.11. For the packages below the pyproject specifier must admit
+# the locked version and refuse the next minor, so a fresh install can only
+# land where the gates ran. Bumping is deliberate: raise the lock and the cap
+# together, on a green ``-m slow`` MinerU run and shakedown.
+_SHAPE_SENSITIVE: dict[str, str] = {
+    "mineru": "MinerU markdown shape locks tests/test_pdf_subsystem.py's slow fixtures and the visual-marker regexes",
+}
+
+_LOCK = _REPO_ROOT / "uv.lock"
+
+
+def _locked_version(name: str) -> str:
+    with _LOCK.open("rb") as f:
+        lock = tomllib.load(f)
+    for pkg in lock["package"]:
+        if pkg["name"] == name:
+            return pkg["version"]
+    raise AssertionError(f"{name} is not in uv.lock")
+
+
+@pytest.mark.parametrize("name", sorted(_SHAPE_SENSITIVE))
+def test_shape_sensitive_dependency_confines_to_the_locked_minor(name: str) -> None:
+    from packaging.version import Version
+
+    specs = {Requirement(d).name: Requirement(d).specifier for d in _load_runtime_dependencies()}
+    assert name in specs, f"{name} is in _SHAPE_SENSITIVE but not a runtime dependency"
+    locked = Version(_locked_version(name))
+    spec = specs[name]
+    assert locked in spec, f"{name}: uv.lock has {locked}, outside pyproject specifier {spec}"
+    next_minor = Version(f"{locked.major}.{locked.minor + 1}")
+    assert next_minor not in spec, (
+        f"{name}: pyproject specifier {spec} admits {next_minor} while uv.lock and every "
+        f"gate run {locked}. A fresh install would resolve past what was tested "
+        f"({_SHAPE_SENSITIVE[name]}). Cap at <{next_minor}, or bump lock and cap together "
+        "on a green slow-gate run."
+    )

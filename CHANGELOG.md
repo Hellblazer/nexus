@@ -8,6 +8,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Fresh installs ran a MinerU no gate had seen. `mineru>=3.1.11,<4` let a
+  fresh resolution land on 3.4.5 (published 2026-08-14) while `uv.lock` and
+  every test stayed on 3.1.11; the same shape holds for docling (2.76.0
+  locked, 2.125.0 installed). The pin is now `<3.2`, the minor the fixtures
+  are locked against; a lint ties that cap to the lock for shape-sensitive
+  packages; the dependency drift watch reports any version change in that
+  set, not only major jumps, and now actually runs weekly; and the developer
+  reinstall constrains to `uv.lock` so the box matches the gates. Bumping
+  MinerU or docling is a deliberate lock-and-cap change on a green slow-gate
+  run.
 - PDF indexing dropped every table (nexus-jd8fi). `pdf.mineru_table_enable`
   defaulted to `false`, and the MinerU server was spawned with
   `MINERU_TABLE_ENABLE` exported, which MinerU lets override the per-request

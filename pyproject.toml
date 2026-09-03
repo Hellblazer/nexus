@@ -135,7 +135,11 @@ dependencies = [
     # nexus-l2ku5 sibling (2026-08-14): was fully unconstrained, the other
     # open door in the unbounded-dependency class. Floor taken from
     # uv.lock's resolved 3.1.11; capped at the next major.
-    "mineru[pipeline]>=3.1.11,<4",
+    # nexus-jd8fi drift: pinned to the minor every fixture and slow gate is
+    # locked against. A fresh install resolved 3.4.5 (never gated) while
+    # uv.lock and every test ran 3.1.11. Bump deliberately, with the -m slow
+    # MinerU tests and the shakedown, never by widening this cap.
+    "mineru[pipeline]>=3.1.11,<3.2",
 ]
 
 [project.optional-dependencies]

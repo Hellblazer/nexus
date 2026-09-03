@@ -91,6 +91,18 @@ class DriftFinding:
         return _leading_component(self.new_version)
 
 
+#: Packages whose OUTPUT the test fixtures lock (nexus-jd8fi drift, 2026-09-03):
+#: ANY version change here is reported, not only a leading-component jump.
+#: ``mineru>=3.1.11,<4`` let fresh installs resolve 3.4.5 from 2026-08-14 while
+#: uv.lock and every gate stayed on 3.1.11; a major-only watch saw nothing.
+#: Mirrors ``_SHAPE_SENSITIVE`` in tests/test_dependency_bounds_lint.py, which
+#: holds the pyproject cap at the locked minor; this side reports the pressure
+#: a fresh resolution would put on that cap, and on the transitive stack under
+#: it (docling is listed although its cap is still ``<3``: its lock-to-PyPI gap
+#: is 2.76 -> 2.125, the same shape, decided separately).
+SHAPE_SENSITIVE: frozenset[str] = frozenset({"mineru", "docling"})
+
+
 @dataclass(frozen=True)
 class DriftReport:
     updates: tuple[DriftFinding, ...] = field(default_factory=tuple)
@@ -102,8 +114,12 @@ class DriftReport:
         return tuple(f for f in self.updates if f.old_major != f.new_major)
 
     @property
+    def shape_sensitive_updates(self) -> tuple[DriftFinding, ...]:
+        return tuple(f for f in self.updates if f.name in SHAPE_SENSITIVE)
+
+    @property
     def ok(self) -> bool:
-        return not self.major_bumps
+        return not self.major_bumps and not self.shape_sensitive_updates
 
 
 def _leading_component(version: str) -> str:
@@ -161,21 +177,42 @@ def parse_dry_run_output(output: str) -> DriftReport:
 
 def render_report(report: DriftReport) -> str:
     bumps = report.major_bumps
-    if not bumps:
+    shape = report.shape_sensitive_updates
+    if not bumps and not shape:
         return (
             "Dependency drift watch: clean. A fresh PyPI resolution of the "
             f"current dependency set would update {len(report.updates)} "
             f"package(s), add {len(report.added)}, remove {len(report.removed)} "
-            "-- none crossing a leading version-component boundary."
+            "-- none crossing a leading version-component boundary, none in "
+            f"the shape-sensitive set ({', '.join(sorted(SHAPE_SENSITIVE))})."
         )
-    lines = [
-        f"Dependency drift watch: {len(bumps)} package(s) would resolve to a "
-        "new leading version component on a fresh PyPI resolution:",
-        "",
-    ]
-    for f in sorted(bumps, key=lambda x: x.name):
-        lines.append(f"  {f.name}: {f.old_version} -> {f.new_version}")
-    lines.append("")
+    lines: list[str] = []
+    if bumps:
+        lines.append(
+            f"Dependency drift watch: {len(bumps)} package(s) would resolve to a "
+            "new leading version component on a fresh PyPI resolution:"
+        )
+        lines.append("")
+        for f in sorted(bumps, key=lambda x: x.name):
+            lines.append(f"  {f.name}: {f.old_version} -> {f.new_version}")
+        lines.append("")
+    if shape:
+        lines.append(
+            f"Dependency drift watch: {len(shape)} shape-sensitive package(s) would "
+            "change version on a fresh PyPI resolution (any change counts here: the "
+            "fixtures lock their output):"
+        )
+        lines.append("")
+        for f in sorted(shape, key=lambda x: x.name):
+            lines.append(f"  {f.name}: {f.old_version} -> {f.new_version}")
+        lines.append("")
+        lines.append(
+            "A fresh install lands on the new version unless the pyproject cap "
+            "holds at the locked minor (tests/test_dependency_bounds_lint.py "
+            "_SHAPE_SENSITIVE). Bump lock and cap together on a green `-m slow` "
+            "MinerU run and shakedown, or leave the cap and accept the gap."
+        )
+        lines.append("")
     lines.append(
         "This is pressure, not a break by itself -- check whether each "
         "package is a direct pyproject.toml dependency (its cap already "
@@ -208,6 +245,11 @@ def main(argv: list[str] | None = None) -> int:
             "ok": report.ok if report else None,
             "major_bumps": (
                 [{"name": f.name, "old": f.old_version, "new": f.new_version} for f in report.major_bumps]
+                if report
+                else []
+            ),
+            "shape_sensitive_updates": (
+                [{"name": f.name, "old": f.old_version, "new": f.new_version} for f in report.shape_sensitive_updates]
                 if report
                 else []
             ),
