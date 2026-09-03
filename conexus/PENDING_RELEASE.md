@@ -31,5 +31,4 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.28.0)
 
-Nothing pending. v7.28.0 advanced the pin with no plugin-surface change
-since v7.27.0.
+- `conexus/skills/using-nx-skills/SKILL.md` (nexus-ht9m5): reworded in plain register, no rule or destination added or removed; em dashes and bold lead-ins gone so the always-injected guidance stops modelling the prose the Communication rules ban.
