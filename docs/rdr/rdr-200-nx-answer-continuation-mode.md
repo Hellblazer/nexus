@@ -2,7 +2,8 @@
 title: "nx_answer Continuation Mode and the Composed-Retrieval Bridge Route"
 id: RDR-200
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-09-03
 priority: medium
 author: Hal Hildebrand
 reviewed-by: substantive-critic (T2 [23900], 2026-09-01)
