@@ -296,6 +296,76 @@ class TestTidyPrefetchNamesItsFailures:
         assert genuine is False
 
 
+class TestTidyMarksDisplayTruncation:
+    """nexus-c0sdc: _tidy_prefetch hydrates with
+    ``max_chars_per_doc=_TIDY_MAX_CHARS_PER_ENTRY``, and ``store_get_many``
+    appends a BARE "…" at the cut. Nothing in the rendered block or the prompt
+    said so, so the tool-free child read a mid-sentence ellipsis as evidence the
+    STORED entry was broken and told operators to re-ingest healthy 6-9 KB
+    documents. Observed 2026-09-02 on knowledge__knowledge: three complete
+    entries flagged for re-ingestion.
+
+    The cut itself is fine and stays — the prompt has a budget. What must never
+    happen again is the cut being INVISIBLE at the point a reader judges the
+    entry."""
+
+    def _prefetch_one(self, monkeypatch, body: str):
+        from nexus.mcp import core
+
+        monkeypatch.setattr(core, "search", lambda **_k: {
+            "ids": ["doc1"], "chunk_collections": ["knowledge"],
+        })
+
+        def fake_hydrate(_ids, _cols, *, max_chars_per_doc, structured):
+            # Reproduce store_get_many's real truncation shape (core.py:4407),
+            # rather than asserting against a hand-written marker.
+            out = body
+            if max_chars_per_doc > 0 and len(out) > max_chars_per_doc:
+                out = out[:max_chars_per_doc] + "\u2026"
+            return {"contents": [out]}
+        monkeypatch.setattr(core, "store_get_many", fake_hydrate)
+        return core._tidy_prefetch("t", "knowledge")
+
+    def test_a_healthy_long_entry_is_marked_as_display_truncated(
+        self, monkeypatch,
+    ) -> None:
+        from nexus.mcp import core
+
+        # 6 KB of intact prose — the shape that was being mis-reported.
+        body = ("Meta-Harness maps paper sections onto code modules. " * 120)
+        assert len(body) > core._TIDY_MAX_CHARS_PER_ENTRY
+
+        block, n, reason, _genuine = self._prefetch_one(monkeypatch, body)
+        assert n == 1
+        assert reason == ""
+        assert "TRUNCATED FOR DISPLAY" in block, (
+            "a cut body must announce itself where the model reads it — "
+            "an unmarked ellipsis is what produced the false defect report"
+        )
+        assert "NOT a defect" in block
+
+    def test_a_short_entry_is_not_marked(self, monkeypatch) -> None:
+        block, n, _reason, _genuine = self._prefetch_one(
+            monkeypatch, "short intact body",
+        )
+        assert n == 1
+        assert "TRUNCATED" not in block, (
+            "marking an untruncated entry would teach the model to discount a "
+            "real truncation it should report"
+        )
+
+    def test_the_prompt_tells_the_model_truncation_is_not_a_defect(self) -> None:
+        """The marker only helps if the prompt says what to do with it."""
+        import inspect
+
+        from nexus.mcp import core
+
+        src = inspect.getsource(core.nx_tidy)
+        assert "TRUNCATED FOR DISPLAY" in src
+        assert "DISPLAY LIMIT" in src
+        assert "re-ingesting" in src
+
+
 class TestNoResultsMessageFailedCollections:
     """nexus-pebfx.8: a zero-hit where collections were excluded by service
     errors must say so — otherwise a partial outage reads as a genuine miss."""

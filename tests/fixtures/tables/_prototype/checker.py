@@ -1,8 +1,8 @@
 """enumcheck — a throwaway coverage/overlap prover for ENUM-ONLY transition
 and decision tables. RDR-201 research question 3 prototype.
 
-Scope, deliberately narrow (the "enum-only subset" per intrastate's
-docs/model-authoring.md):
+Scope, deliberately narrow (the "enum-only subset" named in RDR-201
+research question 3):
 
   - Every discriminating tag is a single-valued enum with a declared,
     non-empty ``domain``. No bool/int/set/scalar kinds, no int comparisons,
@@ -12,19 +12,19 @@ docs/model-authoring.md):
     ``guard_unless`` (the whole block negated once, never per-atom).
   - A row's ``outcome`` field is its MATCH dimension: rows sharing an
     outcome form a coverage group, and the outcome itself contributes NO
-    product dimension — exactly intrastate's "match atoms scope, they do
+    product dimension — exactly the rule RDR-201 adopted: "match atoms scope, they do
     not discriminate" rule. Only guard_all/guard_unless keys become
     dimensions.
   - One rescuable class only, spelled ``escape = true`` on a row. A bare
     escape row (no guard atoms) that closes a group's coverage earns the
-    ``graph-coverage-closed-by-escape`` advisory, exactly as intrastate's
+    ``graph-coverage-closed-by-escape`` advisory, exactly as the prior art's
     ``bareEscapeFor`` does — closure by a non-bare escape row, or by the
     ordinary rows alone, is proved cleanly with no advisory.
   - ``[model] class`` is ``"state-machine"`` or ``"decision-table"``. A
     zero-guard-dimension group is legitimate (silently covered by the
     single empty assignment) for a state machine, and is a blocking
     ``graph-unprovable-coverage`` (reason ``no-participating-dimension``)
-    for a decision table — this is intrastate's C5/BR6 distinction.
+    for a decision table — the C5/BR6 distinction RDR-201 records.
 
 TOML input shape::
 
@@ -49,7 +49,7 @@ TOML input shape::
     [rows.guard_unless]
     state = "closed"
 
-What this subset CANNOT express, and what intrastate's full grammar can:
+What this subset CANNOT express, and what a full grammar can:
 int ranges (``min``/``max`` + ``lt``/``lte``/``gt``/``gte``), ``set`` tags
 and ``contains``, ``exists`` over optional keys (and the row-can-refuse
 withholding that comes with optionality), accessors (``[read.*]`` /
@@ -78,7 +78,7 @@ GRAPH_UNPROVABLE_COVERAGE = "graph-unprovable-coverage"
 BLOCKING_CODES = {GRAPH_COVERAGE_GAP, GRAPH_OVERLAP, GRAPH_UNPROVABLE_COVERAGE}
 
 # A cross-product larger than this is refused rather than enumerated, mirroring
-# intrastate's published ProductBound refusal (CodeProductTooLarge). No
+# the prior art's published ProductBound refusal (CodeProductTooLarge). No
 # fixture in this prototype gets remotely close; the bound exists so the
 # checker fails loud instead of hanging on a pathological input.
 PRODUCT_BOUND = 50_000
@@ -144,7 +144,7 @@ def load_model(path: Path) -> Model:
         escape = bool(raw.get("escape", False))
         for i, outcome in enumerate(outcomes):
             # An `in`-on-outcome expansion mints one row per member, exactly
-            # as intrastate's match-block `in` does. Suffix disambiguates ids.
+            # as a match-block `in` does. Suffix disambiguates ids.
             rid = row_id if len(outcomes) == 1 else f"{row_id}[{i}]"
             rows.append(
                 Row(
@@ -328,7 +328,7 @@ def _check_group(model: Model, group: Group) -> list[Finding]:
             )
         # Coverage cannot be proved with an unprovable dimension in play, but
         # overlap is still decidable on the dims that ARE provable — mirrors
-        # intrastate's "withholding one claim must not suppress the other".
+        # the rule "withholding one claim must not suppress the other".
         decidable = [d for d in dims if d not in unprovable]
         if decidable:
             findings.extend(_check_overlap(group, decidable, model.tags))

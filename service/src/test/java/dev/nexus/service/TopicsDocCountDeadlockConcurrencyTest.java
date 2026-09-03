@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.DeadlockRetry;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
 import liquibase.Contexts;
@@ -269,6 +270,76 @@ class TopicsDocCountDeadlockConcurrencyTest {
         }
     }
 
+    // ── ORDERED: the persisted INSERT's own deadlock source is closed at the root ──
+
+    /**
+     * The regression gate the GREEN phase could not be (nexus-6n51g).
+     *
+     * <p>GREEN asserts {@code escaped == 0} through the real call path, which proves
+     * the production claim but — as this class's javadoc and
+     * {@link DeadlockRetry#retryAttemptCount()}'s own javadoc both record — CANNOT
+     * discriminate "the deadlock source is closed" from "the belt absorbed it", since
+     * the belt is deliberately built to make the latter look like the former to the
+     * caller. Three strengthenings were tried for nexus-0uuit and empirically
+     * rejected, all for the same underlying reason: source (2), the persisted CTE
+     * INSERT's implicit FK lock on {@code nexus.topics}, was still open and fired on
+     * very nearly every round regardless of the trigger's correctness.
+     *
+     * <p>taxonomy-015 closes source (2), but NOT the way taxonomy-013 predicted. That
+     * changeset expected reordering the INSERT to be the root fix; measured here over
+     * 20 rounds per variant, it is neither necessary nor sufficient:
+     *
+     * <pre>
+     *   INSERT ORDER BY only, trigger FOR UPDATE  -> 10 retries  FAILS
+     *   INSERT ORDER BY + FOR NO KEY UPDATE       ->  0 retries  passes
+     *   FOR NO KEY UPDATE alone, no ORDER BY      ->  0 retries  passes (x3)
+     * </pre>
+     *
+     * <p>The real cause is lock STRENGTH, not lock ORDER. The INSERT's FK takes an
+     * implicit {@code FOR KEY SHARE} on each referenced topics row, and
+     * {@code FOR KEY SHARE} conflicts with exactly one mode: {@code FOR UPDATE}. Both
+     * callers therefore hold KEY SHARE on the shared rows before either trigger asks
+     * to upgrade, and ordering cannot help a cycle whose shared locks are already
+     * held. Since the trigger only ever UPDATEs {@code doc_count}, a non-key column,
+     * {@code FOR NO KEY UPDATE} is the lock it actually needs — it does not conflict
+     * with KEY SHARE, but still conflicts with itself, so taxonomy-013's ordered
+     * one-row-at-a-time acquisition still serializes trigger against trigger.
+     *
+     * <p>With that closed the belt should never engage at all, which is a far stronger
+     * and more specific claim than "nothing escaped": this asserts the DeadlockRetry
+     * retry counter does not move across the whole run.
+     *
+     * <p>Measured DELTA, not absolute value — {@code retryAttemptCount()} is
+     * process-wide by design, and its javadoc requires exactly this. The delta is
+     * attributable here because surefire uses FORK-level parallelism with
+     * {@code reuseForks=true} (service/pom.xml): classes run sequentially within a
+     * fork, so no other class is issuing DeadlockRetry calls concurrently, though
+     * earlier classes in the same fork may have left the absolute count nonzero.
+     *
+     * <p>If this ever goes red, the ordering regressed — do NOT loosen it to
+     * {@code escaped == 0}, which is what made the gap invisible until the belt
+     * exhausted in production on 2026-09-02.
+     */
+    @Test
+    @Order(3)
+    void orderedInsertPhase_beltNeverEngages_becauseNoDeadlockOccursAtAll() throws Exception {
+        long retriesBefore = DeadlockRetry.retryAttemptCount();
+        int escaped = runRounds("ordered", ROUNDS, null, this::assignFromChashesTask);
+        long retriesDelta = DeadlockRetry.retryAttemptCount() - retriesBefore;
+
+        assertThat(escaped)
+            .as("no deadlock may escape the caller across " + ROUNDS + " rounds")
+            .isZero();
+        assertThat(retriesDelta)
+            .as("with taxonomy-015 pre-locking via FOR NO KEY UPDATE (which does not"
+                + " conflict with the INSERT's implicit FK FOR KEY SHARE), NO deadlock"
+                + " should occur at all across " + ROUNDS + " rounds — so the DeadlockRetry"
+                + " belt must never engage. A nonzero delta means a deadlock still formed"
+                + " and was merely absorbed, which is the exact condition that exhausted"
+                + " the belt in production (nexus-6n51g)")
+            .isZero();
+    }
+
     // ── repro driver ────────────────────────────────────────────────────────────
 
     /** Builds a round's concurrent task from its seeded fixtures. */
@@ -471,8 +542,11 @@ class TopicsDocCountDeadlockConcurrencyTest {
      * and the changeset it validates.
      */
     private void restoreFixedTriggerBody() throws Exception {
-        String insSql = extractChangesetSql("taxonomy-013-1");
-        String delSql = extractChangesetSql("taxonomy-013-2");
+        // nexus-6n51g: restore the LIVE generation. taxonomy-015-1/-2 supersede
+        // taxonomy-013-1/-2 via CREATE OR REPLACE; restoring taxonomy-013 here would
+        // silently re-install the superseded FOR UPDATE body under every later phase.
+        String insSql = extractChangesetSql(LIVE_TRIGGER_CHANGELOG, "taxonomy-015-1");
+        String delSql = extractChangesetSql(LIVE_TRIGGER_CHANGELOG, "taxonomy-015-2");
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             su.createStatement().execute(insSql);
@@ -483,14 +557,18 @@ class TopicsDocCountDeadlockConcurrencyTest {
     /** Extracts the "up" {@code <sql>} body text (the child directly under
      *  {@code <changeSet id="...">}, NOT the one nested inside its {@code <rollback>})
      *  for the given changeSet id from taxonomy-013-doc-count-lock-order.xml. */
-    private static String extractChangesetSql(String changeSetId) throws Exception {
+    /** Changelog holding the LIVE trigger generation (see restoreFixedTriggerBody). */
+    private static final String LIVE_TRIGGER_CHANGELOG =
+        "db/changelog/taxonomy-015-doc-count-lock-mode.xml";
+
+    private static String extractChangesetSql(String changelogResource, String changeSetId) throws Exception {
         var dbf = javax.xml.parsers.DocumentBuilderFactory.newInstance();
         dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
         var db = dbf.newDocumentBuilder();
         org.w3c.dom.Document doc;
         try (var in = TopicsDocCountDeadlockConcurrencyTest.class.getClassLoader()
-                .getResourceAsStream("db/changelog/taxonomy-013-doc-count-lock-order.xml")) {
-            assertThat(in).as("taxonomy-013-doc-count-lock-order.xml must be on the test classpath").isNotNull();
+                .getResourceAsStream(changelogResource)) {
+            assertThat(in).as(changelogResource + " must be on the test classpath").isNotNull();
             doc = db.parse(in);
         }
         var changeSets = doc.getElementsByTagName("changeSet");

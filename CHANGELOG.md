@@ -6,6 +6,47 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.28.0] - 2026-09-03
+
+Engine identity: `engine-service-v0.1.98` (was v0.1.95). Three engine cuts
+ride this release, all deployed and cloud-gated before the floor moved.
+
+### Added
+- `nx review commit` / `nx review show`: per-commit automated review on the
+  post-commit hook, recorded in T2; `nx census reviews` counts findings by
+  verdict and reports reviewed-and-clean separately from not-reviewed
+  (nexus-jh86x).
+- `nx_answer_steps` telemetry persists `cache_read_input_tokens` and
+  `cache_creation_input_tokens`; the engine half is telemetry-008 in
+  v0.1.96 (nexus-ndoke).
+
+### Changed
+- Operator dispatch isolates `claude -p` children by default (nexus-11nm2).
+- `nx upgrade`'s restart-stale starts a replacement aspect-worker after
+  draining the old one, instead of leaving none running.
+
+### Fixed
+- Engine: a vector search backend that outlived its container ran 8.9 hours
+  and pinned xmin database-wide. Every vector-ranked statement now carries a
+  30s `statement_timeout` (`NX_SEARCH_STATEMENT_TIMEOUT_MS`), and the engine
+  terminates its own backends at shutdown (v0.1.96, nexus-g17tf).
+- Engine: a per-connection cached generic plan applied the HNSW-ordered scan
+  to a tiny collection and ran ~30s; vector-ranked transactions now force a
+  custom plan. Cloud search p95 fell from 2665ms to 652ms (v0.1.97,
+  nexus-6nkn3).
+- Engine: an HNSW scan under a highly selective filter could exhaust the scan
+  cap and return empty; an empty index-ordered result is re-run exactly
+  (v0.1.98, nexus-bq06h).
+- Engine: the `doc_count` triggers pre-lock with `FOR NO KEY UPDATE`, closing
+  the production deadlock that exhausted the retry belt; AWT kept out of the
+  native image (v0.1.95, nexus-6n51g, nexus-223oj).
+- `nx_tidy` no longer reports healthy entries as truncated: display
+  truncation is marked so the model can tell it from stored truncation
+  (nexus-c0sdc).
+- Bibliography entries are excluded from DOI extraction (nexus-kho0p).
+- Test readers refuse a gate jar that is mid-write or being rebuilt
+  (nexus-06fu4).
+
 ## [7.27.0] - 2026-09-02
 
 Paired release with `engine-service-v0.1.94` (tagged on `13c5b2c31`;

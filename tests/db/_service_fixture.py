@@ -43,6 +43,7 @@ import subprocess
 import tempfile
 import time
 import urllib.error
+import zipfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -304,9 +305,73 @@ def unstamped_jar_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
     )
 
 
+#: Where scripts/lib/build-lease.sh puts its leases. A SIBLING of
+#: service/target, deliberately: `mvn clean` deletes target/ wholesale and
+#: would destroy a lease out from under its own holder (see that script's
+#: header). Readers must look here, not under target/.
+_BUILD_LEASE_ROOT = _REPO_ROOT / "service" / ".build-lease"
+
+
+def build_in_progress_reason(lease_root: Path = _BUILD_LEASE_ROOT) -> str | None:
+    """Return a reason if a service BUILD IS RUNNING, else ``None``.
+
+    nexus-06fu4. Writers of the shaded jar take a lease
+    (scripts/lib/build-lease.sh, resource "service"); readers never did.
+    That asymmetry is the whole defect: a reader had no way to learn a
+    build was in flight, so it launched a jar that was being rewritten
+    underneath it.
+
+    THIS IS THE STRONGEST OF THE THREE SIGNALS, and both sessions that
+    worked the bead initially ranked it WEAKEST. Measured 2026-09-02: a
+    concurrent native build rewrote the jar across a full suite and
+    produced 4178 passed / 12494 errors, every one an unattributable
+    "no main manifest attribute". The build held the lease for the entire
+    window. A freshness check cannot cover that case -- ``_boot()`` checks
+    and THEN launches the JVM, so a build starting after the check clobbers
+    the jar while the JVM is still reading it. mtime and completeness are
+    both POINT-IN-TIME samples of a resource that changes after the sample;
+    a lease is the only one of the three that describes an INTERVAL.
+
+    "Advisory" costs much less than it sounds: a two-minute build is not a
+    millisecond race, so a boot-time consult catches essentially the whole
+    population, and it fails LOUD and ATTRIBUTABLE.
+
+    REPORTS ONLY -- never reclaims. A stale lease from a dead builder must
+    not wedge every future run, but reclaiming from a reader would race the
+    real acquire path in build-lease.sh, so a dead holder is simply treated
+    as no lease.
+
+    Never raises: a malformed or half-written lease returns ``None`` rather
+    than blocking the suite on the lease reader's own bug.
+    """
+    try:
+        lease = lease_root / "service"
+        if not lease.is_dir():
+            return None
+        raw_pid = (lease / "pid").read_text().strip()
+        pid = int(raw_pid)
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, ValueError):
+            return None  # holder is gone; the lease lib will reclaim it
+        except PermissionError:
+            pass  # alive, owned by another user — still a live build
+        holder = (lease / "label").read_text().strip() or "unknown"
+        command = (lease / "command").read_text().strip() or "unknown command"
+        since = (lease / "ts").read_text().strip() or "unknown time"
+    except (OSError, ValueError):
+        return None
+    return (
+        f"a service BUILD IS IN PROGRESS (lease held by pid {pid}, "
+        f"{holder}, since {since}): {command}. The shaded jar is being "
+        "rewritten, so launching the engine now would read a partial or "
+        "half-replaced artifact. Wait for that build to finish and rerun."
+    )
+
+
 def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
-    """Return a skip reason if the shaded service jar is missing or STALE,
-    else ``None`` (jar is current and safe to launch).
+    """Return a skip reason if the shaded service jar is missing, INCOMPLETE
+    or STALE, else ``None`` (jar is current and safe to launch).
 
     nexus-todyv: the ``-m integration`` fixtures launch the prebuilt jar but do
     NOT rebuild it. A jar built before a handler/route change yields false 404s
@@ -316,6 +381,13 @@ def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
     forgotten ``mvn -f service/pom.xml package -DskipTests`` skips loudly
     instead of testing pre-change sources.
     """
+    # BEFORE anything else: if a build holds the lease, nothing about this
+    # jar's current bytes is meaningful -- it is mid-replacement. Reporting
+    # that is strictly more useful than reporting whatever the partial file
+    # happens to look like right now (nexus-06fu4).
+    building = build_in_progress_reason()
+    if building:
+        return building
     if not jar.exists():
         return (
             f"service jar not built: {_rel(jar)} "
@@ -348,6 +420,39 @@ def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
             f"service jar is STALE: {_rel(jar)} predates "
             f"{rel} — rebuild before integration run "
             "(run: mvn -f service/pom.xml package -DskipTests)"
+        )
+    # COMPLETENESS, checked AFTER staleness (nexus-06fu4). Being-written is a
+    # third state the mtime comparison above cannot represent: a jar mid-write
+    # has an mtime NEWER than every source, i.e. exactly the "safe to launch"
+    # branch. Measured 2026-09-02 -- a concurrent container native build
+    # rewrote this path while a pytest run was starting, and every
+    # engine-substrate test errored at setup with "no main manifest attribute"
+    # while this function returned None.
+    #
+    # A jar IS a zip, and a zip's end-of-central-directory record sits at the
+    # END of the file, so a truncated one cannot be opened. That makes this a
+    # DETERMINISTIC completeness test rather than an advisory one: it needs no
+    # cooperation from any writer, which matters because there are at least
+    # two (scripts/build-gate-jar.sh and any `mvn package`, native or plain,
+    # via maven-shade writing this filename in place) and a fix confined to
+    # one leaves the other exposed. It also cannot be raced the way a
+    # lease-file check can, because it inspects the artifact itself.
+    #
+    # It does NOT close the window entirely -- a writer can truncate the jar
+    # one millisecond after this returns. Only atomic publication (build to a
+    # staging path, rename into place) would do that, and it is recorded on
+    # the bead as the remaining gap rather than silently implied here.
+    try:
+        with zipfile.ZipFile(jar) as zf:
+            zf.read("META-INF/MANIFEST.MF")
+    except (zipfile.BadZipFile, KeyError, OSError, EOFError) as exc:
+        return (
+            f"service jar is INCOMPLETE or CORRUPT: {_rel(jar)} could not be "
+            f"opened as a jar ({type(exc).__name__}). Its mtime is current, so "
+            "this is most likely a concurrent `mvn package` rewriting it right "
+            "now rather than a stale build — wait for that build to finish and "
+            "rerun. If no build is running, rebuild: "
+            "mvn -f service/pom.xml package -DskipTests"
         )
     return None
 

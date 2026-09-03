@@ -31,7 +31,13 @@ public final class PgSession {
     private static final Set<String> ALLOWED_GUCS = Set.of(
         "hnsw.iterative_scan",
         "hnsw.ef_search",
-        "pg_trgm.word_similarity_threshold"
+        "pg_trgm.word_similarity_threshold",
+        "statement_timeout",
+        "plan_cache_mode",
+        "enable_indexscan",
+        "enable_seqscan",
+        "enable_bitmapscan",
+        "enable_sort"
     );
 
     /**
@@ -65,7 +71,133 @@ public final class PgSession {
     private static final int EF_SEARCH_FLOOR =
         efSearchFloor(System.getenv("NX_HNSW_EF_SEARCH"));
 
+    /**
+     * Server-side bound on a vector-ranked statement (nexus-g17tf). Sized to
+     * the edge's 30s time-to-first-byte budget: a bound LONGER than the edge's
+     * guarantees the client has already given up while the backend keeps
+     * burning CPU and holding its snapshot -- the measured shape was a search
+     * backend running 8.9h after its container was removed, pinning xmin so
+     * autovacuum reclaimed nothing database-wide. A CPU-bound backend never
+     * notices a dead client between socket writes; only the timer reaches it.
+     */
+    static final int DEFAULT_SEARCH_STATEMENT_TIMEOUT_MS = 30_000;
+
+    /** Upper bound on the override: past this the edge has long since 504'd. */
+    static final int SEARCH_STATEMENT_TIMEOUT_MAX_MS = 600_000;
+
+    /**
+     * Env-resolved bound ({@code NX_SEARCH_STATEMENT_TIMEOUT_MS}), same
+     * precedent as {@link #EF_SEARCH_FLOOR}: read once at class load,
+     * validated at boot by {@link #startupSearchStatementTimeoutMs()}.
+     */
+    private static final int SEARCH_STATEMENT_TIMEOUT_MS =
+        searchStatementTimeoutMs(System.getenv("NX_SEARCH_STATEMENT_TIMEOUT_MS"));
+
     private PgSession() {
+    }
+
+    /**
+     * Parse the {@code NX_SEARCH_STATEMENT_TIMEOUT_MS} override. Null/blank
+     * means the default; anything else must be an integer in
+     * [1, {@link #SEARCH_STATEMENT_TIMEOUT_MAX_MS}]. Zero is refused
+     * explicitly: to Postgres {@code statement_timeout=0} means DISABLED,
+     * which is exactly the unbounded state this setting exists to end.
+     */
+    static int searchStatementTimeoutMs(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return DEFAULT_SEARCH_STATEMENT_TIMEOUT_MS;
+        }
+        int ms;
+        try {
+            ms = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                "NX_SEARCH_STATEMENT_TIMEOUT_MS must be an integer, got: " + raw, e);
+        }
+        if (ms < 1 || ms > SEARCH_STATEMENT_TIMEOUT_MAX_MS) {
+            throw new IllegalArgumentException(
+                "NX_SEARCH_STATEMENT_TIMEOUT_MS must be in 1.." + SEARCH_STATEMENT_TIMEOUT_MAX_MS
+                + " (0 would DISABLE the bound), got: " + ms);
+        }
+        return ms;
+    }
+
+    /**
+     * Boot-time touch for {@code NX_SEARCH_STATEMENT_TIMEOUT_MS}, for the same
+     * class-init reason as {@link #startupEfSearchFloor()}.
+     *
+     * @return the resolved bound in milliseconds, for the boot log line
+     */
+    public static int startupSearchStatementTimeoutMs() {
+        return SEARCH_STATEMENT_TIMEOUT_MS;
+    }
+
+    /**
+     * Bound every statement in this transaction to the serving timeout
+     * (nexus-g17tf). Paired with {@link #setHnswEfSearch} at every
+     * vector-ranked call site; the pairing is pinned by
+     * {@code HnswServingGucParityTest}. Postgres raises SQLSTATE 57014
+     * ({@code query_canceled}) when the bound is hit.
+     */
+    public static void setSearchStatementTimeout(DSLContext ctx) {
+        setSearchStatementTimeout(ctx, SEARCH_STATEMENT_TIMEOUT_MS);
+    }
+
+    /** Explicit-bound form, for tests that need a bound shorter than the env-resolved one. */
+    static void setSearchStatementTimeout(DSLContext ctx, int timeoutMs) {
+        setLocal(ctx, "statement_timeout", Integer.toString(timeoutMs));
+    }
+
+    /**
+     * Force a CUSTOM plan for every statement in this transaction
+     * (nexus-6nkn3). The vector-ranked statements are parameterised on the
+     * collection set, and their right plan depends on that set's
+     * selectivity: a 176-row collection wants the pk scan (0.6s), a large
+     * one wants the HNSW-ordered scan. pgjdbc switches a prepared statement
+     * to a GENERIC plan after five executions on each pooled connection, and
+     * a generic plan cannot see selectivity. Measured in production
+     * 2026-09-03: a generic HNSW-ordered plan built under stale stats,
+     * applied to a 176-row collection under iterative scan, removed 22,932
+     * rows by filter, admitted NONE, ran ~30s cold and returned EMPTY,
+     * while the custom plan on the same statement took 0.6s. Paired with
+     * {@link #setSearchStatementTimeout} at every vector-ranked site; the
+     * pairing is pinned by {@code HnswServingGucParityTest}.
+     *
+     * <p>This removes the TRIGGER (a stale generic plan), not the CLASS: an
+     * HNSW-ordered scan under a filter selective enough to exhaust
+     * {@code hnsw.max_scan_tuples} with too few admitted rows still
+     * under-returns, or returns empty, silently. That is nexus-bq06h, open.
+     *
+     * <p>Reaches the combined-query SQL functions ({@code search_*_scoped},
+     * {@code search_graph_hop}) only because they are inlinable (STABLE,
+     * SECURITY INVOKER, not STRICT — pinned by {@code CombinedQueryParityTest});
+     * a non-inlinable function body plans on its own and would not see this.
+     */
+    public static void setSearchPlanCacheMode(DSLContext ctx) {
+        setLocal(ctx, "plan_cache_mode", "force_custom_plan");
+    }
+
+    /**
+     * Exact-ordering fallback (nexus-bq06h): disable index scans for the rest
+     * of this transaction so the re-run of a vector-ranked statement orders
+     * the FILTERED rows exactly instead of walking the shared HNSW index.
+     * Used only after the index-ordered attempt returned NOTHING: an HNSW scan
+     * under a selective filter can exhaust {@code hnsw.max_scan_tuples}
+     * admitting no row and return empty, silently (measured in production
+     * 2026-09-03: 176-row collection, 22,932 removed by filter, 0 admitted).
+     *
+     * <p>Bitmap scans stay ON: pgvector's HNSW cannot serve a bitmap scan, so
+     * the planner's exact alternatives are a bitmap scan on the primary key's
+     * (tenant, collection) prefix, proportional to the collection set, or a
+     * sequential scan when that is cheaper, then a sort. Seq scan and sort are
+     * re-enabled outright so a session that penalised them to force the index
+     * cannot leave the fallback with no exact plan.
+     */
+    public static void disableIndexScanForExactFallback(DSLContext ctx) {
+        setLocal(ctx, "enable_indexscan", "off");
+        setLocal(ctx, "enable_bitmapscan", "on");
+        setLocal(ctx, "enable_seqscan", "on");
+        setLocal(ctx, "enable_sort", "on");
     }
 
     /**

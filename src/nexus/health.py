@@ -1642,14 +1642,21 @@ def _check_git_hooks() -> list[HealthResult]:
     # the import is lazy because commands/hooks.py imports click
     # which we don't want to pay for at health-check time when no
     # repos are registered.
-    def _canonical_stanza_body() -> str | None:
+    def _canonical_stanza_body(hook_name: str) -> str | None:
+        """Canonical body for *hook_name*.
+
+        Per-hook since nexus-jh86x: ``post-commit`` carries the review
+        stanza inside the same sentinel block, so comparing every hook
+        against one template would report a correctly-installed
+        post-commit as drifted on every ``nx doctor`` run.
+        """
         try:
-            from nexus.commands.hooks import _STANZA  # noqa: PLC0415 — deferred to avoid circular import
+            from nexus.commands.hooks import _stanza_for  # noqa: PLC0415 — deferred to avoid circular import
         except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
             return None
         m = re.search(
             rf"{re.escape(SENTINEL_BEGIN)}\n(.*?)\n{re.escape(SENTINEL_END)}",
-            _STANZA, re.DOTALL,
+            _stanza_for(hook_name), re.DOTALL,
         )
         return m.group(1) if m else None
 
@@ -1660,7 +1667,7 @@ def _check_git_hooks() -> list[HealthResult]:
         )
         return m.group(1) if m else None
 
-    canonical = _canonical_stanza_body()
+    canonical_by_hook = {n: _canonical_stanza_body(n) for n in hook_names}
 
     # RDR-137 Phase 3.1 (nexus-tts0d.6): catalog-backed enumeration with
     # legacy ``repos.json`` fallback via the dual-read shim. Catalog
@@ -1724,13 +1731,15 @@ def _check_git_hooks() -> list[HealthResult]:
                     # (e.g. pre-pgrep-guard, vulnerable to the multi-
                     # indexer pile-up race).
                     drifted: list[str] = []
-                    if canonical is not None:
-                        for name in installed:
-                            installed_body = _installed_stanza_body(
-                                (hdir / name).read_text()
-                            )
-                            if installed_body is not None and installed_body != canonical:
-                                drifted.append(name)
+                    for name in installed:
+                        canonical = canonical_by_hook.get(name)
+                        if canonical is None:
+                            continue
+                        installed_body = _installed_stanza_body(
+                            (hdir / name).read_text()
+                        )
+                        if installed_body is not None and installed_body != canonical:
+                            drifted.append(name)
                     if drifted:
                         results.append(HealthResult(
                             label="git hooks (stanza drift)",

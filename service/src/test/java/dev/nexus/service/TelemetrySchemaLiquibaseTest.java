@@ -52,9 +52,11 @@ class TelemetrySchemaLiquibaseTest {
         "tenant_id", "chunk_id", "embedded_at", "ttl_days", "frecency_score",
         "miss_count", "last_hit_at");
     // RDR-196 .p1c (nexus-nyry9.9): per-step cost/quality telemetry, child of nx_answer_runs.
+    // telemetry-008 (nexus-ndoke): the two prompt-cache token columns.
     private static final Set<String> NX_ANSWER_STEPS_COLS = Set.of(
         "run_id", "tenant_id", "step_index", "operator", "source", "model",
-        "input_tokens", "output_tokens", "cost_usd", "elapsed_ms", "ok", "bundled_steps");
+        "input_tokens", "output_tokens", "cost_usd", "elapsed_ms", "ok", "bundled_steps",
+        "cache_read_input_tokens", "cache_creation_input_tokens");
 
     // Tables that should NOT have a tsvector column (telemetry is never FTS-searched)
     private static final List<String> ALL_TEL_TABLES = List.of(

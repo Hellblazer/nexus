@@ -181,6 +181,43 @@
     the PRE-fix function shape (two threads, overlapping topic sets in
     opposite orders, real PG) and proves the POST-fix function survives N
     concurrent rounds with correct final doc_counts.
+
+    CORRECTION (nexus-6n51g, 2026-09-02 — MEASURED; do NOT act on the deferred
+    prescription above). The reordering named above as what "would close it at
+    the root" was implemented and measured, and it does NOT close it: 20
+    concurrent rounds still produced 10 DeadlockRetry retries with the INSERT
+    ordered by (topic_id, chash). It is neither necessary nor sufficient.
+
+    The cause is lock STRENGTH, not lock ORDER. The implicit FK FOR KEY SHARE
+    this header correctly identifies conflicts with exactly ONE row-lock mode:
+    FOR UPDATE — the mode THIS changeset's own pre-lock loop requests. Both
+    callers already hold KEY SHARE on the shared rows before either attempts
+    the upgrade, so no insertion order can help. Since the trigger only ever
+    UPDATEs doc_count, a NON-KEY column, FOR NO KEY UPDATE is the lock it
+    actually needs: it does not conflict with FOR KEY SHARE, but still
+    conflicts with itself, so this changeset's ordered one-row-at-a-time
+    acquisition still serializes trigger against trigger and is preserved
+    verbatim. Fixed in taxonomy-015-doc-count-lock-mode.xml, which carries the
+    three measured variants.
+
+    In short: this changeset closed source (1) and opened source (2) in one
+    stroke, by taking the strongest lock rather than the sufficient one. The
+    belt it added absorbed the result until it exhausted in production on
+    2026-09-02.
+
+    TIMING FOOTNOTE (conexus-13, 2026-09-02). The paragraph above this
+    correction says the FK's KEY SHARE is taken "AS EACH inserted row is
+    processed". That is wrong, and it matters only for REPRODUCING the
+    deadlock, not for the diagnosis. PostgreSQL implements an immediate FK as
+    an AFTER ROW trigger queued per row and fired at the END of the statement,
+    so the RI checks take their locks in a tail immediately before the AFTER
+    STATEMENT trigger — not interleaved with the inserts. The contention
+    window is that tail. Measured consequence: two statements must end within
+    it, which happens routinely in-process against a local PG (10-13 retries
+    per 20 rounds) and essentially never across a WAN (nine natural variants
+    against the live cloud, all zero on two independent instruments). Forcing
+    the precondition reproduces it at once: 20/20 rounds on live 0.1.94.
+
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"

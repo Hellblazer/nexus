@@ -982,6 +982,7 @@ async def claude_dispatch(
     model: str | None = None,
     operator: str | None = None,
     max_budget_usd: float | None = None,
+    isolated: bool = True,
 ) -> dict[str, Any]:
     """Dispatch a single operator call to claude -p, fully async.
 
@@ -1067,6 +1068,19 @@ async def claude_dispatch(
             error message (only when *model* is also set) so a rejected
             ``--model`` value names both what was rejected and who asked
             for it. Never affects argv or control flow.
+        isolated: Hermetic child. DEFAULT TRUE since nexus-11nm2. Passes
+            ``--setting-sources ""`` so the child loads NO user/project/local
+            settings file and therefore runs NONE of the caller's hooks.
+            ``--strict-mcp-config`` (always on, above) covers MCP servers
+            only; it does not cover hooks, and a tool-free child was
+            measured booting eight SessionStart hooks on 2026-09-02.
+            Required by any dispatch whose correctness depends on the child
+            NOT seeing the ambient session context. NOT compatible with
+            settings-supplied auth: this box authenticates via OAuth/keychain
+            and was verified working under the flag, but a box relying on an
+            ``apiKeyHelper`` in a settings file would lose it.
+            Pass ``False`` for a child that genuinely needs the caller's
+            settings; that is now the exceptional case, not the default.
         max_budget_usd: Opt-in per-DISPATCH cost ceiling (nexus-2g8y7),
             passed straight to the CLI's own ``--max-budget-usd`` flag
             (added in Claude Code 2.1.217; confirmed present on installed
@@ -1232,6 +1246,39 @@ async def claude_dispatch(
         # servers; with an opt-in --mcp-config below it loads ONLY those.
         "--strict-mcp-config",
     ]
+    # nexus-jh86x, measured 2026-09-02: --strict-mcp-config stops the child
+    # loading ambient MCP SERVERS, but it does NOT stop it running the
+    # user's SessionStart HOOKS. A probe on this box counted EIGHT
+    # hook_started events in a tool-free child, injecting the conexus
+    # skills preamble, the beads workflow context, a bead list, an RDR
+    # indexing notice and the Serena/Context7 blurb -- into a dispatch with
+    # no tools to act on any of it.
+    #
+    # For the per-commit reviewer this is a CORRECTNESS break, not just
+    # cost: that reviewer's value depends on judging a diff with NO
+    # visibility into the decision record. A child that boots with the
+    # bead board in its context is not that reviewer.
+    #
+    # DEFAULT ON since nexus-11nm2 (2026-09-02). It shipped opt-in for one
+    # reason: ``--setting-sources ""`` also drops settings-supplied auth, so
+    # a box authenticating via an ``apiKeyHelper`` in a settings file would
+    # lose auth on EVERY operator call -- a loud total failure, not a
+    # degradation. That risk was closed by measurement rather than argued
+    # away:
+    #   * no ``apiKeyHelper`` in any settings file on this box, and
+    #     ``settings.env`` carries no auth-shaped key (conexus-77);
+    #   * the conexus cloud estate cannot dispatch at all -- no claude
+    #     binary on the engine host or in its container, and the private
+    #     subnet has no general outbound path, so a dispatch could not
+    #     reach the API even if one were installed (conexus-77, SSM probe);
+    #   * ``deploy/`` and ``.github/workflows/`` never invoke claude;
+    #   * this laptop is the sole nx operator (Sam, 2026-09-02) -- the last
+    #     gate, and not answerable from any machine, so it was asked rather
+    #     than assumed.
+    # Pass ``isolated=False`` explicitly for a child that genuinely needs
+    # the caller's settings, and expect to justify it.
+    if isolated:
+        argv += ["--setting-sources", ""]
     # RDR-196 .p2b (nexus-nyry9.15): ability only -- appended ONLY when the
     # caller passes an explicit model. Tier resolution to this string (if
     # any) happens in the CALLER, e.g. via

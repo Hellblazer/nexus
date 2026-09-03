@@ -302,7 +302,26 @@ class StaleProcess:
 
     @property
     def restartable(self) -> bool:
-        """Safe to cycle without severing a live human session."""
+        """Safe to cycle without severing a live human session.
+
+        The allowlist is short because the constraint is a CLIENT
+        behaviour, not a nexus one, and it is worth stating rather than
+        leaving as a bare assertion (it read as an unexamined assumption
+        and was re-litigated on 2026-09-02 before anyone checked).
+
+        Claude Code does NOT automatically reconnect **stdio** MCP
+        servers -- documented at code.claude.com/docs/en/mcp: remote
+        HTTP/SSE servers auto-reconnect with backoff, local stdio
+        processes are the deliberate exception. So killing an nx-mcp
+        host does not recycle it; it leaves that session's MCP
+        connection dead until a human runs ``/mcp`` -> Reconnect. A
+        clean self-exit is not documented as being treated any
+        differently from a crash, so "have the stale host exit itself"
+        does not rescue the idea either.
+
+        aspect-worker and mineru carry no client connection, so cycling
+        them severs nothing and is safe to automate.
+        """
         return self.kind in ("aspect-worker", "mineru")
 
 
@@ -645,10 +664,39 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                         break
                     time.sleep(0.5)
                 if exited:
-                    actions.append(
-                        f"restarted {proc.kind} (pid {proc.pid} drained; "
-                        "respawns on demand)"
-                    )
+                    # START ONE. Draining is only half a cycle, and the
+                    # allowlist that puts aspect-worker in scope promises a
+                    # cycle (see StaleProcess.restartable). The old line
+                    # said "restarted ... respawns on demand" after doing
+                    # only a stop: the ONLY on-demand respawn is inside the
+                    # ENQUEUE path (aspect_worker.py -> ensure_aspect_worker_daemon
+                    # when work is enqueued), so on a box with no enqueue
+                    # traffic the worker simply stays down and the summary
+                    # line reads as success. Measured 2026-09-02: a
+                    # reinstall + restart-stale left it down ~35 minutes
+                    # until a human noticed. Its mineru sibling below has
+                    # always done an explicit stop AND start.
+                    try:
+                        from nexus.daemon.aspect_worker_daemon import (  # noqa: PLC0415 — deferred; daemon module is CLI/service-side
+                            ensure_aspect_worker_daemon,
+                        )
+                        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred with its sibling
+
+                        new_pid = ensure_aspect_worker_daemon(config_dir=nexus_config_dir())
+                        actions.append(
+                            f"cycled {proc.kind} (pid {proc.pid} drained; "
+                            f"started pid {new_pid})"
+                        )
+                    except Exception as exc:  # noqa: BLE001 — never fail the finish pass on a respawn
+                        # Say so loudly rather than reporting a restart:
+                        # a silent stop is what produced the 35-minute
+                        # outage, and an upgrade summary that claims
+                        # success is worse than one that names a gap.
+                        actions.append(
+                            f"NEEDS HUMAN: {proc.kind} pid {proc.pid} drained but "
+                            f"the respawn failed ({exc}) — start it with "
+                            "`nx daemon aspect-worker start`"
+                        )
                 else:
                     actions.append(
                         f"{proc.kind} pid {proc.pid}: SIGTERM sent but still "
@@ -687,8 +735,11 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
     for proc in report.session_bound:
         if proc.kind == "mcp-host":
             remedy = (
-                "belongs to a live Claude session — exit that session to "
-                f"pick up {report.installed_version}"
+                "belongs to a live Claude session — run `/mcp` in it and "
+                f"reconnect to pick up {report.installed_version} "
+                "(exiting the session also works, but is not required; "
+                "stdio MCP servers are not auto-reconnected, so killing "
+                "this pid would only leave that session's tools dead)"
             )
         elif proc.kind == "service":
             remedy = (

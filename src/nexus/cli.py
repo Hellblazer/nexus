@@ -58,6 +58,7 @@ from nexus.commands.migration_cmd import migration_cmd
 from nexus.commands.mineru import mineru_group
 from nexus.commands.plan import plan as plan_group
 from nexus.commands.rdr import rdr as rdr_group
+from nexus.commands.review_cmd import review_group
 from nexus.commands.scratch import scratch
 from nexus.commands.self_cmd import self_group
 from nexus.commands.search_cmd import search_cmd
@@ -189,6 +190,7 @@ main.add_command(hooks)
 main.add_command(index)
 main.add_command(init_cmd, name="init")
 main.add_command(memory)
+main.add_command(review_group)
 main.add_command(migration_cmd, name="migration")
 main.add_command(mineru_group, name="mineru")
 main.add_command(plan_group, name="plan")

@@ -1672,15 +1672,81 @@ class TelemetryRepositoryTest {
 
     // ── nx_answer_steps (RDR-196 .p1c, nexus-nyry9.9) ────────────────────────────
 
+    /**
+     * nexus-ndoke. The Anthropic usage envelope reports CACHED input separately:
+     * a cached prompt records {@code input_tokens=2} with the real size in
+     * {@code cache_creation_input_tokens} (cold) or {@code cache_read_input_tokens}
+     * (warm). Measured on real dispatch envelopes: cold 2 / 26068 / 0, warm
+     * 2 / - / 16324. telemetry-007 had no column for either, so {@code input_tokens}
+     * read 2 on essentially every recorded step and every per-plan cost aggregate
+     * over these rows mixed cache-warm and cache-cold runs with nothing recorded
+     * that could separate them — RDR-196's own numbers included.
+     *
+     * <p>The other tests in this class pass {@code null, null} for the new fields,
+     * so they prove the columns EXIST but nothing about the values surviving. This
+     * one asserts the round trip with the measured cold and warm shapes, and that
+     * absence still stores as NULL rather than 0 — a stored 0 would read as "used
+     * no cached input", a measurement claim the run never made.
+     */
+    @Test @Order(49)
+    void recordNxAnswerRun_persistsCacheTokenFields() {
+        String tenant = "tel-tenant-a";
+        String question = "cache-token-question-" + System.nanoTime();
+        List<TelemetryRepository.StepInput> steps = List.of(
+            // cold: real prompt size lands in cache_creation, cache_read is 0
+            new TelemetryRepository.StepInput(0, "claude_dispatch", "llm", "claude-opus-5",
+                2, 1685, 0, 26068, 0.8851, 9000, true, List.of()),
+            // warm: real prompt size lands in cache_read
+            new TelemetryRepository.StepInput(1, "claude_dispatch", "llm", "claude-opus-5",
+                2, 1684, 16324, 0, 0.0843, 3000, true, List.of()),
+            // a sql step runs no prompt at all — absence, not zero
+            new TelemetryRepository.StepInput(2, "operator_filter", "sql", null,
+                0, 0, null, null, 0.0, 5, true, List.of()));
+
+        repo.recordNxAnswerRun(tenant, question, null, null, 3, "cache token text",
+            0.9694, 12005, PAST_TS, steps);
+
+        List<Map<String, Object>> rows =
+            fetchNxAnswerStepRows(fetchNxAnswerRunId(tenant, question));
+        assertThat(rows).hasSize(3);
+
+        Map<String, Object> cold = rows.get(0);
+        assertThat(((Number) cold.get("input_tokens")).intValue())
+            .as("the envelope really does report 2 for a cached prompt — this is not a bug")
+            .isEqualTo(2);
+        assertThat(((Number) cold.get("cache_creation_input_tokens")).intValue())
+            .as("the real prompt size must survive, or cost is unattributable")
+            .isEqualTo(26068);
+        assertThat(((Number) cold.get("cache_read_input_tokens")).intValue()).isZero();
+
+        Map<String, Object> warm = rows.get(1);
+        assertThat(((Number) warm.get("cache_read_input_tokens")).intValue())
+            .isEqualTo(16324);
+        assertThat(((Number) warm.get("cache_creation_input_tokens")).intValue()).isZero();
+
+        // The pair that made the defect visible: same model, output tokens differing
+        // by ONE, cost differing 10x. Only the cache columns can explain it.
+        assertThat(cold.get("model")).isEqualTo(warm.get("model"));
+        assertThat(Math.abs(((Number) cold.get("output_tokens")).intValue()
+                          - ((Number) warm.get("output_tokens")).intValue()))
+            .isEqualTo(1);
+
+        Map<String, Object> sql = rows.get(2);
+        assertThat(sql.get("cache_read_input_tokens"))
+            .as("absence must store as NULL — 0 would claim 'used no cached input'")
+            .isNull();
+        assertThat(sql.get("cache_creation_input_tokens")).isNull();
+    }
+
     @Test @Order(49)
     void recordNxAnswerRun_withSteps_writesParentAndChildren() {
         String tenant = "tel-tenant-a";
         String question = "steps-write-question-" + System.nanoTime();
         List<TelemetryRepository.StepInput> steps = List.of(
             new TelemetryRepository.StepInput(0, "operator_filter", "sql", null,
-                0, 0, 0.0, 12, true, List.of()),
+                0, 0, null, null, 0.0, 12, true, List.of()),
             new TelemetryRepository.StepInput(1, "claude_dispatch", "bundle", "claude-fable-5",
-                150, 40, 0.0021, 4200, true, List.of(1, 2)));
+                150, 40, null, null, 0.0021, 4200, true, List.of(1, 2)));
 
         repo.recordNxAnswerRun(tenant, question, null, null, 2, "steps final text",
             0.0021, 4212, PAST_TS, steps);
@@ -1718,7 +1784,7 @@ class TelemetryRepositoryTest {
         // TelemetryHandler.parseNxAnswerSteps javadoc).
         List<TelemetryRepository.StepInput> steps = List.of(
             new TelemetryRepository.StepInput(0, "op", "not_a_real_source", null,
-                null, null, null, 1, true, List.of()));
+                null, null, null, null, null, 1, true, List.of()));
 
         assertThatThrownBy(() ->
             repo.recordNxAnswerRun(tenant, question, null, null, 1, "should not persist",
@@ -1753,7 +1819,7 @@ class TelemetryRepositoryTest {
         String question = "steps-tenant-iso-question-" + System.nanoTime();
         List<TelemetryRepository.StepInput> steps = List.of(
             new TelemetryRepository.StepInput(0, "op", "llm", null,
-                null, null, null, 3, true, List.of()));
+                null, null, null, null, null, 3, true, List.of()));
 
         repo.recordNxAnswerRun(tenantA, question, null, null, 1, "iso final",
             0.0, 3, PAST_TS, steps);
@@ -1813,9 +1879,9 @@ class TelemetryRepositoryTest {
         // read path orders by step_index, not insertion/write order.
         List<TelemetryRepository.StepInput> steps = List.of(
             new TelemetryRepository.StepInput(1, "claude_dispatch", "bundle", "claude-fable-5",
-                150, 40, 0.0021, 4200, true, List.of(1, 2)),
+                150, 40, null, null, 0.0021, 4200, true, List.of(1, 2)),
             new TelemetryRepository.StepInput(0, "operator_filter", "sql", null,
-                0, 0, 0.0, 12, true, List.of()));
+                0, 0, null, null, 0.0, 12, true, List.of()));
         // Each StepInput inserts as its own PK-addressed row regardless of
         // list position, so writing index-1-then-index-0 exercises the
         // claim that the READ path (ORDER BY step_index) — not write
@@ -1862,7 +1928,7 @@ class TelemetryRepositoryTest {
         String tenant = "nar-no-incl-steps-" + System.nanoTime();
         List<TelemetryRepository.StepInput> steps = List.of(
             new TelemetryRepository.StepInput(0, "op", "llm", null,
-                null, null, null, 1, true, List.of()));
+                null, null, null, null, null, 1, true, List.of()));
         repo.recordNxAnswerRun(tenant, "q", null, null, 1, "a", 0.0, 1, PAST_TS, steps);
 
         // Both the default 3-arg overload AND explicit includeSteps=false must
@@ -1883,7 +1949,7 @@ class TelemetryRepositoryTest {
         String tenantB = "nar-incl-iso-b-" + System.nanoTime();
         List<TelemetryRepository.StepInput> steps = List.of(
             new TelemetryRepository.StepInput(0, "op", "llm", null,
-                null, null, null, 3, true, List.of()));
+                null, null, null, null, null, 3, true, List.of()));
         repo.recordNxAnswerRun(tenantA, "tenant-a-run", null, null, 1, "a",
             0.0, 3, PAST_TS, steps);
 
@@ -1937,6 +2003,7 @@ class TelemetryRepositoryTest {
         try (Connection conn = pg.createConnection("")) {
             var rs = conn.createStatement().executeQuery(
                 "SELECT step_index, operator, source, model, input_tokens, output_tokens, "
+                + "cache_read_input_tokens, cache_creation_input_tokens, "
                 + "cost_usd, elapsed_ms, ok, bundled_steps FROM nexus.nx_answer_steps "
                 + "WHERE run_id=" + runId + " ORDER BY step_index");
             List<Map<String, Object>> rows = new java.util.ArrayList<>();
@@ -1948,6 +2015,13 @@ class TelemetryRepositoryTest {
                 row.put("model", rs.getString("model"));
                 row.put("input_tokens", (Object) rs.getObject("input_tokens"));
                 row.put("output_tokens", (Object) rs.getObject("output_tokens"));
+                // nexus-ndoke: getObject, not getInt — these must round-trip NULL
+                // as null. getInt would coerce absence to 0, which is the exact
+                // "used no cached input" claim the nullable columns exist to avoid.
+                row.put("cache_read_input_tokens",
+                    (Object) rs.getObject("cache_read_input_tokens"));
+                row.put("cache_creation_input_tokens",
+                    (Object) rs.getObject("cache_creation_input_tokens"));
                 row.put("cost_usd", rs.getObject("cost_usd"));
                 row.put("elapsed_ms", rs.getInt("elapsed_ms"));
                 row.put("ok", rs.getBoolean("ok"));

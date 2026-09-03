@@ -411,7 +411,17 @@ def test_restart_stale_actually_signals_a_generation_aspect_worker(
         "'.local/bin/nx') can appear in a shim-launched generation path, so "
         "the pre-kill re-check skipped a live worker as 'gone or recycled'"
     )
-    assert any("restarted aspect-worker" in a for a in actions)
+    # Wording changed when the branch began actually restarting the worker
+    # rather than only draining it. What this test is really pinning is
+    # that DETECTION LEADS TO A SIGNAL (asserted on `calls` above); the
+    # action line just has to name the worker and not claim a restart it
+    # did not perform -- this fixture stubs no respawn, so the honest
+    # outcome here is the NEEDS HUMAN line.
+    assert any(
+        "aspect-worker" in a and ("cycled" in a or "NEEDS HUMAN" in a)
+        for a in actions
+    ), actions
+    assert not any("restarted aspect-worker" in a for a in actions)
 
 
 def test_the_pid_recycle_guard_still_refuses_a_foreign_command(

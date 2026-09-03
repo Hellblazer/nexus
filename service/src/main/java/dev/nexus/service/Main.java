@@ -70,6 +70,11 @@ public final class Main {
         // search_path: set via connectionInitSql (not ALTER ROLE, which requires superuser).
         // Covers nexus (T2 tables), t1 (T1 scratch), and public for pg_catalog visibility.
         hikari.setConnectionInitSql("SET search_path TO nexus, t1, public");
+        // nexus-g17tf: per-boot unique application_name so the shutdown hook can
+        // terminate THIS process's backends (and only these) via pg_stat_activity.
+        String applicationName = dev.nexus.service.db.BackendReaper.newApplicationName(
+                dev.nexus.service.http.VersionHandler.resolveReleaseVersion());
+        hikari.addDataSourceProperty("ApplicationName", applicationName);
         var ds = new HikariDataSource(hikari);
 
         // ── Schema migration (RDR-152 bead nexus-net63) ───────────────────────
@@ -207,6 +212,9 @@ public final class Main {
         try {
             log.info("event=hnsw_ef_search_floor floor={}",
                      dev.nexus.service.db.PgSession.startupEfSearchFloor());
+            // nexus-g17tf: same fail-fast for NX_SEARCH_STATEMENT_TIMEOUT_MS.
+            log.info("event=search_statement_timeout timeout_ms={}",
+                     dev.nexus.service.db.PgSession.startupSearchStatementTimeoutMs());
         } catch (Throwable t) {
             ds.close();
             log.error("event=hnsw_ef_search_env_invalid error=\"{}\"", t.getMessage(), t);
@@ -256,6 +264,17 @@ public final class Main {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("event=shutdown_signal");
             service.stop();
+            // nexus-g17tf: FIRST after the listener stops, ahead of the embedder
+            // closes (each can wait up to 5s) so the reaper always runs inside a
+            // 10s container stop grace. Hikari's close aborts the sockets, and a
+            // CPU-bound backend never notices a closed socket; only the postmaster
+            // signal pg_terminate_backend sends reaches it. Fresh connection, never
+            // a pool borrow (the pool is what the runaways hold). SIGKILL (OOM, an
+            // expired grace) runs no hook at all: that path is bounded only by the
+            // statement_timeout on the search transactions.
+            dev.nexus.service.db.BackendReaper.terminateOwnBackends(
+                    dbUrl, dbUser, dbPass, applicationName,
+                    ds.getHikariPoolMXBean().getActiveConnections());
             // doc and qry routers share the SAME local embedder instance (the
             // native ONNX session + tokenizer), so closing one is sufficient for
             // THAT resource (a second close is harmless — close() swallows it).

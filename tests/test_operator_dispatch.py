@@ -4452,3 +4452,143 @@ class TestClaudeDispatchPerOperatorSchemaCheapTier:
         )
 
         jsonschema.validate(result, schema)
+
+
+class TestIsolatedHermeticChild:
+    """``isolated=True`` must reach argv, and must stay opt-in (nexus-jh86x).
+
+    ``--strict-mcp-config`` keeps ambient MCP SERVERS out of the child but
+    does NOT stop it running the caller's SessionStart hooks: eight were
+    measured firing in a tool-free child on 2026-09-02, injecting the
+    conexus skills preamble, the beads workflow context and the ready-bead
+    list into a dispatch with no tools to use any of it. For the
+    per-commit reviewer that is a correctness break, not a cost nuisance --
+    it must review a diff WITHOUT seeing the decision record.
+
+    Both directions are pinned here because the code review of a461db0b7
+    found the flag shipped with zero assertions anywhere: a regression
+    dropping it would have passed every other test while silently
+    reintroducing the leak the commit was written to close. The
+    cross-cutting question of whether every operator should be isolated is
+    nexus-11nm2.
+    """
+
+    @staticmethod
+    async def _argv_for(**kwargs) -> list:
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+
+        async def intercept(*args, **kw):
+            captured.append(args)
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA, **kwargs)
+        return list(captured[0])
+
+    @pytest.mark.asyncio
+    async def test_isolated_true_emits_empty_setting_sources(self) -> None:
+        argv = await self._argv_for(isolated=True)
+        assert "--setting-sources" in argv, (
+            "isolated=True must pass --setting-sources so the child loads no "
+            "settings file and therefore runs none of the caller's hooks"
+        )
+        assert argv[argv.index("--setting-sources") + 1] == "", (
+            "the value must be EMPTY -- any source loads that file's hooks"
+        )
+
+    @pytest.mark.asyncio
+    async def test_isolation_is_now_the_DEFAULT(self) -> None:
+        """Flipped by nexus-11nm2 (2026-09-02) after the auth risk was
+        closed by measurement: no apiKeyHelper on this box, the cloud
+        estate cannot dispatch at all, and this laptop is the sole nx
+        operator. Every operator now gets a hermetic child."""
+        argv = await self._argv_for()
+        assert "--setting-sources" in argv
+        assert argv[argv.index("--setting-sources") + 1] == ""
+
+    @pytest.mark.asyncio
+    async def test_isolated_false_is_still_an_escape_hatch(self) -> None:
+        """A child that genuinely needs the caller's settings can still
+        ask, explicitly. That is now the exceptional case."""
+        assert "--setting-sources" not in await self._argv_for(isolated=False)
+
+    @pytest.mark.asyncio
+    async def test_isolation_does_not_break_the_t1_mint(self) -> None:
+        """The coupling a sibling session asked us to confirm rather than
+        assume (nexus-11nm2).
+
+        Suppressing settings for the child is a SEPARATE mechanism from
+        tool access, so the AGENTS.md contract predicts no interaction: an
+        ephemeral dispatch mints a T1 session only when it grants tool
+        access (nexus-bjltu), and that is unchanged by --setting-sources.
+        Predicted is not measured, and nothing covered isolated=True
+        TOGETHER with tool access -- the reviewer that drove the flag is
+        tool-free, so it only ever walked the non-minting path.
+        """
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        captured: list = []
+        mint_calls: list = []
+
+        async def intercept(*args, **kwargs):
+            captured.append(kwargs)
+            return proc
+
+        def _fake_mint(session_id: str, *, context: str) -> dict:
+            mint_calls.append(session_id)
+            return {"session_token": f"tok-for-{session_id}", "expires_in_seconds": 3600}
+
+        with (
+            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
+        ):
+            await claude_dispatch(
+                "prompt", _SIMPLE_SCHEMA, allowed_tools=["Read"], isolated=True
+            )
+
+        assert mint_calls, "tool access must still mint under isolated=True"
+        env = captured[0].get("env")
+        assert env is not None
+        assert env.get("NX_T1_SESSION_ID"), "the minted session id must still reach the child"
+        assert env.get("NX_T1_SESSION"), "the minted token must still reach the child"
+
+    @pytest.mark.asyncio
+    async def test_isolation_still_mints_nothing_when_tool_free(self) -> None:
+        """The other half of the same coupling: the default path must not
+        start minting just because it is now isolated."""
+        from nexus.operators.dispatch import claude_dispatch
+
+        proc = _make_proc()
+        mint_calls: list = []
+
+        async def intercept(*args, **kwargs):
+            return proc
+
+        def _fake_mint(session_id: str, *, context: str) -> dict:
+            mint_calls.append(session_id)
+            return {"session_token": "t", "expires_in_seconds": 3600}
+
+        with (
+            patch("asyncio.create_subprocess_exec", side_effect=intercept),
+            patch("nexus.db.t1.mint_t1_session_token", side_effect=_fake_mint),
+        ):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA, isolated=True)
+
+        assert mint_calls == []
+
+    @pytest.mark.asyncio
+    async def test_isolation_does_not_disturb_the_mcp_flags(self) -> None:
+        """The two mechanisms are independent and must both survive.
+
+        --strict-mcp-config covers servers, --setting-sources covers hooks.
+        A fix for one that quietly dropped the other would reopen the gap
+        it was meant to close.
+        """
+        argv = await self._argv_for(isolated=True)
+        assert "--strict-mcp-config" in argv
+        assert "--allowedTools" not in argv
+        assert "--mcp-config" not in argv

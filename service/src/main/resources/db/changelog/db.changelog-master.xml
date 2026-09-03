@@ -955,6 +955,40 @@
          per-step rationale. -->
     <include file="db/changelog/hygiene-001-not-null.xml"/>
 
+    <!-- nexus-6n51g — the topics.doc_count triggers pre-lock with
+         FOR NO KEY UPDATE instead of FOR UPDATE, closing the deadlock that
+         exhausted the DeadlockRetry belt in production on 2026-09-02 (14 x
+         HTTP 500, all on assign_from_chashes; 163 retry events reaching 3-4
+         of maxAttempts=4). Supersedes taxonomy-013-1/-2 via CREATE OR
+         REPLACE, so it must come after taxonomy-013-doc-count-lock-order.xml.
+         NOTE it is deliberately NOT the reordered-INSERT follow-up that
+         taxonomy-013's header prescribes: that variant was measured and still
+         deadlocked (10 retries / 20 rounds), while the lock-mode change alone
+         is clean — see taxonomy-015-doc-count-lock-mode.xml's own header for
+         the three measured variants.
+         Placed after hygiene-001-not-null.xml (current tail) and before the
+         grants-nexus-svc.xml runAlways block, matching the established
+         late-append convention (D0.1; see taxonomy-013's / taxonomy-014's /
+         hygiene-001's own <include> comments for the identical reasoning). -->
+    <include file="db/changelog/taxonomy-015-doc-count-lock-mode.xml"/>
+
+    <!-- nexus-ndoke — nx_answer_steps gains cache_read_input_tokens and
+         cache_creation_input_tokens. The Anthropic usage envelope reports
+         CACHED input separately, so a cached prompt records input_tokens=2
+         with the real size in one of these two fields; telemetry-007 had no
+         column for either, so input_tokens reads 2 on essentially every step
+         and every per-plan cost aggregate over these rows is a mixture of
+         cache-warm and cache-cold runs that nothing recorded can separate
+         (RDR-196's own numbers included). The client ALREADY parses both
+         fields (DispatchUsage) and discards them at the persistence boundary,
+         so this is plumbing rather than new instrumentation. Depends only on
+         telemetry-007-nx-answer-steps.xml, which creates the table. Placed
+         after taxonomy-015-doc-count-lock-mode.xml (current tail) and before
+         the grants-nexus-svc.xml runAlways block, matching the established
+         late-append convention (D0.1; see taxonomy-013's / taxonomy-014's /
+         taxonomy-015's own <include> comments for the identical reasoning). -->
+    <include file="db/changelog/telemetry-008-step-cache-tokens.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

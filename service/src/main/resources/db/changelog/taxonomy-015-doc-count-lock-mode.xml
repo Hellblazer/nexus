@@ -1,0 +1,312 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+
+    <!--
+        nexus-6n51g — the doc_count trigger pre-locks with FOR NO KEY UPDATE
+        instead of FOR UPDATE, closing the deadlock that exhausted the
+        DeadlockRetry belt in production on 2026-09-02.
+
+        THIS IS NOT THE FIX taxonomy-013 PRESCRIBED, AND THAT MATTERS.
+        taxonomy-013-doc-count-lock-order.xml (~lines 100-130) concluded that
+        the surviving deadlock could only be closed by reordering
+        assign_from_chashes_<dim>'s persisted-CTE INSERT ("... FROM nearest
+        ORDER BY topic_id, chash"), and deferred that as larger-blast-radius
+        follow-up. MEASURED, on real PG, 20 concurrent rounds per variant,
+        via TopicsDocCountDeadlockConcurrencyTest's new @Order(3) phase
+        (retry-counter DELTA, not escaped==0):
+
+            INSERT ORDER BY only, trigger FOR UPDATE  -> 10 retries  FAILS
+            INSERT ORDER BY + FOR NO KEY UPDATE       ->  0 retries  passes
+            FOR NO KEY UPDATE alone, no ORDER BY      ->  0 retries  passes (x3)
+
+        So the prescribed reordering is NEITHER NECESSARY NOR SUFFICIENT, and
+        this changeset deliberately does NOT make it. Shipping ~600 lines of
+        re-declared assign_from_chashes_<dim> bodies that measurably change
+        nothing would be cost without benefit, and would put three more
+        hand-maintained copies of those functions into the changelog.
+
+        WHY FOR UPDATE WAS THE PROBLEM. The persisted-CTE INSERT carries an FK
+        to nexus.topics, so PostgreSQL takes an implicit FOR KEY SHARE on each
+        referenced topics row. FOR KEY SHARE conflicts with exactly one
+        row-lock mode: FOR UPDATE. Two concurrent callers over an overlapping
+        topic set therefore BOTH hold FOR KEY SHARE on the shared rows before
+        either statement finishes, and then each one's AFTER trigger asks for
+        FOR UPDATE on those same rows — a lock UPGRADE that each transaction
+        can only complete once the other releases. Ordering the INSERT cannot
+        help: the shared locks are already held by both parties before any
+        upgrade is attempted. That is why variant A above still deadlocked.
+
+        WHEN the KEY SHARE is taken, precisely (correction, conexus-13
+        2026-09-02 — an earlier version of this note said "as each row is
+        inserted", which is wrong and matters for anyone trying to REPRODUCE
+        this). PostgreSQL implements an immediate FK as an AFTER ROW trigger
+        queued per row and fired at the END of the statement, so the RI checks
+        take their KEY SHARE locks in a tail immediately before the AFTER
+        STATEMENT trigger runs — not interleaved with the inserts. The
+        contention window is therefore that RI tail, not the whole insert,
+        which is far narrower than the wrong version implies.
+
+        WHAT THAT PREDICTS, AND IT WAS MEASURED BOTH WAYS. Two statements must
+        end within that tail of each other. In-process against a local PG they
+        routinely do: 10-13 retries per 20 rounds through the real call path.
+        Across a WAN they essentially never do: conexus-13 measured NINE
+        natural variants against the live cloud (edge and direct-DB, 2-4
+        writers, 7 to 24,000 rows per statement, equal and differing set sizes,
+        fresh rows per round, pre-connected) and every one read ZERO on both
+        CloudWatch deadlock_retry and pg_stat_database.deadlocks — with large
+        statements the second writer simply waited out the first. Forcing the
+        precondition (each writer holds FOR KEY SHARE on its topics in the same
+        transaction before the barrier, then calls the function) reproduces it
+        immediately: 20/20 rounds 40P01, deadlocks delta exactly 20, on live
+        0.1.94.
+
+        NONE OF THIS CHANGES THE REMEDY. The conflict is still KEY SHARE vs
+        FOR UPDATE and FOR NO KEY UPDATE still does not conflict with KEY
+        SHARE, so the fix below is unaffected. What the timing changes is how
+        you PROVE it: a natural-timing probe that reads zero is not evidence
+        the fix worked, because it read zero before the fix too.
+
+        WHY FOR NO KEY UPDATE IS BOTH SUFFICIENT AND CORRECT. The trigger's
+        whole purpose is an UPDATE of topics.doc_count, a NON-KEY column. A
+        plain UPDATE of a non-key column takes FOR NO KEY UPDATE, so that is
+        precisely the lock the trigger needs — pre-locking with FOR UPDATE was
+        always stronger than required. FOR NO KEY UPDATE does NOT conflict with
+        FOR KEY SHARE, which removes the upgrade cycle, while it DOES conflict
+        with itself, so taxonomy-013's central guarantee is untouched:
+        concurrent trigger invocations still serialize against each other, and
+        still acquire the shared topics rows in the same relative order via that
+        changeset's pre-sorted, one-row-at-a-time loop (preserved verbatim
+        below). taxonomy-013 closed source (1) and, by reaching for the
+        strongest lock rather than the sufficient one, opened source (2).
+
+        SCOPE: two functions, one clause each. The pre-sorted array_agg, the
+        single-table PK-indexed loop, and the batched-aggregate recompute are
+        taxonomy-013's, unchanged. Each rollback restores that file's body
+        verbatim, following its own verbatim-restore precedent.
+    -->
+
+    <changeSet id="taxonomy-015-1" author="nexus-6n51g">
+        <comment>
+            nexus.topics_doc_count_recount_ins (INSERT trigger): pre-lock with FOR NO KEY UPDATE
+            rather than FOR UPDATE. Body is taxonomy-013-1's verbatim apart
+            from that one clause — the lock mode the trigger's own non-key
+            doc_count UPDATE actually needs, and the one that does not conflict
+            with the INSERT's implicit FK FOR KEY SHARE.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.topics_doc_count_recount_ins()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant_ids TEXT[];
+    v_topic_ids  BIGINT[];
+    v_i          INT;
+BEGIN
+    -- Materialize the distinct (tenant_id, topic_id) pairs FIRST, PRE-SORTED
+    -- (ORDER BY inside array_agg itself — deterministic regardless of
+    -- new_rows' own row order), in a statement carrying NO locking clause.
+    SELECT array_agg(tenant_id ORDER BY tenant_id, topic_id),
+           array_agg(topic_id  ORDER BY tenant_id, topic_id)
+      INTO v_tenant_ids, v_topic_ids
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM new_rows) d;
+
+    -- (1) CORRECTNESS: acquire every affected topics row lock up front, ONE
+    -- ROW AT A TIME via a single-table, PK-indexed, join-free `FOR UPDATE`
+    -- — see the IMPLEMENTATION NOTE above for why a JOIN-based `ORDER BY
+    -- ... FOR UPDATE` does NOT reliably serialize this (PostgreSQL's
+    -- LockRows node locks in JOIN order, not sorted order, once a join is
+    -- involved). Iterating the PRE-SORTED arrays above one indexed
+    -- single-row lock at a time is what actually guarantees every
+    -- concurrent invocation acquires the shared topics in the same
+    -- relative order.
+    FOR v_i IN 1 .. COALESCE(array_length(v_topic_ids, 1), 0) LOOP
+        PERFORM 1 FROM nexus.topics
+         WHERE tenant_id = v_tenant_ids[v_i] AND id = v_topic_ids[v_i]
+           FOR NO KEY UPDATE;
+    END LOOP;
+
+    -- (2) PROBABILITY: recompute doc_count for every affected topic via ONE
+    -- batched GROUP BY aggregate (not a per-row correlated subquery
+    -- re-evaluated once per topics row), narrowing the window the
+    -- just-acquired locks above sit held while the scan work happens.
+    UPDATE nexus.topics t
+       SET doc_count = c.cnt
+      FROM (
+          SELECT ta.tenant_id, ta.topic_id, COUNT(*) AS cnt
+            FROM nexus.topic_assignments ta
+            JOIN (SELECT DISTINCT tenant_id, topic_id FROM new_rows) a
+              ON a.tenant_id = ta.tenant_id AND a.topic_id = ta.topic_id
+           GROUP BY ta.tenant_id, ta.topic_id
+      ) c
+     WHERE t.tenant_id = c.tenant_id AND t.id = c.topic_id;
+    RETURN NULL;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <!-- Restores taxonomy-013-1's body verbatim (FOR UPDATE). -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.topics_doc_count_recount_ins()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant_ids TEXT[];
+    v_topic_ids  BIGINT[];
+    v_i          INT;
+BEGIN
+    -- Materialize the distinct (tenant_id, topic_id) pairs FIRST, PRE-SORTED
+    -- (ORDER BY inside array_agg itself — deterministic regardless of
+    -- new_rows' own row order), in a statement carrying NO locking clause.
+    SELECT array_agg(tenant_id ORDER BY tenant_id, topic_id),
+           array_agg(topic_id  ORDER BY tenant_id, topic_id)
+      INTO v_tenant_ids, v_topic_ids
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM new_rows) d;
+
+    -- (1) CORRECTNESS: acquire every affected topics row lock up front, ONE
+    -- ROW AT A TIME via a single-table, PK-indexed, join-free `FOR UPDATE`
+    -- — see the IMPLEMENTATION NOTE above for why a JOIN-based `ORDER BY
+    -- ... FOR UPDATE` does NOT reliably serialize this (PostgreSQL's
+    -- LockRows node locks in JOIN order, not sorted order, once a join is
+    -- involved). Iterating the PRE-SORTED arrays above one indexed
+    -- single-row lock at a time is what actually guarantees every
+    -- concurrent invocation acquires the shared topics in the same
+    -- relative order.
+    FOR v_i IN 1 .. COALESCE(array_length(v_topic_ids, 1), 0) LOOP
+        PERFORM 1 FROM nexus.topics
+         WHERE tenant_id = v_tenant_ids[v_i] AND id = v_topic_ids[v_i]
+           FOR UPDATE;
+    END LOOP;
+
+    -- (2) PROBABILITY: recompute doc_count for every affected topic via ONE
+    -- batched GROUP BY aggregate (not a per-row correlated subquery
+    -- re-evaluated once per topics row), narrowing the window the
+    -- just-acquired locks above sit held while the scan work happens.
+    UPDATE nexus.topics t
+       SET doc_count = c.cnt
+      FROM (
+          SELECT ta.tenant_id, ta.topic_id, COUNT(*) AS cnt
+            FROM nexus.topic_assignments ta
+            JOIN (SELECT DISTINCT tenant_id, topic_id FROM new_rows) a
+              ON a.tenant_id = ta.tenant_id AND a.topic_id = ta.topic_id
+           GROUP BY ta.tenant_id, ta.topic_id
+      ) c
+     WHERE t.tenant_id = c.tenant_id AND t.id = c.topic_id;
+    RETURN NULL;
+END;
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="taxonomy-015-2" author="nexus-6n51g">
+        <comment>
+            nexus.topics_doc_count_recount_del (DELETE trigger): pre-lock with FOR NO KEY UPDATE
+            rather than FOR UPDATE. Body is taxonomy-013-2's verbatim apart
+            from that one clause — the lock mode the trigger's own non-key
+            doc_count UPDATE actually needs, and the one that does not conflict
+            with the INSERT's implicit FK FOR KEY SHARE.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.topics_doc_count_recount_del()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant_ids TEXT[];
+    v_topic_ids  BIGINT[];
+    v_i          INT;
+BEGIN
+    -- Materialize the distinct (tenant_id, topic_id) pairs FIRST, PRE-SORTED
+    -- — same reasoning as the INSERT-path function above.
+    SELECT array_agg(tenant_id ORDER BY tenant_id, topic_id),
+           array_agg(topic_id  ORDER BY tenant_id, topic_id)
+      INTO v_tenant_ids, v_topic_ids
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM old_rows) d;
+
+    -- (1) CORRECTNESS: same single-row, join-free, PK-indexed lock loop as
+    -- the INSERT-path function above (see its IMPLEMENTATION NOTE).
+    FOR v_i IN 1 .. COALESCE(array_length(v_topic_ids, 1), 0) LOOP
+        PERFORM 1 FROM nexus.topics
+         WHERE tenant_id = v_tenant_ids[v_i] AND id = v_topic_ids[v_i]
+           FOR NO KEY UPDATE;
+    END LOOP;
+
+    -- (2) PROBABILITY: single batched-aggregate recompute, LEFT JOINed so a
+    -- topic whose LAST assignment was just deleted (zero remaining rows,
+    -- absent from the aggregate's GROUP BY) still resets to 0 rather than
+    -- being skipped.
+    UPDATE nexus.topics t
+       SET doc_count = COALESCE(c.cnt, 0)
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM old_rows) a
+      LEFT JOIN (
+          SELECT ta.tenant_id, ta.topic_id, COUNT(*) AS cnt
+            FROM nexus.topic_assignments ta
+            JOIN (SELECT DISTINCT tenant_id, topic_id FROM old_rows) a2
+              ON a2.tenant_id = ta.tenant_id AND a2.topic_id = ta.topic_id
+           GROUP BY ta.tenant_id, ta.topic_id
+      ) c ON c.tenant_id = a.tenant_id AND c.topic_id = a.topic_id
+     WHERE t.tenant_id = a.tenant_id AND t.id = a.topic_id;
+    RETURN NULL;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <!-- Restores taxonomy-013-2's body verbatim (FOR UPDATE). -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.topics_doc_count_recount_del()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_tenant_ids TEXT[];
+    v_topic_ids  BIGINT[];
+    v_i          INT;
+BEGIN
+    -- Materialize the distinct (tenant_id, topic_id) pairs FIRST, PRE-SORTED
+    -- — same reasoning as the INSERT-path function above.
+    SELECT array_agg(tenant_id ORDER BY tenant_id, topic_id),
+           array_agg(topic_id  ORDER BY tenant_id, topic_id)
+      INTO v_tenant_ids, v_topic_ids
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM old_rows) d;
+
+    -- (1) CORRECTNESS: same single-row, join-free, PK-indexed lock loop as
+    -- the INSERT-path function above (see its IMPLEMENTATION NOTE).
+    FOR v_i IN 1 .. COALESCE(array_length(v_topic_ids, 1), 0) LOOP
+        PERFORM 1 FROM nexus.topics
+         WHERE tenant_id = v_tenant_ids[v_i] AND id = v_topic_ids[v_i]
+           FOR UPDATE;
+    END LOOP;
+
+    -- (2) PROBABILITY: single batched-aggregate recompute, LEFT JOINed so a
+    -- topic whose LAST assignment was just deleted (zero remaining rows,
+    -- absent from the aggregate's GROUP BY) still resets to 0 rather than
+    -- being skipped.
+    UPDATE nexus.topics t
+       SET doc_count = COALESCE(c.cnt, 0)
+      FROM (SELECT DISTINCT tenant_id, topic_id FROM old_rows) a
+      LEFT JOIN (
+          SELECT ta.tenant_id, ta.topic_id, COUNT(*) AS cnt
+            FROM nexus.topic_assignments ta
+            JOIN (SELECT DISTINCT tenant_id, topic_id FROM old_rows) a2
+              ON a2.tenant_id = ta.tenant_id AND a2.topic_id = ta.topic_id
+           GROUP BY ta.tenant_id, ta.topic_id
+      ) c ON c.tenant_id = a.tenant_id AND c.topic_id = a.topic_id
+     WHERE t.tenant_id = a.tenant_id AND t.id = a.topic_id;
+    RETURN NULL;
+END;
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

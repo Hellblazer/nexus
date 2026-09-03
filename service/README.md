@@ -67,6 +67,14 @@ is not supported — DJL 0.30.0 ships no `osx-x86_64` tokenizers lib.)
 crowd-out headroom (nexus-4ktfm; see `PgSession.DEFAULT_EF_SEARCH_FLOOR`).
 A malformed/out-of-range value fails the service AT BOOT with the parse
 error (validated from `Main`, never deferred to the first query).
+`NX_SEARCH_STATEMENT_TIMEOUT_MS` (default 30000, range 1..600000) bounds
+every vector-ranked statement with a transaction-local `statement_timeout`
+(nexus-g17tf) so an orphaned or pathological scan cancels (SQLSTATE 57014)
+instead of pinning xmin for hours. Sized to the edge's 30s budget; `0`
+would disable the bound and is refused at boot. The shutdown hook also
+terminates this process's own backends (`BackendReaper`, keyed on a
+per-boot `application_name`) before closing the pool, since a CPU-bound
+backend never notices a closed socket.
 
 ### CI
 
