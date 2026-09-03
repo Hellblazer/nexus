@@ -1026,6 +1026,77 @@ class TestRenderContinuationText:
             if stripped and set(stripped) == {"`"}:
                 assert len(stripped) < len(fence)
 
+    # ── Retrieval provenance (nexus-kim0o) ──────────────────────────────
+
+    @staticmethod
+    def _envelope_with_hydrated_bundles() -> dict:
+        env = TestRenderContinuationText._envelope()
+        env["hydrated_bundles"] = [
+            {
+                "step_index": 0,
+                "collection": "knowledge__dt-papers",
+                "items": [
+                    {"id": "a", "chash": "h1", "tumbler": "1.1",
+                     "collection": "knowledge__dt-papers", "distance": 0.123},
+                    {"id": "b", "chash": "h2", "tumbler": "1.2",
+                     "collection": "knowledge__dt-papers", "distance": 0.456},
+                ],
+            },
+            {
+                "step_index": 1,
+                "collection": "rdr__1-1",
+                "items": [
+                    {"id": "c", "chash": "h3", "tumbler": "2.1",
+                     "collection": "rdr__1-1", "distance": 0.789},
+                ],
+            },
+        ]
+        return env
+
+    def test_renders_every_items_collection(self):
+        """nexus-kim0o: the structured envelope's hydrated_bundles already
+        carries collection + distance per item; the text-mode instruction
+        rendered none of it. Every item's collection must name itself in
+        the rendered text."""
+        env = self._envelope_with_hydrated_bundles()
+        text = render_continuation_text(env)
+        for bundle in env["hydrated_bundles"]:
+            for item in bundle["items"]:
+                assert item["collection"] in text, (
+                    f"collection {item['collection']!r} for item "
+                    f"{item['id']!r} missing from rendered instruction"
+                )
+
+    def test_renders_distance_per_item(self):
+        env = self._envelope_with_hydrated_bundles()
+        text = render_continuation_text(env)
+        assert "0.123" in text
+        assert "0.456" in text
+        assert "0.789" in text
+
+    def test_no_hydrated_bundles_renders_no_provenance_section(self):
+        """Empty hydrated_bundles (the ``_envelope()`` default) must not
+        add an empty/labeled section with nothing under it."""
+        text = render_continuation_text(self._envelope())
+        assert "provenance" not in text.lower()
+
+    def test_provenance_does_not_alter_the_fenced_prompt(self):
+        """The byte-identity golden (TestShapeAFidelityGolden /
+        TestShapeBFidelityGolden) asserts ``envelope["reduction_spec"]
+        ["prompt"]`` equals the real dispatch_bundle prompt verbatim.
+        This renderer must add provenance OUTSIDE that fenced block,
+        never inside it — confirmed here by asserting the fenced prompt
+        text is unchanged and none of the injected collection names leak
+        inside the fence."""
+        env = self._envelope_with_hydrated_bundles()
+        text = render_continuation_text(env)
+        fence_start = text.index("```text")
+        fence_end = text.index("```", fence_start + len("```text"))
+        fenced_prompt = text[fence_start + len("```text") + 1:fence_end]
+        assert fenced_prompt.rstrip("\n") == env["reduction_spec"]["prompt"]
+        assert "knowledge__dt-papers" not in fenced_prompt
+        assert "rdr__1-1" not in fenced_prompt
+
 
 # ── Go-live gate (nexus-4e75w.4 sequencing constraint) ──────────────────────
 
