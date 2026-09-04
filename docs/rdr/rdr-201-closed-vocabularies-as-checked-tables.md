@@ -34,7 +34,9 @@ published with no deploy armed) and once by leaving a state uncovered (the
 7.1.0 / v0.1.62 inversion, a client shipped pinned to an engine lacking its
 own features). In the vocabulary of a transition table those are an overlap
 and a coverage gap, and a table would have reported both before either
-shipped.
+shipped. (Amended 2026-09-04: as built, the table pins the first and, by
+Sam's 2026-09-02 event-invariance ruling, cannot represent the second; see
+Revision History.)
 
 This came into view through a comparison with `cwensel/intrastate`
 (2026-09-01), a Go kernel whose whole purpose is to hold
@@ -387,6 +389,27 @@ forbids the question. A row carries exactly one of
 `refuse` (a typed refusal code). At most one `escape = true` row per group
 closes the group's remainder and takes the `closed-by-escape` advisory.
 
+**Two proofs of different strength (amended 2026-09-04).** The release
+choreography table has no escape rows: 89 rows, 1,155 enumerated cells,
+zero findings, every cell reached by a named row. The packaged lifecycle
+table proves its 12 legal-transition groups by enumeration and closes the
+other 24 groups with one bare escape row each, so two thirds of it is
+proved the way a `default:` branch proves a switch. That is the intended
+design for a six-status lifecycle whose illegal transitions carry no
+distinguishing reason, and the checker reports it as an advisory. The two
+sentences "the lifecycle is a checked table" and "the release choreography
+is a checked table" therefore make claims of different strength, and the
+table header now says so.
+
+**Guard-dimension independence (amended 2026-09-04).** The coverage
+product is the full cross-product of declared domains. A combination that
+cannot occur in reality is still a cell the checker demands a row for:
+false-positive gaps, never false negatives. The release table handles it by
+keeping impossible values out of the domain (its header's
+short-circuit-by-omission). The limit is inherited from the design this
+borrows from, where it was equally undocumented; `check.py`'s
+`full_product` docstring now states it.
+
 **Checker.** `src/nexus/tables/check.py` (name provisional), stdlib only,
 the prototype from Finding 3 productionised: load, validate every literal
 against its declared domain, group rows by match assignment, prove
@@ -492,6 +515,7 @@ Three new data files and a checker join the lint bucket. The release scripts shr
 | Two rows disagree at runtime (`ambiguous-match`) | Evaluator refuses with the row ids | Release or status change halts loudly; the checker should have caught it, so this is also a checker defect |
 | A record cites a dependency the catalog cannot resolve to one tumbler | Index-time warning naming both candidates | Edge not created; audit shows the record as unlinked |
 | Table file missing or unparsable | Consumer refuses to run, exit 2 | No silent fallback to the old imperative path |
+| A real invariant between two guard dimensions is not expressible as a guard atom | Not detected: the checker demands coverage of the impossible cell (false-positive gap) | Author either writes a row for a cell that never occurs or drops the value from the domain; documented at `full_product`, 2026-09-04 |
 
 ## Implementation Plan
 
@@ -643,3 +667,4 @@ class this RDR names was found and fixed during its own research.
 - 2026-09-02: Sam ruled O2 KEEP both rows (nexus-j9z30.17): `--paired-deploy-auto` is the unattended path (release.yml) and trusts the cloud probe; `--paired-deploy` is attended, where refusing and asking is cheap. Recorded as comments at both rows and in the table header; zero behaviour change.
 - 2026-09-02: Phase 2 complete on develop (nexus-j9z30.11-.17, nexus-w2x5x): 89 cells enumerated, table authored, both scripts routed through one shared module (`scripts/release_choreography.py`), old path deleted after per-cell parity on verdict and per-stream text; one cell's stream (`main_bare_tracker_opt_out`, exit 0 on stderr) carried by an `emit.stream` field. Measured size against Finding 2's estimate (about 580 replaced, about 460 added, net 120 saved): the two scripts shrank 52 lines; the table (834), catalog (554) and shared evaluator (124) added about 1,500 -- net about +1,460, not -120. The auditability case (scattered guards becoming checked, disjoint, total rows) stands; the size claim did not, and Trade-offs is amended. The message-drift Failure Modes row is restated for the post-cutover harness (frozen per-stream text oracle plus placeholder check).
 - 2026-09-02: Phase 3 complete on develop (nexus-j9z30.20-.24): canonical-tumbler rule, dependency edges seeded from frontmatter (6 `supersedes`, ~259 `relates`), `set-status` marks the records a flipped record SUPERSEDES `needs-reexamination`, the edge named on the marker (Sam, 2026-09-02: `supersedes` edges only, and successor -> predecessor only -- a successor's flip leaves its predecessor's `superseded` verdict stale; a predecessor's flip marks nobody), `rdr-audit` lists markers and, since the SessionStart reconciler was deleted under nexus-e19sa, prints a `DRIFT:` line per file-vs-T2 status disagreement -- detection, not reconciliation. Markers are cleared by hand after re-examination. Test Plan's Phase 3 floor corrected from 23 to the 6 real edges. Measured backlog at landing: no markers exist yet; of the 6 edges, three predecessors carry a verdict inconsistent with being superseded (RDR-014 closed, RDR-112 abandoned, RDR-159 closed) -- recorded on nexus-j9z30.22, not marked retroactively.
+- 2026-09-04: Amended after the intrastate reanalysis (T3 `analysis-deep-intrastate-vs-conexus-reanalysis-2026-09-04`, T2 [24279]) without reopening. Three corrections of record. (1) The Problem Statement's "a table would have reported both" is narrowed: GH #1402 (client tag pushed with the cloud below floor and no deploy armed) is the cell `check_floor_bare::bare_probe_stale_via_success`, exit 1, now pinned by `tests/tables/test_release_incidents.py`; the 7.1.0/v0.1.62 inversion is not representable in this table by the 2026-09-02 event-invariance ruling and lives in the skill choreography, so the table does not and cannot catch it. (2) The lifecycle table's proof is the weaker kind: 24 of its 36 groups close by a bare escape row, reported as an advisory; the release table is the escape-free proof. Both the Technical Design and the table header now say which is which. (3) The checker assumes guard dimensions independent, a limit inherited undocumented from the design borrowed; recorded at `full_product` and in Failure Modes. Also corrected: the lifecycle header's claim that an omitted status is not caught was stale, `_check_match_totality` catches it. The re-examination edge has still never fired live; `tests/test_rdr_needs_reexamination.py` exercises a synthetic flip, so the first real one is not the first run.

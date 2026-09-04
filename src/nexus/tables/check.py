@@ -150,6 +150,23 @@ Assignment = tuple[str, ...]
 
 
 def full_product(dims: list[str], dimensions: dict[str, Dimension]) -> set[Assignment]:
+    """Every assignment over ``dims``, the universe coverage is proved against.
+
+    KNOWN LIMIT: guard dimensions are assumed INDEPENDENT. The product is
+    the full cross-product of the declared domains, so a combination that
+    cannot occur in reality (an invariant enforced somewhere the table
+    cannot see, such as "probe is never examined when pin_currency
+    blocks") is still a cell the checker demands a row for. This produces
+    false-positive coverage gaps, never false negatives, so the safety
+    direction holds; the cost is that authors must either write a row for
+    an impossible cell or keep the impossible value out of the domain.
+    docs/tables/release-choreography.toml does the second (its header calls
+    it short-circuit-by-omission and explains the dropped "n/a" value).
+    The limit was inherited from the design this borrows from and went
+    undocumented on both sides until the 2026-09-04 reanalysis; a table
+    author who hits a phantom gap should read this paragraph before
+    inventing a row.
+    """
     ranges = [dimensions[d].domain for d in dims]
     size = 1
     for r in ranges:
