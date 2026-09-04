@@ -22,75 +22,51 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class OnnxThreadPolicyTest {
 
     @Test
-    void defaultsToCoresDividedByAdmissionPermits_minimumOne() {
-        assertThat(OnnxThreadPolicy.intraOpThreads(name -> null, 16, 2)).isEqualTo(8);
-        assertThat(OnnxThreadPolicy.intraOpThreads(name -> null, 16, 8)).isEqualTo(2);
-        assertThat(OnnxThreadPolicy.intraOpThreads(name -> null, 1, 4)).isEqualTo(1);
-        assertThat(OnnxThreadPolicy.intraOpThreads(name -> null, 16, 100)).isEqualTo(1);
+    void unsetLeavesOrtDefault_neverDerivedFromCoresOrPermits() {
+        // The ONNX session is one shared object per model, so its intra-op
+        // pool is the whole engine's embedding width. v0.1.99 derived a count
+        // from cores/permits and capped a 16-core box at 2 threads; the 7.29.0
+        // shakedown measured nx index rdr stalling on it. Unset now means
+        // "do not call setIntraOpNumThreads at all": ORT's own default.
+        assertThat(OnnxThreadPolicy.intraOpThreads(name -> null)).isEmpty();
+        Map<String, String> permitsOnly = Map.of(LocalOnnxAdmission.PERMITS_ENV, "8");
+        assertThat(OnnxThreadPolicy.intraOpThreads(permitsOnly::get)).isEmpty();
     }
 
     @Test
     void explicitOverrideWins() {
         Map<String, String> env = Map.of(OnnxThreadPolicy.INTRA_OP_THREADS_ENV, "4");
-        assertThat(OnnxThreadPolicy.intraOpThreads(env::get, 16, 2)).isEqualTo(4);
+        assertThat(OnnxThreadPolicy.intraOpThreads(env::get)).hasValue(4);
     }
 
     @Test
     void refusesZeroOrNegativeOverride() {
         Map<String, String> zero = Map.of(OnnxThreadPolicy.INTRA_OP_THREADS_ENV, "0");
-        assertThatThrownBy(() -> OnnxThreadPolicy.intraOpThreads(zero::get, 16, 2))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining(OnnxThreadPolicy.INTRA_OP_THREADS_ENV);
-
-        Map<String, String> negative = Map.of(OnnxThreadPolicy.INTRA_OP_THREADS_ENV, "-1");
-        assertThatThrownBy(() -> OnnxThreadPolicy.intraOpThreads(negative::get, 16, 2))
+        assertThatThrownBy(() -> OnnxThreadPolicy.intraOpThreads(zero::get))
+                .isInstanceOf(IllegalArgumentException.class);
+        Map<String, String> negative = Map.of(OnnxThreadPolicy.INTRA_OP_THREADS_ENV, "-3");
+        assertThatThrownBy(() -> OnnxThreadPolicy.intraOpThreads(negative::get))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void refusesNonNumericOverride() {
-        Map<String, String> junk = Map.of(OnnxThreadPolicy.INTRA_OP_THREADS_ENV, "lots");
-        assertThatThrownBy(() -> OnnxThreadPolicy.intraOpThreads(junk::get, 16, 2))
+        Map<String, String> junk = Map.of(OnnxThreadPolicy.INTRA_OP_THREADS_ENV, "many");
+        assertThatThrownBy(() -> OnnxThreadPolicy.intraOpThreads(junk::get))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
-    void blankOverrideFallsBackToDefault() {
+    void blankOverrideLeavesOrtDefault() {
         Map<String, String> blank = Map.of(OnnxThreadPolicy.INTRA_OP_THREADS_ENV, "   ");
-        assertThat(OnnxThreadPolicy.intraOpThreads(blank::get, 16, 2)).isEqualTo(8);
+        assertThat(OnnxThreadPolicy.intraOpThreads(blank::get)).isEmpty();
     }
 
     @Test
-    void permitsTimesThreads_neverExceedsCores_wherePermitsFitsWithinCores() {
-        // The review-2 coordination invariant: floor(cores/permits) * permits <= cores,
-        // for every permits value that itself fits within cores (the only regime
-        // where "coordinated" is a meaningful claim — see the next test for the
-        // permits > cores degenerate case).
-        for (int cores : new int[] {1, 2, 3, 4, 7, 16, 32, 64}) {
-            for (int permits = 1; permits <= cores; permits++) {
-                int threads = OnnxThreadPolicy.intraOpThreads(name -> null, cores, permits);
-                assertThat((long) threads * permits)
-                        .as("cores=%d permits=%d threads=%d", cores, permits, threads)
-                        .isLessThanOrEqualTo(cores);
-            }
-        }
-    }
-
-    @Test
-    void threadsFloorsToOne_whenPermitsExceedCores() {
-        // permits > cores is a degenerate config (more concurrent-embed permits
-        // than the box has cores) — the minimum-1 floor applies and the product
-        // can legitimately exceed cores; this is the boundary the previous test
-        // deliberately excludes.
-        assertThat(OnnxThreadPolicy.intraOpThreads(name -> null, 4, 100)).isEqualTo(1);
-    }
-
-    @Test
-    void realEnvEntryPoint_returnsPositiveValue() {
-        // Production entry point (System::getenv + real core count, admission
-        // permits from LocalOnnxAdmission.permitsFromEnv()) — no override in
-        // the test process env, so this exercises the real coordination path
-        // end to end.
-        assertThat(OnnxThreadPolicy.intraOpThreads()).isPositive();
+    void realEnvEntryPoint_isEmptyOrPositive() {
+        // Production entry point on the real env: either the operator set an
+        // explicit positive count or the session keeps ORT's default.
+        var threads = OnnxThreadPolicy.intraOpThreads();
+        assertThat(threads.isEmpty() || threads.getAsInt() > 0).isTrue();
     }
 }

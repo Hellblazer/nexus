@@ -5,6 +5,7 @@ package dev.nexus.service.vectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.OptionalInt;
 import java.util.function.Function;
 
 /**
@@ -23,17 +24,23 @@ import java.util.function.Function;
  * the health-probe thread of CPU). This class is the ONE resolver all three
  * sites read, so the bound is consistent.
  *
- * <p><b>Coordinated with {@link LocalOnnxAdmission} (review finding 2).</b>
- * The default is no longer independent of the admission-permits default:
- * {@code intraOpThreads = max(1, availableCores / admissionPermits)}, so
- * {@code permits * intraOpThreads <= availableCores} by construction (floor
- * division) in the unconfigured case — round 1 defaulted both to {@code
- * cores/2} independently, which on a 16-core box could reach 8x8=64 threads
- * if every admitted embed ran full-width, before even counting round 1's
- * separate double-admission defect. An explicit {@code
- * NX_ONNX_INTRA_OP_THREADS} override still wins outright (an operator who
- * sets it is accepting responsibility for the product), refused at zero,
- * negative, or non-numeric, same discipline as {@link
+ * <p><b>The session is SHARED, so the bound is per PROCESS, not per request
+ * (2026-09-04, the v0.1.99 regression).</b> v0.1.99 derived the default as
+ * {@code availableCores / admissionPermits} on the reasoning that each
+ * admitted embed would run its own full-width session. It does not: every
+ * request runs against ONE {@code OrtSession} per model, and ORT's intra-op
+ * pool belongs to the session, so that arithmetic capped the WHOLE engine
+ * at cores/permits threads (two on a 16-core box). The 7.29.0 release
+ * shakedown measured it: {@code nx index rdr} sat 30+ minutes with the
+ * engine pinned at ~190% CPU, where the previous engine finished the same
+ * step in minutes. The engine therefore no longer sets the intra-op count
+ * at all unless an operator asks: with no override the session keeps ORT's
+ * own default (its physical-core heuristic, the exact pre-v0.1.99 width the
+ * 7.8-of-16-cores measurement above was taken against), so this class never
+ * has to guess at logical-versus-physical cores. {@link LocalOnnxAdmission}
+ * alone bounds concurrency (admitted runs share this one pool, ORT schedules
+ * them onto it). {@code NX_ONNX_INTRA_OP_THREADS} sets an explicit count,
+ * refused at zero, negative, or non-numeric, same discipline as {@link
  * LocalOnnxAdmission#permitsFromEnv}.
  *
  * <p><b>Unmeasured (critic finding 3).</b> This class does not claim a
@@ -53,35 +60,35 @@ final class OnnxThreadPolicy {
     private OnnxThreadPolicy() {}
 
     /**
-     * Production entry point: real env, real core count, admission permits
-     * resolved from {@link LocalOnnxAdmission#permitsFromEnv()} so the
-     * default coordinates with the admission bound. Logs the resolved value
-     * at INFO (previously this class logged nothing — review finding 2/5;
-     * pairs with {@link LocalOnnxAdmission}'s own boot log line for full
-     * "both resolved values" visibility).
+     * Production entry point: real env. Returns the operator's explicit
+     * intra-op count, or empty when the session should keep ORT's default.
+     * Logs the resolved choice at INFO either way, so an operator can see
+     * which applies without reading the code.
      */
-    static int intraOpThreads() {
-        int cores = Runtime.getRuntime().availableProcessors();
-        int permits = LocalOnnxAdmission.permitsFromEnv();
-        int threads = intraOpThreads(System::getenv, cores, permits);
-        log.info("event=onnx_intra_op_threads_configured threads={} admission_permits={} cores={}",
-                threads, permits, cores);
+    static OptionalInt intraOpThreads() {
+        OptionalInt threads = intraOpThreads(System::getenv);
+        if (threads.isPresent()) {
+            log.info("event=onnx_intra_op_threads_configured threads={} source=env shared_session=true",
+                    threads.getAsInt());
+        } else {
+            log.info("event=onnx_intra_op_threads_configured threads=ort_default source=default shared_session=true");
+        }
         return threads;
     }
 
     /**
      * Env-injectable resolver (tests never mutate real process env).
      *
-     * <p>Default: {@code max(1, availableCores / admissionPermits)} — see
-     * class javadoc for the coordination rationale. {@code
-     * NX_ONNX_INTRA_OP_THREADS} overrides the default; a non-positive or
-     * non-numeric override is REFUSED loudly (no-silent-fallbacks-for-
-     * correctness).
+     * <p>Empty when {@code NX_ONNX_INTRA_OP_THREADS} is unset or blank: the
+     * session keeps ORT's default, see the class javadoc for why it is never
+     * derived from cores or permits here. A set value is applied verbatim; a
+     * non-positive or non-numeric value is REFUSED loudly
+     * (no-silent-fallbacks-for-correctness).
      */
-    static int intraOpThreads(Function<String, String> env, int availableCores, int admissionPermits) {
+    static OptionalInt intraOpThreads(Function<String, String> env) {
         String raw = env.apply(INTRA_OP_THREADS_ENV);
         if (raw == null || raw.isBlank()) {
-            return Math.max(1, availableCores / Math.max(1, admissionPermits));
+            return OptionalInt.empty();
         }
         int parsed;
         try {
@@ -94,6 +101,6 @@ final class OnnxThreadPolicy {
             throw new IllegalArgumentException(
                     INTRA_OP_THREADS_ENV + " must be positive, got: " + parsed);
         }
-        return parsed;
+        return OptionalInt.of(parsed);
     }
 }

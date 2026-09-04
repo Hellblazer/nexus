@@ -79,9 +79,13 @@ public final class OnnxEmbedder implements Embedder {
 
             var sessionOpts = new OrtSession.SessionOptions();
             // Use CPU only — GPU not required for local mode
-            // nexus-00wsf residual: bound intra-op threads so one request cannot
-            // take every core (measured 7.8 of 16 with no bound at all).
-            sessionOpts.setIntraOpNumThreads(OnnxThreadPolicy.intraOpThreads());
+            // nexus-00wsf: the intra-op width of this SHARED session comes from one
+            // resolver (OnnxThreadPolicy: ORT's own default unless an operator overrides);
+            // concurrency is bounded by LocalOnnxAdmission, never by this number.
+            var intraOp = OnnxThreadPolicy.intraOpThreads();
+            if (intraOp.isPresent()) {
+                sessionOpts.setIntraOpNumThreads(intraOp.getAsInt());
+            }
             this.session = ortEnv.createSession(modelPath, sessionOpts);
 
             // DJL HuggingFace tokenizer: truncation to maxLength=256

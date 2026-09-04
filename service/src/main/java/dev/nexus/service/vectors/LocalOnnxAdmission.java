@@ -40,7 +40,7 @@ import java.util.function.Function;
  * {@code embedSubBatched} already computes padded-token-area per sub-batch,
  * so the input is cheap to obtain — the gap is threading that area out to
  * this layer BEFORE {@code delegate.embed()} runs, which this round's scope
- * (bound the call count, coordinate it with the intra-op thread count) does
+ * (bound the call count; the intra-op width belongs to the one shared session, see OnnxThreadPolicy) does
  * not cover.
  *
  * <p>Two acquisition policies, chosen per caller (see {@link
@@ -207,11 +207,10 @@ public final class LocalOnnxAdmission {
      * Env-injectable resolver (tests never mutate real process env — mirrors
      * {@code OnnxModelPaths}/{@code MintRateLimiter}'s injection pattern).
      *
-     * <p>Default: half the available cores (minimum 1) — a single local embed
-     * can itself use several cores once {@link OnnxThreadPolicy} bounds intra-op
-     * parallelism (which now DERIVES its own default from this permits value —
-     * see that class), so admitting more than half the box at once would
-     * still let concurrent requests fully oversubscribe every core. {@code
+     * <p>Default: half the available cores (minimum 1). The intra-op width of
+     * the one shared ONNX session is NOT derived from this value (v0.1.99 did
+     * that and capped the whole engine, see {@link OnnxThreadPolicy}); this
+     * bound limits how many embed calls share that pool at once. {@code
      * NX_LOCAL_EMBED_ADMISSION_PERMITS} overrides the default; a non-positive
      * or non-numeric override is REFUSED loudly rather than silently coerced
      * (no-silent-fallbacks-for-correctness).
