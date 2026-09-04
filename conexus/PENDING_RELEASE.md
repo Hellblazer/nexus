@@ -27,9 +27,3 @@ nothing.
 mechanize, it matters enough to ship.
 
 ---
-
-
-## Awaiting the next release or plugin cut (pinned: v7.28.0)
-
-- `conexus/skills/using-nx-skills/SKILL.md` (nexus-ht9m5): reworded in plain register, no rule or destination added or removed; em dashes and bold lead-ins gone so the always-injected guidance stops modelling the prose the Communication rules ban.
-- `conexus/skills/orchestration/SKILL.md` (nexus-ht9m5): same register pass; 31 em dashes and every bold lead-in removed, three heading em dashes became colons, no rule, identifier, path, or fenced template changed.
