@@ -59,19 +59,42 @@ _log = structlog.get_logger(__name__)
 #: A verdict outside this set is a defect rather than a new case.
 VERDICTS: Final[tuple[str, ...]] = ("FIX-NOW", "FILE", "DROP")
 
-#: T2 project for review records, and the title prefix that identifies
-#: them within it.
+#: T2 project for review records.
 #:
 #: Sam ruled the shared ``nexus`` project on 2026-09-02, over a dedicated
 #: namespace this first shipped with. Consequence, handled rather than
 #: ignored: the project carries thousands of entries, so nothing may
-#: assume a whole-project read is all reviews -- :data:`RECORD_PREFIX` is
-#: what selects them, and the census filters on it.
+#: assume a whole-project read is all reviews. :func:`is_review_record`
+#: is the one selector; it needs the title prefix AND the record's own
+#: first line, because the prefix alone matched 401 human review notes.
 REVIEW_PROJECT: Final = "nexus"
 
-#: Title prefix for review records. The census and the SessionStart notice
-#: both select on it, so it is a constant, not a repeated literal.
+#: Title prefix for review records. Necessary, not sufficient: see
+#: :func:`is_review_record`.
 RECORD_PREFIX: Final = "review-"
+
+#: First line of every record :func:`render_record` writes, and the only
+#: thing the census may select on besides the title prefix. Human and
+#: agent review notes in the same project also start ``review-``; none
+#: of them starts with this line.
+RECORD_MARKER: Final = "Commit review: "
+
+
+def is_review_record(row: dict) -> bool:
+    """True only for a record :func:`render_record` wrote.
+
+    The title prefix alone is not a selector: on 2026-09-04 the shared
+    project held 401 ``review-*`` titles (``review-range-<sha>``,
+    ``review-completed``, per-bead reviewer notes) and not one commit
+    review, and the census reported 401 commits reviewed and clean while
+    the hook had never fired on the box. The record's own first line is
+    the marker. Both consumers (the census and the SessionStart FIX-NOW
+    notice) select through this one function; the first fix landed it in
+    the census only and the notice kept the prefix (critique [24283] S1).
+    """
+    title = str(row.get("title", "") if isinstance(row, dict) else "")
+    content = str((row.get("content", "") if isinstance(row, dict) else "") or "")
+    return title.startswith(RECORD_PREFIX) and content.startswith(RECORD_MARKER)
 
 #: Output contract for the dispatch. ``claude_dispatch`` passes this to
 #: ``--json-schema``, so the enum is enforced at the boundary;
@@ -148,6 +171,15 @@ def commit_diff(repo: Path, sha: str, *, max_bytes: int) -> tuple[str, bool]:
     reviewer return a clean verdict over code it never saw, which is the
     exact failure the RDR-201 post-mortem calls "a rule proven below the
     layer that uses it".
+
+    ``-m --first-parent`` because a bare ``git show`` on a two-parent commit
+    emits the combined ``--cc`` diff, which shows only hunks that differ
+    from BOTH parents. Measured on the v7.29.0 back-merge (31b20c305,
+    reanalysis 2026-09-04): 2 of 13 files carried a patch body, the eleven
+    elided ones being the whole release version surface, and the reviewer
+    recorded "No findings" over them. Back-merges are mandatory after every
+    release, so the bare form fired on exactly the commits that matter.
+    The first-parent diff is what the merge brought onto the branch.
     """
     try:
         proc = subprocess.run(
@@ -155,6 +187,8 @@ def commit_diff(repo: Path, sha: str, *, max_bytes: int) -> tuple[str, bool]:
                 "git",
                 "show",
                 "--no-color",
+                "-m",
+                "--first-parent",
                 "--stat",
                 "--patch",
                 "--format=%H%n%s%n%an%n",
@@ -174,6 +208,33 @@ def commit_diff(repo: Path, sha: str, *, max_bytes: int) -> tuple[str, bool]:
     return text, False
 
 
+def has_patch(diff_text: str) -> bool:
+    """True when the ``git show`` output carries at least one file diff.
+
+    The ``--format=%H%n%s%n%an%n`` header is always present, so emptiness
+    must be judged on the body: a commit with no tree change (``--allow-
+    empty``, ``merge -s ours``) has a header and no ``diff --git`` line.
+    """
+    return "\ndiff --git " in diff_text or diff_text.startswith("diff --git ")
+
+
+def commit_parent_count(repo: Path, sha: str) -> int:
+    """Number of parents of *sha*: 0 for a root commit, and 0 when git
+    cannot answer (never raises). Callers only ask "more than one".
+    """
+    try:
+        line = subprocess.run(
+            ["git", "rev-list", "--parents", "-n", "1", sha],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+    except (subprocess.CalledProcessError, OSError):
+        return 0
+    return max(len(line) - 1, 0)
+
+
 def commit_subject(repo: Path, sha: str) -> str:
     """Best-effort one-line subject for *sha*; empty string if unavailable."""
     try:
@@ -188,7 +249,7 @@ def commit_subject(repo: Path, sha: str) -> str:
         return ""
 
 
-def build_prompt(sha: str, diff_text: str, *, truncated: bool) -> str:
+def build_prompt(sha: str, diff_text: str, *, truncated: bool, merge: bool = False) -> str:
     """Assemble the fixed reviewer prompt.
 
     Repo-sandboxed by construction: the child gets this text and no tools,
@@ -201,6 +262,13 @@ def build_prompt(sha: str, diff_text: str, *, truncated: bool) -> str:
         "prefix of the change, not all of it. Do not report on what you "
         "cannot see, and do not claim the commit is clean.\n"
         if truncated
+        else ""
+    )
+    merge_note = (
+        "\nNOTE: this is a MERGE commit. The diff below is against its first "
+        "parent only: everything the merge brought onto the branch, whether "
+        "or not it also exists on the other parent. Review it as such.\n"
+        if merge
         else ""
     )
     return f"""You are reviewing a single git commit. You can see only the diff below.
@@ -216,7 +284,7 @@ Assign each finding exactly one verdict:
 
 For each finding give: verdict, a one-line summary, a reason grounded in the
 diff, and the file it concerns when identifiable.
-{truncation_note}
+{truncation_note}{merge_note}
 --- commit {sha} ---
 {diff_text}
 """
@@ -262,6 +330,7 @@ def render_record(
     findings: list[Finding],
     cost_usd: float | None,
     truncated: bool = False,
+    merge: bool = False,
 ) -> str:
     """Render the T2 record body.
 
@@ -271,12 +340,17 @@ def render_record(
     a review that never ran.
     """
     lines = [
-        f"Commit review: {sha}",
+        f"{RECORD_MARKER}{sha}",
         f"Subject: {subject}" if subject else "Subject: (unavailable)",
         f"Reviewer: claude -p, tool-free, per-commit hook (nexus-jh86x)",
     ]
     if cost_usd is not None:
         lines.append(f"Cost: ${cost_usd:.4f}")
+    if merge:
+        lines.append(
+            "Diff: MERGE commit, first-parent view (what the merge brought onto "
+            "the branch); the other parent's own history was not reviewed here."
+        )
     if truncated:
         lines.append("Diff: TRUNCATED at the configured cap; review is partial.")
     lines.append("")
@@ -360,7 +434,11 @@ async def review_commit(
         _log.warning("commit_review_diff_failed", sha=sha[:12], error=str(exc))
         return ReviewResult(sha=sha, skipped_reason=str(exc))
 
-    if not diff_text.strip():
+    if not has_patch(diff_text):
+        # commit_diff always emits the --format header, so a bare
+        # ``.strip()`` check never fired (code review [24285] Major 2): a
+        # ``merge -s ours`` that discards a whole branch, or --allow-empty,
+        # dispatched a header-only diff and recorded "No findings" over it.
         return ReviewResult(sha=sha, skipped_reason="empty diff")
 
     if dispatch is None:  # pragma: no cover - exercised via the CLI path
@@ -369,9 +447,10 @@ async def review_commit(
         dispatch = claude_dispatch
 
     usage: list[Any] = []
+    merge = commit_parent_count(repo, sha) > 1
     try:
         payload = await dispatch(
-            build_prompt(sha, diff_text, truncated=truncated),
+            build_prompt(sha, diff_text, truncated=truncated, merge=merge),
             REVIEW_SCHEMA,
             timeout=cfg.timeout_seconds,
             model=cfg.model,
@@ -410,6 +489,7 @@ async def review_commit(
         findings=findings,
         cost_usd=cost,
         truncated=truncated,
+        merge=merge,
     )
 
     if put is None:

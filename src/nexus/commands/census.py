@@ -152,8 +152,12 @@ def reviews_cmd(as_json: bool) -> None:
         return
 
     if not records:
-        click.echo("No commit reviews recorded. Is the post-commit hook installed?")
-        click.echo("  nx hooks install")
+        click.echo(
+            "No commit reviews recorded (records expire after the configured "
+            "ttl). Either the post-commit hook is not armed here, or nothing "
+            "has committed since. nx doctor reports a stale hook stanza; "
+            "nx hooks update refreshes it."
+        )
         return
 
     click.echo(f"Commit reviews: {records} record(s), {clean} clean")

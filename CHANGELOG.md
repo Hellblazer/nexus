@@ -6,6 +6,62 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.29.1] - 2026-09-04
+
+Engine identity unchanged: `engine-service-v0.1.100`. Patch release so
+installed clients stop re-indexing unchanged files.
+
+### Fixed
+
+- `nx index` re-chunked, re-embedded and re-uploaded hundreds of unchanged
+  files on every run (nexus-vayt7): on this repository 650 of 2370 files,
+  the same set each time, about ten minutes per post-commit run; on a
+  work box, half of each repository per commit. The staleness cache read a
+  document's content hash from T3 chunk metadata, which is
+  content-addressed: a chunk shared by two files carries the first
+  writer's hash, and a chunk re-upserted for a changed file keeps its
+  original row (RDR-181 embed-skip), so 536 of 1818 code documents read as
+  changed while the catalog fence said complete with the current hash.
+  The cache now marks every document a shared chunk maps to as present and
+  takes the hash from the catalog fence (`index_content_hash`, the repo
+  hook's owner fetch plus a paged `resolve_many` for documents under other
+  owners). Measured on an unchanged tree: 2370 of 2370 files skipped, flush
+  wall under two seconds (was 1720 of 2370 and 508 seconds).
+  `staleness_caches_built` now logs `complete_fence_docs` and
+  `fence_hash_overrides`.
+
+
+- The per-commit reviewer saw only a combined diff on merge commits: a bare
+  `git show` on a two-parent commit emits hunks that differ from both
+  parents, so on the v7.29.0 back-merge it was handed 2 of 13 files (the
+  release version surface elided) and recorded "No findings". The diff is
+  now the first-parent diff, and the prompt says when the commit is a merge.
+- `nx census reviews` counted every `review-*` title in the shared `nexus`
+  project as a commit review: 401 human and agent review notes reported as
+  401 commits reviewed and clean, while the post-commit reviewer had never
+  fired on the box. The census now also requires the record's own first
+  line, `Commit review: `, in both consumers (the census and the SessionStart
+  FIX-NOW notice), so an unarmed hook reads as zero records rather than as a
+  clean codebase. Merge records now say they are a first-parent view.
+
+- The sn plugin drifted from the Serena it launches (nexus-jbt5x). Its
+  auto-approve list named 27 tools of which 4 no longer exist in the
+  context, so 22 live ones (the whole LSP-backend navigation set,
+  `jet_brains_debug`, the inspections, `replace_in_files`, `serena_info`)
+  prompted on every call; its injected guidance told subagents to load three tools the
+  `claude-code` context excludes; a grep-to-Serena routing hook removed from
+  `hooks.json` in June still shipped with its vendored framework, twenty
+  tests, and a claimed slot in the four-hook budget; and `.mcp.json`
+  resolved Serena at git HEAD and Context7 at npx latest. Serena is now pinned to a
+  revision and Context7 to a version (their own dependencies still resolve
+  at spawn), the allowlist and the section are checked against a snapshot
+  that `scripts/sync_sn_serena_tools.py` generates from the pin the way
+  Serena's own registry discovers tools (`remove_project` and
+  `open_dashboard` are refused by a named deny set), the dead
+  wire is deleted, and both guidance sections inject for every subagent
+  (the task-text heuristic had dropped Serena for any brief containing
+  "investigate" or "dependency").
+
 ## [7.29.0] - 2026-09-04
 
 Engine identity: `engine-service-v0.1.100` (was v0.1.98). Deployed and

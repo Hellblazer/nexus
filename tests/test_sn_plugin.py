@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Structural and functional tests for the sn (Serena + Context7) plugin."""
 import json
+import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+from sync_sn_serena_tools import parse_snapshot, serena_pin  # noqa: E402
 
 REPO_ROOT = Path(__file__).parent.parent
 SN_DIR = REPO_ROOT / "sn"
@@ -80,6 +85,23 @@ class TestSnMcpConfig:
 
     def test_context7_uses_npx(self, mcp_config: dict) -> None:
         assert mcp_config["context7"]["command"] == "npx"
+
+    def test_serena_pinned_to_revision(self, mcp_config: dict) -> None:
+        """nexus-jbt5x: an unpinned git+ URL gives every fresh spawn a different Serena."""
+        url, rev = serena_pin()
+        assert url == "https://github.com/oraios/serena"
+        assert len(rev) == 40
+
+    def test_context7_pinned_to_version(self, mcp_config: dict) -> None:
+        pkg = next(a for a in mcp_config["context7"]["args"] if a.startswith("@upstash/context7-mcp"))
+        assert re.fullmatch(r"@upstash/context7-mcp@\d+\.\d+\.\d+", pkg), pkg
+
+    def test_snapshot_matches_pin(self) -> None:
+        """serena-tools.txt was generated from the revision .mcp.json pins."""
+        _, rev = serena_pin()
+        snap_rev, available, _ = parse_snapshot()
+        assert snap_rev == rev, "run scripts/sync_sn_serena_tools.py after changing the Serena pin"
+        assert len(available) > 20, available
 
 
 # ── Marketplace registration ─────────────────────────────────────────────────
@@ -200,9 +222,9 @@ class TestSnHookOutput:
         """Parameter docs are now delegated to Serena's initial_instructions tool."""
         assert "initial_instructions" in hook_output
 
-    def test_search_for_pattern_in_routing(self, hook_output: str) -> None:
-        """search_for_pattern is available in claude-code context and must be documented."""
-        assert "search_for_pattern" in hook_output
+    def test_jetbrains_edit_tool_in_routing(self, hook_output: str) -> None:
+        """replace_in_files is the JetBrains backend's edit path and must be documented."""
+        assert "replace_in_files" in hook_output
 
     def test_context7_workflow(self, hook_output: str) -> None:
         assert "resolve-library-id" in hook_output
@@ -220,6 +242,34 @@ class TestSnHookOutput:
         replace_content. Verify on Serena version bumps — if the exclusion list changes upstream,
         update the inject script and this test accordingly.
         """
-        assert "| `replace_content`" not in hook_output
-        assert "| `create_text_file`" not in hook_output
-        assert "| `read_file`" not in hook_output
+        _, _, excluded = parse_snapshot()
+        assert excluded, "snapshot lists no excluded tools; the sync script is broken"
+        for name in excluded:
+            assert f"`{name}`" not in hook_output or name in ("find_file", "list_dir", "search_for_pattern"), (
+                f"{name} is excluded by the claude-code context but the routing table names it"
+            )
+        for name in ("find_file", "list_dir", "search_for_pattern"):
+            assert f"| `{name}`" not in hook_output, (
+                f"{name} must not be a routing-table entry (the exclusion note may name it)"
+            )
+
+    def test_every_documented_serena_tool_exists(self, hook_output: str) -> None:
+        """Every mcp__plugin_sn_serena__ name in the section is a tool the pinned Serena ships."""
+        _, available, _ = parse_snapshot()
+        serena_part = hook_output.split("## Context7")[0]
+        documented = set(re.findall(r"mcp__plugin_sn_serena__([a-z_]+)", serena_part))
+        rows = [ln for ln in serena_part.split("### Task")[1].split("###")[0].splitlines() if ln.startswith("|")]
+        documented |= set(re.findall(r"`([a-z_]+)`", "\n".join(rows)))
+        assert len(documented) > 10, sorted(documented)
+        assert documented <= set(available), sorted(documented - set(available))
+
+    def test_injects_both_sections_regardless_of_task_text(self) -> None:
+        """nexus-jbt5x: the former task-text heuristic dropped Serena for 'investigate'/'dependency' briefs."""
+        script = SN_DIR / "hooks" / "scripts" / "mcp-inject.sh"
+        payload = json.dumps({"task": "investigate the dependency migration and audit the package"})
+        result = subprocess.run(
+            ["bash", str(script)], input=payload, capture_output=True, text=True, timeout=10, cwd=str(REPO_ROOT)
+        )
+        body = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "## Serena MCP" in body
+        assert "## Context7 MCP" in body

@@ -39,6 +39,8 @@ on:
       - 'conexus/resources/**'
       - 'conexus/PENDING_RELEASE.md'
       - 'sn/hooks/**'
+      - 'sn/.mcp.json'
+      - 'conexus/.mcp.json'
       - '.claude-plugin/marketplace.json'
       - 'tests/test_plugin_release_drift_ledger.py'
       - '.github/workflows/plugin-drift-ledger.yml'

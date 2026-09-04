@@ -16,7 +16,7 @@ import click
 
 from nexus.commands._helpers import t2_handle
 from nexus.commit_review import (
-    RECORD_PREFIX,
+    is_review_record,
     REVIEW_PROJECT,
     VERDICTS,
     parse_record_verdicts,
@@ -145,7 +145,7 @@ def _iter_review_records(db) -> list[dict]:
     except Exception as exc:  # noqa: BLE001 - a census must report, not crash
         click.echo(f"nx census reviews: T2 unreachable ({exc})", err=True)
         sys.exit(1)
-    return [r for r in rows if str(r.get("title", "")).startswith(RECORD_PREFIX)]
+    return [r for r in rows if is_review_record(r)]
 
 
 def reviews_census(db, *, limit: int | None = None) -> dict[str, int]:
