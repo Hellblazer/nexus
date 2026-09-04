@@ -589,3 +589,20 @@ def test_flip_to_superseded_with_an_unindexed_successor_says_so_and_still_flips(
     assert cat.written == []
     assert "catalog edge not written: RDR-185 has no canonical catalog tumbler" in result.output
     assert "status -> superseded" in result.output
+
+
+def test_a_free_text_successor_writes_no_edge(tmp_path, monkeypatch):
+    """rdr-079's shape: superseded_by "nexus.operators.dispatch (PR #168)".
+    A digit search would mint RDR-168 -> RDR-79 (review [24399] Critical)."""
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr_with_successor(rdr_dir, 79, "closed", '"nexus.operators.dispatch (PR #168)"')
+    _write_rdr(rdr_dir, 168, "closed")
+    cat = _FakeCatalog(entries=[_entry(tmp_path, 79, 1), _entry(tmp_path, 168, 2)])
+    project = _project(tmp_path)
+    t2 = _FakeT2Client({(project, "79"): {"content": "status: closed\n", "tags": "rdr"}})
+    _install(monkeypatch, tmp_path, cat, t2)
+
+    result = _flip(tmp_path, 79, "superseded")
+    assert result.exit_code == 0, result.output
+    assert cat.written == []
+    assert "does not name exactly one RDR-NNN" in result.output

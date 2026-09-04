@@ -634,12 +634,19 @@ def _ensure_supersedes_edge(
     note)``: the text when the edge exists after this call (created or
     already there), the note when it could not be written. Never raises;
     the flip already stands."""
-    from nexus.catalog.link_generator import rdr_resolution  # noqa: PLC0415 — deferred import, see _default_catalog_reader
+    from nexus.catalog.link_generator import (  # noqa: PLC0415 — deferred import, see _default_catalog_reader
+        _extract_rdr_ref_numbers,
+        rdr_resolution,
+    )
 
-    m = re.search(r"\d+", successor or "")
-    if not m:
-        return None, f"superseded_by {successor!r} names no RDR number; no edge written"
-    succ_num = int(m.group(0))
+    # The generator's own anchored RDR-NNN parser, never a bare digit
+    # search: rdr-079 carries superseded_by "nexus.operators.dispatch
+    # (PR #168)" (an RDR subsumed by code), and a digit search would
+    # write "RDR-168 supersedes RDR-79" for real (review [24399]).
+    numbers = _extract_rdr_ref_numbers(successor or "")
+    if len(numbers) != 1:
+        return None, f"superseded_by {successor!r} does not name exactly one RDR-NNN; no edge written"
+    succ_num = numbers[0]
     try:
         owner, prefix = _rdr_repo_scope(cat, repo_root)
         if owner is None:
