@@ -1033,6 +1033,17 @@
          comments for the identical reasoning). -->
     <include file="db/changelog/catalog-035-fts-match-function.xml"/>
 
+    <!-- nexus-zrcj7 (Sam's no-SQL-strings-in-Java directive) — table-valued
+         nexus.terminate_own_backends(text) wrapping BackendReaper's
+         shutdown-hook pg_stat_activity + pg_terminate_backend statement.
+         No dependency on any other changeset (pg_stat_activity is a system
+         view). Placed after catalog-035-fts-match-function.xml (current
+         tail) and before the grants-nexus-svc.xml runAlways block, matching
+         the established late-append convention (D0.1; see taxonomy-013's /
+         taxonomy-014's / taxonomy-015's / telemetry-008's / catalog-035's
+         own <include> comments for the identical reasoning). -->
+    <include file="db/changelog/backend-reaper-001-terminate-own-backends.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
