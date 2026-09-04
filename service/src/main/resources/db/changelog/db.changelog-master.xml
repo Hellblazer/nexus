@@ -989,6 +989,16 @@
          taxonomy-015's own <include> comments for the identical reasoning). -->
     <include file="db/changelog/telemetry-008-step-cache-tokens.xml"/>
 
+    <!-- nexus-zrcj7 (Sam directive 2026-09-03: no SQL strings in Java, anywhere) —
+         nexus.plain_search_384/768/1024: retires PgVectorRepository#searchWithTokens's
+         raw SQL onto an inlinable schema function. Depends only on nexus.chunks/
+         catalog_document_chunks/catalog_documents, all of which exist well before
+         this point. Placed after telemetry-008-step-cache-tokens.xml (current tail)
+         and before the grants-nexus-svc.xml runAlways block, matching the
+         established late-append convention (D0.1). See the file's own header for
+         the where/jsonpath split and the tombstone-filter derivation. -->
+    <include file="db/changelog/vectors-009-plain-search.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

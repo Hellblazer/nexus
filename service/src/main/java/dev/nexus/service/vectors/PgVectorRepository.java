@@ -44,6 +44,12 @@ import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_768;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_1024;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_384;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_768;
+// nexus-zrcj7: plain_search_<dim> (vectors-009) retires searchWithTokens's raw SQL onto
+// an inlinable schema function, the same generated-function-table idiom as every sibling
+// combined-query shape above.
+import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_1024;
+import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_384;
+import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_768;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -1066,33 +1072,21 @@ public final class PgVectorRepository {
         // homogeneous, and the Python client never mixes embedder families in one call
         // (same convention as the Chroma path).
         EmbedResult embedResult = embedQuery(collectionNames.get(0), queryText, dim);
-        float[] queryVec = embedResult.embeddings().get(0);
+        Vector queryVec = Vector.of(embedResult.embeddings().get(0));
+        WherePlan wherePlan = planWhere(where);
+        String[] colls = collectionNames.toArray(String[]::new);
 
-        StringBuilder sql = new StringBuilder()
-            // RDR-180: bytea storage — hex at the SQL seam (raw-SQL twin of
-            // the ChashHex converted type the jOOQ paths use).
-            .append("SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,")
-            .append(" (").append(DimTables.embeddingColumn(dim)).append(" <=> ?::vector) AS distance")
-            .append(" FROM ").append(chunksTable(dim)).append(" c")
-            .append(" WHERE c.collection IN (").append(placeholders(collectionNames.size())).append(")")
-            // RDR-156 Decision 6 (nexus-3ck2g): live_chunks predicate, inlined so the
-            // HNSW index scan on c stays engaged (see liveChunksPredicate's javadoc).
-            .append(" AND ").append(liveChunksPredicate("c"))
-            // nexus-74zvm DECISION (see method javadoc): exclude foreign-dim rows so a
-            // NULL embedding_<dim> never produces a NULL-distance result under LIMIT.
-            .append(" AND ").append(DimTables.embeddingColumn(dim)).append(" IS NOT NULL");
-        List<Object> binds = new ArrayList<>();
-        binds.add(vectorLiteral(queryVec));
-        binds.addAll(collectionNames);
-        if (where != null) {
-            for (Map.Entry<String, Object> e : where.entrySet()) {
-                appendWherePredicate(sql, binds, e.getKey(), e.getValue());
-            }
-        }
-        sql.append(" ORDER BY distance ASC, chash ASC LIMIT ?");
-        binds.add(nResults);
+        org.jooq.Table<?> fn = switch (dim) {
+            case 384  -> PLAIN_SEARCH_384.call(
+                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+            case 768  -> PLAIN_SEARCH_768.call(
+                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+            case 1024 -> PLAIN_SEARCH_1024.call(
+                queryVec, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
 
-        Result<Record> result = tenantScope.withTenant(tenant, ctx -> {
+        Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
             // Filtered-ANN recall: keep HNSW scanning past ef_search when the RLS +
             // collection + metadata predicates narrow the candidate set. SET LOCAL is
             // txn-scoped (same pool discipline as the TenantScope GUC stamp).
@@ -1108,18 +1102,21 @@ public final class PgVectorRepository {
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
             PgSession.setSearchPlanCacheMode(ctx);
-            return exactOnUnderReturn(ctx, nResults,
-                    () -> rawVectorFetch(ctx, sql.toString(), binds.toArray()));
+            // nexus-zrcj7: plain_search_<dim> (vectors-009) replaces the raw
+            // rawVectorFetch(sql, binds) call — still wrapped by exactSelectFrom/
+            // exactOnUnderReturn for the nexus-bq06h exact fallback.
+            return exactSelectFrom(ctx, nResults, fn);
         });
 
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
         for (Record rec : result) {
             Map<String, Object> row = new LinkedHashMap<>();
-            row.put("id",         rec.get("chash", String.class));
-            row.put("content",    rec.get("chunk_text", String.class));
+            row.put("id",         rec.get("id", String.class));
+            row.put("content",    rec.get("content", String.class));
             row.put("distance",   rec.get("distance", Double.class));
             row.put("collection", rec.get("collection", String.class));
-            row.putAll(fromJson(rec.get("metadata_json", String.class)));
+            JSONB meta = rec.get("metadata", JSONB.class);
+            row.putAll(fromJson(meta != null ? meta.data() : null));
             rows.add(row);
         }
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
@@ -3293,6 +3290,22 @@ public final class PgVectorRepository {
         return exact;
     }
 
+    /**
+     * {@link #exactOnUnderReturn} combined with a generated function-table SELECT
+     * (nexus-zrcj7). {@code fn}'s static type at every call site
+     * ({@link #searchWithTokens}) is the switch-unified {@code Table<?>} the
+     * combined-query dispatch idiom already uses ({@link #runCombinedQuery} et al.) —
+     * passing that wildcard-typed value as an ARGUMENT here (rather than closing over
+     * it inside a {@code Supplier<R>} lambda passed directly to
+     * {@link #exactOnUnderReturn}) lets Java's capture conversion bind a real type
+     * parameter {@code R} at the call site, which a wildcard flowing through two
+     * chained generic-method invocations cannot reliably do.
+     */
+    private static <R extends Record> Result<R> exactSelectFrom(
+            DSLContext ctx, int nResults, org.jooq.Table<R> fn) {
+        return exactOnUnderReturn(ctx, nResults, () -> ctx.selectFrom(fn).fetch());
+    }
+
     /** Count of exact re-runs (nexus-bq06h): an absorption counter, so the belt is measurable. */
     private static final java.util.concurrent.atomic.AtomicLong EXACT_FALLBACKS =
             new java.util.concurrent.atomic.AtomicLong();
@@ -3566,6 +3579,171 @@ public final class PgVectorRepository {
             sb.append("decode(?, 'hex')");
         }
         return sb.toString();
+    }
+
+    /**
+     * (containment, jsonpath) pair a Chroma-style metadata {@code where} map compiles
+     * into for {@code nexus.plain_search_<dim>} (vectors-009) — nexus-zrcj7 design of
+     * record (T2 nexus/decision-zrcj7-no-sql-strings-design-2026-09-03 [24207]).
+     * {@code containment} is bound as the function's {@code p_where jsonb} argument
+     * ({@code metadata @> containment}); {@code jsonPath} is bound as the function's
+     * {@code p_where_path text} argument, cast to {@code jsonpath} INSIDE the function
+     * body -- never SQL string concatenation. Either or both may be {@code null} (no
+     * predicate of that kind). {@code hybridSearch} still uses the older
+     * {@code appendWherePredicate} translator below (retired in the next commit, once
+     * hybridSearch is rewired onto {@code text_gated_search_<dim>}, vectors-010).
+     */
+    record WherePlan(JSONB containment, String jsonPath) {}
+
+    /**
+     * Translate a Chroma-style metadata {@code where} map into a {@link WherePlan}
+     * (nexus-zrcj7). A plain scalar or {@code $eq} field becomes JSONB containment
+     * (byte-for-byte the predicate every other combined-query shape -- catalog-008/
+     * vectors-006/vectors-007/vectors-008 -- already uses for equality): type-preserving
+     * JSON equality, not appendWherePredicate's TEXT-comparison quirk
+     * ({@code metadata->>'k' = 'v'}). Every other operator ({@code $ne}/{@code $in}/
+     * {@code $nin}/{@code $gte}/{@code $lte}/{@code $gt}/{@code $lt}) compiles into ONE
+     * jsonpath predicate-check fragment; all fragments are ANDed together (all-fields-
+     * ANDed, same contract appendWherePredicate carries) and returned as a single
+     * {@code jsonPath} string, bound as a VALUE -- this method never builds SQL text.
+     * Null semantics (T2 [24207]):
+     * <ul>
+     *   <li>{@code $ne} -&gt; {@code (!exists($."k") || $."k" != v)} -- an ABSENT key is
+     *       KEPT, matching appendWherePredicate's {@code IS DISTINCT FROM} semantics.</li>
+     *   <li>{@code $nin} -&gt; {@code (!exists($."k") || !($."k" == a || ...))}.</li>
+     *   <li>{@code $in} -&gt; {@code ($."k" == a || ...)}.</li>
+     *   <li>Range operators ({@code $gte}/{@code $lte}/{@code $gt}/{@code $lt}) use
+     *       jsonpath's OWN native comparison typing -- a type-mismatched comparison is
+     *       simply false/unknown under jsonpath's default lax mode, so no
+     *       {@code jsonb_typeof} guard is needed (nexus-4l80g's hand-rolled guard
+     *       retired for this path).</li>
+     * </ul>
+     *
+     * <p>Unsupported shapes fail loud with {@link IllegalArgumentException}, same
+     * contract as appendWherePredicate: a {@code $}-prefixed FIELD key (compound
+     * {@code $and}/{@code $or}), an operator map with more than one operator, a
+     * non-list operand for {@code $in}/{@code $nin}, a non-numeric/non-string operand
+     * for a range operator, or an unrecognized operator.
+     */
+    static WherePlan planWhere(Map<String, Object> where) {
+        if (where == null || where.isEmpty()) {
+            return new WherePlan(null, null);
+        }
+        Map<String, Object> containment = new LinkedHashMap<>();
+        List<String> predicates = new ArrayList<>();
+        for (Map.Entry<String, Object> e : where.entrySet()) {
+            String key = e.getKey();
+            Object value = e.getValue();
+            if (key.startsWith("$")) {
+                throw new IllegalArgumentException(
+                    "compound where operator '" + key + "' is not supported on the vector "
+                    + "bridge; express each field as its own predicate (all fields are ANDed)");
+            }
+            if (!(value instanceof Map<?, ?> ops)) {
+                containment.put(key, value);
+                continue;
+            }
+            if (ops.size() != 1) {
+                throw new IllegalArgumentException(
+                    "where operator map for field '" + key + "' must hold exactly one operator, got "
+                    + ops.keySet());
+            }
+            Map.Entry<?, ?> op = ops.entrySet().iterator().next();
+            String operator = String.valueOf(op.getKey());
+            Object operand = op.getValue();
+            String path = jsonPathKey(key);
+            switch (operator) {
+                case "$eq" -> containment.put(key, operand);
+                case "$ne" -> predicates.add(
+                    "(!exists(" + path + ") || " + path + " != " + jsonPathLiteral(operator, key, operand) + ")");
+                case "$in" -> {
+                    List<?> items = requireListOperand(operator, key, operand);
+                    predicates.add(items.isEmpty() ? "(1 == 2)" : "(" + orEquals(path, items) + ")");
+                }
+                case "$nin" -> {
+                    List<?> items = requireListOperand(operator, key, operand);
+                    predicates.add(items.isEmpty()
+                        ? "(1 == 1)"
+                        : "(!exists(" + path + ") || !(" + orEquals(path, items) + "))");
+                }
+                case "$gte", "$lte", "$gt", "$lt" -> {
+                    if (!(operand instanceof Number) && !(operand instanceof String)) {
+                        throw new IllegalArgumentException(
+                            operator + " for field '" + key + "' expects a numeric or string "
+                            + "operand, got "
+                            + (operand == null ? "null" : operand.getClass().getSimpleName()));
+                    }
+                    String cmp = switch (operator) {
+                        case "$gte" -> ">=";
+                        case "$lte" -> "<=";
+                        case "$gt" -> ">";
+                        default -> "<";
+                    };
+                    predicates.add(path + " " + cmp + " " + jsonPathLiteral(operator, key, operand));
+                }
+                default -> throw new IllegalArgumentException(
+                    "unsupported where operator '" + operator + "' for field '" + key
+                    + "'; supported: $eq, $ne, $in, $nin, $gte, $lte, $gt, $lt");
+            }
+        }
+        JSONB containmentJsonb = containment.isEmpty() ? null : JSONB.jsonb(toJson(containment));
+        String jsonPath = predicates.isEmpty() ? null : String.join(" && ", predicates);
+        return new WherePlan(containmentJsonb, jsonPath);
+    }
+
+    /** ORed jsonpath equality fragment: {@code (path == a || path == b || ...)}'s inner text, no parens. */
+    private static String orEquals(String path, List<?> items) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < items.size(); i++) {
+            if (i > 0) sb.append(" || ");
+            sb.append(path).append(" == ").append(jsonPathLiteral("$in/$nin", "(list item)", items.get(i)));
+        }
+        return sb.toString();
+    }
+
+    /** {@code $in}/{@code $nin} operand validation -- must be a List. */
+    private static List<?> requireListOperand(String operator, String key, Object operand) {
+        if (!(operand instanceof List<?> items)) {
+            throw new IllegalArgumentException(
+                operator + " for field '" + key + "' expects a list operand, got "
+                + (operand == null ? "null" : operand.getClass().getSimpleName()));
+        }
+        return items;
+    }
+
+    /** Quoted jsonpath member accessor for an arbitrary metadata key: {@code $."key"}. */
+    private static String jsonPathKey(String key) {
+        try {
+            return "$." + MAPPER.writeValueAsString(key);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("where field key is not JSON-serializable: " + key, e);
+        }
+    }
+
+    /**
+     * A JSON-typed jsonpath scalar literal for {@code operand} -- numbers render as
+     * plain numeric text (NaN/Infinity rejected the same way {@code toBigDecimalOperand}
+     * already does), booleans as {@code true}/{@code false}, {@code null} as the
+     * jsonpath {@code null} literal, and everything else (String, or any other
+     * JSON-serializable scalar) via Jackson -- a JSON string literal is also valid
+     * jsonpath string-literal syntax.
+     */
+    private static String jsonPathLiteral(String operator, String key, Object operand) {
+        if (operand == null) {
+            return "null";
+        }
+        if (operand instanceof Number n) {
+            return toBigDecimalOperand(operator, key, n).toPlainString();
+        }
+        if (operand instanceof Boolean b) {
+            return b.toString();
+        }
+        try {
+            return MAPPER.writeValueAsString(operand);
+        } catch (Exception e) {
+            throw new IllegalArgumentException(
+                operator + " for field '" + key + "' has a non-JSON-scalar operand: " + operand, e);
+        }
     }
 
     /**
