@@ -77,7 +77,7 @@ def review_commit_cmd(rev: str, repo: Path, quiet: bool) -> None:
     try:
         with t2_handle() as db:
             result = asyncio.run(
-                review_commit(repo=repo, sha=sha, cfg=cfg, put=db.memory.put)
+                review_commit(repo=repo, sha=sha, cfg=cfg, put=db.memory.put, memory=db.memory)
             )
     except Exception as exc:  # noqa: BLE001 - never fail a commit
         click.echo(f"nx review: skipped ({exc})", err=True)
@@ -119,8 +119,9 @@ def review_show_cmd(rev: str, repo: Path) -> None:
         entry = db.memory.get(project=REVIEW_PROJECT, title=record_title(sha))
     if not entry:
         raise click.ClickException(
-            f"no review recorded for {sha[:12]} "
-            f"(run: nx review commit {sha[:12]} --repo {repo})"
+            f"no review recorded for {sha[:12]}; an amended or rebased commit is "
+            f"recorded under the sha it was first reviewed as "
+            f"(run: nx review commit {sha[:12]} --repo {repo}, which names it)"
         )
     content = entry.get("content") if isinstance(entry, dict) else str(entry)
     click.echo(content)

@@ -997,13 +997,16 @@ imports; normal index runs are incremental.
 
 ```
 nx catalog generate-links [--citations/--no-citations] [--filepath/--no-filepath]
-                          [--prose/--no-prose] [--pdf/--no-pdf] [--dry-run]
+                          [--prose/--no-prose] [--pdf/--no-pdf]
+                          [--rdr-dependency/--no-rdr-dependency] [--dry-run]
 ```
 
-Auto-generate typed links from metadata cross-matching. Four generators, all
+Auto-generate typed links from metadata cross-matching. Five generators, all
 enabled by default: `--citations` (citation links from bibliographic
 metadata), `--filepath` (RDR-to-code links by file path), `--prose`
-(prose/markdown filepath links) and `--pdf` (PDF corpus links).
+(prose/markdown filepath links), `--pdf` (PDF corpus links) and
+`--rdr-dependency` (RDR-to-RDR links from `supersedes` / `superseded_by` /
+`parent_rdr` / `related_rdrs` frontmatter).
 
 `--prose` and `--pdf` were reachable at index time but not from this command
 until 7.16.4 (nexus-glivh); before that a full pass here understated itself by
@@ -1630,10 +1633,10 @@ taxonomy:
 | `review` | Interactive review: accept, rename, merge, delete, skip. `-c NAME` to filter, `-n N` topics per session (default: 15). `--auto` swaps in batched `claude_dispatch` verdicts (default limit 5000); `--yes` skips the destructive-action confirm, `--dry-run` applies nothing, `--batch-size N` sets topics per dispatch (default: 40) |
 | `label` | Batch-relabel topics with Claude haiku. `--all` relabels accepted topics too |
 | `assign DOC LABEL` | Manually assign a doc to a topic by label. `-c NAME` scopes label lookup |
-| `rename OLD NEW` | Rename a topic. `-c NAME` scopes label lookup |
+| `rename OLD NEW` | Rename a topic. `-c NAME` scopes label lookup; `--no-accept` renames without transitioning `review_status` to `accepted` |
 | `merge SOURCE TARGET` | Merge source into target. `-c NAME` scopes label lookup |
 | `split LABEL --k N` | Split into N sub-topics via KMeans. `-c NAME` scopes label lookup |
-| `links` | Inter-topic link counts from catalog graph. `-c NAME` filters by collection |
+| `links` | Inter-topic link counts from catalog graph. `-c NAME` filters by collection; `--refresh` recomputes catalog-derived links first (requires catalog) |
 | `rebuild` | Full re-cluster (alias for `discover --force`). `-c NAME` required |
 | `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (optional; when omitted uses per-corpus defaults: `code__*` 0.70, `knowledge__*` 0.50, `docs__*`/`rdr__*` 0.55 — see [taxonomy-projection-tuning.md](exploration/taxonomy-projection-tuning.md)). `--top-k N` caps centroids considered per chunk (default: 3). `--use-icf` suppresses hub topics via Inverse Collection Frequency weighting (RDR-077). `--persist` to write assignments. `--backfill` to project all collections against each other |
 | `hubs` | List generic-pattern hub topics (RDR-077 Phase 5). `--min-collections N` (default 2), `--max-icf F` filter, `--warn-stale` flags hubs whose latest assignment post-dates the newest `last_discover_at` across contributing source collections, `--explain` shows DF / ICF / matched stopword tokens per row. |
@@ -3690,6 +3693,8 @@ Nothing is auto-applied and nothing is auto-filed. Triage is a human act. Expect
 
 Records land in T2 project `nexus`, titled `review-<12-hex>`, with a default 90-day TTL. Count them with [`nx census reviews`](#nx-census).
 
+Each record carries a `Diff-Hash:` line, the sha256 of the first-parent patch with the sha/subject/author header stripped. A commit whose hash already has a record is skipped without a dispatch (`skipped (same diff already reviewed as review-<12-hex>)` on stderr) and gets no record of its own: an amend that rewords a message or a rebase that moves a change is the same review, and re-reviewing them was a quarter of the reviewer's spend when measured (nexus-yh25a). A rebase that changes the patch text, context lines included, hashes differently and is reviewed again.
+
 **Findings are surfaced, not merely stored.** SessionStart reports how many commits in the last 7 days carry `FIX-NOW` findings, because a verdict meaning "fix before this work goes further" that nobody sees is theatre. It counts commits rather than findings (two `FIX-NOW`s on one commit is one thing to look at), and the window is bounded on purpose: there is no "resolved" state on a review record, so an unbounded count would become the line people learn to scroll past.
 
 **Configuration** (`.nexus.yml#commit_review`, all optional):
@@ -3760,8 +3765,9 @@ RDR (Research-Design-Review) authoring helpers.
 
 | Subcommand | Description |
 |------------|-------------|
-| `lint` | Lint RDR frontmatter/structure; reports findings per file |
-| `set-status STATUS` | Flip an RDR's `status:` frontmatter field and README row (refused unless the lifecycle table allows the transition); then append `needs-reexamination` to the T2 entry of every RDR joined to it by a `supersedes` edge (RDR-201 P3.3) |
-| `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-close`, `rdr-research`) |
+| `lint [PATHS]` | Lint RDR frontmatter/structure; reports findings per file. `--root DIR` scans a directory other than `docs/rdr/` |
+| `set-status STATUS` | Flip an RDR's `status:` frontmatter field and README row (refused unless the lifecycle table allows the transition); then append `needs-reexamination` to the T2 entry of every RDR joined to it by a `supersedes` edge (RDR-201 P3.3). `--date YYYY-MM-DD` sets `accepted_date`/`closed_date` (default today, UTC); `--root DIR` names the repo root (default git toplevel) |
+| `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-close`, `rdr-research`, `rdr-audit`, `phase-review-gate`) |
+| `repeat RDR` | Multi-model repeatability diff (nexus-axwpn): send the RDR's Technical Design (or `Proposed Design` / `Design`) section to two model tiers (`--tiers cheap,strong`), ask each for an implementation plan, and report where the plans diverge in steps, files and decisions. A divergence is a place the text left open, not a verdict on a model. `RDR` is a path or a number resolved under `--root` (default `docs/rdr/`); `--json` emits both plans and the diff. Exits 0 with the report, 2 when the RDR has no design section, 1 when a dispatch fails. Writes nothing |
 
 Run `nx rdr --help` / `nx rdr preamble --help` for the full subcommand list. The `preamble` subcommands are primarily invoked by the conexus RDR-lifecycle skills.
