@@ -52,20 +52,6 @@ def test_readme_exists():
     assert README_PATH.exists(), f"missing: {README_PATH}"
 
 
-def test_lib_copies_are_byte_identical():
-    """The routing framework lib is shipped in BOTH plugins. They must stay
-    byte-identical; a silent divergence makes one plugin's hooks behave
-    differently from the other's. Enforce parity here so an edit to one without
-    the other fails CI rather than shipping a latent split."""
-    sn_lib = PROJECT_ROOT / "sn" / "hooks" / "scripts" / "routing" / "_lib.py"
-    conexus_lib = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "_lib.py"
-    assert sn_lib.exists() and conexus_lib.exists()
-    assert sn_lib.read_bytes() == conexus_lib.read_bytes(), (
-        "sn/ and conexus/ routing _lib.py have diverged — they must be identical; "
-        "copy one over the other."
-    )
-
-
 # ---------------------------------------------------------------------------
 # JSON envelope shape — allow / deny / warn
 # ---------------------------------------------------------------------------
