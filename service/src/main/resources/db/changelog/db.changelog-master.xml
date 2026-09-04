@@ -1021,6 +1021,17 @@
          grants-nexus-svc.xml runAlways block, matching the established late-append
          convention (D0.1). -->
     <include file="db/changelog/vectors-011-hybrid-selectivity-dispatch.xml"/>
+    <!-- nexus-zrcj7 (Sam's no-SQL-strings-in-Java directive) — moves
+         CatalogRepository#searchDocuments's raw-template FTS match
+         expression server-side as nexus.catalog_fts_match(tsvector, text,
+         boolean). Depends only on nexus.fold_diacritics (memory-002-0) and
+         catalog_documents.fts_vector (catalog-017-0), both long-settled.
+         Placed after telemetry-008-step-cache-tokens.xml (current tail) and
+         before the grants-nexus-svc.xml runAlways block, matching the
+         established late-append convention (D0.1; see taxonomy-013's /
+         taxonomy-014's / taxonomy-015's / telemetry-008's own <include>
+         comments for the identical reasoning). -->
+    <include file="db/changelog/catalog-035-fts-match-function.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

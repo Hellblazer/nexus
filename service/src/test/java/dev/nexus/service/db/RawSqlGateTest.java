@@ -296,24 +296,23 @@ class RawSqlGateTest {
                 + "+ op + \" ?\" + \" ORDER BY distance ASC, topic_id ASC LIMIT ?\", "
                 + "vectorLiteral(embedding), collection, nResults)", 1))),
         Map.entry("CatalogRepository.java", Map.of(
-            // SANCTIONED RAW (nexus-5xn3k.2): pg_advisory_xact_lock over a
-            // hashtext'd (tenant, doc_id) key — a session-scoped lock
-            // primitive with no jOOQ DSL form, same category as RekeyOps'
-            // advisory lock (see ChashSqlIdioms.java's entry below — the
-            // lock primitive's OWN DSL rendering there is what RekeyOps
-            // actually uses; this method is a second, independent
-            // hashtext'd-key variant local to CatalogRepository, not a
-            // duplicate of that one). Single-homed: every manifest-mutation
-            // and verify-then-stamp path calls this one method.
-            "acquireIndexRunLock", Map.of(
-                ".execute(\"SELECT pg_advisory_xact_lock(hashtext('indexrun:' || ? || ':' || ?))\", "
-                + "tenant, docId)", 1),
+            // nexus-zrcj7: acquireIndexRunLock's entry (SANCTIONED RAW,
+            // nexus-5xn3k.2 — pg_advisory_xact_lock over a hashtext'd
+            // (tenant, doc_id) key) is REMOVED here: the method was retired
+            // from a raw ctx.execute(...) onto the same typed
+            // DSL.function(...) composition acquireSweepGateShared/
+            // acquireSweepGateExclusive already use, so it no longer
+            // matches RAW_EXECUTE at all — leaving the entry would be a
+            // STALE SANCTIONED FINGERPRINT.
+            //
             // SANCTIONED RAW (RDR-191 Phase 5, nexus-o8dil.29): SET CONSTRAINTS is
             // PostgreSQL transaction-control syntax with no jOOQ typed-DSL form —
             // same category as SchemaMigrator's NO FORCE/FORCE ROW LEVEL SECURITY
-            // entry below. Deferred-constraint fix for deleteCollectionTxn's
-            // chunk-before-manifest ordering under fk_catalog_chunks_chunk (class-B
-            // site 2 — see the method's own javadoc for the full derivation).
+            // entry below (verified again, nexus-zrcj7: no matching jOOQ 3.21 DSL
+            // method found via Context7). Deferred-constraint fix for
+            // deleteCollectionTxn's chunk-before-manifest ordering under
+            // fk_catalog_chunks_chunk (class-B site 2 — see the method's own
+            // javadoc for the full derivation).
             "deferManifestChunkFk", Map.of(
                 ".execute(\"SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED\")", 1))),
         Map.entry("PoolerModeCheck.java", Map.of(
