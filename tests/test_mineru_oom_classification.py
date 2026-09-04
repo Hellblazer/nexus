@@ -47,6 +47,10 @@ def _run_with_returncode(returncode: int, *, ceiling: bool):
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch("subprocess.Popen", return_value=proc))
         stack.enter_context(patch("nexus.util.process_group.safe_killpg"))
+        # nexus-5ny9r: the sibling sweeps by the recorded group id, and the
+        # mocked Popen hands the worker a real int pid — unpatched, this
+        # would os.killpg that number for real from inside the suite.
+        stack.enter_context(patch("nexus.util.process_group.safe_killpg_group"))
         stack.enter_context(patch(
             "nexus.config.get_mineru_page_timeout_s", return_value=180,
         ))
@@ -199,6 +203,10 @@ def _run_capturing_popen(*, ceiling_mb: int, platform: str, start=0, end=1):
     with contextlib.ExitStack() as stack:
         mock_popen = stack.enter_context(patch("subprocess.Popen", return_value=proc))
         stack.enter_context(patch("nexus.util.process_group.safe_killpg"))
+        # nexus-5ny9r: the sibling sweeps by the recorded group id, and the
+        # mocked Popen hands the worker a real int pid — unpatched, this
+        # would os.killpg that number for real from inside the suite.
+        stack.enter_context(patch("nexus.util.process_group.safe_killpg_group"))
         stack.enter_context(patch(
             "nexus.config.get_mineru_memory_ceiling_mb", return_value=ceiling_mb,
         ))
@@ -262,6 +270,10 @@ def test_per_page_timeout_scales_for_whole_doc_batch() -> None:
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch("subprocess.Popen", return_value=proc))
         stack.enter_context(patch("nexus.util.process_group.safe_killpg"))
+        # nexus-5ny9r: the sibling sweeps by the recorded group id, and the
+        # mocked Popen hands the worker a real int pid — unpatched, this
+        # would os.killpg that number for real from inside the suite.
+        stack.enter_context(patch("nexus.util.process_group.safe_killpg_group"))
         stack.enter_context(patch(
             "nexus.config.get_mineru_memory_ceiling_mb", return_value=0))
         stack.enter_context(patch(
@@ -289,6 +301,10 @@ def test_whole_doc_batch_without_total_pages_falls_back_to_one_page() -> None:
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch("subprocess.Popen", return_value=proc))
         stack.enter_context(patch("nexus.util.process_group.safe_killpg"))
+        # nexus-5ny9r: the sibling sweeps by the recorded group id, and the
+        # mocked Popen hands the worker a real int pid — unpatched, this
+        # would os.killpg that number for real from inside the suite.
+        stack.enter_context(patch("nexus.util.process_group.safe_killpg_group"))
         stack.enter_context(patch(
             "nexus.config.get_mineru_memory_ceiling_mb", return_value=0))
         stack.enter_context(patch(
