@@ -33,7 +33,6 @@ from nexus.tables.check import (
     exit_code,
 )
 from nexus.tables.load import (
-    TableLoadError,
     Dimension,
     DuplicateRowIdError,
     FrozenMapping,
