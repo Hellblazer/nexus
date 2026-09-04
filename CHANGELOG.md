@@ -8,6 +8,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `nx census reviews` counted every `review-*` title in the shared `nexus`
+  project as a commit review: 401 human and agent review notes reported as
+  401 commits reviewed and clean, while the post-commit reviewer had never
+  fired on the box. The census now also requires the record's own first
+  line, `Commit review: `, which only the reviewer writes, and reports zero
+  records honestly when the hook is not armed.
 - The sn plugin drifted from the Serena it launches (nexus-jbt5x). Its
   auto-approve list named 27 tools of which 4 no longer exist in the
   context, so 22 live ones (the whole LSP-backend navigation set,

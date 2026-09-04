@@ -493,6 +493,12 @@ def test_census_counts_across_records_built_by_the_renderer() -> None:
                 # prefix filter must drop it; counted, it would read as a
                 # commit that was reviewed and found clean.
                 {"title": "continuation-state.md", "content": "unrelated note"},
+                # The neighbours that DID get counted (2026-09-04): 401
+                # human and agent review notes whose titles start with the
+                # prefix. The record's first line is what distinguishes a
+                # commit review from a note about a review.
+                {"title": "review-completed", "content": "Reviewed nexus-x; clean."},
+                {"title": "review-range-abc123def456", "content": "Range review of ...\nVerdicts: FIX-NOW=3"},
             ]
 
     class FakeDB:
@@ -502,7 +508,8 @@ def test_census_counts_across_records_built_by_the_renderer() -> None:
     assert totals["FIX-NOW"] == 1
     assert totals["FILE"] == 1
     assert totals["DROP"] == 1
-    assert totals["_records"] == 3, "the non-review neighbour must not be counted"
+    assert totals["_records"] == 3, "the non-review neighbours must not be counted"
+    assert totals["FIX-NOW"] == 1, "a note carrying a Verdicts: line is still not a review"
     assert totals["_clean"] == 1
 
 

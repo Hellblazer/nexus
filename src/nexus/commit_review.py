@@ -73,6 +73,12 @@ REVIEW_PROJECT: Final = "nexus"
 #: both select on it, so it is a constant, not a repeated literal.
 RECORD_PREFIX: Final = "review-"
 
+#: First line of every record :func:`render_record` writes, and the only
+#: thing the census may select on besides the title prefix. Human and
+#: agent review notes in the same project also start ``review-``; none
+#: of them starts with this line.
+RECORD_MARKER: Final = "Commit review: "
+
 #: Output contract for the dispatch. ``claude_dispatch`` passes this to
 #: ``--json-schema``, so the enum is enforced at the boundary;
 #: :func:`parse_findings` re-checks it because a schema-conformant model
@@ -271,7 +277,7 @@ def render_record(
     a review that never ran.
     """
     lines = [
-        f"Commit review: {sha}",
+        f"{RECORD_MARKER}{sha}",
         f"Subject: {subject}" if subject else "Subject: (unavailable)",
         f"Reviewer: claude -p, tool-free, per-commit hook (nexus-jh86x)",
     ]

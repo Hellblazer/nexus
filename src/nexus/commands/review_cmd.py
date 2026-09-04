@@ -16,6 +16,7 @@ import click
 
 from nexus.commands._helpers import t2_handle
 from nexus.commit_review import (
+    RECORD_MARKER,
     RECORD_PREFIX,
     REVIEW_PROJECT,
     VERDICTS,
@@ -145,7 +146,23 @@ def _iter_review_records(db) -> list[dict]:
     except Exception as exc:  # noqa: BLE001 - a census must report, not crash
         click.echo(f"nx census reviews: T2 unreachable ({exc})", err=True)
         sys.exit(1)
-    return [r for r in rows if str(r.get("title", "")).startswith(RECORD_PREFIX)]
+    return [r for r in rows if is_review_record(r)]
+
+
+def is_review_record(row: dict) -> bool:
+    """True only for a record :func:`render_record` wrote.
+
+    The title prefix alone is not a selector: on 2026-09-04 the shared
+    project held 401 ``review-*`` titles (``review-range-<sha>``,
+    ``review-completed``, per-bead reviewer notes) and not one commit
+    review, and the census reported 401 commits reviewed and clean while
+    the hook had never fired on the box. The record's own first line is
+    the marker; the writer sets it and nothing else in the project starts
+    that way.
+    """
+    title = str(row.get("title", ""))
+    content = str(row.get("content", "") or "")
+    return title.startswith(RECORD_PREFIX) and content.startswith(RECORD_MARKER)
 
 
 def reviews_census(db, *, limit: int | None = None) -> dict[str, int]:
