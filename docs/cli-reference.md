@@ -997,13 +997,16 @@ imports; normal index runs are incremental.
 
 ```
 nx catalog generate-links [--citations/--no-citations] [--filepath/--no-filepath]
-                          [--prose/--no-prose] [--pdf/--no-pdf] [--dry-run]
+                          [--prose/--no-prose] [--pdf/--no-pdf]
+                          [--rdr-dependency/--no-rdr-dependency] [--dry-run]
 ```
 
-Auto-generate typed links from metadata cross-matching. Four generators, all
+Auto-generate typed links from metadata cross-matching. Five generators, all
 enabled by default: `--citations` (citation links from bibliographic
 metadata), `--filepath` (RDR-to-code links by file path), `--prose`
-(prose/markdown filepath links) and `--pdf` (PDF corpus links).
+(prose/markdown filepath links), `--pdf` (PDF corpus links) and
+`--rdr-dependency` (RDR-to-RDR links from `supersedes` / `superseded_by` /
+`parent_rdr` / `related_rdrs` frontmatter).
 
 `--prose` and `--pdf` were reachable at index time but not from this command
 until 7.16.4 (nexus-glivh); before that a full pass here understated itself by
@@ -1630,10 +1633,10 @@ taxonomy:
 | `review` | Interactive review: accept, rename, merge, delete, skip. `-c NAME` to filter, `-n N` topics per session (default: 15). `--auto` swaps in batched `claude_dispatch` verdicts (default limit 5000); `--yes` skips the destructive-action confirm, `--dry-run` applies nothing, `--batch-size N` sets topics per dispatch (default: 40) |
 | `label` | Batch-relabel topics with Claude haiku. `--all` relabels accepted topics too |
 | `assign DOC LABEL` | Manually assign a doc to a topic by label. `-c NAME` scopes label lookup |
-| `rename OLD NEW` | Rename a topic. `-c NAME` scopes label lookup |
+| `rename OLD NEW` | Rename a topic. `-c NAME` scopes label lookup; `--no-accept` renames without transitioning `review_status` to `accepted` |
 | `merge SOURCE TARGET` | Merge source into target. `-c NAME` scopes label lookup |
 | `split LABEL --k N` | Split into N sub-topics via KMeans. `-c NAME` scopes label lookup |
-| `links` | Inter-topic link counts from catalog graph. `-c NAME` filters by collection |
+| `links` | Inter-topic link counts from catalog graph. `-c NAME` filters by collection; `--refresh` recomputes catalog-derived links first (requires catalog) |
 | `rebuild` | Full re-cluster (alias for `discover --force`). `-c NAME` required |
 | `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (optional; when omitted uses per-corpus defaults: `code__*` 0.70, `knowledge__*` 0.50, `docs__*`/`rdr__*` 0.55 — see [taxonomy-projection-tuning.md](exploration/taxonomy-projection-tuning.md)). `--top-k N` caps centroids considered per chunk (default: 3). `--use-icf` suppresses hub topics via Inverse Collection Frequency weighting (RDR-077). `--persist` to write assignments. `--backfill` to project all collections against each other |
 | `hubs` | List generic-pattern hub topics (RDR-077 Phase 5). `--min-collections N` (default 2), `--max-icf F` filter, `--warn-stale` flags hubs whose latest assignment post-dates the newest `last_discover_at` across contributing source collections, `--explain` shows DF / ICF / matched stopword tokens per row. |
