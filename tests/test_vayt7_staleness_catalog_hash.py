@@ -31,7 +31,7 @@ from nexus.indexer_utils import (
 
 def _col(metadatas: list[dict]) -> MagicMock:
     col = MagicMock(spec=["get", "get_all_metadata", "name"])
-    col.name = "code__x__voyage-code-3__v1"
+    col.name = "code__x__model-a__v1"
     col.get_all_metadata.return_value = {
         "ids": [f"c{i}" for i in range(len(metadatas))],
         "metadatas": metadatas,
@@ -47,14 +47,14 @@ class TestSharedChashPresence:
         ``sorted(doc_ids)[0]`` only, so the other doc was invisible: a
         cache miss, re-indexed on every run."""
         col = _col([
-            {"chunk_text_hash": "shared", "content_hash": "hash-a", "embedding_model": "voyage-code-3"},
+            {"chunk_text_hash": "shared", "content_hash": "hash-a", "embedding_model": "model-a"},
         ])
         fake_cat = MagicMock()
         fake_cat.docs_for_chashes.return_value = {"shared": ["1.1.1", "1.1.2"]}
         with patch("nexus.catalog.factory.make_catalog_reader", return_value=fake_cat):
             cache = build_staleness_cache(col)
         assert set(cache.by_doc_id) == {"1.1.1", "1.1.2"}
-        assert cache.by_doc_id["1.1.1"] == ("hash-a", "voyage-code-3")
+        assert cache.by_doc_id["1.1.1"] == ("hash-a", "model-a")
 
     @pytest.mark.parametrize("shared_first", [True, False])
     def test_unique_chunk_value_is_not_overwritten_by_shared_chunk(
@@ -63,8 +63,8 @@ class TestSharedChashPresence:
         """A doc's own (unique) chunk value wins over a shared chunk's
         first-writer value, whatever order the sweep returns rows in."""
         rows = [
-            {"chunk_text_hash": "shared", "content_hash": "hash-other", "embedding_model": "voyage-code-3"},
-            {"chunk_text_hash": "own-2", "content_hash": "hash-2", "embedding_model": "voyage-code-3"},
+            {"chunk_text_hash": "shared", "content_hash": "hash-other", "embedding_model": "model-a"},
+            {"chunk_text_hash": "own-2", "content_hash": "hash-2", "embedding_model": "model-a"},
         ]
         col = _col(rows if shared_first else rows[::-1])
         fake_cat = MagicMock()
@@ -73,17 +73,17 @@ class TestSharedChashPresence:
         }
         with patch("nexus.catalog.factory.make_catalog_reader", return_value=fake_cat):
             cache = build_staleness_cache(col)
-        assert cache.by_doc_id["1.1.2"] == ("hash-2", "voyage-code-3")
+        assert cache.by_doc_id["1.1.2"] == ("hash-2", "model-a")
 
 
 class TestCatalogOverlay:
     def test_complete_fence_hash_replaces_chunk_metadata_hash(self) -> None:
-        cache = StalenessCache(by_doc_id={"1.1.1": ("stale-chunk-hash", "voyage-code-3")})
+        cache = StalenessCache(by_doc_id={"1.1.1": ("stale-chunk-hash", "model-a")})
         applied = apply_catalog_content_hashes(cache, {"1.1.1": "current"})
         assert applied == 1
-        assert cache.by_doc_id["1.1.1"] == ("current", "voyage-code-3")
+        assert cache.by_doc_id["1.1.1"] == ("current", "model-a")
         assert check_staleness(
-            MagicMock(), "a.py", "current", "voyage-code-3", doc_id="1.1.1", cache=cache,
+            MagicMock(), "a.py", "current", "model-a", doc_id="1.1.1", cache=cache,
         ) is True
 
     def test_doc_absent_from_t3_stays_a_miss(self) -> None:
@@ -96,17 +96,17 @@ class TestCatalogOverlay:
         assert applied == 0
         assert "1.1.9" not in cache.by_doc_id
         assert check_staleness(
-            MagicMock(), "a.py", "current", "voyage-code-3", doc_id="1.1.9", cache=cache,
+            MagicMock(), "a.py", "current", "model-a", doc_id="1.1.9", cache=cache,
         ) is False
 
     def test_never_fresh_still_wins_over_a_matching_fence_hash(self) -> None:
         cache = StalenessCache(
-            by_doc_id={"1.1.1": ("x", "voyage-code-3")},
+            by_doc_id={"1.1.1": ("x", "model-a")},
             never_fresh=frozenset({"1.1.1"}),
         )
         apply_catalog_content_hashes(cache, {"1.1.1": "current"})
         assert check_staleness(
-            MagicMock(), "a.py", "current", "voyage-code-3", doc_id="1.1.1", cache=cache,
+            MagicMock(), "a.py", "current", "model-a", doc_id="1.1.1", cache=cache,
         ) is False
 
     def test_empty_overlay_is_a_no_op(self) -> None:
