@@ -1,0 +1,308 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-zrcj7 (Sam directive 2026-09-03: no SQL strings in Java, anywhere) — restores
+    the lcogi/x7z7l selectivity-aware two-branch dispatch vectors-010's single
+    materializing-CTE design retired without proving equivalence for the non-selective
+    (dense) gate regime (coordinator finding, confirmed by EXPLAIN evidence: a 5500-of-
+    6000-row gate — above the retired Java code's own SELECTIVE_GATE_MAX=5000 threshold
+    — never touched the HNSW index under vectors-010's single-function design, unlike
+    the retired Java HNSW-first branch; see T2 nexus/finding-zrcj7-dense-gate-hnsw-not-
+    preserved [24216]). Two new schema functions, zero SQL strings in the Java caller:
+
+    nexus.text_gate_probe_384/768/1024(p_text text, p_collections text[], p_where jsonb,
+    p_where_path text, p_cap int) RETURNS int — the bounded gate-selectivity probe the
+    retired Java hybridSearch built as
+    {@code "SELECT encode(chash,'hex') AS chash FROM " + table + gateSql + " LIMIT ?"}
+    (single-gate-eval, nexus-x7z7l), now a COUNT capped at p_cap instead of a chash list
+    — the Java caller only ever used the COUNT (gateChashes.size()), never the actual
+    chashes, so a count-returning function is a strictly simpler byte-equivalent
+    retirement of that call site. Byte-for-byte the same gate predicate as
+    text_gated_search_&lt;dim&gt;'s own WHERE clause (vectors-010) MINUS the
+    embedding_&lt;dim&gt; IS NOT NULL guard — the retired Java gate/scope builders never
+    filtered by embedding at PROBE time either (the text gate has no dim awareness; a
+    foreign-dim row legitimately counts toward gate size even though it will later be
+    excluded at RANK time, nexus-74zvm). p_cap is always called as
+    {@code PgVectorRepository.SELECTIVE_GATE_MAX + 1} — a scalar-returning function
+    (not RETURNS TABLE) becomes a jOOQ generated Routine
+    ({@code Routines.textGateProbe384(configuration, ...)}), the same dispatch idiom this
+    class already uses for {@code nexus.gc_restore_rereferenced}
+    (PgVectorRepository#restoreRereferenced).
+
+    nexus.text_gated_search_hnsw_first_384/768/1024(p_query vector, p_query_text text,
+    p_collections text[], p_where jsonb, p_where_path text, p_n int) RETURNS
+    TABLE(id text, content text, collection text, distance float8, metadata jsonb) — the
+    retired Java HNSW-first branch's exact rank query
+    ({@code "... FROM " + table + gateSql + " AND " + embeddingCol + " IS NOT NULL" +
+    " ORDER BY distance ASC, chash ASC LIMIT ?"}), now the schema function's own SQL
+    body. Deliberately a BARE {@code ORDER BY ... LIMIT} — no CTE, no window function —
+    so the HNSW index (idx_chunks_embedding_&lt;dim&gt;) stays reachable exactly as it was
+    for the retired raw SQL: PgVectorRepository sets
+    {@code hnsw.iterative_scan}/{@code setHnswEfSearch} before calling this function,
+    identically to the retired code's own two SET LOCAL calls immediately before this
+    exact query, and those GUCs govern the function body because it inlines (LANGUAGE
+    sql, STABLE, no function-level SET clause — same discipline as every sibling). This
+    is the ONLY search function in the zrcj7 retirement family that is INTENDED to
+    engage the HNSW index for a text-gated query; PlainSearchTextGatedSearchExplainTest's
+    dense-gate EXPLAIN test asserts exactly that.
+
+    Java dispatch (byte-equivalent to the retired code, read from git history at the
+    commit preceding this one): embed once, probe once
+    ({@code matches = Routines.textGateProbe<dim>(...)}), then
+    {@code matches <= SELECTIVE_GATE_MAX} → text_gated_search_&lt;dim&gt; (vectors-010,
+    unchanged); else → text_gated_search_hnsw_first_&lt;dim&gt;, wrapped in
+    exactSelectFrom/exactOnUnderReturn exactly as the retired HNSW-first branch was the
+    ONLY branch exactOnUnderReturn ever wrapped for hybridSearch (nexus-bq06h).
+    matches == 0 needs no special empty-gate case here (unlike the retired code's
+    explicit {@code chash IN ()} guard): text_gated_search_&lt;dim&gt;'s own WHERE clause
+    naturally returns zero rows for an empty gate.
+
+    Tombstone-filtered / embedding guard / where-jsonpath split: byte-for-byte vectors-
+    009's/vectors-010's own (see those changesets' headers for the derivation) — the
+    probe omits the embedding guard (see above); text_gated_search_hnsw_first carries it,
+    matching text_gated_search_&lt;dim&gt;'s own guard.
+
+    LANGUAGE sql, STABLE, SECURITY INVOKER, NOT STRICT (the default) — same discipline as
+    every sibling combined-query function. EXECUTE defaults to PUBLIC (vectors-007
+    precedent) — no explicit GRANT EXECUTE here.
+
+    Placed after vectors-010-text-gated-search.xml (current tail) and before the
+    grants-nexus-svc.xml runAlways block — the established late-append convention (D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-011-1" author="nexus-zrcj7">
+        <comment>text_gate_probe_384/768/1024: bounded gate-selectivity probe (COUNT capped at p_cap), restoring the retired Java hybridSearch's single-gate-eval dispatch, nexus-zrcj7</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS int
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT count(*)::int FROM (
+        SELECT 1
+          FROM nexus.chunks c
+         WHERE c.collection = ANY(p_collections)
+           AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                             JOIN nexus.catalog_documents d
+                               ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                            WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                              AND d.deleted_at IS NOT NULL
+                              AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                                JOIN nexus.catalog_documents d2
+                                                  ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                               WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                                 AND d2.deleted_at IS NULL)))
+           AND (p_where IS NULL OR c.metadata @&gt; p_where)
+           AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+           AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text &lt;% c.chunk_text)
+         LIMIT p_cap
+    ) gate
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS int
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT count(*)::int FROM (
+        SELECT 1
+          FROM nexus.chunks c
+         WHERE c.collection = ANY(p_collections)
+           AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                             JOIN nexus.catalog_documents d
+                               ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                            WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                              AND d.deleted_at IS NOT NULL
+                              AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                                JOIN nexus.catalog_documents d2
+                                                  ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                               WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                                 AND d2.deleted_at IS NULL)))
+           AND (p_where IS NULL OR c.metadata @&gt; p_where)
+           AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+           AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text &lt;% c.chunk_text)
+         LIMIT p_cap
+    ) gate
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gate_probe_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int
+) RETURNS int
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT count(*)::int FROM (
+        SELECT 1
+          FROM nexus.chunks c
+         WHERE c.collection = ANY(p_collections)
+           AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                             JOIN nexus.catalog_documents d
+                               ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                            WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                              AND d.deleted_at IS NOT NULL
+                              AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                                JOIN nexus.catalog_documents d2
+                                                  ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                               WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                                 AND d2.deleted_at IS NULL)))
+           AND (p_where IS NULL OR c.metadata @&gt; p_where)
+           AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+           AND (c.chunk_tsv @@ plainto_tsquery('english', p_text) OR p_text &lt;% c.chunk_text)
+         LIMIT p_cap
+    ) gate
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.text_gate_probe_384(text, text[], jsonb, text, int);
+DROP FUNCTION IF EXISTS nexus.text_gate_probe_768(text, text[], jsonb, text, int);
+DROP FUNCTION IF EXISTS nexus.text_gate_probe_1024(text, text[], jsonb, text, int);
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-011-2" author="nexus-zrcj7">
+        <comment>text_gated_search_hnsw_first_384/768/1024: the retired Java hybridSearch's HNSW-first dense-gate rank query, restored as an inlinable schema function so the HNSW index stays reachable, nexus-zrcj7</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_hnsw_first_384(
+    p_query        vector(384),
+    p_query_text   text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 &lt;=&gt; p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_384 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text &lt;% c.chunk_text)
+     ORDER BY c.embedding_384 &lt;=&gt; p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_hnsw_first_768(
+    p_query        vector(768),
+    p_query_text   text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 &lt;=&gt; p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_768 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text &lt;% c.chunk_text)
+     ORDER BY c.embedding_768 &lt;=&gt; p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.text_gated_search_hnsw_first_1024(
+    p_query        vector(1024),
+    p_query_text   text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 &lt;=&gt; p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_1024 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+       AND (c.chunk_tsv @@ plainto_tsquery('english', p_query_text) OR p_query_text &lt;% c.chunk_text)
+     ORDER BY c.embedding_1024 &lt;=&gt; p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.text_gated_search_hnsw_first_384(vector, text, text[], jsonb, text, int);
+DROP FUNCTION IF EXISTS nexus.text_gated_search_hnsw_first_768(vector, text, text[], jsonb, text, int);
+DROP FUNCTION IF EXISTS nexus.text_gated_search_hnsw_first_1024(vector, text, text[], jsonb, text, int);
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -109,7 +109,8 @@ class PlainSearchTextGatedSearchExplainTest {
             su.createStatement().execute(
                 "GRANT SELECT ON nexus.catalog_document_chunks, nexus.catalog_documents TO " + SVC_ROLE);
             su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.plain_search_1024, nexus.text_gated_search_1024 TO "
+                "GRANT EXECUTE ON FUNCTION nexus.plain_search_1024, nexus.text_gated_search_1024, "
+                + "nexus.text_gate_probe_1024, nexus.text_gated_search_hnsw_first_1024 TO "
                 + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
@@ -286,6 +287,14 @@ class PlainSearchTextGatedSearchExplainTest {
                 + "pressure (enable_seqscan=off only — sort stays available, its correct, "
                 + "safe alternative). Plan was:%n%s", plan)
             .doesNotContain("idx_chunks_embedding_1024");
+        // Positive shape check (coordinator: "the selective fixture must show the
+        // materialize+rank plan on the selective function") -- the row_number() window
+        // function is what materializes the gate before ranking; its presence is the
+        // structural signature of the selective path, not merely the absence of HNSW.
+        assertThat(plan)
+            .as("the selective path must show the materialize+rank shape (a WindowAgg "
+                + "computing row_number() over the materialized gate). Plan was:%n%s", plan)
+            .contains("WindowAgg");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -293,49 +302,59 @@ class PlainSearchTextGatedSearchExplainTest {
     // task instructed EITHER preserving the lcogi/x7z7l two-branch dispatch (selective
     // chash-rank vs HNSW-first) inside the new function, OR proving with EXPLAIN evidence
     // that a single function keeps the index engaged on BOTH the selective AND
-    // non-selective gate regimes. The single-materializing-CTE design was NOT proven for
-    // the non-selective case before the first completion report — this closes that gap.
-    //
-    // Finding: it is NOT proven safe. DENSE_MATCHING (5500) is deliberately chosen ABOVE
-    // PgVectorRepository.SELECTIVE_GATE_MAX (5000) -- the retired Java hybridSearch's own
-    // selective/HNSW-first dispatch threshold -- so this fixture exercises exactly the
-    // regime where the OLD code would have taken the HNSW-first branch, not the regime a
-    // smaller dense gate would share trivially with the (always-materializing) selective
-    // branch. Under NATURAL planner settings (no GUC overrides), this 5500-of-6000-row
-    // gate STILL produces a plan that materializes and sorts the whole gate -- the HNSW
-    // index is not used, exactly the "materializing a huge gated set would spill
-    // work_mem" cost the retired Java HNSW-first branch existed to avoid. At this
-    // fixture's scale the materialize+sort is still cheap enough that nothing actually
-    // spills or times out, so this is NOT the acute production collapse (that remains a
-    // >20k-row, conexus xr7.8.9-owned phenomenon per CombinedQueryParityTest's own GROUP 4
-    // comment and HybridSelectiveGateTest's class javadoc -- container scale cannot
-    // reproduce it faithfully either direction). But it IS proof that
-    // text_gated_search_<dim> does NOT reproduce the old HNSW-first branch's plan shape
-    // for a gate PAST the old selectivity threshold, and does not have the mechanism (a
-    // bounded, HNSW-ordered, early-terminating scan) that made the old branch scale-safe.
-    // This is a real, open design gap, not a false alarm -- reported as such rather than
-    // papered over with a passing assertion of the wrong claim.
+    // non-selective gate regimes. text_gated_search_<dim>'s single materializing CTE was
+    // proven NOT to reach the HNSW index for a dense gate (T2 nexus/finding-zrcj7-dense-
+    // gate-hnsw-not-preserved [24216]) -- FIXED, not accepted as a known gap: vectors-011
+    // restores the lcogi/x7z7l two-branch dispatch as three generated schema functions
+    // (text_gate_probe_<dim>, text_gated_search_<dim> unchanged for the selective path,
+    // text_gated_search_hnsw_first_<dim> for the dense path). This test now proves the
+    // HNSW-first function DOES reach the index for the exact same dense fixture the
+    // earlier (retired) test proved the single-function design could not.
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test
-    void explain_textGatedSearch_denseGate_materializesFullGate_doesNotUseHnswEarlyTermination()
+    void explain_textGatedSearchHnswFirst_denseGate_usesHnswIndex_notFunctionScan()
             throws Exception {
-        String plan = explainNatural(
-            "SELECT id FROM nexus.text_gated_search_1024('" + vec(1.0, 0.0) + "'::vector, "
-            + "'" + DENSE_TOKEN + "', ARRAY['" + DENSE_COLL + "']::text[], NULL::jsonb, "
-            + "NULL::text, 50)");
-        // Documents the ACTUAL natural-planner behavior at this fixture's scale (a
-        // materializing WindowAgg/Sort over the dense gate, no HNSW index) — this is the
-        // known-gap finding above, not an endorsement. If a future fix changes the SQL
-        // shape to reach idx_chunks_embedding_1024 for a dense gate (e.g. reintroducing a
-        // bounded probe + dispatch), this assertion should be inverted to REQUIRE the
-        // index, not merely observe its absence.
+        // DENSE_MATCHING (5500) is deliberately chosen ABOVE
+        // PgVectorRepository.SELECTIVE_GATE_MAX (5000) -- the retired-and-now-restored
+        // selective/HNSW-first dispatch threshold -- so this fixture exercises exactly
+        // the regime where hybridSearch's Java dispatch routes to
+        // text_gated_search_hnsw_first_1024, not text_gated_search_1024.
+        String plan = explain(
+            "SELECT id FROM nexus.text_gated_search_hnsw_first_1024('" + vec(1.0, 0.0)
+            + "'::vector, '" + DENSE_TOKEN + "', ARRAY['" + DENSE_COLL + "']::text[], "
+            + "NULL::jsonb, NULL::text, 50)");
         assertThat(plan)
-            .as("KNOWN GAP (nexus-zrcj7 pushback item 2): the single-materializing-CTE "
-                + "shape does not reach idx_chunks_embedding_1024 for a dense/non-selective "
-                + "gate — it materializes and sorts the whole gate instead, unlike the "
-                + "retired Java HNSW-first branch. Plan was:%n%s", plan)
-            .doesNotContain("idx_chunks_embedding_1024");
+            .as("text_gated_search_hnsw_first_1024 must use the HNSW index "
+                + "idx_chunks_embedding_1024 for a dense/non-selective gate -- this is the "
+                + "restored lcogi/x7z7l HNSW-first branch, the bare ORDER BY/LIMIT shape "
+                + "(no CTE, no window function) that keeps the index reachable exactly as "
+                + "the retired raw SQL did. Plan was:%n%s", plan)
+            .contains("idx_chunks_embedding_1024");
+        assertThat(plan)
+            .as("a Function Scan node means the function is not inlinable (plpgsql) — "
+                + "vectors-011 must use an inlinable LANGUAGE sql function. Plan was:%n%s",
+                plan)
+            .doesNotContain("Function Scan");
+    }
+
+    @Test
+    void hybridSearch_denseGate_dispatchesToHnswFirst_viaPublicApi() {
+        // Behavioral companion: the production PgVectorRepository#hybridSearch API,
+        // given a gate PAST SELECTIVE_GATE_MAX, must dispatch to the HNSW-first branch
+        // and still return exactly the token-bearing matches ranked by distance —
+        // the probe/dispatch is a Java-side count comparison, invisible from the
+        // caller's perspective except via the plan shape the EXPLAIN test above pins.
+        List<Map<String, Object>> rows =
+            repo.hybridSearch(TENANT, DENSE_TOKEN, List.of(DENSE_COLL), 5, null);
+        assertThat(rows)
+            .as("hybridSearch must return results for a dense gate via the HNSW-first "
+                + "branch, not silently collapse to empty")
+            .hasSize(5);
+        assertThat(rows)
+            .as("every returned row must carry the dense token — the HNSW-first branch's "
+                + "gate filter is load-bearing, not a vector passthrough")
+            .allSatisfy(r -> assertThat((String) r.get("content")).contains(DENSE_TOKEN));
     }
 
     @Test
@@ -378,6 +397,49 @@ class PlainSearchTextGatedSearchExplainTest {
                 .as("row %d (id=%s) distance must match the analytic cosine-distance oracle "
                     + "1 - cos(theta) to within float8 tolerance", i, ids.get(i))
                 .isCloseTo(expectedDistances[i], org.assertj.core.data.Offset.offset(1e-4));
+        }
+    }
+
+    @Test
+    void textGatedSearchHnswFirst_orderAndDistanceParity_matchesAnalyticCosineOracle()
+            throws Exception {
+        // Same oracle as hybridSearch_orderAndDistanceParity_matchesAnalyticCosineOracle
+        // above, called DIRECTLY against text_gated_search_hnsw_first_1024 (vectors-011)
+        // rather than through hybridSearch's Java dispatch -- the ORDER_COLL fixture (4
+        // rows) is far below SELECTIVE_GATE_MAX, so hybridSearch itself would route to
+        // the selective function, never exercising the HNSW-first function's OWN
+        // correctness independent of when Java chooses to call it (coordinator: "add the
+        // same oracle against the hnsw-first function").
+        List<String> ids = new ArrayList<>();
+        List<Double> distances = new ArrayList<>();
+        try (Connection su = pg.createConnection("");
+             ResultSet rs = su.createStatement().executeQuery(
+                 "SELECT id, distance FROM nexus.text_gated_search_hnsw_first_1024('"
+                 + vec(1.0, 0.0) + "'::vector, '" + ORDER_TOKEN + "', ARRAY['" + ORDER_COLL
+                 + "']::text[], NULL::jsonb, NULL::text, 50)")) {
+            while (rs.next()) {
+                ids.add(rs.getString("id"));
+                distances.add(rs.getDouble("distance"));
+            }
+        }
+        assertThat(ids)
+            .as("text_gated_search_hnsw_first_1024 must return exactly the three "
+                + "token-bearing targets in ASCENDING distance order (30deg, 60deg, "
+                + "90deg) — the vector-closest 5deg filler carries no token and must "
+                + "never appear despite being nearer than all three")
+            .containsExactly(
+                chash("zrcj7order", 30), chash("zrcj7order", 60), chash("zrcj7order", 90));
+
+        double[] expectedHnswFirstDistances = {
+            1 - Math.cos(Math.toRadians(30)),
+            1 - Math.cos(Math.toRadians(60)),
+            1 - Math.cos(Math.toRadians(90)),
+        };
+        for (int i = 0; i < distances.size(); i++) {
+            assertThat(distances.get(i))
+                .as("row %d (id=%s) distance must match the analytic cosine-distance oracle "
+                    + "1 - cos(theta) to within float8 tolerance", i, ids.get(i))
+                .isCloseTo(expectedHnswFirstDistances[i], org.assertj.core.data.Offset.offset(1e-4));
         }
     }
 

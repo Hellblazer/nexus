@@ -1011,6 +1011,21 @@
          two-branch Java dispatch). -->
     <include file="db/changelog/vectors-010-text-gated-search.xml"/>
 
+    <!-- nexus-zrcj7 (coordinator finding, confirmed by EXPLAIN evidence) — restores
+         the lcogi/x7z7l selectivity-aware two-branch dispatch vectors-010's single
+         materializing-CTE design retired without proving dense-gate equivalence:
+         nexus.text_gate_probe_384/768/1024 (the bounded gate-selectivity probe,
+         RETURNS int) and nexus.text_gated_search_hnsw_first_384/768/1024 (the
+         retired Java HNSW-first branch, restored as an inlinable schema function
+         so the HNSW index stays reachable for a dense gate). Depends on
+         nexus.chunks/catalog_document_chunks/catalog_documents (same as vectors-
+         009/010) and on nothing from vectors-010 itself (independent siblings, not
+         a modification). Placed after vectors-010-text-gated-search.xml (current
+         tail) and before the grants-nexus-svc.xml runAlways block, matching the
+         established late-append convention (D0.1). See the file's own header for
+         the byte-equivalence derivation against the retired Java dispatch. -->
+    <include file="db/changelog/vectors-011-hybrid-selectivity-dispatch.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

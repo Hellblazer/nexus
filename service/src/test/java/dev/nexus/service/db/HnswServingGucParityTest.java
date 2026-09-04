@@ -30,15 +30,19 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>nexus-g17tf extends the pairing: every such site must ALSO bound the
  * statement ({@link PgSession#setSearchStatementTimeout}) so an orphaned or
- * pathological scan cancels instead of pinning xmin for hours. "ALSO" is a
- * SUPERSET relationship, not a fourth strict-equality leg (nexus-zrcj7,
- * 2026-09-03): {@code text_gated_search_<dim>}'s (vectors-010) row_number()-
- * over-the-materialized-gate shape never touches the HNSW index by
- * construction, so {@link PgVectorRepository#hybridSearch}'s
- * {@code withTenant} block sets {@code setSearchStatementTimeout}/
- * {@code setSearchPlanCacheMode} but deliberately NOT
- * {@code hnsw.iterative_scan}/{@code setHnswEfSearch} — a real HNSW site
- * still needs BOTH bounds, but a bounded site need not be an HNSW site.
+ * pathological scan cancels instead of pinning xmin for hours.
+ *
+ * <p>nexus-zrcj7 (2026-09-03): briefly loosened this to a strict-pair-plus-
+ * superset relationship when {@code text_gated_search_<dim>}'s single
+ * materializing-CTE design replaced {@link PgVectorRepository#hybridSearch}'s
+ * HNSW-first branch entirely. RESTORED to the original strict 4-way equality
+ * here (coordinator finding, confirmed by EXPLAIN evidence the single-function
+ * design did not preserve dense-gate HNSW reachability, T2 nexus/finding-
+ * zrcj7-dense-gate-hnsw-not-preserved [24216]): the lcogi/x7z7l selectivity-
+ * aware two-branch dispatch is back (vectors-011, {@code
+ * text_gate_probe_<dim>} + {@code text_gated_search_hnsw_first_<dim>}), so
+ * hybridSearch's {@code withTenant} block sets all four GUCs again, exactly
+ * as before.
  */
 class HnswServingGucParityTest {
 
@@ -63,16 +67,7 @@ class HnswServingGucParityTest {
                     continue; // the definitions themselves
                 }
                 iterativeSites += iter;
-                // iter/ef stay a strict PAIR (nexus-4ktfm: neither substitutes for the
-                // other at an HNSW site) and timeout/planMode stay a strict PAIR
-                // (nexus-6nkn3); nexus-g17tf's "ALSO bound the statement" is a SUPERSET
-                // relationship, not a fourth strict-equality leg — timeout/planMode must
-                // cover AT LEAST every iter/ef site (every HNSW site is bounded) but may
-                // exceed it (a non-HNSW vector-ranking site, e.g. text_gated_search_<dim>'s
-                // materializing rank, is bounded without being an HNSW site).
-                boolean pairMismatch = iter != ef || timeout != planMode;
-                boolean supersetViolated = timeout < iter || planMode < ef;
-                if (pairMismatch || supersetViolated) {
+                if (iter != ef || iter != timeout || iter != planMode) {
                     unpaired.add(p.getFileName() + ": " + iter
                         + " iterative_scan site(s) vs " + ef + " setHnswEfSearch call(s) vs "
                         + timeout + " setSearchStatementTimeout call(s) vs "
@@ -83,22 +78,16 @@ class HnswServingGucParityTest {
             throw new UncheckedIOException(e);
         }
         assertThat(unpaired)
-            .as("files where hnsw.iterative_scan/setHnswEfSearch or "
-                + "setSearchStatementTimeout/setSearchPlanCacheMode diverge from each "
-                + "other, or where the statement-bound count fails to cover every HNSW "
-                + "site — pair them (nexus-4ktfm, nexus-6nkn3) or bound every HNSW site "
-                + "(nexus-g17tf) or record a deliberate exemption here")
+            .as("files where hnsw.iterative_scan, setHnswEfSearch and setSearchStatementTimeout "
+                + "counts diverge — pair them (nexus-4ktfm, nexus-g17tf) or record a deliberate "
+                + "exemption here")
             .isEmpty();
         // Non-vacuity: the scan must actually see the known production sites
-        // (PgVectorRepository x3 -- searchWithTokens, runCombinedQuery,
-        // runCombinedQueryWithChash -- + TaxonomyCentroidRepository x1). Was x4/5
-        // before nexus-zrcj7 retired hybridSearch's dense-gate HNSW-first branch
-        // (text_gated_search_<dim>'s materializing rank never touches the index);
-        // a refactor that renames the literal out of visibility must fail here,
-        // not pass.
+        // (PgVectorRepository x4 + TaxonomyCentroidRepository x1); a refactor
+        // that renames the literal out of visibility must fail here, not pass.
         assertThat(iterativeSites)
             .as("iterative_scan sites visible to the sweep")
-            .isGreaterThanOrEqualTo(4);
+            .isGreaterThanOrEqualTo(5);
     }
 
     private static int count(String haystack, String needle) {

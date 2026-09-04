@@ -53,6 +53,13 @@ import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_768;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_768;
+// nexus-zrcj7 (coordinator finding, T2 [24216]): restores the lcogi/x7z7l selectivity-
+// aware two-branch dispatch (vectors-011) -- text_gate_probe_<dim> is a scalar function
+// (Routines.textGateProbe_NNN, already imported above via Routines); the HNSW-first
+// fallback is a table-valued function like every sibling.
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_384;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_768;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -1339,44 +1346,80 @@ public final class PgVectorRepository {
         String[] colls = collectionNames.toArray(String[]::new);
         String gateQueryText = queryText;
 
-        // nexus-zrcj7: text_gated_search_<dim> (vectors-010) replaces the raw
-        // two-branch (bounded gate probe, chash-ranked selective path vs
-        // HNSW-first fallback, nexus-lcogi/nexus-x7z7l) Java dispatch with ONE
-        // materializing statement -- see that changeset's own header for why a
-        // single row_number()-over-the-whole-gate CTE is the sanctioned shape
-        // (mirrors hybrid_search_<dim>'s P5.2 precedent). selectiveGateMax no
-        // longer selects between two query shapes; it is validated above only
-        // (>= 1) for backward-compatible test-pinning call sites.
-        org.jooq.Table<?> fn = switch (dim) {
-            case 384  -> TEXT_GATED_SEARCH_384.call(
-                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
-            case 768  -> TEXT_GATED_SEARCH_768.call(
-                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
-            case 1024 -> TEXT_GATED_SEARCH_1024.call(
-                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
-            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-        };
+        // nexus-zrcj7 (coordinator finding, T2 [24216]): restores the lcogi/x7z7l
+        // selectivity-aware two-branch dispatch (bounded gate probe -> chash-ranked
+        // selective path vs HNSW-first fallback) as three generated schema functions,
+        // byte-equivalent to the retired Java dispatch (see vectors-011's own header
+        // for the derivation from git history). Probe cap and comparison are
+        // unchanged: LIMIT selectiveGateMax + 1, dispatch on matches <= selectiveGateMax.
+        final int probeCap = selectiveGateMax + 1;
 
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
             // Trigram gate calibration (contract anchor): word_similarity >= 0.6, pg_trgm's
             // default - typo-probe candidates sit at ~0.9 and pass, no-signal rows at ~0.1
             // do not. Pinned per-transaction so the gate is independent of cluster config --
-            // text_gated_search_<dim> is a LANGUAGE sql function and cannot SET LOCAL its
-            // own GUC (see that changeset's header).
+            // every schema function below is LANGUAGE sql and cannot SET LOCAL its own GUC.
             PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
-            // nexus-g17tf: bound the statement so an orphaned or pathological scan
-            // cancels (57014) instead of pinning xmin for hours -- the gate's <%
-            // trigram heap-recheck and the row_number() materialization both run
-            // inside this one statement now (nexus-zrcj7), so one timeout covers it.
+            // nexus-g17tf: bound EVERY statement in this transaction -- the gate probe (a
+            // <% trigram heap-recheck), the selective rank, and the HNSW-first rank all
+            // inherit it. Set here, before the first fetch, rather than per branch: a
+            // branch without HNSW is still a scan that can pin xmin.
             PgSession.setSearchStatementTimeout(ctx);
             // nexus-6nkn3: a custom plan per execution so the planner sees the
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
             PgSession.setSearchPlanCacheMode(ctx);
-            // No hnsw.iterative_scan/setHnswEfSearch here (nexus-zrcj7): the
-            // row_number()-over-the-materialized-gate shape never touches the HNSW
-            // index by construction (vectors-010's own header) -- nothing to widen.
-            return ctx.selectFrom(fn).fetch();
+
+            // jOOQ codegen keeps the underscore before a purely-numeric dim suffix
+            // (textGateProbe_384, not textGateProbe384) -- verified against the
+            // generated Routines.java, matching the SQL function name literally.
+            int matches = switch (dim) {
+                case 384  -> Routines.textGateProbe_384(ctx.configuration(),
+                    gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap);
+                case 768  -> Routines.textGateProbe_768(ctx.configuration(),
+                    gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap);
+                case 1024 -> Routines.textGateProbe_1024(ctx.configuration(),
+                    gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap);
+                default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+            };
+
+            if (matches <= selectiveGateMax) {
+                // Selective: rank the complete (materialized) gate exactly, no HNSW --
+                // text_gated_search_<dim> (vectors-010), unchanged. matches == 0 needs no
+                // special empty-gate case: the function's own WHERE clause returns zero
+                // rows for an empty gate.
+                org.jooq.Table<?> fn = switch (dim) {
+                    case 384  -> TEXT_GATED_SEARCH_384.call(
+                        queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                    case 768  -> TEXT_GATED_SEARCH_768.call(
+                        queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                    case 1024 -> TEXT_GATED_SEARCH_1024.call(
+                        queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                    default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+                };
+                return ctx.selectFrom(fn).fetch();
+            }
+            // HNSW-first for a dense gate: keep HNSW scanning past ef_search
+            // (text_gated_search_hnsw_first_<dim>, vectors-011, inlines so these GUCs
+            // govern its own body exactly as they governed the retired raw SQL).
+            PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
+            // nexus-4ktfm: crowd-out headroom for the traversal itself (see
+            // PgSession.DEFAULT_EF_SEARCH_FLOOR).
+            PgSession.setHnswEfSearch(ctx, nResults);
+            org.jooq.Table<?> hnswFirstFn = switch (dim) {
+                case 384  -> TEXT_GATED_SEARCH_HNSW_FIRST_384.call(
+                    queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                case 768  -> TEXT_GATED_SEARCH_HNSW_FIRST_768.call(
+                    queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                case 1024 -> TEXT_GATED_SEARCH_HNSW_FIRST_1024.call(
+                    queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+            };
+            // nexus-bq06h: exactOnUnderReturn wraps ONLY the HNSW-first branch, exactly
+            // as it wrapped the retired raw-SQL HNSW-first branch -- the selective branch
+            // is already exact (ranks the complete materialized gate), so it never needed
+            // the fallback.
+            return exactSelectFrom(ctx, nResults, hnswFirstFn);
         });
 
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
