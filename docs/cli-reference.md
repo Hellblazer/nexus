@@ -1092,7 +1092,7 @@ nx catalog prune-stale [--collection NAME] [--owner PREFIX] [--source-dir DIR] [
 
 Drop catalog entries whose `file_path` is missing on disk. This is the supported stale-content sweep: `nx t3 prune-stale` was retired in 7.0.0 (nexus-bm8dd), and this verb followed by `nx t3 gc` replaces it. Pairs naturally with `remediate-paths`: run the remediator first to repair what's recoverable, then prune the rest. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete. **Not reversible in-product** (the pre-delete snapshots died with the local catalog, 7.0.0/nexus-i711w).
 
-Never deleted: entries with empty `file_path` (MCP-stored), basename-only paths (remediable, not stale), paths that exist, relative-path entries whose owner has no `repo_root` (presence cannot be verified; repair the owner first), and, when `--source-dir` is set with `--rdr-prefix-skip` (the default), RDR entries whose `rdr-NNN-` prefix matches a file under the source dir (a plausible rename; prefer remediation over destructive prune). Relative paths are resolved against the owner's `repo_root`, not the cwd (nexus-6ims).
+Never deleted: entries with empty `file_path` (MCP-stored), basename-only paths (remediable, not stale), paths that exist, relative-path entries whose owner has no `repo_root` (presence cannot be verified; repair the owner first), and, when `--source-dir` is set with `--rdr-prefix-skip` (the default; `--no-rdr-prefix-skip` disables it), RDR entries whose `rdr-NNN-` prefix matches a file under the source dir (a plausible rename; prefer remediation over destructive prune). Relative paths are resolved against the owner's `repo_root`, not the cwd (nexus-6ims).
 
 ### nx catalog link-density
 
@@ -1367,10 +1367,9 @@ Note: this verb reclaims storage; it is not the search-visibility fix for a dele
 ```
 nx catalog orphan-backfill dt-link COLLECTION [--min-score 0.75] [--owner PREFIX] [--dry-run/--no-dry-run]
 nx catalog orphan-backfill synthetic COLLECTION [--owner PREFIX] [--dry-run/--no-dry-run]
-nx catalog orphan-backfill link-existing COLLECTION [--dry-run/--no-dry-run]
 nx catalog orphan-backfill dump-csv COLLECTION [--out-dir DIR] [--min-score 0.75]
 nx catalog orphan-backfill apply-csv COLLECTION CSV_PATH [--owner PREFIX]
-nx catalog orphan-backfill link-existing COLLECTION [--by title|content_hash] [--also-synthetic] [--no-dry-run]
+nx catalog orphan-backfill link-existing COLLECTION [--by title|content_hash] [--also-synthetic/--no-also-synthetic] [--dry-run/--no-dry-run]
 ```
 
 Subgroup that backfills catalog Documents for T3 chunks that have no catalog entry. Complementary to `backfill-collections` (which syncs the collections projection) and to the manifest backfill (which writes manifest rows when Documents already exist). All destructive subcommands default to dry-run.
@@ -1456,7 +1455,7 @@ Carve-outs:
 ### nx t3 backfill-manifest
 
 ```
-nx t3 backfill-manifest [-c COLLECTION] [--no-dry-run] [-n N | --limit N] [--resume] [--only-gapped]
+nx t3 backfill-manifest [-c COLLECTION] [--no-dry-run] [-n N | --limit N] [--resume/--no-resume] [--only-gapped/--no-only-gapped]
 ```
 
 Backfill the `document_chunks` manifest from T3 chunk metadata (RDR-108 D2). Reads each catalog document's T3 chunk metadata (`doc_id`, `chunk_index`, `chunk_text_hash`, span coordinates) and writes one manifest row per chunk, so the catalog can answer "what chunks compose this Document, in what order?" without consulting T3. Omitting `-c` processes every collection registered in the catalog; `-n` caps documents per collection.
@@ -3774,6 +3773,6 @@ RDR (Research-Design-Review) authoring helpers.
 | `lint [PATHS]` | Lint RDR frontmatter/structure; reports findings per file. `--root DIR` scans a directory other than `docs/rdr/` |
 | `set-status STATUS` | Flip an RDR's `status:` frontmatter field and README row (refused unless the lifecycle table allows the transition); then append `needs-reexamination` to the T2 entry of every RDR joined to it by a `supersedes` edge (RDR-201 P3.3). `--date YYYY-MM-DD` sets `accepted_date`/`closed_date` (default today, UTC); `--root DIR` names the repo root (default git toplevel) |
 | `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-close`, `rdr-research`, `rdr-audit`, `phase-review-gate`) |
-| `repeat RDR` | Multi-model repeatability diff (nexus-axwpn): send the RDR's Technical Design (or `Proposed Design` / `Design`) section to two model tiers (`--tiers cheap,strong`), ask each for an implementation plan, and report where the plans diverge in steps, files and decisions. A divergence is a place the text left open, not a verdict on a model. `RDR` is a path or a number resolved under `--root` (default `docs/rdr/`); `--timeout` (seconds per dispatch, default 300) and `--max-budget-usd` (per dispatch, default 0.50) bound each reader; `--json` emits both plans and the diff. Exits 0 with the report, 2 when the RDR has no design section, 1 when a dispatch fails. Writes nothing |
+| `repeat RDR` | Multi-model repeatability diff (nexus-axwpn): send the RDR's Technical Design (or `Proposed Design` / `Design`) section to two claude -p models (`--models haiku,sonnet`, never the operator tier table), ask each for an implementation plan, and report where the plans diverge in steps, files and decisions. A divergence is a place the text left open, not a verdict on a model. `RDR` is a path or a number resolved under `--root` (default `docs/rdr/`); `--timeout` (seconds per dispatch, default 300) and `--max-budget-usd` (per dispatch, default 0.50) bound each reader; `--json` emits both plans and the diff. Exits 0 with the report, 2 when the RDR has no design section, 1 when a dispatch fails. Writes nothing |
 
 Run `nx rdr --help` / `nx rdr preamble --help` for the full subcommand list. The `preamble` subcommands are primarily invoked by the conexus RDR-lifecycle skills.

@@ -83,6 +83,22 @@ SHA_ALLOWLIST: dict[str, str] = {
     "bc9f2a0": "rdr-201: sha in the cwensel/intrastate repo, not this one",
     "a228e079": "docs/wire-contract-pending.md: sha in the conexus repo, not this one",
     "433b036": "rdr-066: release commit squashed away at merge (2026-04-11); PR #148 is the durable pointer",
+    # Local-only commits: they open in a developer clone that still holds
+    # the squashed feature branch, and nowhere else (CI run 33919575425).
+    "7a4fcbc": "docs/plans 2026-04-15: feature-branch commit squashed away at merge",
+    "d255340": "post-mortem 014: feature-branch commit squashed away at merge",
+    "dc443f3": "post-mortem 015: feature-branch commit squashed away at merge",
+    "cfbab97": "post-mortem 015: feature-branch commit squashed away at merge",
+    "4e69804": "post-mortem 088: feature-branch commit squashed away at merge",
+    "ab8bc459": "post-mortem 103: feature-branch commit squashed away at merge",
+    "a4c16dbd": "post-mortem nexus-3e4s: feature-branch commit squashed away at merge",
+    "9bde077c": "post-mortem nexus-3e4s: feature-branch commit squashed away at merge",
+    "7a2a71e4": "post-mortem nexus-3e4s: feature-branch commit squashed away at merge",
+    "81a982e4": "post-mortem nexus-3e4s: feature-branch commit squashed away at merge",
+    "8db21143": "post-mortem nexus-3e4s: feature-branch commit squashed away at merge",
+    "4a912f9": "rdr-095: feature-branch commit squashed away at merge",
+    "715fcd6": "rdr-097: feature-branch commit squashed away at merge",
+    "87928a989": "rdr-199: feature-branch commit squashed away at merge",
     "cbe7290": "rdr-066: feature-branch commit squashed away at merge (2026-04-11)",
     "6cf0703": "rdr-066: feature-branch commit squashed away at merge (2026-04-11)",
     "44e9fe9": "rdr-066: feature-branch commit squashed away at merge (2026-04-11)",
@@ -134,7 +150,25 @@ def _sha_cites(files: list[Path] | None = None) -> list[Cite]:
     ]
 
 
+def _published_commits() -> set[str]:
+    """Every commit reachable from a remote-tracking ref or a tag: what a
+    fresh ``fetch-depth: 0`` checkout (CI's lint job) can see. A local
+    clone also holds commits from branches that were squash-merged and
+    deleted, so ``git cat-file`` alone said "resolves" here for 19
+    citations CI could not open (run 33919575425, 2026-09-04)."""
+    out = subprocess.run(
+        ["git", "rev-list", "--remotes", "--tags"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return set(out.split())
+
+
 def _unresolved_shas(values: set[str]) -> set[str]:
+    """Values that do not name a PUBLISHED commit (see
+    :func:`_published_commits`): missing, ambiguous, or local-only."""
     if not values:
         return set()
     proc = subprocess.run(
@@ -145,10 +179,21 @@ def _unresolved_shas(values: set[str]) -> set[str]:
         text=True,
         check=False,
     )
+    published = _published_commits()
     missing: set[str] = set()
     for line in proc.stdout.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
         if line.endswith(" missing") or line.endswith(" ambiguous"):
-            missing.add(line.split()[0].split("^")[0])
+            missing.add(parts[0].split("^")[0])
+            continue
+        full, kind = parts[0], parts[1] if len(parts) > 1 else ""
+        if kind != "commit" or full not in published:
+            # cat-file echoes the full sha; map back to the cited prefix
+            for v in values:
+                if full.startswith(v):
+                    missing.add(v)
     return missing
 
 
@@ -275,11 +320,13 @@ def test_planted_bogus_sha_is_detected(tmp_path: Path) -> None:
     assert _unresolved_shas({"deadbee5"}) == {"deadbee5"}
 
 
-def test_a_real_head_sha_resolves() -> None:
-    head = subprocess.run(
-        ["git", "rev-parse", "--short=9", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+def test_a_real_published_sha_resolves() -> None:
+    """A commit on origin's develop resolves; local HEAD may not, since an
+    unpushed commit is exactly what CI cannot see."""
+    published = subprocess.run(
+        ["git", "rev-parse", "--short=9", "origin/develop"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
     ).stdout.strip()
-    assert _unresolved_shas({head}) == set()
+    assert _unresolved_shas({published}) == set()
 
 
 def test_planted_bogus_rdr_is_detected(tmp_path: Path) -> None:

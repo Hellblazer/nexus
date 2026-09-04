@@ -60,7 +60,14 @@ def walk(root: click.Group, prefix: str = "nx") -> tuple[list[str], list[tuple[s
             commands.append(sub_path)
             for prm in sub.params:
                 if isinstance(prm, click.Option) and not prm.hidden:
-                    options.extend((sub_path, o) for o in prm.opts if o.startswith("--"))
+                    # secondary_opts is the --no-x half of a --x/--no-x
+                    # toggle; 27 exist and 4 were undocumented while the
+                    # walk ignored them (review [24393] Major 2).
+                    options.extend(
+                        (sub_path, o)
+                        for o in [*prm.opts, *prm.secondary_opts]
+                        if o.startswith("--")
+                    )
             visit(sub, sub_path)
 
     visit(root, prefix)
@@ -82,7 +89,10 @@ def _mentioning_sections(path: str, doc: str) -> list[str]:
     together with its parent group's name."""
     parts = path.split(" ")
     leaf = parts[-1]
-    parent = parts[-2] if len(parts) > 2 else ""
+    # The parent must appear as a command, ``nx catalog``, not as a word
+    # in prose: "catalog" occurs in the nx store section and that section
+    # has a `list` leaf too (review [24393] Major 1, falsified live).
+    parent = " ".join(parts[:-1]) if len(parts) > 2 else ""
     out = []
     for sec in _sections(doc):
         if path in sec or (f"`{leaf}" in sec and (not parent or parent in sec)):
@@ -163,3 +173,16 @@ def test_a_planted_undocumented_option_is_detected() -> None:
     assert commands == ["nx thing"]
     assert options == [("nx thing", "--absolutely-undocumented-flag")], "hidden options are out of scope"
     assert "--absolutely-undocumented-flag" not in REFERENCE.read_text()
+
+
+def test_an_option_documented_under_a_same_named_leaf_elsewhere_does_not_count() -> None:
+    """The section heuristic: `list` under nx store, with --offset, must
+    not vouch for nx catalog list --offset; and prose mentioning "catalog"
+    is not the command nx catalog."""
+    doc = (
+        "## nx store\n\nThe catalog is separate.\n\n| `list` | List entries. `--offset N` |\n\n"
+        "## nx catalog\n\n| `list` | List documents |\n"
+    )
+    assert _mentioning_sections("nx catalog list", doc) == ["nx catalog\n\n| `list` | List documents |\n"]
+    assert not any("--offset" in sec for sec in _mentioning_sections("nx catalog list", doc))
+    assert any("--offset" in sec for sec in _mentioning_sections("nx store list", doc))

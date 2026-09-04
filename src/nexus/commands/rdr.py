@@ -848,10 +848,10 @@ def _resolve_repeat_dispatch():
     help="RDR directory used to resolve a numeric id (default: docs/rdr/).",
 )
 @click.option(
-    "--tiers",
-    default="cheap,strong",
+    "--models",
+    default="haiku,sonnet",
     show_default=True,
-    help="Two model tiers to dispatch, comma-separated (see nexus.operators.model_tiers).",
+    help="Two claude -p model aliases to dispatch, comma-separated; they must differ.",
 )
 @click.option("--timeout", type=float, default=300.0, show_default=True, help="Seconds per dispatch.")
 @click.option(
@@ -865,22 +865,26 @@ def _resolve_repeat_dispatch():
 def repeat(
     rdr: str,
     root: Path | None,
-    tiers: str,
+    models: str,
     timeout: float,
     max_budget_usd: float,
     as_json: bool,
 ) -> None:
     """Multi-model repeatability diff of RDR's design text (nexus-axwpn).
 
-    Sends the Technical Design section to two model tiers, asks each for
-    an implementation plan, and reports where the plans diverge: steps,
+    Sends the Technical Design section to two models, asks each for an
+    implementation plan, and reports where the plans diverge: steps,
     files, decisions. A divergence is a place the text left open. Exits
     0 with a report; exits 2 when there is nothing to repeat.
+
+    Models are named as claude -p aliases, never resolved through the
+    operator tier table: that table's consumers are the two dispatch
+    sites RDR-196 allowlists, and this verb is an explicit, hand-run
+    comparison outside them.
     """
     import asyncio  # noqa: PLC0415 — only this verb runs an event loop
     import json as _json  # noqa: PLC0415
 
-    from nexus.operators.model_tiers import UnknownTierError, resolve_model_for_tier  # noqa: PLC0415
     from nexus.rdr_repeat import (  # noqa: PLC0415
         PLAN_SCHEMA,
         RepeatError,
@@ -910,21 +914,17 @@ def repeat(
         )
         sys.exit(2)
 
-    tier_names = [t.strip() for t in tiers.split(",") if t.strip()]
-    if len(tier_names) != 2:
-        click.echo("nx rdr repeat: --tiers needs exactly two tiers", err=True)
+    model_names = [m.strip() for m in models.split(",") if m.strip()]
+    if len(model_names) != 2:
+        click.echo("nx rdr repeat: --models needs exactly two model aliases", err=True)
         sys.exit(2)
-    try:
-        models = [resolve_model_for_tier(t) for t in tier_names]
-    except UnknownTierError as exc:
-        click.echo(f"nx rdr repeat: {exc}", err=True)
-        sys.exit(2)
-    if models[0] == models[1]:
+    if model_names[0] == model_names[1]:
         click.echo(
-            f"nx rdr repeat: both tiers resolve to {models[0]!r}; a repeatability diff needs two readers",
+            f"nx rdr repeat: both models are {model_names[0]!r}; a repeatability diff needs two readers",
             err=True,
         )
         sys.exit(2)
+    models_resolved = model_names
 
     dispatch = _resolve_repeat_dispatch()
     prompt = build_prompt(rdr_id, design)
@@ -941,13 +941,13 @@ def repeat(
                     operator="rdr_repeat",
                     isolated=True,
                 )
-                for m in models
+                for m in models_resolved
             )
         )
 
     try:
         payloads = asyncio.run(_run())
-        plans = [parse_plan(m, p) for m, p in zip(models, payloads, strict=True)]
+        plans = [parse_plan(m, p) for m, p in zip(models_resolved, payloads, strict=True)]
     except (RepeatError, Exception) as exc:  # noqa: BLE001 - report, never traceback
         click.echo(f"nx rdr repeat: dispatch failed ({exc})", err=True)
         sys.exit(1)

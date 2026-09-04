@@ -85,8 +85,11 @@ and a moved anchor is the duplicate-contract drift this exists to end
 with a dated Revision History line; retire with `status: retired` and a
 pointer to what replaced it. `tests/test_docs_reference_rot.py` (lint
 bucket) fails on any `JDR-NNN` cited under `docs/` that has no file here.
-JDRs are not RDRs: `nx rdr` lifecycle verbs, the README index, and
-`nx index rdr` do not see them; they are documentation of a seam.
+JDRs are not RDRs: `nx rdr` lifecycle verbs, the README index, and the
+standalone `nx index rdr` (non-recursive) do not see them. `nx index repo`
+does walk `docs/rdr/` recursively and registers them under the `rdr`
+corpus, exactly as it does `post-mortem/`; that is fine, they are
+decision records, but nothing in the lifecycle acts on them.
 Seeded 2026-09-04 (nexus-vuiid) with JDR-001, the T1 three-scopes contract
 shared by RDR-105, RDR-149 and RDR-184.
 
