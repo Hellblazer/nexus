@@ -591,7 +591,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     ),
     # ── straddle-era FK test, Phase 5 LANDED (nexus-o8dil.49) ────────────────
     "service/src/test/java/dev/nexus/service/CollectionRegistryFkTest.java": (
-        13,
+        12,
         "RDR-156 nexus-70r3c.1 FK+hygiene suite. RDR-191 Phase 5 "
         "(nexus-o8dil.49, fk-004-chunks-collection-registry.xml) landed the "
         "unified chunks_collection_fk on 2026-08-15 — every test method that "
@@ -685,7 +685,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "mirrors CatalogDeleteCollectionCascadeTest's allowlist reason."
     ),
     "service/src/test/java/dev/nexus/service/CatalogRepositoryTest.java": (
-        3,
+        2,
         "Comments narrating the RDR-191 unification (chunks_384/768/1024 -> "
         "nexus.chunks, chunks_768 as a pre-unify FK-target example); "
         "historical only."
