@@ -4486,7 +4486,7 @@ def _run_index(
     )
     # The hook map covers this repo's owner only; a chash in rdr__/docs__
     # can resolve to a doc registered under another owner (this checkout's
-    # RDRs sit under eight). One all_documents() sweep fills those in.
+    # RDRs sit under eight). One paged resolve_many fills those in.
     _cached_doc_ids = (
         set(code_staleness.by_doc_id)
         | set(docs_staleness.by_doc_id)

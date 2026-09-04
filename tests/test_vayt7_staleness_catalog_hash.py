@@ -18,6 +18,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from nexus.indexer_utils import (
     StalenessCache,
     apply_catalog_content_hashes,
@@ -54,13 +56,17 @@ class TestSharedChashPresence:
         assert set(cache.by_doc_id) == {"1.1.1", "1.1.2"}
         assert cache.by_doc_id["1.1.1"] == ("hash-a", "voyage-code-3")
 
-    def test_unique_chunk_value_is_not_overwritten_by_shared_chunk(self) -> None:
+    @pytest.mark.parametrize("shared_first", [True, False])
+    def test_unique_chunk_value_is_not_overwritten_by_shared_chunk(
+        self, shared_first: bool,
+    ) -> None:
         """A doc's own (unique) chunk value wins over a shared chunk's
         first-writer value, whatever order the sweep returns rows in."""
-        col = _col([
+        rows = [
             {"chunk_text_hash": "shared", "content_hash": "hash-other", "embedding_model": "voyage-code-3"},
             {"chunk_text_hash": "own-2", "content_hash": "hash-2", "embedding_model": "voyage-code-3"},
-        ])
+        ]
+        col = _col(rows if shared_first else rows[::-1])
         fake_cat = MagicMock()
         fake_cat.docs_for_chashes.return_value = {
             "shared": ["1.1.1", "1.1.2"], "own-2": ["1.1.2"],
@@ -116,8 +122,6 @@ class TestCatalogOverlay:
 # suite substrate, fake local T3 for chunk content). Imported names are
 # picked up by pytest as fixtures in this module's namespace.
 from pathlib import Path  # noqa: E402
-
-import pytest  # noqa: E402
 
 from nexus.db.t3 import T3Database  # noqa: E402
 from tests.test_cp46b_runfence_repo_staleness import (  # noqa: E402, F401
@@ -180,24 +184,25 @@ class TestStaleChunkMetadataDoesNotForceReindex:
 class TestCompleteDocHashesFor:
     def test_sweep_fills_docs_outside_the_hook_map(self) -> None:
         cat = MagicMock()
-        cat.all_documents.return_value = [
-            SimpleNamespace(tumbler="1.2.7", index_state="complete", index_content_hash="h7", index_state_reported=True),
-            SimpleNamespace(tumbler="1.2.8", index_state="indexing", index_content_hash="h8", index_state_reported=True),
-            SimpleNamespace(tumbler="1.2.9", index_state="complete", index_content_hash="", index_state_reported=True),
-            SimpleNamespace(tumbler="1.9.1", index_state="complete", index_content_hash="unwanted", index_state_reported=True),
-        ]
+        cat.resolve_many.return_value = {
+            "1.2.7": SimpleNamespace(tumbler="1.2.7", index_state="complete", index_content_hash="h7", index_state_reported=True),
+            "1.2.8": SimpleNamespace(tumbler="1.2.8", index_state="indexing", index_content_hash="h8", index_state_reported=True),
+            "1.2.9": SimpleNamespace(tumbler="1.2.9", index_state="complete", index_content_hash="", index_state_reported=True),
+        }
         out = complete_doc_hashes_for(
             cat, {"1.1.1", "1.2.7", "1.2.8", "1.2.9"}, known={"1.1.1": "hook"},
         )
         assert out == {"1.1.1": "hook", "1.2.7": "h7"}
+        # O(wanted): only the ids outside the hook map are resolved.
+        cat.resolve_many.assert_called_once_with(["1.2.7", "1.2.8", "1.2.9"])
 
     def test_nothing_wanted_means_no_sweep(self) -> None:
         cat = MagicMock()
         assert complete_doc_hashes_for(cat, {"1.1.1"}, known={"1.1.1": "hook"}) == {"1.1.1": "hook"}
-        cat.all_documents.assert_not_called()
+        cat.resolve_many.assert_not_called()
 
     def test_sweep_failure_keeps_known_and_does_not_raise(self) -> None:
         cat = MagicMock()
-        cat.all_documents.side_effect = RuntimeError("engine away")
+        cat.resolve_many.side_effect = RuntimeError("engine away")
         assert complete_doc_hashes_for(cat, {"1.2.7"}, known={"1.1.1": "hook"}) == {"1.1.1": "hook"}
         assert complete_doc_hashes_for(None, {"1.2.7"}) == {}

@@ -718,13 +718,14 @@ class StalenessCache:
 
     One index:
 
-    - ``by_doc_id`` keys on the catalog tumbler stored in chunk
-      metadata. Populated only for chunks whose stored ``doc_id`` field
-      is non-empty. The post-RDR-101-Phase-4 write path stamps
-      ``doc_id`` on every new chunk; legacy chunks predating the
-      backfill are absent from this index, which the cached
-      ``check_staleness`` correctly treats as a cache miss → "stale" →
-      re-index → ghost-chunk healed.
+    - ``by_doc_id`` keys on the catalog tumbler. Chunks no longer carry
+      ``doc_id`` (RDR-108 Phase 3): each chunk's ``chunk_text_hash`` is
+      resolved to its document(s) through the catalog manifest, and the
+      value is the fence hash where the catalog has one
+      (``apply_catalog_content_hashes``, nexus-vayt7), else the chunk's
+      first-writer hash. A doc with no chunk in T3 is absent from this
+      index, which the cached ``check_staleness`` treats as a cache miss
+      → "stale" → re-index → ghost-chunk healed.
 
     nexus-afudo (2026-08-05): ``by_source_path`` DELETED as dead code —
     RDR-102 D2 (83ac62c7, 2026-05-02) hard-removed ``source_path`` from
@@ -798,6 +799,15 @@ def apply_catalog_content_hashes(
     ghost-heal path (miss -> re-index) is untouched. ``never_fresh`` is
     consulted by ``check_staleness`` before ``by_doc_id`` and is not
     affected here.
+
+    One heal is deliberately given up: a doc whose ONLY surviving T3 row
+    is a chunk it shares with another doc used to be an unconditional
+    miss (re-indexed every run, so a partial loss of its own unique
+    chunks healed for free). It is now present, and a matching fence hash
+    skips it. The manifest-chunk FK (catalog-029) rejects a manifest row
+    with no chunk and the sweeps only reap superseded rows, so a live
+    'complete' doc losing its own chunks is not a state the store admits;
+    if it ever appears, ``nx index --force`` is the remedy.
     """
     if not complete_doc_hashes:
         return 0
@@ -820,10 +830,11 @@ def complete_doc_hashes_for(
     known: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """``{doc_id: index_content_hash}`` for every *doc_ids* member fenced
-    ``'complete'`` in *catalog*, one ``all_documents()`` sweep
-    (nexus-vayt7). *known* entries are copied through untouched so the
-    hook's owner-scoped map (see ``indexer._catalog_hook``) is not
-    re-fetched; the sweep fills in the docs that map lives outside of.
+    ``'complete'`` in *catalog*, via the paged ``resolve_many`` batch
+    resolve (nexus-vayt7). *known* entries are copied through untouched so
+    the hook's owner-scoped map (see ``indexer._catalog_hook``) is not
+    re-fetched; the resolve covers only the docs that map lives outside of,
+    so the cost is O(wanted), never O(catalog).
 
     Why a second source: the repo hook only sees ONE owner's entries, but a
     chash in the rdr__ / docs__ collections can resolve to a document
@@ -833,26 +844,23 @@ def complete_doc_hashes_for(
     2325 of 2370 files skipped, and 40 of the 45 still re-indexed were
     RDRs whose fence lived under one of those other owners.
 
-    Returns *known* alone when *catalog* is ``None`` or the sweep fails —
+    Returns *known* alone when *catalog* is ``None`` or the resolve fails —
     never raises; a missing overlay costs a re-index, not a run.
     """
     out: dict[str, str] = dict(known or {})
-    wanted = {d for d in doc_ids if d and d not in out}
+    wanted = sorted({d for d in doc_ids if d and d not in out})
     if catalog is None or not wanted:
         return out
     try:
-        entries = catalog.all_documents()  # type: ignore[attr-defined]
+        entries = catalog.resolve_many(wanted)  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 — best-effort overlay; a miss re-indexes, never fails the run
         import structlog  # noqa: PLC0415 — deferred import; rare/branch-local path
 
         structlog.get_logger(__name__).warning(
-            "complete_doc_hashes_sweep_failed", wanted=len(wanted), exc_info=True,
+            "complete_doc_hashes_resolve_failed", wanted=len(wanted), exc_info=True,
         )
         return out
-    for e in entries:
-        doc_id = str(getattr(e, "tumbler", ""))
-        if doc_id not in wanted:
-            continue
+    for doc_id, e in (entries or {}).items():
         if (
             getattr(e, "index_state_reported", True)
             and getattr(e, "index_state", None) == "complete"
