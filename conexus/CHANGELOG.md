@@ -15,6 +15,12 @@ Plugin version aligned with conexus 7.28.0. No plugin-side changes.
 
 ## [Unreleased]
 
+## [7.29.1] - 2026-09-04
+
+Advancing `source.ref` to `v7.29.1` is what makes the sn plugin change below
+live; it was merged on `develop` after the v7.29.0 tag and inert in every
+running session until this tag.
+
 - sn plugin (nexus-jbt5x): Serena and Context7 pinned in `sn/.mcp.json`; the
   auto-approve list is generated from the pinned Serena's tool set the way its
   registry discovers tools (22 live tools had been prompting, 4 listed ones no

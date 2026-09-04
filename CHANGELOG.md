@@ -6,7 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.29.1] - 2026-09-04
+
+Engine identity unchanged: `engine-service-v0.1.100`. Patch release so
+installed clients stop re-indexing unchanged files.
+
 ### Fixed
+
+- `nx index` re-chunked, re-embedded and re-uploaded hundreds of unchanged
+  files on every run (nexus-vayt7): on this repository 650 of 2370 files,
+  the same set each time, about ten minutes per post-commit run; on a
+  work box, half of each repository per commit. The staleness cache read a
+  document's content hash from T3 chunk metadata, which is
+  content-addressed: a chunk shared by two files carries the first
+  writer's hash, and a chunk re-upserted for a changed file keeps its
+  original row (RDR-181 embed-skip), so 536 of 1818 code documents read as
+  changed while the catalog fence said complete with the current hash.
+  The cache now marks every document a shared chunk maps to as present and
+  takes the hash from the catalog fence (`index_content_hash`, the repo
+  hook's owner fetch plus a paged `resolve_many` for documents under other
+  owners). Measured on an unchanged tree: 2370 of 2370 files skipped, flush
+  wall under two seconds (was 1720 of 2370 and 508 seconds).
+  `staleness_caches_built` now logs `complete_fence_docs` and
+  `fence_hash_overrides`.
+
 
 - The per-commit reviewer saw only a combined diff on merge commits: a bare
   `git show` on a two-parent commit emits hunks that differ from both
