@@ -9,12 +9,6 @@ import com.sun.net.httpserver.HttpPrincipal;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -30,7 +24,6 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -84,39 +77,15 @@ class TaxonomyHandlerImportRlsTest {
         pg = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN "
-                + "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "'; END IF; END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN "
-                + "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; END IF; END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db).update(new Contexts());
-        }
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            for (String table : List.of("topics", "taxonomy_meta", "topic_assignments", "topic_links")) {
-                su.createStatement().execute(
-                    "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + table + " TO " + SVC_ROLE);
-            }
-            // USAGE alone is NOT enough here, unlike the sibling AssignFkTest:
             // importTopic preserves a client-supplied id by calling
             // setval(pg_get_serial_sequence(...), GREATEST(last_value, ?)) to keep the
-            // sequence ahead of imported ids, and setval requires UPDATE on the
-            // sequence. Production grants exactly this in
-            // taxonomy-005-topics-seq-update-grant.xml (GRANT UPDATE ON SEQUENCE ...
-            // TO nexus_svc); this harness runs as its own role, so it must mirror it or
-            // every import 500s on "permission denied for sequence topics_id_seq" and
-            // the RLS behaviour under test is never reached.
-            su.createStatement().execute("GRANT USAGE, SELECT, UPDATE ON SEQUENCE nexus.topics_id_seq TO " + SVC_ROLE);
-            su.createStatement().execute("GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
-            su.createStatement().execute("ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+            // sequence ahead of imported ids, which needs UPDATE on topics_id_seq --
+            // granted by db.changelog-test-role.xml itself (nexus-cbo4a batch 1b:
+            // widened rather than repeated per-class; see that file's comment).
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();

@@ -8,12 +8,6 @@ import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -104,47 +98,32 @@ class CatalogPurgeTrashVacuumTest {
         pg = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            for (String role : List.of(SVC_ROLE, SVC_ROLE_NO_MAINTAIN)) {
-                su.createStatement().execute(
-                    "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + role + "') THEN "
-                    + "CREATE ROLE " + role + " LOGIN PASSWORD '" + SVC_PASS + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
-            }
-            // nexus_svc: ONLY created here, deliberately NOT granted anything by hand —
-            // grants-nexus-svc.xml's own changesets provision it below, exactly like a
-            // real deploy (that changelog REQUIRES the role to pre-exist and fails loud
-            // otherwise; it does not create it).
+            PgContainerHelper.applyProductSchema(su);
+        }
+
+        // SVC_ROLE / SVC_ROLE_NO_MAINTAIN: two svc-shaped roles in one class (nexus-cbo4a
+        // batch 1b audit) -- bootstrapServiceRole's fixed grant set has no MAINTAIN either
+        // way, so it is safe for BOTH the plain role and the MAINTAIN-withholding negative
+        // control; purge_trash(interval) EXECUTE is kept as an explicit grant per role.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
+            su.createStatement().execute("GRANT EXECUTE ON FUNCTION nexus.purge_trash(interval) TO " + SVC_ROLE);
+        }
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE_NO_MAINTAIN, SVC_PASS);
             su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + NEXUS_SVC + "') THEN "
-                + "CREATE ROLE " + NEXUS_SVC + " LOGIN PASSWORD '" + NEXUS_SVC_PASS + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
-        }
-
-        try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su));
-            Liquibase liquibase = new Liquibase(
-                "db/changelog/db.changelog-master.xml", new ClassLoaderResourceAccessor(), db);
-            liquibase.update(new Contexts());
+                "GRANT EXECUTE ON FUNCTION nexus.purge_trash(interval) TO " + SVC_ROLE_NO_MAINTAIN);
         }
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            for (String role : List.of(SVC_ROLE, SVC_ROLE_NO_MAINTAIN)) {
-                su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + role);
-                su.createStatement().execute(
-                    "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + role);
-                su.createStatement().execute(
-                    "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO " + role);
-                su.createStatement().execute(
-                    "GRANT EXECUTE ON FUNCTION nexus.purge_trash(interval) TO " + role);
-                su.createStatement().execute("ALTER ROLE " + role + " SET search_path TO nexus, public");
-            }
             // nexus_svc gets NO manual grants here — grants-nexus-svc-1 (base DML,
             // EXECUTE on purge_trash) and grants-005-chunks-unify-maintain (MAINTAIN on
-            // the three unified purge-vacuum tables, RDR-191) already ran as part of the
-            // migration above,
-            // exactly as they would against a real deploy. Only search_path, the one
-            // thing every other test class's connecting role also sets and which no
-            // changeset can set for a role it does not create.
+            // the three unified purge-vacuum tables, RDR-191) already ran as part of
+            // applyProductSchema's master changelog above (which also creates nexus_svc
+            // itself, via role-001-nexus-svc.xml), exactly as they would against a real
+            // deploy. Only search_path, the one thing every other test class's connecting
+            // role also sets and which no changeset can set for a role it does not create.
             su.createStatement().execute("ALTER ROLE " + NEXUS_SVC + " SET search_path TO nexus, public");
         }
 

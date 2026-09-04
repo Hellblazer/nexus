@@ -3,12 +3,6 @@ package dev.nexus.service;
 import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.*;
 
 import java.sql.Connection;
@@ -79,57 +73,14 @@ class AspectRepositoryTest {
         pg = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN " +
-                "    CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "'; " +
-                "  END IF; " +
-                "END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; " +
-                "  END IF; " +
-                "END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
-
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            Liquibase liquibase = new Liquibase(
-                "db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db);
-            liquibase.update(new Contexts());
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            // Grant on all 4 aspect tables
-            for (String table : List.of("document_aspects", "document_highlights",
-                                        "aspect_extraction_queue", "aspect_promotion_log")) {
-                su.createStatement().execute(
-                    "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + table + " TO " + SVC_ROLE);
-                su.createStatement().execute(
-                    "GRANT USAGE ON SEQUENCE nexus." + table + "_id_seq TO " + SVC_ROLE);
-            }
-            // RDR-164 P1a: aspect/highlight/queue writes now ensure-register their collection
-            // (catalog_collections stub) to satisfy the new fk-003 collection FKs, so the
-            // service role needs INSERT on catalog_collections (production grants this via
-            // GRANT ... ON ALL TABLES IN SCHEMA nexus; the test role is scoped explicitly).
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.catalog_collections TO " + SVC_ROLE);
-            // registerFixtureDoc (hygiene-001, nexus-tk070.p6a follow-on) and other
-            // FK-fixture helpers in this file SELECT/INSERT catalog_documents rows
-            // directly for doc_id FK satisfaction. Production's nexus_svc holds
-            // SELECT there via grants-nexus-svc's schema-wide loop; this explicitly
-            // scoped test role must be granted it by hand, same as catalog_collections
-            // above.
-            su.createStatement().execute(
-                "GRANT SELECT ON nexus.catalog_documents TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
 
             // nexus-b7v6i: document_aspects.doc_id and document_highlights.doc_id now enforce
             // a FK to catalog_documents(tenant_id, tumbler). Seed all tumbler values used

@@ -4,12 +4,6 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -104,50 +98,22 @@ class TaxonomyAssignFromChashesRepositoryTest {
         pg = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN "
-                + "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "'; END IF; END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN "
-                + "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; END IF; END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
 
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db).update(new Contexts());
-        }
-
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            // RDR-191 unify (vectors-004/taxonomy-007): chunks_<dim> and
-            // taxonomy_centroids_<dim> collapse into ONE unified table each
-            // (nexus.chunks / nexus.taxonomy_centroids, three nullable typed
-            // embedding_<dim> columns) -- one grant apiece, not a dim loop.
+            // topics_id_seq UPDATE is granted by db.changelog-test-role.xml itself
+            // (nexus-cbo4a batch 1b: widened rather than repeated per-class).
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             // assign_from_chashes_<dim> stays THREE separate typed functions
-            // (DECISION 2, T2 [22445]), so its EXECUTE grant keeps the loop.
-            su.createStatement().execute(
-                "GRANT SELECT ON nexus.chunks TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT ON nexus.taxonomy_centroids TO " + SVC_ROLE);
+            // (DECISION 2, T2 [22445]); EXECUTE ON FUNCTION is not part of
+            // bootstrapServiceRole's fixed grant set -- kept as explicit grants
+            // (nexus-cbo4a batch 1b).
             for (int dim : new int[] {384, 768, 1024}) {
                 su.createStatement().execute(
                     "GRANT EXECUTE ON FUNCTION nexus.assign_from_chashes_" + dim
                     + "(text, text[], boolean) TO " + SVC_ROLE);
             }
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.topics TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT USAGE, SELECT, UPDATE ON SEQUENCE nexus.topics_id_seq TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.topic_assignments TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();

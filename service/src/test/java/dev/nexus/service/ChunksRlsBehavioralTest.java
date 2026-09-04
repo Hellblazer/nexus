@@ -5,12 +5,6 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -104,70 +98,12 @@ class ChunksRlsBehavioralTest {
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
 
-        // --- Step 1: create roles before Liquibase runs (changeset DO-blocks need them).
+        // --- Steps 1-3: product schema + service-role bootstrap (nexus-cbo4a batch 1b).
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN " +
-                // Explicit NOSUPERUSER NOBYPASSRLS: this suite exists to catch vacuous
-                // RLS coverage (nexus-5j7pb); relying on PG defaults would let a future
-                // copy-paste edit silently hollow out every behavioral assertion.
-                "    CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "' NOSUPERUSER NOBYPASSRLS; " +
-                "  END IF; " +
-                "END $$");
-            // nexus_svc required by changeset 5 grant DO-block.
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; " +
-                "  END IF; " +
-                "END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
-
-        // --- Step 2: apply Liquibase changelog via superuser.
-        //     After nexus-mf447 lands this will also CREATE the chunks tables and their
-        //     RLS policies. Before that bead, the changelog stops before chunks are created,
-        //     so everything below that touches chunks_NNN will fail with "relation does not
-        //     exist" -- which is the expected RED state for this bead.
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            Liquibase liquibase = new Liquibase(
-                "db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(),
-                db);
-            liquibase.update(new Contexts());
-        }
-
-        // --- Step 3: grant nexus schema access + chunks-table DML to the svc role.
-        //     RDR-191 Phase 4: a single GRANT on the unified nexus.chunks table now
-        //     covers what three per-dim GRANTs did.
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
-            // RDR-156 P0.2: insertChunk now auto-stubs catalog_collections before chunk writes.
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
-            // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk's ON DELETE
-            // CASCADE means a DELETE on nexus.chunks can now cascade-delete matching
-            // nexus.topic_assignments rows -- Postgres's own FK/RI cascade mechanism
-            // is privilege-exempt, but the EXISTING taxonomy-003 doc_count triggers
-            // (trg_topic_assignments_doc_count_del, deliberately SECURITY INVOKER,
-            // never DEFINER -- taxonomy-003-doc-count-trigger.xml) fire as part of
-            // that SAME cascade and run an ordinary UPDATE nexus.topics under the
-            // INVOKING role's own privileges. This role never touched topic_
-            // assignments/topics before this FK existed, so it needs the grants
-            // that trigger's body requires: SELECT on topic_assignments (the
-            // recount subquery) and SELECT, UPDATE on topics (the recount itself).
-            su.createStatement().execute(
-                "GRANT SELECT ON nexus.topic_assignments TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, UPDATE ON nexus.topics TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
 
         // --- Step 4: build the svc-role Hikari pool used by TenantScope.

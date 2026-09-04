@@ -78,6 +78,16 @@ GRANT USAGE ON SCHEMA nexus TO ${svcRole};
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO ${svcRole};
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO ${svcRole};
 
+-- nexus-cbo4a batch 1b: topics_id_seq additionally needs UPDATE (not just
+-- USAGE/SELECT) -- importTopic-style fidelity paths call
+-- setval(pg_get_serial_sequence(...), GREATEST(last_value, ?)) to keep the
+-- sequence ahead of a client-supplied id, mirroring production's own
+-- taxonomy-005-topics-seq-update-grant.xml (GRANT UPDATE ... TO nexus_svc).
+-- Three test classes previously hand-granted this identical statement; no
+-- test in the repo relies on this sequence's UPDATE being ABSENT, so it is
+-- safe to widen here once instead of per-class.
+GRANT UPDATE ON SEQUENCE nexus.topics_id_seq TO ${svcRole};
+
 GRANT USAGE ON SCHEMA staging TO ${svcRole};
 GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA staging TO ${svcRole};
 

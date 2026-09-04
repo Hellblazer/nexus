@@ -13,12 +13,6 @@ import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.RequestContext;
 import org.testcontainers.containers.PostgreSQLContainer;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -132,44 +126,18 @@ class TokenBoundaryAdversarialTest {
         pg     = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            // RLS-enforcing app role: NOSUPERUSER NOBYPASSRLS makes the tenant policy a
-            // real boundary. nexus_svc is fail-fast-required by grants-nexus-svc.xml.
-            su.createStatement().execute(
-                "DO $$ BEGIN "
-                + "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN "
-                + "    CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "' NOSUPERUSER NOBYPASSRLS; "
-                + "  END IF; "
-                + "END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN "
-                + "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN "
-                + "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; "
-                + "  END IF; "
-                + "END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
 
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(), db).update(new Contexts());
-        }
-
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
+            // t1 is a separate schema bootstrapServiceRole never touches (it covers
+            // nexus/staging only) -- kept as explicit grants (nexus-cbo4a batch 1b).
+            // search_path is re-set here to ADD t1 alongside what the helper already
+            // set (nexus, public).
             su.createStatement().execute("GRANT USAGE ON SCHEMA t1 TO " + SVC_ROLE);
             su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.memory TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT USAGE ON SEQUENCE nexus.memory_id_seq TO " + SVC_ROLE);
-            su.createStatement().execute(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON t1.scratch TO " + SVC_ROLE);
-            // AuthFilter resolves bearer→tenant against the (RLS-off) credential tables
-            // as the app role: SELECT only (writes go through the superuser seed path).
-            su.createStatement().execute(
-                "GRANT SELECT ON nexus.service_tokens, nexus.session_tokens TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, t1, public");
 
