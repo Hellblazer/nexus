@@ -107,7 +107,7 @@ source "$REPO_ROOT/tests/e2e/migration-rehearsal/lib/index_throughput.sh"
 THROUGHPUT_BASELINES="$REPO_ROOT/tests/e2e/migration-rehearsal/lib/index-throughput-baselines.tsv"
 _throughput_step() {
     local step="$1" label="$2" log="$3" elapsed="$4"
-    throughput_engine_shape "$HOME/.config/nexus/logs/storage_service.log"
+    throughput_engine_shape "$HOME/.config/nexus/logs"
     local rc=0
     throughput_gate "$label" "$log" "$elapsed" "$THROUGHPUT_BASELINES" || rc=$?
     case "$rc" in

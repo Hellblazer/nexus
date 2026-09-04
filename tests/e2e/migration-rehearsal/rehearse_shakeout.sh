@@ -252,7 +252,7 @@ THROUGHPUT_BASELINES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/index-th
 IDX1_T0=$SECONDS
 if nx index repo "$REPO" > "$IDX1" 2>&1; then ok "index run 1 (exit 0)"; else bad "index run 1 failed"; fi
 IDX1_ELAPSED=$((SECONDS - IDX1_T0))
-throughput_engine_shape "$HOME/.config/nexus/logs/storage_service.log"
+throughput_engine_shape "$HOME/.config/nexus/logs"
 _tp_rc=0
 throughput_gate "shakeout-synthetic-repo" "$IDX1" "$IDX1_ELAPSED" "$THROUGHPUT_BASELINES" || _tp_rc=$?
 case "$_tp_rc" in

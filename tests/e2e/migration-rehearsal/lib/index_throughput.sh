@@ -53,17 +53,30 @@ throughput_chunks_in_log() {
 }
 
 throughput_engine_shape() {
-    local log="${1:-$HOME/.config/nexus/logs/storage_service.log}"
-    if [ ! -f "$log" ]; then
-        echo "  engine shape: no engine log at $log"
+    # The engine's own stdout lands in storage_service_native.log (the
+    # native binary) while storage_service.log is the supervisor's; the
+    # first shakedown run looked only at the latter and printed "not
+    # logged" beside a healthy engine. Accept a directory or a file.
+    local target="${1:-$HOME/.config/nexus/logs}"
+    local -a logs=()
+    if [ -d "$target" ]; then
+        local f
+        for f in "$target"/storage_service_native.log "$target"/storage_service.log; do
+            [ -f "$f" ] && logs+=("$f")
+        done
+    elif [ -f "$target" ]; then
+        logs=("$target")
+    fi
+    if [ "${#logs[@]}" -eq 0 ]; then
+        echo "  engine shape: no engine log at $target"
         return 0
     fi
     local threads admission
     # `|| true` on each: the callers run under set -euo pipefail, and a log
     # without the line makes grep exit 1 through tail — a bare assignment
     # would then kill the whole gate run with no diagnostic.
-    threads="$(grep -o 'event=onnx_intra_op_threads_configured.*' "$log" | tail -1 || true)"
-    admission="$(grep -o 'event=local_onnx_admission_configured.*' "$log" | tail -1 || true)"
+    threads="$(grep -ho 'event=onnx_intra_op_threads_configured.*' "${logs[@]}" | tail -1 || true)"
+    admission="$(grep -ho 'event=local_onnx_admission_configured.*' "${logs[@]}" | tail -1 || true)"
     echo "  engine shape: ${threads:-onnx_intra_op_threads_configured not logged}"
     echo "  engine shape: ${admission:-local_onnx_admission_configured not logged}"
 }

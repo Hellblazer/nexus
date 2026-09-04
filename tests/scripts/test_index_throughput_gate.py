@@ -127,3 +127,23 @@ def test_unwritable_baseline_is_reported_not_claimed_recorded(tmp_path: Path) ->
     assert "not writable" in out
     assert "recorded into" not in out
     assert "corpus-a\t2.0000\t50" in out
+
+
+def test_engine_shape_reads_the_native_log_in_a_logs_dir(tmp_path: Path) -> None:
+    """The boot lines live in storage_service_native.log, not the supervisor's
+    storage_service.log; the first live shakedown printed 'not logged' beside
+    a healthy engine because only the latter was read."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "storage_service.log").write_text("supervisor chatter\n")
+    (logs / "storage_service_native.log").write_text(
+        "INFO x - event=onnx_intra_op_threads_configured threads=ort_default source=default shared_session=true\n"
+        "INFO y - event=local_onnx_admission_configured permits=8 query_timeout_ms=10000\n"
+    )
+    proc = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", f'source "{_LIB}"; throughput_engine_shape "{logs}"'],
+        capture_output=True, text=True, timeout=60, env={"PATH": "/usr/sbin:/usr/bin:/bin"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "threads=ort_default" in proc.stdout
+    assert "permits=8" in proc.stdout
