@@ -919,6 +919,12 @@ def repeat(
     except UnknownTierError as exc:
         click.echo(f"nx rdr repeat: {exc}", err=True)
         sys.exit(2)
+    if models[0] == models[1]:
+        click.echo(
+            f"nx rdr repeat: both tiers resolve to {models[0]!r}; a repeatability diff needs two readers",
+            err=True,
+        )
+        sys.exit(2)
 
     dispatch = _resolve_repeat_dispatch()
     prompt = build_prompt(rdr_id, design)

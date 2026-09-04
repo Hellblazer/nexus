@@ -222,3 +222,13 @@ def test_repeat_reports_a_dispatch_failure_without_a_traceback(tmp_path: Path, m
     res = CliRunner().invoke(rdr_cli, ["repeat", str(f)])
     assert res.exit_code == 1 and "claude -p exploded" in res.output
     assert "Traceback" not in res.output
+
+
+def test_repeat_refuses_two_tiers_that_are_one_model(tmp_path: Path, monkeypatch) -> None:
+    """Per-commit reviewer FILE finding on 4b65a7ffa: one model twice is a
+    self-diff, not a repeatability check."""
+    f = tmp_path / "rdr-999-example.md"
+    f.write_text(RDR_TEXT)
+    calls = _install_fake_dispatch(monkeypatch, {})
+    res = CliRunner().invoke(rdr_cli, ["repeat", str(f), "--tiers", "cheap,cheap"])
+    assert res.exit_code == 2 and "two readers" in res.output and calls == []
