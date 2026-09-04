@@ -39,8 +39,13 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Ask what a fresh PyPI resolution would change
         run: |
+          set -uo pipefail
+          # The script's exit code is the verdict; capture it without a pipe
+          # (tests/test_workflow_run_pipefail_lint.py) and without -e.
           set +e
-          uv run --no-sync --python 3.12 python scripts/check_dependency_drift.py --fail-on shape | tee drift.txt
-          rc=${PIPESTATUS[0]}
+          uv run --no-sync --python 3.12 python scripts/check_dependency_drift.py --fail-on shape > drift.txt 2>&1
+          rc=$?
+          set -e
+          cat drift.txt
           { echo '```'; cat drift.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
