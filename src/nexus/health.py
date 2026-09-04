@@ -1669,6 +1669,13 @@ def _check_git_hooks() -> list[HealthResult]:
 
     canonical_by_hook = {n: _canonical_stanza_body(n) for n in hook_names}
 
+    def _stanza_state(repo: Path, name: str) -> str:
+        try:
+            from nexus.commands.hooks import hook_stanza_state  # noqa: PLC0415 — deferred to avoid circular import
+        except Exception:  # noqa: BLE001 — boundary fallback
+            return "unknown"
+        return hook_stanza_state(repo, name)
+
     # RDR-137 Phase 3.1 (nexus-tts0d.6): catalog-backed enumeration with
     # legacy ``repos.json`` fallback via the dual-read shim. Catalog
     # paths come from ``owners WHERE owner_type='repo'``; the registry
@@ -1730,15 +1737,14 @@ def _check_git_hooks() -> list[HealthResult]:
                     # body means the user is running an old stanza
                     # (e.g. pre-pgrep-guard, vulnerable to the multi-
                     # indexer pile-up race).
+                    # One comparison, shared with ``nx census reviews``
+                    # (commands/hooks.py hook_stanza_state, nexus-trwxr):
+                    # a second copy of this selector drifted on arrival.
                     drifted: list[str] = []
                     for name in installed:
-                        canonical = canonical_by_hook.get(name)
-                        if canonical is None:
+                        if canonical_by_hook.get(name) is None:
                             continue
-                        installed_body = _installed_stanza_body(
-                            (hdir / name).read_text()
-                        )
-                        if installed_body is not None and installed_body != canonical:
+                        if _stanza_state(repo_path, name) == "stale":
                             drifted.append(name)
                     if drifted:
                         results.append(HealthResult(

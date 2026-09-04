@@ -101,7 +101,7 @@ def phantom_repo(tmp_path: Path) -> Path:
     - ``pkg/__init__.py``: zero bytes. CODE classification (``.py``
       extension). ``code_indexer.py``'s ``chunk_file`` returns ``[]`` on
       empty content -> 0 chunks (the 9-file nexus population).
-    - ``data/fixture.npz``: content with an embedded NUL byte and no
+    - ``data/fixture.blobx``: content with an embedded NUL byte and no
       recognized code/skip/binary-asset extension -> falls through
       ``classify_file``'s step-8 PROSE default, then fails
       ``read_text(encoding="utf-8")`` -> 0 chunks (the nexus .npz/.bundle
@@ -118,7 +118,7 @@ def phantom_repo(tmp_path: Path) -> Path:
     empty_init.parent.mkdir(parents=True)
     empty_init.write_bytes(b"")
 
-    binary_npz = repo / "data" / "fixture.npz"
+    binary_npz = repo / "data" / "fixture.blobx"
     binary_npz.parent.mkdir(parents=True)
     binary_npz.write_bytes(bytes(range(256)) * 4)  # deterministic, has \x00
 
@@ -232,7 +232,7 @@ class TestUnchunkableFilesNeverRegister:
         self, phantom_repo: Path, registry: RepoRegistry, local_t3: T3Database
     ) -> None:
         _index(phantom_repo, registry, local_t3)
-        assert documents_by_file_path("data/fixture.npz") == [], (
+        assert documents_by_file_path("data/fixture.blobx") == [], (
             "a binary file misclassified as prose (unknown extension, "
             "classify_file step-8 default) was registered as a catalog "
             "document even though read_text() can never decode it -- "

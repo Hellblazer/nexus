@@ -99,6 +99,25 @@ _index_floor_check() {
     fi
 }
 
+# nexus-98zsp: indexing wall-clock floor. engine-service-v0.1.99 shipped an
+# 8x embed slowdown through every gate because none of them timed an index
+# run; this is the only place a real corpus is indexed pre-release.
+# shellcheck source=tests/e2e/migration-rehearsal/lib/index_throughput.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/migration-rehearsal/lib/index_throughput.sh"
+THROUGHPUT_BASELINES="$REPO_ROOT/tests/e2e/migration-rehearsal/lib/index-throughput-baselines.tsv"
+_throughput_step() {
+    local step="$1" label="$2" log="$3" elapsed="$4"
+    throughput_engine_shape "$HOME/.config/nexus/logs"
+    local rc=0
+    throughput_gate "$label" "$log" "$elapsed" "$THROUGHPUT_BASELINES" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) SHAKEDOWN_FAILED+=("$step (throughput above ${THROUGHPUT_CEILING_FACTOR}x baseline)") ;;
+        2) SHAKEDOWN_SOFT+=("$step: throughput baseline RECORDED, no ceiling applied — commit $THROUGHPUT_BASELINES") ;;
+        *) SHAKEDOWN_SOFT+=("$step: too few chunks to measure throughput") ;;
+    esac
+}
+
 # nexus-whqun: the T1 leak sniff used to count two directories that are
 # BOTH confirmed dead by the current T1 design: `$HOME/.config/nexus/
 # sessions/` (the legacy SESSIONS_DIR resolver -- T1Database._reconnect's
@@ -906,10 +925,18 @@ case "$MODE" in
         # misses a real zero-chunk regression).
         REPO_FLOOR=$(( ${#FIXTURE_FILES[@]} * 60 / 100 ))
         read -r RDOCS_BEFORE RCHUNKS_BEFORE < <(_catalog_counts)
-        if ! nx index repo "$FIXTURE_DIR" 2>&1 | tail -5 | sed 's/^/  /'; then
+        # nexus-98zsp: the full client log is kept (the throughput gate
+        # counts its "N chunks" lines) and the step is timed.
+        mkdir -p "$SANDBOX/logs"
+        INDEX_REPO_LOG="$SANDBOX/logs/shakedown-index-repo.log"
+        INDEX_REPO_T0=$SECONDS
+        if ! nx index repo "$FIXTURE_DIR" >"$INDEX_REPO_LOG" 2>&1; then
+            tail -5 "$INDEX_REPO_LOG" | sed 's/^/  /'
             echo "  [FAIL] nx index repo exited non-zero" >&2
             SHAKEDOWN_FAILED+=("2/11 nx index repo")
         else
+            tail -5 "$INDEX_REPO_LOG" | sed 's/^/  /'
+            _throughput_step "2/11 index-repo" "sandbox-repo-fixture" "$INDEX_REPO_LOG" $((SECONDS - INDEX_REPO_T0))
             # Chunk floor is 3x the doc floor (same 1:3 ratio as the PDF
             # steps): live evidence 2026-08-14 measured ~47 chunks/doc on
             # this fixture set, so 3x has wide margin while still catching
@@ -1019,10 +1046,15 @@ case "$MODE" in
         # trims/consolidation of the RDR corpus) that still catches a
         # complete-failure regression (zero indexed).
         read -r ODOCS_BEFORE OCHUNKS_BEFORE < <(_catalog_counts)
-        if ! nx index rdr "$REPO_ROOT" 2>&1 | tail -5 | sed 's/^/  /'; then
+        INDEX_RDR_LOG="$SANDBOX/logs/shakedown-index-rdr.log"
+        INDEX_RDR_T0=$SECONDS
+        if ! nx index rdr "$REPO_ROOT" >"$INDEX_RDR_LOG" 2>&1; then
+            tail -5 "$INDEX_RDR_LOG" | sed 's/^/  /'
             echo "  [FAIL] nx index rdr exited non-zero" >&2
             SHAKEDOWN_FAILED+=("4/11 nx index rdr")
         else
+            tail -5 "$INDEX_RDR_LOG" | sed 's/^/  /'
+            _throughput_step "4/11 index-rdr" "sandbox-rdr-corpus" "$INDEX_RDR_LOG" $((SECONDS - INDEX_RDR_T0))
             # 1:3 doc:chunk ratio floor, matching the other steps; live
             # evidence 2026-08-14 measured ~36 chunks/doc here.
             _index_floor_check "4/11 nx index rdr" 10 30 "$ODOCS_BEFORE" "$OCHUNKS_BEFORE"

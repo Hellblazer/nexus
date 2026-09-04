@@ -98,4 +98,33 @@ def safe_killpg(
         return False
 
 
-__all__ = ["safe_killpg"]
+def safe_killpg_group(pgid: Any, sig: int = _signal.SIGKILL) -> bool:
+    """Signal process group *pgid* directly, safely (nexus-5ny9r).
+
+    :func:`safe_killpg` resolves the group from a LIVE pid. After the
+    group leader has exited and been reaped, ``os.getpgid(pid)`` raises
+    and the sweep silently does nothing — which is how a MinerU worker's
+    ``os._exit`` left its multiprocessing pool child and resource tracker
+    reparented to init on every page (324 of them on one box). A leader
+    spawned with ``start_new_session=True`` has ``pgid == pid`` for its
+    whole life, so the caller records that number at spawn and sweeps by
+    it afterwards; the group id stays reserved while any member lives.
+
+    Same guards and same swallow contract as :func:`safe_killpg`: a
+    non-int or ``pgid <= 1`` is refused (``1`` is init's group), and
+    ``ESRCH`` (nothing left in the group) / ``EPERM`` return ``False``.
+    """
+    if not isinstance(pgid, int) or isinstance(pgid, bool):
+        _log.debug("safe_killpg_group_type_guard", pgid_type=type(pgid).__name__)
+        return False
+    if pgid <= 1:
+        _log.debug("safe_killpg_group_pgid_guard", pgid=pgid)
+        return False
+    try:
+        os.killpg(pgid, sig)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
+__all__ = ["safe_killpg", "safe_killpg_group"]

@@ -80,6 +80,35 @@ RECORD_PREFIX: Final = "review-"
 RECORD_MARKER: Final = "Commit review: "
 
 
+#: The ``agent`` attribution every review record is written with. The
+#: engine filters ``GET /v1/memory/list?project=&agent=`` on it server-side,
+#: so consumers fetch only the reviewer's own rows instead of downloading
+#: the whole shared project and sieving it (critique [24283] (a)): a
+#: foreign note cannot carry this attribution by accident, where a title
+#: prefix can and did.
+REVIEW_AGENT: Final = "commit-review"
+
+
+def iter_review_records(memory) -> list[dict]:
+    """Every record the reviewer wrote, with content, from a T2 memory store.
+
+    Lists by ``agent`` (a summary view: id, title, timestamp), then fetches
+    each candidate's content and keeps only rows :func:`is_review_record`
+    accepts. Two selectors, both required: the attribution says who wrote
+    it, the first line says what it is. Raises whatever the store raises;
+    callers decide how to report an unreachable T2.
+    """
+    out: list[dict] = []
+    for summary in memory.list_entries(project=REVIEW_PROJECT, agent=REVIEW_AGENT) or []:
+        title = str(summary.get("title", ""))
+        if not title.startswith(RECORD_PREFIX):
+            continue
+        row = memory.get(project=REVIEW_PROJECT, title=title)
+        if row and is_review_record(row):
+            out.append(row)
+    return out
+
+
 def is_review_record(row: dict) -> bool:
     """True only for a record :func:`render_record` wrote.
 
@@ -164,8 +193,14 @@ def record_title(sha: str) -> str:
     return f"{RECORD_PREFIX}{sha[:12]}"
 
 
-def commit_diff(repo: Path, sha: str, *, max_bytes: int) -> tuple[str, bool]:
-    """Return ``(text, truncated)`` for *sha* in *repo*.
+def commit_diff(repo: Path, sha: str, *, max_bytes: int) -> tuple[str, bool, int]:
+    """Return ``(text, truncated, total_bytes)`` for *sha* in *repo*.
+
+    ``total_bytes`` is the length of the untruncated ``git show`` text (characters,
+    since the stream is decoded; the cap is applied to the same measure), so a
+    record can say "reviewed 200,000 of 2,074,000 characters" rather than a bare
+    flag: 199 of 200 KB and 200 of 2,074 KB are different reviews and a
+    boolean made them read the same (critique [24283] S2).
 
     Truncation is REPORTED, never silent: a quietly cut diff would let the
     reviewer return a clean verdict over code it never saw, which is the
@@ -204,8 +239,8 @@ def commit_diff(repo: Path, sha: str, *, max_bytes: int) -> tuple[str, bool]:
 
     text = proc.stdout
     if len(text) > max_bytes:
-        return text[:max_bytes], True
-    return text, False
+        return text[:max_bytes], True, len(text)
+    return text, False, len(text)
 
 
 def has_patch(diff_text: str) -> bool:
@@ -331,6 +366,8 @@ def render_record(
     cost_usd: float | None,
     truncated: bool = False,
     merge: bool = False,
+    seen_bytes: int | None = None,
+    total_bytes: int | None = None,
 ) -> str:
     """Render the T2 record body.
 
@@ -352,7 +389,12 @@ def render_record(
             "the branch); the other parent's own history was not reviewed here."
         )
     if truncated:
-        lines.append("Diff: TRUNCATED at the configured cap; review is partial.")
+        sizes = (
+            f" Reviewed {seen_bytes:,} of {total_bytes:,} characters."
+            if seen_bytes is not None and total_bytes is not None
+            else ""
+        )
+        lines.append(f"Diff: TRUNCATED at the configured cap; review is partial.{sizes}")
     lines.append("")
 
     if not findings:
@@ -429,7 +471,7 @@ async def review_commit(
         return ReviewResult(sha=sha, skipped_reason="disabled")
 
     try:
-        diff_text, truncated = commit_diff(repo, sha, max_bytes=cfg.max_diff_bytes)
+        diff_text, truncated, total_bytes = commit_diff(repo, sha, max_bytes=cfg.max_diff_bytes)
     except CommitReviewError as exc:
         _log.warning("commit_review_diff_failed", sha=sha[:12], error=str(exc))
         return ReviewResult(sha=sha, skipped_reason=str(exc))
@@ -490,6 +532,8 @@ async def review_commit(
         cost_usd=cost,
         truncated=truncated,
         merge=merge,
+        seen_bytes=len(diff_text),
+        total_bytes=total_bytes,
     )
 
     if put is None:
@@ -513,7 +557,7 @@ async def review_commit(
             content=content,
             tags="commit-review,nexus-jh86x",
             ttl=cfg.ttl_days,
-            agent="commit-review",
+            agent=REVIEW_AGENT,
         )
     except Exception as exc:  # noqa: BLE001 - a hook must never block a commit
         _log.warning("commit_review_write_failed", sha=sha[:12], error=str(exc))

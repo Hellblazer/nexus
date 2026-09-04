@@ -17,6 +17,7 @@ import pytest
 
 from nexus.commands.review_cmd import reviews_census
 from nexus.commit_review import (
+    REVIEW_AGENT,
     REVIEW_PROJECT,
     VERDICTS,
     CommitReviewError,
@@ -60,6 +61,31 @@ def tiny_repo(tmp_path: Path) -> Path:
     _run(["git", "add", "a.py"], repo)
     _run(["git", "commit", "-q", "-m", "feat: add f"], repo)
     return repo
+
+
+def _fake_memory(rows: list[dict]):
+    """A T2 memory store double with the two calls iter_review_records makes:
+    list_entries(project, agent) returns summaries filtered server-side by
+    agent, get(project, title) returns the full row. get_all is deliberately
+    absent: the whole-project download is what the selector retired."""
+
+    class FakeMemory:
+        def list_entries(self, project, agent=None):
+            assert project == REVIEW_PROJECT
+            return [
+                {"title": r["title"], "agent": r.get("agent")}
+                for r in rows
+                if agent is None or r.get("agent") == agent
+            ]
+
+        def get(self, project=None, title=None, id=None):
+            assert project == REVIEW_PROJECT
+            for r in rows:
+                if r["title"] == title:
+                    return r
+            return None
+
+    return FakeMemory
 
 
 # ── the verdict vocabulary ────────────────────────────────────────────────────
@@ -107,7 +133,7 @@ def test_parse_findings_rejects_a_missing_findings_key() -> None:
 
 def test_commit_diff_reads_a_real_commit(tiny_repo: Path) -> None:
     sha = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
-    text, truncated = commit_diff(tiny_repo, sha, max_bytes=100_000)
+    text, truncated, _total = commit_diff(tiny_repo, sha, max_bytes=100_000)
     assert "def f()" in text
     assert "feat: add f" in text
     assert truncated is False
@@ -120,9 +146,15 @@ def test_commit_diff_truncates_and_says_so(tiny_repo: Path) -> None:
     verdict over code it never saw.
     """
     sha = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
-    text, truncated = commit_diff(tiny_repo, sha, max_bytes=40)
+    text, truncated, total = commit_diff(tiny_repo, sha, max_bytes=40)
     assert truncated is True
     assert len(text) <= 40
+    assert total > 40, "the untruncated size must survive so the record can state the ratio"
+    rendered = render_record(
+        sha=sha, subject="s", findings=[], cost_usd=None,
+        truncated=True, seen_bytes=len(text), total_bytes=total,
+    )
+    assert f"Reviewed {len(text):,} of {total:,} characters" in rendered
 
 
 def test_commit_diff_of_a_merge_shows_everything_the_merge_brought(tiny_repo: Path) -> None:
@@ -143,7 +175,7 @@ def test_commit_diff_of_a_merge_shows_everything_the_merge_brought(tiny_repo: Pa
     _run(["git", "merge", "-q", "--no-ff", "-m", "merge side", "side"], tiny_repo)
     sha = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
     assert commit_parent_count(tiny_repo, sha) == 2
-    text, _ = commit_diff(tiny_repo, sha, max_bytes=100_000)
+    text, _, _total = commit_diff(tiny_repo, sha, max_bytes=100_000)
     assert 'VERSION = "2"' in text, "the file the merge brought in must be in the diff the reviewer sees"
     assert "version.py" in text
     assert commit_parent_count(tiny_repo, "HEAD~1") == 1
@@ -172,10 +204,10 @@ def test_a_tree_less_commit_is_skipped_not_reviewed_clean(tiny_repo: Path) -> No
     no files in it (code review [24285] Major 2)."""
     _run(["git", "commit", "-q", "--allow-empty", "-m", "chore: empty"], tiny_repo)
     sha = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
-    text, _ = commit_diff(tiny_repo, sha, max_bytes=100_000)
+    text, _, _total = commit_diff(tiny_repo, sha, max_bytes=100_000)
     assert text.strip(), "the header is always present; that is the whole point"
     assert has_patch(text) is False
-    full, _ = commit_diff(tiny_repo, "HEAD~1", max_bytes=100_000)
+    full, _, _total = commit_diff(tiny_repo, "HEAD~1", max_bytes=100_000)
     assert has_patch(full) is True
 
 
@@ -211,7 +243,7 @@ def test_the_commit_body_never_reaches_the_reviewer(tmp_path: Path) -> None:
         repo,
     )
     sha = _run(["git", "rev-parse", "HEAD"], repo).strip()
-    text, _ = commit_diff(repo, sha, max_bytes=100_000)
+    text, _, _total = commit_diff(repo, sha, max_bytes=100_000)
 
     assert "subject line is fine" in text, "the subject should be present"
     assert "SECRET_BODY_MARKER" not in text, (
@@ -536,26 +568,27 @@ def test_census_counts_across_records_built_by_the_renderer() -> None:
             "content": render_record(
                 sha=sha, subject=subject, findings=findings, cost_usd=0.01
             ),
+            "agent": REVIEW_AGENT,
         }
 
-    class FakeMemory:
-        def get_all(self, project):
-            assert project == REVIEW_PROJECT
-            return [
-                _row("a" * 40, "one", [Finding("FIX-NOW", "s", "r")]),
-                _row("b" * 40, "two", [Finding("DROP", "s", "r"), Finding("FILE", "s", "r")]),
-                _row("c" * 40, "clean", []),
-                # A NEIGHBOUR in the same project that is not a review. The
-                # prefix filter must drop it; counted, it would read as a
-                # commit that was reviewed and found clean.
-                {"title": "continuation-state.md", "content": "unrelated note"},
-                # The neighbours that DID get counted (2026-09-04): 401
-                # human and agent review notes whose titles start with the
-                # prefix. The record's first line is what distinguishes a
-                # commit review from a note about a review.
-                {"title": "review-completed", "content": "Reviewed nexus-x; clean."},
-                {"title": "review-range-abc123def456", "content": "Range review of ...\nVerdicts: FIX-NOW=3"},
-            ]
+    rows = [
+        _row("a" * 40, "one", [Finding("FIX-NOW", "s", "r")]),
+        _row("b" * 40, "two", [Finding("DROP", "s", "r"), Finding("FILE", "s", "r")]),
+        _row("c" * 40, "clean", []),
+        # A NEIGHBOUR in the same project that is not a review. Counted, it
+        # would read as a commit that was reviewed and found clean.
+        {"title": "continuation-state.md", "content": "unrelated note", "agent": "developer"},
+        # The neighbours that DID get counted (2026-09-04): 401 human and
+        # agent review notes whose titles start with the prefix. These two
+        # even carry the reviewer's agent attribution, so only the record's
+        # first line separates them.
+        {"title": "review-completed", "content": "Reviewed nexus-x; clean.", "agent": REVIEW_AGENT},
+        {"title": "review-range-abc123def456", "content": "Range review.\nVerdicts: FIX-NOW=3", "agent": REVIEW_AGENT},
+        # A real record shape written under a different attribution: the
+        # agent filter drops it before the marker is consulted.
+        {**_row("d" * 40, "foreign", [Finding("FIX-NOW", "s", "r")]), "agent": "someone-else"},
+    ]
+    FakeMemory = _fake_memory(rows)
 
     class FakeDB:
         memory = FakeMemory()
@@ -621,9 +654,9 @@ class TestSessionStartNotice:
 
         from nexus import hooks as hooks_mod
 
-        class FakeMemory:
-            def get_all(self, project):
-                return rows
+        FakeMemory = _fake_memory(
+            [{**r, "agent": r.get("agent", REVIEW_AGENT)} for r in rows]
+        )
 
         class FakeDB:
             memory = FakeMemory()

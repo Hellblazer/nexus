@@ -117,7 +117,7 @@ def pg_bin_dir() -> Path:
     pgvector-less system PG, so every engine-substrate test died at boot and
     the pinned bundle was never downloaded. See :func:`_has_pgvector`.
     """
-    from nexus.db.pg_provision import PgBinaryNotFoundError, discover_pg_binaries
+    from nexus.db.pg_provision import PgBinaryNotFoundError, discover_pg_binaries  # noqa: PLC0415 — deferred import, function-local by this file's convention
 
     # An EXPLICIT override is a user statement and is honoured verbatim, before
     # any usability opinion is applied. The pgvector guard below deliberately
@@ -200,6 +200,35 @@ def _has_pgvector(bin_dir: Path) -> bool:
     return any((c / "extension" / "vector.control").exists() for c in candidates)
 
 
+#: sigstore's TUF trust-root refresh is a network round-trip that fails
+#: transiently (and reliably under the contention nexus-9rnfr removed);
+#: the retry is cheap and the failure text is the only handle it offers.
+_TUF_RETRY_ATTEMPTS = 3
+_TUF_RETRY_BACKOFF_S = 2.0
+
+
+def _install_pg_bundle_with_tuf_retry(tag: str, cache_dir: Path) -> None:
+    """``install_pg_bundle`` with a bounded retry on a TUF-refresh failure.
+
+    Only that failure is retried: a real signature, identity or digest
+    mismatch is a verdict and re-raises on the first attempt exactly as
+    before (the caller's own re-raise arm handles it).
+    """
+    import time  # noqa: PLC0415 — deferred import, function-local by this file's convention
+
+    from nexus.daemon.binary_install import BinaryDownloadError, BinaryVerificationError, install_pg_bundle  # noqa: PLC0415 — deferred import, function-local by this file's convention
+
+    for attempt in range(1, _TUF_RETRY_ATTEMPTS + 1):
+        try:
+            install_pg_bundle(tag, cache_dir)
+            return
+        except BinaryVerificationError as exc:
+            transient = "TUF" in str(exc) and not isinstance(exc, BinaryDownloadError)
+            if not transient or attempt == _TUF_RETRY_ATTEMPTS:
+                raise
+            time.sleep(_TUF_RETRY_BACKOFF_S * attempt)
+
+
 def _self_provision_pg_bundle() -> Path | None:
     """Fetch + extract OUR pinned PG bundle into the per-tag test cache.
 
@@ -209,8 +238,9 @@ def _self_provision_pg_bundle() -> Path | None:
     (no pinned tag, offline) — the caller then falls back to the
     skip-sentinel. Never touches the live config dir.
     """
-    from nexus.daemon.binary_install import PINNED_SERVICE_TAG, install_pg_bundle
-    from nexus.db.pg_bundle import ensure_pg_bundle, extracted_bin_dir
+    from nexus._locking import lock_file, unlock_file  # noqa: PLC0415 — deferred import, function-local by this file's convention
+    from nexus.daemon.binary_install import PINNED_SERVICE_TAG  # noqa: PLC0415 — deferred import, function-local by this file's convention
+    from nexus.db.pg_bundle import ensure_pg_bundle, extracted_bin_dir  # noqa: PLC0415 — deferred import, function-local by this file's convention
 
     if not PINNED_SERVICE_TAG:
         return None
@@ -219,12 +249,30 @@ def _self_provision_pg_bundle() -> Path | None:
     if cached is not None:
         return cached
     try:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        (cache_dir / "service").mkdir(exist_ok=True)
-        install_pg_bundle(PINNED_SERVICE_TAG, cache_dir)
-        return ensure_pg_bundle(
-            cache_dir, search_dirs=[cache_dir / "service"]
-        )
+        # nexus-9rnfr: ONE provisioner per box. The first -n auto run after
+        # a floor bump used to race every xdist worker into the same cold
+        # per-tag cache: concurrent downloads and extractions into one
+        # `.incoming` dir, and sigstore's TUF refresh failing under
+        # contention, read as BinaryVerificationError in several workers
+        # and as an incomplete tree in the rest. A blocking exclusive lock
+        # beside the cache dir serialises the leg; a waiter re-checks the
+        # extract marker under the lock and takes the holder's result.
+        cache_dir.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = cache_dir.parent / f"{PINNED_SERVICE_TAG}.provision.lock"
+        with lock_path.open("a+") as lock_fh:
+            lock_file(lock_fh, blocking=True)
+            try:
+                cached = extracted_bin_dir(cache_dir)
+                if cached is not None:
+                    return cached
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                (cache_dir / "service").mkdir(exist_ok=True)
+                _install_pg_bundle_with_tuf_retry(PINNED_SERVICE_TAG, cache_dir)
+                return ensure_pg_bundle(
+                    cache_dir, search_dirs=[cache_dir / "service"]
+                )
+            finally:
+                unlock_file(lock_fh)
     except Exception as exc:  # noqa: BLE001 — connectivity-class miss degrades to the documented skip-sentinel; verification failures re-raise below
         # Review finding (P0 remainder, Important 2): a signature/digest
         # verification failure is a security signal, categorically NOT a
@@ -236,14 +284,14 @@ def _self_provision_pg_bundle() -> Path | None:
         # BinaryVerificationError for the product's fail-closed callers, so
         # the name check below used to re-raise it and one reset connection
         # aborted pytest collection with zero tests run (PR #1474).
-        from nexus.daemon.binary_install import BinaryDownloadError
+        from nexus.daemon.binary_install import BinaryDownloadError  # noqa: PLC0415 — deferred import, function-local by this file's convention
 
         name = type(exc).__name__
         if not isinstance(exc, BinaryDownloadError) and (
             "Verification" in name or "sha256" in str(exc).lower()
         ):
             raise
-        import warnings
+        import warnings  # noqa: PLC0415 — deferred import, function-local by this file's convention
 
         warnings.warn(
             f"PG-bundle self-provisioning failed ({exc}); PG-dependent "

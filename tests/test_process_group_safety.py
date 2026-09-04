@@ -182,3 +182,63 @@ class TestNonPositivePidGuard:
         assert calls == [], (
             "safe_killpg invoked os.killpg for a negative pid — guard broken"
         )
+
+
+# nexus-5ny9r: sweeping by the recorded group id reaches children the
+# leader abandoned via os._exit, which safe_killpg's live-pid resolution
+# cannot see once the leader is reaped.
+
+
+def test_group_sweep_reaches_children_of_an_exited_leader(tmp_path):
+    import subprocess
+    import sys
+    import time
+
+    from nexus.util.process_group import safe_killpg, safe_killpg_group
+
+    pid_file = tmp_path / "child.pid"
+    leader = subprocess.Popen(
+        [sys.executable, "-c",
+         "import os, subprocess, sys, time\n"
+         "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+         f"open({str(pid_file)!r}, 'w').write(str(c.pid))\n"
+         "os._exit(0)\n"],
+        start_new_session=True,
+    )
+    pgid = leader.pid
+    leader.wait(timeout=30)
+    for _ in range(50):
+        if pid_file.is_file() and pid_file.read_text().strip():
+            break
+        time.sleep(0.1)
+    child_pid = int(pid_file.read_text())
+    os.kill(child_pid, 0)  # alive: the leader's os._exit abandoned it
+    assert safe_killpg(leader, signal.SIGKILL) is False  # leader reaped: nothing to resolve
+    assert safe_killpg_group(pgid, signal.SIGKILL) is True
+
+    def _gone(pid: int) -> bool:
+        # A killed child of a dead leader is reparented and reaped by init
+        # asynchronously; until then it is a zombie, which os.kill(pid, 0)
+        # still "finds". Dead-or-zombie is the property under test.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+        return stat == "" or stat.startswith("Z")
+
+    for _ in range(100):
+        if _gone(child_pid):
+            break
+        time.sleep(0.1)
+    assert _gone(child_pid), f"child {child_pid} survived the group sweep"
+
+
+@pytest.mark.parametrize("pgid", [MagicMock(), "12", 0, 1, -5, True])
+def test_group_sweep_refuses_unsafe_ids(pgid, monkeypatch):
+    from nexus.util.process_group import safe_killpg_group
+
+    calls: list = []
+    monkeypatch.setattr(os, "killpg", lambda g, s: calls.append(g))
+    assert safe_killpg_group(pgid) is False
+    assert calls == []

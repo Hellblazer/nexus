@@ -27,16 +27,36 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 import httpx
 import structlog
 
 from nexus.errors import ExtractionQualityError, UnextractableContentError
 
-try:
-    from mineru.cli.common import do_parse
-except ImportError:
-    do_parse = None  # type: ignore[assignment]
+# MinerU is resolved LAZILY (nexus-ct17r). ``mineru.cli.common`` imports
+# magika, which imports onnxruntime at module scope, and this module is
+# imported by doc_indexer / pipeline_stages on every ``nx`` command that
+# touches the store — so an eager import here loaded ORT into every
+# ``nx store put`` that never parsed a PDF. ORT's telemetry dispatcher then
+# raced interpreter teardown ("recursive_mutex lock failed", Abort trap 6).
+# The parent only needs to know MinerU is importable; the parse itself runs
+# in a subprocess (see ``_MINERU_WORKER_SCRIPT``). ``do_parse`` stays a
+# module attribute so tests can patch it (``None`` = unavailable).
+_DO_PARSE_UNRESOLVED = object()
+do_parse = _DO_PARSE_UNRESOLVED
+
+
+def _mineru_do_parse():  # noqa: ANN202 — mineru's callable type is not importable eagerly, by design
+    """Resolve ``mineru.cli.common.do_parse`` on first use; ``None`` if absent."""
+    global do_parse
+    if do_parse is _DO_PARSE_UNRESOLVED:
+        try:
+            from mineru.cli.common import do_parse as _resolved  # noqa: PLC0415 — deliberately lazy (nexus-ct17r)
+        except ImportError:
+            _resolved = None
+        do_parse = _resolved
+    return do_parse
 
 
 # Inline script executed in a child Python process for memory isolation.
@@ -67,6 +87,10 @@ except ImportError:
 # (-9) path, so the -9-only mapping would miss it (gate finding). Sentinel is
 # substituted into the worker script template below.
 _MINERU_OOM_EXIT = 42
+
+#: nexus-5ny9r: how long a "no live MinerU server" verdict is trusted before
+#: the next page re-probes the endpoint (one cheap /health, no autostart).
+_MINERU_SERVER_RECHECK_S = 60.0
 
 _MINERU_WORKER_SCRIPT = '''
 import json, sys, os
@@ -854,6 +878,11 @@ class PDFExtractor:
         self._converter_enriched = None  # lazy init — enriched mode (formula enrichment)
         self._mineru_server_checked: bool = False
         self._mineru_server_up: bool = False
+        # nexus-5ny9r: when the verdict was "no live server" (not skew), a
+        # monotonic deadline after which the next call re-probes the
+        # endpoint, so a server started mid-run is picked up instead of
+        # every remaining page paying the per-page subprocess cost.
+        self._mineru_server_recheck_after: float | None = None
         self._mineru_server_restarts: int = 0
         # RDR-148 Gap 5/6: set True by Gap 6 when an RLIMIT_AS memory ceiling is
         # applied to the worker, so the OOM classifier treats ANY non-zero exit
@@ -1279,7 +1308,7 @@ class PDFExtractor:
         ``mineru_page_batch`` config).  The callback receives the batch start
         page index, the batch markdown, and metadata.
         """
-        if do_parse is None:
+        if _mineru_do_parse() is None:
             from nexus import install_advice  # noqa: PLC0415 — deferred import
 
             reinstall = install_advice.upgrade_command(
@@ -1499,7 +1528,25 @@ class PDFExtractor:
         On skew, skip straight to subprocess with one loud, reasoned log.
         """
         if self._mineru_server_checked:
-            return self._mineru_server_up
+            if self._mineru_server_up or self._mineru_server_recheck_after is None:
+                return self._mineru_server_up
+            # nexus-5ny9r: a cached "no live server" verdict expires. The
+            # re-check is ONE cheap health probe of the current endpoint —
+            # never the rediscover + autostart walk below, which is a
+            # once-per-run decision (and on skew never a retry at all:
+            # that verdict leaves the deadline unset, per nexus-eti1v).
+            if time.monotonic() < self._mineru_server_recheck_after:
+                return False
+            from nexus.config import get_mineru_server_url as _url_now  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+            url_now = _url_now()
+            if url_now is not None and self._probe_mineru_health(url_now)[0]:
+                _log.info("mineru_server_picked_up_mid_run", url=url_now)
+                _progress(f"  MinerU server is up at {url_now} — switching off the per-page subprocess path.")
+                self._mineru_server_up = True
+                self._mineru_server_recheck_after = None
+                return True
+            self._mineru_server_recheck_after = time.monotonic() + _MINERU_SERVER_RECHECK_S
+            return False
 
         from nexus.config import get_mineru_server_url, get_mineru_skew_info  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
@@ -1585,6 +1632,7 @@ class PDFExtractor:
         # No live server after rediscovery + autostart — loud, reasoned fallback.
         self._mineru_server_up = False
         self._mineru_server_checked = True
+        self._mineru_server_recheck_after = time.monotonic() + _MINERU_SERVER_RECHECK_S
         _log.warning(
             "mineru_fallback_to_subprocess",
             first_url=first_url, rediscovered_url=second_url,
@@ -1796,6 +1844,10 @@ class PDFExtractor:
                         return self._mineru_run_via_server(pdf_path, start, end)
                     except Exception:  # noqa: BLE001 — best-effort server call; falls through to subprocess mode
                         pass  # fall through to subprocess
+                # nexus-5ny9r: a lost-then-unrestartable server is the same
+                # degrade as "no live server" and gets the same expiring
+                # verdict, so an operator restart mid-run is picked up.
+                self._mineru_server_recheck_after = time.monotonic() + _MINERU_SERVER_RECHECK_S
                 return self._mineru_run_subprocess(pdf_path, start, end)
             except httpx.HTTPStatusError as exc:
                 _log.warning("mineru_server_error", path=str(pdf_path),
@@ -1887,13 +1939,25 @@ class PDFExtractor:
             # from the live PID slot (raises ProcessLookupError if the
             # process is already gone, which we swallow). Matches the
             # session.py:301 idiom (indexing review C1).
+            # nexus-5ny9r: the worker's session id, recorded while it is
+            # alive. start_new_session=True makes pgid == pid at spawn; once
+            # the worker exits and is reaped, safe_killpg's os.getpgid(pid)
+            # raises and the post-exit sweep silently did nothing, so
+            # MinerU's multiprocessing pool child and resource tracker
+            # (spawned inside do_parse, abandoned by the worker's os._exit)
+            # survived every page, reparented to init: 324 on one box after
+            # a 38-page fallback run. Sweeping by the recorded group id
+            # reaches them whether or not the leader still exists.
+            worker_pgid = proc.pid
+
             def _killpg_safe() -> None:
                 # Delegated to nexus.util.process_group.safe_killpg so
                 # the mock-guard + error-swallow contract is consistent
                 # across every subprocess cleanup site in the codebase.
-                from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+                from nexus.util.process_group import safe_killpg, safe_killpg_group  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
                 safe_killpg(proc, signal.SIGKILL)
+                safe_killpg_group(worker_pgid, signal.SIGKILL)
 
             try:
                 returncode = proc.wait(timeout=timeout_s)

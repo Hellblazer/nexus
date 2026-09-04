@@ -566,3 +566,83 @@ class TestAdaptivePageRanges:
         assert ranges == [(0, 5), (0, 2), (2, 5), (5, 10)]  # failed range bisected only
         assert ranges.count((5, 10)) == 1  # healthy batch never retried
         assert result.metadata["extraction_method"] == "mineru"
+
+
+# ── nexus-5ny9r: a "no live server" verdict expires; a skew verdict does not ──
+class TestMineruServerRecheck:
+    def test_server_started_mid_run_is_picked_up_after_the_deadline(
+        self, extractor: PDFExtractor, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import nexus.pdf_extractor as pe
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(pe.time, "monotonic", lambda: clock["t"])
+        # First verdict: nothing answers, no autostart -> subprocess path.
+        with (
+            patch("nexus.pdf_extractor.httpx.get", side_effect=httpx.ConnectError("refused")),
+            patch("nexus.daemon.mineru_lifecycle.ensure_mineru_running", return_value=None),
+            _patch_config(_MINERU_CFG),
+        ):
+            assert extractor._mineru_server_available() is False
+        # Inside the window the verdict is trusted and nothing is probed.
+        clock["t"] += pe._MINERU_SERVER_RECHECK_S / 2
+        with patch("nexus.pdf_extractor.httpx.get") as mock_get, _patch_config(_MINERU_CFG):
+            assert extractor._mineru_server_available() is False
+            mock_get.assert_not_called()
+        # Past the deadline a server that came up is picked up by one probe.
+        clock["t"] += pe._MINERU_SERVER_RECHECK_S
+        with (
+            patch("nexus.pdf_extractor.httpx.get", return_value=MagicMock(status_code=200)) as mock_get,
+            patch("nexus.daemon.mineru_lifecycle.ensure_mineru_running") as mock_ensure,
+            _patch_config(_MINERU_CFG),
+        ):
+            assert extractor._mineru_server_available() is True
+            assert mock_get.call_count == 1
+            mock_ensure.assert_not_called()  # a re-check never autostarts
+        # And stays up without further probes.
+        clock["t"] += pe._MINERU_SERVER_RECHECK_S * 3
+        with patch("nexus.pdf_extractor.httpx.get") as mock_get, _patch_config(_MINERU_CFG):
+            assert extractor._mineru_server_available() is True
+            mock_get.assert_not_called()
+
+    def test_skew_verdict_never_rechecks(
+        self, extractor: PDFExtractor, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import nexus.pdf_extractor as pe
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(pe.time, "monotonic", lambda: clock["t"])
+        with (
+            patch("nexus.config.get_mineru_server_url", return_value=None),
+            patch("nexus.config.get_mineru_skew_info", return_value=_SKEW),
+        ):
+            assert extractor._mineru_server_available() is False
+        clock["t"] += pe._MINERU_SERVER_RECHECK_S * 10
+        with patch("nexus.pdf_extractor.httpx.get") as mock_get:
+            assert extractor._mineru_server_available() is False
+            mock_get.assert_not_called()
+
+    def test_server_lost_mid_run_and_not_restarted_still_rechecks(
+        self, extractor: PDFExtractor, monkeypatch: pytest.MonkeyPatch, dummy_pdf: Path,
+    ) -> None:
+        import nexus.pdf_extractor as pe
+
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(pe.time, "monotonic", lambda: clock["t"])
+        extractor._mineru_server_checked = True
+        extractor._mineru_server_up = True
+        with (
+            patch.object(extractor, "_mineru_run_via_server", side_effect=httpx.ConnectError("gone")),
+            patch.object(extractor, "_restart_mineru_server", return_value=False),
+            patch.object(extractor, "_mineru_run_subprocess", return_value=("", [], [])) as sub,
+        ):
+            extractor._mineru_run_isolated(dummy_pdf, 0, 1)
+            sub.assert_called_once()
+        assert extractor._mineru_server_available() is False
+        clock["t"] += pe._MINERU_SERVER_RECHECK_S * 2
+        with (
+            patch("nexus.pdf_extractor.httpx.get", return_value=MagicMock(status_code=200)) as mock_get,
+            _patch_config(_MINERU_CFG),
+        ):
+            assert extractor._mineru_server_available() is True
+            assert mock_get.call_count == 1

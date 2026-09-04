@@ -24,7 +24,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
-from nexus.commands.hooks import _REVIEW_STANZA, _STANZA, _stanza_for
+from nexus.commands.hooks import _REVIEW_STANZA, _STANZA, _install_hook, _stanza_for, hook_stanza_state
 
 SENTINEL_BEGIN = "# >>> nexus managed begin >>>"
 SENTINEL_END = "# <<< nexus managed end <<<"
@@ -367,3 +367,41 @@ def test_a_second_concurrent_review_is_skipped_but_says_so(
 
     log = fake_home / ".config" / "nexus" / "index.log"
     assert "SKIPPED (review already running)" in _await_file(log)
+
+
+# ── the census can answer the hook-armed question itself (nexus-trwxr) ────────
+
+
+def test_hook_stanza_state_names_armed_stale_and_missing(tmp_path):
+    """The reviewer sat unarmed for two days while nx doctor reported the
+    stale stanza to nobody; the census now asks the same question."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    assert hook_stanza_state(repo) == "not installed"
+    hooks_dir = repo / ".git" / "hooks"
+    _install_hook(hooks_dir, "post-commit")
+    assert hook_stanza_state(repo) == "armed"
+    hook = hooks_dir / "post-commit"
+    hook.write_text(hook.read_text().replace("nx review commit", "nx review commit --pre-jh86x"))
+    assert hook_stanza_state(repo) == "stale"
+    hook.write_text("#!/bin/sh\necho mine\n")
+    assert hook_stanza_state(repo) == "unmanaged"
+    assert hook_stanza_state(tmp_path / "not-a-repo") == "unknown"
+    assert "nx review commit" in _stanza_for("post-commit")
+
+
+def test_hook_stanza_state_honours_core_hookspath(tmp_path):
+    """Every sibling (install, update, status, doctor) resolves core.hooksPath;
+    the first cut of this function did not and would have told such a repo
+    "not installed" forever (critique [24292] ship-blocker)."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    custom = tmp_path / "custom-hooks"
+    custom.mkdir()
+    subprocess.run(["git", "-C", str(repo), "config", "core.hooksPath", str(custom)], check=True)
+    assert hook_stanza_state(repo) == "not installed"
+    _install_hook(custom, "post-commit")
+    assert hook_stanza_state(repo) == "armed"
+    assert not (repo / ".git" / "hooks" / "post-commit").exists()

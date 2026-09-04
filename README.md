@@ -29,6 +29,7 @@ Download `conexus.mcpb` from the [latest release](https://github.com/Hellblazer/
 
 ```bash
 uv tool install conexus                  # 1. the nx CLI (the plugin's MCP servers ARE this package)
+nx self install                          #    then move it onto the generation layout (drops the stray `av` wheel, see below)
 /plugin marketplace add Hellblazer/nexus # 2. add the marketplace
 /plugin install conexus@nexus-plugins    # 3. install the plugin
 ```
@@ -55,6 +56,7 @@ For the full deployment story across all three surfaces (install, service lifecy
 
 ```bash
 uv tool install conexus        # install the nx CLI
+nx self install                # move it onto the generation layout: uv's own tree carries `av` (PyAV) whose bundled ffmpeg collides with opencv's; the generation build excludes it
 nx init                        # acquires the signed engine + Postgres bundle, provisions pgvector + bge-768, starts the service, offers autostart
 nx doctor                      # verify the stack
 nx index repo .                # index your repo + discover topics

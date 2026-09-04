@@ -147,10 +147,16 @@ trap _cleanup_incomplete EXIT
 # the shared bin entries — and those must be nexus-owned regular files (.4),
 # never uv-owned symlinks.
 uv venv --python "$PYTHON_VERSION" "$GEN" >&2
+# nexus-heykz: pyproject's [tool.uv] override-dependencies (the `av`
+# exclusion) is read by uv from the invoking project, never from the wheel,
+# so every user install got av and its colliding ffmpeg dylibs. The same
+# overrides ship beside this script and are handed to uv explicitly.
+OVERRIDES="$_here/overrides.txt"
+[ -f "$OVERRIDES" ] || _die "packaged overrides file is missing: $OVERRIDES"
 if [ -n "$CONSTRAINTS" ]; then
-    uv pip install --python "$GEN/bin/python" --constraints "$CONSTRAINTS" "$SPEC" >&2
+    uv pip install --python "$GEN/bin/python" --overrides "$OVERRIDES" --constraints "$CONSTRAINTS" "$SPEC" >&2
 else
-    uv pip install --python "$GEN/bin/python" "$SPEC" >&2
+    uv pip install --python "$GEN/bin/python" --overrides "$OVERRIDES" "$SPEC" >&2
 fi
 
 # ── Receipt ──────────────────────────────────────────────────────────────────

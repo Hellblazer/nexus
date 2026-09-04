@@ -481,3 +481,19 @@ def test_no_constraints_flag_installs_unconstrained(tmp_path: Path) -> None:
     proc, argv_log = _run_builder(tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert "--constraints" not in argv_log.read_text()
+
+
+# nexus-heykz: the packaged overrides file reaches uv on every build.
+
+
+def test_packaged_overrides_are_handed_to_uv_pip_install(tmp_path: Path) -> None:
+    """uv reads pyproject's [tool.uv] override-dependencies from the invoking
+    project, never from the wheel, so a user's `nx self install` got `av`.
+    The builder passes the shipped overrides file explicitly, every time."""
+    proc, argv_log = _run_builder(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    install_lines = [ln for ln in argv_log.read_text().splitlines() if "pip install" in ln]
+    assert len(install_lines) == 1, argv_log.read_text()
+    overrides = _INSTALLER.parent / "overrides.txt"
+    assert f"--overrides {overrides}" in install_lines[0]
+    assert overrides.is_file()

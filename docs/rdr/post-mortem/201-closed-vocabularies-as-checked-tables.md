@@ -121,3 +121,17 @@ silently re-accumulate. The release table's value is narrower but sharper —
 the two gates evaluate one table, so the O1 class (the two scripts returning
 opposite verdicts on the same ledger) is impossible by construction rather than
 by two authors remembering to keep their branches in step.
+
+## Addendum, 2026-09-04
+
+The lesson above, a rule proven below the layer that uses it, held one more
+time after this file was written. The RDR's Problem Statement said a table
+would have reported both justifying incidents; nothing asserted where their
+cells were until the intrastate reanalysis (T3
+`analysis-deep-intrastate-vs-conexus-reanalysis-2026-09-04`) asked. GH #1402
+now resolves to a named refusal in `tests/tables/test_release_incidents.py`;
+the inversion's failure class is pinned, the incident is not, and the RDR
+says why. Two more things the same pass corrected: the lifecycle table
+header claimed an omitted status went uncaught (the totality check catches
+it), and the checker's guard-independence assumption was undocumented on
+both sides of the borrowing. Amendments in the RDR's Revision History.

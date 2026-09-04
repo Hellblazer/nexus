@@ -70,6 +70,13 @@ _BINARY_EXTENSIONS: frozenset[str] = frozenset({
     # Documents / misc binary
     ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
     ".db", ".sqlite", ".sqlite3",
+    # Git and data containers (nexus-hg2dw / nexus-b9m7a): a git bundle
+    # opens with a text ref list and only turns binary past the first few
+    # KB, so it passed the prefix sniff, registered a catalog document on
+    # every run, produced no chunk, and was re-stamped by every HEAD bump —
+    # an unfenced document doctor reported as a producer regression.
+    ".bundle", ".pack", ".idx", ".npz", ".npy", ".parquet", ".pkl",
+    ".pickle", ".onnx", ".safetensors",
 })
 
 # nexus-haet (GH issue surfaced 2026-05-08): minified bundle filenames
@@ -113,22 +120,24 @@ def _has_shebang(path: Path) -> bool:
         return False
 
 
-def looks_like_binary_content(path: Path, *, sample_bytes: int = 8192) -> bool:
+def looks_like_binary_content(path: Path, *, sample_bytes: int = 65536) -> bool:
     """Cheap prefix sniff for binary content on a file ``classify_file``
     classified as PROSE via its step-8 fall-through default.
 
     ``classify_file`` is extension-only by design (its docstring): any
     extension not in the code/skip/binary-asset tables falls through to
     PROSE, on the assumption that unknown extensions are more often prose
-    than not. Extensions such as ``.npz`` (numpy archive) or ``.bundle``
-    (git bundle) are not in ``_BINARY_EXTENSIONS`` yet decode as binary,
-    not UTF-8 text — the prose indexer's own ``read_text(encoding="utf-8")``
+    than not. An unknown-extension file that decodes as binary, not UTF-8
+    text — the prose indexer's own ``read_text(encoding="utf-8")``
     then raises ``UnicodeDecodeError`` and returns 0 chunks
     (``prose_indexer.py``). Registering a catalog document ahead of that
     outcome mints a permanent ``chunk_count=0`` phantom no re-index can
     ever clear (nexus-rqsh1). This sniff catches that case at
     classification time, before registration, by reading a small prefix
-    rather than the whole file.
+    rather than the whole file. The prefix is 64 KB, not 8 KB
+    (nexus-hg2dw): a git bundle's ref list is plain text for the first
+    13 KB of the one this repo carries, and an 8 KB sample read it as
+    prose every run.
 
     Returns False (i.e. "looks like text") on any read failure — the
     per-file indexer's own read is the authority on genuine I/O errors;

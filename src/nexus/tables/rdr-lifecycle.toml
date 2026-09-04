@@ -25,13 +25,24 @@
 # group over its GUARD dimensions, not automatically across the full
 # status x event product, so every status must be named explicitly for
 # every event: either handled by name, or swept into an `escape` row's
-# match.status list. Getting that enumeration wrong (omitting a status
-# entirely from an event) is NOT caught by the checker -- a status a row
-# never names has no group at all, so there is nothing to check. The
-# arithmetic below is verified by construction: each event's explicit
-# status set and its "otherwise" set are complements summing to the full
-# 6-member domain, with no member repeated across the two sets.
+# match.status list. Omitting a status from an event entirely IS caught:
+# check.py's _check_match_totality (added after the P1.2 critique, T2
+# [24018]) demands that every (status, event) combination be named by
+# some row's match, so a missing status is a blocking finding, not a
+# silent hole. An earlier version of this header said the opposite.
 #
+# WHAT THE ESCAPE ROWS DO AND DO NOT SAY (reanalysis 2026-09-04, T3
+# analysis-deep-intrastate-vs-conexus-reanalysis-2026-09-04, critique
+# [24292]). Coverage of this table is FULLY proved: totality over the 36
+# (status, event) groups, and enumeration over each group's guards. What
+# the 24 bare `escape = true` groups lack is DISCRIMINATION: each says
+# "any other status, refuse" with no per-transition reason, and the checker
+# reports each as closed-by-escape, an advisory. That is the intended
+# design for six statuses whose illegal transitions carry nothing worth
+# distinguishing. docs/tables/release-choreography.toml has no escape rows
+# because every one of its cells emits a distinct exit code and message.
+# Say which property you mean before comparing the two.
+
 # The `defer` event is legal from `draft` and from `accepted` (Sam,
 # 2026-09-01, RDR-201 Revision History). A deferred record resumes to
 # `draft` only, so deferred-then-resumed work re-gates.

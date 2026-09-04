@@ -98,9 +98,10 @@ class DriftFinding:
 #: Mirrors ``_SHAPE_SENSITIVE`` in tests/test_dependency_bounds_lint.py, which
 #: holds the pyproject cap at the locked minor; this side reports the pressure
 #: a fresh resolution would put on that cap, and on the transitive stack under
-#: it (docling is listed although its cap is still ``<3``: its lock-to-PyPI gap
-#: is 2.76 -> 2.125, the same shape, decided separately).
-SHAPE_SENSITIVE: frozenset[str] = frozenset({"mineru", "docling"})
+#: it. docling is declared as ``docling-slim`` (nexus-jpsn1: the same import,
+#: without the [standard] extra's OCR and test-data factories), so that is the
+#: name the lock and the requirement both carry.
+SHAPE_SENSITIVE: frozenset[str] = frozenset({"mineru", "docling-slim"})
 
 #: Shape-sensitive versions already gated and REFUSED, keyed (name, version)
 #: -> the record. A fresh resolution landing on one of these is known

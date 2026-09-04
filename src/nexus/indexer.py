@@ -1830,6 +1830,27 @@ def _run_housekeeping(
             )
 
 
+def select_local_mode_embed_fn(local_ef: Callable[[list[str]], list[list[float]]]) -> Callable[[list[str]], list[list[float]]]:
+    """The client-side ``embed_fn`` for a LOCAL-mode index run (nexus-b7s8t).
+
+    In local mode T3 is still the service-backed ``HttpVectorClient``
+    (``make_t3()`` is unconditional since RDR-155 P4a.2) and its
+    ``upsert_chunks_with_embeddings`` discards caller embeddings. Handing
+    the bge ONNX model in as ``embed_fn`` therefore embedded every chunk
+    TWICE — once here (466% CPU, ~2 GB RSS on a 16 GB box, competing with
+    the engine JVM that then did the same work again) and once server-side.
+    The client embeds only when the vector backend is opted OUT of service
+    mode (the in-memory / chroma-injected test substrate); otherwise the
+    server-embed stub ``[[]] * n`` is returned, the same one the cloud
+    branch uses.
+    """
+    from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
+
+    if is_vector_service_mode():
+        return lambda texts: [[]] * len(texts)
+    return local_ef
+
+
 def index_repository(
     repo: Path,
     registry: "object",
@@ -4197,7 +4218,17 @@ def _run_index(
         # model)``) is no longer needed here. doc_indexer.py's own shape #2
         # remains for its OTHER callers (`nx collection reindex`, standalone
         # RDR-only index), which build their own adapter independently.
-        _embed_fn = _local_ef  # shape #1 for code / prose / PDF / RDR
+        # nexus-b7s8t: in local mode T3 is STILL the service-backed
+        # HttpVectorClient (make_t3() is unconditional since RDR-155
+        # P4a.2) and ``upsert_chunks_with_embeddings`` discards caller
+        # embeddings — so running the bge ONNX model here embedded every
+        # chunk TWICE: once in this process (466% CPU, ~2 GB RSS on a
+        # 16 GB box, competing with the engine JVM that then did the
+        # same work again) and once server-side. ``_local_ef`` is kept
+        # only for its model name (construction is lazy, no model load);
+        # the client embeds only when the vector backend is opted OUT of
+        # service mode (the in-memory test substrate).
+        _embed_fn = select_local_mode_embed_fn(_local_ef)  # shape #1 for code / prose / PDF / RDR
 
         code_model = local_model
         docs_model = local_model

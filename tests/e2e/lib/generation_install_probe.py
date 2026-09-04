@@ -88,7 +88,7 @@ def main() -> int:
     # (1) The wheel must actually SHIP the installer. Asserted before use, so
     # a packaging regression reads as a packaging regression rather than as a
     # confusing bash error from a missing file.
-    for name in ("install_generation.sh", "flip.sh", "shims.sh", "layout.sh"):
+    for name in ("install_generation.sh", "flip.sh", "shims.sh", "layout.sh", "overrides.txt"):
         if not check(
             (install_dir / name).is_file(),
             f"packaged installer ships {name}",
@@ -193,6 +193,26 @@ def main() -> int:
         "restart-stale, converge_engine, the diag-view heal and both "
         "launchagent unloads (nexus-utpuw.10). The transition gate would "
         "never fire.",
+    )
+
+    # (7) nexus-heykz: `av` must NOT be in the generation. pyproject's
+    # [tool.uv] override is read from the invoking project, so only the
+    # packaged overrides file (handed to uv by install_generation.sh) keeps
+    # av and its ffmpeg-62 dylibs out of a user's install. A checkout-run
+    # install inherits the override by accident; this probe runs from the
+    # ARTIFACT's own installer, so it sees what a user sees.
+    av = subprocess.run(
+        [str(generation / "bin" / "python"), "-c",
+         "import importlib.util as u;"
+         "print('PRESENT' if u.find_spec('av') else 'ABSENT')"],
+        capture_output=True, text=True, timeout=300, env=env,
+    )
+    check(
+        av.stdout.strip() == "ABSENT",
+        "av is absent from the generation (packaged overrides reached uv)",
+        f"av is {av.stdout.strip() or av.stderr.strip()[:200]!r} in the generation — "
+        "the packaged overrides file did not reach `uv pip install`; users get "
+        "PyAV's ffmpeg-62 dylibs colliding with opencv's ffmpeg-61 (nexus-heykz)",
     )
 
     if FAILURES:

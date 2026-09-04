@@ -317,13 +317,13 @@ class TestLooksLikeBinaryContent:
         from nexus.classifier import looks_like_binary_content
         p = tmp_path / "small.md"
         p.write_text("# Hello\n\nOrdinary short prose.\n", encoding="utf-8")
-        assert looks_like_binary_content(p) is False
+        assert looks_like_binary_content(p, sample_bytes=8192) is False
 
     def test_nul_byte_is_binary(self, tmp_path: Path):
         from nexus.classifier import looks_like_binary_content
         p = tmp_path / "fixture.npz"
         p.write_bytes(b"prefix\x00suffix")
-        assert looks_like_binary_content(p) is True
+        assert looks_like_binary_content(p, sample_bytes=8192) is True
 
     def test_genuine_binary_over_8192_bytes_is_binary(self, tmp_path: Path):
         """A byte sequence that is invalid UTF-8 well within the first
@@ -335,7 +335,7 @@ class TestLooksLikeBinaryContent:
         p = tmp_path / "fixture.bin"
         # 0xFF is never a valid UTF-8 lead byte -- invalid at position 0.
         p.write_bytes(b"\xff\xfe" * 5000)  # 10000 bytes, well over 8192
-        assert looks_like_binary_content(p) is True
+        assert looks_like_binary_content(p, sample_bytes=8192) is True
 
     def test_long_valid_utf8_multibyte_char_straddles_sample_boundary_is_text(
         self, tmp_path: Path,
@@ -362,7 +362,7 @@ class TestLooksLikeBinaryContent:
         content.decode("utf-8")  # sanity: the FULL file is valid UTF-8
         p = tmp_path / "prose_with_boundary_char.md"
         p.write_bytes(content)
-        assert looks_like_binary_content(p) is False, (
+        assert looks_like_binary_content(p, sample_bytes=8192) is False, (
             "a multibyte UTF-8 character straddling the 8192-byte sniff "
             "boundary must not be misclassified as binary content"
         )
@@ -376,7 +376,7 @@ class TestLooksLikeBinaryContent:
         assert len(content) == 8264
         p = tmp_path / "critic_repro.md"
         p.write_bytes(content)
-        assert looks_like_binary_content(p) is False
+        assert looks_like_binary_content(p, sample_bytes=8192) is False
 
     def test_read_failure_is_not_binary(self, tmp_path: Path):
         from nexus.classifier import looks_like_binary_content
@@ -407,7 +407,7 @@ class TestLooksLikeBinaryContent:
         assert len(content) == 8192, "deterministic exactly-sample_bytes shape"
         p = tmp_path / "exactly_8192_corrupt.md"
         p.write_bytes(content)
-        assert looks_like_binary_content(p) is True, (
+        assert looks_like_binary_content(p, sample_bytes=8192) is True, (
             "an exactly-8192-byte file truncated mid-multibyte-char at "
             "true EOF is genuine corruption and must be classified as "
             "binary, not deferred as if more bytes existed"
@@ -423,4 +423,50 @@ class TestLooksLikeBinaryContent:
         content.decode("utf-8")  # sanity: fully valid UTF-8
         p = tmp_path / "exactly_8192_valid.md"
         p.write_bytes(content)
-        assert looks_like_binary_content(p) is False
+        assert looks_like_binary_content(p, sample_bytes=8192) is False
+
+
+# The boundary tests above pin ``sample_bytes=8192`` explicitly: they were
+# written against the old default and exercise the exact-cap disambiguation,
+# which the 64 KB default would never reach on their 8 KB fixtures.
+# nexus-hg2dw / nexus-b9m7a: a git bundle opens with a text ref list and
+# turns binary only past the first few KB. With an 8 KB sniff it read as
+# prose, registered a catalog document every run, produced no chunk, and
+# every HEAD bump re-stamped it — an unfenced document doctor reported as a
+# producer regression on this repo (archive/rdr-110-119-scrapped-chain.bundle,
+# first NUL at byte 13700).
+
+
+def test_text_header_then_binary_body_is_binary(tmp_path):
+    from nexus.classifier import looks_like_binary_content
+
+    f = tmp_path / "chain.unknownext"
+    f.write_bytes(b"# v2 git bundle\n" + b"-529f4881803929dacc48eccff3dfec7 Merge pull request\n" * 300 + b"PACK\x00\x00\x00\x02" + bytes(range(256)) * 64)
+    assert f.stat().st_size > 8192
+    assert looks_like_binary_content(f)
+    # the old 8 KB prefix is exactly what missed it
+    assert not looks_like_binary_content(f, sample_bytes=8192)
+
+
+def test_git_bundle_and_data_containers_classify_as_skip(tmp_path):
+    from nexus.classifier import ContentClass, classify_file
+
+    for name in ("x.bundle", "x.pack", "x.idx", "x.npz", "x.npy", "x.parquet", "x.pkl", "x.safetensors", "x.onnx"):
+        f = tmp_path / name
+        f.write_bytes(b"\x00binary")
+        assert classify_file(f) is ContentClass.SKIP, name
+
+
+def test_the_repo_bundle_itself_is_never_prose():
+    """The real file this repo carries, the one doctor named (1.1.3437)."""
+    from pathlib import Path
+
+    from nexus.classifier import ContentClass, classify_file, looks_like_binary_content
+
+    bundle = Path(__file__).resolve().parents[1] / "archive" / "rdr-110-119-scrapped-chain.bundle"
+    if not bundle.is_file():
+        import pytest
+
+        pytest.skip("archive bundle not present in this checkout")
+    assert classify_file(bundle) is ContentClass.SKIP
+    assert looks_like_binary_content(bundle)
