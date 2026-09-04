@@ -951,8 +951,7 @@ class CollectionRegistryFkTest {
         // (is_local=true would scope the GUC to the set_config statement's own transaction
         // and expire before the INSERT when autoCommit=true).
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             PSQLException ex = assertThrows(PSQLException.class, () ->
                 svc.createStatement().execute(
                     "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, "

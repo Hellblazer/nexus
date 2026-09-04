@@ -2,6 +2,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.SchemaMigrator.MigrationException;
+import dev.nexus.service.db.TenantScope;
 import liquibase.Contexts;
 import liquibase.LabelExpression;
 import liquibase.Liquibase;
@@ -286,11 +287,8 @@ class VectorsRepointFunctionsIntegrationTest {
         return sb.toString();
     }
 
-    private static void setTenantGuc(Connection conn, String tenant) throws SQLException {
-        try (PreparedStatement ps = conn.prepareStatement("SELECT set_config('nexus.tenant', ?, false)")) {
-            ps.setString(1, tenant);
-            ps.executeQuery();
-        }
+    private static void setTenantGuc(Connection conn, String tenant) {
+        PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
     }
 
     // ── Test 1: the chain applies cleanly end to end (structural smoke) ─────

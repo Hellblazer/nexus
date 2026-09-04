@@ -480,7 +480,7 @@ class ManifestVerifyTest {
         String docId = "mvf-allpresent-doc-1"; // exists from GROUP 1, has chunks
 
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute("RESET nexus.tenant");
+            PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, null, false);
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT referenced, present, missing FROM nexus.manifest_verify('" + docId + "')");
             assertThat(rs.next())

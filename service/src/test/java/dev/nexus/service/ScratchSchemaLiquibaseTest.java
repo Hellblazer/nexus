@@ -184,10 +184,7 @@ class ScratchSchemaLiquibaseTest {
         // Tokenisation probe: insert via superuser, verify FTS behavior
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
-            try (var ps = su.prepareStatement("SELECT set_config('nexus.t1_tenant', ?, true)")) {
-                ps.setString(1, "probe-tenant-scratch");
-                ps.execute();
-            }
+            PgContainerHelper.setTenant(su, TenantScope.T1_TENANT_GUC, "probe-tenant-scratch", true);
             su.createStatement().execute(
                 "INSERT INTO t1.scratch " +
                 "(id, tenant_id, session_id, content, tags, flagged, access_count, ts) " +
@@ -313,10 +310,7 @@ class ScratchSchemaLiquibaseTest {
 
     private void insertRow(Connection su, String tenant, String sessionId,
                            String id, String content, String tags) throws Exception {
-        try (var ps = su.prepareStatement("SELECT set_config('nexus.t1_tenant', ?, true)")) {
-            ps.setString(1, tenant);
-            ps.execute();
-        }
+        PgContainerHelper.setTenant(su, TenantScope.T1_TENANT_GUC, tenant, true);
         try (var ps = su.prepareStatement(
                 "INSERT INTO t1.scratch (id, tenant_id, session_id, content, tags, flagged, access_count, ts) " +
                 "VALUES (?, ?, ?, ?, ?, false, 0, now()) ON CONFLICT (id) DO NOTHING")) {

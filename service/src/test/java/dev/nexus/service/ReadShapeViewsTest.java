@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.TenantScope;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
@@ -209,7 +210,7 @@ class ReadShapeViewsTest {
 
     private StatsRow statsFor(String tenant) throws Exception {
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute("SELECT set_config('nexus.tenant', '" + tenant + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT doc_count, chunk_count FROM nexus.catalog_stats");
             rs.next();
@@ -274,7 +275,7 @@ class ReadShapeViewsTest {
 
     private long collectionDocCount(String tenant, String coll) throws Exception {
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute("SELECT set_config('nexus.tenant', '" + tenant + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT doc_count FROM nexus.collection_doc_counts WHERE physical_collection = '" + coll + "'");
             return rs.next() ? rs.getLong(1) : 0L;
@@ -314,7 +315,7 @@ class ReadShapeViewsTest {
 
     private long coverageTotalFor(String tenant, String contentType) throws Exception {
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute("SELECT set_config('nexus.tenant', '" + tenant + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT total FROM nexus.coverage_by_content_type WHERE content_type = '" + contentType + "'");
             return rs.next() ? rs.getLong(1) : 0L;
@@ -359,7 +360,7 @@ class ReadShapeViewsTest {
 
     private long orphanCountFor(String tenant, String coll) throws Exception {
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute("SELECT set_config('nexus.tenant', '" + tenant + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT orphan_count FROM nexus.collection_health_meta WHERE collection = '" + coll + "'");
             return rs.next() ? rs.getLong(1) : 0L;
@@ -481,7 +482,7 @@ class ReadShapeViewsTest {
         }
         // svc + GUC=A: zero tenant-B rows; at least one tenant-A row.
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute("SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             for (String view : GROUPED_VIEWS) {
                 ResultSet rsB = svc.createStatement().executeQuery(
                     "SELECT count(*) FROM nexus." + view + " WHERE tenant_id = '" + TENANT_B + "'");
@@ -504,7 +505,7 @@ class ReadShapeViewsTest {
     @Test @Order(30)
     void catalogStats_scopesScalarCountsToGucTenant() throws Exception {
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute("SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             ResultSet a = svc.createStatement().executeQuery(
                 "SELECT doc_count, link_count, owner_count, collection_count, chunk_count "
                 + "FROM nexus.catalog_stats");
@@ -515,7 +516,7 @@ class ReadShapeViewsTest {
             assertThat(a.getLong("collection_count")).as("GUC=A collection_count").isEqualTo(2L);
             assertThat(a.getLong("chunk_count")).as("GUC=A chunk_count").isEqualTo(2L);
 
-            svc.createStatement().execute("SELECT set_config('nexus.tenant', '" + TENANT_B + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_B, false);
             ResultSet b = svc.createStatement().executeQuery(
                 "SELECT doc_count, link_count, owner_count, collection_count, chunk_count "
                 + "FROM nexus.catalog_stats");

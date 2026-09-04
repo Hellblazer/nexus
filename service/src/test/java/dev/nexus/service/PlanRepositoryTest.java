@@ -694,8 +694,7 @@ class PlanRepositoryTest {
             try (var conn = svcDs.getConnection()) {
                 conn.setAutoCommit(true);
                 // Set GUC to TENANT_A but try to insert with TENANT_B — WITH CHECK violation
-                conn.createStatement().execute(
-                    "SET LOCAL nexus.tenant = '" + TENANT_A + "'");
+                PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
                 conn.createStatement().execute(
                     "INSERT INTO nexus.plans (tenant_id, project, query, plan_json) " +
                     "VALUES ('" + TENANT_B + "', 'bad-proj', 'RLS violation test', '{}')");

@@ -285,9 +285,7 @@ class ManifestChunkFkTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             assertThatCode(() -> {
-                var ps = su.prepareStatement("SELECT set_config('nexus.tenant', ?, false)");
-                ps.setString(1, TENANT);
-                ps.executeQuery();
+                PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, TENANT, false);
                 su.createStatement().execute("SELECT nexus.purge_trash(interval '30 days')");
             })
                 .as("purge_trash's chunk-before-manifest deletion must survive under the deferred FK "

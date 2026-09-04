@@ -430,7 +430,7 @@ class HybridSearchFunctionParityIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             su.createStatement().execute("SET LOCAL enable_seqscan = off");
-            su.createStatement().execute("SELECT set_config('nexus.tenant', '" + TENANT_A + "', true)");
+            PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
             su.createStatement().execute("SELECT set_config('pg_trgm.word_similarity_threshold', '0.6', true)");
             StringBuilder sb = new StringBuilder();
             try (ResultSet rs = su.createStatement().executeQuery("EXPLAIN " + inner)) {

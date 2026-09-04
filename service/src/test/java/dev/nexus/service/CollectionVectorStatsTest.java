@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -378,8 +379,7 @@ class CollectionVectorStatsTest {
 
         // svc + GUC=A: zero tenant-B rows, but tenant-A rows visible
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             ResultSet rsB = svc.createStatement().executeQuery(
                 "SELECT count(*) FROM " + VIEW_STATS +
                 " WHERE tenant_id = '" + TENANT_B + "'");
@@ -398,8 +398,7 @@ class CollectionVectorStatsTest {
 
         // svc + GUC=B: exactly the one tenant-B collection row, exact count
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_B + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_B, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT collection, chunk_count FROM " + VIEW_STATS);
             assertThat(rs.next())
@@ -415,7 +414,7 @@ class CollectionVectorStatsTest {
 
         // svc + no GUC: zero rows
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute("RESET nexus.tenant");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, null, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT count(*) FROM " + VIEW_STATS);
             rs.next();

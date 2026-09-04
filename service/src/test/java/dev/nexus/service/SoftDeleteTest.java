@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import org.junit.jupiter.api.*;
 import org.postgresql.util.PSQLException;
@@ -293,8 +294,7 @@ class SoftDeleteTest {
         // Call document_trash via svc role with GUC set — this is the RED trigger.
         // The function nexus.document_trash(text) does not exist yet; PSQLException propagates.
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             svc.createStatement().execute(
                 "SELECT " + FN_TRASH + "('" + tumbler + "')");
         }
@@ -340,16 +340,14 @@ class SoftDeleteTest {
         // Tombstone first (also triggers RED if trash absent — acceptable; restore test
         // is the primary target; both are RED for the same reason: function absent).
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             svc.createStatement().execute(
                 "SELECT " + FN_TRASH + "('" + tumbler + "')");
         }
 
         // Now restore
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             svc.createStatement().execute(
                 "SELECT " + FN_RESTORE + "('" + tumbler + "')");
         }
@@ -435,16 +433,14 @@ class SoftDeleteTest {
 
         // Tombstone doc A via svc role
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             svc.createStatement().execute(
                 "SELECT " + FN_TRASH + "('" + tumblerA + "')");
         }
 
         // Purge (older_than = 0 seconds: tombstone is always older than "now - 0s")
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             svc.createStatement().execute(
                 "SELECT " + FN_PURGE + "('0 seconds'::interval)");
         }
@@ -554,16 +550,14 @@ class SoftDeleteTest {
 
         // Tombstone the document (just now — it will be "new")
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             svc.createStatement().execute(
                 "SELECT " + FN_TRASH + "('" + tumbler + "')");
         }
 
         // Purge with a very long older_than (e.g. 30 days) — the recent tombstone must NOT be purged
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             svc.createStatement().execute(
                 "SELECT " + FN_PURGE + "('30 days'::interval)");
         }
@@ -637,16 +631,14 @@ class SoftDeleteTest {
 
         // Tombstone doc X
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             svc.createStatement().execute(
                 "SELECT " + FN_TRASH + "('" + tumblerX + "')");
         }
 
         // (a) Orphan chunk (only X references it; X is tombstoned) must be ABSENT from live_chunks
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM " + VIEW_LIVE_CHUNKS +
                 " WHERE chash = decode('" + chashOrphan + "', 'hex')");
@@ -658,8 +650,7 @@ class SoftDeleteTest {
 
         // (b) Shared chunk (live doc Y still references it) must be PRESENT in live_chunks
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM " + VIEW_LIVE_CHUNKS +
                 " WHERE chash = decode('" + chashLive + "', 'hex')");
@@ -713,8 +704,7 @@ class SoftDeleteTest {
         // Pinned contract: 0 rows affected (FORCE RLS silently filters the UPDATE).
         // Function MUST NOT raise an error — it executes and affects nothing.
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             // This call should succeed (no exception) but affect 0 rows.
             svc.createStatement().execute(
                 "SELECT " + FN_TRASH + "('" + tumblerTenantB + "')");
@@ -749,8 +739,7 @@ class SoftDeleteTest {
 
         // Attempt restore on TENANT_B's doc via GUC=A — must silently affect 0 rows
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             svc.createStatement().execute(
                 "SELECT " + FN_RESTORE + "('" + tumblerTenantB + "')");
         }
@@ -815,8 +804,7 @@ class SoftDeleteTest {
 
         // Act: purge_trash with 0-second interval (would sweep anything eligible)
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             svc.createStatement().execute(
                 "SELECT " + FN_PURGE + "('0 seconds'::interval)");
         }
@@ -847,8 +835,7 @@ class SoftDeleteTest {
         // Assert: the chunk appears in live_chunks (NOT EXISTS(manifest) → visible)
         // The svc role reads via GUC-scoped RLS; live_chunks is SECURITY INVOKER.
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM " + VIEW_LIVE_CHUNKS + " " +
                 "WHERE tenant_id = '" + TENANT_A + "' AND chash = decode('" + manifestlessChash + "', 'hex')");
@@ -878,8 +865,7 @@ class SoftDeleteTest {
 
         // First trash — sets deleted_at
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             svc.createStatement().execute(
                 "SELECT " + FN_TRASH + "('" + tumbler + "')");
         }
@@ -899,8 +885,7 @@ class SoftDeleteTest {
 
         // Second trash — must NOT change deleted_at (AND deleted_at IS NULL guard)
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             svc.createStatement().execute(
                 "SELECT " + FN_TRASH + "('" + tumbler + "')");
         }

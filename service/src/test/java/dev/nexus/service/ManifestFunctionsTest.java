@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import org.junit.jupiter.api.*;
 import org.postgresql.util.PSQLException;
@@ -156,8 +157,7 @@ class ManifestFunctionsTest {
 
         // Call document_text via svc role with GUC set — RED trigger: function absent
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT position, chunk_text FROM " + FN_DOC_TEXT + "('" + docId + "') " +
                 "ORDER BY position");
@@ -224,8 +224,7 @@ class ManifestFunctionsTest {
 
         // document_text must return EMPTY SET for the tombstoned doc
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT count(*) FROM " + FN_DOC_TEXT + "('" + docId + "')");
             rs.next();
@@ -277,8 +276,7 @@ class ManifestFunctionsTest {
 
         // document_text must return exactly 1 row (position 0; position 1 gap is skipped)
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT position, chunk_text FROM " + FN_DOC_TEXT + "('" + docId + "') " +
                 "ORDER BY position");
@@ -386,8 +384,7 @@ class ManifestFunctionsTest {
 
         // Call document_text for tenant B's doc via GUC=A — must return empty set (RLS filters)
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT count(*) FROM " + FN_DOC_TEXT + "('" + docB + "')");
             rs.next();
@@ -422,7 +419,7 @@ class ManifestFunctionsTest {
 
         try (Connection su = pg.createConnection("")) {
             // Confirm GUC is NOT set (reset to default)
-            su.createStatement().execute("RESET nexus.tenant");
+            PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, null, false);
 
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT count(*) FROM " + FN_DOC_TEXT + "('" + anyDocId + "')");

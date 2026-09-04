@@ -2,6 +2,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.SchemaMigrator.MigrationException;
+import dev.nexus.service.db.TenantScope;
 import liquibase.Contexts;
 import liquibase.LabelExpression;
 import liquibase.Liquibase;
@@ -355,10 +356,7 @@ class SchemaMigratorIntegrationTest {
             svc.setAutoCommit(false);
 
             // Stamp the tenant GUC (same pattern as TenantScope.withTenant).
-            try (var ps = svc.prepareStatement("SELECT set_config('nexus.tenant', ?, true)")) {
-                ps.setString(1, tenant);
-                ps.execute();
-            }
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, tenant, true);
 
             // INSERT: proves nexus_svc has INSERT privilege on nexus.memory.
             try (var ps = svc.prepareStatement(
@@ -404,10 +402,7 @@ class SchemaMigratorIntegrationTest {
         try (Connection admin = adminDs.getConnection()) {
             admin.setAutoCommit(false);
             // Owner must stamp GUC even for themselves when FORCE RLS is set.
-            try (var ps = admin.prepareStatement("SELECT set_config('nexus.tenant', ?, true)")) {
-                ps.setString(1, "failclosed-tenant");
-                ps.execute();
-            }
+            PgContainerHelper.setTenant(admin, TenantScope.DEFAULT_TENANT_GUC, "failclosed-tenant", true);
             try (var ps = admin.prepareStatement(
                     "INSERT INTO nexus.memory " +
                     "(tenant_id, project, title, content, tags, timestamp, access_count) " +
@@ -1464,10 +1459,7 @@ class SchemaMigratorIntegrationTest {
                 // nexusSvc_noGucStamp_rlsFailClosed_returnsZeroRows — documents).
                 try (Connection conn = agedDs.getConnection()) {
                     conn.setAutoCommit(false);
-                    try (var ps = conn.prepareStatement("SELECT set_config('nexus.tenant', ?, true)")) {
-                        ps.setString(1, tenant);
-                        ps.execute();
-                    }
+                    PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, true);
 
                     assertThat(constraintValidated(conn, "fk_catalog_chunks_chunk"))
                         .as("fk_catalog_chunks_chunk must exist and be VALIDATED "

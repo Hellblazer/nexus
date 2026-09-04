@@ -325,12 +325,8 @@ class ServiceIntegrationTest {
         return new com.zaxxer.hikari.HikariDataSource(config);
     }
 
-    private void stampAndInsert(Connection conn, String tenant, String key, String payload)
-            throws SQLException {
-        try (var ps = conn.prepareStatement("SELECT set_config('nexus.tenant', ?, true)")) {
-            ps.setString(1, tenant);
-            ps.execute();
-        }
+    private void stampAndInsert(Connection conn, String tenant, String key, String payload) {
+        PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, true);
         DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
         ctx.execute("INSERT INTO nexus_test.rls_probe (tenant_id, key, payload) VALUES (?, ?, ?)",
             tenant, key, payload);

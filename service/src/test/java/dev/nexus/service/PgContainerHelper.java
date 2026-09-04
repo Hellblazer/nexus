@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.TokenHashing;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -12,6 +13,9 @@ import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 
@@ -19,6 +23,7 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 
 import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 
@@ -306,5 +311,57 @@ public final class PgContainerHelper {
             .values(TokenHashing.sha256Hex(token), tenant, label)
             .onConflictDoNothing()
             .execute();
+    }
+
+    /**
+     * Allowlist of GUC names {@link #setTenant} may stamp — the same two names {@link
+     * TenantScope#PERMITTED_GUCS} enforces (that field is package-private inside {@code
+     * dev.nexus.service.db}, unreachable from this package, so this is a second copy of
+     * the same guard rather than a shared reference; drift between the two would be a
+     * silent RLS-context miss either way, and both are derived from {@link
+     * TenantScope#DEFAULT_TENANT_GUC}/{@link TenantScope#T1_TENANT_GUC} so a future third
+     * GUC needs a coordinated edit in both places, not a lone one here).
+     */
+    private static final Set<String> TENANT_GUC_ALLOWLIST =
+        Set.of(TenantScope.DEFAULT_TENANT_GUC, TenantScope.T1_TENANT_GUC);
+
+    /**
+     * Stamp {@code gucName} on an existing, test-owned {@link Connection} via jOOQ's typed
+     * {@code set_config(...)} function call (nexus-cbo4a batch 2) — the test-tree counterpart
+     * to {@link TenantScope#withTenant}, for call sites that hold a raw {@link Connection}
+     * they already own (bootstrap superuser connections, multi-connection cross-tenant
+     * isolation probes, {@code RESET}-then-reassert sequences) and need to stamp or clear a
+     * tenant GUC on it directly, with no lambda-scoped connection lifecycle. {@link
+     * TenantScope#withTenant} does not fit that shape at all — it BORROWS its own connection
+     * from a {@link javax.sql.DataSource} and commits/closes it before returning, whereas every
+     * caller here already has the connection open and keeps driving it afterward.
+     *
+     * <p>Replaces the raw {@code SET nexus.tenant = '...'} / {@code SET LOCAL nexus.tenant =
+     * '...'} / {@code SELECT set_config('nexus.tenant', ..., ...)} / {@code RESET nexus.tenant}
+     * string literals these call sites used to build by hand (Sam's no-raw-SQL-strings-in-Java
+     * directive, nexus-zrcj7).
+     *
+     * @param conn    the connection to stamp; its transaction/autocommit state is left exactly
+     *                as the caller set it — this method neither opens nor commits a transaction
+     * @param gucName the GUC name, restricted to {@link #TENANT_GUC_ALLOWLIST} — the same
+     *                defense-in-depth guard {@link TenantScope#withTenant} itself enforces, so
+     *                this helper cannot become a second, unguarded path to an arbitrary session
+     *                GUC
+     * @param tenant  the tenant value to set, or {@code null} to RESET the GUC to its default
+     *                (Postgres: {@code set_config(name, NULL, is_local)} performs exactly the
+     *                {@code RESET name} operation — see the {@code set_config} documentation)
+     * @param isLocal {@code true} for {@code SET LOCAL} (transaction-scoped — {@code conn} must
+     *                have an open, not-yet-committed transaction, i.e. {@code autoCommit=false});
+     *                {@code false} for session-scoped {@code SET}/{@code RESET}
+     */
+    public static void setTenant(Connection conn, String gucName, String tenant, boolean isLocal) {
+        if (!TENANT_GUC_ALLOWLIST.contains(gucName)) {
+            throw new IllegalArgumentException(
+                "gucName not permitted: " + gucName + " (allowed: " + TENANT_GUC_ALLOWLIST + ")");
+        }
+        DSL.using(conn, SQLDialect.POSTGRES)
+            .select(DSL.function("set_config", SQLDataType.VARCHAR,
+                DSL.val(gucName), DSL.val(tenant, SQLDataType.VARCHAR), DSL.val(isLocal)))
+            .fetch();
     }
 }

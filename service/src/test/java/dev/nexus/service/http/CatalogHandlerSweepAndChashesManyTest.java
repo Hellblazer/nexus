@@ -101,7 +101,7 @@ class CatalogHandlerSweepAndChashesManyTest {
             "embedding_model", "minilm-l6-v2-384", "model_version", "v1"));
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("SET nexus.tenant = '" + TENANT + "'");
+            PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, TENANT, false);
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             var ps = su.prepareStatement(
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ")"
