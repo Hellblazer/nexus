@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # The no-bare-green advisory for shell gates (nexus-1c7oq). Same line as
 # src/nexus/gate_advisory.py's passed_by_default(); a summary counts them.

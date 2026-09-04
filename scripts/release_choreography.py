@@ -53,7 +53,7 @@ from nexus.tables.resolve import resolve as _resolve_table
 #: The keys a row's ``emit`` table may carry. ``nexus.tables.load`` validates
 #: only that ``emit`` is a table; a misspelt key (``strem = "stderr"``) would
 #: otherwise be ignored silently and the exit-code default would apply.
-EMIT_KEYS = frozenset({"exit_code", "message_key", "stream", "advisory"})
+EMIT_KEYS = frozenset({"exit_code", "message_key", "stream", "advisory", "advisory_reason"})
 
 #: The one value ``emit.advisory`` may carry: the row is an exit-0 pass
 #: that rests on a default or a fallback, and the emit appends the
@@ -165,7 +165,10 @@ def emit_choreography(
             raise TableDefect(f"row {row.id!r}: emit.advisory must be {ADVISORY_PASSED_BY_DEFAULT!r}, got {advisory!r}")
         if exit_code != 0:
             raise TableDefect(f"row {row.id!r}: emit.advisory on a non-zero exit is a contradiction")
+        reason = outcome.get("advisory_reason")
+        if not reason:
+            raise TableDefect(f"row {row.id!r}: emit.advisory needs emit.advisory_reason naming the default the pass rests on")
         from nexus.gate_advisory import passed_by_default  # noqa: PLC0415 — keeps this module importable without the package on sys.path for the table-only callers
 
-        print(passed_by_default(function, f"{row.id}: an exit-0 pass on a declared default"), file=out)
+        print(passed_by_default(function, reason), file=out)
     return exit_code

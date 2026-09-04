@@ -245,7 +245,7 @@ emit = { exit_code = "1", message_key = "ledger_blocked" }
 id = "check_client_lag_ledger::ledger_additive_authorized"
 match = { function = "check_client_lag_ledger" }
 guard = { "check_client_lag_ledger.ledger" = "additive" }
-emit = { exit_code = "0", message_key = "ledger_additive_authorized", advisory = "passed-by-default" }
+emit = { exit_code = "0", message_key = "ledger_additive_authorized", advisory = "passed-by-default", advisory_reason = "every unshipped both-halves commit carries the [additive] token; the deploy is authorized on that token alone, with no paired client tag verified" }
 
 [[row]]
 id = "check_client_lag_ledger::ledger_acked"
@@ -280,7 +280,7 @@ emit = { exit_code = "1", message_key = "ledger_blocked" }
 id = "check_wire_contract_ledger::ledger_additive_authorized"
 match = { function = "check_wire_contract_ledger" }
 guard = { "check_wire_contract_ledger.ledger" = "additive" }
-emit = { exit_code = "0", message_key = "ledger_additive_authorized", advisory = "passed-by-default" }
+emit = { exit_code = "0", message_key = "ledger_additive_authorized", advisory = "passed-by-default", advisory_reason = "every unshipped both-halves commit carries the [additive] token; the deploy is authorized on that token alone, with no paired client tag verified" }
 
 [[row]]
 id = "check_wire_contract_ledger::ledger_acked"

@@ -5,7 +5,7 @@
   },
   "check_client_lag_ledger::ledger_additive_authorized": {
     "err": "",
-    "out": "client-lag ledger: 1 unacknowledged unshipped both-halves commit(s), all marked [additive] (old client + new engine safe) \u2014 deploy authorized ahead of the client tag (nexus-1emxn choreography (a)); pairing completes when the client release carrying nexus-fake2 bumps the floor.\nGATE PASSED-BY-DEFAULT: check_client_lag_ledger check_client_lag_ledger::ledger_additive_authorized: an exit-0 pass on a declared default\n"
+    "out": "client-lag ledger: 1 unacknowledged unshipped both-halves commit(s), all marked [additive] (old client + new engine safe) \u2014 deploy authorized ahead of the client tag (nexus-1emxn choreography (a)); pairing completes when the client release carrying nexus-fake2 bumps the floor.\nGATE PASSED-BY-DEFAULT: check_client_lag_ledger every unshipped both-halves commit carries the [additive] token; the deploy is authorized on that token alone, with no paired client tag verified\n"
   },
   "check_client_lag_ledger::ledger_blocked": {
     "err": "PAIRED DEPLOY BLOCKED: 1 both-halves commit(s) in <LEDGER_PATH> have an unshipped client half, no [additive] direction-safety token, and no acknowledgment:\n  deadbeef1  bead nexus-fake1  engine tag engine-service-v9.9.9  (blocking, no token)\n\nThis engine tag cannot deploy without an explicit paired-client acknowledgment (nexus-1vogq). Either pair this deploy with the client release carrying the listed commit(s), or pass --ack-client-lag <bead-id> for each entry above to deploy anyway.\n",
@@ -37,7 +37,7 @@
   },
   "check_composite::composite_table_satisfied_ledger_additive": {
     "err": "",
-    "out": "  deadbeef  in v0.0.1  (test...)\nOK: all client preconditions for engine-service-vTEST are in v0.0.1\nwire-contract ledger: 1 unacknowledged unshipped both-halves commit(s), all marked [additive] (old client + new engine safe) \u2014 unpaired deploy authorized ahead of the client tag (nexus-1emxn choreography (a)); pairing completes when the client release carrying nexus-fake2 bumps the floor.\nGATE PASSED-BY-DEFAULT: check_wire_contract_ledger check_wire_contract_ledger::ledger_additive_authorized: an exit-0 pass on a declared default\n"
+    "out": "  deadbeef  in v0.0.1  (test...)\nOK: all client preconditions for engine-service-vTEST are in v0.0.1\nwire-contract ledger: 1 unacknowledged unshipped both-halves commit(s), all marked [additive] (old client + new engine safe) \u2014 unpaired deploy authorized ahead of the client tag (nexus-1emxn choreography (a)); pairing completes when the client release carrying nexus-fake2 bumps the floor.\nGATE PASSED-BY-DEFAULT: check_wire_contract_ledger every unshipped both-halves commit carries the [additive] token; the deploy is authorized on that token alone, with no paired client tag verified\n"
   },
   "check_composite::composite_table_satisfied_ledger_blocks": {
     "err": "BLOCKED: 1 both-halves commit(s) in <LEDGER_PATH> have an unshipped client half, no [additive] direction-safety token, and no acknowledgment:\n  deadbeef1  bead nexus-fake1  engine tag engine-service-v9.9.9  (blocking, no token)\n\nRemedy: this engine deploy carries an engine-side wire change (docs/wire-contract-pending.md ## Unshipped) whose client half is not yet in a published release (nexus-1vogq class -- the 08-13 v0.1.73 manifest-400 outage shape). Either pair this deploy with the client release carrying the listed commit(s) (see AGENTS.md \u00a7 Engine-service release, paired-release choreography), or pass --ack-client-lag <bead-id> for each entry below to deploy anyway.\n",
@@ -53,7 +53,7 @@
   },
   "check_composite::composite_vacuous_table_ledger_additive": {
     "err": "",
-    "out": "wire-contract ledger: 1 unacknowledged unshipped both-halves commit(s), all marked [additive] (old client + new engine safe) \u2014 unpaired deploy authorized ahead of the client tag (nexus-1emxn choreography (a)); pairing completes when the client release carrying nexus-fake2 bumps the floor.\nGATE PASSED-BY-DEFAULT: check_wire_contract_ledger check_wire_contract_ledger::ledger_additive_authorized: an exit-0 pass on a declared default\n"
+    "out": "wire-contract ledger: 1 unacknowledged unshipped both-halves commit(s), all marked [additive] (old client + new engine safe) \u2014 unpaired deploy authorized ahead of the client tag (nexus-1emxn choreography (a)); pairing completes when the client release carrying nexus-fake2 bumps the floor.\nGATE PASSED-BY-DEFAULT: check_wire_contract_ledger every unshipped both-halves commit carries the [additive] token; the deploy is authorized on that token alone, with no paired client tag verified\n"
   },
   "check_composite::composite_vacuous_table_ledger_blocks": {
     "err": "BLOCKED: 1 both-halves commit(s) in <LEDGER_PATH> have an unshipped client half, no [additive] direction-safety token, and no acknowledgment:\n  deadbeef1  bead nexus-fake1  engine tag engine-service-v9.9.9  (blocking, no token)\n\nRemedy: this engine deploy carries an engine-side wire change (docs/wire-contract-pending.md ## Unshipped) whose client half is not yet in a published release (nexus-1vogq class -- the 08-13 v0.1.73 manifest-400 outage shape). Either pair this deploy with the client release carrying the listed commit(s) (see AGENTS.md \u00a7 Engine-service release, paired-release choreography), or pass --ack-client-lag <bead-id> for each entry below to deploy anyway.\n",
@@ -245,7 +245,7 @@
   },
   "check_wire_contract_ledger::ledger_additive_authorized": {
     "err": "",
-    "out": "wire-contract ledger: 1 unacknowledged unshipped both-halves commit(s), all marked [additive] (old client + new engine safe) \u2014 unpaired deploy authorized ahead of the client tag (nexus-1emxn choreography (a)); pairing completes when the client release carrying nexus-fake2 bumps the floor.\nGATE PASSED-BY-DEFAULT: check_wire_contract_ledger check_wire_contract_ledger::ledger_additive_authorized: an exit-0 pass on a declared default\n"
+    "out": "wire-contract ledger: 1 unacknowledged unshipped both-halves commit(s), all marked [additive] (old client + new engine safe) \u2014 unpaired deploy authorized ahead of the client tag (nexus-1emxn choreography (a)); pairing completes when the client release carrying nexus-fake2 bumps the floor.\nGATE PASSED-BY-DEFAULT: check_wire_contract_ledger every unshipped both-halves commit carries the [additive] token; the deploy is authorized on that token alone, with no paired client tag verified\n"
   },
   "check_wire_contract_ledger::ledger_blocked": {
     "err": "BLOCKED: 1 both-halves commit(s) in <LEDGER_PATH> have an unshipped client half, no [additive] direction-safety token, and no acknowledgment:\n  deadbeef1  bead nexus-fake1  engine tag engine-service-v9.9.9  (blocking, no token)\n\nRemedy: this engine deploy carries an engine-side wire change (docs/wire-contract-pending.md ## Unshipped) whose client half is not yet in a published release (nexus-1vogq class -- the 08-13 v0.1.73 manifest-400 outage shape). Either pair this deploy with the client release carrying the listed commit(s) (see AGENTS.md \u00a7 Engine-service release, paired-release choreography), or pass --ack-client-lag <bead-id> for each entry below to deploy anyway.\n",
@@ -281,7 +281,7 @@
   },
   "main_dispatch::main_ledger_only_additive": {
     "err": "",
-    "out": "client-lag ledger: 1 unacknowledged unshipped both-halves commit(s), all marked [additive] (old client + new engine safe) \u2014 deploy authorized ahead of the client tag (nexus-1emxn choreography (a)); pairing completes when the client release carrying nexus-fake2 bumps the floor.\nGATE PASSED-BY-DEFAULT: check_client_lag_ledger check_client_lag_ledger::ledger_additive_authorized: an exit-0 pass on a declared default\n"
+    "out": "client-lag ledger: 1 unacknowledged unshipped both-halves commit(s), all marked [additive] (old client + new engine safe) \u2014 deploy authorized ahead of the client tag (nexus-1emxn choreography (a)); pairing completes when the client release carrying nexus-fake2 bumps the floor.\nGATE PASSED-BY-DEFAULT: check_client_lag_ledger every unshipped both-halves commit carries the [additive] token; the deploy is authorized on that token alone, with no paired client tag verified\n"
   },
   "main_dispatch::main_ledger_only_blocked": {
     "err": "PAIRED DEPLOY BLOCKED: 1 both-halves commit(s) in <LEDGER_PATH> have an unshipped client half, no [additive] direction-safety token, and no acknowledgment:\n  deadbeef1  bead nexus-fake1  engine tag engine-service-v9.9.9  (blocking, no token)\n\nThis engine tag cannot deploy without an explicit paired-client acknowledgment (nexus-1vogq). Either pair this deploy with the client release carrying the listed commit(s), or pass --ack-client-lag <bead-id> for each entry above to deploy anyway.\n",
