@@ -94,7 +94,6 @@ class PgVectorRepositoryGcQuarantineTest {
             // carry (catalog_links_id_seq, gc_audit_id_seq) are now redundant with
             // bootstrapServiceRole's broader "USAGE, SELECT ON ALL SEQUENCES" and
             // are dropped.
-            su.setAutoCommit(true);
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.gc_quarantine_orphans(int, text, text, text, text, int) TO " + SVC_ROLE);
             su.createStatement().execute(

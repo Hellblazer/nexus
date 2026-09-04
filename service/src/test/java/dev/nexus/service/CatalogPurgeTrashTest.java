@@ -127,7 +127,6 @@ class CatalogPurgeTrashTest {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             // purge_trash(interval) EXECUTE is not part of bootstrapServiceRole's
             // fixed grant set (nexus-cbo4a batch 1a) -- kept as an explicit grant.
-            su.setAutoCommit(true);
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.purge_trash(interval) TO " + SVC_ROLE);
         }

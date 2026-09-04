@@ -58,10 +58,6 @@ class CatalogHandlerRenameTest {
         }
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
-            // bootstrapServiceRole's Liquibase run leaves su's autoCommit disabled
-            // (Liquibase manages its own changeset-boundary commits); re-enable it
-            // so this INSERT via seedServiceToken actually commits before su closes.
-            su.setAutoCommit(true);
             PgContainerHelper.seedServiceToken(
                 DSL.using(su, SQLDialect.POSTGRES), TOKEN, TENANT, "test-bound");
             // Seed two registry rows to rename (one per route-shape test).

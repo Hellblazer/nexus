@@ -157,7 +157,6 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
             // The two gc_* function EXECUTE grants are not part of
             // bootstrapServiceRole's fixed grant set (nexus-cbo4a batch 1a) --
             // kept as explicit grants.
-            su.setAutoCommit(true);
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.gc_quarantine_orphans(int, text, text, text, text, int) TO " + SVC_ROLE);
             su.createStatement().execute(

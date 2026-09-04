@@ -266,6 +266,17 @@ public final class PgContainerHelper {
      * hand before this call (see {@link SharedCluster}'s template-bootstrap comment
      * for the same finding, made independently for the shared-cluster path).
      *
+     * <p><b>Leaves {@code su} with {@code autoCommit(true)} restored</b> (review
+     * finding, nexus-cbo4a batch 1a follow-up): Liquibase manages its own
+     * changeset-boundary commits and disables the connection's autoCommit while
+     * {@code update()} runs, but does NOT restore it afterward. A caller that
+     * issues a further raw statement on this SAME connection after this method
+     * returns (e.g. a hand-kept {@code GRANT}) would otherwise run it inside an
+     * open transaction that is silently rolled back when {@code su} closes —
+     * exactly the bug {@link #bootstrapServiceRole}'s own note below documents.
+     * Restoring it here, once, means every caller gets the fix for free instead
+     * of re-adding {@code su.setAutoCommit(true)} at each call site.
+     *
      * @param su superuser connection to run the migration under
      */
     public static void applyProductSchema(Connection su) throws Exception {
@@ -273,6 +284,7 @@ public final class PgContainerHelper {
         Liquibase liquibase = new Liquibase(
             "db/changelog/db.changelog-master.xml", new ClassLoaderResourceAccessor(), db);
         liquibase.update(new Contexts());
+        su.setAutoCommit(true);
     }
 
     /**
@@ -291,6 +303,21 @@ public final class PgContainerHelper {
      * TABLES}/{@code ON ALL SEQUENCES} statements inside the test changelog require
      * the {@code nexus}/{@code staging} schemas and their tables to already exist.
      *
+     * <p><b>Leaves {@code su} with {@code autoCommit(true)} restored</b> (real bug
+     * found converting the six classes that also call {@link #seedServiceToken}, then
+     * generalized here, nexus-cbo4a batch 1a follow-up): Liquibase's {@code update()}
+     * manages its own changeset-boundary commits by disabling the connection's
+     * autoCommit, and does NOT turn it back on when it returns. Every caller that then
+     * runs a further raw statement on the SAME {@code su} — a {@code seedServiceToken}
+     * insert, or a hand-kept {@code GRANT EXECUTE ON FUNCTION} the fixed grant set here
+     * does not cover — was silently executing it inside an open transaction that got
+     * rolled back the moment the try-with-resources closed {@code su}, with no
+     * exception raised anywhere. The first version of this batch left the fix as a
+     * copy-pasted {@code su.setAutoCommit(true)} at 11 call sites; restoring it here
+     * once, at the one place every caller already goes through, means the fix cannot
+     * be forgotten by a future caller and cannot rot into 11 independently-maintained
+     * copies.
+     *
      * @param su      superuser connection (the role owner / grantor)
      * @param svcRole the test-local service role name to create and grant
      * @param svcPass the password for {@code svcRole}
@@ -306,6 +333,7 @@ public final class PgContainerHelper {
             liquibase.setChangeLogParameter(entry.getKey(), entry.getValue());
         }
         liquibase.update(new Contexts());
+        su.setAutoCommit(true);
     }
 
     /**
