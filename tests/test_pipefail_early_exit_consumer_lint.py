@@ -867,7 +867,7 @@ _PIPEFAIL_EARLY_EXIT_EXEMPT: frozenset[str] = frozenset(
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:221",
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:229",
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:233",
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:278",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:295",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:142",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:193",
         "tests/e2e/migration-rehearsal/rehearse_shakeout_e2e.sh:238",
@@ -1183,7 +1183,7 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         #   this guarded site itself gates nothing.
         #   Retargeted AGAIN (nexus-l8xnz): +12 for the Phase F header
         #   addition described above -- :264 -> :276, :128 -> :140.
-        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:276",
+        "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:293",
         "tests/e2e/migration-rehearsal/rehearse_shakeout.sh:140",
         # tests/e2e/release-sandbox.sh (3 entries): the already-commented
         # `|| true: head is an early-exit consumer...` idiom this file's
@@ -1204,9 +1204,9 @@ _PIPEFAIL_OR_TRUE_SITES: frozenset[str] = frozenset(
         #   can be appended only for --check-schema, +11 lines before this
         #   region): :1130 -> :1141, :1134 -> :1145, :1182 -> :1193. Same 3
         #   sites, same rationale -- only an earlier, unrelated loop grew.
-        "tests/e2e/release-sandbox.sh:1141",
-        "tests/e2e/release-sandbox.sh:1145",
-        "tests/e2e/release-sandbox.sh:1193",
+        "tests/e2e/release-sandbox.sh:1173",
+        "tests/e2e/release-sandbox.sh:1177",
+        "tests/e2e/release-sandbox.sh:1225",
     }
 )
 _PIPEFAIL_OR_TRUE_SITES_CEILING = 9

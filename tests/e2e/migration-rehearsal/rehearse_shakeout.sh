@@ -236,14 +236,31 @@ printf '%s\n' "$DOCTOR_OUT" | grep -q "Traceback" && bad "doctor raised a traceb
 say "Phase C — index a synthetic repo; staleness must make re-index incremental"
 REPO=/tmp/shakeout-repo
 rm -rf "$REPO"; mkdir -p "$REPO/src" "$REPO/docs"
-for i in $(seq 1 20); do
+for i in $(seq 1 60); do
   printf 'def fn_%d(x):\n    """Shakeout function %d."""\n    return x * %d\n' "$i" "$i" "$i" > "$REPO/src/mod_$i.py"
   printf '# Doc %d\n\nShakeout markdown document number %d about the flux capacitor array.\n' "$i" "$i" > "$REPO/docs/doc_$i.md"
 done
 ( cd "$REPO" && git init -q && git add -A && git -c user.email=s@x -c user.name=s commit -qm seed )
 
 IDX1=/tmp/shakeout-index-1.log
+# nexus-98zsp: run 1 is timed and held to the persisted per-corpus
+# throughput baseline (lib/index_throughput.sh). engine-service-v0.1.99's
+# 8x embed slowdown passed this phase because nothing here read a clock.
+# shellcheck source=./lib/index_throughput.sh disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/index_throughput.sh"
+THROUGHPUT_BASELINES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/index-throughput-baselines.tsv"
+IDX1_T0=$SECONDS
 if nx index repo "$REPO" > "$IDX1" 2>&1; then ok "index run 1 (exit 0)"; else bad "index run 1 failed"; fi
+IDX1_ELAPSED=$((SECONDS - IDX1_T0))
+throughput_engine_shape "$HOME/.config/nexus/logs/storage_service.log"
+_tp_rc=0
+throughput_gate "shakeout-synthetic-repo" "$IDX1" "$IDX1_ELAPSED" "$THROUGHPUT_BASELINES" || _tp_rc=$?
+case "$_tp_rc" in
+  0) ok "index run 1 throughput within ceiling" ;;
+  1) bad "index run 1 throughput above ceiling (nexus-98zsp)" ;;
+  2) note "WARN index run 1 throughput baseline RECORDED in-container — copy the row into tests/e2e/migration-rehearsal/lib/index-throughput-baselines.tsv" ;;
+  *) note "WARN index run 1 too small to measure throughput" ;;
+esac
 # nexus-xm0cp: the chash dual-write hook this used to guard (`grep -q
 # "dual_write_failed"`) was retired at RDR-187 / nexus-piwya.4 -- the
 # chunks tables are the chash store now, nothing left to dual-write, and
@@ -260,7 +277,7 @@ IDX2=/tmp/shakeout-index-2.log
 if nx index repo "$REPO" > "$IDX2" 2>&1; then ok "index run 2 (exit 0)"; else bad "index run 2 failed"; fi
 grep -q "docs_for_chashes_failed" "$IDX2" && bad "staleness-cache failure in run 2" || ok "staleness cache ok in run 2"
 # Incremental assertion: run 2 must process far fewer files than run 1.
-# Skipped files still emit "[n/40] ... skipped" lines — incremental means
+# Skipped files still emit "[n/120] ... skipped" lines — incremental means
 # few NON-skipped (actually re-processed) files, not fewer lines (maiden-run
 # lesson: run 4 proved the skip works while the line-count assertion lied).
 files1=$(grep -E '^\s+\[[0-9]+/[0-9]+\]' "$IDX1" | grep -cv "skipped" || true)
