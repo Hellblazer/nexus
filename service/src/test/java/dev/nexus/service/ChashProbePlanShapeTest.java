@@ -19,6 +19,7 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.Statement;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -150,7 +151,7 @@ class ChashProbePlanShapeTest {
                 "SELECT '" + TENANT + "', 'plan-384', " +
                 "       decode('" + liveChash(768, 42) + "', 'hex'), 'cross-model copy', " +
                 "       ('[1' || repeat(',0', 383) || ']')::vector");
-            st.execute("ANALYZE nexus.chunks");
+            PgContainerHelper.analyzeTable(su, CHUNKS);
         }
     }
 

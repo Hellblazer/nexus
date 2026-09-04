@@ -25,6 +25,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -1170,8 +1171,13 @@ class CatalogManifestSweepRepositoryTest {
                 + "SELECT '" + TENANT_A + "', 'explain-plan.' || i, 0, "
                 + "encode(sha256(('explain-seed-' || i)::bytea), 'hex') "
                 + "FROM generate_series(1, " + stagingRows + ") AS i");
+            // staging.document_chunks: SANCTIONED RAW (nexus-cbo4a batch 3) -- the
+            // staging schema is outside jOOQ codegen scope (service/pom.xml's
+            // jOOQ codegen config lists only the nexus/t1 schemas), so no
+            // generated Table exists to build PgContainerHelper.analyzeTable's
+            // typed-name argument from.
             su.createStatement().execute("ANALYZE staging.document_chunks");
-            su.createStatement().execute("ANALYZE nexus.chunks");
+            PgContainerHelper.analyzeTable(su, CHUNKS);
         }
 
         try {

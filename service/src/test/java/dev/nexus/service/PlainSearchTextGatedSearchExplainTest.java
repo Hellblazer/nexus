@@ -7,7 +7,6 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
-import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.DSLContext;
 import org.jooq.Query;
@@ -25,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_1024;
@@ -151,7 +151,7 @@ class PlainSearchTextGatedSearchExplainTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("ANALYZE " + DimTables.CHUNKS_TABLE_NAME);
+            PgContainerHelper.analyzeTable(su, CHUNKS);
         }
     }
 

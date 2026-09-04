@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
+import org.jooq.Table;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.util.ArrayList;
@@ -17,6 +18,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.testcontainers.containers.PostgreSQLContainer;
+
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 
 /**
  * RDR-156 P4 follow-on, bead nexus-houg9 — contract suite for the graph-hop combined
@@ -159,9 +165,9 @@ class GraphHopParityTest {
             // ----- large star fixture for the EXPLAIN group (GROUP 10) -----
             seedExplainFixture(su);
 
-            for (String tbl : List.of("chunks", "catalog_documents",
-                    "catalog_document_chunks", "catalog_links")) {
-                su.createStatement().execute("ANALYZE nexus." + tbl);
+            for (Table<?> tbl : List.of(CHUNKS, CATALOG_DOCUMENTS,
+                    CATALOG_DOCUMENT_CHUNKS, CATALOG_LINKS)) {
+                PgContainerHelper.analyzeTable(su, tbl);
             }
         }
     }

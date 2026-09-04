@@ -14,6 +14,7 @@ import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
+import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -21,6 +22,7 @@ import org.testcontainers.utility.DockerImageName;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -363,5 +365,34 @@ public final class PgContainerHelper {
             .select(DSL.function("set_config", SQLDataType.VARCHAR,
                 DSL.val(gucName), DSL.val(tenant, SQLDataType.VARCHAR), DSL.val(isLocal)))
             .fetch();
+    }
+
+    /**
+     * {@code ANALYZE table} on an existing, test-owned {@link Connection} (nexus-cbo4a
+     * batch 3) -- the test-tree counterpart to {@link TenantScope#vacuumAnalyze}.
+     *
+     * <p>SANCTIONED RAW: ANALYZE is PostgreSQL maintenance syntax, not DML -- jOOQ has
+     * no typed DSL form for it at all (same category {@link TenantScope#vacuumAnalyze}'s
+     * own SANCTIONED RAW comment documents for VACUUM; {@code RawSqlGateTest}'s
+     * {@code SANCTIONED_STATEMENTS} registry, src/main-only today). Table identity comes
+     * from a generated jOOQ {@link Table}, rendered through {@code ctx.render(table)}
+     * (properly quoted/qualified for the dialect) -- never a hand-typed schema-qualified
+     * string literal, so unlike {@code vacuumAnalyze}'s allowlist (needed there because
+     * VACUUM's callers pass a bare string) there is no caller-controlled name to
+     * validate: only a compile-time-checked generated {@code Table} reaches this method.
+     * Replaces the {@code su.createStatement().execute("ANALYZE " + <table literal>)} /
+     * {@code st.execute("ANALYZE " + <table literal>)} call sites the affected test
+     * classes used to build by hand.
+     *
+     * @param conn  the connection to run ANALYZE on; unlike {@code vacuumAnalyze}, ANALYZE
+     *              has no autocommit/transaction-block restriction, so this method neither
+     *              inspects nor changes the connection's autocommit state
+     * @param table the generated jOOQ table to analyze (e.g. {@code Tables.CHUNKS})
+     */
+    public static void analyzeTable(Connection conn, Table<?> table) throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute("ANALYZE " + ctx.render(table));
+        }
     }
 }

@@ -16,6 +16,7 @@ import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -154,7 +155,7 @@ class DenseGateScanBudgetIntegrationTest {
             su.createStatement().execute(
                 "CREATE INDEX idx_chunks_embedding_384 ON " + DimTables.CHUNKS_TABLE_NAME + " "
                 + "USING hnsw (" + DimTables.embeddingColumn(384) + " vector_cosine_ops)");
-            su.createStatement().execute("ANALYZE " + DimTables.CHUNKS_TABLE_NAME);
+            PgContainerHelper.analyzeTable(su, CHUNKS);
         }
     }
 

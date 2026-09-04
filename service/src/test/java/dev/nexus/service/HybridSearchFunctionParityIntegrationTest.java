@@ -7,6 +7,7 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.OnnxEmbedder;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -16,8 +17,12 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.Result;
+import org.jooq.SQLDialect;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
@@ -35,6 +40,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.HYBRID_SEARCH_384;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -425,19 +431,20 @@ class HybridSearchFunctionParityIntegrationTest {
     }
 
     /** EXPLAIN with seqscan disabled so index access paths are chosen at fixture scale
-     *  (mirrors {@code HybridSelectiveGateTest#explain}). */
-    private String explain(String inner) throws Exception {
+     *  (mirrors {@code HybridSelectiveGateTest#explain}). Takes a typed jOOQ table-
+     *  function call (nexus-cbo4a batch 3) rather than a raw SQL string -- the query
+     *  under EXPLAIN is a single generated table-function call, so it has a typed
+     *  DSL form (unlike a hand-transcribed mirror of private production SQL text). */
+    private String explain(Table<?> fn) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             su.createStatement().execute("SET LOCAL enable_seqscan = off");
             PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
             su.createStatement().execute("SELECT set_config('pg_trgm.word_similarity_threshold', '0.6', true)");
-            StringBuilder sb = new StringBuilder();
-            try (ResultSet rs = su.createStatement().executeQuery("EXPLAIN " + inner)) {
-                while (rs.next()) sb.append(rs.getString(1)).append('\n');
-            }
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            String plan = ctx.explain(ctx.selectFrom(fn)).plan();
             su.rollback();
-            return sb.toString();
+            return plan;
         }
     }
 
@@ -555,9 +562,9 @@ class HybridSearchFunctionParityIntegrationTest {
         // contract is unchanged.
         String q = queries.get(0);
         float[] vec = embedQuery(COL_MAIN, q);
-        String sql = "SELECT * FROM nexus.hybrid_search_" + DIM + "('" + vectorLiteral(vec)
-            + "'::vector, '" + q + "', ARRAY['" + COL_MAIN + "']::text[], NULL::jsonb, " + K + ")";
-        String plan = explain(sql);
+        Table<?> fn = HYBRID_SEARCH_384.call(
+            Vector.of(vec), q, new String[] {COL_MAIN}, null, K);
+        String plan = explain(fn);
         assertThat(plan)
             .as("hybrid_search_%d must be plannable/INLINABLE (LANGUAGE sql, STABLE, "
                 + "SECURITY INVOKER, not STRICT -- catalog-006 discipline) so the calling "

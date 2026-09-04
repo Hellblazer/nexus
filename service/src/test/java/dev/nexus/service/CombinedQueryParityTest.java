@@ -3,7 +3,12 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.DimTables;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
@@ -12,6 +17,21 @@ import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_1024;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_384;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_768;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_1024;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_384;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_768;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_1024;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_384;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_768;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -262,10 +282,10 @@ class CombinedQueryParityTest {
             // Real row-count statistics so the planner does not under-estimate the
             // bulk-loaded tables to rows=1 and wrongly prefer a filter-first sort over
             // the HNSW index in GROUP 3.
-            for (String tbl : List.of("chunks", "catalog_documents",
-                    "catalog_document_chunks", "topic_assignments", "topics",
-                    "document_aspects")) {
-                su.createStatement().execute("ANALYZE nexus." + tbl);
+            for (Table<?> tbl : List.of(CHUNKS, CATALOG_DOCUMENTS,
+                    CATALOG_DOCUMENT_CHUNKS, TOPIC_ASSIGNMENTS, TOPICS,
+                    DOCUMENT_ASPECTS)) {
+                PgContainerHelper.analyzeTable(su, tbl);
             }
         }
     }
@@ -1126,11 +1146,18 @@ class CombinedQueryParityTest {
     /** EXPLAIN (no ANALYZE) the metadata function with seqscan disabled. */
     private String explainMetaPlan(int dim, String collection, String contentType)
             throws Exception {
-        String inner =
-            "SELECT id FROM nexus.search_metadata_scoped_" + dim + "(" +
-            queryVecLiteral(dim) + ", ARRAY['" + collection + "']::text[], " +
-            sqlText(contentType) + ", NULL, NULL::int, NULL, NULL::text, NULL::jsonb, 10)";
-        return explain(inner);
+        Vector vec = queryVec(dim);
+        String[] colls = {collection};
+        Table<?> fn = switch (dim) {
+            case 384  -> SEARCH_METADATA_SCOPED_384.call(
+                vec, colls, contentType, null, null, null, null, null, 10);
+            case 768  -> SEARCH_METADATA_SCOPED_768.call(
+                vec, colls, contentType, null, null, null, null, null, 10);
+            case 1024 -> SEARCH_METADATA_SCOPED_1024.call(
+                vec, colls, contentType, null, null, null, null, null, 10);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        return explain(fn);
     }
 
     /** Invoke search_aspect_scoped_&lt;dim&gt;; returns ids in returned order. */
@@ -1152,24 +1179,50 @@ class CombinedQueryParityTest {
     /** EXPLAIN (no ANALYZE) the aspect-scoped function with seqscan disabled. */
     private String explainAspectPlan(int dim, String collection, String field, String pattern)
             throws Exception {
-        String inner =
-            "SELECT id FROM nexus.search_aspect_scoped_" + dim + "(" +
-            queryVecLiteral(dim) + ", ARRAY['" + collection + "']::text[], " +
-            sqlText(field) + ", " + sqlText(pattern) + ", NULL::float8, NULL::jsonb, 10)";
-        return explain(inner);
+        Vector vec = queryVec(dim);
+        String[] colls = {collection};
+        Table<?> fn = switch (dim) {
+            case 384  -> SEARCH_ASPECT_SCOPED_384.call(
+                vec, colls, field, pattern, null, null, 10);
+            case 768  -> SEARCH_ASPECT_SCOPED_768.call(
+                vec, colls, field, pattern, null, null, 10);
+            case 1024 -> SEARCH_ASPECT_SCOPED_1024.call(
+                vec, colls, field, pattern, null, null, 10);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        return explain(fn);
     }
 
     /** EXPLAIN (no ANALYZE) the topic function with seqscan disabled. */
     private String explainTopicPlan(int dim, String collection, String topicLabel)
             throws Exception {
-        String inner =
-            "SELECT id FROM nexus.search_topic_scoped_" + dim + "(" +
-            queryVecLiteral(dim) + ", " + sqlText(topicLabel) + ", " +
-            sqlText(collection) + ", 10)";
-        return explain(inner);
+        Vector vec = queryVec(dim);
+        Table<?> fn = switch (dim) {
+            case 384  -> SEARCH_TOPIC_SCOPED_384.call(vec, topicLabel, collection, 10);
+            case 768  -> SEARCH_TOPIC_SCOPED_768.call(vec, topicLabel, collection, 10);
+            case 1024 -> SEARCH_TOPIC_SCOPED_1024.call(vec, topicLabel, collection, 10);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        return explain(fn);
     }
 
-    private String explain(String inner) throws Exception {
+    /** A length-{@code dim} typed pgvector value with the SAME first-two-components
+     *  (x=1.0, y=0.0, rest zero) shape as {@link #queryVecLiteral} -- for EXPLAIN
+     *  call sites converted onto typed jOOQ {@code Table<?>.call(...)} (nexus-cbo4a
+     *  batch 3), which need an actual {@link Vector}, not a literal-text pgvector
+     *  cast. */
+    private static Vector queryVec(int dim) {
+        float[] v = new float[dim];
+        v[0] = 1.0f;
+        return Vector.of(v);
+    }
+
+    /** EXPLAIN a typed jOOQ table-function call (nexus-cbo4a batch 3: no jOOQ typed
+     *  DSL form for maintenance-adjacent statements EXPLAINed to plain text existed
+     *  in this test before, but the QUERY itself, being a single generated
+     *  table-function call, does -- see {@code PlainSearchTextGatedSearchExplainTest}'s
+     *  identical {@code ctx.explain(...)} pattern). */
+    private String explain(Table<?> fn) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             // Penalize every NON-index way to satisfy ORDER BY embedding <=> <const>
@@ -1186,10 +1239,8 @@ class CombinedQueryParityTest {
                     "enable_sort", "enable_hashjoin")) {
                 su.createStatement().execute("SET " + guc + " = off");
             }
-            ResultSet rs = su.createStatement().executeQuery("EXPLAIN " + inner);
-            StringBuilder sb = new StringBuilder();
-            while (rs.next()) sb.append(rs.getString(1)).append('\n');
-            return sb.toString();
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            return ctx.explain(ctx.select(fn.field("id")).from(fn)).plan();
         }
     }
 

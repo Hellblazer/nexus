@@ -16,6 +16,10 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.sql.Connection;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -274,7 +278,7 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 if (dim == 1024) {
                     nearestChash1024 = nearestChash;
                 }
-                st.execute("ANALYZE nexus.chunks");
+                PgContainerHelper.analyzeTable(su, CHUNKS);
             }
 
             // nexus-gjwhu (Deliverable 2): fixtures for the SQL-function-family
@@ -319,9 +323,9 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                 + "FROM nexus.chunks WHERE tenant_id = '" + TENANT + "' AND collection = '" + COL_384 + "' "
                 + "AND get_byte(chash, 0) < 26");
 
-            st.execute("ANALYZE nexus.catalog_document_chunks");
-            st.execute("ANALYZE nexus.catalog_documents");
-            st.execute("ANALYZE nexus.topic_assignments");
+            PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
+            PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
+            PgContainerHelper.analyzeTable(su, TOPIC_ASSIGNMENTS);
         }
     }
 

@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -139,7 +140,7 @@ class HybridSelectiveGateTest {
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("ANALYZE " + DimTables.CHUNKS_TABLE_NAME);
+            PgContainerHelper.analyzeTable(su, CHUNKS);
         }
     }
 
