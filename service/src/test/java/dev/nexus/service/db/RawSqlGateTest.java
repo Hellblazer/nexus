@@ -239,6 +239,98 @@ class RawSqlGateTest {
         Pattern.DOTALL);
 
 
+    /*
+     * DRAFT step-4 exemption list (nexus-zrcj7, 2026-09-03) — NOT ENFORCED.
+     * A sibling doc comment, not a table this class reads: nothing here changes
+     * {@link #scan}'s behavior. It exists to separate the truly-unavoidable raw-SQL
+     * class from the convertible-but-not-yet-converted one BEFORE the gate is
+     * tightened to reject the latter — that tightening is deliberately left to a
+     * follow-up commit assigned after step 1 (PgVectorRepository's search-path
+     * retirement) lands, per the design record (T2
+     * {@code nexus/decision-zrcj7-no-sql-strings-design-2026-09-03}).
+     *
+     * <p><b>Genuinely unavoidable (stays exempt; each already has its own
+     * SANCTIONED_STATEMENTS entry above/below with the same reasoning
+     * inline):</b>
+     * <ul>
+     *   <li>{@code SchemaMigrator.migrate}/{@code countChangelogRows}/{@code
+     *       serverNow} — Liquibase bootstraps on a BARE JDBC {@code Connection}
+     *       before any {@code DSLContext} exists (Liquibase owns that
+     *       connection, not this codebase), plus reads of Liquibase's own
+     *       {@code databasechangelog} bookkeeping table, which sits outside
+     *       jOOQ codegen's modeled schemata.</li>
+     *   <li>{@code SchemaMigrator.preflightChashConstraints} — {@code ALTER
+     *       TABLE ... {NO} FORCE ROW LEVEL SECURITY} is DDL with no jOOQ
+     *       typed-DSL form at all.</li>
+     *   <li>{@code CatalogRepository.deferManifestChunkFk} — {@code SET
+     *       CONSTRAINTS ... DEFERRED} is PostgreSQL transaction-control
+     *       syntax; re-verified via Context7 against the jOOQ 3.21 manual
+     *       (nexus-zrcj7) — no matching DSL method (the closest hits,
+     *       {@code alterConstraint().enforced()/.notEnforced()}, are a
+     *       PERMANENT schema-level toggle, not this transaction-scoped
+     *       checking-mode statement).</li>
+     *   <li>{@code TenantScope.vacuumAnalyze} — {@code VACUUM} is PostgreSQL
+     *       maintenance syntax with no jOOQ typed-DSL form.</li>
+     *   <li>{@code PoolerModeCheck.fetchShowConfig} — {@code SHOW CONFIG} is a
+     *       PgBouncer admin-console meta-command, not SQL against any
+     *       nexus-owned table/schema.</li>
+     *   <li>{@code ChashRepository.lookup} — executes the PUBLISHED {@code
+     *       PROBE_SQL} constant BY NAME; a DSL rendering would decouple the
+     *       EXECUTED statement from the one {@code ChashProbePlanShapeTest}
+     *       EXPLAINs verbatim to pin index usage at 255k-row scale (see this
+     *       class's own top-level javadoc, "Three methods carry a
+     *       registration with a genuinely EMPTY statement multiset").</li>
+     * </ul>
+     *
+     * <p><b>Convertible, NOT true exemptions — deferred, not yet tightened
+     * against:</b>
+     * <ul>
+     *   <li>{@code TaxonomyRepository.advanceTopicsIdSequence} — {@code
+     *       setval(pg_get_serial_sequence(...), GREATEST(...))} is three
+     *       ordinary PostgreSQL functions, each a plain {@code
+     *       DSL.function(name, type, boundArgs...)} call away from typed DSL
+     *       (the same bound-value idiom {@code acquireSweepGateShared}/
+     *       {@code acquireIndexRunLock} already use); small, one call site,
+     *       fidelity-import path only.</li>
+     *   <li>{@code TaxonomyCentroidRepository.annQuery} — the pgvector
+     *       {@code <=>} distance operator over a DYNAMIC-dim embedding column
+     *       (384/768/1024) and centroid table name, built via string
+     *       concatenation. Since RDR-191 unified {@code
+     *       nexus.taxonomy_centroids} into one table with per-dim nullable
+     *       embedding columns, this is very likely expressible as a
+     *       {@code DimTables}-style per-dim {@code switch} selecting the
+     *       already-generated {@code TableField}/{@code Field} constant, then
+     *       the pgvector binding's own operator support (see {@code
+     *       PgVectorRepository}'s {@code Vector}/{@code VectorBinding}
+     *       precedent for {@code <=>}) — not confirmed against the live
+     *       generated DSL surface in this session (PgVectorRepository, where
+     *       that precedent lives, is out of scope here — a parallel worktree
+     *       is retiring its search paths this same cycle); largest of the
+     *       three, warrants its own review pass rather than a guess.</li>
+     * </ul>
+     *
+     * <p><b>Not found in the current tree (bead CENSUS listed these as
+     * candidates; both turned out to be inaccurate on inspection,
+     * nexus-zrcj7):</b>
+     * <ul>
+     *   <li>{@code BackendReaper} — carried NO {@link #SANCTIONED_STATEMENTS}
+     *       entry at all before this session: its raw SQL lived in a bare
+     *       {@code Connection.prepareStatement(String)} call, a shape {@link
+     *       #RAW_EXECUTE} never matched in the first place (not "excused" —
+     *       no anchor; the same structural gap this class's own "KNOWN
+     *       RESIDUAL" section documents for other call shapes). Now moot:
+     *       {@code BackendReaper.terminateOwnBackends} is retired onto
+     *       {@code nexus.terminate_own_backends} (backend-reaper-001), a
+     *       generated table function, so there is neither a stale entry to
+     *       remove nor a residual scan gap to worry about for this file.</li>
+     *   <li>{@code Main.java} — no raw SQL, no JDBC statement construction,
+     *       and no {@link #SANCTIONED_STATEMENTS} entry exist for it today;
+     *       the only hits are a javadoc mention of a {@code jdbc:} URL scheme
+     *       and a comment about grants. Nothing to exempt or convert.</li>
+     * </ul>
+     */
+    // ── end DRAFT step-4 exemption list ──
+
     /**
      * Statement-granular escape hatch (nexus-mzuj9 origin, nexus-4okz4
      * increment 5 tightening): {@code file.java -> {method name ->
