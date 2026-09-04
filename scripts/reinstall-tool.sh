@@ -211,7 +211,9 @@ _build_args=(--source "$SOURCE")
 CONSTRAINTS_FILE=""
 if [ -f "$SOURCE/uv.lock" ]; then
     CONSTRAINTS_FILE="$(mktemp "${TMPDIR:-/tmp}/nx-constraints.XXXXXX")"
-    if uv export --frozen --no-hashes --no-emit-project --no-dev --directory "$SOURCE" \
+    # --all-extras: a receipt-preserved extra (e.g. [local]) is installed in the
+    # same `uv pip install`, so its dependencies must be constrained too.
+    if uv export --frozen --no-hashes --no-emit-project --no-dev --all-extras --directory "$SOURCE" \
             > "$CONSTRAINTS_FILE" 2>/dev/null; then
         _build_args+=(--constraints "$CONSTRAINTS_FILE")
         echo "Constraining to uv.lock ($(grep -c '==' "$CONSTRAINTS_FILE") pins)"

@@ -455,7 +455,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1,<9" },
-    { name = "docling", specifier = ">=2.125.0,<2.126" },
+    { name = "docling", specifier = ">=2.125.0,<2.125.1" },
     { name = "fastapi", specifier = ">=0.115,<1.0" },
     { name = "fastembed", marker = "extra == 'local'", specifier = ">=0.7.0" },
     { name = "httpx", specifier = ">=0.27,<1.0" },

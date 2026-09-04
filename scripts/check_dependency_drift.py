@@ -102,6 +102,15 @@ class DriftFinding:
 #: is 2.76 -> 2.125, the same shape, decided separately).
 SHAPE_SENSITIVE: frozenset[str] = frozenset({"mineru", "docling"})
 
+#: Shape-sensitive versions already gated and REFUSED, keyed (name, version)
+#: -> the record. A fresh resolution landing on one of these is known
+#: pressure, not news: it is rendered but does not fail the run. Add a row
+#: when a bead refuses a version; remove it when the lock moves past it.
+SHAPE_SENSITIVE_ACKNOWLEDGED: dict[tuple[str, str], str] = {
+    ("mineru", "3.1.15"): "nexus-6ht8u: spurious inline math on prose, split word (2026-09-03)",
+    ("mineru", "3.4.5"): "nexus-gup3b: every ff ligature loses a letter (2026-09-03)",
+}
+
 
 @dataclass(frozen=True)
 class DriftReport:
@@ -118,8 +127,24 @@ class DriftReport:
         return tuple(f for f in self.updates if f.name in SHAPE_SENSITIVE)
 
     @property
+    def unacknowledged_shape_sensitive_updates(self) -> tuple[DriftFinding, ...]:
+        return tuple(
+            f for f in self.shape_sensitive_updates
+            if (f.name, f.new_version) not in SHAPE_SENSITIVE_ACKNOWLEDGED
+        )
+
+    @property
     def ok(self) -> bool:
-        return not self.major_bumps and not self.shape_sensitive_updates
+        return not self.major_bumps and not self.unacknowledged_shape_sensitive_updates
+
+    @property
+    def shape_ok(self) -> bool:
+        """The weekly workflow's verdict: only an UNACKNOWLEDGED shape-sensitive
+        change fails it. Leading-component drift in the transitive graph is
+        routine (20 packages on 2026-09-03) and would keep the scheduled run
+        permanently red, burying every other workflow's signal in the shared
+        scheduled-failure tracking issue."""
+        return not self.unacknowledged_shape_sensitive_updates
 
 
 def _leading_component(version: str) -> str:
@@ -204,7 +229,9 @@ def render_report(report: DriftReport) -> str:
         )
         lines.append("")
         for f in sorted(shape, key=lambda x: x.name):
-            lines.append(f"  {f.name}: {f.old_version} -> {f.new_version}")
+            ack = SHAPE_SENSITIVE_ACKNOWLEDGED.get((f.name, f.new_version))
+            suffix = f"   (acknowledged: {ack})" if ack else ""
+            lines.append(f"  {f.name}: {f.old_version} -> {f.new_version}{suffix}")
         lines.append("")
         lines.append(
             "A fresh install lands on the new version unless the pyproject cap "
@@ -223,21 +250,29 @@ def render_report(report: DriftReport) -> str:
     return "\n".join(lines)
 
 
-def check(*, cwd: str | None = None) -> tuple[int, str, DriftReport | None]:
+def check(*, cwd: str | None = None, fail_on: str = "any") -> tuple[int, str, DriftReport | None]:
+    """*fail_on*: ``"any"`` (default; rc=1 on a leading-component bump or an
+    unacknowledged shape-sensitive change) or ``"shape"`` (rc=1 only on the
+    latter; what the weekly workflow runs)."""
     output = run_uv_dry_run_upgrade(cwd=cwd)
     if output is UV_UNAVAILABLE:
         return 2, "dependency drift watch could not run `uv lock --upgrade --dry-run`", None
     report = parse_dry_run_output(output)  # type: ignore[arg-type]
-    rc = 0 if report.ok else 1
+    verdict = report.shape_ok if fail_on == "shape" else report.ok
+    rc = 0 if verdict else 1
     return rc, render_report(report), report
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON instead of prose")
+    parser.add_argument(
+        "--fail-on", choices=("any", "shape"), default="any",
+        help="what exits 1: any drift class (default) or only an unacknowledged shape-sensitive change (the weekly workflow)",
+    )
     args = parser.parse_args(argv)
 
-    rc, body, report = check()
+    rc, body, report = check(fail_on=args.fail_on)
 
     if args.json:
         payload = {

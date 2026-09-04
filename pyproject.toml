@@ -83,7 +83,7 @@ dependencies = [
     # Same discipline as mineru: docling is the formula screen and the fallback
     # extractor for every PDF; its output shape is gated, so the cap sits at the
     # locked minor.
-    "docling>=2.125.0,<2.126",
+    "docling>=2.125.0,<2.125.1",
     "python-pptx>=1.0.0,<2",
     "opencv-python-headless>=4.0.0,<5",
     "httpx>=0.27,<1.0",

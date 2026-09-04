@@ -90,7 +90,8 @@ class TestShapeSensitiveDetection:
     """nexus-jd8fi drift: a minor bump of a fixture-locked package is a finding."""
 
     def test_mineru_minor_bump_is_flagged(self):
-        report = drift.parse_dry_run_output("Update mineru v3.1.11 -> v3.4.5\n")
+        # 3.3.0: a version nobody has gated, so not in SHAPE_SENSITIVE_ACKNOWLEDGED.
+        report = drift.parse_dry_run_output("Update mineru v3.1.11 -> v3.3.0\n")
         assert report.major_bumps == ()
         assert [f.name for f in report.shape_sensitive_updates] == ["mineru"]
         assert not report.ok
@@ -105,11 +106,30 @@ class TestShapeSensitiveDetection:
         assert report.ok
 
     def test_render_names_the_shape_sensitive_package_and_the_remedy(self):
-        report = drift.parse_dry_run_output("Update mineru v3.1.11 -> v3.4.5\n")
+        report = drift.parse_dry_run_output("Update mineru v3.1.11 -> v3.3.0\n")
         body = drift.render_report(report)
-        assert "mineru: 3.1.11 -> 3.4.5" in body
+        assert "mineru: 3.1.11 -> 3.3.0" in body
         assert "shape-sensitive" in body
         assert "_SHAPE_SENSITIVE" in body
+
+    def test_acknowledged_refusal_is_rendered_but_does_not_fail(self):
+        """A version a bead already refused is known pressure: the weekly run
+        must not stay red on it (code review [24211] finding 1)."""
+        report = drift.parse_dry_run_output("Update mineru v3.1.11 -> v3.1.15\n")
+        assert report.shape_sensitive_updates and not report.unacknowledged_shape_sensitive_updates
+        assert report.ok and report.shape_ok
+        body = drift.render_report(report)
+        assert "mineru: 3.1.11 -> 3.1.15" in body and "acknowledged: nexus-6ht8u" in body
+
+    def test_fail_on_shape_ignores_major_bumps_but_not_new_shape_changes(self, monkeypatch):
+        monkeypatch.setattr(drift, "run_uv_dry_run_upgrade", lambda **kw: "Update starlette v0.52.1 -> v1.6.0\n")
+        assert drift.check(fail_on="shape")[0] == 0
+        assert drift.check(fail_on="any")[0] == 1
+        monkeypatch.setattr(drift, "run_uv_dry_run_upgrade", lambda **kw: "Update docling v2.125.0 -> v2.125.1\n")
+        assert drift.check(fail_on="shape")[0] == 1
+
+    def test_acknowledged_rows_name_only_shape_sensitive_packages(self):
+        assert {n for n, _ in drift.SHAPE_SENSITIVE_ACKNOWLEDGED} <= drift.SHAPE_SENSITIVE
 
     def test_set_mirrors_the_lint_table(self):
         """The lint holds the cap; the watch reports the pressure. A package

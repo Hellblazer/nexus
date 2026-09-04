@@ -208,10 +208,13 @@ def test_shape_sensitive_dependency_confines_to_the_locked_minor(name: str) -> N
     locked = Version(_locked_version(name))
     spec = specs[name]
     assert locked in spec, f"{name}: uv.lock has {locked}, outside pyproject specifier {spec}"
-    next_minor = Version(f"{locked.major}.{locked.minor + 1}")
-    assert next_minor not in spec, (
-        f"{name}: pyproject specifier {spec} admits {next_minor} while uv.lock and every "
+    # The next PATCH, not only the next minor: mineru 3.1.15 was gated on
+    # 2026-09-03 and refused (spurious inline math on prose, a split word), so
+    # a patch is a behaviour change here too. The cap is the exact version.
+    next_patch = Version(f"{locked.major}.{locked.minor}.{locked.micro + 1}")
+    assert next_patch not in spec, (
+        f"{name}: pyproject specifier {spec} admits {next_patch} while uv.lock and every "
         f"gate run {locked}. A fresh install would resolve past what was tested "
-        f"({_SHAPE_SENSITIVE[name]}). Cap at <{next_minor}, or bump lock and cap together "
+        f"({_SHAPE_SENSITIVE[name]}). Cap at <{next_patch}, or bump lock and cap together "
         "on a green slow-gate run."
     )
