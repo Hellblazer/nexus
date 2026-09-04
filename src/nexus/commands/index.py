@@ -2507,8 +2507,13 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
     # LocalEmbeddingFunction's __call__ is a ChromaDB EF — `(input) → embeddings`.
     # We wrap it to match the indexer contract.
     from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
+    # nexus-b7s8t: only when the vector backend is opted OUT of service
+    # mode. In service mode (local included) the engine embeds and the
+    # client's vectors are discarded; batch_index_markdowns's own gate
+    # (doc_indexer) installs the server-embed stub when embed_fn is None.
+    from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
     _embed_fn = None
-    if is_local_mode():
+    if is_local_mode() and not is_vector_service_mode():
         from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deliberate function-local import (rare branch: local-mode embedder only)
         _local_ef = LocalEmbeddingFunction()
 
