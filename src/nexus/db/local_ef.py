@@ -12,6 +12,7 @@ Explicit: ``LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")`` forces tier 
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import threading
 from typing import Any
 
@@ -103,11 +104,16 @@ def local_model_for_token(token: str) -> str:
 
 
 def _fastembed_available() -> bool:
-    """Return True if fastembed can be imported."""
+    """Return True if fastembed is installed.
+
+    A spec lookup, not an import (nexus-ct17r / nexus-b7s8t): importing
+    fastembed loads onnxruntime, and this probe runs on every local-mode
+    collection-name derivation — including ``nx store put`` in service
+    mode, where the engine embeds and the client never should.
+    """
     try:
-        importlib.import_module("fastembed")
-        return True
-    except (ImportError, ModuleNotFoundError):
+        return importlib.util.find_spec("fastembed") is not None
+    except (ImportError, ValueError):
         return False
 
 

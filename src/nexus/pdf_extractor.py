@@ -33,10 +33,29 @@ import structlog
 
 from nexus.errors import ExtractionQualityError, UnextractableContentError
 
-try:
-    from mineru.cli.common import do_parse
-except ImportError:
-    do_parse = None  # type: ignore[assignment]
+# MinerU is resolved LAZILY (nexus-ct17r). ``mineru.cli.common`` imports
+# magika, which imports onnxruntime at module scope, and this module is
+# imported by doc_indexer / pipeline_stages on every ``nx`` command that
+# touches the store — so an eager import here loaded ORT into every
+# ``nx store put`` that never parsed a PDF. ORT's telemetry dispatcher then
+# raced interpreter teardown ("recursive_mutex lock failed", Abort trap 6).
+# The parent only needs to know MinerU is importable; the parse itself runs
+# in a subprocess (see ``_MINERU_WORKER_SCRIPT``). ``do_parse`` stays a
+# module attribute so tests can patch it (``None`` = unavailable).
+_DO_PARSE_UNRESOLVED = object()
+do_parse = _DO_PARSE_UNRESOLVED
+
+
+def _mineru_do_parse():  # noqa: ANN202 — mineru's callable type is not importable eagerly, by design
+    """Resolve ``mineru.cli.common.do_parse`` on first use; ``None`` if absent."""
+    global do_parse
+    if do_parse is _DO_PARSE_UNRESOLVED:
+        try:
+            from mineru.cli.common import do_parse as _resolved  # noqa: PLC0415 — deliberately lazy (nexus-ct17r)
+        except ImportError:
+            _resolved = None
+        do_parse = _resolved
+    return do_parse
 
 
 # Inline script executed in a child Python process for memory isolation.
@@ -1279,7 +1298,7 @@ class PDFExtractor:
         ``mineru_page_batch`` config).  The callback receives the batch start
         page index, the batch markdown, and metadata.
         """
-        if do_parse is None:
+        if _mineru_do_parse() is None:
             from nexus import install_advice  # noqa: PLC0415 — deferred import
 
             reinstall = install_advice.upgrade_command(
