@@ -9,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.commands.hooks import _stanza_for
 from nexus.db.http_vector_client import HttpVectorClient
 from tests._catalog_fixture_ops import ActiveCatalog, only_document
 
@@ -400,17 +401,35 @@ def test_doctor_hooks_installed(runner):
     reg.all.return_value = ["/some/repo"]
     with tempfile.TemporaryDirectory() as td:
         hooks_dir = Path(td)
+        # A real installed stanza, not a begin-sentinel with no end: the
+        # old drift comparison returned "no body" for that malformed shape
+        # and reported it green; the shared hook_stanza_state (nexus-trwxr)
+        # calls it stale, which is the honest answer.
         for name in ("post-commit", "post-merge", "post-rewrite"):
-            (hooks_dir / name).write_text(
-                f"#!/bin/sh\n{SENTINEL_BEGIN}\nnx index repo ...\n")
+            (hooks_dir / name).write_text(f"#!/bin/sh\n{_stanza_for(name)}\n")
         result = _invoke(runner, reg, extra_patches=[
             patch("nexus._git_hooks_meta.effective_hooks_dir",
                   return_value=hooks_dir),
         ])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     assert "\u2713 git hooks" in result.output
     assert "/some/repo" in result.output
     assert "post-commit" in result.output
+
+
+def test_doctor_reports_a_malformed_stanza_as_drift(runner):
+    """Begin sentinel, no end sentinel: previously green by accident."""
+    reg = MagicMock()
+    reg.all.return_value = ["/some/repo"]
+    with tempfile.TemporaryDirectory() as td:
+        hooks_dir = Path(td)
+        (hooks_dir / "post-commit").write_text(
+            f"#!/bin/sh\n{SENTINEL_BEGIN}\nnx index repo ...\n")
+        result = _invoke(runner, reg, extra_patches=[
+            patch("nexus._git_hooks_meta.effective_hooks_dir",
+                  return_value=hooks_dir),
+        ])
+    assert "stanza differs" in result.output
 
 
 def test_doctor_hooks_not_installed(runner):

@@ -261,29 +261,32 @@ def hook_stanza_state(repo: Path, hook_name: str = "post-commit") -> str:
     ``not installed``: no hook file. ``unknown``: not a git repository.
 
     ``nx doctor`` has computed the stale case since nexus-mkj6u, but as a
-    line in a long report nobody was reading; this is the same comparison
-    exposed to callers that can act on it, ``nx census reviews`` first.
+    line in a long report nobody was reading; doctor now resolves each
+    hook's state through this function too, so there is one comparison,
+    and ``nx census reviews`` prints it where someone will act on it.
     """
     try:
-        hooks_dir = _git_common_dir_raw(repo) / "hooks"
-    except (RuntimeError, OSError):
+        # core.hooksPath honoured, like install/update/status and nx doctor
+        # (critique [24292]: the first cut used the common dir directly and
+        # would have told a core.hooksPath user "not installed" forever).
+        hooks_dir = _effective_hooks_dir(repo)
+        status = _hook_status(hooks_dir, hook_name)
+        if status in ("not installed", "unmanaged"):
+            return status
+        installed = (hooks_dir / hook_name).read_text()
+    except Exception:  # noqa: BLE001 - a census line must never traceback
         return "unknown"
-    status = _hook_status(hooks_dir, hook_name)
-    if status in ("not installed", "unmanaged"):
-        return status
-    body = re.search(
-        rf"{re.escape(SENTINEL_BEGIN)}\n(.*?)\n{re.escape(SENTINEL_END)}",
-        (hooks_dir / hook_name).read_text(),
-        re.DOTALL,
+    return "armed" if stanza_body(installed) == stanza_body(_stanza_for(hook_name)) else "stale"
+
+
+def stanza_body(text: str) -> str | None:
+    """The text between the nexus sentinels, or None when absent. The one
+    definition of "the installed stanza" that both hook_stanza_state and
+    nx doctor compare through."""
+    m = re.search(
+        rf"{re.escape(SENTINEL_BEGIN)}\n(.*?)\n{re.escape(SENTINEL_END)}", text, re.DOTALL
     )
-    canonical = re.search(
-        rf"{re.escape(SENTINEL_BEGIN)}\n(.*?)\n{re.escape(SENTINEL_END)}",
-        _stanza_for(hook_name),
-        re.DOTALL,
-    )
-    if body is None or canonical is None:
-        return "stale"
-    return "armed" if body.group(1) == canonical.group(1) else "stale"
+    return m.group(1) if m else None
 
 
 def _install_hook(hooks_dir: Path, hook_name: str) -> str:

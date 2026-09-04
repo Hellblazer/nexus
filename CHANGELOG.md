@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `nx census reviews` reports the current repo's post-commit hook state
+  (armed, stale, not installed, unmanaged) first, using the same comparison
+  `nx doctor` makes and honouring `core.hooksPath`, instead of asking whether
+  the hook is installed; a truncated review record states characters
+  reviewed of characters total. RDR-201 amended after the intrastate
+  reanalysis: the lifecycle table header no longer claims an omitted status
+  goes uncaught, the checker's guard-independence limit is documented, GH
+  #1402 is pinned to its refusing cell, and the inversion incident's failure
+  class is asserted while the incident itself is stated as outside the
+  table's inputs.
+
 ## [7.29.1] - 2026-09-04
 
 Engine identity unchanged: `engine-service-v0.1.100`. Patch release so
@@ -43,9 +56,6 @@ installed clients stop re-indexing unchanged files.
   line, `Commit review: `, in both consumers (the census and the SessionStart
   FIX-NOW notice), so an unarmed hook reads as zero records rather than as a
   clean codebase. Merge records now say they are a first-parent view.
-  `nx census reviews` now reports the current repo's post-commit hook state
-  (armed, stale, not installed) itself instead of asking, and a truncated
-  record states bytes reviewed of bytes total.
 
 - The sn plugin drifted from the Serena it launches (nexus-jbt5x). Its
   auto-approve list named 27 tools of which 4 no longer exist in the

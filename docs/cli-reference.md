@@ -3714,7 +3714,7 @@ nx census capability [--session SESSION_ID] [--since ISO_DATE] [--project-dir PA
 nx census reviews [--as-json]
 ```
 
-`nx census reviews` counts per-commit review findings by verdict across the T2 records [`nx review commit`](#nx-review) writes, and reports **reviewed-and-clean separately from not-reviewed**: a census that could not tell those apart would read an unarmed hook as a clean codebase (the nexus-moht0 vacuous-gate doctrine).
+`nx census reviews` counts per-commit review findings by verdict across the T2 records [`nx review commit`](#nx-review) writes, and reports **reviewed-and-clean separately from not-reviewed**: a census that could not tell those apart would read an unarmed hook as a clean codebase (the nexus-moht0 vacuous-gate doctrine). The first line reports the current repository's post-commit hook state (`armed`, `stale`, `not installed`, `unmanaged`, `unknown`; `hook_state` under `--as-json`), the same comparison `nx doctor` makes, so the census answers the hook-armed question rather than asking it. Records are selected by title prefix AND their first line `Commit review: `; human review notes sharing the prefix are not counted.
 
 Counts tool calls per capability across Claude Code session transcripts, split **orchestrator vs subagent** (nexus-h33x8.1). Buckets are `skill`, `agent`, `serena`, `nx_answer`, `search_query`, `other_nx_mcp`, `baseline` (Bash/Read/Edit/Write), `other`.
 

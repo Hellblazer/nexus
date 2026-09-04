@@ -128,7 +128,7 @@ def test_commit_diff_truncates_and_says_so(tiny_repo: Path) -> None:
         sha=sha, subject="s", findings=[], cost_usd=None,
         truncated=True, seen_bytes=len(text), total_bytes=total,
     )
-    assert f"Reviewed {len(text):,} of {total:,} bytes" in rendered
+    assert f"Reviewed {len(text):,} of {total:,} characters" in rendered
 
 
 def test_commit_diff_of_a_merge_shows_everything_the_merge_brought(tiny_repo: Path) -> None:

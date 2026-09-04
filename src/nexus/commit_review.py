@@ -167,8 +167,9 @@ def record_title(sha: str) -> str:
 def commit_diff(repo: Path, sha: str, *, max_bytes: int) -> tuple[str, bool, int]:
     """Return ``(text, truncated, total_bytes)`` for *sha* in *repo*.
 
-    ``total_bytes`` is the size of the untruncated ``git show`` output, so a
-    record can say "reviewed 200,000 of 2,074,000 bytes" rather than a bare
+    ``total_bytes`` is the length of the untruncated ``git show`` text (characters,
+    since the stream is decoded; the cap is applied to the same measure), so a
+    record can say "reviewed 200,000 of 2,074,000 characters" rather than a bare
     flag: 199 of 200 KB and 200 of 2,074 KB are different reviews and a
     boolean made them read the same (critique [24283] S2).
 
@@ -360,7 +361,7 @@ def render_record(
         )
     if truncated:
         sizes = (
-            f" Reviewed {seen_bytes:,} of {total_bytes:,} bytes."
+            f" Reviewed {seen_bytes:,} of {total_bytes:,} characters."
             if seen_bytes is not None and total_bytes is not None
             else ""
         )

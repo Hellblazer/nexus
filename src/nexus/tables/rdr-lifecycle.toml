@@ -31,19 +31,18 @@
 # some row's match, so a missing status is a blocking finding, not a
 # silent hole. An earlier version of this header said the opposite.
 #
-# PROOF STRENGTH, stated so nobody reads more into this file than it
-# proves (reanalysis 2026-09-04, T3 analysis-deep-intrastate-vs-conexus-
-# reanalysis-2026-09-04). This table has 36 (status, event) groups. The
-# 12 groups holding a LEGAL transition are proved over their guard
-# dimensions by enumeration. The other 24 are each one bare `escape =
-# true` row: "any other status, refuse", proved the way a `default:`
-# branch proves a switch, and reported by the checker as closed-by-escape,
-# an advisory. That is the design: the illegal transitions are refusals
-# with no reason to distinguish, so enumerating them one by one would be
-# ceremony. It also means "the lifecycle is a checked table" is a weaker
-# claim than the same sentence about docs/tables/release-choreography.toml,
-# which has no escape rows at all. Say which one you mean.
-#
+# WHAT THE ESCAPE ROWS DO AND DO NOT SAY (reanalysis 2026-09-04, T3
+# analysis-deep-intrastate-vs-conexus-reanalysis-2026-09-04, critique
+# [24292]). Coverage of this table is FULLY proved: totality over the 36
+# (status, event) groups, and enumeration over each group's guards. What
+# the 24 bare `escape = true` groups lack is DISCRIMINATION: each says
+# "any other status, refuse" with no per-transition reason, and the checker
+# reports each as closed-by-escape, an advisory. That is the intended
+# design for six statuses whose illegal transitions carry nothing worth
+# distinguishing. docs/tables/release-choreography.toml has no escape rows
+# because every one of its cells emits a distinct exit code and message.
+# Say which property you mean before comparing the two.
+
 # The `defer` event is legal from `draft` and from `accepted` (Sam,
 # 2026-09-01, RDR-201 Revision History). A deferred record resumes to
 # `draft` only, so deferred-then-resumed work re-gates.

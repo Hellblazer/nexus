@@ -11,30 +11,25 @@ the table that is the bare floor gate seeing a reachable cloud that reports
 a version below ``REQUIRED_ENGINE_VERSION``: it must refuse, exit 1, so the
 release stops before the tag.
 
-The 7.1.0/v0.1.62 inversion is NOT here, deliberately. Sam's 2026-09-02
-ruling (nexus-j9z30.26): the fix changed a remedy string and prose, no
-decision logic; the event-sensitivity lives in which moment a human runs
-which gate, which the skills carry and the table's inputs cannot express.
-A test claiming the table catches it would be the vacuous kind.
+The 7.1.0/v0.1.62 inversion is NOT pinned here, deliberately. Its failure
+class is in the table (the two ``ledger_blocked`` rows, exit 1, asserted
+below), but Sam's 2026-09-02 ruling (nexus-j9z30.26) holds that the
+incident itself was which moment a human ran which gate, which the skills
+carry and the table's inputs cannot express. A test naming a cell as
+"the inversion" would be the vacuous kind.
 """
 from __future__ import annotations
 
-import pathlib
-import sys
-
 import pytest
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
-
-import release_choreography as choreo  # noqa: E402
+import release_choreography as choreo  # scripts/ is on pythonpath via pyproject
 
 
 def test_gh_1402_cloud_below_floor_on_the_bare_gate_refuses() -> None:
     row = choreo.resolve_choreography_row(
         "check_floor_bare", {"pin_currency": "passes", "probe": "success_stale"}
     )
-    assert row.id == "check_floor_bare::bare_probe_stale_via_success"
+    assert row.id == "check_floor_bare::bare_probe_stale_via_success", row.id
     assert row.outcome["exit_code"] == "1", "a reachable cloud below the floor must stop the release"
 
 
@@ -45,8 +40,8 @@ def test_gh_1402_shape_is_allowed_only_when_a_deploy_is_armed() -> None:
     row = choreo.resolve_choreography_row(
         "check_floor_paired", {"battery": "passes", "probe": "success_below_floor"}
     )
-    assert row.id == "check_floor_paired::paired_probe_ack_via_success"
-    assert row.outcome["exit_code"] == "0"
+    assert row.id == "check_floor_paired::paired_probe_ack_via_success", row.id
+    assert row.outcome["exit_code"] == "0", "with the deploy armed the same cloud state is allowed"
 
 
 @pytest.mark.parametrize("probe", ["unreachable", "ms_error"])
@@ -57,3 +52,12 @@ def test_an_unverifiable_cloud_never_reads_as_current_on_the_bare_gate(probe: st
         "check_floor_bare", {"pin_currency": "passes", "probe": probe}
     )
     assert row.outcome["exit_code"] != "0", row.id
+
+
+@pytest.mark.parametrize("function", ["check_wire_contract_ledger", "check_client_lag_ledger"])
+def test_the_inversion_failure_class_is_a_refusal(function: str) -> None:
+    """A blocking ledger entry stops the release. This is the class the
+    7.1.0/v0.1.62 inversion belongs to, not the incident."""
+    row = choreo.resolve_choreography_row(function, {"ledger": "blocking"})
+    assert row.id == f"{function}::ledger_blocked"
+    assert row.outcome["exit_code"] == "1"

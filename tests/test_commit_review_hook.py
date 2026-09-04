@@ -389,3 +389,19 @@ def test_hook_stanza_state_names_armed_stale_and_missing(tmp_path):
     assert hook_stanza_state(repo) == "unmanaged"
     assert hook_stanza_state(tmp_path / "not-a-repo") == "unknown"
     assert "nx review commit" in _stanza_for("post-commit")
+
+
+def test_hook_stanza_state_honours_core_hookspath(tmp_path):
+    """Every sibling (install, update, status, doctor) resolves core.hooksPath;
+    the first cut of this function did not and would have told such a repo
+    "not installed" forever (critique [24292] ship-blocker)."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    custom = tmp_path / "custom-hooks"
+    custom.mkdir()
+    subprocess.run(["git", "-C", str(repo), "config", "core.hooksPath", str(custom)], check=True)
+    assert hook_stanza_state(repo) == "not installed"
+    _install_hook(custom, "post-commit")
+    assert hook_stanza_state(repo) == "armed"
+    assert not (repo / ".git" / "hooks" / "post-commit").exists()

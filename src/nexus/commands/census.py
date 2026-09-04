@@ -147,19 +147,23 @@ def reviews_cmd(as_json: bool) -> None:
     records = totals.pop("_records", 0)
     clean = totals.pop("_clean", 0)
 
-    if as_json:
-        click.echo(_json.dumps({"records": records, "clean": clean, "verdicts": totals}, indent=2))
-        return
-
     from pathlib import Path  # noqa: PLC0415 — stdlib deferred to subcommand scope
 
     from nexus.commands.hooks import hook_stanza_state  # noqa: PLC0415 — deferred; avoids click group import at module load
 
     state = hook_stanza_state(Path.cwd())
+
+    if as_json:
+        click.echo(_json.dumps(
+            {"records": records, "clean": clean, "verdicts": totals, "hook_state": state}, indent=2
+        ))
+        return
+
     remedy = {
         "stale": " (nx hooks update refreshes it)",
         "not installed": " (nx hooks install arms it)",
         "unmanaged": " (a foreign hook; nx hooks install appends the stanza)",
+        "unknown": " (not a git repository, or git did not answer)",
     }.get(state, "")
     click.echo(f"Post-commit reviewer in this repo: {state}{remedy}")
 
