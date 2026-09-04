@@ -107,7 +107,7 @@ def test_parse_findings_rejects_a_missing_findings_key() -> None:
 
 def test_commit_diff_reads_a_real_commit(tiny_repo: Path) -> None:
     sha = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
-    text, truncated = commit_diff(tiny_repo, sha, max_bytes=100_000)
+    text, truncated, _total = commit_diff(tiny_repo, sha, max_bytes=100_000)
     assert "def f()" in text
     assert "feat: add f" in text
     assert truncated is False
@@ -120,9 +120,15 @@ def test_commit_diff_truncates_and_says_so(tiny_repo: Path) -> None:
     verdict over code it never saw.
     """
     sha = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
-    text, truncated = commit_diff(tiny_repo, sha, max_bytes=40)
+    text, truncated, total = commit_diff(tiny_repo, sha, max_bytes=40)
     assert truncated is True
     assert len(text) <= 40
+    assert total > 40, "the untruncated size must survive so the record can state the ratio"
+    rendered = render_record(
+        sha=sha, subject="s", findings=[], cost_usd=None,
+        truncated=True, seen_bytes=len(text), total_bytes=total,
+    )
+    assert f"Reviewed {len(text):,} of {total:,} bytes" in rendered
 
 
 def test_commit_diff_of_a_merge_shows_everything_the_merge_brought(tiny_repo: Path) -> None:
@@ -143,7 +149,7 @@ def test_commit_diff_of_a_merge_shows_everything_the_merge_brought(tiny_repo: Pa
     _run(["git", "merge", "-q", "--no-ff", "-m", "merge side", "side"], tiny_repo)
     sha = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
     assert commit_parent_count(tiny_repo, sha) == 2
-    text, _ = commit_diff(tiny_repo, sha, max_bytes=100_000)
+    text, _, _total = commit_diff(tiny_repo, sha, max_bytes=100_000)
     assert 'VERSION = "2"' in text, "the file the merge brought in must be in the diff the reviewer sees"
     assert "version.py" in text
     assert commit_parent_count(tiny_repo, "HEAD~1") == 1
@@ -172,10 +178,10 @@ def test_a_tree_less_commit_is_skipped_not_reviewed_clean(tiny_repo: Path) -> No
     no files in it (code review [24285] Major 2)."""
     _run(["git", "commit", "-q", "--allow-empty", "-m", "chore: empty"], tiny_repo)
     sha = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
-    text, _ = commit_diff(tiny_repo, sha, max_bytes=100_000)
+    text, _, _total = commit_diff(tiny_repo, sha, max_bytes=100_000)
     assert text.strip(), "the header is always present; that is the whole point"
     assert has_patch(text) is False
-    full, _ = commit_diff(tiny_repo, "HEAD~1", max_bytes=100_000)
+    full, _, _total = commit_diff(tiny_repo, "HEAD~1", max_bytes=100_000)
     assert has_patch(full) is True
 
 
@@ -211,7 +217,7 @@ def test_the_commit_body_never_reaches_the_reviewer(tmp_path: Path) -> None:
         repo,
     )
     sha = _run(["git", "rev-parse", "HEAD"], repo).strip()
-    text, _ = commit_diff(repo, sha, max_bytes=100_000)
+    text, _, _total = commit_diff(repo, sha, max_bytes=100_000)
 
     assert "subject line is fine" in text, "the subject should be present"
     assert "SECRET_BODY_MARKER" not in text, (

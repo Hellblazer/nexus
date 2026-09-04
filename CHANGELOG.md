@@ -43,6 +43,9 @@ installed clients stop re-indexing unchanged files.
   line, `Commit review: `, in both consumers (the census and the SessionStart
   FIX-NOW notice), so an unarmed hook reads as zero records rather than as a
   clean codebase. Merge records now say they are a first-parent view.
+  `nx census reviews` now reports the current repo's post-commit hook state
+  (armed, stale, not installed) itself instead of asking, and a truncated
+  record states bytes reviewed of bytes total.
 
 - The sn plugin drifted from the Serena it launches (nexus-jbt5x). Its
   auto-approve list named 27 tools of which 4 no longer exist in the

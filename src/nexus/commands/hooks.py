@@ -250,6 +250,42 @@ def _hook_status(hooks_dir: Path, hook_name: str) -> str:
     return "appended"
 
 
+def hook_stanza_state(repo: Path, hook_name: str = "post-commit") -> str:
+    """One word for what *repo*'s *hook_name* will do on the next commit.
+
+    ``armed``: the installed stanza equals the current template.
+    ``stale``: a nexus stanza is installed but differs from the template
+    (a release changed it and ``nx hooks update`` has not run; the
+    per-commit reviewer was silently absent for two days this way,
+    nexus-trwxr). ``unmanaged``: a hook exists without a nexus sentinel.
+    ``not installed``: no hook file. ``unknown``: not a git repository.
+
+    ``nx doctor`` has computed the stale case since nexus-mkj6u, but as a
+    line in a long report nobody was reading; this is the same comparison
+    exposed to callers that can act on it, ``nx census reviews`` first.
+    """
+    try:
+        hooks_dir = _git_common_dir_raw(repo) / "hooks"
+    except (RuntimeError, OSError):
+        return "unknown"
+    status = _hook_status(hooks_dir, hook_name)
+    if status in ("not installed", "unmanaged"):
+        return status
+    body = re.search(
+        rf"{re.escape(SENTINEL_BEGIN)}\n(.*?)\n{re.escape(SENTINEL_END)}",
+        (hooks_dir / hook_name).read_text(),
+        re.DOTALL,
+    )
+    canonical = re.search(
+        rf"{re.escape(SENTINEL_BEGIN)}\n(.*?)\n{re.escape(SENTINEL_END)}",
+        _stanza_for(hook_name),
+        re.DOTALL,
+    )
+    if body is None or canonical is None:
+        return "stale"
+    return "armed" if body.group(1) == canonical.group(1) else "stale"
+
+
 def _install_hook(hooks_dir: Path, hook_name: str) -> str:
     """Install or append nexus stanza. Returns 'created' | 'appended' | 'already installed'."""
     hook_file = hooks_dir / hook_name

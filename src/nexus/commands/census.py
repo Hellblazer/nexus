@@ -151,12 +151,23 @@ def reviews_cmd(as_json: bool) -> None:
         click.echo(_json.dumps({"records": records, "clean": clean, "verdicts": totals}, indent=2))
         return
 
+    from pathlib import Path  # noqa: PLC0415 — stdlib deferred to subcommand scope
+
+    from nexus.commands.hooks import hook_stanza_state  # noqa: PLC0415 — deferred; avoids click group import at module load
+
+    state = hook_stanza_state(Path.cwd())
+    remedy = {
+        "stale": " (nx hooks update refreshes it)",
+        "not installed": " (nx hooks install arms it)",
+        "unmanaged": " (a foreign hook; nx hooks install appends the stanza)",
+    }.get(state, "")
+    click.echo(f"Post-commit reviewer in this repo: {state}{remedy}")
+
     if not records:
         click.echo(
             "No commit reviews recorded (records expire after the configured "
-            "ttl). Either the post-commit hook is not armed here, or nothing "
-            "has committed since. nx doctor reports a stale hook stanza; "
-            "nx hooks update refreshes it."
+            "ttl). Either the hook was not armed when commits happened, or "
+            "nothing has committed since."
         )
         return
 
