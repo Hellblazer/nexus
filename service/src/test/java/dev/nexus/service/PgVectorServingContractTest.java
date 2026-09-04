@@ -381,6 +381,26 @@ class PgVectorServingContractTest {
     }
 
     @Test
+    @Order(5)
+    void search_nonScalarOperand_returns400OverHttp() throws Exception {
+        // T2 [24220] review finding: a Map/List operand for $eq/$ne/$in/$nin serializes
+        // as raw, unquoted JSON object/array text straight into the jsonpath predicate
+        // string -- without the planWhere guard this is a jsonpath SYNTAX error deep in
+        // Postgres, surfacing as an opaque 500 instead of the 400 every other malformed
+        // where shape produces. Pinned at the WIRE, not just the repo layer.
+        var resp = post("/v1/vectors/search", TOKEN_A, Map.of(
+            "query", Q, "collections", List.of(COL), "n_results", 10,
+            "where", Map.of("lang", Map.of("$in", List.of(Map.of("nested", 1))))));
+        assertThat(resp.statusCode())
+            .as("a non-scalar $in item must be rejected 400, never surface as an opaque "
+                + "500 jsonpath syntax error (got: %s)", resp.body())
+            .isEqualTo(400);
+        assertThat(resp.body())
+            .as("400 body carries an error message naming the scalar-operand rule")
+            .contains("error").contains("scalar operand");
+    }
+
+    @Test
     @Order(6)
     void storeList_paginatedEnvelope() throws Exception {
         Map<String, Object> resp = postOk("/v1/vectors/store-list", TOKEN_A, Map.of(

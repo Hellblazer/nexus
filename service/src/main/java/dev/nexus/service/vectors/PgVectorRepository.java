@@ -54,12 +54,21 @@ import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_768;
 // nexus-zrcj7 (coordinator finding, T2 [24216]): restores the lcogi/x7z7l selectivity-
-// aware two-branch dispatch (vectors-011) -- text_gate_probe_<dim> is a scalar function
-// (Routines.textGateProbe_NNN, already imported above via Routines); the HNSW-first
-// fallback is a table-valued function like every sibling.
+// aware two-branch dispatch (vectors-011) -- the HNSW-first fallback is a table-valued
+// function like every sibling.
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_768;
+// nexus-zrcj7 (T2 [24219] critique finding B, single-gate-eval restored): text_gate_probe_
+// <dim> changed from a scalar Routine (RETURNS int) to a SETOF-bytea table-valued
+// function (vectors-012), and text_gated_search_by_chash_<dim> ranks ONLY over the
+// probe's own chash set -- no second text-gate evaluation.
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_384;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_768;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_384;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_768;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -1174,21 +1183,22 @@ public final class PgVectorRepository {
      *       {@code nResults} cap, flat row shape ({@code id}, {@code content},
      *       {@code distance}, {@code collection}, metadata flattened in).
      *   <li><strong>Selectivity-aware dispatch (nexus-lcogi; single-gate-eval nexus-x7z7l).</strong>
-     *       ONE bounded fetch of the gate's chashes ({@code LIMIT} {@link #SELECTIVE_GATE_MAX}
-     *       {@code + 1}) both picks the plan and, for a SELECTIVE gate ({@code matches <=}
-     *       {@link #SELECTIVE_GATE_MAX}), IS the gate evaluation: the complete gate comes back
-     *       and is ranked by EXACT cosine distance via a {@code chash IN (...)} PK filter, so
-     *       the expensive {@code <%} trigram heap-recheck runs ONCE, not twice (the prior
-     *       design ran a standalone {@code COUNT(*)} probe AND re-ran the gate in the ranked
-     *       query, two {@code <%} rechecks per call on a large code corpus; conexus-qsa).
-     *       This preserves the lcogi fix: the rank never routes through the HNSW index, so a
-     *       selective gate cannot be starved past {@code hnsw.max_scan_tuples} (lcogi: the
-     *       retired HNSW-first plan returned 6/116k to 0). For a NON-SELECTIVE gate the bounded
-     *       fetch hits the {@code LIMIT}, is discarded, and the HNSW-first plan is kept (a
-     *       dense gate is found within the scan budget; materializing a huge gated set would
-     *       spill {@code work_mem}). Superseded by RDR-156 P5.2 server-side RRF fusion (unified
-     *       selectivity-aware); its P5.G gate verifies the selective case at production
-     *       scale rather than re-fixing it.
+     *       ONE bounded fetch of the gate's chashes ({@code text_gate_probe_<dim>}, {@code
+     *       LIMIT} {@link #SELECTIVE_GATE_MAX} {@code + 1}) both picks the plan and, for a
+     *       SELECTIVE gate ({@code matches <=} {@link #SELECTIVE_GATE_MAX}), IS the gate
+     *       evaluation: the fetched chashes are ranked by EXACT cosine distance via a {@code
+     *       chash = ANY(...)} PK filter ({@code text_gated_search_by_chash_<dim>}, T2 [24219]
+     *       finding B / vectors-012), so the expensive {@code <%} trigram heap-recheck runs
+     *       ONCE, not twice (a standalone {@code COUNT(*)} probe followed by an independent
+     *       re-evaluation of the same gate in the ranked query would recheck twice per call on
+     *       a large code corpus; conexus-qsa). This preserves the lcogi fix: the rank never
+     *       routes through the HNSW index, so a selective gate cannot be starved past {@code
+     *       hnsw.max_scan_tuples} (lcogi: the retired HNSW-first plan returned 6/116k to 0).
+     *       For a NON-SELECTIVE gate the bounded fetch hits the {@code LIMIT}, is discarded,
+     *       and the HNSW-first plan is kept (a dense gate is found within the scan budget;
+     *       materializing a huge gated set would spill {@code work_mem}). Superseded by
+     *       RDR-156 P5.2 server-side RRF fusion (unified selectivity-aware); its P5.G gate
+     *       verifies the selective case at production scale rather than re-fixing it.
      *   <li><strong>Trigram gate calibration anchor.</strong> The contract fixture
      *       pins the gate's discriminating range, not an exact threshold: the typo probe's
      *       candidate rows sit at word-similarity ≈ 0.9 (and plain trigram similarity
@@ -1370,31 +1380,40 @@ public final class PgVectorRepository {
             // collection ran ~30s and returned EMPTY in production).
             PgSession.setSearchPlanCacheMode(ctx);
 
-            // jOOQ codegen keeps the underscore before a purely-numeric dim suffix
-            // (textGateProbe_384, not textGateProbe384) -- verified against the
-            // generated Routines.java, matching the SQL function name literally.
-            int matches = switch (dim) {
-                case 384  -> Routines.textGateProbe_384(ctx.configuration(),
+            // T2 [24219] critique finding B (single-gate-eval restored, nexus-x7z7l/
+            // conexus-qsa): the probe is now SETOF bytea, not a scalar COUNT -- ONE
+            // bounded fetch both decides the plan (row count vs selectiveGateMax) AND,
+            // for the selective case, supplies the exact chash set the rank query below
+            // reuses via a cheap chash = ANY(...) PK filter, never re-running the
+            // expensive `<%` trigram gate a second time.
+            org.jooq.Table<?> probeFn = switch (dim) {
+                case 384  -> TEXT_GATE_PROBE_384.call(
                     gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap);
-                case 768  -> Routines.textGateProbe_768(ctx.configuration(),
+                case 768  -> TEXT_GATE_PROBE_768.call(
                     gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap);
-                case 1024 -> Routines.textGateProbe_1024(ctx.configuration(),
+                case 1024 -> TEXT_GATE_PROBE_1024.call(
                     gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap);
                 default   -> throw new IllegalArgumentException("unsupported dim " + dim);
             };
+            Result<? extends Record> probeResult = ctx.selectFrom(probeFn).fetch();
+            int matches = probeResult.size();
 
             if (matches <= selectiveGateMax) {
-                // Selective: rank the complete (materialized) gate exactly, no HNSW --
-                // text_gated_search_<dim> (vectors-010), unchanged. matches == 0 needs no
-                // special empty-gate case: the function's own WHERE clause returns zero
-                // rows for an empty gate.
+                // Selective: rank ONLY the probe's own chash set + scope, no text-gate
+                // re-evaluation -- text_gated_search_by_chash_<dim> (vectors-012).
+                // matches == 0 needs no special empty-gate case: chash = ANY('{}') is
+                // false for every row, so the rank query naturally returns zero rows.
+                byte[][] chashes = new byte[probeResult.size()][];
+                for (int i = 0; i < probeResult.size(); i++) {
+                    chashes[i] = probeResult.get(i).get(0, byte[].class);
+                }
                 org.jooq.Table<?> fn = switch (dim) {
-                    case 384  -> TEXT_GATED_SEARCH_384.call(
-                        queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
-                    case 768  -> TEXT_GATED_SEARCH_768.call(
-                        queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
-                    case 1024 -> TEXT_GATED_SEARCH_1024.call(
-                        queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                    case 384  -> TEXT_GATED_SEARCH_BY_CHASH_384.call(
+                        queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                    case 768  -> TEXT_GATED_SEARCH_BY_CHASH_768.call(
+                        queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+                    case 1024 -> TEXT_GATED_SEARCH_BY_CHASH_1024.call(
+                        queryVec, chashes, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
                     default   -> throw new IllegalArgumentException("unsupported dim " + dim);
                 };
                 return ctx.selectFrom(fn).fetch();
@@ -3466,33 +3485,71 @@ public final class PgVectorRepository {
 
     /**
      * Translate a Chroma-style metadata {@code where} map into a {@link WherePlan}
-     * (nexus-zrcj7). A plain scalar or {@code $eq} field becomes JSONB containment
-     * (byte-for-byte the predicate every other combined-query shape -- catalog-008/
-     * vectors-006/vectors-007/vectors-008 -- already uses for equality): type-preserving
-     * JSON equality, not appendWherePredicate's TEXT-comparison quirk
-     * ({@code metadata->>'k' = 'v'}). Every other operator ({@code $ne}/{@code $in}/
-     * {@code $nin}/{@code $gte}/{@code $lte}/{@code $gt}/{@code $lt}) compiles into ONE
-     * jsonpath predicate-check fragment; all fragments are ANDed together (all-fields-
-     * ANDed, same contract appendWherePredicate carries) and returned as a single
+     * (nexus-zrcj7). Every other operator ({@code $ne}/{@code $in}/{@code $nin}/
+     * {@code $gte}/{@code $lte}/{@code $gt}/{@code $lt}) compiles into ONE jsonpath
+     * predicate-check fragment; all fragments are ANDed together (all-fields-ANDed,
+     * same contract appendWherePredicate carries) and returned as a single
      * {@code jsonPath} string, bound as a VALUE -- this method never builds SQL text.
-     * Null semantics (T2 [24207]):
+     *
+     * <p><b>Tolerant-typing rule (T2 [24219] critique finding A, 2026-09-04):</b> the
+     * retired appendWherePredicate always compared via {@code metadata->>'k'} (a TEXT
+     * extraction), so a stored JSON number {@code 5} matched an operand {@code "5"} and
+     * vice versa, and likewise for booleans -- {@code String.valueOf(operand)} was the
+     * only typing the retired code ever did. JSONB containment and jsonpath's native
+     * {@code ==} are both type-STRICT, so reproducing that tolerance requires routing
+     * {@code $eq}/{@code $ne}/{@code $in}/{@code $nin} through a per-operand check:
      * <ul>
-     *   <li>{@code $ne} -&gt; {@code (!exists($."k") || $."k" != v)} -- an ABSENT key is
-     *       KEPT, matching appendWherePredicate's {@code IS DISTINCT FROM} semantics.</li>
-     *   <li>{@code $nin} -&gt; {@code (!exists($."k") || !($."k" == a || ...))}.</li>
-     *   <li>{@code $in} -&gt; {@code ($."k" == a || ...)}.</li>
-     *   <li>Range operators ({@code $gte}/{@code $lte}/{@code $gt}/{@code $lt}) use
-     *       jsonpath's OWN native comparison typing -- a type-mismatched comparison is
-     *       simply false/unknown under jsonpath's default lax mode, so no
-     *       {@code jsonb_typeof} guard is needed (nexus-4l80g's hand-rolled guard
-     *       retired for this path).</li>
+     *   <li>Operand is a plain scalar or {@code $eq}: if the operand is a
+     *       {@code Number}, a {@code Boolean}, a numeric-looking {@code String}
+     *       (parses as a {@link java.math.BigDecimal}), or the {@code String}
+     *       {@code "true"}/{@code "false"} -- i.e. its {@code String.valueOf(...)}
+     *       text COULD also equal a differently-JSON-typed stored value under the
+     *       retired text compare -- emit a jsonpath OR of both literal forms, e.g.
+     *       {@code ($."k" == 5 || $."k" == "5")}. Otherwise (a plain, non-numeric,
+     *       non-boolean-looking string) containment stays exact: no JSON number's or
+     *       boolean's text rendering can equal an arbitrary such string, so
+     *       {@code metadata @> {"k": "v"}} is provably identical to the retired
+     *       {@code metadata->>'k' = 'v'} for this one shape.</li>
+     *   <li>{@code $ne}/{@code $in}/{@code $nin} apply the same per-operand dual-form
+     *       rule (union of literal forms across every {@code $in}/{@code $nin} item)
+     *       -- these operators never used containment even before this fix.</li>
+     *   <li>Range operators ({@code $gte}/{@code $lte}/{@code $gt}/{@code $lt}) are
+     *       UNCHANGED: they keep the retired split exactly -- numeric operand means a
+     *       numeric jsonpath comparison (the old {@code jsonb_typeof} guard's
+     *       equivalent under jsonpath's own native typing), string operand means a
+     *       string comparison, with no cross-type tolerance in either the retired
+     *       code or here.</li>
+     * </ul>
+     *
+     * Null semantics (T2 [24207], typing note added [24219]):
+     * <ul>
+     *   <li>{@code $ne} -&gt; {@code (!exists($."k") || !(exists($."k" ? (@ == v))))} --
+     *       an ABSENT key is KEPT, matching appendWherePredicate's
+     *       {@code IS DISTINCT FROM} semantics. Every equality comparison is wrapped
+     *       in its own {@code exists(path ? (@ == literal))} rather than a bare
+     *       {@code path == literal} -- see {@link #existsEquals} for why a bare
+     *       comparison silently breaks under jsonpath's three-valued logic once more
+     *       than one literal form is ORed together.</li>
+     *   <li>{@code $nin} -&gt; {@code (!exists($."k") || !(exists($."k" ? (@==a)) || ...))}.</li>
+     *   <li>{@code $in} -&gt; {@code (exists($."k" ? (@==a)) || ...)}.</li>
+     *   <li>A {@code null} operand always routes through the tolerant path with the
+     *       SINGLE literal {@code "null"} (the retired code's own
+     *       {@code String.valueOf(null)}) -- never containment, since
+     *       {@code containment.put(key, null)} would mean "stored value IS json
+     *       null", a different predicate than "stored value's text is the four-char
+     *       string null".</li>
      * </ul>
      *
      * <p>Unsupported shapes fail loud with {@link IllegalArgumentException}, same
-     * contract as appendWherePredicate: a {@code $}-prefixed FIELD key (compound
-     * {@code $and}/{@code $or}), an operator map with more than one operator, a
-     * non-list operand for {@code $in}/{@code $nin}, a non-numeric/non-string operand
-     * for a range operator, or an unrecognized operator.
+     * contract as appendWherePredicate, plus one new guard (T2 [24220] review
+     * finding): a {@code $}-prefixed FIELD key (compound {@code $and}/{@code $or}),
+     * an operator map with more than one operator, a non-list operand for
+     * {@code $in}/{@code $nin}, a non-scalar (Map/List) operand for {@code $eq}/
+     * {@code $ne}/{@code $in} item/{@code $nin} item -- unquoted nested JSON would
+     * otherwise serialize straight into the jsonpath predicate text and fail as a
+     * jsonpath SYNTAX error deep in Postgres, surfacing as an opaque 500 instead of
+     * the 400 every other malformed {@code where} shape produces -- a non-numeric/
+     * non-string operand for a range operator, or an unrecognized operator.
      */
     static WherePlan planWhere(Map<String, Object> where) {
         if (where == null || where.isEmpty()) {
@@ -3509,7 +3566,8 @@ public final class PgVectorRepository {
                     + "bridge; express each field as its own predicate (all fields are ANDed)");
             }
             if (!(value instanceof Map<?, ?> ops)) {
-                containment.put(key, value);
+                requireScalarOperand("$eq", key, value);
+                addEquality(containment, predicates, jsonPathKey(key), key, value);
                 continue;
             }
             if (ops.size() != 1) {
@@ -3522,9 +3580,16 @@ public final class PgVectorRepository {
             Object operand = op.getValue();
             String path = jsonPathKey(key);
             switch (operator) {
-                case "$eq" -> containment.put(key, operand);
-                case "$ne" -> predicates.add(
-                    "(!exists(" + path + ") || " + path + " != " + jsonPathLiteral(operator, key, operand) + ")");
+                case "$eq" -> {
+                    requireScalarOperand(operator, key, operand);
+                    addEquality(containment, predicates, path, key, operand);
+                }
+                case "$ne" -> {
+                    requireScalarOperand(operator, key, operand);
+                    List<String> literals = equalityLiterals(operator, key, operand);
+                    predicates.add(
+                        "(!exists(" + path + ") || !(" + orEqualsLiterals(path, literals) + "))");
+                }
                 case "$in" -> {
                     List<?> items = requireListOperand(operator, key, operand);
                     predicates.add(items.isEmpty() ? "(1 == 2)" : "(" + orEquals(path, items) + ")");
@@ -3560,12 +3625,161 @@ public final class PgVectorRepository {
         return new WherePlan(containmentJsonb, jsonPath);
     }
 
-    /** ORed jsonpath equality fragment: {@code (path == a || path == b || ...)}'s inner text, no parens. */
+    /**
+     * {@code $eq} (or plain-scalar shorthand) routing: containment when
+     * {@code operand}'s text form is provably unambiguous against the retired
+     * text-comparison semantics, a tolerant jsonpath OR otherwise (nexus-zrcj7,
+     * T2 [24219] finding A).
+     */
+    private static void addEquality(
+            Map<String, Object> containment, List<String> predicates, String path, String key, Object operand) {
+        if (isTypeAmbiguousOperand(operand)) {
+            predicates.add("(" + orEqualsLiterals(path, equalityLiterals("$eq", key, operand)) + ")");
+        } else {
+            containment.put(key, operand);
+        }
+    }
+
+    /**
+     * Reject a Map/List operand for {@code $eq}/{@code $ne}/{@code $in} item/
+     * {@code $nin} item (T2 [24220] review finding): these serialize into raw,
+     * unquoted JSON object/array text inside a jsonpath predicate string, which is
+     * not valid jsonpath literal syntax and would otherwise surface as an opaque
+     * Postgres jsonpath-syntax-error 500 instead of a 400. Range operators already
+     * carry their own, tighter Number/String-only guard and need no separate call.
+     */
+    private static void requireScalarOperand(String operator, String key, Object operand) {
+        if (operand instanceof Map || operand instanceof List) {
+            throw new IllegalArgumentException(
+                operator + " for field '" + key + "' expects a scalar operand (string, number, "
+                + "boolean, or null), got " + operand.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * True when the retired appendWherePredicate's cross-type TEXT comparison
+     * ({@code metadata->>key = String.valueOf(operand)}) could match a stored value
+     * whose OWN JSON type differs from {@code operand}'s Java type -- i.e.
+     * containment's type-preserving equality is NOT provably identical to the
+     * retired semantics for this operand, and the caller must fall back to a
+     * type-tolerant jsonpath OR instead (T2 [24219] finding A). A plain
+     * non-numeric, non-boolean-looking String is the only operand shape where
+     * containment stays exact.
+     */
+    private static boolean isTypeAmbiguousOperand(Object operand) {
+        if (operand == null) {
+            // Retired code compared against the literal 4-char string "null" via
+            // String.valueOf(null); containment.put(key, null) would instead mean
+            // "stored value IS json null" -- a different predicate entirely.
+            return true;
+        }
+        if (operand instanceof Number || operand instanceof Boolean) {
+            return true;
+        }
+        String text = String.valueOf(operand);
+        return isNumericLooking(text) || "true".equals(text) || "false".equals(text);
+    }
+
+    private static boolean isNumericLooking(String s) {
+        try {
+            new java.math.BigDecimal(s);
+            return true;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    /**
+     * All jsonpath equality-literal forms the retired TEXT comparison could match
+     * for {@code operand}: one literal for a provably-unambiguous String, two
+     * (typed form + string form) for anything the retired code's
+     * {@code String.valueOf(...)} coercion could have matched across a
+     * JSON-number/JSON-string or JSON-boolean/JSON-string boundary (T2 [24219]
+     * finding A).
+     */
+    private static List<String> equalityLiterals(String operator, String key, Object operand) {
+        String text = String.valueOf(operand); // matches appendWherePredicate's own coercion, incl. null -> "null"
+        List<String> literals = new ArrayList<>(2);
+        if (operand instanceof Number n) {
+            literals.add(toBigDecimalOperand(operator, key, n).toPlainString());
+            literals.add(jsonStringLiteral(text));
+        } else if (operand instanceof Boolean b) {
+            literals.add(b.toString());
+            literals.add(jsonStringLiteral(text));
+        } else if (operand == null) {
+            // String form only: exists($.k) is false for a genuinely-absent key in
+            // either semantics, and a stored JSON null's ->> text is SQL NULL, never
+            // the string "null" -- so there is no separate JSON-null literal form
+            // the retired text compare could ever have matched here.
+            literals.add(jsonStringLiteral(text));
+        } else if (isNumericLooking(text)) {
+            literals.add(new java.math.BigDecimal(text).toPlainString());
+            literals.add(jsonStringLiteral(text));
+        } else if ("true".equals(text) || "false".equals(text)) {
+            literals.add(text);
+            literals.add(jsonStringLiteral(text));
+        } else {
+            literals.add(jsonStringLiteral(text));
+        }
+        return literals;
+    }
+
+    private static String jsonStringLiteral(String text) {
+        try {
+            return MAPPER.writeValueAsString(text);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("where operand is not JSON-serializable: " + text, e);
+        }
+    }
+
+    /**
+     * A single equality check as an {@code exists(path ? (@ == literal))} filter,
+     * rather than a bare {@code path == literal}. Required whenever more than one
+     * literal form can be ORed together (T2 [24219] finding A's tolerant typing):
+     * jsonpath comparison is three-valued (true/false/unknown) under its default lax
+     * mode, and a TYPE-MISMATCHED {@code ==} yields {@code unknown}, not
+     * {@code false} -- {@code unknown || false} stays {@code unknown} under
+     * SQL/JSON's three-valued {@code ||}, and {@code metadata @@ jsonpath} demands a
+     * definite {@code true} to match, treating {@code unknown} the same as
+     * {@code false} (no match). A bare OR of mixed-type {@code ==} comparisons would
+     * therefore silently fail to match the WELL-typed branch too, since the whole
+     * OR collapses to {@code unknown} once ANY operand does. Wrapping each
+     * comparison in its own {@code exists(...)} forces a definite boolean at that
+     * boundary (a filter predicate that is {@code unknown} for an item excludes it,
+     * so {@code exists()} on an empty result is a clean {@code false}) before the
+     * surrounding {@code ||}/{@code !} ever see it -- confirmed by a live-Postgres
+     * regression (a bare-OR encoding returned zero rows for a well-typed non-matching
+     * comparison sharing a key with a type-mismatched one).
+     */
+    private static String existsEquals(String path, String literal) {
+        return "exists(" + path + " ? (@ == " + literal + "))";
+    }
+
+    /** ORed {@code exists(...)} equality fragment over a pre-computed literal set, no parens. */
+    private static String orEqualsLiterals(String path, List<String> literals) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < literals.size(); i++) {
+            if (i > 0) sb.append(" || ");
+            sb.append(existsEquals(path, literals.get(i)));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * ORed {@code exists(...)} equality fragment over {@code $in}/{@code $nin}
+     * items, no parens: each item contributes its own tolerant literal set (T2
+     * [24219] finding A), unioned with every other item's.
+     */
     private static String orEquals(String path, List<?> items) {
         StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < items.size(); i++) {
-            if (i > 0) sb.append(" || ");
-            sb.append(path).append(" == ").append(jsonPathLiteral("$in/$nin", "(list item)", items.get(i)));
+        boolean first = true;
+        for (Object item : items) {
+            requireScalarOperand("$in/$nin", "(list item)", item);
+            for (String literal : equalityLiterals("$in/$nin", "(list item)", item)) {
+                if (!first) sb.append(" || ");
+                sb.append(existsEquals(path, literal));
+                first = false;
+            }
         }
         return sb.toString();
     }

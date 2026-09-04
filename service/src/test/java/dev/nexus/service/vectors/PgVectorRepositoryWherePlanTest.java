@@ -35,13 +35,125 @@ class PgVectorRepositoryWherePlanTest {
         assertThat(plan.jsonPath()).isNull();
     }
 
+    // ── tolerant-typing rule (T2 [24219] critique finding A) ────────────────────────
+    // The retired appendWherePredicate always compared via metadata->>'k' (TEXT), so a
+    // stored JSON number 5 matched an operand "5" and vice versa, likewise booleans.
+    // Containment/jsonpath native == are both type-strict, so a Number/Boolean/
+    // numeric-looking-string/boolean-looking-string operand must route through a
+    // tolerant jsonpath OR of both literal forms to reproduce that cross-type match.
+
     @Test
-    void plainEquality_coercesNonStringValue_asJsonNumber() {
-        // Unlike appendWherePredicate's TEXT-comparison quirk (metadata->>'k' = '2020'),
-        // containment is type-preserving JSON equality: the operand's own JSON type
-        // (here, a number) is what gets compared, not its String.valueOf() rendering.
+    void plainEquality_numericOperand_toleratesCrossTypeMatch() {
+        // Containment alone would only match a stored JSON number 2020, never a stored
+        // JSON string "2020" -- both matched under the retired TEXT comparison.
         WherePlan plan = PgVectorRepository.planWhere(Map.of("year", 2020));
-        assertThat(plan.containment().data()).isEqualTo("{\"year\":2020}");
+        assertThat(plan.containment()).isNull();
+        assertThat(plan.jsonPath())
+            .isEqualTo("(exists($.\"year\" ? (@ == 2020)) || exists($.\"year\" ? (@ == \"2020\")))");
+    }
+
+    @Test
+    void plainEquality_numericLookingStringOperand_toleratesCrossTypeMatch() {
+        // Symmetric case: a String operand that LOOKS numeric must also match a stored
+        // JSON number, exactly as the retired code's blind String.valueOf(...) did.
+        WherePlan plan = PgVectorRepository.planWhere(Map.of("year", "2020"));
+        assertThat(plan.containment()).isNull();
+        assertThat(plan.jsonPath())
+            .isEqualTo("(exists($.\"year\" ? (@ == 2020)) || exists($.\"year\" ? (@ == \"2020\")))");
+    }
+
+    @Test
+    void plainEquality_booleanOperand_toleratesCrossTypeMatch() {
+        WherePlan plan = PgVectorRepository.planWhere(Map.of("flag", true));
+        assertThat(plan.containment()).isNull();
+        assertThat(plan.jsonPath())
+            .isEqualTo("(exists($.\"flag\" ? (@ == true)) || exists($.\"flag\" ? (@ == \"true\")))");
+    }
+
+    @Test
+    void plainEquality_booleanLookingStringOperand_toleratesCrossTypeMatch() {
+        WherePlan plan = PgVectorRepository.planWhere(Map.of("flag", "false"));
+        assertThat(plan.containment()).isNull();
+        assertThat(plan.jsonPath())
+            .isEqualTo("(exists($.\"flag\" ? (@ == false)) || exists($.\"flag\" ? (@ == \"false\")))");
+    }
+
+    @Test
+    void plainEquality_nullOperand_matchesLiteralFourCharacterString() {
+        // Retired code compared against String.valueOf(null) = "null" (a plain 4-char
+        // string), never the JSON null literal -- containment.put(key, null) would mean
+        // something else entirely ("stored value IS json null").
+        var where = new LinkedHashMap<String, Object>();
+        where.put("k", null);
+        WherePlan plan = PgVectorRepository.planWhere(where);
+        assertThat(plan.containment()).isNull();
+        assertThat(plan.jsonPath()).isEqualTo("(exists($.\"k\" ? (@ == \"null\")))");
+    }
+
+    @Test
+    void neOperator_numericOperand_toleratesCrossTypeMatch() {
+        WherePlan plan = PgVectorRepository.planWhere(Map.of("year", Map.of("$ne", 2020)));
+        assertThat(plan.jsonPath())
+            .isEqualTo("(!exists($.\"year\") || !(exists($.\"year\" ? (@ == 2020)) "
+                + "|| exists($.\"year\" ? (@ == \"2020\"))))");
+    }
+
+    @Test
+    void inOperator_numericAndBooleanItems_toleratesCrossTypeMatch() {
+        WherePlan plan = PgVectorRepository.planWhere(Map.of("k", Map.of("$in", List.of(5, true))));
+        assertThat(plan.jsonPath())
+            .isEqualTo("(exists($.\"k\" ? (@ == 5)) || exists($.\"k\" ? (@ == \"5\")) "
+                + "|| exists($.\"k\" ? (@ == true)) || exists($.\"k\" ? (@ == \"true\")))");
+    }
+
+    @Test
+    void ninOperator_numericItem_toleratesCrossTypeMatch() {
+        WherePlan plan = PgVectorRepository.planWhere(Map.of("k", Map.of("$nin", List.of(3))));
+        assertThat(plan.jsonPath())
+            .isEqualTo("(!exists($.\"k\") || !(exists($.\"k\" ? (@ == 3)) "
+                + "|| exists($.\"k\" ? (@ == \"3\"))))");
+    }
+
+    // ── non-scalar operand rejection (T2 [24220] review finding) ────────────────────
+    // A Map/List operand would otherwise serialize as raw, unquoted JSON object/array
+    // text straight into the jsonpath predicate string -- invalid jsonpath syntax,
+    // surfacing as an opaque Postgres syntax-error 500 instead of a 400.
+
+    @Test
+    void plainEquality_nonScalarValue_failsLoud() {
+        assertThatThrownBy(() -> PgVectorRepository.planWhere(Map.of("k", List.of("a", "b"))))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("scalar operand");
+    }
+
+    @Test
+    void eqOperator_nonScalarOperand_failsLoud() {
+        assertThatThrownBy(() -> PgVectorRepository.planWhere(Map.of("k", Map.of("$eq", Map.of("nested", 1)))))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("scalar operand");
+    }
+
+    @Test
+    void neOperator_nonScalarOperand_failsLoud() {
+        assertThatThrownBy(() -> PgVectorRepository.planWhere(Map.of("k", Map.of("$ne", List.of("a", "b")))))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("scalar operand");
+    }
+
+    @Test
+    void inOperator_nestedMapItem_failsLoud() {
+        assertThatThrownBy(
+                () -> PgVectorRepository.planWhere(Map.of("k", Map.of("$in", List.of(Map.of("nested", 1))))))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("scalar operand");
+    }
+
+    @Test
+    void ninOperator_nestedListItem_failsLoud() {
+        assertThatThrownBy(
+                () -> PgVectorRepository.planWhere(Map.of("k", Map.of("$nin", List.of(List.of(1, 2))))))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("scalar operand");
     }
 
     @Test
@@ -56,20 +168,22 @@ class PgVectorRepositoryWherePlanTest {
         WherePlan plan = PgVectorRepository.planWhere(Map.of("section_type", Map.of("$ne", "references")));
         assertThat(plan.containment()).isNull();
         assertThat(plan.jsonPath())
-            .isEqualTo("(!exists($.\"section_type\") || $.\"section_type\" != \"references\")");
+            .isEqualTo("(!exists($.\"section_type\") || !(exists($.\"section_type\" ? (@ == \"references\"))))");
     }
 
     @Test
     void inOperator_orsEquality() {
         WherePlan plan = PgVectorRepository.planWhere(Map.of("kind", Map.of("$in", List.of("a", "b"))));
-        assertThat(plan.jsonPath()).isEqualTo("($.\"kind\" == \"a\" || $.\"kind\" == \"b\")");
+        assertThat(plan.jsonPath())
+            .isEqualTo("(exists($.\"kind\" ? (@ == \"a\")) || exists($.\"kind\" ? (@ == \"b\")))");
     }
 
     @Test
     void ninOperator_absentKeyKeptSemantics() {
         WherePlan plan = PgVectorRepository.planWhere(Map.of("kind", Map.of("$nin", List.of("a", "b"))));
         assertThat(plan.jsonPath())
-            .isEqualTo("(!exists($.\"kind\") || !($.\"kind\" == \"a\" || $.\"kind\" == \"b\"))");
+            .isEqualTo("(!exists($.\"kind\") || !(exists($.\"kind\" ? (@ == \"a\")) "
+                + "|| exists($.\"kind\" ? (@ == \"b\"))))");
     }
 
     @Test
@@ -175,6 +289,6 @@ class PgVectorRepositoryWherePlanTest {
     void keyRequiringQuoting_rendersAsQuotedJsonPathMember() {
         WherePlan plan = PgVectorRepository.planWhere(Map.of("weird key", Map.of("$ne", "x")));
         assertThat(plan.jsonPath())
-            .isEqualTo("(!exists($.\"weird key\") || $.\"weird key\" != \"x\")");
+            .isEqualTo("(!exists($.\"weird key\") || !(exists($.\"weird key\" ? (@ == \"x\"))))");
     }
 }

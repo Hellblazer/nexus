@@ -673,6 +673,59 @@ class PgVectorRepositoryContractTest {
             .containsExactly("3642f56d48b72b6bf43456f6c1a451d6625e9efc5bed097f381214eca5998b3e", "8ecea065b8b1777ed87fa27510795344fcb20d7312c5be5965882374f971d014");
     }
 
+    // Tolerant-typing rule (nexus-zrcj7, T2 [24219] critique finding A): the retired
+    // appendWherePredicate compared via metadata->>'k' (TEXT), so a stored JSON number
+    // matched an operand string and vice versa. planWhere must reproduce that tolerance
+    // for $eq/$ne, not the type-strict containment/jsonpath equality that regressed it.
+
+    @Test
+    void search_whereEqNumeric_matchesBothJsonNumberAndJsonStringStoredValues() {
+        String col = "code__searcheqtyping__voyage-code-3__v1";
+        embedder1024.register("search query", 1.0f, 0.0f);
+        embedder1024.register("eq typing num", 1.0f, 0.0f);
+        embedder1024.register("eq typing str", 0.8f, 0.6f);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("c0f697c5882a7b89ad4df5916773ef043b00ba1fd1a6bfe058f56e1c7bf98b1b",
+                    "3951f2235b88dca02fd70cf06f48499c4dd18370f0b326114dc8ae82b5f97a5e"),
+            List.of("eq typing num", "eq typing str"),
+            List.of(Map.of("year", 2020),      // JSON number
+                    Map.of("year", "2020")));   // JSON string
+
+        List<Map<String, Object>> rows = repo1024.search(
+            TENANT_A, "search query", List.of(col), 10, Map.of("year", 2020));
+
+        assertThat(rows).extracting(r -> r.get("id"))
+            .as("{year: 2020} (a Java Integer operand) must match BOTH the JSON-number "
+                + "and JSON-string stored forms, exactly as the retired TEXT-comparison "
+                + "appendWherePredicate did — cross-type tolerance, not containment's "
+                + "type-strict equality")
+            .containsExactlyInAnyOrder(
+                "c0f697c5882a7b89ad4df5916773ef043b00ba1fd1a6bfe058f56e1c7bf98b1b",
+                "3951f2235b88dca02fd70cf06f48499c4dd18370f0b326114dc8ae82b5f97a5e");
+    }
+
+    @Test
+    void search_whereNeNumeric_excludesBothJsonNumberAndJsonStringStoredValues() {
+        String col = "code__searchnetyping__voyage-code-3__v1";
+        embedder1024.register("search query", 1.0f, 0.0f);
+        embedder1024.register("ne typing num", 1.0f, 0.0f);
+        embedder1024.register("ne typing other", 0.8f, 0.6f);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("fee047ffeec6cacb34fe65bbdd0260f6c2b6015e9d4ac7e2076e1867bf73cdf4",
+                    "295bc5a5a2bcbef81fa6f5078dc53801858e93f1cac49c96dcf08ac9a656106b"),
+            List.of("ne typing num", "ne typing other"),
+            List.of(Map.of("year", 2020),      // JSON number, must be excluded
+                    Map.of("year", "2021")));  // JSON string, non-matching, must be kept
+
+        List<Map<String, Object>> rows = repo1024.search(
+            TENANT_A, "search query", List.of(col), 10, Map.of("year", Map.of("$ne", 2020)));
+
+        assertThat(rows).extracting(r -> r.get("id"))
+            .as("{year:{$ne:2020}} must exclude the JSON-number 2020 row (cross-type "
+                + "tolerance applies to $ne too) and keep the non-matching string row")
+            .containsExactly("295bc5a5a2bcbef81fa6f5078dc53801858e93f1cac49c96dcf08ac9a656106b");
+    }
+
     @Test
     void search_whereIn_matchesAnyListed() {
         String col = "code__searchin__voyage-code-3__v1";

@@ -110,8 +110,8 @@ class PlainSearchTextGatedSearchExplainTest {
                 "GRANT SELECT ON nexus.catalog_document_chunks, nexus.catalog_documents TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.plain_search_1024, nexus.text_gated_search_1024, "
-                + "nexus.text_gate_probe_1024, nexus.text_gated_search_hnsw_first_1024 TO "
-                + SVC_ROLE);
+                + "nexus.text_gate_probe_1024, nexus.text_gated_search_hnsw_first_1024, "
+                + "nexus.text_gated_search_by_chash_1024 TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
@@ -298,6 +298,58 @@ class PlainSearchTextGatedSearchExplainTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // text_gated_search_by_chash_1024 (vectors-012): the selective rank must NOT
+    // re-evaluate the text gate (T2 [24219] critique finding B, single-gate-eval
+    // restored) -- its plan must carry no trigram `<%` operator at all.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    void explain_textGatedSearchByChash_selectiveRank_noTrigramOperator() throws Exception {
+        // targetChashes come from the SAME selective fixture as
+        // explain_textGatedSearch_selectiveGate_neverTouchesHnsw_notFunctionScan above --
+        // hybridSearch's own probe would have fetched exactly this chash set for this
+        // fixture (below SELECTIVE_GATE_MAX). The rank query below takes those chashes
+        // directly, exactly as hybridSearch's Java dispatch now does, and must contain
+        // NO `<%` (word_similarity/trigram) operator -- the gate was already evaluated
+        // once by the probe; re-running it here would be the exact double-recheck this
+        // changeset exists to eliminate.
+        StringBuilder chashArray = new StringBuilder("ARRAY[");
+        for (int i = 0; i < targetChashes.size(); i++) {
+            if (i > 0) chashArray.append(',');
+            chashArray.append("decode('").append(targetChashes.get(i)).append("','hex')");
+        }
+        chashArray.append("]::bytea[]");
+        String plan = explain(
+            "SELECT id FROM nexus.text_gated_search_by_chash_1024('" + vec(1.0, 0.0)
+            + "'::vector, " + chashArray + ", ARRAY['" + COLL + "']::text[], "
+            + "NULL::jsonb, NULL::text, 50)");
+        assertThat(plan)
+            .as("text_gated_search_by_chash_1024's plan must carry NO trigram `<%` "
+                + "operator -- the gate is not re-evaluated here, only chash = ANY(...) "
+                + "plus scope. Plan was:%n%s", plan)
+            .doesNotContain("<%");
+        assertThat(plan)
+            .as("a Function Scan node means the function is not inlinable (plpgsql) — "
+                + "vectors-012 must use an inlinable LANGUAGE sql function. Plan was:%n%s",
+                plan)
+            .doesNotContain("Function Scan");
+    }
+
+    @Test
+    void textGatedSearchByChash_selectiveRank_returnsExactMatches_viaPublicApi() {
+        // Behavioral companion, through hybridSearch's actual Java dispatch (which now
+        // calls text_gated_search_by_chash_1024 for the selective branch, not
+        // text_gated_search_1024 directly -- T2 [24219] finding B).
+        List<Map<String, Object>> rows = repo.hybridSearch(TENANT, TOKEN, List.of(COLL), 50, null);
+        List<String> ids = rows.stream().map(r -> (String) r.get("id")).toList();
+        assertThat(ids)
+            .as("hybridSearch's selective branch (probe -> text_gated_search_by_chash_1024) "
+                + "must return exactly the token-bearing targets, excluding vector-closest "
+                + "filler with no text signal")
+            .containsExactlyInAnyOrderElementsOf(targetChashes);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // nexus-zrcj7 pushback item 2 (coordinator, post-completion review): the original
     // task instructed EITHER preserving the lcogi/x7z7l two-branch dispatch (selective
     // chash-rank vs HNSW-first) inside the new function, OR proving with EXPLAIN evidence
@@ -360,13 +412,16 @@ class PlainSearchTextGatedSearchExplainTest {
     @Test
     void textGatedSearch_selectiveGate_returnsExactMatches_viaPublicApi() {
         // Behavioral companion to the EXPLAIN proof above, through the production
-        // PgVectorRepository#hybridSearch API (which now dispatches to
-        // text_gated_search_1024): the selective gate (filler is vector-closest but
-        // carries no token) must return exactly the token-bearing targets.
+        // PgVectorRepository#hybridSearch API (which dispatches to text_gate_probe_1024
+        // then text_gated_search_by_chash_1024 for the selective case -- T2 [24219]
+        // finding B; see textGatedSearchByChash_selectiveRank_returnsExactMatches_
+        // viaPublicApi below for the dedicated coverage of that exact path): the
+        // selective gate (filler is vector-closest but carries no token) must return
+        // exactly the token-bearing targets.
         List<Map<String, Object>> rows = repo.hybridSearch(TENANT, TOKEN, List.of(COLL), 50, null);
         List<String> ids = rows.stream().map(r -> (String) r.get("id")).toList();
         assertThat(ids)
-            .as("text_gated_search_1024 must return exactly the token-bearing gate, "
+            .as("the selective dispatch must return exactly the token-bearing gate, "
                 + "excluding vector-closest filler with no text signal")
             .containsExactlyInAnyOrderElementsOf(targetChashes);
     }
