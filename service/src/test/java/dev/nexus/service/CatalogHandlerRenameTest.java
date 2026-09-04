@@ -5,11 +5,8 @@ package dev.nexus.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.TenantConstants;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
@@ -57,32 +54,16 @@ class CatalogHandlerRenameTest {
         mapper = new ObjectMapper();
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='" + SVC_ROLE + "') THEN "
-                + "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "'; END IF; END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='nexus_svc') THEN "
-                + "CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; END IF; END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
         try (Connection su = pg.createConnection("")) {
-            var lb = new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(),
-                DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su)));
-            lb.update(new Contexts());
-        }
-        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
+            // bootstrapServiceRole's Liquibase run leaves su's autoCommit disabled
+            // (Liquibase manages its own changeset-boundary commits); re-enable it
+            // so this INSERT via seedServiceToken actually commits before su closes.
             su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES ('"
-                + dev.nexus.service.db.TokenHashing.sha256Hex(TOKEN)
-                + "', '" + TENANT + "', 'test-bound') ON CONFLICT (token_hash) DO NOTHING");
-            su.createStatement().execute("ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+            PgContainerHelper.seedServiceToken(
+                DSL.using(su, SQLDialect.POSTGRES), TOKEN, TENANT, "test-bound");
             // Seed two registry rows to rename (one per route-shape test).
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT + "', 'hren__old')");

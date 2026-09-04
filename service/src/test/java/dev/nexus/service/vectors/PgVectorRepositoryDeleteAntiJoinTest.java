@@ -7,11 +7,6 @@ import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -68,37 +63,11 @@ class PgVectorRepositoryDeleteAntiJoinTest {
         pg = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN " +
-                "    CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "' NOSUPERUSER NOBYPASSRLS; " +
-                "  END IF; " +
-                "END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; " +
-                "  END IF; " +
-                "END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
 
         try (Connection su = pg.createConnection("")) {
-            var lb = new Liquibase(
-                "db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(),
-                DatabaseFactory.getInstance().findCorrectDatabaseImplementation(
-                    new JdbcConnection(su)));
-            lb.update(new Contexts());
-        }
-
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute("GRANT USAGE ON SEQUENCE nexus.catalog_links_id_seq TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
 
         var cfg = new HikariConfig();

@@ -11,11 +11,6 @@ import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.PgVectorRepository;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -155,38 +150,18 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            for (String role : new String[] {SVC_ROLE, "nexus_svc"}) {
-                su.createStatement().execute(
-                    "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '"
-                    + role + "') THEN CREATE ROLE " + role + " LOGIN PASSWORD '"
-                    + (role.equals(SVC_ROLE) ? SVC_PASS : "nexus_svc_pass")
-                    + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
-            }
+            PgContainerHelper.applyProductSchema(su);
         }
         try (Connection su = pg.createConnection("")) {
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(),
-                DatabaseFactory.getInstance().findCorrectDatabaseImplementation(
-                    new JdbcConnection(su)))
-                .update(new Contexts());
-        }
-        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
+            // The two gc_* function EXECUTE grants are not part of
+            // bootstrapServiceRole's fixed grant set (nexus-cbo4a batch 1a) --
+            // kept as explicit grants.
             su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA staging TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA staging TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.gc_quarantine_orphans(int, text, text, text, text, int) TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.gc_expire_quarantine(int, text, text, text, text, float8, int, boolean) TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());

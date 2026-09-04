@@ -4,11 +4,23 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.TokenHashing;
+import liquibase.Contexts;
+import liquibase.Liquibase;
+import liquibase.database.Database;
+import liquibase.database.DatabaseFactory;
+import liquibase.database.jvm.JdbcConnection;
+import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.DSLContext;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.Map;
+
+import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 
 
 /**
@@ -226,16 +238,95 @@ public final class PgContainerHelper {
      *
      * @param su      superuser connection (the role owner / grantor)
      * @param svcRole the test-local service role name to grant
+     * @deprecated (nexus-cbo4a batch 1a) — delegates to {@link
+     *     #bootstrapServiceRole(Connection, String, String)} using this
+     *     class's own {@link #SVC_PASSWORD} as the role's password, since
+     *     this 2-arg signature has no password parameter of its own. Every
+     *     existing caller already creates {@code svcRole} (or relies on it
+     *     already existing) before invoking this method with SOME password —
+     *     {@code bootstrapServiceRole}'s own {@code CREATE ROLE ... IF NOT
+     *     EXISTS} guard is then a no-op and only the grants below actually
+     *     execute, exactly as before. Kept only so this method's 7 existing
+     *     call sites keep compiling unchanged; new callers should call
+     *     {@code bootstrapServiceRole} directly with their own role/password.
      */
-    public static void grantServiceSchemaAccess(Connection su, String svcRole) throws SQLException {
-        su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + svcRole);
-        su.createStatement().execute(
-            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + svcRole);
-        su.createStatement().execute(
-            "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO " + svcRole);
-        su.createStatement().execute("GRANT USAGE ON SCHEMA staging TO " + svcRole);
-        su.createStatement().execute(
-            "GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA staging TO " + svcRole);
-        su.createStatement().execute("ALTER ROLE " + svcRole + " SET search_path TO nexus, public");
+    @Deprecated
+    public static void grantServiceSchemaAccess(Connection su, String svcRole) throws Exception {
+        bootstrapServiceRole(su, svcRole, SVC_PASSWORD);
+    }
+
+    /**
+     * Run the PRODUCT master changelog ({@code db/changelog/db.changelog-master.xml})
+     * against {@code su} — the single place every test class's own hand-rolled
+     * {@code new Liquibase("db/changelog/db.changelog-master.xml", ...)} call
+     * used to live (nexus-cbo4a batch 1a). Creates the {@code nexus}/{@code staging}
+     * schemas and every product table, and — via {@code role-001-nexus-svc.xml}, the
+     * FIRST include in the master changelog — creates the {@code nexus_svc} role
+     * itself if it does not already exist, so callers never need to pre-create it by
+     * hand before this call (see {@link SharedCluster}'s template-bootstrap comment
+     * for the same finding, made independently for the shared-cluster path).
+     *
+     * @param su superuser connection to run the migration under
+     */
+    public static void applyProductSchema(Connection su) throws Exception {
+        Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su));
+        Liquibase liquibase = new Liquibase(
+            "db/changelog/db.changelog-master.xml", new ClassLoaderResourceAccessor(), db);
+        liquibase.update(new Contexts());
+    }
+
+    /**
+     * Bootstrap a test-local service role via the {@code db/changelog-test/
+     * db.changelog-test-role.xml} test changelog (nexus-cbo4a batch 1a) — replaces
+     * the hand-rolled DO-block {@code CREATE ROLE}, schema/table/sequence
+     * {@code GRANT}s, and {@code ALTER ROLE ... SET search_path} that 84 test
+     * classes used to copy by hand. Creates {@code svcRole} (LOGIN, NOSUPERUSER,
+     * NOBYPASSRLS) if absent, redundantly/idempotently ensures {@code nexus_svc}
+     * exists too (see {@link #applyProductSchema}'s javadoc — always a no-op here
+     * in practice), grants {@code svcRole} the same {@code nexus}+{@code staging}
+     * DML/sequence access {@link #grantServiceSchemaAccess} used to hand-grant, and
+     * sets {@code svcRole}'s {@code search_path}.
+     *
+     * <p><b>Call AFTER {@link #applyProductSchema}</b> — the {@code GRANT ... ON ALL
+     * TABLES}/{@code ON ALL SEQUENCES} statements inside the test changelog require
+     * the {@code nexus}/{@code staging} schemas and their tables to already exist.
+     *
+     * @param su      superuser connection (the role owner / grantor)
+     * @param svcRole the test-local service role name to create and grant
+     * @param svcPass the password for {@code svcRole}
+     */
+    public static void bootstrapServiceRole(Connection su, String svcRole, String svcPass) throws Exception {
+        Database db = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(new JdbcConnection(su));
+        Liquibase liquibase = new Liquibase(
+            "db/changelog-test/db.changelog-test-role.xml", new ClassLoaderResourceAccessor(), db);
+        Map<String, Object> params = new HashMap<>();
+        params.put("svcRole", svcRole);
+        params.put("svcPass", svcPass);
+        for (var entry : params.entrySet()) {
+            liquibase.setChangeLogParameter(entry.getKey(), entry.getValue());
+        }
+        liquibase.update(new Contexts());
+    }
+
+    /**
+     * Seed one {@code nexus.service_tokens} row via generated jOOQ DSL (nexus-cbo4a
+     * batch 1a) — replaces the hand-rolled {@code INSERT INTO nexus.service_tokens
+     * (token_hash, tenant_id, label) VALUES (...) ON CONFLICT (token_hash) DO
+     * NOTHING} six test classes used to build by string concatenation. The raw
+     * token is hashed via {@link TokenHashing#sha256Hex}, matching production's own
+     * issuance path exactly.
+     *
+     * @param dsl    a {@link DSLContext} over the same connection/role the schema
+     *               was migrated under (e.g. {@code DSL.using(su, SQLDialect.POSTGRES)})
+     * @param token  the raw bearer token to hash and store
+     * @param tenant the tenant id to bind the token to
+     * @param label  the token's {@code service_tokens.label} value
+     */
+    public static void seedServiceToken(DSLContext dsl, String token, String tenant, String label) {
+        dsl.insertInto(SERVICE_TOKENS)
+            .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
+            .values(TokenHashing.sha256Hex(token), tenant, label)
+            .onConflictDoNothing()
+            .execute();
     }
 }
