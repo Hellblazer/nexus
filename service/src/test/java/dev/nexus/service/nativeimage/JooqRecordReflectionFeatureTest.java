@@ -155,7 +155,16 @@ class JooqRecordReflectionFeatureTest {
     // SearchAspectScoped_768Record/SearchAspectScoped_1024Record), +3.
     // aspects-004-doc-id-backfill.xml (same bead) is DATA-only DML, no
     // new relation, no further delta.
-    private static final int EXPECTED_RECORD_TYPES = 68;
+    // 68 -> 81: nexus-zrcj7 (no SQL strings in Java) retired the search
+    // paths and BackendReaper onto schema functions: vectors-009
+    // nexus.plain_search_384/768/1024 (+3), vectors-011
+    // nexus.text_gate_probe_384/768/1024 (SETOF bytea, +3),
+    // nexus.text_gated_search_hnsw_first_384/768/1024 (+3),
+    // nexus.text_gated_search_by_chash_384/768/1024 (+3), and
+    // backend-reaper-001 nexus.terminate_own_backends (RETURNS TABLE, +1).
+    // catalog-035 nexus.catalog_fts_match is a scalar boolean function:
+    // no Record type, no delta.
+    private static final int EXPECTED_RECORD_TYPES = 81;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {
