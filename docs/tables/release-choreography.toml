@@ -60,12 +60,16 @@
 # using the IDENTICAL short-circuit-by-omission discipline. The
 # enumerator's own "n/a" placeholder (a cell input value meaning "this
 # axis is not examined on this branch", e.g. check_floor_bare's
-# pin_currency=blocks cell carries probe="n/a") is dropped from the
-# domain entirely rather than declared as a real value -- the omission
-# technique already expresses "not examined" without it, and a "n/a"
-# domain member would create a phantom, permanently-uncovered
-# combination (real probe values never co-occur with pin_currency=
-# blocks) that check_table would wrongly flag as a coverage-gap.
+# pin_currency=blocks cell carries probe="n/a") was, until nexus-q9u2n,
+# dropped from the domain entirely rather than declared as a real value:
+# a "n/a" domain member created a phantom, permanently-uncovered
+# combination (a real probe value never co-occurs with pin_currency=
+# blocks, and "n/a" never with passes) that check_table flagged as a
+# coverage-gap. The checker now takes [[impossible]] blocks naming a
+# guard pair that cannot co-occur and subtracts those cells from the
+# product, so "n/a" is declared for check_floor_bare and
+# check_floor_paired with the pair that rules it out; the omission
+# discipline still carries the other groups.
 #
 # NO EVENT COLUMN -- BY RULING, NOT OVERSIGHT (nexus-j9z30.26, Sam,
 # 2026-09-02). RDR-201 Finding 2 classified the 7.1.0/v0.1.62 incident as
@@ -446,15 +450,19 @@ emit = { exit_code = "0", message_key = "tracker_recorded" }
 
 # --------------------------------------------------------------------
 # check_floor_bare (hand-enumerated, 5 cells): pin_currency delegate
-# (2 values) x probe (4 real values; the enumerator's "n/a" placeholder
-# for the pin_currency=blocks short-circuit is dropped, not declared --
-# see the file header).
+# (2 values) x probe (4 real values plus the enumerator's "n/a", the
+# value the pin_currency=blocks short-circuit carries; the [[impossible]]
+# block below says "n/a" never co-occurs with passes -- see the header).
 # --------------------------------------------------------------------
 
 [dimensions."check_floor_bare.pin_currency"]
 domain = ["blocks", "passes"]
 [dimensions."check_floor_bare.probe"]
-domain = ["unreachable", "ms_error", "success_stale", "success_current"]
+domain = ["n/a", "unreachable", "ms_error", "success_stale", "success_current"]
+
+[[impossible]]
+"check_floor_bare.pin_currency" = "passes"
+"check_floor_bare.probe" = "n/a"
 
 [[row]]
 id = "check_floor_bare::bare_pin_blocks"
@@ -488,16 +496,21 @@ emit = { exit_code = "0", message_key = "bare_probe_current" }
 
 # --------------------------------------------------------------------
 # check_floor_paired (hand-enumerated, 7 cells): battery delegate
-# (2 values) x probe (6 real values, "n/a" dropped as above).
+# (2 values) x probe (6 real values plus "n/a", ruled out against
+# passes by the [[impossible]] block, as above).
 # --------------------------------------------------------------------
 
 [dimensions."check_floor_paired.battery"]
 domain = ["blocks", "passes"]
 [dimensions."check_floor_paired.probe"]
 domain = [
-  "unreachable", "ms_error_not_below_floor", "ms_error_below_floor",
+  "n/a", "unreachable", "ms_error_not_below_floor", "ms_error_below_floor",
   "success_unparseable", "success_below_floor", "success_at_or_above_floor",
 ]
+
+[[impossible]]
+"check_floor_paired.battery" = "passes"
+"check_floor_paired.probe" = "n/a"
 
 # O2 pair, half 1 of 2 (ruling nexus-j9z30.17, Sam 2026-09-02: KEEP).
 # Exit 1 here even when the cloud is already at floor, because the

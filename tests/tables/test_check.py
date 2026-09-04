@@ -33,6 +33,7 @@ from nexus.tables.check import (
     exit_code,
 )
 from nexus.tables.load import (
+    TableLoadError,
     Dimension,
     DuplicateRowIdError,
     FrozenMapping,
@@ -375,8 +376,8 @@ def test_non_vacuity_neutering_detectors_removes_planted_findings(monkeypatch):
     assert OVERLAP in {f.code for f in live_findings}
     assert COVERAGE_GAP in {f.code for f in live_findings}
 
-    monkeypatch.setattr(check_mod, "_check_overlap", lambda group, dims, dimensions: [])
-    monkeypatch.setattr(check_mod, "_check_coverage", lambda group, dims, dimensions: [])
+    monkeypatch.setattr(check_mod, "_check_overlap", lambda group, dims, dimensions, impossible=(): [])
+    monkeypatch.setattr(check_mod, "_check_coverage", lambda group, dims, dimensions, impossible=(): [])
     neutered_findings = check_table(table)
 
     assert OVERLAP not in {f.code for f in neutered_findings}
@@ -627,3 +628,103 @@ def test_declared_but_never_named_dimension_is_an_advisory():
 def test_packaged_lifecycle_table_has_no_unused_dimension():
     findings = check_mod.check_table(load_packaged_table("rdr-lifecycle.toml"))
     assert not [f for f in findings if f.code == check_mod.UNUSED_DIMENSION]
+
+
+# --------------------------------------------------------------------------
+# [[impossible]] guard pairs (nexus-q9u2n)
+
+_IMPOSSIBLE_BASE = """
+[table]
+id = "t"
+kind = "decision-table"
+
+[dimensions.fn]
+domain = ["f"]
+[dimensions."fn.gate"]
+domain = ["blocks", "passes"]
+[dimensions."fn.probe"]
+domain = ["n/a", "ok", "bad"]
+
+[[row]]
+id = "blocks"
+match = { fn = "f" }
+guard = { "fn.gate" = "blocks" }
+emit = { exit_code = "2", message_key = "blocks" }
+
+[[row]]
+id = "ok"
+match = { fn = "f" }
+guard = { "fn.gate" = "passes", "fn.probe" = "ok" }
+emit = { exit_code = "0", message_key = "ok" }
+
+[[row]]
+id = "bad"
+match = { fn = "f" }
+guard = { "fn.gate" = "passes", "fn.probe" = "bad" }
+emit = { exit_code = "1", message_key = "bad" }
+"""
+
+_IMPOSSIBLE_PAIR = """
+[[impossible]]
+"fn.gate" = "passes"
+"fn.probe" = "n/a"
+"""
+
+
+def _write(tmp_path, text: str):
+    p = tmp_path / "t.toml"
+    p.write_text(text)
+    return p
+
+
+def test_a_phantom_cell_is_a_gap_without_the_impossible_block(tmp_path):
+    """(passes, n/a) is in the product and no row covers it."""
+    findings = check_table(load_table(_write(tmp_path, _IMPOSSIBLE_BASE)))
+    gaps = [f for f in findings if f.code == COVERAGE_GAP]
+    assert len(gaps) == 1 and gaps[0].detail["missing_sample"] == [{"fn.gate": "passes", "fn.probe": "n/a"}]
+
+
+def test_the_impossible_block_subtracts_the_cell_and_the_table_proves(tmp_path):
+    findings = check_table(load_table(_write(tmp_path, _IMPOSSIBLE_BASE + _IMPOSSIBLE_PAIR)))
+    assert findings == [], [f.to_json() for f in findings]
+
+
+def test_a_row_covering_only_impossible_cells_is_a_dead_row_advisory(tmp_path):
+    dead = """
+[[row]]
+id = "never"
+match = { fn = "f" }
+guard = { "fn.gate" = "passes", "fn.probe" = "n/a" }
+emit = { exit_code = "0", message_key = "never" }
+"""
+    findings = check_table(load_table(_write(tmp_path, _IMPOSSIBLE_BASE + dead + _IMPOSSIBLE_PAIR)))
+    assert [f.code for f in findings] == [check_mod.DEAD_ROW]
+    assert findings[0].detail["row"] == "never"
+    assert exit_code(findings) == 0, "advisory, not blocking"
+
+
+def test_overlap_confined_to_an_impossible_cell_is_not_an_overlap(tmp_path):
+    """Two rows that share only a ruled-out cell do not conflict."""
+    wide = """
+[[row]]
+id = "any-probe-passes"
+match = { fn = "f" }
+guard = { "fn.gate" = "passes", "fn.probe" = ["n/a", "ok"] }
+emit = { exit_code = "0", message_key = "wide" }
+"""
+    text = _IMPOSSIBLE_BASE.replace('guard = { "fn.gate" = "passes", "fn.probe" = "ok" }', 'guard = { "fn.gate" = "passes", "fn.probe" = "n/a" }')
+    findings = check_table(load_table(_write(tmp_path, text + wide + _IMPOSSIBLE_PAIR)))
+    assert OVERLAP not in {f.code for f in findings}, [f.to_json() for f in findings]
+
+
+@pytest.mark.parametrize(
+    "block, err",
+    [
+        ('[[impossible]]\n"fn.gate" = "passes"\n', "exactly two"),
+        ('[[impossible]]\n"fn.gate" = "passes"\n"fn.nope" = "x"\n', "undeclared"),
+        ('[[impossible]]\n"fn.gate" = "passes"\n"fn.probe" = "zzz"\n', "domain"),
+    ],
+)
+def test_malformed_impossible_blocks_are_refused_at_load(tmp_path, block, err):
+    with pytest.raises(TableLoadError, match=err):
+        load_table(_write(tmp_path, _IMPOSSIBLE_BASE + block))

@@ -131,6 +131,10 @@ class UnknownLiteralError(TableLoadError):
     """A match or guard literal falls outside its dimension's declared domain."""
 
 
+class ImpossibleShapeError(TableLoadError):
+    """An ``[[impossible]]`` block is not exactly two guard dimensions, one value each."""
+
+
 class UndeclaredDimensionError(TableLoadError):
     """A match or guard key names a dimension with no ``[dimensions.<key>]``
     section at all (RDR-201 P1.2 review finding, T2
@@ -207,6 +211,14 @@ class Table:
     dimensions: dict[str, Dimension]
     match_keys: tuple[str, ...]
     rows: tuple[Row, ...]
+    #: ``[[impossible]]`` blocks (nexus-q9u2n): guard-pair assignments that
+    #: cannot co-occur, each a mapping of exactly two guard dimensions to
+    #: one value each. The checker subtracts every cell matching a pair
+    #: from the product it proves coverage and overlap over, so an author
+    #: names the dependence between two dimensions instead of dropping a
+    #: value from a domain to dodge a phantom cell. See
+    #: :func:`nexus.tables.check.impossible_assignments`.
+    impossible: tuple[FrozenMapping, ...] = ()
 
 
 def load_table(path: Path) -> Table:
@@ -259,7 +271,42 @@ def _build_table(doc: dict, *, default_id: str) -> Table:
 
     _check_escape_multiplicity(rows)
 
-    return Table(id=table_id, kind=kind, dimensions=dimensions, match_keys=match_keys, rows=tuple(rows))
+    impossible = tuple(_build_impossible(raw, dimensions) for raw in doc.get("impossible", []))
+
+    return Table(
+        id=table_id,
+        kind=kind,
+        dimensions=dimensions,
+        match_keys=match_keys,
+        rows=tuple(rows),
+        impossible=impossible,
+    )
+
+
+def _build_impossible(raw: dict, dimensions: dict[str, Dimension]) -> FrozenMapping:
+    """One ``[[impossible]]`` block: exactly two declared enum dimensions,
+    each pinned to one member of its domain. Refused at load, like an
+    out-of-domain literal, so a typo cannot silently subtract nothing."""
+    if not isinstance(raw, dict) or len(raw) != 2:
+        raise ImpossibleShapeError(
+            f"[[impossible]] block must name exactly two guard dimensions, got {raw!r}"
+        )
+    pair: dict[str, str] = {}
+    for dim, value in raw.items():
+        if dim not in dimensions:
+            raise UndeclaredDimensionError(
+                f"[[impossible]] names undeclared dimension {dim!r}"
+            )
+        if dimensions[dim].kind != "enum":
+            raise ImpossibleShapeError(
+                f"[[impossible]] dimension {dim!r} is not an enum; only enum pairs can be impossible"
+            )
+        if not isinstance(value, str) or value not in dimensions[dim].domain:
+            raise UnknownLiteralError(
+                f"[[impossible]] value {value!r} is not in dimension {dim!r}'s domain {list(dimensions[dim].domain)}"
+            )
+        pair[dim] = value
+    return FrozenMapping(pair)
 
 
 def _reference_match_keys(raw_rows: list[dict]) -> tuple[str, ...]:
