@@ -97,7 +97,7 @@ class TestShapeSensitiveDetection:
         assert not report.ok
 
     def test_docling_patch_bump_is_flagged(self):
-        report = drift.parse_dry_run_output("Update docling v2.76.0 -> v2.76.1\n")
+        report = drift.parse_dry_run_output("Update docling-slim v2.76.0 -> v2.76.1\n")
         assert not report.ok
 
     def test_unlisted_minor_bump_stays_clean(self):
@@ -125,7 +125,7 @@ class TestShapeSensitiveDetection:
         monkeypatch.setattr(drift, "run_uv_dry_run_upgrade", lambda **kw: "Update starlette v0.52.1 -> v1.6.0\n")
         assert drift.check(fail_on="shape")[0] == 0
         assert drift.check(fail_on="any")[0] == 1
-        monkeypatch.setattr(drift, "run_uv_dry_run_upgrade", lambda **kw: "Update docling v2.125.0 -> v2.125.1\n")
+        monkeypatch.setattr(drift, "run_uv_dry_run_upgrade", lambda **kw: "Update docling-slim v2.125.0 -> v2.125.1\n")
         assert drift.check(fail_on="shape")[0] == 1
 
     def test_acknowledged_rows_name_only_shape_sensitive_packages(self):
