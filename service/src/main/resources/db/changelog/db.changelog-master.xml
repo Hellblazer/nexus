@@ -999,47 +999,28 @@
          the where/jsonpath split and the tombstone-filter derivation. -->
     <include file="db/changelog/vectors-009-plain-search.xml"/>
 
-    <!-- nexus-zrcj7 — nexus.text_gated_search_384/768/1024: retires
-         PgVectorRepository#hybridSearch's raw SQL (the lcogi selectivity-aware
-         dispatch) onto an inlinable schema function, pure retirement per Sam's
-         DECISION 2026-09-03 (T2 [24207]). Depends only on nexus.chunks/
-         catalog_document_chunks/catalog_documents. Placed after
+    <!-- nexus-zrcj7 (T2 critic follow-up, 2026-09-04) — nexus.text_gate_probe_384/768/
+         1024 (SETOF bytea: the bounded gate-selectivity probe, projecting the gate's
+         own matched chashes, not a COUNT), nexus.text_gated_search_hnsw_first_384/768/
+         1024 (the retired Java HNSW-first dense-gate branch, restored as an inlinable
+         schema function so the HNSW index stays reachable), and
+         nexus.text_gated_search_by_chash_384/768/1024 (ranks ONLY over the probe's
+         chash set + scope, no text-gate re-evaluation — single-gate-eval,
+         nexus-x7z7l/conexus-qsa). Together these restore the lcogi/x7z7l
+         selectivity-aware two-branch dispatch. Supersedes an earlier vectors-010
+         (nexus.text_gated_search_&lt;dim&gt;, a single materializing-CTE design) and
+         vectors-012 (a COUNT-only probe revision that lost single-gate-eval), both
+         deleted outright rather than left as dead schema objects: neither ever
+         shipped in any engine tag, vectors-010 had zero production callers once this
+         file's dispatch existed, and vectors-012's rollback recreating the probe as
+         an int-returning stub was itself a defect (T2 [24223] finding 1 — a
+         rollback that would make hybridSearch silently return nothing, forever;
+         see this file's own header for the full derivation). Depends only on
+         nexus.chunks/catalog_document_chunks/catalog_documents. Placed after
          vectors-009-plain-search.xml (current tail) and before the
-         grants-nexus-svc.xml runAlways block, matching the established
-         late-append convention (D0.1). See the file's own header for the
-         single-materializing-gate rationale (vs hybridSearch's retired
-         two-branch Java dispatch). -->
-    <include file="db/changelog/vectors-010-text-gated-search.xml"/>
-
-    <!-- nexus-zrcj7 (coordinator finding, confirmed by EXPLAIN evidence) — restores
-         the lcogi/x7z7l selectivity-aware two-branch dispatch vectors-010's single
-         materializing-CTE design retired without proving dense-gate equivalence:
-         nexus.text_gate_probe_384/768/1024 (the bounded gate-selectivity probe,
-         RETURNS int) and nexus.text_gated_search_hnsw_first_384/768/1024 (the
-         retired Java HNSW-first branch, restored as an inlinable schema function
-         so the HNSW index stays reachable for a dense gate). Depends on
-         nexus.chunks/catalog_document_chunks/catalog_documents (same as vectors-
-         009/010) and on nothing from vectors-010 itself (independent siblings, not
-         a modification). Placed after vectors-010-text-gated-search.xml (current
-         tail) and before the grants-nexus-svc.xml runAlways block, matching the
-         established late-append convention (D0.1). See the file's own header for
-         the byte-equivalence derivation against the retired Java dispatch. -->
+         grants-nexus-svc.xml runAlways block, matching the established late-append
+         convention (D0.1). -->
     <include file="db/changelog/vectors-011-hybrid-selectivity-dispatch.xml"/>
-
-    <!-- nexus-zrcj7 (T2 nexus/critique-zrcj7-step1-hybrid-typing-and-double-recheck-
-         2026-09-04 [24219], finding B) — restores the single-gate-eval optimization
-         (nexus-x7z7l/conexus-qsa) vectors-011's COUNT-only probe lost:
-         nexus.text_gate_probe_384/768/1024 changes from RETURNS int to RETURNS SETOF
-         bytea (the gate's actual chashes, capped at p_cap, DROP+CREATE since Postgres
-         cannot alter a function's return type), and a new
-         nexus.text_gated_search_by_chash_384/768/1024 ranks ONLY over that chash set
-         plus scope predicates — no second text-gate evaluation. Depends on
-         nexus.chunks/catalog_document_chunks/catalog_documents (same as vectors-
-         009/010/011). Placed after vectors-011-hybrid-selectivity-dispatch.xml
-         (current tail) and before the grants-nexus-svc.xml runAlways block, matching
-         the established late-append convention (D0.1). See the file's own header for
-         the derivation. -->
-    <include file="db/changelog/vectors-012-gate-probe-chashes.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

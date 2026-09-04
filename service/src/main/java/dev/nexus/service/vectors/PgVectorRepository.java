@@ -50,19 +50,18 @@ import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_768;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_1024;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_384;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_768;
-import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_1024;
-import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_384;
-import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_768;
 // nexus-zrcj7 (coordinator finding, T2 [24216]): restores the lcogi/x7z7l selectivity-
 // aware two-branch dispatch (vectors-011) -- the HNSW-first fallback is a table-valued
-// function like every sibling.
+// function like every sibling. text_gated_search_<dim> (the retired single-materializing-
+// CTE design) was deleted outright (T2 critic follow-up, 2026-09-04): zero production
+// callers once this dispatch existed.
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_768;
 // nexus-zrcj7 (T2 [24219] critique finding B, single-gate-eval restored): text_gate_probe_
-// <dim> changed from a scalar Routine (RETURNS int) to a SETOF-bytea table-valued
-// function (vectors-012), and text_gated_search_by_chash_<dim> ranks ONLY over the
-// probe's own chash set -- no second text-gate evaluation.
+// <dim> is a SETOF-bytea table-valued function (vectors-011), and
+// text_gated_search_by_chash_<dim> ranks ONLY over the probe's own chash set -- no second
+// text-gate evaluation.
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_768;
@@ -1188,7 +1187,7 @@ public final class PgVectorRepository {
      *       SELECTIVE gate ({@code matches <=} {@link #SELECTIVE_GATE_MAX}), IS the gate
      *       evaluation: the fetched chashes are ranked by EXACT cosine distance via a {@code
      *       chash = ANY(...)} PK filter ({@code text_gated_search_by_chash_<dim>}, T2 [24219]
-     *       finding B / vectors-012), so the expensive {@code <%} trigram heap-recheck runs
+     *       finding B / vectors-011), so the expensive {@code <%} trigram heap-recheck runs
      *       ONCE, not twice (a standalone {@code COUNT(*)} probe followed by an independent
      *       re-evaluation of the same gate in the ranked query would recheck twice per call on
      *       a large code corpus; conexus-qsa). This preserves the lcogi fix: the rank never
@@ -1400,7 +1399,7 @@ public final class PgVectorRepository {
 
             if (matches <= selectiveGateMax) {
                 // Selective: rank ONLY the probe's own chash set + scope, no text-gate
-                // re-evaluation -- text_gated_search_by_chash_<dim> (vectors-012).
+                // re-evaluation -- text_gated_search_by_chash_<dim> (vectors-011).
                 // matches == 0 needs no special empty-gate case: chash = ANY('{}') is
                 // false for every row, so the rank query naturally returns zero rows.
                 byte[][] chashes = new byte[probeResult.size()][];
@@ -3473,7 +3472,8 @@ public final class PgVectorRepository {
     /**
      * (containment, jsonpath) pair a Chroma-style metadata {@code where} map compiles
      * into for {@code nexus.plain_search_<dim>} (vectors-009) / {@code
-     * nexus.text_gated_search_<dim>} (vectors-010) — nexus-zrcj7 design of record (T2
+     * nexus.text_gated_search_by_chash_<dim>}/{@code text_gated_search_hnsw_first_<dim>}
+     * (vectors-011) — nexus-zrcj7 design of record (T2
      * nexus/decision-zrcj7-no-sql-strings-design-2026-09-03 [24207]), retiring
      * appendWherePredicate's raw-SQL-string translation. {@code containment} is bound
      * as the function's {@code p_where jsonb} argument ({@code metadata @> containment});

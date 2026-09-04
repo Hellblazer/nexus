@@ -107,10 +107,14 @@ class HnswServingGucParityTest {
      * still applies to every current fetch shape (jOOQ generated-function-table SELECTs,
      * {@link #exactSelectFrom}'s own supplier, {@code runCombinedQuery}/{@code
      * runCombinedQueryWithChash}'s {@code ctx.selectFrom(fn).fetch()}), so this scans for
-     * their two literal anchors instead of the retired wrapper's name. The anchor is
+     * their literal anchors instead of the retired wrapper's name. The anchors are
      * {@code .selectFrom(fn)} — the exact identifier {@code fn} every vector-ranking
-     * dispatch site binds its switch-selected {@code Table<?>} to — NOT bare {@code
-     * .selectFrom(}, which also matches unrelated GC/quarantine call sites
+     * dispatch site binds its switch-selected {@code Table<?>} to — and {@code
+     * .selectFrom(probeFn)} — {@code hybridSearch}'s text_gate_probe_&lt;dim&gt; fetch
+     * (T2 [24224] review finding: this anchor was missing, so the probe fetch fell
+     * outside this gate's coverage; a LATER {@code .selectFrom(fn)} in the same block
+     * happened to still pass, masking the gap rather than failing on it). NOT bare
+     * {@code .selectFrom(}, which also matches unrelated GC/quarantine call sites
      * ({@code quarantineOrphans}/{@code expireQuarantine}'s {@code ctx.selectFrom(
      * GC_QUARANTINE_ORPHANS.call(...))}) that never need these GUCs and would otherwise
      * false-positive as "unbounded".
@@ -135,7 +139,8 @@ class HnswServingGucParityTest {
                     // a call of the block above it.
                     int end = body.indexOf("\n    }\n", at);
                     String block = body.substring(at, end < 0 ? body.length() : end);
-                    int fetch = firstIndexOfAny(block, "exactSelectFrom(", ".selectFrom(fn)");
+                    int fetch = firstIndexOfAny(block, "exactSelectFrom(", ".selectFrom(fn)",
+                        ".selectFrom(probeFn)");
                     if (fetch < 0) {
                         continue;
                     }

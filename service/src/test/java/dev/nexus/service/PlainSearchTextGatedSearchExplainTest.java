@@ -4,7 +4,9 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
 import liquibase.Contexts;
@@ -13,6 +15,9 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.DSLContext;
+import org.jooq.Query;
+import org.jooq.Table;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -20,19 +25,27 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
+import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_1024;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * nexus-zrcj7 — EXPLAIN-based inlining/index-engagement proof for
  * {@code nexus.plain_search_&lt;dim&gt;} (vectors-009) and {@code
- * nexus.text_gated_search_&lt;dim&gt;} (vectors-010), the two schema functions that
- * retire {@link PgVectorRepository#searchWithTokens}/{@link PgVectorRepository#hybridSearch}'s
- * raw-SQL StringBuilder assembly.
+ * nexus.text_gated_search_by_chash_&lt;dim&gt;}/{@code
+ * nexus.text_gated_search_hnsw_first_&lt;dim&gt;} (vectors-011), the schema functions
+ * that retire {@link PgVectorRepository#searchWithTokens}/
+ * {@link PgVectorRepository#hybridSearch}'s raw-SQL StringBuilder assembly.
+ * EXPLAIN is run via jOOQ's {@code DSLContext#explain} (T2 critic follow-up
+ * 2026-09-04: no SQL strings in tests either), never a raw JDBC {@code EXPLAIN}
+ * string.
  *
  * <p>Mirrors {@code CombinedQueryParityTest}'s GROUP 3 EXPLAIN discipline (a {@code
  * Function Scan} node means the function is not inlinable — LANGUAGE sql required, not
@@ -109,7 +122,7 @@ class PlainSearchTextGatedSearchExplainTest {
             su.createStatement().execute(
                 "GRANT SELECT ON nexus.catalog_document_chunks, nexus.catalog_documents TO " + SVC_ROLE);
             su.createStatement().execute(
-                "GRANT EXECUTE ON FUNCTION nexus.plain_search_1024, nexus.text_gated_search_1024, "
+                "GRANT EXECUTE ON FUNCTION nexus.plain_search_1024, "
                 + "nexus.text_gate_probe_1024, nexus.text_gated_search_hnsw_first_1024, "
                 + "nexus.text_gated_search_by_chash_1024 TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -236,10 +249,9 @@ class PlainSearchTextGatedSearchExplainTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test
-    void explain_plainSearch_usesHnswIndex_notFunctionScan() throws Exception {
-        String plan = explain(
-            "SELECT id FROM nexus.plain_search_1024('" + vec(1.0, 0.0) + "'::vector, "
-            + "ARRAY['" + COLL + "']::text[], NULL::jsonb, NULL::text, 10)");
+    void explain_plainSearch_usesHnswIndex_notFunctionScan() {
+        Table<?> fn = PLAIN_SEARCH_1024.call(vec(1.0, 0.0), colls(COLL), null, null, 10);
+        String plan = explain(ctx -> ctx.select(fn.field("id")).from(fn));
         assertThat(plan)
             .as("plain_search_1024 must use the HNSW index idx_chunks_embedding_1024 for "
                 + "the ANN ordering — the vector is a plan-time argument and the function "
@@ -253,93 +265,59 @@ class PlainSearchTextGatedSearchExplainTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // text_gated_search_1024: inlinable, and a SELECTIVE gate never touches HNSW
-    // (the row_number()-over-the-materialized-gate shape, vectors-010's own header)
+    // text_gated_search_by_chash_1024 (vectors-011): the selective rank must NOT
+    // re-evaluate the text gate (T2 [24219] critique finding B, single-gate-eval
+    // restored) and must NOT naturally touch the HNSW index -- both retargeted here
+    // (T2 critic follow-up, 2026-09-04) from the deleted text_gated_search_1024
+    // (vectors-010, a single materializing-CTE design with zero production callers
+    // once this dispatch existed). text_gated_search_by_chash_1024 has a different
+    // plan SHAPE than the deleted function's row_number()-over-the-gate CTE (a bare
+    // chash = ANY(...) filter + ORDER BY/LIMIT, no window function), so the retired
+    // test's positive "WindowAgg" assertion does not carry over -- only the negative
+    // "never reaches HNSW" claim does.
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test
-    void explain_textGatedSearch_selectiveGate_neverTouchesHnsw_notFunctionScan() throws Exception {
-        // Deliberately the WEAKER explainSeqscanOff() (enable_seqscan off only), not the
-        // stronger explain() plain_search uses above: this is a NEGATIVE assertion ("HNSW
-        // must never be reachable"), so forcing every OTHER access path away too (as
-        // explain() does with enable_sort/enable_bitmapscan/enable_hashjoin off) would
-        // adversarially strip the row_number()-over-the-gate CTE's OWN natural, correct,
-        // and safe plan (a cheap GIN-indexed gate + a trivial Sort over ~6 matched rows)
-        // of its only non-HNSW alternative — proving nothing about what the planner
-        // actually chooses under real cost pressure. Confirmed empirically: with
-        // enable_sort forced off, the planner switches to Index Scan using
-        // idx_chunks_embedding_1024 (HNSW-ordered) with the text gate as a POST-hoc
-        // filter — precisely the nexus-lcogi starvation shape this function exists to
-        // avoid — which only happens because sort was taken away as an option, not
-        // because text_gated_search_1024 has any inherent tendency toward it.
-        String plan = explainSeqscanOff(
-            "SELECT id FROM nexus.text_gated_search_1024('" + vec(1.0, 0.0) + "'::vector, "
-            + "'" + TOKEN + "', ARRAY['" + COLL + "']::text[], NULL::jsonb, NULL::text, 50)");
+    void explain_textGatedSearchByChash_selectiveRank_neverTouchesHnsw_noTrigramOperator_notFunctionScan() {
+        // targetChashes come from the SAME selective fixture the retired
+        // text_gated_search_1024 EXPLAIN test used -- hybridSearch's own probe would
+        // have fetched exactly this chash set for this fixture (below
+        // SELECTIVE_GATE_MAX). The rank query below takes those chashes directly,
+        // exactly as hybridSearch's Java dispatch now does.
+        //
+        // Deliberately the WEAKER explainSeqscanOff() (enable_seqscan off only), not
+        // the stronger explain(): this is a NEGATIVE assertion ("HNSW must never be
+        // reachable"), so forcing every OTHER access path away too would
+        // adversarially strip the plan's own natural, correct, safe alternative (a
+        // cheap chash-membership lookup over ~4 matched rows) — proving nothing about
+        // what the planner actually chooses under real cost pressure (the same
+        // discipline the retired text_gated_search_1024 test used).
+        Table<?> fn = TEXT_GATED_SEARCH_BY_CHASH_1024.call(
+            vec(1.0, 0.0), chashes(targetChashes), colls(COLL), null, null, 50);
+        String plan = explainSeqscanOff(ctx -> ctx.select(fn.field("id")).from(fn));
         assertThat(plan)
             .as("a Function Scan node means the function is not inlinable (plpgsql) — "
-                + "vectors-010 must use an inlinable LANGUAGE sql function. Plan was:%n%s",
+                + "vectors-011 must use an inlinable LANGUAGE sql function. Plan was:%n%s",
                 plan)
             .doesNotContain("Function Scan");
         assertThat(plan)
-            .as("text_gated_search_1024's row_number()-over-the-materialized-gate rank must "
-                + "NOT NATURALLY touch the HNSW index (the nexus-lcogi starvation class this "
-                + "shape exists to close, vectors-010's own header) under normal cost "
-                + "pressure (enable_seqscan=off only — sort stays available, its correct, "
-                + "safe alternative). Plan was:%n%s", plan)
+            .as("text_gated_search_by_chash_1024's rank must NOT NATURALLY touch the "
+                + "HNSW index (the nexus-lcogi starvation class this design closes) "
+                + "under normal cost pressure (enable_seqscan=off only). Plan was:%n%s",
+                plan)
             .doesNotContain("idx_chunks_embedding_1024");
-        // Positive shape check (coordinator: "the selective fixture must show the
-        // materialize+rank plan on the selective function") -- the row_number() window
-        // function is what materializes the gate before ranking; its presence is the
-        // structural signature of the selective path, not merely the absence of HNSW.
-        assertThat(plan)
-            .as("the selective path must show the materialize+rank shape (a WindowAgg "
-                + "computing row_number() over the materialized gate). Plan was:%n%s", plan)
-            .contains("WindowAgg");
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // text_gated_search_by_chash_1024 (vectors-012): the selective rank must NOT
-    // re-evaluate the text gate (T2 [24219] critique finding B, single-gate-eval
-    // restored) -- its plan must carry no trigram `<%` operator at all.
-    // ══════════════════════════════════════════════════════════════════════════
-
-    @Test
-    void explain_textGatedSearchByChash_selectiveRank_noTrigramOperator() throws Exception {
-        // targetChashes come from the SAME selective fixture as
-        // explain_textGatedSearch_selectiveGate_neverTouchesHnsw_notFunctionScan above --
-        // hybridSearch's own probe would have fetched exactly this chash set for this
-        // fixture (below SELECTIVE_GATE_MAX). The rank query below takes those chashes
-        // directly, exactly as hybridSearch's Java dispatch now does, and must contain
-        // NO `<%` (word_similarity/trigram) operator -- the gate was already evaluated
-        // once by the probe; re-running it here would be the exact double-recheck this
-        // changeset exists to eliminate.
-        StringBuilder chashArray = new StringBuilder("ARRAY[");
-        for (int i = 0; i < targetChashes.size(); i++) {
-            if (i > 0) chashArray.append(',');
-            chashArray.append("decode('").append(targetChashes.get(i)).append("','hex')");
-        }
-        chashArray.append("]::bytea[]");
-        String plan = explain(
-            "SELECT id FROM nexus.text_gated_search_by_chash_1024('" + vec(1.0, 0.0)
-            + "'::vector, " + chashArray + ", ARRAY['" + COLL + "']::text[], "
-            + "NULL::jsonb, NULL::text, 50)");
         assertThat(plan)
             .as("text_gated_search_by_chash_1024's plan must carry NO trigram `<%` "
                 + "operator -- the gate is not re-evaluated here, only chash = ANY(...) "
                 + "plus scope. Plan was:%n%s", plan)
             .doesNotContain("<%");
-        assertThat(plan)
-            .as("a Function Scan node means the function is not inlinable (plpgsql) — "
-                + "vectors-012 must use an inlinable LANGUAGE sql function. Plan was:%n%s",
-                plan)
-            .doesNotContain("Function Scan");
     }
 
     @Test
     void textGatedSearchByChash_selectiveRank_returnsExactMatches_viaPublicApi() {
-        // Behavioral companion, through hybridSearch's actual Java dispatch (which now
-        // calls text_gated_search_by_chash_1024 for the selective branch, not
-        // text_gated_search_1024 directly -- T2 [24219] finding B).
+        // Behavioral companion, through hybridSearch's actual Java dispatch (which
+        // calls text_gated_search_by_chash_1024 for the selective branch -- T2 [24219]
+        // finding B).
         List<Map<String, Object>> rows = repo.hybridSearch(TENANT, TOKEN, List.of(COLL), 50, null);
         List<String> ids = rows.stream().map(r -> (String) r.get("id")).toList();
         assertThat(ids)
@@ -365,17 +343,15 @@ class PlainSearchTextGatedSearchExplainTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test
-    void explain_textGatedSearchHnswFirst_denseGate_usesHnswIndex_notFunctionScan()
-            throws Exception {
+    void explain_textGatedSearchHnswFirst_denseGate_usesHnswIndex_notFunctionScan() {
         // DENSE_MATCHING (5500) is deliberately chosen ABOVE
         // PgVectorRepository.SELECTIVE_GATE_MAX (5000) -- the retired-and-now-restored
         // selective/HNSW-first dispatch threshold -- so this fixture exercises exactly
         // the regime where hybridSearch's Java dispatch routes to
-        // text_gated_search_hnsw_first_1024, not text_gated_search_1024.
-        String plan = explain(
-            "SELECT id FROM nexus.text_gated_search_hnsw_first_1024('" + vec(1.0, 0.0)
-            + "'::vector, '" + DENSE_TOKEN + "', ARRAY['" + DENSE_COLL + "']::text[], "
-            + "NULL::jsonb, NULL::text, 50)");
+        // text_gated_search_hnsw_first_1024, not the selective by-chash function.
+        Table<?> fn = TEXT_GATED_SEARCH_HNSW_FIRST_1024.call(
+            vec(1.0, 0.0), DENSE_TOKEN, colls(DENSE_COLL), null, null, 50);
+        String plan = explain(ctx -> ctx.select(fn.field("id")).from(fn));
         assertThat(plan)
             .as("text_gated_search_hnsw_first_1024 must use the HNSW index "
                 + "idx_chunks_embedding_1024 for a dense/non-selective gate -- this is the "
@@ -456,8 +432,7 @@ class PlainSearchTextGatedSearchExplainTest {
     }
 
     @Test
-    void textGatedSearchHnswFirst_orderAndDistanceParity_matchesAnalyticCosineOracle()
-            throws Exception {
+    void textGatedSearchHnswFirst_orderAndDistanceParity_matchesAnalyticCosineOracle() {
         // Same oracle as hybridSearch_orderAndDistanceParity_matchesAnalyticCosineOracle
         // above, called DIRECTLY against text_gated_search_hnsw_first_1024 (vectors-011)
         // rather than through hybridSearch's Java dispatch -- the ORDER_COLL fixture (4
@@ -465,18 +440,17 @@ class PlainSearchTextGatedSearchExplainTest {
         // the selective function, never exercising the HNSW-first function's OWN
         // correctness independent of when Java chooses to call it (coordinator: "add the
         // same oracle against the hnsw-first function").
+        Table<?> fn = TEXT_GATED_SEARCH_HNSW_FIRST_1024.call(
+            vec(1.0, 0.0), ORDER_TOKEN, colls(ORDER_COLL), null, null, 50);
         List<String> ids = new ArrayList<>();
         List<Double> distances = new ArrayList<>();
-        try (Connection su = pg.createConnection("");
-             ResultSet rs = su.createStatement().executeQuery(
-                 "SELECT id, distance FROM nexus.text_gated_search_hnsw_first_1024('"
-                 + vec(1.0, 0.0) + "'::vector, '" + ORDER_TOKEN + "', ARRAY['" + ORDER_COLL
-                 + "']::text[], NULL::jsonb, NULL::text, 50)")) {
-            while (rs.next()) {
-                ids.add(rs.getString("id"));
-                distances.add(rs.getDouble("distance"));
+        tenantScope.withTenant(TENANT, ctx -> {
+            for (var rec : ctx.select(fn.field("id"), fn.field("distance")).from(fn).fetch()) {
+                ids.add(rec.get(0, String.class));
+                distances.add(rec.get(1, Double.class));
             }
-        }
+            return null;
+        });
         assertThat(ids)
             .as("text_gated_search_hnsw_first_1024 must return exactly the three "
                 + "token-bearing targets in ASCENDING distance order (30deg, 60deg, "
@@ -499,63 +473,40 @@ class PlainSearchTextGatedSearchExplainTest {
     }
 
     /**
-     * EXPLAIN with every non-index-scan access path penalized so the HNSW-ordered scan
-     * is reachable at fixture scale (CombinedQueryParityTest's own {@code explain()}
-     * discipline, GROUP 3's comment): {@code enable_seqscan}/{@code enable_bitmapscan}/
-     * {@code enable_sort}/{@code enable_hashjoin} off. {@code enable_nestloop} stays ON —
-     * the HNSW-ordered chunk scan joins to the tombstone-check subqueries via nested
-     * loop; disabling it would defeat the very plan this proof asserts. A stronger
-     * disabling set than {@code enable_seqscan} alone is needed here (unlike
+     * EXPLAIN (via jOOQ's {@code DSLContext#explain}, T2 critic follow-up 2026-09-04:
+     * no SQL strings in tests either -- Sam's rule) with every non-index-scan access
+     * path penalized so the HNSW-ordered scan is reachable at fixture scale
+     * (CombinedQueryParityTest's own {@code explain()} discipline, GROUP 3's comment):
+     * {@code enable_seqscan}/{@code enable_bitmapscan}/{@code enable_sort}/
+     * {@code enable_hashjoin} off, via {@link PgSession#setLocal} (the sanctioned,
+     * SQL-string-free {@code SET LOCAL} form -- {@code enable_hashjoin} added to its
+     * allowlist for this test class). {@code enable_nestloop} stays ON — the
+     * HNSW-ordered chunk scan joins to the tombstone-check subqueries via nested loop;
+     * disabling it would defeat the very plan this proof asserts. A stronger disabling
+     * set than {@code enable_seqscan} alone is needed here (unlike
      * HybridSelectiveGateTest's identically-named helper, which only needs to prove
      * HNSW is NEVER reachable — a weaker GUC set suffices for a negative assertion):
      * plain_search_1024's tombstone Anti Join adds enough cost that, at this fixture's
      * ~200-row scale, a Sort over a plain index scan on {@code idx_chunks_tenant_chash}
      * otherwise costs less than the HNSW-ordered scan.
      */
-    private String explain(String inner) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(false);
+    private String explain(Function<DSLContext, ? extends Query> queryBuilder) {
+        return tenantScope.withTenant(TENANT, ctx -> {
             for (String guc : List.of("enable_seqscan", "enable_bitmapscan",
                     "enable_sort", "enable_hashjoin")) {
-                su.createStatement().execute("SET LOCAL " + guc + " = off");
+                PgSession.setLocal(ctx, guc, "off");
             }
-            StringBuilder sb = new StringBuilder();
-            try (ResultSet rs = su.createStatement().executeQuery("EXPLAIN " + inner)) {
-                while (rs.next()) sb.append(rs.getString(1)).append('\n');
-            }
-            su.rollback();
-            return sb.toString();
-        }
+            return ctx.explain(queryBuilder.apply(ctx)).plan();
+        });
     }
 
     /** EXPLAIN with ONLY seqscan disabled — see the negative-assertion rationale on
-     * {@link #explain_textGatedSearch_selectiveGate_neverTouchesHnsw_notFunctionScan}. */
-    private String explainSeqscanOff(String inner) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(false);
-            su.createStatement().execute("SET LOCAL enable_seqscan = off");
-            StringBuilder sb = new StringBuilder();
-            try (ResultSet rs = su.createStatement().executeQuery("EXPLAIN " + inner)) {
-                while (rs.next()) sb.append(rs.getString(1)).append('\n');
-            }
-            su.rollback();
-            return sb.toString();
-        }
-    }
-
-    /** EXPLAIN with NO GUC overrides at all — the natural, undisturbed cost-based choice
-     * (nexus-zrcj7 pushback item 2: what does the planner ACTUALLY pick for a dense gate,
-     * with nothing forced either way). */
-    private String explainNatural(String inner) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(false);
-            StringBuilder sb = new StringBuilder();
-            try (ResultSet rs = su.createStatement().executeQuery("EXPLAIN " + inner)) {
-                while (rs.next()) sb.append(rs.getString(1)).append('\n');
-            }
-            su.rollback();
-            return sb.toString();
-        }
+     * {@link #explain_textGatedSearchByChash_selectiveRank_neverTouchesHnsw_noTrigramOperator_notFunctionScan}. */
+    private String explainSeqscanOff(Function<DSLContext, ? extends Query> queryBuilder) {
+        return tenantScope.withTenant(TENANT, ctx -> {
+            PgSession.setLocal(ctx, "enable_seqscan", "off");
+            return ctx.explain(queryBuilder.apply(ctx)).plan();
+        });
     }
 
     /** Full 64-hex chunk id deterministically derived from prefix + index (RDR-180). */
@@ -563,14 +514,21 @@ class PlainSearchTextGatedSearchExplainTest {
         return dev.nexus.service.db.Chash.ofText(prefix + i).toHex();
     }
 
-    /** 1024-dim pgvector literal with first two components (x, y), rest 0. */
-    private static String vec(double x, double y) {
-        StringBuilder sb = new StringBuilder("[").append(fmt(x)).append(',').append(fmt(y));
-        for (int i = 2; i < 1024; i++) sb.append(",0");
-        return sb.append("]").toString();
+    /** 1024-dim pgvector value with first two components (x, y), rest 0. */
+    private static Vector vec(double x, double y) {
+        float[] v = new float[1024];
+        v[0] = (float) x;
+        v[1] = (float) y;
+        return Vector.of(v);
     }
 
-    private static String fmt(double v) {
-        return v == Math.rint(v) ? Integer.toString((int) v) : Double.toString(v);
+    /** Single-collection array, the shape every {@code p_collections} parameter expects. */
+    private static String[] colls(String collection) {
+        return new String[] {collection};
+    }
+
+    /** Hex chash strings decoded to the {@code bytea[]} shape {@code p_chashes} expects. */
+    private static byte[][] chashes(List<String> hexChashes) {
+        return hexChashes.stream().map(hex -> HexFormat.of().parseHex(hex)).toArray(byte[][]::new);
     }
 }
