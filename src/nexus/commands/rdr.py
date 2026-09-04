@@ -825,6 +825,155 @@ def _gate_repo_name(repo_root: str) -> str:
     return _resolve_main_repo(Path(repo_root)).name
 
 
+#: Injectable dispatch seam for ``nx rdr repeat``, same shape as
+#: ``_t2_client_factory``: production resolves ``claude_dispatch`` lazily,
+#: tests set this to an async fake and never spawn a child.
+_repeat_dispatch = None
+
+
+def _resolve_repeat_dispatch():
+    if _repeat_dispatch is not None:
+        return _repeat_dispatch
+    from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — heavy operator dep deferred to call time
+
+    return claude_dispatch
+
+
+@rdr.command("repeat")
+@click.argument("rdr", type=str)
+@click.option(
+    "--root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="RDR directory used to resolve a numeric id (default: docs/rdr/).",
+)
+@click.option(
+    "--tiers",
+    default="cheap,strong",
+    show_default=True,
+    help="Two model tiers to dispatch, comma-separated (see nexus.operators.model_tiers).",
+)
+@click.option("--timeout", type=float, default=300.0, show_default=True, help="Seconds per dispatch.")
+@click.option(
+    "--max-budget-usd",
+    type=float,
+    default=0.50,
+    show_default=True,
+    help="Budget cap per dispatch.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit the two plans and the divergence as JSON.")
+def repeat(
+    rdr: str,
+    root: Path | None,
+    tiers: str,
+    timeout: float,
+    max_budget_usd: float,
+    as_json: bool,
+) -> None:
+    """Multi-model repeatability diff of RDR's design text (nexus-axwpn).
+
+    Sends the Technical Design section to two model tiers, asks each for
+    an implementation plan, and reports where the plans diverge: steps,
+    files, decisions. A divergence is a place the text left open. Exits
+    0 with a report; exits 2 when there is nothing to repeat.
+    """
+    import asyncio  # noqa: PLC0415 — only this verb runs an event loop
+    import json as _json  # noqa: PLC0415
+
+    from nexus.operators.model_tiers import UnknownTierError, resolve_model_for_tier  # noqa: PLC0415
+    from nexus.rdr_repeat import (  # noqa: PLC0415
+        PLAN_SCHEMA,
+        RepeatError,
+        build_prompt,
+        diff_plans,
+        extract_design_section,
+        parse_plan,
+        render_report,
+    )
+
+    path = Path(rdr)
+    if not path.is_file():
+        scan_root = root or Path("docs/rdr")
+        found = _preamble_find_rdr_file(scan_root, rdr) if scan_root.exists() else None
+        if found is None:
+            click.echo(f"nx rdr repeat: no RDR file for {rdr!r} under {scan_root}", err=True)
+            sys.exit(2)
+        path = found
+    rdr_id = path.stem
+
+    design = extract_design_section(path.read_text())
+    if not design:
+        click.echo(
+            f"nx rdr repeat: {path} has no Technical Design / Proposed Design / Design section; "
+            "nothing to repeat",
+            err=True,
+        )
+        sys.exit(2)
+
+    tier_names = [t.strip() for t in tiers.split(",") if t.strip()]
+    if len(tier_names) != 2:
+        click.echo("nx rdr repeat: --tiers needs exactly two tiers", err=True)
+        sys.exit(2)
+    try:
+        models = [resolve_model_for_tier(t) for t in tier_names]
+    except UnknownTierError as exc:
+        click.echo(f"nx rdr repeat: {exc}", err=True)
+        sys.exit(2)
+
+    dispatch = _resolve_repeat_dispatch()
+    prompt = build_prompt(rdr_id, design)
+
+    async def _run():
+        return await asyncio.gather(
+            *(
+                dispatch(
+                    prompt,
+                    PLAN_SCHEMA,
+                    timeout=timeout,
+                    model=m,
+                    max_budget_usd=max_budget_usd,
+                    operator="rdr_repeat",
+                    isolated=True,
+                )
+                for m in models
+            )
+        )
+
+    try:
+        payloads = asyncio.run(_run())
+        plans = [parse_plan(m, p) for m, p in zip(models, payloads, strict=True)]
+    except (RepeatError, Exception) as exc:  # noqa: BLE001 - report, never traceback
+        click.echo(f"nx rdr repeat: dispatch failed ({exc})", err=True)
+        sys.exit(1)
+
+    divergence = diff_plans(plans[0], plans[1])
+    if as_json:
+        click.echo(
+            _json.dumps(
+                {
+                    "rdr": rdr_id,
+                    "plans": [
+                        {
+                            "model": pl.model,
+                            "steps": [
+                                {"title": st.title, "files": list(st.files), "decisions": list(st.decisions)}
+                                for st in pl.steps
+                            ],
+                        }
+                        for pl in plans
+                    ],
+                    "divergence": {
+                        k: v for k, v in divergence.__dict__.items()
+                    }
+                    | {"count": divergence.count},
+                },
+                indent=2,
+            )
+        )
+        return
+    click.echo(render_report(rdr_id, plans[0], plans[1], divergence))
+
+
 @rdr.command("set-status")
 @click.argument("rdr_id")
 @click.argument("new_status")

@@ -3765,8 +3765,9 @@ RDR (Research-Design-Review) authoring helpers.
 
 | Subcommand | Description |
 |------------|-------------|
-| `lint` | Lint RDR frontmatter/structure; reports findings per file |
-| `set-status STATUS` | Flip an RDR's `status:` frontmatter field and README row (refused unless the lifecycle table allows the transition); then append `needs-reexamination` to the T2 entry of every RDR joined to it by a `supersedes` edge (RDR-201 P3.3) |
-| `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-close`, `rdr-research`) |
+| `lint [PATHS]` | Lint RDR frontmatter/structure; reports findings per file. `--root DIR` scans a directory other than `docs/rdr/` |
+| `set-status STATUS` | Flip an RDR's `status:` frontmatter field and README row (refused unless the lifecycle table allows the transition); then append `needs-reexamination` to the T2 entry of every RDR joined to it by a `supersedes` edge (RDR-201 P3.3). `--date YYYY-MM-DD` sets `accepted_date`/`closed_date` (default today, UTC); `--root DIR` names the repo root (default git toplevel) |
+| `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-close`, `rdr-research`, `rdr-audit`, `phase-review-gate`) |
+| `repeat RDR` | Multi-model repeatability diff (nexus-axwpn): send the RDR's Technical Design (or `Proposed Design` / `Design`) section to two model tiers (`--tiers cheap,strong`), ask each for an implementation plan, and report where the plans diverge in steps, files and decisions. A divergence is a place the text left open, not a verdict on a model. `RDR` is a path or a number resolved under `--root` (default `docs/rdr/`); `--json` emits both plans and the diff. Exits 0 with the report, 2 when the RDR has no design section, 1 when a dispatch fails. Writes nothing |
 
 Run `nx rdr --help` / `nx rdr preamble --help` for the full subcommand list. The `preamble` subcommands are primarily invoked by the conexus RDR-lifecycle skills.
