@@ -278,8 +278,8 @@ def _pending_fix_now_notice() -> str:
 
         from nexus.commands._helpers import t2_handle  # noqa: PLC0415 — deferred; T2 dep off the hot path
         from nexus.commit_review import (  # noqa: PLC0415 — deferred with its sibling
-            RECORD_PREFIX,
             REVIEW_PROJECT,
+            is_review_record,
             parse_record_verdicts,
         )
 
@@ -289,7 +289,7 @@ def _pending_fix_now_notice() -> str:
 
         commits = 0
         for row in rows:
-            if not str(row.get("title", "")).startswith(RECORD_PREFIX):
+            if not is_review_record(row):
                 continue
             stamp = str(row.get("timestamp", "") or "")
             if stamp:

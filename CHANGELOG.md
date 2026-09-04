@@ -17,8 +17,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   project as a commit review: 401 human and agent review notes reported as
   401 commits reviewed and clean, while the post-commit reviewer had never
   fired on the box. The census now also requires the record's own first
-  line, `Commit review: `, which only the reviewer writes, and reports zero
-  records honestly when the hook is not armed.
+  line, `Commit review: `, in both consumers (the census and the SessionStart
+  FIX-NOW notice), so an unarmed hook reads as zero records rather than as a
+  clean codebase. Merge records now say they are a first-parent view.
 
 - The sn plugin drifted from the Serena it launches (nexus-jbt5x). Its
   auto-approve list named 27 tools of which 4 no longer exist in the

@@ -25,6 +25,7 @@ from nexus.commit_review import (
     build_prompt,
     commit_diff,
     commit_parent_count,
+    has_patch,
     parse_findings,
     parse_record_verdicts,
     record_title,
@@ -151,6 +152,31 @@ def test_commit_diff_of_a_merge_shows_everything_the_merge_brought(tiny_repo: Pa
 def test_build_prompt_names_a_merge_commit() -> None:
     assert "MERGE commit" in build_prompt("a" * 40, "diff", truncated=False, merge=True)
     assert "MERGE commit" not in build_prompt("a" * 40, "diff", truncated=False)
+
+
+def test_the_record_says_when_it_was_a_first_parent_view() -> None:
+    """A reader of T2 [24274] could not tell whether "No findings" covered
+    2 files or 13 (critique [24283] S3). The record carries the view."""
+    rendered = render_record(sha="a" * 40, subject="merge", findings=[], cost_usd=0.01, merge=True)
+    assert "MERGE commit, first-parent view" in rendered
+    assert "No findings." in rendered
+    plain = render_record(sha="a" * 40, subject="s", findings=[], cost_usd=0.01)
+    assert "MERGE" not in plain
+    assert parse_record_verdicts(rendered) == {}
+
+
+def test_a_tree_less_commit_is_skipped_not_reviewed_clean(tiny_repo: Path) -> None:
+    """--allow-empty and ``merge -s ours`` produce a header-only diff. The
+    old ``.strip()`` guard never fired because the --format header is
+    always there, so the reviewer recorded "No findings" over a diff with
+    no files in it (code review [24285] Major 2)."""
+    _run(["git", "commit", "-q", "--allow-empty", "-m", "chore: empty"], tiny_repo)
+    sha = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
+    text, _ = commit_diff(tiny_repo, sha, max_bytes=100_000)
+    assert text.strip(), "the header is always present; that is the whole point"
+    assert has_patch(text) is False
+    full, _ = commit_diff(tiny_repo, "HEAD~1", max_bytes=100_000)
+    assert has_patch(full) is True
 
 
 def test_commit_diff_on_an_unknown_sha_raises(tiny_repo: Path) -> None:
@@ -539,7 +565,6 @@ def test_census_counts_across_records_built_by_the_renderer() -> None:
     assert totals["FILE"] == 1
     assert totals["DROP"] == 1
     assert totals["_records"] == 3, "the non-review neighbours must not be counted"
-    assert totals["FIX-NOW"] == 1, "a note carrying a Verdicts: line is still not a review"
     assert totals["_clean"] == 1
 
 
@@ -648,7 +673,12 @@ class TestSessionStartNotice:
 
     def test_non_review_entries_in_the_project_are_ignored(self, monkeypatch) -> None:
         """The records share the nexus project with thousands of notes."""
-        rows = [{"title": "continuation-state.md", "content": "Verdicts: FIX-NOW=9"}]
+        rows = [
+            {"title": "continuation-state.md", "content": "Verdicts: FIX-NOW=9"},
+            # The prefix-only selector counted these (critique [24283] S1):
+            # a review NOTE about a range, carrying its own Verdicts: line.
+            {"title": "review-range-abc123def456", "content": "Range review.\nVerdicts: FIX-NOW=3"},
+        ]
         assert self._notice(monkeypatch, rows) == ""
 
     def test_a_t2_failure_never_breaks_session_start(self, monkeypatch) -> None:
