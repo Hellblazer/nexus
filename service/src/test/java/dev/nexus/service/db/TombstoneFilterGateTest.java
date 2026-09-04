@@ -140,9 +140,21 @@ class TombstoneFilterGateTest {
      * (nexus-3ck2g bug: the regression shipped and stayed invisible to this whole class of
      * gate). Method-scoped (WIDEN-style, not statement-scoped): each entry names a method
      * whose body raw-reads {@code nexus.chunks_<dim>} via {@code chunksTable(dim)}.
+     *
+     * <p>Empty (nexus-zrcj7, 2026-09-03): the sole entry, PgVectorRepository.java's
+     * {@code searchWithTokens}/{@code hybridSearch}, is REMOVED. Both methods are retired
+     * onto generated jOOQ function tables ({@code plain_search_<dim>}/
+     * {@code text_gated_search_<dim>}, vectors-009/010) whose OWN inlined SQL body carries
+     * the live_chunks/tombstone predicate directly — neither method calls
+     * {@code chunksTable(dim)} any more (that raw-SQL-string channel is gone; {@code
+     * chunksTable(dim)} itself survives only for {@link
+     * dev.nexus.service.vectors.PgVectorRepository#upsertChunks}, which this scan never
+     * named). Kept as a live (not deleted) mechanism, dormant by construction until a
+     * future raw {@code chunksTable(dim)} string read needs it again — same "dormant, not
+     * enforced, noted per spec" disposition this class's own header gives the
+     * {@code catalog_links} case.
      */
-    private static final Map<String, List<String>> RAW_CHUNKS_READ_METHODS = Map.of(
-        "PgVectorRepository.java", List.of("searchWithTokens", "hybridSearch"));
+    private static final Map<String, List<String>> RAW_CHUNKS_READ_METHODS = Map.of();
 
     /** Marker for a raw {@code chunksTable(dim)} table reference in the blanked source. */
     private static final String CHUNKS_TABLE_CALL = "chunksTable(";
@@ -695,17 +707,15 @@ class TombstoneFilterGateTest {
         assertThat(result.setDeletedSites().size()).isGreaterThanOrEqualTo(3);
     }
 
-    @Test
-    void floor_rawChunksReadSites() throws IOException {
-        // 2 on the final tree: searchWithTokens + hybridSearch, the two methods
-        // nexus-3ck2g found reading nexus.chunks_<dim> as hand-built SQL text with
-        // no tombstone filter at all (RDR-156 Decision 6, never implemented).
-        var result = scan();
-        assertThat(result.rawChunksSites().size())
-            .as("raw chunksTable(dim) read sites walked — a collapse below this suggests "
-                + "the method-name list in RAW_CHUNKS_READ_METHODS stopped matching")
-            .isGreaterThanOrEqualTo(2);
-    }
+    // floor_rawChunksReadSites: RETIRED (nexus-zrcj7, 2026-09-03), not adjusted to
+    // >= 0 — same disposition floor_stagingPromoteOpsRawSqlSites already established
+    // in this file. Its corpus (searchWithTokens/hybridSearch reading
+    // chunksTable(dim) as hand-built SQL text, RAW_CHUNKS_READ_METHODS above) is now
+    // permanently empty by construction: both methods are retired onto generated
+    // jOOQ function tables (plain_search_<dim>/text_gated_search_<dim>, vectors-
+    // 009/010) whose own inlined SQL predicate carries the live_chunks/tombstone
+    // filter directly. A floor whose corpus can never again be anything but its own
+    // minimum is backlog padding, not a live regression guard.
 
     @Test
     void floor_typedChunksReadSites() throws IOException {
@@ -749,48 +759,13 @@ class TombstoneFilterGateTest {
 
     // ── Meta-tests: the raw-chunks scan (nexus-3ck2g E2) ─────────────────────
 
-    /**
-     * The exact regression this check exists to catch: a method matching one of
-     * {@link #RAW_CHUNKS_READ_METHODS} that calls {@code chunksTable(dim)} but never
-     * calls {@code liveChunksPredicate(...)} must be flagged, unexcused.
-     */
-    @Test
-    void rawChunksScan_missingPredicate_isFlagged() {
-        String synthetic = String.join("\n",
-            "public final class PgVectorRepository {",
-            "    private String searchWithTokens(String tenant, String queryText) {",
-            "        String table = chunksTable(dim);",
-            "        String sql = \"SELECT chash FROM \" + table;",
-            "        return rawVectorFetch(ctx, sql).toString();",
-            "    }",
-            "}");
-        String blanked = RawSqlGateTest.blank(synthetic);
-        var out = new ArrayList<Finding>();
-        scanRawChunksSites("PgVectorRepository.java", blanked, List.of(), out);
-        assertThat(out).hasSize(1);
-        assertThat(out.get(0).excused())
-            .as("a chunksTable(dim) read with no liveChunksPredicate(...) call anywhere in "
-                + "the method must be flagged")
-            .isFalse();
-    }
-
-    /** The fixed shape: the same method, now calling the inline predicate. */
-    @Test
-    void rawChunksScan_presentPredicate_passes() {
-        String synthetic = String.join("\n",
-            "public final class PgVectorRepository {",
-            "    private String searchWithTokens(String tenant, String queryText) {",
-            "        String table = chunksTable(dim);",
-            "        String sql = \"SELECT chash FROM \" + table + liveChunksPredicate(\"c\");",
-            "        return rawVectorFetch(ctx, sql).toString();",
-            "    }",
-            "}");
-        String blanked = RawSqlGateTest.blank(synthetic);
-        var out = new ArrayList<Finding>();
-        scanRawChunksSites("PgVectorRepository.java", blanked, List.of(), out);
-        assertThat(out).hasSize(1);
-        assertThat(out.get(0).excused()).isTrue();
-    }
+    // rawChunksScan_missingPredicate_isFlagged / rawChunksScan_presentPredicate_passes:
+    // RETIRED (nexus-zrcj7, 2026-09-03). Both proved scanRawChunksSites's flag/excuse
+    // behavior for a method NAMED in RAW_CHUNKS_READ_METHODS — a precondition that no
+    // longer holds now that map is empty (see its own retirement comment above).
+    // rawChunksScan_noChunksTableCall_isNotACandidate (below) still exercises the same
+    // scan function and needs no change (it already asserted zero findings, which is
+    // exactly what an unregistered/no-match method name produces either way).
 
     /** A method whose name matches but never reads the raw chunks table (no
      * {@code chunksTable(} call) is not a candidate at all — zero findings. */

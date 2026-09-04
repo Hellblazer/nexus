@@ -96,11 +96,11 @@ import java.util.stream.Stream;
  * {@code rawVectorFetch} therefore FAILS the gate on sight — silent-miss
  * becomes loud-add. See {@link #wrapperCallSites_newUnsentineledCaller_isFlagged}
  * for the falsification proof and {@link
- * #wrapperCallSites_realPgVectorRepository_allFiveCallSitesAreSentineled}
+ * #wrapperCallSites_realPgVectorRepository_zeroRawVectorFetchCallSitesRemain}
  * for the non-overreach proof (the extension does not simply ban the
- * wrapper — it passes cleanly on the real tree, where every one of the 5
- * current call sites sits inside {@code searchWithTokens} or {@code
- * hybridSearch}). This closes the same-file half of nexus-8emxy's P2 for
+ * wrapper — nexus-zrcj7, 2026-09-03, retired the wrapper itself: the real tree
+ * now carries ZERO rawVectorFetch call sites, which that test pins directly).
+ * This closes the same-file half of nexus-8emxy's P2 for
  * {@code PgVectorRepository.java} specifically; a hypothetical brand-new
  * private raw-SQL wrapper method appearing in some OTHER file still needs a
  * conscious {@link #RAW_SQL_WRAPPER_METHODS} registration, AND that
@@ -271,13 +271,14 @@ class RawSqlGateTest {
             // lookup() is caught immediately rather than silently inheriting
             // a blanket excuse.
             "lookup", Map.of())),
-        Map.entry("PgVectorRepository.java", Map.of(
-            // pgvector `<=>` ordered off a bind-parameter vector literal, combined with a
-            // dynamic-arity metadata WHERE and (hybridSearch) a selectivity-dependent plan
-            // choice between structurally different queries — the single execution
-            // chokepoint for search()/hybridSearch().
-            "rawVectorFetch", Map.of(
-                ".fetch(sql, binds)", 1))),
+        // PgVectorRepository.java's "rawVectorFetch" entry: REMOVED (nexus-zrcj7,
+        // 2026-09-03). rawVectorFetch (the single execution chokepoint for
+        // searchWithTokens()/hybridSearch()'s raw SQL) is deleted outright --
+        // both callers now go through generated jOOQ function tables
+        // (plain_search_<dim>/text_gated_search_<dim>, vectors-009/010) like every
+        // other combined-query shape. Per the dead-entry-avoidance discipline this
+        // class already established (RekeyOps.java's entry, below), a registration
+        // for a deleted method is removed outright, not kept as a no-op.
         Map.entry("TaxonomyCentroidRepository.java", Map.of(
             // Same pgvector `<=>` category as PgVectorRepository.rawVectorFetch.
             // RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-jv3ue item 5):
@@ -1242,148 +1243,24 @@ class RawSqlGateTest {
      * additional tripwire, not overreach).
      */
     private static final Map<String, Map<String, java.util.Set<String>>> RAW_SQL_ASSEMBLY_SENTINELS =
-        Map.of(
-        "PgVectorRepository.java", Map.of(
-            "searchWithTokens", java.util.Set.of(
-                "{ return searchWithTokens(tenant, queryText, collectionNames, nResults, where, false); }",
-                "{ if (collectionNames == null || collectionNames.isEmpty()) { return new Tokened<>(List.of(), 0L); }"
-                + " int dim = dimForCollection(collectionNames.get(0)); for (String col : collectionNames) { int colDim"
-                + " = dimForCollection(col); if (colDim != dim) { throw new IllegalArgumentException( \"mixed dimension"
-                + "s in one search call: '\" + collectionNames.get(0) + \"' is \" + dim + \"-dim but '\" + col + \"' is"
-                + " \" + colDim + \"-dim - one query vector cannot serve both spaces\"); } } // Route by the first coll"
-                + "ection - the same-dim check above guarantees the set is // homogeneous, and the Python client never "
-                + "mixes embedder families in one call // (same convention as the Chroma path). EmbedResult embedResult"
-                + " = embedQuery(collectionNames.get(0), queryText, dim); float[] queryVec = embedResult.embeddings().g"
-                + "et(0); StringBuilder sql = new StringBuilder() // RDR-180: bytea storage — hex at the SQL seam (raw-"
-                + "SQL twin of // the ChashHex converted type the jOOQ paths use). .append(\"SELECT encode(chash, 'hex'"
-                + ") AS chash, chunk_text, collection, metadata::text AS metadata_json,\") .append(\" (\").append(DimTa"
-                + "bles.embeddingColumn(dim)).append(\" <=> ?::vector) AS distance\") .append(\" FROM \").append(chunks"
-                + "Table(dim)).append(\" c\") .append(\" WHERE c.collection IN (\").append(placeholders(collectionNames"
-                + ".size())).append(\")\") // RDR-156 Decision 6 (nexus-3ck2g): live_chunks predicate, inlined so the /"
-                + "/ HNSW index scan on c stays engaged (see liveChunksPredicate's javadoc). .append(\" AND \").append("
-                + "liveChunksPredicate(\"c\")) // nexus-74zvm DECISION (see method javadoc): exclude foreign-dim rows s"
-                + "o a // NULL embedding_<dim> never produces a NULL-distance result under LIMIT. .append(\" AND \").ap"
-                + "pend(DimTables.embeddingColumn(dim)).append(\" IS NOT NULL\"); List<Object> binds = new ArrayList<>("
-                + "); binds.add(vectorLiteral(queryVec)); binds.addAll(collectionNames); if (where != null) { for (Map."
-                + "Entry<String, Object> e : where.entrySet()) { appendWherePredicate(sql, binds, e.getKey(), e.getValu"
-                + "e()); } } sql.append(\" ORDER BY distance ASC, chash ASC LIMIT ?\"); binds.add(nResults); Result<Rec"
-                + "ord> result = tenantScope.withTenant(tenant, ctx -> { // Filtered-ANN recall: keep HNSW scanning pas"
-                + "t ef_search when the RLS + // collection + metadata predicates narrow the candidate set. SET LOCAL i"
-                + "s // txn-scoped (same pool discipline as the TenantScope GUC stamp). PgSession.setLocal(ctx, \"hnsw."
-                + "iterative_scan\", \"relaxed_order\"); // nexus-4ktfm: widen the traversal's candidate list too — ite"
-                + "rative scan // cannot recover neighbors the ef-bounded traversal already pruned // (cross-tenant cro"
-                + "wd-out; see PgSession.DEFAULT_EF_SEARCH_FLOOR). PgSession.setHnswEfSearch(ctx, nResults); // nexus-g17tf: bound the statement so an orphaned or pathological // scan cancels (57014) instead of pinning xmin for hours. PgSession.setSearchStatementTimeout(ctx); // nexus-6nkn3: a custom plan per execution so the planner sees the // collection set's selectivity (a cached generic HNSW plan on a tiny // collection ran ~30s and returned EMPTY in production). PgSession.setSearchPlanCacheMode(ctx); return exactOnUnderReturn(ctx, nResults, () -> raw"
-                + "VectorFetch(ctx, sql.toString(), binds.toArray())); }); List<Map<String, Object>> rows = new ArrayLis"
-                + "t<>(result.size()); for (Record rec : result) { Map<String, Object> row = new LinkedHashMap<>(); row"
-                + ".put(\"id\", rec.get(\"chash\", String.class)); row.put(\"content\", rec.get(\"chunk_text\", String."
-                + "class)); row.put(\"distance\", rec.get(\"distance\", Double.class)); row.put(\"collection\", rec.get"
-                + "(\"collection\", String.class)); row.putAll(fromJson(rec.get(\"metadata_json\", String.class))); row"
-                + "s.add(row); } // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-"
-                + "in) enrichSearchRows(tenant, rows, includeSourceUri); return new Tokened<>(rows, embedResult.tokens("
-                + ")); }"),
-            "hybridSearch", java.util.Set.of(
-                "{ return hybridSearchWithTokens(tenant, queryText, collectionNames, nResults, where, false).value();"
-                + " }",
-                "{ return hybridSearch(tenant, queryText, collectionNames, nResults, where, selectiveGateMax, null); "
-                + "}",
-                "{ if (collectionNames == null || collectionNames.isEmpty()) { return List.of(); } // queryText is bo"
-                + "und twice below as a raw text parameter (plainto_tsquery + // trgm <%); a NUL-bearing query would hi"
-                + "t the same UTF8-0x00 rejection the // upsert path sanitizes (nexus-rvfwj sibling hole, dual-review H"
-                + "1). queryText = stripNul(queryText); if (nResults < 1) { // LIMIT -1 is \"no limit\" in Postgres - a"
-                + " non-positive value would silently // unbound the query instead of capping it. throw new IllegalArgu"
-                + "mentException(\"nResults must be >= 1, got \" + nResults); } if (selectiveGateMax < 1) { // A non-po"
-                + "sitive threshold routes EVERY gate to the HNSW-first branch // (matchCount >= 0 is always > a non-po"
-                + "sitive cutoff), silently re-enabling // the lcogi selective-gate collapse. Reject rather than mis-di"
-                + "spatch. throw new IllegalArgumentException( \"selectiveGateMax must be >= 1, got \" + selectiveGateM"
-                + "ax); } int dim = dimForCollection(collectionNames.get(0)); for (String col : collectionNames) { int "
-                + "colDim = dimForCollection(col); if (colDim != dim) { throw new IllegalArgumentException( \"mixed dim"
-                + "ensions in one hybrid-search call: '\" + collectionNames.get(0) + \"' is \" + dim + \"-dim but '\" +"
-                + " col + \"' is \" + colDim + \"-dim - one query vector cannot serve both spaces\"); } } EmbedResult h"
-                + "ybridEmbed = embedQuery(collectionNames.get(0), queryText, dim); if (tokensOut != null) tokensOut[0]"
-                + " = hybridEmbed.tokens(); float[] queryVec = hybridEmbed.embeddings().get(0); // Non-text scope (coll"
-                + "ection IN + metadata where). Shared by the selective // rank-by-chash query (nexus-x7z7l): that quer"
-                + "y re-applies these cheap predicates // but NOT the text gate - the gate's matching chashes already s"
-                + "atisfy it, so the // expensive <% trigram heap-recheck runs ONCE (in the bounded fetch below), not /"
-                + "/ again at rank time. (The metadata->>? predicate is kept on the rank query, not // dropped: two sam"
-                + "e-text rows in different collections share a chash, so chash // alone would not re-impose a per-row "
-                + "metadata filter.) StringBuilder scope = new StringBuilder() .append(\" WHERE collection IN (\").appe"
-                + "nd(placeholders(collectionNames.size())).append(\")\"); List<Object> scopeBinds = new ArrayList<>(co"
-                + "llectionNames); // RDR-156 Decision 6 (nexus-3ck2g): live_chunks predicate folded into `scope` // BE"
-                + "FORE `gate` is derived from it below, so every downstream query built off // either scope or gate — "
-                + "the bounded gate-selectivity probe, the selective // chash-ranked rank, and the HNSW-first fallback,"
-                + " all three read sites — inherits // it by construction; a single fix point instead of three. Inlined"
-                + " (never a JOIN // to nexus.live_chunks) so the HNSW/GIN scans on `c` (the alias assigned to // `tabl"
-                + "e` below) stay engaged — see liveChunksPredicate's javadoc. scope.append(\" AND \").append(liveChunk"
-                + "sPredicate(\"c\")); // Full gate = scope AND a text signal. FTS lexeme match OR word-trigram similar"
-                + "ity: // the <% operator form (word_similarity >= pg_trgm.word_similarity_threshold) is // gin_trgm_o"
-                + "ps-indexable (vectors-002) where the function-call form is not; // word_similarity (vs plain similar"
-                + "ity) does not dilute with chunk_text length. // The threshold GUC is pinned per-transaction below. S"
-                + "tringBuilder gate = new StringBuilder(scope) .append(\" AND (chunk_tsv @@ plainto_tsquery('english',"
-                + " ?) OR ? <% chunk_text)\"); List<Object> gateBinds = new ArrayList<>(scopeBinds); gateBinds.add(quer"
-                + "yText); gateBinds.add(queryText); if (where != null) { for (Map.Entry<String, Object> e : where.entr"
-                + "ySet()) { appendWherePredicate(gate, gateBinds, e.getKey(), e.getValue()); appendWherePredicate(scop"
-                + "e, scopeBinds, e.getKey(), e.getValue()); } } final String table = chunksTable(dim) + \" c\"; final "
-                + "String gateSql = gate.toString(); final String scopeSql = scope.toString(); final String vecLit = ve"
-                + "ctorLiteral(queryVec); // SELECTIVITY-AWARE DISPATCH (nexus-lcogi; single-gate-eval, nexus-x7z7l). O"
-                + "NE // bounded fetch of the gate's chashes (LIMIT SELECTIVE_GATE_MAX+1) both picks the // plan AND, f"
-                + "or the selective case, IS the gate evaluation - the ranked query then // filters by chash (PK lookup"
-                + "), so the expensive <% trigram heap-recheck runs once, // not twice. The prior design ran a standalo"
-                + "ne COUNT(*) probe AND re-ran the gate in // the ranked query: on a large code corpus that was two ~6"
-                + "50ms <% heap-rechecks per // call (conexus-qsa EXPLAIN: count probe 700ms + materialized-CTE rank 65"
-                + "4ms, both // dominated by the lossy gin_trgm_ops recheck over ~1900 candidate rows). // // * SELECTI"
-                + "VE gate (matches <= SELECTIVE_GATE_MAX): the bounded fetch returns the // COMPLETE gate (all matches"
-                + ", since it did not hit the LIMIT). Rank those exact // chashes by cosine distance via a chash IN (.."
-                + ".) filter + the cheap non-text // scope (collection/metadata). No HNSW, no re-gate: ranks the small "
-                + "gated set // exactly, with NO dependence on hnsw.max_scan_tuples (the lcogi collapse fix is // prese"
-                + "rved - the prior HNSW-first single-query plan starved selective gates). // // * NON-SELECTIVE gate ("
-                + "matches > SELECTIVE_GATE_MAX): the bounded fetch hit the // LIMIT (returned SELECTIVE_GATE_MAX+1 cha"
-                + "shes) and is discarded - keep the // HNSW-first plan (gate as scan filter, iterative_scan). A dense "
-                + "gate is usually // found within the scan budget; materializing a huge gated set (~4 KB/row // embedd"
-                + "ings) would spill work_mem. The bounded fetch caps this probe's cost // (the prior unbounded COUNT s"
-                + "canned the full dense gate). Same SEMI-selective // caveat as before applies; P5.2's RRF fusion clos"
-                + "es that window. // // matches == 0 -> empty gate -> selective branch returns an empty result (no sil"
-                + "ent // vector fallback), handled explicitly (chash IN () is not valid SQL). List<Object> probeBinds "
-                + "= new ArrayList<>(gateBinds); probeBinds.add(selectiveGateMax + 1); Result<Record> result = tenantSc"
-                + "ope.withTenant(tenant, ctx -> { // Trigram gate calibration (contract anchor): word_similarity >= 0."
-                + "6, pg_trgm's // default - typo-probe candidates sit at ~0.9 and pass, no-signal rows at ~0.1 // do n"
-                + "ot. Pinned per-transaction so the gate is independent of cluster config. PgSession.setLocal(ctx, \"p"
-                + "g_trgm.word_similarity_threshold\", \"0.6\"); // nexus-g17tf: bound EVERY statement in this transaction — the gate // probe (a <% trigram heap-recheck), the selective chash rank, and the // dense HNSW rank all inherit it. Set here, before the first fetch, // rather than per branch: a branch without HNSW is still a scan that // can pin xmin (substantive-critic finding, 2026-09-02). PgSession.setSearchStatementTimeout(ctx); // nexus-6nkn3: a custom plan per execution so the planner sees the // collection set's selectivity (a cached generic HNSW plan on a tiny // collection ran ~30s and returned EMPTY in production). PgSession.setSearchPlanCacheMode(ctx); List<String> gateChashes = rawVectorFetch( ctx, \"SELE"
-                + "CT encode(chash, 'hex') AS chash FROM \" + table + gateSql + \" LIMIT ?\", probeBinds.toArray()) .ma"
-                + "p(r -> r.get(\"chash\", String.class)); if (gateChashes.size() <= selectiveGateMax) { // Selective: "
-                + "the bounded fetch returned the COMPLETE gate (the LIMIT did NOT // fire - fewer than selectiveGateMa"
-                + "x+1 matches exist, so it scanned the full // GIN candidate set, same work the old COUNT(*) did). The"
-                + " win is not a // cheaper probe: this single gate scan REPLACES both the old COUNT(*) probe // AND th"
-                + "e MATERIALIZED-CTE gate re-evaluation - the rank below filters by // chash with NO text gate, so the"
-                + " <% heap-recheck happens once, not twice. if (gateChashes.isEmpty()) { // Empty gate: typed-empty re"
-                + "sult (chash IN () is invalid SQL). return rawVectorFetch(ctx, \"SELECT NULL::text AS chash, NULL::te"
-                + "xt AS chunk_text,\" + \" NULL::text AS collection, NULL::text AS metadata_json,\" + \" NULL::float8 "
-                + "AS distance WHERE false\"); } // chash is NOT unique across collections (the table key is // (tenant"
-                + "_id, collection, chash)): a multi-collection gate can return the // same chash from N collections. D"
-                + "edup the IN list - the collection scope in // scopeSql still yields one ranked row per (collection, "
-                + "chash). Dedup runs // AFTER the size-based dispatch so the selective/non-selective boundary stays //"
-                + " identical to the old per-row COUNT(*). List<String> inChashes = gateChashes.stream().distinct().toL"
-                + "ist(); String sql = \"SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text A"
-                + "S metadata_json,\" + \" (\" + DimTables.embeddingColumn(dim) + \" <=> ?::vector) AS distance FROM \""
-                + " + table + scopeSql + \" AND chash IN (\" + decodePlaceholders(inChashes.size()) + \")\" // nexus-74"
-                + "zvm DECISION (see method javadoc): the text gate has no dim // awareness, so a foreign-dim row can m"
-                + "atch it — exclude here rather // than rank it with a NULL embedding_<dim> distance. + \" AND \" + Di"
-                + "mTables.embeddingColumn(dim) + \" IS NOT NULL\" + \" ORDER BY distance ASC, chash ASC LIMIT ?\"; Lis"
-                + "t<Object> b = new ArrayList<>(); b.add(vecLit); b.addAll(scopeBinds); b.addAll(inChashes); b.add(nRe"
-                + "sults); return rawVectorFetch(ctx, sql, b.toArray()); } // HNSW-first for a dense gate: keep HNSW sc"
-                + "anning past ef_search. PgSession.setLocal(ctx, \"hnsw.iterative_scan\", \"relaxed_order\"); // nexus"
-                + "-4ktfm: crowd-out headroom for the traversal itself (see // PgSession.DEFAULT_EF_SEARCH_FLOOR). PgSe"
-                + "ssion.setHnswEfSearch(ctx, nResults); String sql = \"SELECT encode(chash, 'hex') AS chash, chunk_tex"
-                + "t, collection, metadata::text AS metadata_json,\" + \" (\" + DimTables.embeddingColumn(dim) + \" <=>"
-                + " ?::vector) AS distance FROM \" + table + gateSql // nexus-74zvm DECISION (see method javadoc): same"
-                + " NULL-distance guard as // the selective-gate branch above. + \" AND \" + DimTables.embeddingColumn("
-                + "dim) + \" IS NOT NULL\" + \" ORDER BY distance ASC, chash ASC LIMIT ?\"; List<Object> b = new ArrayL"
-                + "ist<>(); b.add(vecLit); b.addAll(gateBinds); b.add(nResults); return exactOnUnderReturn(ctx, nResults, () -> rawVectorFetch(ctx, sql, b.toAr"
-                + "ray())); }); List<Map<String, Object>> rows = new ArrayList<>(result.size()); for (Record rec : resul"
-                + "t) { Map<String, Object> row = new LinkedHashMap<>(); row.put(\"id\", rec.get(\"chash\", String.clas"
-                + "s)); row.put(\"content\", rec.get(\"chunk_text\", String.class)); row.put(\"distance\", rec.get(\"di"
-                + "stance\", Double.class)); row.put(\"collection\", rec.get(\"collection\", String.class)); row.putAll"
-                + "(fromJson(rec.get(\"metadata_json\", String.class))); rows.add(row); } return rows; }")));
+        Map.of();
 
+    // RETIRED (nexus-zrcj7, 2026-09-03): this map used to carry a PgVectorRepository.java
+    // entry naming searchWithTokens/hybridSearch, the two StringBuilder-assembled-raw-SQL
+    // methods this whole mechanism was built for (this class's own javadoc: "the
+    // bead's first NAMED motivating file"). Both methods are retired onto generated
+    // jOOQ function tables (plain_search_<dim>/text_gated_search_<dim>, vectors-
+    // 009/010) -- zero raw-SQL-assembling methods remain on the search path, the
+    // corpus this mechanism polices is now permanently empty by construction, and
+    // RAW_SQL_ASSEMBLY_SENTINELS above is Map.of() rather than carrying a stale or
+    // vacuous entry, matching the dead-entry-avoidance discipline this class already
+    // established elsewhere (SANCTIONED_STATEMENTS' RekeyOps.java removal, above;
+    // TombstoneFilterGateTest's floor_stagingPromoteOpsRawSqlSites retirement, same
+    // reasoning). {@link #noUnreviewedRawSqlAssemblyChanges} keeps running (walks
+    // src/main for every registered file -- there are none today, so it always
+    // finds zero violations) as a live, non-dormant guard should a FUTURE raw-SQL-
+    // assembling method ever need this registration again; only the DATA that named
+    // PgVectorRepository.java is gone, not the mechanism.
     /** Per-file scan for {@link #RAW_SQL_ASSEMBLY_SENTINELS} violations:
      * every registered method's CURRENT whole-body canonical text must
      * match one of its declared snapshots exactly, and every declared
@@ -1455,20 +1332,20 @@ class RawSqlGateTest {
             .isEmpty();
     }
 
-    @Test
-    void assemblySentinel_bodyChange_isFlagged() {
-        String synthetic = String.join("\n",
-            "public final class PgVectorRepository {",
-            "    private void hybridSearch() {",
-            "        rawVectorFetch(ctx, \"SELECT 1 WHERE definitely-not-the-real-body\");",
-            "    }",
-            "}");
-        assertThat(scanAssemblySentinels("PgVectorRepository.java", synthetic))
-            .as("a body that matches none of the registered snapshots must fail loud, "
-                + "even though a method of that name IS registered")
-            .anySatisfy(h -> assertThat(h).contains("SENTINEL BODY CHANGED")
-                .contains("hybridSearch"));
-    }
+    // assemblySentinel_bodyChange_isFlagged: RETIRED (nexus-zrcj7, 2026-09-03). It
+    // proved a body that matches none of RAW_SQL_ASSEMBLY_SENTINELS's registered
+    // snapshots fails loud "even though a method of that name IS registered" -- a
+    // precondition (SOME method registered for PgVectorRepository.java) that no
+    // longer holds now that the map is Map.of() (searchWithTokens/hybridSearch
+    // retired onto generated jOOQ function tables, vectors-009/010: see the
+    // RAW_SQL_ASSEMBLY_SENTINELS retirement comment above). Same disposition as
+    // TombstoneFilterGateTest's floor_stagingPromoteOpsRawSqlSites: a proof whose
+    // fixture went permanently empty is removed, not adjusted to assert nothing.
+    // assemblySentinel_unregisteredFileOrMethod_isUnaffected (below) still covers
+    // the scan-logic-returns-empty-for-an-unregistered-file/method shape this test
+    // used to distinguish from -- PgVectorRepository.java now behaves exactly like
+    // that case, so no coverage is lost, only the SPECIFIC "registered but wrong
+    // body" branch, which nothing in the real tree can exercise any more.
 
     @Test
     void assemblySentinel_unregisteredFileOrMethod_isUnaffected() {
@@ -1501,8 +1378,15 @@ class RawSqlGateTest {
      * call is a literal {@link #RAW_EXECUTE} match); this map is the
      * companion registration for treating it as a wrapper whose callers
      * must all be accounted for. */
+    // Empty (nexus-zrcj7, 2026-09-03): the sole entry, PgVectorRepository.java's
+    // "rawVectorFetch", is REMOVED -- that method is deleted outright (searchWithTokens/
+    // hybridSearch retired onto generated jOOQ function tables, vectors-009/010), so
+    // there is no wrapper method left anywhere in this class's corpus to register. Kept
+    // as a live (not deleted) mechanism, dormant by construction until a future raw-
+    // SQL-assembling wrapper needs it again -- same "dormant, not enforced, noted per
+    // spec" disposition TombstoneFilterGateTest gives its own catalog_links case.
     private static final Map<String, java.util.Set<String>> RAW_SQL_WRAPPER_METHODS =
-        Map.of("PgVectorRepository.java", java.util.Set.of("rawVectorFetch"));
+        Map.of();
 
     /** Every CALL SITE start-offset of {@code name} in blanked source --
      * i.e. every {@code \bname(} match that is NOT that name's own
@@ -1619,70 +1503,50 @@ class RawSqlGateTest {
             .isEmpty();
     }
 
-    /** THE non-vacuity proof: a brand-new, differently-named method added
-     * to {@code PgVectorRepository.java} that calls the wrapper must fail
-     * loud even though it is not, and could never have been, named in any
-     * allowlist ahead of time -- this is the falsification the bead
-     * demanded (an unnamed future caller must produce a FAILING signal,
-     * not zero signal). */
-    @Test
-    void wrapperCallSites_newUnsentineledCaller_isFlagged() {
-        String synthetic = String.join("\n",
-            "public final class PgVectorRepository {",
-            "    private static Result<Record> rawVectorFetch(DSLContext ctx, String sql, Object... binds) {",
-            "        return ctx.fetch(sql, binds);",
-            "    }",
-            "    List<Map<String, Object>> newExperimentalSearch(String tenant, String extraPredicate) {",
-            "        StringBuilder sql = new StringBuilder(\"SELECT 1\");",
-            "        sql.append(extraPredicate);",
-            "        return tenantScope.withTenant(tenant,",
-            "            ctx -> rawVectorFetch(ctx, sql.toString(), new Object[0]));",
-            "    }",
-            "}");
-        List<String> hits = scanWrapperCallSitesSentineled("PgVectorRepository.java", synthetic);
-        assertThat(hits)
-            .as("a new method calling rawVectorFetch that is not registered in "
-                + "RAW_SQL_ASSEMBLY_SENTINELS must fail loud -- under the pre-fix, purely "
-                + "name-keyed mechanism this produced ZERO violations")
-            .anySatisfy(h -> assertThat(h)
-                .contains("UNSENTINELED WRAPPER CALL SITE")
-                .contains("rawVectorFetch")
-                .contains("PgVectorRepository.java"));
-    }
+    // wrapperCallSites_newUnsentineledCaller_isFlagged: RETIRED (nexus-zrcj7,
+    // 2026-09-03). It proved a brand-new, differently-named method calling
+    // rawVectorFetch fails loud even though the wrapper's OWN existence is what
+    // RAW_SQL_WRAPPER_METHODS registers ("PgVectorRepository.java" ->
+    // "rawVectorFetch") -- a precondition that no longer holds now that
+    // RAW_SQL_WRAPPER_METHODS is Map.of() (rawVectorFetch itself deleted;
+    // searchWithTokens/hybridSearch retired onto generated jOOQ function tables,
+    // vectors-009/010). scanWrapperCallSitesSentineled short-circuits to
+    // List.of() for any file with no registered wrapper name, so this synthetic
+    // source can no longer produce the finding it asserted. The falsification
+    // this test demonstrated (an unnamed future caller must produce a FAILING
+    // signal, not zero signal) is preserved for a FUTURE raw-SQL wrapper: the
+    // moment RAW_SQL_WRAPPER_METHODS names one again, this same shape of proof
+    // is the one to write back in.
 
-    /** THE non-overreach proof: the extension does not simply ban the
-     * wrapper outright -- every one of the 5 real call sites in the actual
-     * {@code PgVectorRepository.java} source sits inside {@code
-     * searchWithTokens} or {@code hybridSearch}, both already registered in
-     * {@link #RAW_SQL_ASSEMBLY_SENTINELS}, so the scan is clean on the real
-     * tree. Reads the real file directly (not the tree-walking {@link
-     * #noUnsentineledRawSqlWrapperCallSites} test) so this assertion is
-     * unambiguous even if some other file elsewhere in the walk were to
-     * fail. */
+    /** RENAMED and REPURPOSED (nexus-zrcj7, 2026-09-03; was
+     * {@code wrapperCallSites_realPgVectorRepository_allFiveCallSitesAreSentineled},
+     * which pinned "exactly 5 rawVectorFetch call sites, all inside
+     * searchWithTokens/hybridSearch" as the non-overreach proof for the
+     * nexus-8emxy extension). searchWithTokens and hybridSearch are now retired
+     * onto generated jOOQ function tables (plain_search_<dim>/text_gated_search_
+     * <dim>, vectors-009/010) -- rawVectorFetch itself is deleted, so the "5 call
+     * sites, all sentineled" shape this test used to pin can never recur. This is
+     * exactly the bead's own success criterion made a standing regression guard:
+     * ZERO raw-SQL-assembling call sites on the search path, in the REAL tree, not
+     * just in RAW_SQL_ASSEMBLY_SENTINELS's (now-empty) data. Reads the real file
+     * directly (not the tree-walking {@link #noUnsentineledRawSqlWrapperCallSites}
+     * test) so this assertion is unambiguous even if some other file elsewhere in
+     * the walk were to fail. */
     @Test
-    void wrapperCallSites_realPgVectorRepository_allFiveCallSitesAreSentineled() throws IOException {
+    void wrapperCallSites_realPgVectorRepository_zeroRawVectorFetchCallSitesRemain() throws IOException {
         Path path = Path.of("src", "main", "java", "dev", "nexus", "service", "vectors",
             "PgVectorRepository.java");
         assertThat(path).exists();
         String source = Files.readString(path);
 
-        List<Integer> callSites = wrapperCallSites(blank(source), "rawVectorFetch");
-        assertThat(callSites)
-            .as("nexus-8emxy's own brace-matcher census found exactly 5 rawVectorFetch call "
-                + "sites (plus its declaration, which must NOT be counted as a call site) -- "
-                + "this pins that count so a silent drop in coverage (e.g. a regex regression "
-                + "that stops matching some call shape) would be caught even if it happened to "
-                + "leave the sentineled-coverage check green")
-            .hasSize(5);
-
-        assertThat(scanWrapperCallSitesSentineled("PgVectorRepository.java", source))
-            .as("every current rawVectorFetch call site is expected to sit inside "
-                + "searchWithTokens or hybridSearch, both registered in "
-                + "RAW_SQL_ASSEMBLY_SENTINELS (proving the extension does not simply ban the "
-                + "wrapper) -- a non-empty result here means a NEW method calling "
-                + "rawVectorFetch was added to PgVectorRepository.java: register that "
-                + "method's whole-body canonical text in RAW_SQL_ASSEMBLY_SENTINELS (see its "
-                + "own javadoc) before this can pass again")
+        assertThat(wrapperCallSites(blank(source), "rawVectorFetch"))
+            .as("nexus-zrcj7: rawVectorFetch (and every call to it) is deleted outright -- "
+                + "searchWithTokens/hybridSearch now read through generated jOOQ function "
+                + "tables (plain_search_<dim>/text_gated_search_<dim>, vectors-009/010). A "
+                + "non-empty result here means a raw-SQL-assembling call was reintroduced; "
+                + "register the wrapper in RAW_SQL_WRAPPER_METHODS and its enclosing method's "
+                + "whole-body canonical text in RAW_SQL_ASSEMBLY_SENTINELS before this can "
+                + "pass again")
             .isEmpty();
     }
 }
