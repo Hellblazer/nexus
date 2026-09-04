@@ -1,0 +1,459 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+package dev.nexus.service;
+
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.vectors.DimTables;
+import dev.nexus.service.vectors.PgVectorRepository;
+import liquibase.Contexts;
+import liquibase.Liquibase;
+import liquibase.database.Database;
+import liquibase.database.DatabaseFactory;
+import liquibase.database.jvm.JdbcConnection;
+import liquibase.resource.ClassLoaderResourceAccessor;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.testcontainers.containers.PostgreSQLContainer;
+
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * nexus-zrcj7 — EXPLAIN-based inlining/index-engagement proof for
+ * {@code nexus.plain_search_&lt;dim&gt;} (vectors-009) and {@code
+ * nexus.text_gated_search_&lt;dim&gt;} (vectors-010), the two schema functions that
+ * retire {@link PgVectorRepository#searchWithTokens}/{@link PgVectorRepository#hybridSearch}'s
+ * raw-SQL StringBuilder assembly.
+ *
+ * <p>Mirrors {@code CombinedQueryParityTest}'s GROUP 3 EXPLAIN discipline (a {@code
+ * Function Scan} node means the function is not inlinable — LANGUAGE sql required, not
+ * plpgsql) and {@code HybridSelectiveGateTest}'s precedent that a SELECTIVE text gate must
+ * never touch the HNSW index (the nexus-lcogi starvation class).
+ */
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+class PlainSearchTextGatedSearchExplainTest {
+
+    private static final String TENANT = "zrcj7-explain";
+    private static final String SVC_ROLE = "svc_zrcj7_explain";
+    private static final String SVC_PASS = "svc_zrcj7_explain_pass";
+    private static final String COLL = "knowledge__zrcj7-explain__voyage-context-3__v1"; // 1024
+    private static final String TOKEN = "zrcj7raretoken";
+    private static final int FILLER = 200;  // vector-closest to the query, no token
+    private static final int TARGETS = 4;   // farthest from the query, carry the token
+
+    // Dense/non-selective-gate probe (nexus-zrcj7 pushback item 2): a SEPARATE collection
+    // where MOST rows carry the token, so the text gate is non-selective. DENSE_MATCHING
+    // is deliberately > SELECTIVE_GATE_MAX (5000) -- the retired Java hybridSearch's own
+    // selective/HNSW-first dispatch threshold -- so this fixture exercises the regime
+    // where OLD code would have taken the HNSW-first branch, not the (still materializing)
+    // selective branch a smaller dense gate would share with the new function trivially.
+    private static final String DENSE_COLL = "knowledge__zrcj7-explain-dense__voyage-context-3__v1";
+    private static final String DENSE_TOKEN = "zrcj7densetoken";
+    private static final int DENSE_ROWS = 6000;
+    private static final int DENSE_MATCHING = 5500;  // > PgVectorRepository.SELECTIVE_GATE_MAX (5000)
+
+    // ORDER/distance parity fixture (nexus-zrcj7 pushback item 3): hybridSearch's exact
+    // ordered ids + numeric distance values, checked against an INDEPENDENT hand-computed
+    // oracle (analytic cosine distance) rather than "the retired Java path" -- that path
+    // is deleted, so there is nothing live to diff against; the oracle is the closest
+    // faithful reading of "byte-identical to the retired Java path" now available: the
+    // retired path's OWN documented contract was "rank gate survivors by exact cosine
+    // distance ASC" (T2 [24207]), which an analytic oracle checks directly and exactly,
+    // not merely approximately via a second implementation that could share a bug.
+    private static final String ORDER_COLL = "knowledge__zrcj7-explain-order__voyage-context-3__v1";
+    private static final String ORDER_TOKEN = "zrcj7ordertoken";
+
+    PostgreSQLContainer<?> pg;
+    HikariDataSource svcDs;
+    TenantScope tenantScope;
+    PgVectorRepository repo;
+    PgVectorRepositoryContractTest.FakeEmbedder embedder;
+    final List<String> targetChashes = new ArrayList<>();
+
+    @BeforeAll
+    void startAll() throws Exception {
+        pg = PgContainerHelper.start();
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE
+                + "') THEN CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
+                + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
+            su.createStatement().execute(
+                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') "
+                + "THEN CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; "
+                + "END IF; END $$");
+        }
+        try (Connection su = pg.createConnection("")) {
+            Database db = DatabaseFactory.getInstance()
+                .findCorrectDatabaseImplementation(new JdbcConnection(su));
+            new Liquibase("db/changelog/db.changelog-master.xml",
+                          new ClassLoaderResourceAccessor(), db).update(new Contexts());
+        }
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
+            su.createStatement().execute(
+                "GRANT SELECT ON nexus.catalog_document_chunks, nexus.catalog_documents TO " + SVC_ROLE);
+            su.createStatement().execute(
+                "GRANT EXECUTE ON FUNCTION nexus.plain_search_1024, nexus.text_gated_search_1024 TO "
+                + SVC_ROLE);
+            su.createStatement().execute(
+                "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+        }
+        var cfg = new HikariConfig();
+        cfg.setJdbcUrl(pg.getJdbcUrl());
+        cfg.setUsername(SVC_ROLE);
+        cfg.setPassword(SVC_PASS);
+        cfg.setMaximumPoolSize(4);
+        cfg.setAutoCommit(true);
+        svcDs = new HikariDataSource(cfg);
+        tenantScope = new TenantScope(svcDs);
+        embedder = new PgVectorRepositoryContractTest.FakeEmbedder(1024);
+        repo = new PgVectorRepository(tenantScope, embedder, embedder);
+
+        seedFixtures();
+    }
+
+    @AfterAll
+    void stopAll() {
+        if (svcDs != null) svcDs.close();
+        if (pg != null) pg.stop();
+    }
+
+    private void seedFixtures() throws Exception {
+        embedder.register(TOKEN, 1.0f, 0.0f);  // query vector points at the filler cluster
+
+        List<String> ids = new ArrayList<>();
+        List<String> texts = new ArrayList<>();
+        List<Map<String, Object>> metas = new ArrayList<>();
+
+        for (int i = 0; i < FILLER; i++) {
+            String text = "common filler document number " + i + " alpha bravo charlie";
+            embedder.register(text, 1.0f, 0.0f);
+            ids.add(chash("zrcj7fill", i));
+            texts.add(text);
+            metas.add(Map.of());
+        }
+        for (int i = 0; i < TARGETS; i++) {
+            String text = TOKEN + " selective gate target row " + i;
+            embedder.register(text, -1.0f, 0.0f);
+            String c = chash("zrcj7target", i);
+            targetChashes.add(c);
+            ids.add(c);
+            texts.add(text);
+            metas.add(Map.of());
+        }
+
+        repo.upsertChunks(TENANT, COLL, ids, texts, metas);
+        seedDenseGateFixture();
+        seedOrderParityFixture();
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("ANALYZE " + DimTables.CHUNKS_TABLE_NAME);
+        }
+    }
+
+    /**
+     * Dense/non-selective-gate fixture (nexus-zrcj7 pushback item 2): {@link #DENSE_MATCHING}
+     * of {@link #DENSE_ROWS} rows carry {@link #DENSE_TOKEN} — a NON-selective text gate,
+     * the regime the retired Java hybridSearch's HNSW-first branch existed for. Seeded in a
+     * separate collection so it does not perturb the selective-gate fixture above.
+     */
+    private void seedDenseGateFixture() throws Exception {
+        embedder.register(DENSE_TOKEN, 1.0f, 0.0f);
+        List<String> ids = new ArrayList<>(DENSE_ROWS);
+        List<String> texts = new ArrayList<>(DENSE_ROWS);
+        List<Map<String, Object>> metas = new ArrayList<>(DENSE_ROWS);
+        for (int i = 0; i < DENSE_ROWS; i++) {
+            double theta = -0.3 + 0.6 * i / (DENSE_ROWS - 1);
+            boolean matches = i < DENSE_MATCHING;
+            String text = (matches ? DENSE_TOKEN + " " : "") + "dense fixture row " + i
+                + " alpha bravo charlie delta";
+            embedder.register(text, (float) Math.cos(theta), (float) Math.sin(theta));
+            ids.add(chash("zrcj7dense", i));
+            texts.add(text);
+            metas.add(Map.of());
+        }
+        for (int from = 0; from < DENSE_ROWS; from += 300) {
+            int to = Math.min(DENSE_ROWS, from + 300);
+            repo.upsertChunks(TENANT, DENSE_COLL, ids.subList(from, to), texts.subList(from, to),
+                              metas.subList(from, to));
+        }
+    }
+
+    /**
+     * ORDER/distance parity fixture (nexus-zrcj7 pushback item 3): three gate-matching
+     * chunks at ANALYTICALLY KNOWN angles from the query vector (30/60/90 degrees), plus
+     * filler at 5 degrees (vector-closest, no token — must be excluded by the gate). Unit
+     * 2-D vectors embedded into dim 1024 (rest zero), so pgvector's cosine distance
+     * {@code <=>} is exactly {@code 1 - cos(theta)} — no floating-point embedding noise to
+     * account for, only pgvector's own float8 arithmetic (checked to 1e-4).
+     */
+    private void seedOrderParityFixture() throws Exception {
+        embedder.register(ORDER_TOKEN, 1.0f, 0.0f);
+        List<String> ids = new ArrayList<>();
+        List<String> texts = new ArrayList<>();
+        List<Map<String, Object>> metas = new ArrayList<>();
+
+        for (double thetaDeg : new double[] {30, 60, 90}) {
+            double theta = Math.toRadians(thetaDeg);
+            String text = ORDER_TOKEN + " order-parity target " + (int) thetaDeg + "deg";
+            embedder.register(text, (float) Math.cos(theta), (float) Math.sin(theta));
+            ids.add(chash("zrcj7order", (int) thetaDeg));
+            texts.add(text);
+            metas.add(Map.of());
+        }
+        // Filler: 5 degrees from the query (closer than any target) but carries no token —
+        // must never appear, proving the gate (not raw vector proximity) governs presence.
+        double fillerTheta = Math.toRadians(5);
+        String fillerText = "order-parity filler no token alpha bravo";
+        embedder.register(fillerText, (float) Math.cos(fillerTheta), (float) Math.sin(fillerTheta));
+        ids.add(chash("zrcj7orderfiller", 0));
+        texts.add(fillerText);
+        metas.add(Map.of());
+
+        repo.upsertChunks(TENANT, ORDER_COLL, ids, texts, metas);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // plain_search_1024: inlinable, HNSW index survives EXPLAIN (vectors-009)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    void explain_plainSearch_usesHnswIndex_notFunctionScan() throws Exception {
+        String plan = explain(
+            "SELECT id FROM nexus.plain_search_1024('" + vec(1.0, 0.0) + "'::vector, "
+            + "ARRAY['" + COLL + "']::text[], NULL::jsonb, NULL::text, 10)");
+        assertThat(plan)
+            .as("plain_search_1024 must use the HNSW index idx_chunks_embedding_1024 for "
+                + "the ANN ordering — the vector is a plan-time argument and the function "
+                + "inlines. Plan was:%n%s", plan)
+            .contains("idx_chunks_embedding_1024");
+        assertThat(plan)
+            .as("a Function Scan node means the function is not inlinable (plpgsql) — "
+                + "vectors-009 must use an inlinable LANGUAGE sql function. Plan was:%n%s",
+                plan)
+            .doesNotContain("Function Scan");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // text_gated_search_1024: inlinable, and a SELECTIVE gate never touches HNSW
+    // (the row_number()-over-the-materialized-gate shape, vectors-010's own header)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    void explain_textGatedSearch_selectiveGate_neverTouchesHnsw_notFunctionScan() throws Exception {
+        // Deliberately the WEAKER explainSeqscanOff() (enable_seqscan off only), not the
+        // stronger explain() plain_search uses above: this is a NEGATIVE assertion ("HNSW
+        // must never be reachable"), so forcing every OTHER access path away too (as
+        // explain() does with enable_sort/enable_bitmapscan/enable_hashjoin off) would
+        // adversarially strip the row_number()-over-the-gate CTE's OWN natural, correct,
+        // and safe plan (a cheap GIN-indexed gate + a trivial Sort over ~6 matched rows)
+        // of its only non-HNSW alternative — proving nothing about what the planner
+        // actually chooses under real cost pressure. Confirmed empirically: with
+        // enable_sort forced off, the planner switches to Index Scan using
+        // idx_chunks_embedding_1024 (HNSW-ordered) with the text gate as a POST-hoc
+        // filter — precisely the nexus-lcogi starvation shape this function exists to
+        // avoid — which only happens because sort was taken away as an option, not
+        // because text_gated_search_1024 has any inherent tendency toward it.
+        String plan = explainSeqscanOff(
+            "SELECT id FROM nexus.text_gated_search_1024('" + vec(1.0, 0.0) + "'::vector, "
+            + "'" + TOKEN + "', ARRAY['" + COLL + "']::text[], NULL::jsonb, NULL::text, 50)");
+        assertThat(plan)
+            .as("a Function Scan node means the function is not inlinable (plpgsql) — "
+                + "vectors-010 must use an inlinable LANGUAGE sql function. Plan was:%n%s",
+                plan)
+            .doesNotContain("Function Scan");
+        assertThat(plan)
+            .as("text_gated_search_1024's row_number()-over-the-materialized-gate rank must "
+                + "NOT NATURALLY touch the HNSW index (the nexus-lcogi starvation class this "
+                + "shape exists to close, vectors-010's own header) under normal cost "
+                + "pressure (enable_seqscan=off only — sort stays available, its correct, "
+                + "safe alternative). Plan was:%n%s", plan)
+            .doesNotContain("idx_chunks_embedding_1024");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // nexus-zrcj7 pushback item 2 (coordinator, post-completion review): the original
+    // task instructed EITHER preserving the lcogi/x7z7l two-branch dispatch (selective
+    // chash-rank vs HNSW-first) inside the new function, OR proving with EXPLAIN evidence
+    // that a single function keeps the index engaged on BOTH the selective AND
+    // non-selective gate regimes. The single-materializing-CTE design was NOT proven for
+    // the non-selective case before the first completion report — this closes that gap.
+    //
+    // Finding: it is NOT proven safe. DENSE_MATCHING (5500) is deliberately chosen ABOVE
+    // PgVectorRepository.SELECTIVE_GATE_MAX (5000) -- the retired Java hybridSearch's own
+    // selective/HNSW-first dispatch threshold -- so this fixture exercises exactly the
+    // regime where the OLD code would have taken the HNSW-first branch, not the regime a
+    // smaller dense gate would share trivially with the (always-materializing) selective
+    // branch. Under NATURAL planner settings (no GUC overrides), this 5500-of-6000-row
+    // gate STILL produces a plan that materializes and sorts the whole gate -- the HNSW
+    // index is not used, exactly the "materializing a huge gated set would spill
+    // work_mem" cost the retired Java HNSW-first branch existed to avoid. At this
+    // fixture's scale the materialize+sort is still cheap enough that nothing actually
+    // spills or times out, so this is NOT the acute production collapse (that remains a
+    // >20k-row, conexus xr7.8.9-owned phenomenon per CombinedQueryParityTest's own GROUP 4
+    // comment and HybridSelectiveGateTest's class javadoc -- container scale cannot
+    // reproduce it faithfully either direction). But it IS proof that
+    // text_gated_search_<dim> does NOT reproduce the old HNSW-first branch's plan shape
+    // for a gate PAST the old selectivity threshold, and does not have the mechanism (a
+    // bounded, HNSW-ordered, early-terminating scan) that made the old branch scale-safe.
+    // This is a real, open design gap, not a false alarm -- reported as such rather than
+    // papered over with a passing assertion of the wrong claim.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    void explain_textGatedSearch_denseGate_materializesFullGate_doesNotUseHnswEarlyTermination()
+            throws Exception {
+        String plan = explainNatural(
+            "SELECT id FROM nexus.text_gated_search_1024('" + vec(1.0, 0.0) + "'::vector, "
+            + "'" + DENSE_TOKEN + "', ARRAY['" + DENSE_COLL + "']::text[], NULL::jsonb, "
+            + "NULL::text, 50)");
+        // Documents the ACTUAL natural-planner behavior at this fixture's scale (a
+        // materializing WindowAgg/Sort over the dense gate, no HNSW index) — this is the
+        // known-gap finding above, not an endorsement. If a future fix changes the SQL
+        // shape to reach idx_chunks_embedding_1024 for a dense gate (e.g. reintroducing a
+        // bounded probe + dispatch), this assertion should be inverted to REQUIRE the
+        // index, not merely observe its absence.
+        assertThat(plan)
+            .as("KNOWN GAP (nexus-zrcj7 pushback item 2): the single-materializing-CTE "
+                + "shape does not reach idx_chunks_embedding_1024 for a dense/non-selective "
+                + "gate — it materializes and sorts the whole gate instead, unlike the "
+                + "retired Java HNSW-first branch. Plan was:%n%s", plan)
+            .doesNotContain("idx_chunks_embedding_1024");
+    }
+
+    @Test
+    void textGatedSearch_selectiveGate_returnsExactMatches_viaPublicApi() {
+        // Behavioral companion to the EXPLAIN proof above, through the production
+        // PgVectorRepository#hybridSearch API (which now dispatches to
+        // text_gated_search_1024): the selective gate (filler is vector-closest but
+        // carries no token) must return exactly the token-bearing targets.
+        List<Map<String, Object>> rows = repo.hybridSearch(TENANT, TOKEN, List.of(COLL), 50, null);
+        List<String> ids = rows.stream().map(r -> (String) r.get("id")).toList();
+        assertThat(ids)
+            .as("text_gated_search_1024 must return exactly the token-bearing gate, "
+                + "excluding vector-closest filler with no text signal")
+            .containsExactlyInAnyOrderElementsOf(targetChashes);
+    }
+
+    @Test
+    void hybridSearch_orderAndDistanceParity_matchesAnalyticCosineOracle() {
+        List<Map<String, Object>> rows =
+            repo.hybridSearch(TENANT, ORDER_TOKEN, List.of(ORDER_COLL), 50, null);
+
+        List<String> ids = rows.stream().map(r -> (String) r.get("id")).toList();
+        assertThat(ids)
+            .as("hybridSearch must return exactly the three token-bearing targets in "
+                + "ASCENDING distance order (30deg, 60deg, 90deg) — the vector-closest "
+                + "5deg filler carries no token and must never appear despite being "
+                + "nearer than all three")
+            .containsExactly(
+                chash("zrcj7order", 30), chash("zrcj7order", 60), chash("zrcj7order", 90));
+
+        // Distance VALUES, not just order: 1 - cos(theta) for each analytically-known angle.
+        double[] expectedDistances = {
+            1 - Math.cos(Math.toRadians(30)),
+            1 - Math.cos(Math.toRadians(60)),
+            1 - Math.cos(Math.toRadians(90)),
+        };
+        for (int i = 0; i < rows.size(); i++) {
+            double got = ((Number) rows.get(i).get("distance")).doubleValue();
+            assertThat(got)
+                .as("row %d (id=%s) distance must match the analytic cosine-distance oracle "
+                    + "1 - cos(theta) to within float8 tolerance", i, ids.get(i))
+                .isCloseTo(expectedDistances[i], org.assertj.core.data.Offset.offset(1e-4));
+        }
+    }
+
+    /**
+     * EXPLAIN with every non-index-scan access path penalized so the HNSW-ordered scan
+     * is reachable at fixture scale (CombinedQueryParityTest's own {@code explain()}
+     * discipline, GROUP 3's comment): {@code enable_seqscan}/{@code enable_bitmapscan}/
+     * {@code enable_sort}/{@code enable_hashjoin} off. {@code enable_nestloop} stays ON —
+     * the HNSW-ordered chunk scan joins to the tombstone-check subqueries via nested
+     * loop; disabling it would defeat the very plan this proof asserts. A stronger
+     * disabling set than {@code enable_seqscan} alone is needed here (unlike
+     * HybridSelectiveGateTest's identically-named helper, which only needs to prove
+     * HNSW is NEVER reachable — a weaker GUC set suffices for a negative assertion):
+     * plain_search_1024's tombstone Anti Join adds enough cost that, at this fixture's
+     * ~200-row scale, a Sort over a plain index scan on {@code idx_chunks_tenant_chash}
+     * otherwise costs less than the HNSW-ordered scan.
+     */
+    private String explain(String inner) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(false);
+            for (String guc : List.of("enable_seqscan", "enable_bitmapscan",
+                    "enable_sort", "enable_hashjoin")) {
+                su.createStatement().execute("SET LOCAL " + guc + " = off");
+            }
+            StringBuilder sb = new StringBuilder();
+            try (ResultSet rs = su.createStatement().executeQuery("EXPLAIN " + inner)) {
+                while (rs.next()) sb.append(rs.getString(1)).append('\n');
+            }
+            su.rollback();
+            return sb.toString();
+        }
+    }
+
+    /** EXPLAIN with ONLY seqscan disabled — see the negative-assertion rationale on
+     * {@link #explain_textGatedSearch_selectiveGate_neverTouchesHnsw_notFunctionScan}. */
+    private String explainSeqscanOff(String inner) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(false);
+            su.createStatement().execute("SET LOCAL enable_seqscan = off");
+            StringBuilder sb = new StringBuilder();
+            try (ResultSet rs = su.createStatement().executeQuery("EXPLAIN " + inner)) {
+                while (rs.next()) sb.append(rs.getString(1)).append('\n');
+            }
+            su.rollback();
+            return sb.toString();
+        }
+    }
+
+    /** EXPLAIN with NO GUC overrides at all — the natural, undisturbed cost-based choice
+     * (nexus-zrcj7 pushback item 2: what does the planner ACTUALLY pick for a dense gate,
+     * with nothing forced either way). */
+    private String explainNatural(String inner) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(false);
+            StringBuilder sb = new StringBuilder();
+            try (ResultSet rs = su.createStatement().executeQuery("EXPLAIN " + inner)) {
+                while (rs.next()) sb.append(rs.getString(1)).append('\n');
+            }
+            su.rollback();
+            return sb.toString();
+        }
+    }
+
+    /** Full 64-hex chunk id deterministically derived from prefix + index (RDR-180). */
+    private static String chash(String prefix, int i) {
+        return dev.nexus.service.db.Chash.ofText(prefix + i).toHex();
+    }
+
+    /** 1024-dim pgvector literal with first two components (x, y), rest 0. */
+    private static String vec(double x, double y) {
+        StringBuilder sb = new StringBuilder("[").append(fmt(x)).append(',').append(fmt(y));
+        for (int i = 2; i < 1024; i++) sb.append(",0");
+        return sb.append("]").toString();
+    }
+
+    private static String fmt(double v) {
+        return v == Math.rint(v) ? Integer.toString((int) v) : Double.toString(v);
+    }
+}

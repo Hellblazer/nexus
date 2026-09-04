@@ -999,6 +999,18 @@
          the where/jsonpath split and the tombstone-filter derivation. -->
     <include file="db/changelog/vectors-009-plain-search.xml"/>
 
+    <!-- nexus-zrcj7 — nexus.text_gated_search_384/768/1024: retires
+         PgVectorRepository#hybridSearch's raw SQL (the lcogi selectivity-aware
+         dispatch) onto an inlinable schema function, pure retirement per Sam's
+         DECISION 2026-09-03 (T2 [24207]). Depends only on nexus.chunks/
+         catalog_document_chunks/catalog_documents. Placed after
+         vectors-009-plain-search.xml (current tail) and before the
+         grants-nexus-svc.xml runAlways block, matching the established
+         late-append convention (D0.1). See the file's own header for the
+         single-materializing-gate rationale (vs hybridSearch's retired
+         two-branch Java dispatch). -->
+    <include file="db/changelog/vectors-010-text-gated-search.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

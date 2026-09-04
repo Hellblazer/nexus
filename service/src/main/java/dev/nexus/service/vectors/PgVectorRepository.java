@@ -50,6 +50,9 @@ import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_768;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_1024;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_384;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_768;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_384;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_768;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -1302,9 +1305,9 @@ public final class PgVectorRepository {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return List.of();
         }
-        // queryText is bound twice below as a raw text parameter (plainto_tsquery +
-        // trgm <%); a NUL-bearing query would hit the same UTF8-0x00 rejection the
-        // upsert path sanitizes (nexus-rvfwj sibling hole, dual-review H1).
+        // queryText is bound as a raw text parameter (plainto_tsquery + trgm <%); a
+        // NUL-bearing query would hit the same UTF8-0x00 rejection the upsert path
+        // sanitizes (nexus-rvfwj sibling hole, dual-review H1).
         queryText = stripNul(queryText);
         if (nResults < 1) {
             // LIMIT -1 is "no limit" in Postgres - a non-positive value would silently
@@ -1331,158 +1334,60 @@ public final class PgVectorRepository {
 
         EmbedResult hybridEmbed = embedQuery(collectionNames.get(0), queryText, dim);
         if (tokensOut != null) tokensOut[0] = hybridEmbed.tokens();
-        float[] queryVec = hybridEmbed.embeddings().get(0);
+        Vector queryVec = Vector.of(hybridEmbed.embeddings().get(0));
+        WherePlan wherePlan = planWhere(where);
+        String[] colls = collectionNames.toArray(String[]::new);
+        String gateQueryText = queryText;
 
-        // Non-text scope (collection IN + metadata where). Shared by the selective
-        // rank-by-chash query (nexus-x7z7l): that query re-applies these cheap predicates
-        // but NOT the text gate - the gate's matching chashes already satisfy it, so the
-        // expensive <% trigram heap-recheck runs ONCE (in the bounded fetch below), not
-        // again at rank time. (The metadata->>? predicate is kept on the rank query, not
-        // dropped: two same-text rows in different collections share a chash, so chash
-        // alone would not re-impose a per-row metadata filter.)
-        StringBuilder scope = new StringBuilder()
-            .append(" WHERE collection IN (").append(placeholders(collectionNames.size())).append(")");
-        List<Object> scopeBinds = new ArrayList<>(collectionNames);
-        // RDR-156 Decision 6 (nexus-3ck2g): live_chunks predicate folded into `scope`
-        // BEFORE `gate` is derived from it below, so every downstream query built off
-        // either scope or gate — the bounded gate-selectivity probe, the selective
-        // chash-ranked rank, and the HNSW-first fallback, all three read sites — inherits
-        // it by construction; a single fix point instead of three. Inlined (never a JOIN
-        // to nexus.live_chunks) so the HNSW/GIN scans on `c` (the alias assigned to
-        // `table` below) stay engaged — see liveChunksPredicate's javadoc.
-        scope.append(" AND ").append(liveChunksPredicate("c"));
-        // Full gate = scope AND a text signal. FTS lexeme match OR word-trigram similarity:
-        // the <% operator form (word_similarity >= pg_trgm.word_similarity_threshold) is
-        // gin_trgm_ops-indexable (vectors-002) where the function-call form is not;
-        // word_similarity (vs plain similarity) does not dilute with chunk_text length.
-        // The threshold GUC is pinned per-transaction below.
-        StringBuilder gate = new StringBuilder(scope)
-            .append(" AND (chunk_tsv @@ plainto_tsquery('english', ?) OR ? <% chunk_text)");
-        List<Object> gateBinds = new ArrayList<>(scopeBinds);
-        gateBinds.add(queryText);
-        gateBinds.add(queryText);
-        if (where != null) {
-            for (Map.Entry<String, Object> e : where.entrySet()) {
-                appendWherePredicate(gate, gateBinds, e.getKey(), e.getValue());
-                appendWherePredicate(scope, scopeBinds, e.getKey(), e.getValue());
-            }
-        }
-        final String table = chunksTable(dim) + " c";
-        final String gateSql = gate.toString();
-        final String scopeSql = scope.toString();
-        final String vecLit = vectorLiteral(queryVec);
+        // nexus-zrcj7: text_gated_search_<dim> (vectors-010) replaces the raw
+        // two-branch (bounded gate probe, chash-ranked selective path vs
+        // HNSW-first fallback, nexus-lcogi/nexus-x7z7l) Java dispatch with ONE
+        // materializing statement -- see that changeset's own header for why a
+        // single row_number()-over-the-whole-gate CTE is the sanctioned shape
+        // (mirrors hybrid_search_<dim>'s P5.2 precedent). selectiveGateMax no
+        // longer selects between two query shapes; it is validated above only
+        // (>= 1) for backward-compatible test-pinning call sites.
+        org.jooq.Table<?> fn = switch (dim) {
+            case 384  -> TEXT_GATED_SEARCH_384.call(
+                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+            case 768  -> TEXT_GATED_SEARCH_768.call(
+                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+            case 1024 -> TEXT_GATED_SEARCH_1024.call(
+                queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
 
-        // SELECTIVITY-AWARE DISPATCH (nexus-lcogi; single-gate-eval, nexus-x7z7l). ONE
-        // bounded fetch of the gate's chashes (LIMIT SELECTIVE_GATE_MAX+1) both picks the
-        // plan AND, for the selective case, IS the gate evaluation - the ranked query then
-        // filters by chash (PK lookup), so the expensive <% trigram heap-recheck runs once,
-        // not twice. The prior design ran a standalone COUNT(*) probe AND re-ran the gate in
-        // the ranked query: on a large code corpus that was two ~650ms <% heap-rechecks per
-        // call (conexus-qsa EXPLAIN: count probe 700ms + materialized-CTE rank 654ms, both
-        // dominated by the lossy gin_trgm_ops recheck over ~1900 candidate rows).
-        //
-        //   * SELECTIVE gate (matches <= SELECTIVE_GATE_MAX): the bounded fetch returns the
-        //     COMPLETE gate (all matches, since it did not hit the LIMIT). Rank those exact
-        //     chashes by cosine distance via a chash IN (...) filter + the cheap non-text
-        //     scope (collection/metadata). No HNSW, no re-gate: ranks the small gated set
-        //     exactly, with NO dependence on hnsw.max_scan_tuples (the lcogi collapse fix is
-        //     preserved - the prior HNSW-first single-query plan starved selective gates).
-        //
-        //   * NON-SELECTIVE gate (matches > SELECTIVE_GATE_MAX): the bounded fetch hit the
-        //     LIMIT (returned SELECTIVE_GATE_MAX+1 chashes) and is discarded - keep the
-        //     HNSW-first plan (gate as scan filter, iterative_scan). A dense gate is usually
-        //     found within the scan budget; materializing a huge gated set (~4 KB/row
-        //     embeddings) would spill work_mem. The bounded fetch caps this probe's cost
-        //     (the prior unbounded COUNT scanned the full dense gate). Same SEMI-selective
-        //     caveat as before applies; P5.2's RRF fusion closes that window.
-        //
-        // matches == 0 -> empty gate -> selective branch returns an empty result (no silent
-        // vector fallback), handled explicitly (chash IN () is not valid SQL).
-        List<Object> probeBinds = new ArrayList<>(gateBinds);
-        probeBinds.add(selectiveGateMax + 1);
-        Result<Record> result = tenantScope.withTenant(tenant, ctx -> {
+        Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
             // Trigram gate calibration (contract anchor): word_similarity >= 0.6, pg_trgm's
             // default - typo-probe candidates sit at ~0.9 and pass, no-signal rows at ~0.1
-            // do not. Pinned per-transaction so the gate is independent of cluster config.
+            // do not. Pinned per-transaction so the gate is independent of cluster config --
+            // text_gated_search_<dim> is a LANGUAGE sql function and cannot SET LOCAL its
+            // own GUC (see that changeset's header).
             PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
-            // nexus-g17tf: bound EVERY statement in this transaction — the gate
-            // probe (a <% trigram heap-recheck), the selective chash rank, and the
-            // dense HNSW rank all inherit it. Set here, before the first fetch,
-            // rather than per branch: a branch without HNSW is still a scan that
-            // can pin xmin (substantive-critic finding, 2026-09-02).
+            // nexus-g17tf: bound the statement so an orphaned or pathological scan
+            // cancels (57014) instead of pinning xmin for hours -- the gate's <%
+            // trigram heap-recheck and the row_number() materialization both run
+            // inside this one statement now (nexus-zrcj7), so one timeout covers it.
             PgSession.setSearchStatementTimeout(ctx);
             // nexus-6nkn3: a custom plan per execution so the planner sees the
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
             PgSession.setSearchPlanCacheMode(ctx);
-
-            List<String> gateChashes = rawVectorFetch(
-                ctx, "SELECT encode(chash, 'hex') AS chash FROM " + table + gateSql + " LIMIT ?",
-                probeBinds.toArray())
-                .map(r -> r.get("chash", String.class));
-
-            if (gateChashes.size() <= selectiveGateMax) {
-                // Selective: the bounded fetch returned the COMPLETE gate (the LIMIT did NOT
-                // fire - fewer than selectiveGateMax+1 matches exist, so it scanned the full
-                // GIN candidate set, same work the old COUNT(*) did). The win is not a
-                // cheaper probe: this single gate scan REPLACES both the old COUNT(*) probe
-                // AND the MATERIALIZED-CTE gate re-evaluation - the rank below filters by
-                // chash with NO text gate, so the <% heap-recheck happens once, not twice.
-                if (gateChashes.isEmpty()) {
-                    // Empty gate: typed-empty result (chash IN () is invalid SQL).
-                    return rawVectorFetch(ctx,
-                        "SELECT NULL::text AS chash, NULL::text AS chunk_text,"
-                        + " NULL::text AS collection, NULL::text AS metadata_json,"
-                        + " NULL::float8 AS distance WHERE false");
-                }
-                // chash is NOT unique across collections (the table key is
-                // (tenant_id, collection, chash)): a multi-collection gate can return the
-                // same chash from N collections. Dedup the IN list - the collection scope in
-                // scopeSql still yields one ranked row per (collection, chash). Dedup runs
-                // AFTER the size-based dispatch so the selective/non-selective boundary stays
-                // identical to the old per-row COUNT(*).
-                List<String> inChashes = gateChashes.stream().distinct().toList();
-                String sql = "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
-                    + " (" + DimTables.embeddingColumn(dim) + " <=> ?::vector) AS distance FROM " + table + scopeSql
-                    + " AND chash IN (" + decodePlaceholders(inChashes.size()) + ")"
-                    // nexus-74zvm DECISION (see method javadoc): the text gate has no dim
-                    // awareness, so a foreign-dim row can match it — exclude here rather
-                    // than rank it with a NULL embedding_<dim> distance.
-                    + " AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL"
-                    + " ORDER BY distance ASC, chash ASC LIMIT ?";
-                List<Object> b = new ArrayList<>();
-                b.add(vecLit);
-                b.addAll(scopeBinds);
-                b.addAll(inChashes);
-                b.add(nResults);
-                return rawVectorFetch(ctx, sql, b.toArray());
-            }
-            // HNSW-first for a dense gate: keep HNSW scanning past ef_search.
-            PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
-            // nexus-4ktfm: crowd-out headroom for the traversal itself (see
-            // PgSession.DEFAULT_EF_SEARCH_FLOOR).
-            PgSession.setHnswEfSearch(ctx, nResults);
-            String sql = "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
-                + " (" + DimTables.embeddingColumn(dim) + " <=> ?::vector) AS distance FROM " + table + gateSql
-                // nexus-74zvm DECISION (see method javadoc): same NULL-distance guard as
-                // the selective-gate branch above.
-                + " AND " + DimTables.embeddingColumn(dim) + " IS NOT NULL"
-                + " ORDER BY distance ASC, chash ASC LIMIT ?";
-            List<Object> b = new ArrayList<>();
-            b.add(vecLit);
-            b.addAll(gateBinds);
-            b.add(nResults);
-            return exactOnUnderReturn(ctx, nResults, () -> rawVectorFetch(ctx, sql, b.toArray()));
+            // No hnsw.iterative_scan/setHnswEfSearch here (nexus-zrcj7): the
+            // row_number()-over-the-materialized-gate shape never touches the HNSW
+            // index by construction (vectors-010's own header) -- nothing to widen.
+            return ctx.selectFrom(fn).fetch();
         });
 
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
         for (Record rec : result) {
             Map<String, Object> row = new LinkedHashMap<>();
-            row.put("id",         rec.get("chash", String.class));
-            row.put("content",    rec.get("chunk_text", String.class));
+            row.put("id",         rec.get("id", String.class));
+            row.put("content",    rec.get("content", String.class));
             row.put("distance",   rec.get("distance", Double.class));
             row.put("collection", rec.get("collection", String.class));
-            row.putAll(fromJson(rec.get("metadata_json", String.class)));
+            JSONB meta = rec.get("metadata", JSONB.class);
+            row.putAll(fromJson(meta != null ? meta.data() : null));
             rows.add(row);
         }
         return rows;
@@ -1678,9 +1583,9 @@ public final class PgVectorRepository {
      * (ANDed) and the common single-field Chroma operator-form
      * ({@code $eq}/{@code $ne}/{@code $in}/{@code $nin}, plus the
      * {@code $gte}/{@code $lte}/{@code $gt}/{@code $lt} range operators since
-     * nexus-4l80g) are supported via {@link #metadataCondition} — the jOOQ twin
-     * of {@link #appendWherePredicate}, kept to the same operator subset
-     * {@link #search} applies (nexus-05bfd). Unsupported operator shapes fail
+     * nexus-4l80g) are supported via {@link #metadataCondition} — kept to the
+     * same operator subset {@link #search} applies via {@link #planWhere}
+     * (nexus-05bfd, nexus-zrcj7). Unsupported operator shapes fail
      * loud with 400 rather than silently matching nothing; compound
      * {@code $and}/{@code $or} remains untranslated.
      *
@@ -3318,107 +3223,37 @@ public final class PgVectorRepository {
     /**
      * RDR-191 Phase 4 (nexus-o8dil.16): thin wrapper over {@link DimTables#CHUNKS_TABLE_NAME}
      * rather than hand-rolling {@code "nexus.chunks_" + dim} — the raw-SQL table-name
-     * channel {@link #searchWithTokens}/{@link #hybridSearch}/{@link #upsertChunks} read
-     * from must consult the same single name authority {@link DimTables} gives the typed
-     * jOOQ channel, or the two channels drift independently (DimTables' own class javadoc).
-     * {@code dim} is now vestigial for the table name itself (every dim resolves to the
-     * SAME {@code nexus.chunks} table) but is kept as a parameter: every call site already
-     * has a resolved {@code dim} in scope for the embedding-column choice
-     * ({@link DimTables#embeddingColumn(int)}) right alongside the table name, and dropping
-     * the parameter here would be a needless signature churn for zero benefit.
+     * channel {@link #upsertChunks} reads from must consult the same single name authority
+     * {@link DimTables} gives the typed jOOQ channel, or the two channels drift
+     * independently (DimTables' own class javadoc). {@code dim} is now vestigial for the
+     * table name itself (every dim resolves to the SAME {@code nexus.chunks} table) but is
+     * kept as a parameter: every call site already has a resolved {@code dim} in scope for
+     * the embedding-column choice ({@link DimTables#embeddingColumn(int)}) right alongside
+     * the table name, and dropping the parameter here would be a needless signature churn
+     * for zero benefit. (nexus-zrcj7: {@link #searchWithTokens}/{@link #hybridSearch} no
+     * longer call this — their reads now go through the generated
+     * {@code plain_search_<dim>}/{@code text_gated_search_<dim>} function tables, vectors-
+     * 009/010, whose own SQL body inlines the live_chunks/tombstone predicate directly.)
      */
     private static String chunksTable(int dim) {
         return DimTables.CHUNKS_TABLE_NAME;
     }
 
     /**
-     * live_chunks predicate (RDR-156 Decision 6, never implemented until nexus-3ck2g):
-     * a chunk row aliased *alias* is live iff it carries NO manifest row at all (a
-     * manifest-less MCP/{@code store_put} note chunk, RDR-145 — the safety contract
-     * {@code nexus.purge_trash}'s own sweep enforces, mirrored here) OR at least one
-     * manifest row whose owning document is NOT tombstoned. Deliberately INLINED as
-     * literal SQL text — never a JOIN to {@code nexus.live_chunks} — the house pattern
-     * (catalog-006-combined-query-functions.xml:173-181, carried into
-     * catalog-019-tombstone-aware-read-views.xml's {@code search_topic_scoped_<dim>}
-     * bodies) so the HNSW/GIN index scans on the raw {@code chunks_<dim>} table
-     * survive: a JOIN to the view would force the planner off the index path. Both
-     * {@code chunks_<dim>.chash} and {@code catalog_document_chunks.chash} are
-     * {@code bytea} post-RDR-180, so the comparison is native bytea=bytea — no
-     * {@code encode}/{@code decode} needed here (those only matter at the Java
-     * projection boundary, not for an internal join predicate).
-     *
-     * <p>Callers before this fix read {@code chunks_<dim>} directly with no tombstone
-     * predicate at all (nexus-3ck2g bug): {@link #searchWithTokens} and every
-     * {@link #hybridSearch} branch. See {@code TombstoneFilterGateTest}'s
-     * {@code RAW_CHUNKS_READ_METHODS} check, which structurally cannot see a raw
-     * hand-built SQL string the way it sees typed jOOQ statements — this predicate's
-     * presence (by name, {@code liveChunksPredicate(}) in the method body is exactly
-     * what that check requires.
-     *
-     * <p><strong>RDR-191 Phase 4 (nexus-o8dil.16/.18): deliberately UNCHANGED.</strong>
-     * This predicate is alias-parameterised and its SQL text names only
-     * {@code catalog_document_chunks}/{@code catalog_documents} (via {@code alias.tenant_id}
-     * / {@code alias.chash} for the correlation, never a dim-sharded table name) — it
-     * carries no {@code chunks_<dim>} reference for the chunks_384/768/1024 unification to
-     * touch. Recorded here so a future repoint census does not re-flag this method: the
-     * "raw {@code chunks_<dim>} table" phrasing above and in the {@code nexus-msz9i} cost
-     * comment below describes the CALLER's table (now {@code nexus.chunks}, resolved via
-     * {@link #chunksTable(int)}), not anything this predicate itself references.
-     */
-    private static String liveChunksPredicate(String alias) {
-        // nexus-msz9i (hybrid p50 744ms -> ~1000ms at the v0.1.63 deploy): the original
-        // two-subquery form `NOT EXISTS(any manifest) OR EXISTS(live manifest)` cost
-        // ~250ms/query and GREW with the corpus. EXPLAIN (ANALYZE, BUFFERS) on a 76k-chunk
-        // / 57k-manifest fixture: PostgreSQL turned BOTH correlated EXISTS into HASHED
-        // SubPlans, each seq-scanning the ENTIRE manifest once per query (a fixed cost
-        // linear in TOTAL manifest size, not in rows examined) — and the resulting cost
-        // estimate rose ~160x (8,130 -> 1,290,101), which additionally (a) crossed
-        // jit_above_cost/jit_inline/jit_optimize, adding ~118ms of JIT COMPILE per query,
-        // and (b) flipped the gate probe off its Seq Scan onto a chunks_<dim>_pk Index
-        // Scan, ~10x buffers (6,415 -> 63,166).
-        //
-        // This form is the DEAD-SET equivalent: one EXISTS whose row set is bounded by the
-        // TOMBSTONED population instead of the whole manifest.
-        //     live <=> NOT EXISTS(dead parent AND no live parent)
-        //           == NOT EXISTS(dead parent) OR EXISTS(live parent)   [the old form]
-        // The inner NOT EXISTS is keyed on m.chash (= alias.chash), so it does not depend
-        // on WHICH dead parent matched — the rewrite is exact, not an approximation.
-        //
-        // EQUIVALENCE DEPENDS ON A VALIDATED FK. The two forms differ on exactly one input:
-        // a manifest row whose doc_id has no catalog_documents row (the old form calls such
-        // a chunk DEAD, this one calls it LIVE). That input is unreachable —
-        // fk_catalog_chunks_catalog_doc (fk-001-5) DELETEs orphans then adds the FK with no
-        // NOT VALID, so it is enforced and validated. If that FK is ever dropped or
-        // re-added NOT VALID, revisit this predicate.
-        //
-        // Measured (same fixture, gate probe): plan and cost restored to the pre-dcf77fb7
-        // shape — Seq Scan, cost 12,009 (vs 8,130 with no predicate at all), no JIT,
-        // buffers 63,166 -> 21,288, execution 1,536ms -> 1,364ms against a 1,355ms
-        // no-predicate baseline.
-        return "(NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m"
-            + " JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id"
-            + " WHERE m.tenant_id = " + alias + ".tenant_id AND m.chash = " + alias + ".chash"
-            + " AND d.deleted_at IS NOT NULL"
-            + " AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2"
-            + " JOIN nexus.catalog_documents d2 ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id"
-            + " WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash"
-            + " AND d2.deleted_at IS NULL)))";
-    }
-
-    /**
-     * Typed-jOOQ twin of {@link #liveChunksPredicate} (nexus-8j1zx, found during
-     * nexus-3ck2g's round-1 substantive critique): identical live-chunk semantics — a
-     * chunk row is live iff it carries NO manifest row at all (a manifest-less
-     * MCP/{@code store_put} note chunk, RDR-145) OR at least one manifest row whose
-     * owning document is not tombstoned — expressed as a typed {@link org.jooq.Condition}
-     * against {@code ch}'s own tenant/chash fields, for the four get-family reads
-     * ({@link #get}, {@link #getWhere}, {@link #getEmbeddings}, {@link #getAllMetadata})
-     * that go through {@link DimTables.ChunkTable} rather than the hand-built {@code
-     * chunksTable(dim)} string {@link #searchWithTokens}/{@link #hybridSearch} use.
-     * {@code liveChunksPredicate}'s literal-SQL-text shape is structurally invisible to a
-     * typed jOOQ statement (no {@code chunksTable(} call, no {@code CATALOG_DOCUMENTS}/
-     * {@code CATALOG_DOCUMENT_CHUNKS} token in the SAME statement as the read) — exactly
-     * the get-family gap nexus-8j1zx found, and this predicate closes.
+     * Typed-jOOQ live_chunks condition (nexus-8j1zx, found during nexus-3ck2g's round-1
+     * substantive critique): a chunk row is live iff it carries NO manifest row at all (a
+     * manifest-less MCP/{@code store_put} note chunk, RDR-145) OR at least one manifest row
+     * whose owning document is not tombstoned — expressed as a typed
+     * {@link org.jooq.Condition} against {@code ch}'s own tenant/chash fields, for the four
+     * get-family reads ({@link #get}, {@link #getWhere}, {@link #getEmbeddings},
+     * {@link #getAllMetadata}) that go through {@link DimTables.ChunkTable}. This is the
+     * SAME dead-set live-chunk semantics {@code plain_search_<dim>}/
+     * {@code text_gated_search_<dim>}'s own inlined SQL predicate carries (vectors-009/010
+     * — nexus-zrcj7 retired this class's former literal-SQL-text twin, {@code
+     * liveChunksPredicate(String alias)}, along with searchWithTokens/hybridSearch's raw
+     * SQL that used it) — the get-family reads here go through a DIFFERENT typed jOOQ path
+     * ({@link DimTables.ChunkTable} rather than a generated function table), so they still
+     * need this Java-side condition; nothing else about this method changed.
      *
      * <p>Both {@code CATALOG_DOCUMENT_CHUNKS.CHASH} and {@code ch.chash()} are hex-carried
      * via {@link ChashHex} (bytea columns, RDR-180), so the comparison is the same
@@ -3431,20 +3266,22 @@ public final class PgVectorRepository {
      * CATALOG_DOCUMENT_CHUNKS} statement scan (keyed off {@code .select(}/{@code
      * .selectFrom(}/{@code .selectCount(}/{@code .selectDistinct(}, never {@code
      * .selectOne(}). This predicate is instead policed by the gate's dedicated {@code
-     * scanTypedChunksSites} check (mirrors {@code scanRawChunksSites}), which requires
-     * every named get-family method to call this helper by name.
+     * scanTypedChunksSites} check, which requires every named get-family method to call
+     * this helper by name.
      *
-     * <p><strong>RDR-191 Phase 4 (nexus-o8dil.16/.18): deliberately UNCHANGED</strong>, same
-     * reason as {@link #liveChunksPredicate} — the {@code ch} parameter's
-     * {@link DimTables.ChunkTable#tenantId()}/{@link DimTables.ChunkTable#chash()} accessors
-     * already resolve against whichever table {@code ch} was built from ({@code nexus.chunks}
-     * post-repoint), so this condition needed no edit for the unification; only the caller's
+     * <p><strong>RDR-191 Phase 4 (nexus-o8dil.16/.18): deliberately UNCHANGED</strong> —
+     * the {@code ch} parameter's {@link DimTables.ChunkTable#tenantId()}/
+     * {@link DimTables.ChunkTable#chash()} accessors already resolve against whichever
+     * table {@code ch} was built from ({@code nexus.chunks} post-repoint), so this
+     * condition needed no edit for the unification; only the caller's
      * {@code DimTables.CHUNKS.get(dim)} lookup (D1's scope) determines which table/columns
      * {@code ch} carries.
      */
     private static org.jooq.Condition liveChunksCondition(DSLContext ctx, DimTables.ChunkTable ch) {
-        // nexus-msz9i: the DEAD-SET form, the typed twin of the rewrite applied to
-        // liveChunksPredicate. See that method for the full derivation and the
+        // nexus-msz9i: the DEAD-SET form, the typed twin of the same rewrite
+        // plain_search_<dim>/text_gated_search_<dim>'s own inlined SQL predicate
+        // carries (vectors-009/010). See vectors-009's changeset header for the full
+        // derivation and the
         // FK-dependent equivalence argument (fk_catalog_chunks_catalog_doc, validated,
         // makes a manifest row with no owning document impossible — the single input on
         // which this form and the old one disagree).
@@ -3491,28 +3328,6 @@ public final class PgVectorRepository {
                       .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))
                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())
                       .and(noLiveParent)));
-    }
-
-    /**
-     * SANCTIONED RAW (nexus-mzuj9): the single execution chokepoint for every genuinely
-     * raw-SQL fetch left in this class after the fetch-side jOOQ conversion sweep. Callers
-     * ({@link #searchWithTokens} and {@link #hybridSearch}) build the SQL text because it
-     * combines things jOOQ's typed DSL cannot express together in one statement: the
-     * pgvector {@code <=>} distance operator ordering directly off a bind-parameter vector
-     * literal, the {@code pg_trgm} {@code <%} similarity operator, a per-call dynamic-arity
-     * {@code WHERE} (an arbitrary count of caller-supplied metadata predicates plus an
-     * IN-list sized to the collection/chash set), and — for {@code hybridSearch} — a
-     * selectivity-dependent PLAN CHOICE (materialize-then-rank vs. HNSW-first) made in Java
-     * between two structurally different follow-up queries. Rewriting this as nested DSL
-     * would either lose the operator-level control the selectivity dispatch depends on or
-     * require a bespoke dynamic-condition builder whose behavior would need to be
-     * re-verified bit-for-bit against the existing (well-tested) selectivity contract —
-     * not a safe mechanical transform. Registered in {@code RawSqlGateTest}'s sanctioned
-     * method allowlist; this is the ONLY place in the class where a caller-built raw SQL
-     * string reaches {@code ctx.fetch}.
-     */
-    private static Result<Record> rawVectorFetch(DSLContext ctx, String sql, Object... binds) {
-        return ctx.fetch(sql, binds);
     }
 
     /** Strip NUL (0x00) — unstorable in Postgres {@code text}/{@code jsonb} (nexus-rvfwj). */
@@ -3581,17 +3396,28 @@ public final class PgVectorRepository {
         return sb.toString();
     }
 
+    /** NaN/Infinity cannot come from JSON parsing, but a programmatic caller
+     * could pass them — rewrap so the handler's 400 ladder catches it, never
+     * an unhandled NumberFormatException 500 (review c0e4493e finding 6). */
+    private static java.math.BigDecimal toBigDecimalOperand(String operator, String key, Number n) {
+        try {
+            return new java.math.BigDecimal(n.toString());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                operator + " for field '" + key + "' got a non-finite numeric operand: " + n);
+        }
+    }
+
     /**
      * (containment, jsonpath) pair a Chroma-style metadata {@code where} map compiles
-     * into for {@code nexus.plain_search_<dim>} (vectors-009) — nexus-zrcj7 design of
-     * record (T2 nexus/decision-zrcj7-no-sql-strings-design-2026-09-03 [24207]).
-     * {@code containment} is bound as the function's {@code p_where jsonb} argument
-     * ({@code metadata @> containment}); {@code jsonPath} is bound as the function's
-     * {@code p_where_path text} argument, cast to {@code jsonpath} INSIDE the function
-     * body -- never SQL string concatenation. Either or both may be {@code null} (no
-     * predicate of that kind). {@code hybridSearch} still uses the older
-     * {@code appendWherePredicate} translator below (retired in the next commit, once
-     * hybridSearch is rewired onto {@code text_gated_search_<dim>}, vectors-010).
+     * into for {@code nexus.plain_search_<dim>} (vectors-009) / {@code
+     * nexus.text_gated_search_<dim>} (vectors-010) — nexus-zrcj7 design of record (T2
+     * nexus/decision-zrcj7-no-sql-strings-design-2026-09-03 [24207]), retiring
+     * appendWherePredicate's raw-SQL-string translation. {@code containment} is bound
+     * as the function's {@code p_where jsonb} argument ({@code metadata @> containment});
+     * {@code jsonPath} is bound as the function's {@code p_where_path text} argument,
+     * cast to {@code jsonpath} INSIDE the function body -- never SQL string
+     * concatenation. Either or both may be {@code null} (no predicate of that kind).
      */
     record WherePlan(JSONB containment, String jsonPath) {}
 
@@ -3747,151 +3573,7 @@ public final class PgVectorRepository {
     }
 
     /**
-     * Translate one metadata {@code where} entry into a SQL predicate appended to
-     * {@code sql}, with its binds added to {@code binds} in placeholder order
-     * (nexus-05bfd, consumer-driven from conexus RDR-001).
-     *
-     * <p>Supports plain equality (a scalar value) and the common Chroma
-     * operator-form on a single field, where the value is a one-entry map:
-     * <ul>
-     *   <li>{@code {"k": "v"}}            → {@code metadata->>'k' = 'v'}</li>
-     *   <li>{@code {"k": {"$eq": "v"}}}   → {@code metadata->>'k' = 'v'}</li>
-     *   <li>{@code {"k": {"$ne": "v"}}}   → {@code metadata->>'k' IS DISTINCT FROM 'v'}</li>
-     *   <li>{@code {"k": {"$in":  [...]}}} → {@code metadata->>'k' IN (...)}</li>
-     *   <li>{@code {"k": {"$nin": [...]}}} → {@code (metadata->>'k' IS NULL OR metadata->>'k' NOT IN (...))}</li>
-     *   <li>{@code {"k": {"$gte"|"$lte"|"$gt"|"$lt": n}}} (numeric operand) →
-     *       {@code jsonb_typeof(metadata->'k') = 'number' AND (metadata->>'k')::numeric ≥ n}
-     *       — operand-typed (nexus-4l80g): only JSON-number metadata values participate;
-     *       non-numeric rows are excluded, never a cast error.</li>
-     *   <li>{@code {"k": {"$gte"|...: "s"}}} (string operand) → lexical text compare
-     *       ({@code '9' > '10'}); pass numbers to compare numerically.</li>
-     * </ul>
-     *
-     * <p>{@code $ne}/{@code $nin} use {@code IS DISTINCT FROM} / {@code IS NULL OR}
-     * semantics so a row whose metadata key is ABSENT is KEPT. This is NULL-inclusive
-     * and intentionally chosen for the noise-dropping use case (e.g. drop only the rows
-     * explicitly tagged {@code section_type = references}, keep everything else including
-     * untagged chunks). Note this DIFFERS from Chroma local-mode, whose DuckDB filter
-     * treats {@code field != value} as NULL-exclusive ({@code NULL != 'x'} is false, so
-     * absent-key rows are dropped). The divergence is moot for the driving consumer:
-     * {@code section_type} is schema-defaulted to {@code ""} (never absent) on indexed
-     * chunks, so both engines keep the same rows in practice.
-     *
-     * <p>Unsupported shapes fail loud with {@link IllegalArgumentException} (mapped
-     * to HTTP 400 by {@code VectorHandler}) rather than silently matching nothing:
-     * a {@code $}-prefixed FIELD key (compound {@code $and}/{@code $or}), an operator
-     * map with more than one operator, a non-list operand for {@code $in}/{@code $nin},
-     * or an unrecognized operator. Before nexus-05bfd an operator-form value was
-     * {@code String.valueOf(map)}-bound and matched no rows with no error.
-     */
-    /** NaN/Infinity cannot come from JSON parsing, but a programmatic caller
-     * could pass them — rewrap so the handler's 400 ladder catches it, never
-     * an unhandled NumberFormatException 500 (review c0e4493e finding 6). */
-    private static java.math.BigDecimal toBigDecimalOperand(String operator, String key, Number n) {
-        try {
-            return new java.math.BigDecimal(n.toString());
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(
-                operator + " for field '" + key + "' got a non-finite numeric operand: " + n);
-        }
-    }
-
-    static void appendWherePredicate(StringBuilder sql, List<Object> binds,
-                                     String key, Object value) {
-        if (key.startsWith("$")) {
-            throw new IllegalArgumentException(
-                "compound where operator '" + key + "' is not supported on the vector "
-                + "bridge; express each field as its own predicate (all fields are ANDed)");
-        }
-        if (!(value instanceof Map<?, ?> ops)) {
-            sql.append(" AND metadata->>? = ?");
-            binds.add(key);
-            binds.add(String.valueOf(value));
-            return;
-        }
-        if (ops.size() != 1) {
-            throw new IllegalArgumentException(
-                "where operator map for field '" + key + "' must hold exactly one operator, got "
-                + ops.keySet());
-        }
-        Map.Entry<?, ?> op = ops.entrySet().iterator().next();
-        String operator = String.valueOf(op.getKey());
-        Object operand = op.getValue();
-        switch (operator) {
-            case "$eq" -> {
-                sql.append(" AND metadata->>? = ?");
-                binds.add(key);
-                binds.add(String.valueOf(operand));
-            }
-            case "$ne" -> {
-                sql.append(" AND metadata->>? IS DISTINCT FROM ?");
-                binds.add(key);
-                binds.add(String.valueOf(operand));
-            }
-            case "$in", "$nin" -> {
-                if (!(operand instanceof List<?> items)) {
-                    throw new IllegalArgumentException(
-                        operator + " for field '" + key + "' expects a list operand, got "
-                        + (operand == null ? "null" : operand.getClass().getSimpleName()));
-                }
-                if (items.isEmpty()) {
-                    // $in [] matches nothing; $nin [] excludes nothing.
-                    sql.append("$in".equals(operator) ? " AND FALSE" : " AND TRUE");
-                    return;
-                }
-                String ph = placeholders(items.size());
-                if ("$in".equals(operator)) {
-                    sql.append(" AND metadata->>? IN (").append(ph).append(")");
-                    binds.add(key);
-                } else {
-                    sql.append(" AND (metadata->>? IS NULL OR metadata->>? NOT IN (")
-                       .append(ph).append("))");
-                    binds.add(key);
-                    binds.add(key);
-                }
-                for (Object it : items) binds.add(String.valueOf(it));
-            }
-            case "$gte", "$lte", "$gt", "$lt" -> {
-                // nexus-4l80g: range operators, operand-TYPED (mirrors Chroma's
-                // client contract). Numeric operand -> numeric compare, guarded
-                // by jsonb_typeof so a non-numeric metadata value on some row
-                // simply doesn't match instead of aborting the whole query on
-                // the ::numeric cast (absent key -> NULL typeof -> no match).
-                // A JSON-string "2020" does NOT match a numeric operand.
-                // String operand -> lexical text compare (the documented
-                // '9' > '10' hazard; callers comparing numbers pass numbers —
-                // the nx CLI parses unquoted numerics into JSON numbers).
-                String cmp = switch (operator) {
-                    case "$gte" -> ">=";
-                    case "$lte" -> "<=";
-                    case "$gt" -> ">";
-                    default -> "<";
-                };
-                if (operand instanceof Number n) {
-                    sql.append(" AND jsonb_typeof(metadata->?) = 'number'")
-                       .append(" AND (metadata->>?)::numeric ").append(cmp).append(" ?");
-                    binds.add(key);
-                    binds.add(key);
-                    binds.add(toBigDecimalOperand(operator, key, n));
-                } else if (operand instanceof String str) {
-                    sql.append(" AND metadata->>? ").append(cmp).append(" ?");
-                    binds.add(key);
-                    binds.add(str);
-                } else {
-                    throw new IllegalArgumentException(
-                        operator + " for field '" + key + "' expects a numeric or string "
-                        + "operand, got "
-                        + (operand == null ? "null" : operand.getClass().getSimpleName()));
-                }
-            }
-            default -> throw new IllegalArgumentException(
-                "unsupported where operator '" + operator + "' for field '" + key
-                + "'; supported: $eq, $ne, $in, $nin, $gte, $lte, $gt, $lt");
-        }
-    }
-
-    /**
-     * Typed jOOQ sibling of {@link #appendWherePredicate} (nexus-mzuj9): same Chroma
+     * Typed jOOQ sibling of {@link #planWhere} (nexus-mzuj9, nexus-zrcj7): same Chroma
      * operator-subset ({@code $eq}/{@code $ne}/{@code $in}/{@code $nin}, plain-scalar
      * shorthand for {@code $eq}), expressed as a {@link org.jooq.Condition} via a
      * {@code metadata ->> {0}} DSL.field template (bind placeholder, not string
@@ -3935,8 +3617,9 @@ public final class PgVectorRepository {
                     : mv.isNull().or(mv.notIn(strItems));
             }
             case "$gte", "$lte", "$gt", "$lt" -> {
-                // nexus-4l80g twin of appendWherePredicate's range case — the
-                // two translators must not drift (same operand-typed semantics).
+                // nexus-4l80g: range operators, operand-typed (kept for the plain-
+                // equality getWhere path; the vector-search where-translator moved to
+                // planWhere's native jsonpath comparison, nexus-zrcj7).
                 String cmp = switch (operator) {
                     case "$gte" -> ">=";
                     case "$lte" -> "<=";
