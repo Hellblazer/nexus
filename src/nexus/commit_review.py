@@ -44,6 +44,7 @@ becomes a real question.
 """
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -253,6 +254,87 @@ def has_patch(diff_text: str) -> bool:
     return "\ndiff --git " in diff_text or diff_text.startswith("diff --git ")
 
 
+#: Number of lines ``commit_diff``'s ``--format=%H%n%s%n%an%n`` header
+#: occupies before the patch body: sha, subject, author, blank.
+_HEADER_LINES: Final = 4
+
+
+def patch_body(diff_text: str) -> str:
+    """The ``git show`` text without its sha/subject/author header.
+
+    The header is exactly the part an amend or rebase rewrites while the
+    change stays the same, so nothing that wants to say "same diff" may
+    include it.
+    """
+    return "\n".join(diff_text.split("\n")[_HEADER_LINES:])
+
+
+def header_subject(diff_text: str) -> str:
+    """The commit subject from ``commit_diff``'s own header.
+
+    Read here rather than by a second ``git log`` after the dispatch:
+    record review-b0c4039fcdae (2026-09-04) said ``Subject: (unavailable)``
+    because the reviewing agent worktree was removed during the minute the
+    dispatch took, and the late call ran in a deleted directory. The diff
+    was captured with its subject before that could happen.
+    """
+    lines = diff_text.split("\n")
+    return lines[1].strip() if len(lines) > 1 else ""
+
+
+def diff_hash(diff_text: str) -> str:
+    """sha256 of :func:`patch_body`, hex. Two commits with the same hash
+    are the same change (nexus-yh25a): an amended or rebased commit keeps
+    its hash and needs no second review.
+    """
+    return hashlib.sha256(patch_body(diff_text).encode("utf-8")).hexdigest()
+
+
+#: The line :func:`render_record` writes and :func:`record_diff_hash`
+#: reads. One constant, two consumers.
+DIFF_HASH_LINE_PREFIX: Final = "Diff-Hash: "
+
+
+def record_diff_hash(content: str) -> str | None:
+    """The diff hash a rendered record carries, or ``None`` for a record
+    written before the line existed."""
+    for line in content.splitlines():
+        if line.startswith(DIFF_HASH_LINE_PREFIX):
+            value = line[len(DIFF_HASH_LINE_PREFIX) :].strip()
+            return value or None
+    return None
+
+
+def find_prior_review(memory, wanted_hash: str) -> str | None:
+    """Title of an existing record for *wanted_hash*, or ``None``.
+
+    One full-text search on the hash token (the engine tokenises a hex
+    run as one word; probed live 2026-09-04 on a 40-hex and a 12-hex
+    token), confirmed by content: the row must be a review record
+    (:func:`is_review_record`) whose own ``Diff-Hash`` line equals the
+    hash. Fetching every review record per commit was the first cut and
+    is O(records) HTTP calls on every commit (review [24376] Major 1).
+
+    A prior record carrying a FIX-NOW is not a match: the defect is still
+    in the diff, and the SessionStart notice only surfaces records from
+    the last seven days, so a rebase must produce a fresh record for it
+    to stay visible (review [24376] Major 2).
+
+    Raises whatever the store raises; :func:`review_commit` treats that
+    as "no prior record" because a T2 outage must never block a commit.
+    """
+    for row in memory.search(wanted_hash, project=REVIEW_PROJECT, access="silent") or []:
+        if not isinstance(row, dict) or not is_review_record(row):
+            continue
+        content = str(row.get("content", "") or "")
+        if record_diff_hash(content) != wanted_hash:
+            continue
+        if parse_record_verdicts(content).get("FIX-NOW"):
+            return None
+        return str(row.get("title", ""))
+    return None
+
+
 def commit_parent_count(repo: Path, sha: str) -> int:
     """Number of parents of *sha*: 0 for a root commit, and 0 when git
     cannot answer (never raises). Callers only ask "more than one".
@@ -270,18 +352,6 @@ def commit_parent_count(repo: Path, sha: str) -> int:
     return max(len(line) - 1, 0)
 
 
-def commit_subject(repo: Path, sha: str) -> str:
-    """Best-effort one-line subject for *sha*; empty string if unavailable."""
-    try:
-        return subprocess.run(
-            ["git", "log", "-1", "--format=%s", sha],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-    except (subprocess.CalledProcessError, OSError):
-        return ""
 
 
 def build_prompt(sha: str, diff_text: str, *, truncated: bool, merge: bool = False) -> str:
@@ -368,6 +438,7 @@ def render_record(
     merge: bool = False,
     seen_bytes: int | None = None,
     total_bytes: int | None = None,
+    diff_hash_hex: str | None = None,
 ) -> str:
     """Render the T2 record body.
 
@@ -383,6 +454,8 @@ def render_record(
     ]
     if cost_usd is not None:
         lines.append(f"Cost: ${cost_usd:.4f}")
+    if diff_hash_hex:
+        lines.append(f"{DIFF_HASH_LINE_PREFIX}{diff_hash_hex}")
     if merge:
         lines.append(
             "Diff: MERGE commit, first-parent view (what the merge brought onto "
@@ -460,12 +533,15 @@ async def review_commit(
     cfg: CommitReviewConfig,
     dispatch: DispatchFn | None = None,
     put: PutFn | None = None,
+    memory=None,
 ) -> ReviewResult:
     """Review one commit and record the result. Never raises.
 
     *dispatch* and *put* are injected (constructor injection, house style)
     so tests drive the real orchestration against fakes rather than
-    proving a narrower thing one layer down.
+    proving a narrower thing one layer down. *memory* is the T2 memory
+    store used to look for a prior record of the same diff; ``None``
+    skips the lookup.
     """
     if not cfg.enabled:
         return ReviewResult(sha=sha, skipped_reason="disabled")
@@ -482,6 +558,27 @@ async def review_commit(
         # ``merge -s ours`` that discards a whole branch, or --allow-empty,
         # dispatched a header-only diff and recorded "No findings" over it.
         return ReviewResult(sha=sha, skipped_reason="empty diff")
+
+    this_hash = diff_hash(diff_text)
+    if memory is not None and not truncated:
+        # Same patch, new sha: an amend or a rebase. Measured 2026-09-04
+        # over 16 live records: two pairs were one change reviewed twice,
+        # a quarter of the spend (nexus-yh25a). Best-effort by design.
+        # Never on a truncated diff: two commits identical up to the cap
+        # and different past it hash the same, and the second would be
+        # skipped as a duplicate with no signal (critique [24377] C1).
+        try:
+            prior = find_prior_review(memory, this_hash)
+        except Exception as exc:  # noqa: BLE001 - a hook must never block a commit
+            _log.warning("commit_review_dedupe_lookup_failed", sha=sha[:12], error=str(exc))
+            prior = None
+        if prior:
+            _log.info("commit_review_duplicate_diff", sha=sha[:12], prior=prior)
+            return ReviewResult(
+                sha=sha,
+                skipped_reason=f"same diff already reviewed as {prior}",
+                truncated=truncated,
+            )
 
     if dispatch is None:  # pragma: no cover - exercised via the CLI path
         from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — deliberate function-local import: heavy operator dep deferred to call time
@@ -527,13 +624,14 @@ async def review_commit(
     cost = usage[0].cost_usd if usage else None
     content = render_record(
         sha=sha,
-        subject=commit_subject(repo, sha),
+        subject=header_subject(diff_text),
         findings=findings,
         cost_usd=cost,
         truncated=truncated,
         merge=merge,
         seen_bytes=len(diff_text),
         total_bytes=total_bytes,
+        diff_hash_hex=this_hash,
     )
 
     if put is None:

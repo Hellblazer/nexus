@@ -10,6 +10,7 @@ actually returns, not a literal that resembles it.
 from __future__ import annotations
 
 import asyncio
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -26,9 +27,11 @@ from nexus.commit_review import (
     build_prompt,
     commit_diff,
     commit_parent_count,
+    diff_hash,
     has_patch,
     parse_findings,
     parse_record_verdicts,
+    record_diff_hash,
     record_title,
     render_record,
     review_commit,
@@ -84,6 +87,12 @@ def _fake_memory(rows: list[dict]):
                 if r["title"] == title:
                     return r
             return None
+
+        def search(self, query, project=None, access="track"):
+            # The engine's FTS finds a hex token as one word (probed live);
+            # the double matches on substring, which is at least as loose.
+            assert project == REVIEW_PROJECT and access == "silent"
+            return [r for r in rows if query in str(r.get("content", ""))]
 
     return FakeMemory
 
@@ -726,3 +735,215 @@ class TestSessionStartNotice:
 
         monkeypatch.setattr("nexus.commands._helpers.t2_handle", exploding_handle)
         assert hooks_mod._pending_fix_now_notice() == ""
+
+
+# ── nexus-yh25a: one diff, one review ────────────────────────────────────────
+
+
+def test_diff_hash_ignores_the_sha_and_message_header(tiny_repo: Path) -> None:
+    """An amend that changes only the message keeps the same diff hash.
+
+    The header ``git show`` emits (sha, subject, author) is exactly the part
+    that changes on amend or rebase; the hash must key on the patch alone.
+    """
+    sha1 = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
+    text1, _, _ = commit_diff(tiny_repo, sha1, max_bytes=200_000)
+    _run(["git", "commit", "-q", "--amend", "-m", "feat: add f (reworded)"], tiny_repo)
+    sha2 = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
+    text2, _, _ = commit_diff(tiny_repo, sha2, max_bytes=200_000)
+    assert sha1 != sha2 and text1 != text2
+    assert diff_hash(text1) == diff_hash(text2)
+    assert len(diff_hash(text1)) == 64
+
+
+def test_diff_hash_changes_when_the_patch_changes(tiny_repo: Path) -> None:
+    sha1 = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
+    text1, _, _ = commit_diff(tiny_repo, sha1, max_bytes=200_000)
+    (tiny_repo / "a.py").write_text("def f():\n    return 2\n")
+    _run(["git", "commit", "-q", "-a", "--amend", "--no-edit"], tiny_repo)
+    sha2 = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
+    text2, _, _ = commit_diff(tiny_repo, sha2, max_bytes=200_000)
+    assert diff_hash(text1) != diff_hash(text2)
+
+
+def test_the_record_carries_the_diff_hash_and_the_reader_finds_it() -> None:
+    """Producer and consumer of the Diff-Hash line, composed."""
+    content = render_record(
+        sha="a" * 40, subject="x", findings=[], cost_usd=None, diff_hash_hex="f" * 64
+    )
+    assert record_diff_hash(content) == "f" * 64
+    assert record_diff_hash("Commit review: abc\nSubject: x\n") is None
+
+
+def test_an_amended_commit_with_the_same_diff_is_not_reviewed_twice(tiny_repo: Path) -> None:
+    """The bead's measurement: 2 of 16 live records were the same change
+    reviewed twice after amend/rebase, a quarter of the spend."""
+    sha1 = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
+    rows: list[dict] = []
+    dispatches = 0
+
+    async def fake_dispatch(prompt, json_schema, **kwargs):
+        nonlocal dispatches
+        dispatches += 1
+        return {"findings": []}
+
+    def fake_put(**kwargs):
+        rows.append({**kwargs, "agent": kwargs["agent"]})
+        return len(rows)
+
+    memory = _fake_memory(rows)()
+    first = asyncio.run(
+        review_commit(
+            repo=tiny_repo, sha=sha1, cfg=CommitReviewConfig(),
+            dispatch=fake_dispatch, put=fake_put, memory=memory,
+        )
+    )
+    assert first.skipped_reason is None and dispatches == 1
+    assert record_diff_hash(rows[0]["content"]) is not None
+
+    _run(["git", "commit", "-q", "--amend", "-m", "feat: add f (reworded)"], tiny_repo)
+    sha2 = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
+    second = asyncio.run(
+        review_commit(
+            repo=tiny_repo, sha=sha2, cfg=CommitReviewConfig(),
+            dispatch=fake_dispatch, put=fake_put, memory=memory,
+        )
+    )
+    assert dispatches == 1, "the same diff must not be dispatched again"
+    assert second.skipped_reason is not None
+    assert record_title(sha1) in second.skipped_reason, "the skip names the prior record"
+    assert len(rows) == 1, "a skipped duplicate writes no record"
+
+
+def test_a_changed_diff_after_amend_is_reviewed_again(tiny_repo: Path) -> None:
+    sha1 = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
+    rows: list[dict] = []
+    dispatches = 0
+
+    async def fake_dispatch(prompt, json_schema, **kwargs):
+        nonlocal dispatches
+        dispatches += 1
+        return {"findings": []}
+
+    def fake_put(**kwargs):
+        rows.append(dict(kwargs))
+        return len(rows)
+
+    memory = _fake_memory(rows)()
+    kw = dict(repo=tiny_repo, cfg=CommitReviewConfig(), dispatch=fake_dispatch,
+              put=fake_put, memory=memory)
+    asyncio.run(review_commit(sha=sha1, **kw))
+    (tiny_repo / "a.py").write_text("def f():\n    return 2\n")
+    _run(["git", "commit", "-q", "-a", "--amend", "--no-edit"], tiny_repo)
+    sha2 = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
+    result = asyncio.run(review_commit(sha=sha2, **kw))
+    assert result.skipped_reason is None and dispatches == 2 and len(rows) == 2
+
+
+def test_an_unreachable_memory_never_blocks_the_review(tiny_repo: Path) -> None:
+    """The dedupe lookup is best-effort: T2 down means review anyway."""
+    sha = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
+
+    class DeadMemory:
+        def search(self, *a, **kw):
+            raise ConnectionError("engine down")
+
+    async def fake_dispatch(prompt, json_schema, **kwargs):
+        return {"findings": []}
+
+    result = asyncio.run(
+        review_commit(
+            repo=tiny_repo, sha=sha, cfg=CommitReviewConfig(),
+            dispatch=fake_dispatch, put=lambda **kw: 1, memory=DeadMemory(),
+        )
+    )
+    assert result.skipped_reason is None and result.row_id == 1
+
+
+def test_the_subject_comes_from_the_diff_header_not_a_second_git_call(tmp_path: Path) -> None:
+    """Record review-b0c4039fcdae (2026-09-04) said ``Subject: (unavailable)``:
+    the reviewing worktree was removed while the dispatch was in flight, so
+    the post-dispatch ``git log`` ran in a deleted directory. The diff was
+    already captured with its subject in the header; use that."""
+    repo = tmp_path / "doomed"
+    repo.mkdir()
+    _run(["git", "init", "-q", "-b", "main"], repo)
+    _run(["git", "config", "user.email", "t@example.invalid"], repo)
+    _run(["git", "config", "user.name", "Test"], repo)
+    (repo / "a.py").write_text("x = 1\n")
+    _run(["git", "add", "a.py"], repo)
+    _run(["git", "commit", "-q", "-m", "feat: the subject line"], repo)
+    sha = _run(["git", "rev-parse", "HEAD"], repo).strip()
+    written: list[dict] = []
+
+    async def fake_dispatch(prompt, json_schema, **kwargs):
+        shutil.rmtree(repo)  # the worktree goes away mid-review
+        return {"findings": []}
+
+    result = asyncio.run(
+        review_commit(
+            repo=repo, sha=sha, cfg=CommitReviewConfig(),
+            dispatch=fake_dispatch, put=lambda **kw: written.append(kw) or 1,
+        )
+    )
+    assert result.skipped_reason is None
+    assert "Subject: feat: the subject line" in written[0]["content"]
+    assert "(unavailable)" not in written[0]["content"]
+
+
+def test_a_truncated_diff_is_never_deduped(tiny_repo: Path) -> None:
+    """Two commits equal up to the cap and different past it hash the same
+    seen text; skipping the second as a duplicate would be a silent wrong
+    skip (critique [24377] C1). So a truncated diff always dispatches."""
+    sha = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
+    text, _, _ = commit_diff(tiny_repo, sha, max_bytes=200_000)
+    rows: list[dict] = [{
+        "title": record_title("0" * 40), "agent": REVIEW_AGENT,
+        "content": render_record(sha="0" * 40, subject="s", findings=[], cost_usd=None,
+                                 diff_hash_hex=diff_hash(text[: text.index("diff --git") + 40])),
+    }]
+    dispatches = 0
+
+    async def fake_dispatch(prompt, json_schema, **kwargs):
+        nonlocal dispatches
+        dispatches += 1
+        return {"findings": []}
+
+    cap = text.index("diff --git") + 40  # keeps the first file header, cuts the hunks
+    result = asyncio.run(
+        review_commit(
+            repo=tiny_repo, sha=sha, cfg=CommitReviewConfig(max_diff_bytes=cap),
+            dispatch=fake_dispatch, put=lambda **kw: 1, memory=_fake_memory(rows)(),
+        )
+    )
+    assert result.truncated and dispatches == 1 and result.skipped_reason is None
+
+
+def test_a_prior_fix_now_is_reviewed_again_so_the_notice_can_see_it(tiny_repo: Path) -> None:
+    """The SessionStart FIX-NOW notice windows on the last seven days; a
+    deduped rebase would leave a stale FIX-NOW record un-renewed and the
+    defect invisible exactly when it is about to merge (review [24376]
+    Major 2). A prior record carrying FIX-NOW does not count as done."""
+    sha = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
+    text, _, _ = commit_diff(tiny_repo, sha, max_bytes=200_000)
+    rows: list[dict] = [{
+        "title": record_title("0" * 40), "agent": REVIEW_AGENT,
+        "content": render_record(
+            sha="0" * 40, subject="s", cost_usd=None, diff_hash_hex=diff_hash(text),
+            findings=[Finding(verdict="FIX-NOW", summary="bad", reason="r")],
+        ),
+    }]
+    dispatches = 0
+
+    async def fake_dispatch(prompt, json_schema, **kwargs):
+        nonlocal dispatches
+        dispatches += 1
+        return {"findings": [{"verdict": "FIX-NOW", "summary": "bad", "reason": "r"}]}
+
+    result = asyncio.run(
+        review_commit(
+            repo=tiny_repo, sha=sha, cfg=CommitReviewConfig(),
+            dispatch=fake_dispatch, put=lambda **kw: 2, memory=_fake_memory(rows)(),
+        )
+    )
+    assert dispatches == 1 and result.row_id == 2

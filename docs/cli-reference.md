@@ -3690,6 +3690,8 @@ Nothing is auto-applied and nothing is auto-filed. Triage is a human act. Expect
 
 Records land in T2 project `nexus`, titled `review-<12-hex>`, with a default 90-day TTL. Count them with [`nx census reviews`](#nx-census).
 
+Each record carries a `Diff-Hash:` line, the sha256 of the first-parent patch with the sha/subject/author header stripped. A commit whose hash already has a record is skipped without a dispatch (`skipped (same diff already reviewed as review-<12-hex>)` on stderr) and gets no record of its own: an amend that rewords a message or a rebase that moves a change is the same review, and re-reviewing them was a quarter of the reviewer's spend when measured (nexus-yh25a). A rebase that changes the patch text, context lines included, hashes differently and is reviewed again.
+
 **Findings are surfaced, not merely stored.** SessionStart reports how many commits in the last 7 days carry `FIX-NOW` findings, because a verdict meaning "fix before this work goes further" that nobody sees is theatre. It counts commits rather than findings (two `FIX-NOW`s on one commit is one thing to look at), and the window is bounded on purpose: there is no "resolved" state on a review record, so an unbounded count would become the line people learn to scroll past.
 
 **Configuration** (`.nexus.yml#commit_review`, all optional):
