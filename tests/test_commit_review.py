@@ -10,14 +10,21 @@ actually returns, not a literal that resembles it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
+import multiprocessing as mp
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
+from nexus.cli import main
 from nexus.commands.review_cmd import reviews_census
 from nexus.commit_review import (
+    COVERAGE_FALLBACK_COMMITS,
     REVIEW_AGENT,
     REVIEW_PROJECT,
     VERDICTS,
@@ -31,10 +38,14 @@ from nexus.commit_review import (
     has_patch,
     parse_findings,
     parse_record_verdicts,
+    pop_review_queue,
     record_diff_hash,
     record_title,
     render_record,
     review_commit,
+    review_coverage,
+    review_queue_depth,
+    review_queue_path,
 )
 from nexus.config import (
     COMMIT_REVIEW_DEFAULT_MODEL,
@@ -947,3 +958,189 @@ def test_a_prior_fix_now_is_reviewed_again_so_the_notice_can_see_it(tiny_repo: P
         )
     )
     assert dispatches == 1 and result.row_id == 2
+
+
+# ── burst queue and coverage (2026-09-04, session nexus-65) ───────────────────
+
+
+def _commit_file(repo: Path, name: str, body: str, msg: str) -> str:
+    (repo / name).write_text(body)
+    _run(["git", "add", name], repo)
+    _run(["git", "commit", "-q", "-m", msg], repo)
+    return _run(["git", "rev-parse", "HEAD"], repo).strip()
+
+
+def test_pop_review_queue_takes_everything_once_and_drops_junk(tiny_repo: Path) -> None:
+    a, b = "a" * 40, "b" * 40
+    review_queue_path(tiny_repo).write_text(f"{a}\n{b}\n{a}\nnot-a-sha\n\n")
+    assert review_queue_depth(tiny_repo) == 3
+    assert pop_review_queue(tiny_repo) == [a, b]
+    assert pop_review_queue(tiny_repo) == []
+    assert review_queue_depth(tiny_repo) == 0
+
+
+def test_pop_review_queue_folds_in_dead_drainers_remnants_from_any_pid(tiny_repo: Path) -> None:
+    """A reviewer killed between its rename and its read leaves
+    ``.draining.<pid>`` behind; the next pop reads every such remnant
+    first, then its own take, and leaves nothing."""
+    q = review_queue_path(tiny_repo)
+    q.with_name(q.name + ".draining.111").write_text("c" * 40 + "\n")
+    q.with_name(q.name + ".draining.222").write_text("e" * 40 + "\n")
+    q.write_text("d" * 40 + "\n")
+    assert review_queue_depth(tiny_repo) == 3
+    assert pop_review_queue(tiny_repo) == ["c" * 40, "e" * 40, "d" * 40]
+    assert not q.exists()
+    assert list(q.parent.glob(q.name + "*")) == []
+
+
+def _popper(out, repo: Path) -> None:
+    """Child of test_two_concurrent_poppers_never_lose_a_sha (module-level so
+    the spawn context can pickle it): pop for two seconds, report the take."""
+    got: list[str] = []
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        got.extend(pop_review_queue(repo))
+    out.put(got)
+
+
+def test_two_concurrent_poppers_never_lose_a_sha(tiny_repo: Path) -> None:
+    """Review [24406] Critical: with one shared ``.draining`` name, popper B's
+    rename clobbered popper A's file before A read it and the sha was gone.
+    Two processes now rename to pid-unique names; the union of what they
+    return must be exactly the queue, every time."""
+    q = review_queue_path(tiny_repo)
+    shas = [f"{i:040x}" for i in range(1, 41)]
+    ctx = mp.get_context("spawn")
+    for _round in range(5):
+        q.write_text("".join(s + "\n" for s in shas))
+        out = ctx.Queue()
+        procs = [ctx.Process(target=_popper, args=(out, tiny_repo)) for _ in range(3)]
+        for p in procs:
+            p.start()
+        results = [out.get(timeout=30) for _ in procs]
+        for p in procs:
+            p.join(timeout=30)
+        taken = [s for r in results for s in r]
+        assert sorted(taken) == sorted(shas), f"lost or duplicated: {set(shas) ^ set(taken)}"
+        assert list(q.parent.glob(q.name + "*")) == []
+
+
+def test_drain_reviews_every_queued_sha_and_empties_the_queue(tiny_repo: Path, monkeypatch) -> None:
+    """The CLI's --drain path against a real repo and a fake dispatcher:
+    the queued commits each get a record and the queue file is gone."""
+    head = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
+    q1 = _commit_file(tiny_repo, "b.py", "x = 1\n", "feat: b")
+    q2 = _commit_file(tiny_repo, "c.py", "y = 2\n", "feat: c")
+    review_queue_path(tiny_repo).write_text(f"{q1}\n{q2}\n")
+
+    written: list[str] = []
+
+    class FakeMemory:
+        def put(self, **kw):
+            written.append(kw["title"])
+            return len(written)
+
+        def search(self, *a, **k):
+            return []
+
+    class FakeDB:
+        memory = FakeMemory()
+
+    @contextlib.contextmanager
+    def fake_handle():
+        yield FakeDB()
+
+    async def fake_dispatch(*a, **k):
+        return {"findings": []}
+
+    monkeypatch.setattr("nexus.commands.review_cmd.t2_handle", fake_handle)
+    monkeypatch.setattr("nexus.operators.dispatch.claude_dispatch", fake_dispatch)
+
+    result = CliRunner().invoke(
+        main, ["review", "commit", head, "--repo", str(tiny_repo), "--drain"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert written == [record_title(head), record_title(q1), record_title(q2)]
+    assert not review_queue_path(tiny_repo).exists()
+    assert "(queued)" in result.stderr
+
+
+def test_review_coverage_names_the_unreviewed_and_honours_diff_hash(tiny_repo: Path) -> None:
+    """Three commits since a tag: one with a record by sha, one covered by a
+    Diff-Hash match (a rebase reviewed under its old sha), one bare. Only
+    the bare one is a gap; a patch-less commit is counted, not listed."""
+    _run(["git", "tag", "v0.0.1"], tiny_repo)
+    by_sha = _commit_file(tiny_repo, "b.py", "x = 1\n", "feat: by sha")
+    by_hash = _commit_file(tiny_repo, "c.py", "y = 2\n", "feat: by hash")
+    bare = _commit_file(tiny_repo, "d.py", "z = 3\n", "feat: bare")
+    _run(["git", "commit", "-q", "--allow-empty", "-m", "chore: empty"], tiny_repo)
+
+    diff_text, _, _ = commit_diff(tiny_repo, by_hash, max_bytes=200_000)
+    records = [
+        {"title": record_title(by_sha), "content": render_record(sha=by_sha, subject="s", findings=[], cost_usd=None)},
+        # Reviewed under a DIFFERENT sha (pre-rebase), same patch.
+        {"title": record_title("f" * 40), "content": render_record(sha="f" * 40, subject="s", findings=[], cost_usd=None, diff_hash_hex=diff_hash(diff_text))},
+    ]
+    cov = review_coverage(tiny_repo, records, max_diff_bytes=200_000)
+    assert cov.since == "v0.0.1"
+    assert cov.commits == 4
+    assert cov.patchless == 1
+    assert [g.sha for g in cov.gaps] == [bare]
+    assert cov.gaps[0].subject == "feat: bare"
+
+
+def test_review_coverage_without_a_tag_is_bounded_and_says_so(tiny_repo: Path) -> None:
+    cov = review_coverage(tiny_repo, [], max_diff_bytes=200_000)
+    assert str(COVERAGE_FALLBACK_COMMITS) in cov.since
+    assert cov.commits == 1 and len(cov.gaps) == 1
+
+
+def test_review_coverage_never_matches_a_truncated_diff_by_hash(tiny_repo: Path) -> None:
+    """Same rule as review_commit's dedupe: two commits identical up to the
+    cap hash alike, so a hash match on a truncated diff proves nothing."""
+    _run(["git", "tag", "v0.0.1"], tiny_repo)
+    big = _commit_file(tiny_repo, "big.py", "x = 1\n" * 200, "feat: big")
+    cap = 300
+    diff_text, truncated, _ = commit_diff(tiny_repo, big, max_bytes=cap)
+    assert truncated
+    records = [{"title": record_title("e" * 40), "content": render_record(sha="e" * 40, subject="s", findings=[], cost_usd=None, diff_hash_hex=diff_hash(diff_text))}]
+    cov = review_coverage(tiny_repo, records, max_diff_bytes=cap)
+    assert [g.sha for g in cov.gaps] == [big]
+
+
+def test_the_census_command_prints_the_gaps_and_the_queue(tiny_repo: Path, monkeypatch) -> None:
+    """The CLI wiring end to end: cwd is the repo, T2 is a fake, one commit
+    since the tag is unreviewed and one sha waits in the queue."""
+    _run(["git", "tag", "v0.0.1"], tiny_repo)
+    reviewed = _commit_file(tiny_repo, "b.py", "x = 1\n", "feat: reviewed")
+    bare = _commit_file(tiny_repo, "c.py", "y = 2\n", "feat: bare one")
+    review_queue_path(tiny_repo).write_text("9" * 40 + "\n")
+    rows = [{
+        "title": record_title(reviewed),
+        "content": render_record(sha=reviewed, subject="s", findings=[Finding("FILE", "s", "r")], cost_usd=None),
+        "agent": REVIEW_AGENT,
+    }]
+    FakeMemory = _fake_memory(rows)
+
+    class FakeDB:
+        memory = FakeMemory()
+
+    @contextlib.contextmanager
+    def fake_handle():
+        yield FakeDB()
+
+    monkeypatch.setattr("nexus.commands._helpers.t2_handle", fake_handle)
+    monkeypatch.chdir(tiny_repo)
+    result = CliRunner().invoke(main, ["census", "reviews"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    out = result.stdout
+    assert "Commit reviews: 1 record(s), 0 clean" in out
+    assert "Unreviewed since v0.0.1: 1 of 2 commit(s)" in out
+    assert f"{bare[:12]}  feat: bare one" in out
+    assert reviewed[:12] not in out
+    assert "Review queue: 1 waiting" in out
+
+    as_json = CliRunner().invoke(main, ["census", "reviews", "--as-json"])
+    payload = json.loads(as_json.stdout)
+    assert payload["queued"] == 1
+    assert [g["sha"] for g in payload["coverage"]["unreviewed"]] == [bare]

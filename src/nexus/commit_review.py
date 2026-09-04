@@ -45,6 +45,8 @@ becomes a real question.
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -664,3 +666,206 @@ async def review_commit(
         )
 
     return ReviewResult(sha=sha, findings=findings, row_id=row_id, truncated=truncated)
+
+
+# ── burst queue and coverage (the post-commit reviewer's drop, 2026-09-04) ────
+#
+# The hook serialises a burst with a pgrep guard. Until 2026-09-04 a hit
+# DROPPED the commit: it logged "SKIPPED (review already running)" and
+# nothing ever came back for it, so 6 of 9 commits in one push went
+# unreviewed while the log looked healthy. Sam's ruling (session nexus-65):
+# queue, and make the gap visible. The hook now appends the sha to
+# :func:`review_queue_path` and the running reviewer, dispatched with
+# ``--drain``, pops and reviews every queued sha before it exits.
+# :func:`review_coverage` is the other half: the census names every commit
+# since the newest reachable tag that has no record, so a stranded queue
+# entry (the reviewer exited between the hook's pgrep and its append) is a
+# named gap, not silence. The next commit's ``--drain`` picks it up.
+
+QUEUE_FILENAME: Final = "nx-review-queue"
+_DRAINING_SUFFIX: Final = ".draining."
+_SHA_RE: Final = re.compile(r"^([0-9a-f]{40}|[0-9a-f]{64})$")
+
+
+def _git_common_dir(repo: Path) -> Path:
+    out = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if not out:
+        raise CommitReviewError(f"git rev-parse --git-common-dir returned nothing in {repo}")
+    common = Path(out)
+    return (common if common.is_absolute() else repo / common).resolve()
+
+
+def review_queue_path(repo: Path) -> Path:
+    """The burst queue for *repo*: one full sha per line, in the COMMON git
+    dir, so every linked worktree of the repository shares one queue with
+    the hook that lives beside it. The hook computes the same path in shell
+    (``cd "$(git rev-parse --git-common-dir)" && pwd -P``); the two are
+    held together by ``tests/test_commit_review_hook.py``."""
+    return _git_common_dir(repo) / QUEUE_FILENAME
+
+
+def _draining_files(path: Path) -> list[Path]:
+    return sorted(path.parent.glob(path.name + _DRAINING_SUFFIX + "*"))
+
+
+def _take(candidate: Path) -> list[str]:
+    """Read and unlink *candidate*; ``[]`` when another popper took it first."""
+    try:
+        text = candidate.read_text()
+        candidate.unlink()
+    except FileNotFoundError:
+        return []
+    return text.splitlines()
+
+
+def pop_review_queue(repo: Path) -> list[str]:
+    """Take every queued sha, oldest first, deduplicated. Never loses one.
+
+    Renames the queue aside to a name unique to THIS process before reading
+    it, so a hook appending concurrently lands in a fresh file the next pop
+    sees, and two poppers racing (the hook's pgrep guard is not a lock)
+    cannot rename onto the same target: ``rename`` of the shared queue
+    succeeds for exactly one of them, and each reads only what it renamed.
+    Remnants of a drainer that died between its rename and its read, from
+    any pid, are folded in first rather than left behind. A remnant a live
+    sibling is about to read may be taken from under it: the sibling then
+    sees nothing (:func:`_take`) and the sha is reviewed here instead.
+    Review [24406] Critical reproduced the shared-name version losing a sha
+    outright; that name is gone. Never raises for a missing queue.
+    """
+    path = review_queue_path(repo)
+    lines: list[str] = []
+    for remnant in _draining_files(path):
+        lines.extend(_take(remnant))
+    mine = path.with_name(f"{path.name}{_DRAINING_SUFFIX}{os.getpid()}")
+    try:
+        path.replace(mine)
+    except FileNotFoundError:
+        pass
+    else:
+        lines.extend(_take(mine))
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in lines:
+        sha = raw.strip()
+        if _SHA_RE.match(sha) and sha not in seen:
+            seen.add(sha)
+            out.append(sha)
+    return out
+
+
+def review_queue_depth(repo: Path) -> int:
+    """Shas waiting in the queue (and any draining remnant), without taking them."""
+    path = review_queue_path(repo)
+    n = 0
+    for candidate in (path, *_draining_files(path)):
+        try:
+            n += sum(1 for line in candidate.read_text().splitlines() if _SHA_RE.match(line.strip()))
+        except FileNotFoundError:
+            continue
+    return n
+
+
+@dataclass(frozen=True)
+class ReviewGap:
+    sha: str
+    subject: str
+
+
+@dataclass(frozen=True)
+class ReviewCoverage:
+    since: str  #: the ref the walk started after (a tag name, or the fallback label)
+    commits: int  #: commits walked
+    gaps: list[ReviewGap]  #: walked commits with a patch and no record
+    patchless: int  #: walked commits with no patch (merge -s ours, --allow-empty): never reviewed by design
+
+
+#: With no tag reachable from HEAD the walk is bounded here instead of
+#: running to the root commit.
+COVERAGE_FALLBACK_COMMITS: Final = 100
+#: Ceiling on any walk, tag or not: each unreviewed commit costs one
+#: ``git show``, and a branch a thousand commits past its last tag is a
+#: census that should say so rather than run for a minute.
+COVERAGE_MAX_COMMITS: Final = 500
+
+
+def newest_reachable_tag(repo: Path) -> str | None:
+    proc = subprocess.run(
+        ["git", "describe", "--tags", "--abbrev=0"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+
+def review_coverage(
+    repo: Path,
+    records: list[dict],
+    *,
+    since: str | None = None,
+    max_diff_bytes: int,
+) -> ReviewCoverage:
+    """Which commits since *since* (default: the newest reachable tag) have
+    no review record.
+
+    A commit is covered when a record carries its sha (``review-<12hex>``)
+    OR a record's ``Diff-Hash`` equals its own patch hash: a rebase or
+    amend is reviewed under the sha it first had, and
+    :func:`review_commit` deliberately writes nothing for the new sha. A
+    truncated diff is never matched by hash, for the reason
+    :func:`review_commit` never dedupes one. Patch-less commits are
+    counted, not listed: the reviewer skips them on purpose.
+
+    *records* is the census's own review-record list (:func:`iter_review_records`),
+    so the two reports walk the same rows.
+    """
+    label = since or newest_reachable_tag(repo)
+    if label:
+        rev_args = [f"{label}..HEAD", f"--max-count={COVERAGE_MAX_COMMITS}"]
+    else:
+        label = f"(no tag reachable; last {COVERAGE_FALLBACK_COMMITS} commits)"
+        rev_args = ["HEAD", f"--max-count={COVERAGE_FALLBACK_COMMITS}"]
+    shas = subprocess.run(
+        ["git", "rev-list", *rev_args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    if len(shas) >= COVERAGE_MAX_COMMITS:
+        label = f"{label} (walk capped at {COVERAGE_MAX_COMMITS} commits)"
+
+    reviewed_shas: set[str] = set()
+    reviewed_hashes: set[str] = set()
+    for row in records:
+        title = str(row.get("title", ""))
+        if title.startswith(RECORD_PREFIX):
+            reviewed_shas.add(title[len(RECORD_PREFIX) :])
+        digest = record_diff_hash(str(row.get("content", "") or ""))
+        if digest:
+            reviewed_hashes.add(digest)
+
+    gaps: list[ReviewGap] = []
+    patchless = 0
+    for sha in shas:
+        if sha[:12] in reviewed_shas:
+            continue
+        try:
+            diff_text, truncated, _ = commit_diff(repo, sha, max_bytes=max_diff_bytes)
+        except CommitReviewError:
+            gaps.append(ReviewGap(sha=sha, subject="(diff unavailable)"))
+            continue
+        if not has_patch(diff_text):
+            patchless += 1
+            continue
+        if not truncated and diff_hash(diff_text) in reviewed_hashes:
+            continue
+        gaps.append(ReviewGap(sha=sha, subject=header_subject(diff_text)))
+    return ReviewCoverage(since=label, commits=len(shas), gaps=gaps, patchless=patchless)
