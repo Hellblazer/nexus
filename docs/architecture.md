@@ -1153,6 +1153,8 @@ Every shipped template must be *offerable* — reachable by some question. A tem
 
 ### T1's three scopes and the CLI/MCP split-brain (nexus-aj564)
 
+> Rule of record: JDR-001 (`docs/rdr/joint/JDR-001-t1-three-scopes.md`). This section is the measured explanation behind it.
+
 The T1 session-scoping decision above describes a single session-id-scoped
 T1. In practice three distinct scopes exist simultaneously, and probes on
 2026-08-03 (T2 `nexus/subagent-reliability-findings-2026-08-03`, id 21371;

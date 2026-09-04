@@ -26,6 +26,10 @@ snapshot of it:
    store is Dolt), so this leg needs ``bd`` and SKIPS, saying so, where it
    is absent (CI). The other two legs still run there.
 3. **RDR ids**: ``RDR-NNN`` must match a ``docs/rdr/rdr-NNN-*.md`` file.
+4. **JDR ids** (nexus-vuiid): ``JDR-NNN`` must match a
+   ``docs/rdr/joint/JDR-NNN-*.md`` file; the registry is append-only, so
+   a dangling number is a deleted or renumbered record, never a typo to
+   allowlist.
 
 Non-vacuity: each leg asserts it found citations to check, and a planted
 bogus value of each shape reds its leg (``test_planted_*``).
@@ -51,6 +55,8 @@ Cite = tuple[str, str, int]  # (value, relpath, lineno)
 _SHA_RE = re.compile(r"(?<![0-9a-zA-Z_/.\-])([0-9a-f]{7,12}|[0-9a-f]{40})(?![0-9a-zA-Z_/\-])")
 _BEAD_RE = re.compile(r"\bnexus-([0-9a-z]{5})(?![0-9a-z])")
 _RDR_RE = re.compile(r"\bRDR-(\d{3})\b")
+_JDR_RE = re.compile(r"\bJDR-(\d{3})\b")
+JOINT_DIR = RDR_DIR / "joint"
 
 #: Dangling commit-shaped tokens that are not commits. Value -> reason.
 #: Enumerated from the first run (2026-09-04, 23 of 194 commit-shaped
@@ -154,6 +160,14 @@ def _rdr_files() -> set[str]:
     }
 
 
+def _jdr_files() -> set[str]:
+    return {
+        m.group(1)
+        for p in JOINT_DIR.glob("JDR-*.md")
+        if (m := re.match(r"JDR-(\d{3})-", p.name))
+    }
+
+
 def _bd_ids() -> set[str]:
     """Live bead ids from ``bd``. Raises :class:`BdUnavailable` naming WHY
     when bd is absent, exits non-zero, or returns something that is not
@@ -216,6 +230,24 @@ def test_cited_rdr_ids_resolve() -> None:
     assert not bad, _report("RDR", bad)
     dead = sorted(v for v in RDR_ALLOWLIST if v in files or v not in {c[0] for c in cites})
     assert not dead, f"RDR_ALLOWLIST rows that resolve or are no longer cited: {dead}"
+
+
+def test_cited_jdr_ids_resolve() -> None:
+    """No allowlist: a JDR number that resolves to nothing is a broken
+    anchor in an append-only registry (docs/rdr/joint/TEMPLATE.md)."""
+    cites = [c for c in _scan(_JDR_RE) if not c[1].startswith("docs/rdr/joint/TEMPLATE")]
+    assert cites, "no JDR citation found anywhere under docs/; the registry has no consumer"
+    files = _jdr_files()
+    assert files, "docs/rdr/joint/ holds no JDR-NNN-*.md file"
+    bad = [c for c in cites if c[0] not in files]
+    assert not bad, _report("JDR", bad)
+
+
+def test_planted_bogus_jdr_is_detected(tmp_path: Path) -> None:
+    doc = tmp_path / "planted.md"
+    doc.write_text("Per JDR-999 the scope is frozen.\n")
+    assert [c[0] for c in _scan(_JDR_RE, [doc])] == ["999"]
+    assert "999" not in _jdr_files()
 
 
 def test_cited_bead_ids_resolve() -> None:

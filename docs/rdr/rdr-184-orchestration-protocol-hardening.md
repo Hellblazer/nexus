@@ -489,3 +489,4 @@ release; repo-local locks land immediately.
   runs in live-block mode (REPORTED x BLOCKED replaces REPORTED x
   WOULDBLOCK). Stamp + repo project-settings defaults flipped in the
   same commit; per-session opt-out is NX_ORCH_STOP_GUARD=off.
+- 2026-09-04: The T1 three-scopes contract this record shares with the other owners is now JDR-001 (`docs/rdr/joint/JDR-001-t1-three-scopes.md`, nexus-vuiid); this text stays as explanation, the JDR is the rule.

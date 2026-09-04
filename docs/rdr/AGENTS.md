@@ -73,3 +73,20 @@ references:
 ```
 
 Run `nx rdr lint` before committing to catch this hazard.
+
+## Joint decision records (`docs/rdr/joint/`)
+
+A rule that two or more RDRs would each carry a copy of lives once, as
+`docs/rdr/joint/JDR-NNN-<slug>.md` (template: `joint/TEMPLATE.md`), and
+the owning records cite the number. The registry is append-only: never
+merge, split or renumber a JDR, because citations anchor on the number
+and a moved anchor is the duplicate-contract drift this exists to end
+(a rule living in two places until the stale one wins). Amend in place
+with a dated Revision History line; retire with `status: retired` and a
+pointer to what replaced it. `tests/test_docs_reference_rot.py` (lint
+bucket) fails on any `JDR-NNN` cited under `docs/` that has no file here.
+JDRs are not RDRs: `nx rdr` lifecycle verbs, the README index, and
+`nx index rdr` do not see them; they are documentation of a seam.
+Seeded 2026-09-04 (nexus-vuiid) with JDR-001, the T1 three-scopes contract
+shared by RDR-105, RDR-149 and RDR-184.
+

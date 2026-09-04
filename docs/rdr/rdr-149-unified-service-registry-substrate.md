@@ -416,3 +416,7 @@ method and the Approach item that discharges it.
   upgrade); GH #956 / `nexus-4fw0z` (related, discovery-free).
 - Anti-pattern precedent: scrapped RDR-110/111/112/113/118/119 big-bang
   substrate chain (`docs/postmortem/2026-05-16-rdr110-113-remediation-chain.md`).
+
+## Revision History
+
+- 2026-09-04: The T1 three-scopes contract this record shares with the other owners is now JDR-001 (`docs/rdr/joint/JDR-001-t1-three-scopes.md`, nexus-vuiid); this text stays as explanation, the JDR is the rule.

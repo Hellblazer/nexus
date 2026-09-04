@@ -537,3 +537,7 @@ Both surfaced during P4 review and originally deferred; resolved alongside the c
 - `tests/test_session_propagation_hypotheses.py`, `tests/test_ppid_chain_hypothesis.py`, `tests/test_session_sweep_orphan_trackers.py` — supporting hypothesis + sweep coverage.
 
 No post-mortem: shipped declared scope across five phases, with the structural-bug-class elimination thesis confirmed by the absence of seventh-instance manifestations through 4.27.x → 4.28.0.
+
+## Revision History
+
+- 2026-09-04: The T1 three-scopes contract this record shares with the other owners is now JDR-001 (`docs/rdr/joint/JDR-001-t1-three-scopes.md`, nexus-vuiid); this text stays as explanation, the JDR is the rule.
