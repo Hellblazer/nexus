@@ -4,9 +4,12 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.Table;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -19,6 +22,14 @@ import java.util.List;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_1024;
+import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_384;
+import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_768;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_768;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_1024;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_384;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_768;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_384;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -51,8 +62,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * sites now DO add an {@code embedding_<dim> IS NOT NULL} predicate — a foreign-dim row
  * (mixed-dim collection) has a NULL value there, so its distance is NULL and, under {@code
  * NULLS LAST}, could otherwise surface via {@code LIMIT} once live matches run out. This
- * suite's hand-built SQL below includes that predicate, mirroring production exactly, and
- * proves it does not defeat the FULL-index bind this class exists to verify: pgvector's
+ * suite EXPLAINs a call to the SAME generated function production dispatches to (each of
+ * plain_search_&lt;dim&gt;/text_gated_search_by_chash_&lt;dim&gt;/
+ * text_gated_search_hnsw_first_&lt;dim&gt; embeds that predicate internally — nexus-cbo4a
+ * batch 3, critic follow-up), and proves it does not defeat the FULL-index bind this class
+ * exists to verify: pgvector's
  * HNSW index structurally never contains a NULL-valued row (there is no vector to place in
  * the graph), so the predicate is redundant at the index and free. See {@code
  * PgVectorRepositoryDimGuardTest}'s {@code search_foreignDimRow_neverEmittedWithNullDistance}
@@ -286,9 +300,10 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             // Reuses the CHUNKS_PER_DIM filler rows already seeded above under
             // COL_768/COL_384 for realistic cardinality; adds only the manifest/
             // topic scaffolding each function's JOIN shape additionally requires
-            // beyond the raw-SQL sites' liveChunksPredicate (which tolerates
-            // manifest-less chunks; these two functions INNER JOIN and so need
-            // real rows to return anything at all).
+            // beyond Site 1/2/3's plain_search_<dim>/text_gated_search_<dim> family
+            // (which tolerates manifest-less chunks via its own live-chunks anti-join;
+            // these two functions INNER JOIN and so need real rows to return anything
+            // at all).
             st.execute(
                 "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
                 + "VALUES ('" + TENANT + "', 'planshape-graphhop-doc', 'planshape graph-hop seed doc', '"
@@ -347,66 +362,55 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     }
 
     /**
-     * Verbatim mirror of {@link PgVectorRepository}'s private {@code liveChunksPredicate}
-     * (RDR-156 Decision 6) — inlined here (rather than reflectively invoked) because the
-     * production method is {@code private static}. MAINTENANCE: if
-     * {@code liveChunksPredicate}'s SQL text changes, update this constant to match, or this
-     * suite's plan shape silently stops mirroring production. It is RDR-191 DELIBERATELY
-     * UNCHANGED (see that method's own javadoc), so this text should be stable across the
-     * repoint.
-     */
-    private static String liveChunksPredicate(String alias) {
-        return "(NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m"
-            + " JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id"
-            + " WHERE m.tenant_id = " + alias + ".tenant_id AND m.chash = " + alias + ".chash"
-            + " AND d.deleted_at IS NOT NULL"
-            + " AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2"
-            + " JOIN nexus.catalog_documents d2 ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id"
-            + " WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash"
-            + " AND d2.deleted_at IS NULL)))";
-    }
-
-    /**
      * Runs {@code EXPLAIN} under the SAME session setting production applies before every
-     * {@code searchWithTokens}/{@code hybridSearch} raw fetch ({@code SET LOCAL
+     * {@code searchWithTokens}/{@code hybridSearch} fetch ({@code SET LOCAL
      * hnsw.iterative_scan = 'relaxed_order'}, via {@link dev.nexus.service.db.PgSession
      * #setLocal}) — filtered-ANN recall keeps HNSW scanning past {@code ef_search} when RLS
      * + collection + metadata predicates narrow the candidate set. Omitting this here would
      * make the dense-gate plan (a filter that matches nearly every seeded row) an unfaithful
      * reproduction of the site under test.
+     *
+     * <p>UPDATED (nexus-cbo4a batch 3, critic follow-up T2 critique-cbo4a-batch3): takes a
+     * typed jOOQ table-function call rather than a raw SQL string — the former
+     * {@code liveChunksPredicate}-based hand SQL this replaced mirrored
+     * {@code searchWithTokens}/{@code hybridSearch}'s retired Java-built raw-SQL dispatch;
+     * both methods now call generated jOOQ table functions ({@code plain_search_<dim>},
+     * {@code text_gated_search_by_chash_<dim>}, {@code text_gated_search_hnsw_first_<dim>} —
+     * vectors-009/011, nexus-zrcj7) with no raw SQL of their own, so the hand-mirrored text
+     * had gone stale the moment that retirement landed (one day before this class's original
+     * raw-SQL cleanup ran). Every site below now calls the SAME generated function table
+     * production dispatches to, so a regression in the REAL function's index binding is
+     * caught here again.
      */
-    private String explain(String sql) throws Exception {
+    private String explain(Table<?> fn) throws Exception {
         return tenantScope.withTenant(TENANT, ctx -> {
             dev.nexus.service.db.PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
-            StringBuilder sb = new StringBuilder();
-            for (var r : ctx.resultQuery("EXPLAIN " + sql).fetch()) {
-                sb.append(r.get(0, String.class)).append('\n');
-            }
-            return sb.toString();
+            return ctx.explain(ctx.select(fn.field("id")).from(fn)).plan();
         });
     }
 
+    /** A length-{@code dim} typed pgvector value: first component 1.0, rest zero — the
+     *  SAME shape as the retired {@code "[1" + ",0".repeat(dim - 1) + "]"} literals. */
+    private static Vector queryVec(int dim) {
+        float[] v = new float[dim];
+        v[0] = 1.0f;
+        return Vector.of(v);
+    }
+
     // ════════════════════════════════════════════════════════════════════════
-    // Site 1: PgVectorRepository#searchWithTokens (embedding_<dim> <=> ?::vector,
-    // FROM nexus.chunks c, WHERE c.collection IN (...) AND liveChunksPredicate AND
-    // embedding_<dim> IS NOT NULL) — nexus-74zvm guarded shape, matching production
-    // exactly (see the class-level comment above for why the guard does not defeat
-    // the FULL-index bind this suite proves).
+    // Site 1: PgVectorRepository#searchWithTokens dispatches to plain_search_<dim>
+    // (vectors-009, nexus-zrcj7) — a generated, inlinable LANGUAGE sql function that
+    // embeds the embedding_<dim> IS NOT NULL guard (nexus-74zvm) and the live-chunks
+    // anti-join production's raw SQL used to build by hand. UPDATED (nexus-cbo4a
+    // batch 3, critic follow-up): EXPLAINs a call to that SAME function rather than a
+    // hand-mirrored raw SQL string that had gone stale the day plain_search_<dim>
+    // replaced the raw dispatch it mirrored.
     // ════════════════════════════════════════════════════════════════════════
 
     @Test
     void searchWithTokens_shape_usesFullHnswIndex_1024() throws Exception {
-        String vec = "[1" + ",0".repeat(1023) + "]";
-        String sql =
-            "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
-            + " (embedding_1024 <=> '" + vec + "'::vector) AS distance"
-            + " FROM nexus.chunks c"
-            + " WHERE c.collection IN ('" + COL_1024 + "')"
-            + " AND " + liveChunksPredicate("c")
-            // nexus-74zvm: guarded shape, mirroring production exactly.
-            + " AND embedding_1024 IS NOT NULL"
-            + " ORDER BY distance ASC, chash ASC LIMIT 10";
-        String plan = explain(sql);
+        Table<?> fn = PLAIN_SEARCH_1024.call(queryVec(1024), new String[] {COL_1024}, null, null, 10);
+        String plan = explain(fn);
         assertThat(plan)
             .as("searchWithTokens' distance projection (1024-dim) must bind to the FULL"
                 + " idx_chunks_embedding_1024 HNSW index with the nexus-74zvm"
@@ -415,29 +419,18 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             .contains("idx_chunks_embedding_1024");
         assertThat(plan)
             .as("must not degrade to a sequential scan of the unified (mixed-dim) table's"
-                + " chunks rows (liveChunksPredicate's own correlated anti-join against the"
-                + " near-empty catalog_document_chunks/catalog_documents manifest tables"
-                + " legitimately Seq Scans at THIS fixture's near-zero manifest cardinality —"
-                + " narrowed to the table this test actually targets, not the whole plan"
-                + " tree; see ChashProbePlanShapeTest's PROBE_SQL, which carries no"
-                + " liveChunksPredicate and so has no such satellite scan to exclude)."
+                + " chunks rows (narrowed to the table this test actually targets, not the"
+                + " whole plan tree — plain_search_1024's own live-chunks anti-join against"
+                + " the near-empty catalog_document_chunks/catalog_documents manifest tables"
+                + " legitimately Seq Scans at THIS fixture's near-zero manifest cardinality)."
                 + " Plan was:%n%s", plan)
             .doesNotContain("Seq Scan on chunks");
     }
 
     @Test
     void searchWithTokens_shape_usesFullHnswIndex_768() throws Exception {
-        String vec = "[1" + ",0".repeat(767) + "]";
-        String sql =
-            "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
-            + " (embedding_768 <=> '" + vec + "'::vector) AS distance"
-            + " FROM nexus.chunks c"
-            + " WHERE c.collection IN ('" + COL_768 + "')"
-            + " AND " + liveChunksPredicate("c")
-            // nexus-74zvm: guarded shape, mirroring production exactly.
-            + " AND embedding_768 IS NOT NULL"
-            + " ORDER BY distance ASC, chash ASC LIMIT 10";
-        String plan = explain(sql);
+        Table<?> fn = PLAIN_SEARCH_768.call(queryVec(768), new String[] {COL_768}, null, null, 10);
+        String plan = explain(fn);
         assertThat(plan)
             .as("searchWithTokens' distance projection (768-dim) must bind to the FULL"
                 + " idx_chunks_embedding_768 HNSW index with the nexus-74zvm guard added."
@@ -452,17 +445,8 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
 
     @Test
     void searchWithTokens_shape_usesFullHnswIndex_384() throws Exception {
-        String vec = "[1" + ",0".repeat(383) + "]";
-        String sql =
-            "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
-            + " (embedding_384 <=> '" + vec + "'::vector) AS distance"
-            + " FROM nexus.chunks c"
-            + " WHERE c.collection IN ('" + COL_384 + "')"
-            + " AND " + liveChunksPredicate("c")
-            // nexus-74zvm: guarded shape, mirroring production exactly.
-            + " AND embedding_384 IS NOT NULL"
-            + " ORDER BY distance ASC, chash ASC LIMIT 10";
-        String plan = explain(sql);
+        Table<?> fn = PLAIN_SEARCH_384.call(queryVec(384), new String[] {COL_384}, null, null, 10);
+        String plan = explain(fn);
         assertThat(plan)
             .as("searchWithTokens' distance projection (384-dim) must bind to the FULL"
                 + " idx_chunks_embedding_384 HNSW index with the nexus-74zvm guard added."
@@ -491,10 +475,12 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // Site 2: hybridSearch selective-gate rank (embedding_<dim> <=> ?::vector, FROM
-    // nexus.chunks c, WHERE collection IN (...) AND liveChunksPredicate AND chash IN (...))
-    // — reconstructs the rank query hybridSearch builds once the bounded gate fetch
-    // resolves a SELECTIVE (small) gate; see that method's javadoc.
+    // Site 2: hybridSearch selective-gate rank dispatches to
+    // text_gated_search_by_chash_<dim> (vectors-011, nexus-zrcj7) — reconstructs the
+    // rank the bounded gate probe's own chash set feeds once it resolves a SELECTIVE
+    // (small) gate; see hybridSearch's javadoc. UPDATED (nexus-cbo4a batch 3, critic
+    // follow-up): EXPLAINs a call to that SAME function rather than a hand-mirrored
+    // raw SQL string.
     //
     // UNLIKE Site 1/3, this branch is NOT an HNSW-binding proof (found during Step G
     // cluster-B triage, nexus-o8dil.16/.48). hybridSearch's own inline comment at the
@@ -515,24 +501,13 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
 
     @Test
     void hybridSearch_selectiveGateRank_shape_usesFullHnswIndex_768() throws Exception {
-        String vec = "[1" + ",0".repeat(767) + "]";
-        // A small, explicit chash IN (...) list mirrors the selective branch's bounded gate
-        // result — any handful of live chashes from the 768-dim fixture works, the plan
-        // shape under test does not depend on which chashes are named.
-        String chash = md5x2("planshape-near-768", "target-768");
-        String sql =
-            "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
-            + " (embedding_768 <=> '" + vec + "'::vector) AS distance"
-            + " FROM nexus.chunks c"
-            + " WHERE collection IN ('" + COL_768 + "')"
-            + " AND " + liveChunksPredicate("c")
-            + " AND chash IN (decode('" + chash + "', 'hex'))"
-            // nexus-74zvm: guarded shape, mirroring production exactly. Pure correctness
-            // here (a foreign-dim row matching the text gate) — no plan-shape risk, since
-            // this branch never binds HNSW regardless (see class-level comment above).
-            + " AND embedding_768 IS NOT NULL"
-            + " ORDER BY distance ASC, chash ASC LIMIT 10";
-        String plan = explain(sql);
+        // A small, explicit chash list mirrors the selective branch's bounded gate result
+        // — any handful of live chashes from the 768-dim fixture works, the plan shape
+        // under test does not depend on which chashes are named.
+        byte[] chash = Chash.fromHex(md5x2("planshape-near-768", "target-768")).toBytes();
+        Table<?> fn = TEXT_GATED_SEARCH_BY_CHASH_768.call(
+            queryVec(768), new byte[][] {chash}, new String[] {COL_768}, null, null, 10);
+        String plan = explain(fn);
         assertThat(plan)
             .as("hybridSearch's selective-gate rank (768-dim) must project distance off the"
                 + " CORRECT dim column (embedding_768, not a wrong dim or a bare"
@@ -548,28 +523,19 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // Site 3: hybridSearch dense-gate HNSW-first rank (embedding_<dim> <=> ?::vector, FROM
-    // nexus.chunks c, WHERE collection IN (...) AND liveChunksPredicate AND the FTS/trigram
-    // text gate) — the branch taken when the bounded gate fetch hits SELECTIVE_GATE_MAX,
-    // ranking directly off the FULL HNSW index with the text gate as a co-filter.
+    // Site 3: hybridSearch dense-gate HNSW-first rank dispatches to
+    // text_gated_search_hnsw_first_<dim> (vectors-011, nexus-zrcj7) — the branch taken
+    // when the bounded gate probe hits SELECTIVE_GATE_MAX, ranking directly off the
+    // FULL HNSW index with the text gate as a co-filter. UPDATED (nexus-cbo4a batch 3,
+    // critic follow-up): EXPLAINs a call to that SAME function rather than a
+    // hand-mirrored raw SQL string.
     // ════════════════════════════════════════════════════════════════════════
 
     @Test
     void hybridSearch_denseGateRank_shape_usesFullHnswIndex_384() throws Exception {
-        String vec = "[1" + ",0".repeat(383) + "]";
-        String sql =
-            "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
-            + " (embedding_384 <=> '" + vec + "'::vector) AS distance"
-            + " FROM nexus.chunks c"
-            + " WHERE collection IN ('" + COL_384 + "')"
-            + " AND " + liveChunksPredicate("c")
-            + " AND (chunk_tsv @@ plainto_tsquery('english', 'planshape') OR 'planshape' <% chunk_text)"
-            // nexus-74zvm: guarded shape, mirroring production exactly — the load-bearing
-            // proof for this suite's HNSW-bind claim (this is the dense-gate, HNSW-first
-            // branch; unlike Site 2 above, an index-defeat here WOULD be a regression).
-            + " AND embedding_384 IS NOT NULL"
-            + " ORDER BY distance ASC, chash ASC LIMIT 10";
-        String plan = explain(sql);
+        Table<?> fn = TEXT_GATED_SEARCH_HNSW_FIRST_384.call(
+            queryVec(384), "planshape", new String[] {COL_384}, null, null, 10);
+        String plan = explain(fn);
         assertThat(plan)
             .as("hybridSearch's dense-gate HNSW-first rank (384-dim) must bind to the FULL"
                 + " idx_chunks_embedding_384 HNSW index for its distance ORDER BY, WITH the"
@@ -594,12 +560,9 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
 
     @Test
     void searchMetadataScoped_shape_usesFullHnswIndex_1024() throws Exception {
-        String vec = "[1" + ",0".repeat(1023) + "]";
-        String sql =
-            "SELECT * FROM nexus.search_metadata_scoped_1024("
-            + "'" + vec + "'::vector, ARRAY['" + COL_1024 + "']::text[], "
-            + "NULL, NULL, NULL, NULL, NULL, NULL, 10)";
-        String plan = explain(sql);
+        Table<?> fn = SEARCH_METADATA_SCOPED_1024.call(
+            queryVec(1024), new String[] {COL_1024}, null, null, null, null, null, null, 10);
+        String plan = explain(fn);
         assertThat(plan)
             .as("search_metadata_scoped_1024's embedding_1024 IS NOT NULL guard "
                 + "(vectors-006-1) must not defeat the FULL idx_chunks_embedding_1024 "
@@ -613,12 +576,10 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
 
     @Test
     void searchGraphHop_shape_usesFullHnswIndex_768() throws Exception {
-        String vec = "[1" + ",0".repeat(767) + "]";
-        String sql =
-            "SELECT * FROM nexus.search_graph_hop_768("
-            + "'" + vec + "'::vector, ARRAY['planshape-graphhop-doc']::text[], "
-            + "ARRAY['" + COL_768 + "']::text[], NULL, 1, 'both', NULL, 10)";
-        String plan = explain(sql);
+        Table<?> fn = SEARCH_GRAPH_HOP_768.call(
+            queryVec(768), new String[] {"planshape-graphhop-doc"}, new String[] {COL_768},
+            null, 1, "both", null, 10);
+        String plan = explain(fn);
         assertThat(plan)
             .as("search_graph_hop_768's embedding_768 IS NOT NULL guard (vectors-006-2) "
                 + "must not defeat the FULL idx_chunks_embedding_768 HNSW bind for the "
@@ -651,11 +612,8 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
      */
     @Test
     void searchTopicScoped_shape_projectsCorrectDimColumn_andStaysCollectionScoped_384() throws Exception {
-        String vec = "[1" + ",0".repeat(383) + "]";
-        String sql =
-            "SELECT * FROM nexus.search_topic_scoped_384("
-            + "'" + vec + "'::vector, 'planshape-topic', '" + COL_384 + "', 10)";
-        String plan = explain(sql);
+        Table<?> fn = SEARCH_TOPIC_SCOPED_384.call(queryVec(384), "planshape-topic", COL_384, 10);
+        String plan = explain(fn);
         assertThat(plan)
             .as("search_topic_scoped_384's distance projection must still read the CORRECT "
                 + "dim column (embedding_384) after vectors-006-3's guard was added. Plan was:%n%s",
