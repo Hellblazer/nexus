@@ -84,11 +84,16 @@ public final class EmbedderRouter implements Embedder {
      * @param inputType     {@code "document"} for indexing, {@code "query"} for search
      */
     public EmbedderRouter(Embedder localEmbedder, String inputType) {
-        this.localEmbedder       = localEmbedder;
+        // nexus-00wsf residual: gate the local (bge/ONNX) embed path with a
+        // bounded in-flight admission semaphore — see AdmissionControlledEmbedder.
+        // Wrapped BEFORE modelToken()/field/map so the map key and the
+        // dispatched instance are always the same (wrapped) identity.
+        Embedder admissionGated = new AdmissionControlledEmbedder(localEmbedder);
+        this.localEmbedder       = admissionGated;
         this.voyageCodeEmbedder  = null;
         this.cceEmbedder         = null;
         this.inputType           = inputType;
-        this.modelEmbedders      = Map.of(localEmbedder.modelToken(), localEmbedder);
+        this.modelEmbedders      = Map.of(admissionGated.modelToken(), admissionGated);
     }
 
     /**
@@ -100,7 +105,10 @@ public final class EmbedderRouter implements Embedder {
      * @param inputType     {@code "document"} or {@code "query"}
      */
     public EmbedderRouter(OnnxEmbedder onnxEmbedder, String voyageApiKey, String inputType) {
-        this.localEmbedder      = onnxEmbedder;
+        // nexus-00wsf residual: same admission gate as the local-mode
+        // constructor — this ONNX fallback is still the "local embed path".
+        Embedder admissionGatedOnnx = new AdmissionControlledEmbedder(onnxEmbedder);
+        this.localEmbedder      = admissionGatedOnnx;
         this.voyageCodeEmbedder = new VoyageEmbedder(voyageApiKey, "voyage-code-3", inputType);
         this.cceEmbedder        = new CceEmbedder(voyageApiKey, inputType);
         this.inputType          = inputType;
@@ -111,7 +119,7 @@ public final class EmbedderRouter implements Embedder {
         // identity actually dispatched.
         VoyageEmbedder voyage3 = new VoyageEmbedder(voyageApiKey, "voyage-3", inputType);
         this.modelEmbedders     = Map.of(
-                onnxEmbedder.modelToken(),       onnxEmbedder,
+                admissionGatedOnnx.modelToken(), admissionGatedOnnx,
                 voyageCodeEmbedder.modelToken(), voyageCodeEmbedder,
                 cceEmbedder.modelToken(),        cceEmbedder,
                 voyage3.modelToken(),            voyage3);

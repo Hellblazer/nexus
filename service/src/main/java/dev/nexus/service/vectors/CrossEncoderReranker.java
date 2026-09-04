@@ -146,6 +146,9 @@ public final class CrossEncoderReranker implements Reranker {
             OrtSession          sess = null;
             HuggingFaceTokenizer tok = null;
             try (var sessionOpts = new OrtSession.SessionOptions()) {
+                // nexus-00wsf residual: bound intra-op threads so one request cannot
+                // take every core (measured 7.8 of 16 with no bound at all).
+                sessionOpts.setIntraOpNumThreads(OnnxThreadPolicy.intraOpThreads());
                 OrtEnvironment env = OrtEnvironment.getEnvironment();
                 sess = env.createSession(modelPath, sessionOpts);
                 tok = HuggingFaceTokenizer.builder()

@@ -79,6 +79,9 @@ public final class OnnxEmbedder implements Embedder {
 
             var sessionOpts = new OrtSession.SessionOptions();
             // Use CPU only — GPU not required for local mode
+            // nexus-00wsf residual: bound intra-op threads so one request cannot
+            // take every core (measured 7.8 of 16 with no bound at all).
+            sessionOpts.setIntraOpNumThreads(OnnxThreadPolicy.intraOpThreads());
             this.session = ortEnv.createSession(modelPath, sessionOpts);
 
             // DJL HuggingFace tokenizer: truncation to maxLength=256
