@@ -1170,16 +1170,26 @@ class RawSqlGateTest {
     /**
      * Marks a {@code DSL.field}/{@code DSL.condition}/{@code DSL.query}/{@code
      * DSL.table} string-literal FIRST argument as assembled SQL TEXT rather than a bare
-     * identifier/pseudo-column reference: any whitespace character, or a substring
-     * matching one of PostgreSQL's comparison/JSON operators. Verified against the live
-     * tree's census (nexus-zrcj7 gate javadoc history, 67 call sites / 5 files): 60 bare
+     * identifier/pseudo-column reference: any whitespace character, a substring matching
+     * one of PostgreSQL's comparison/JSON operators, or one of {@code (}/{@code ,}/{@code
+     * '} — a function-call or literal-bearing shape carries real SQL text even with no
+     * space and no comparison operator at all (critic finding, nexus-zrcj7 review of
+     * commit 3ae405673, T2 critique-24233: the original whitespace-or-operator check
+     * alone let a space-free call template like {@code "GREATEST(a,b)"} or {@code
+     * "nextval('nexus.seq')"} slip through undetected). Verified against the live tree's
+     * census (nexus-zrcj7 gate javadoc history, 67 call sites / 5 files): 60 bare
      * references like {@code "EXCLUDED.name"} or {@code "catalog_owners.next_seq"} have
-     * NEITHER a space nor an operator and are left alone; every genuine fragment this
-     * cycle converted ({@code "metadata ->> {0}"}, {@code "GREATEST(catalog_owners.
-     * next_seq, EXCLUDED.next_seq)"}) has at least one.
+     * NEITHER a space, an operator, NOR a paren/comma/quote, and are left alone; every
+     * genuine fragment this bead converted ({@code "metadata ->> {0}"}, {@code
+     * "GREATEST(catalog_owners.next_seq, EXCLUDED.next_seq)"}, {@code
+     * "CAST(split_part(tumbler_prefix, '.', 2) AS INTEGER)"}) has at least one trigger.
+     * The pass-through set stays exactly the letters/digits/underscore/dot a bare or
+     * dotted identifier is made of (plus double-quoted-identifier syntax, which uses
+     * {@code "} rather than {@code (}/{@code ,}/{@code '} and so is unaffected by this
+     * widening) — nothing else survives unflagged.
      */
     private static final String[] SQL_OPERATOR_SUBSTRINGS =
-        {"->>", "->", "<=", ">=", "<>", "!=", "::", "=", "<", ">"};
+        {"->>", "->", "<=", ">=", "<>", "!=", "::", "=", "<", ">", "(", ",", "'"};
 
     static boolean looksLikeAssembledSql(String literalBody) {
         if (literalBody.chars().anyMatch(Character::isWhitespace)) {
@@ -1326,6 +1336,58 @@ class RawSqlGateTest {
             .isEmpty();
     }
 
+    /** Critic finding, T2 critique-24233: a SPACE-FREE function-call template (no
+     * comparison operator, no whitespace at all) must still fail loud — the pre-widening
+     * check missed exactly this shape. */
+    @Test
+    void dslTemplate_spaceFreeFunctionCallTemplate_isFlagged() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    void danger() {",
+            "        Field<Long> f = DSL.field(\"GREATEST(a,b)\", Long.class);",
+            "    }",
+            "}");
+        assertThat(scanDslTemplates("Whatever.java", synthetic))
+            .as("a space-free, operator-free function-call template (a bare comma and "
+                + "parens) must still fail loud")
+            .anySatisfy(h -> assertThat(h).contains("GREATEST(a,b)"));
+    }
+
+    /** Critic finding, T2 critique-24233: a space-free literal-bearing template
+     * ({@code nextval('nexus.seq')}) must fail loud too — the single-quoted SQL string
+     * literal it carries is exactly the shape the pre-widening check missed alongside
+     * the space-free function call above. */
+    @Test
+    void dslTemplate_spaceFreeLiteralBearingTemplate_isFlagged() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    void danger() {",
+            "        Field<Long> f = DSL.field(\"nextval('nexus.seq')\", Long.class);",
+            "    }",
+            "}");
+        assertThat(scanDslTemplates("Whatever.java", synthetic))
+            .as("a space-free template embedding a single-quoted SQL literal must fail loud")
+            .anySatisfy(h -> assertThat(h).contains("nextval"));
+    }
+
+    /** A bare DOTTED identifier reference (no {@code EXCLUDED.} prefix, no space, no
+     * operator, no paren/comma/quote) stays excused — the pass-through category is
+     * "letters/digits/underscore/dot", not merely "starts with EXCLUDED". */
+    @Test
+    void dslTemplate_bareDottedIdentifierReference_isExcusedWithoutAnyRegistration() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    void safe() {",
+            "        Field<Long> f = DSL.field(\"catalog_owners.next_seq\", Long.class);",
+            "    }",
+            "}");
+        assertThat(scanDslTemplates("Whatever.java", synthetic))
+            .as("a bare dotted table.column identifier reference (no space, no operator, "
+                + "no paren/comma/quote) is not assembled SQL text and needs no exemption "
+                + "entry")
+            .isEmpty();
+    }
+
     @Test
     void dslTemplate_dslNameIdiomForDynamicRelationNames_isNeverMatched() {
         String synthetic = String.join("\n",
@@ -1451,29 +1513,103 @@ class RawSqlGateTest {
             .isLessThanOrEqualTo(EXEMPTION_REGISTRY_CEILING);
     }
 
+    /**
+     * Per-entry validation for {@link #EXEMPTION_REGISTRY}, extracted so a synthetic
+     * fixture can exercise each of its three INDEPENDENT failure branches directly
+     * (critic finding, T2 critique-24233: the real test had no falsification proof) —
+     * see {@link #exemptionRegistry_missingSanctionedStatementsKey_isFlagged} / {@link
+     * #exemptionRegistry_missingFile_isFlagged} / {@link
+     * #exemptionRegistry_missingMethodRegion_isFlagged} / {@link
+     * #exemptionRegistry_wellFormedEntry_producesNoViolations}. {@code sourceOrNull} is
+     * the named file's content, or {@code null} when the file does not exist (the real
+     * test passes {@code Files.readString(path)} only when {@code Files.exists(path)}).
+     *
+     * @return violation messages; empty means the entry is well-formed
+     */
+    static List<String> checkExemptionEntry(ExemptionEntry e,
+            Map<String, Map<String, Map<String, Integer>>> sanctionedStatements,
+            String sourceOrNull) {
+        List<String> violations = new ArrayList<>();
+        if (!sanctionedStatements.getOrDefault(e.file(), Map.of()).containsKey(e.method())) {
+            violations.add("exemption registry entry " + e.file() + "#" + e.method()
+                + " has no matching SANCTIONED_STATEMENTS registration -- either the "
+                + "entry is stale (method converted/removed) or the SANCTIONED_STATEMENTS "
+                + "registration was dropped without updating this registry");
+            return violations;
+        }
+        if (sourceOrNull == null) {
+            violations.add("exemption registry entry " + e.file() + "#" + e.method()
+                + " names a file that no longer exists under dev.nexus.service.db");
+            return violations;
+        }
+        List<int[]> regions = sanctionedRegions(blank(sourceOrNull), java.util.Set.of(e.method()));
+        if (regions.isEmpty()) {
+            violations.add("exemption registry entry " + e.file() + "#" + e.method()
+                + ": method " + e.method() + " no longer has a live declaration in "
+                + e.file() + " -- stale exemption, remove or update this registry entry");
+        }
+        return violations;
+    }
+
     @Test
     void exemptionRegistry_everySiteStillExistsInSanctionedStatementsAndSource() throws IOException {
+        List<String> violations = new ArrayList<>();
         for (ExemptionEntry e : EXEMPTION_REGISTRY) {
-            assertThat(SANCTIONED_STATEMENTS.getOrDefault(e.file(), Map.of()))
-                .as("exemption registry entry %s#%s has no matching SANCTIONED_STATEMENTS "
-                    + "registration -- either the entry is stale (method converted/removed) "
-                    + "or the SANCTIONED_STATEMENTS registration was dropped without "
-                    + "updating this registry", e.file(), e.method())
-                .containsKey(e.method());
-
             Path path = Path.of("src", "main", "java", "dev", "nexus", "service", "db", e.file());
-            assertThat(path)
-                .as("exemption registry entry %s#%s names a file that no longer exists "
-                    + "under dev.nexus.service.db", e.file(), e.method())
-                .exists();
-            List<int[]> regions = sanctionedRegions(blank(Files.readString(path)),
-                java.util.Set.of(e.method()));
-            assertThat(regions)
-                .as("exemption registry entry %s#%s: method %s no longer has a live "
-                    + "declaration in %s -- stale exemption, remove or update this "
-                    + "registry entry", e.file(), e.method(), e.method(), e.file())
-                .isNotEmpty();
+            String source = Files.exists(path) ? Files.readString(path) : null;
+            violations.addAll(checkExemptionEntry(e, SANCTIONED_STATEMENTS, source));
         }
+        assertThat(violations)
+            .as("EXEMPTION_REGISTRY entries must each have a live SANCTIONED_STATEMENTS "
+                + "registration and a live method declaration on disk -- see "
+                + "checkExemptionEntry's own javadoc")
+            .isEmpty();
+    }
+
+    private static final ExemptionEntry SYNTHETIC_EXEMPTION_ENTRY =
+        new ExemptionEntry("Whatever.java", "someMethod", "synthetic fixture entry", false);
+
+    @Test
+    void exemptionRegistry_missingSanctionedStatementsKey_isFlagged() {
+        List<String> hits = checkExemptionEntry(SYNTHETIC_EXEMPTION_ENTRY, Map.of(),
+            "public final class Whatever { private void someMethod() { } }");
+        assertThat(hits)
+            .as("an entry with no matching SANCTIONED_STATEMENTS registration must fail loud")
+            .anySatisfy(h -> assertThat(h).contains("no matching SANCTIONED_STATEMENTS"));
+    }
+
+    @Test
+    void exemptionRegistry_missingFile_isFlagged() {
+        Map<String, Map<String, Map<String, Integer>>> sanctioned =
+            Map.of("Whatever.java", Map.of("someMethod", Map.of()));
+        List<String> hits = checkExemptionEntry(SYNTHETIC_EXEMPTION_ENTRY, sanctioned, null);
+        assertThat(hits)
+            .as("an entry naming a file that no longer exists must fail loud")
+            .anySatisfy(h -> assertThat(h).contains("no longer exists"));
+    }
+
+    @Test
+    void exemptionRegistry_missingMethodRegion_isFlagged() {
+        Map<String, Map<String, Map<String, Integer>>> sanctioned =
+            Map.of("Whatever.java", Map.of("someMethod", Map.of()));
+        // The file exists, but someMethod was renamed/removed -- no live declaration.
+        String source = "public final class Whatever { private void otherMethod() { } }";
+        List<String> hits = checkExemptionEntry(SYNTHETIC_EXEMPTION_ENTRY, sanctioned, source);
+        assertThat(hits)
+            .as("a SANCTIONED_STATEMENTS-registered method with no live declaration left "
+                + "in the source must fail loud")
+            .anySatisfy(h -> assertThat(h).contains("no longer has a live declaration"));
+    }
+
+    @Test
+    void exemptionRegistry_wellFormedEntry_producesNoViolations() {
+        Map<String, Map<String, Map<String, Integer>>> sanctioned =
+            Map.of("Whatever.java", Map.of("someMethod", Map.of()));
+        String source = "public final class Whatever { private void someMethod() { } }";
+        assertThat(checkExemptionEntry(SYNTHETIC_EXEMPTION_ENTRY, sanctioned, source))
+            .as("a registered method with a live declaration and a live "
+                + "SANCTIONED_STATEMENTS entry is well-formed -- no violations")
+            .isEmpty();
     }
 
     // ── RAW_SQL_ASSEMBLY_SENTINELS / RAW_SQL_WRAPPER_METHODS: DELETED (nexus-zrcj7
