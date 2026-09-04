@@ -8,6 +8,12 @@ import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.exception.LiquibaseException;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -212,21 +218,50 @@ public final class SchemaMigrator {
     // Unqualified table references, deliberately: these run on the SAME
     // connection Liquibase itself uses, so they resolve to exactly the
     // databasechangelog Liquibase reads and writes.
+    //
+    // nexus-zrcj7 step 4 review follow-up (critic, T2 [24235]): the three methods
+    // below used to carry raw JDBC Statement/PreparedStatement calls, EXEMPTED with
+    // the reason "no jOOQ typed-DSL form" -- false. The true (and only) reason they
+    // were raw was architectural: they run on the BARE bootstrap Connection Liquibase
+    // itself borrows, before this class ever constructs a DSLContext. That connection
+    // is a plain java.sql.Connection like any other, and jOOQ's DSL.using(Connection,
+    // SQLDialect) wraps ANY such connection -- so the architectural constraint does
+    // NOT actually preclude typed DSL here. Converted: DSL.table(DSL.name(
+    // "databasechangelog")) / DSL.field(DSL.name("dateexecuted"), ...) for Liquibase's
+    // own bookkeeping table (outside jOOQ codegen's modeled schemata, but nameable via
+    // the same safe quoted-identifier idiom ChashCensus.java/StagingPromoteOps.java/
+    // this bead's own TaxonomyRepository#advanceTopicsIdSequence conversion already
+    // use), DSL.function("to_regclass", ...) for the existence probe, and
+    // DSL.currentTimestamp() -- which jOOQ's own Postgres dialect renders as
+    // CAST(CURRENT_TIMESTAMP AS timestamp without time zone), the EXACT semantic
+    // equivalent of the retired "now()::timestamp" (session-zone wall clock, tz
+    // dropped; session is UTC-pinned by pinJvmTimeZoneToUtc()/the SET TIME ZONE
+    // statement above). Each method still throws SQLException (unchanged signature,
+    // unchanged caller-side catch(SQLException) at this method's own call site) by
+    // catching jOOQ's unchecked DataAccessException and rethrowing checked -- jOOQ
+    // itself never throws SQLException directly, so this preserves the exact
+    // propagation path migrate()'s own catch(SQLException) already depends on.
 
     /** Rows in {@code databasechangelog}, or -1 when the table does not exist
      * yet (first boot — Liquibase creates it during the update). */
     private static long countChangelogRows(Connection conn) throws SQLException {
-        try (Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery("SELECT to_regclass('databasechangelog')")) {
-            rs.next();
-            if (rs.getString(1) == null) {
+        try {
+            DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+            String regclass = ctx.select(DSL.function(
+                    "to_regclass", SQLDataType.VARCHAR, DSL.val("databasechangelog")))
+                .fetchOne(0, String.class);
+            if (regclass == null) {
                 return -1L;
             }
-        }
-        try (Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery("SELECT count(*) FROM databasechangelog")) {
-            rs.next();
-            return rs.getLong(1);
+            // jOOQ 3.20.11 (pinned; see pom.xml) has no countLarge() -- that arrived in
+            // a later jOOQ release. count() returns Field<Integer>; cast to BIGINT to
+            // keep this method's own long return type without narrowing anywhere.
+            Field<Long> cnt = DSL.count().cast(SQLDataType.BIGINT);
+            return ctx.select(cnt)
+                .from(DSL.table(DSL.name("databasechangelog")))
+                .fetchOne(cnt);
+        } catch (DataAccessException e) {
+            throw new SQLException("countChangelogRows failed", e);
         }
     }
 
@@ -236,23 +271,29 @@ public final class SchemaMigrator {
      * (nexus-rph82), so the stamp and the comparison share one clock. */
     private static long countChangelogRowsSince(Connection conn, java.sql.Timestamp since)
             throws SQLException {
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT count(*) FROM databasechangelog WHERE dateexecuted >= ?")) {
-            ps.setTimestamp(1, since);
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getLong(1);
-            }
+        try {
+            DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+            Field<java.sql.Timestamp> dateExecuted =
+                DSL.field(DSL.name("dateexecuted"), java.sql.Timestamp.class);
+            Field<Long> cnt = DSL.count().cast(SQLDataType.BIGINT);
+            return ctx.select(cnt)
+                .from(DSL.table(DSL.name("databasechangelog")))
+                .where(dateExecuted.greaterOrEqual(since))
+                .fetchOne(cnt);
+        } catch (DataAccessException e) {
+            throw new SQLException("countChangelogRowsSince failed", e);
         }
     }
 
     /** The server's own clock as a session-zone (UTC) timestamp — the same
      * clock Liquibase stamps {@code dateexecuted} from. */
     private static java.sql.Timestamp serverNow(Connection conn) throws SQLException {
-        try (Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery("SELECT now()::timestamp")) {
-            rs.next();
-            return rs.getTimestamp(1);
+        try {
+            return DSL.using(conn, SQLDialect.POSTGRES)
+                .select(DSL.currentTimestamp())
+                .fetchOne(DSL.currentTimestamp());
+        } catch (DataAccessException e) {
+            throw new SQLException("serverNow failed", e);
         }
     }
 

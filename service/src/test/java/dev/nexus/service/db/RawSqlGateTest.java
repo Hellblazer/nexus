@@ -163,9 +163,21 @@ class RawSqlGateTest {
      * itself, and its later {@code .executeQuery()}/{@code .executeUpdate()} calls take
      * NO string argument at all -- structurally invisible to every alternative above
      * before this addition (confirmed empirically: {@code SchemaMigrator}'s three
-     * {@code conn.prepareStatement("...")} call sites, in {@code countChangelogRowsSince}
-     * and {@code preflightChashConstraints}, produced ZERO gate signal; see {@link
-     * #EXEMPTION_REGISTRY} for their disposition).
+     * {@code conn.prepareStatement("...")} call sites -- all three now either
+     * SANCTIONED_STATEMENTS-registered ({@code preflightChashConstraints}) or converted
+     * onto typed DSL ({@code countChangelogRowsSince}, this same review round -- see
+     * {@link #EXEMPTION_REGISTRY} for the surviving exemption set) -- produced ZERO gate
+     * signal before this addition).
+     *
+     * <p>nexus-zrcj7 step 4 review follow-up (critic, T2 [24235]): added jOOQ's plain-SQL
+     * predicate/sort overloads -- {@code .where("...", binds...)}, {@code .and("...",
+     * binds...)}, {@code .or("...", binds...)}, {@code .having("...", binds...)}, {@code
+     * .orderBy("...")}. Each has a TYPED sibling overload taking a {@code Condition}/
+     * {@code Field}/{@code SortField} argument, never a bare string literal -- the
+     * anchor's immediate-quote requirement matches only the raw-string form, so a typed
+     * call like {@code .where(TABLE.COL.eq(1))} never matches at all (see the pos/neg
+     * synthetic pairs at {@link #rawExecute_whereRawStringOverload_isFlagged} and its four
+     * siblings).
      *
      * KNOWN RESIDUAL (accepted, documented per critique): a raw SQL
      * string bound to a variable NOT prefixed "sql" and passed to
@@ -181,7 +193,12 @@ class RawSqlGateTest {
         + "|\\.fetchOne\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.fetchAny\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.resultQuery\\(\\s*(\"|sql|SQL|new StringBuilder)"
-        + "|\\.prepareStatement\\(\\s*(\"|sql|SQL|new StringBuilder))",
+        + "|\\.prepareStatement\\(\\s*(\"|sql|SQL|new StringBuilder)"
+        + "|\\.where\\(\\s*(\"|sql|SQL|new StringBuilder)"
+        + "|\\.and\\(\\s*(\"|sql|SQL|new StringBuilder)"
+        + "|\\.or\\(\\s*(\"|sql|SQL|new StringBuilder)"
+        + "|\\.having\\(\\s*(\"|sql|SQL|new StringBuilder)"
+        + "|\\.orderBy\\(\\s*(\"|sql|SQL|new StringBuilder))",
         Pattern.DOTALL);
 
 
@@ -315,32 +332,13 @@ class RawSqlGateTest {
             // pinJvmTimeZoneToUtc() still carries the old zone; this pins the
             // session directly. One statement, executed once per migrate() call.
             "migrate", Map.of(
-                ".execute(\"SET TIME ZONE 'UTC'\")", 1),
-            // SANCTIONED RAW (nexus-x0s52): databasechangelog is LIQUIBASE'S
-            // OWN bookkeeping table — outside jOOQ codegen (which models the
-            // nexus/staging application schemas), and deliberately referenced
-            // UNQUALIFIED on the SAME connection Liquibase itself uses, so the
-            // reads resolve to exactly the changelog Liquibase reads and
-            // writes (a DSL rendering over the pooled DSLContext would be a
-            // different session with a different search path). to_regclass()
-            // probes first-boot absence; both statements execute once per
-            // migrate() call, before and after the update.
-            "countChangelogRows", Map.of(
-                ".executeQuery(\"SELECT to_regclass('databasechangelog')\")", 1,
-                ".executeQuery(\"SELECT count(*) FROM databasechangelog\")", 1),
-            // SANCTIONED RAW (nexus-x0s52): now()::timestamp read on the
-            // migration connection itself — the same clock and session zone
-            // Liquibase stamps dateexecuted from (see the SET TIME ZONE entry
-            // above); no table involved, no jOOQ typed form for a bare
-            // server-clock read on a specific connection.
-            "serverNow", Map.of(
-                ".executeQuery(\"SELECT now()::timestamp\")", 1),
-            // SANCTIONED RAW (nexus-x0s52, nexus-zrcj7 step 4): same databasechangelog
-            // bootstrap-connection category as countChangelogRows -- a windowed COUNT
-            // via a bound PreparedStatement, structurally invisible to RAW_EXECUTE
-            // before this cycle's .prepareStatement(...) widening.
-            "countChangelogRowsSince", Map.of(
-                ".prepareStatement( \"SELECT count(*) FROM databasechangelog WHERE dateexecuted >= ?\")", 1))),
+                ".execute(\"SET TIME ZONE 'UTC'\")", 1))),
+        // SchemaMigrator.java's "countChangelogRows"/"serverNow"/"countChangelogRowsSince"
+        // entries: REMOVED (nexus-zrcj7 step 4 review follow-up, critic T2 [24235]). All
+        // three retired onto DSL.using(conn, SQLDialect.POSTGRES) over the SAME bare
+        // bootstrap Connection -- the architectural constraint (no DSLContext exists yet)
+        // never actually precluded typed DSL, since jOOQ wraps any plain Connection. See
+        // SchemaMigrator.java's own comment at these three methods for the full derivation.
         // TaxonomyRepository.java's "advanceTopicsIdSequence" entry: REMOVED
         // (nexus-zrcj7 step 4, 2026-09-03). Retired onto typed jOOQ DSL --
         // DSL.function("setval"/"pg_get_serial_sequence", ...) + DSL.greatest(...)
@@ -784,6 +782,133 @@ class RawSqlGateTest {
             .anySatisfy(h -> assertThat(h).contains("resultQuery"));
     }
 
+    // ── nexus-zrcj7 step 4 review follow-up (critic, T2 [24235]): jOOQ's plain-SQL
+    //    predicate/sort overloads (.where/.and/.or/.having/.orderBy(String, ...)) --
+    //    pos/neg synthetic pairs, one per method, mirroring the resultQuery proof above ──
+
+    @Test
+    void rawExecute_whereRawStringOverload_isFlagged() {
+        String synthetic = String.join("\n",
+            "public final class SomeRepo {",
+            "    void danger() {",
+            "        ctx.selectFrom(TABLE).where(\"col = ?\", val).fetch();",
+            "    }",
+            "}");
+        assertThat(scan("SomeRepo.java", synthetic))
+            .as(".where(\"...\", ...) -- jOOQ's plain-SQL predicate overload -- must fail loud")
+            .anySatisfy(h -> assertThat(h).contains(".where("));
+    }
+
+    @Test
+    void rawExecute_whereTypedConditionOverload_isNotFlagged() {
+        String synthetic = String.join("\n",
+            "public final class SomeRepo {",
+            "    void safe() {",
+            "        ctx.selectFrom(TABLE).where(TABLE.COL.eq(1)).fetch();",
+            "    }",
+            "}");
+        assertThat(scan("SomeRepo.java", synthetic))
+            .as(".where(Condition) -- the typed sibling overload -- must never match: no "
+                + "string literal follows the open paren")
+            .isEmpty();
+    }
+
+    @Test
+    void rawExecute_andRawStringOverload_isFlagged() {
+        String synthetic = String.join("\n",
+            "public final class SomeRepo {",
+            "    void danger() {",
+            "        ctx.selectFrom(TABLE).where(cond).and(\"col = ?\", val).fetch();",
+            "    }",
+            "}");
+        assertThat(scan("SomeRepo.java", synthetic))
+            .as(".and(\"...\", ...) must fail loud")
+            .anySatisfy(h -> assertThat(h).contains(".and("));
+    }
+
+    @Test
+    void rawExecute_andTypedConditionOverload_isNotFlagged() {
+        String synthetic = String.join("\n",
+            "public final class SomeRepo {",
+            "    void safe() {",
+            "        ctx.selectFrom(TABLE).where(cond).and(TABLE.COL.eq(1)).fetch();",
+            "    }",
+            "}");
+        assertThat(scan("SomeRepo.java", synthetic)).isEmpty();
+    }
+
+    @Test
+    void rawExecute_orRawStringOverload_isFlagged() {
+        String synthetic = String.join("\n",
+            "public final class SomeRepo {",
+            "    void danger() {",
+            "        ctx.selectFrom(TABLE).where(cond).or(\"col = ?\", val).fetch();",
+            "    }",
+            "}");
+        assertThat(scan("SomeRepo.java", synthetic))
+            .as(".or(\"...\", ...) must fail loud")
+            .anySatisfy(h -> assertThat(h).contains(".or("));
+    }
+
+    @Test
+    void rawExecute_orTypedConditionOverload_isNotFlagged() {
+        String synthetic = String.join("\n",
+            "public final class SomeRepo {",
+            "    void safe() {",
+            "        ctx.selectFrom(TABLE).where(cond).or(TABLE.COL.eq(2)).fetch();",
+            "    }",
+            "}");
+        assertThat(scan("SomeRepo.java", synthetic)).isEmpty();
+    }
+
+    @Test
+    void rawExecute_havingRawStringOverload_isFlagged() {
+        String synthetic = String.join("\n",
+            "public final class SomeRepo {",
+            "    void danger() {",
+            "        ctx.selectFrom(TABLE).groupBy(TABLE.COL).having(\"count(*) > ?\", n).fetch();",
+            "    }",
+            "}");
+        assertThat(scan("SomeRepo.java", synthetic))
+            .as(".having(\"...\", ...) must fail loud")
+            .anySatisfy(h -> assertThat(h).contains(".having("));
+    }
+
+    @Test
+    void rawExecute_havingTypedConditionOverload_isNotFlagged() {
+        String synthetic = String.join("\n",
+            "public final class SomeRepo {",
+            "    void safe() {",
+            "        ctx.selectFrom(TABLE).groupBy(TABLE.COL).having(TABLE.COL.gt(1)).fetch();",
+            "    }",
+            "}");
+        assertThat(scan("SomeRepo.java", synthetic)).isEmpty();
+    }
+
+    @Test
+    void rawExecute_orderByRawStringOverload_isFlagged() {
+        String synthetic = String.join("\n",
+            "public final class SomeRepo {",
+            "    void danger() {",
+            "        ctx.selectFrom(TABLE).orderBy(\"col DESC\").fetch();",
+            "    }",
+            "}");
+        assertThat(scan("SomeRepo.java", synthetic))
+            .as(".orderBy(\"...\") must fail loud")
+            .anySatisfy(h -> assertThat(h).contains(".orderBy("));
+    }
+
+    @Test
+    void rawExecute_orderByTypedFieldOverload_isNotFlagged() {
+        String synthetic = String.join("\n",
+            "public final class SomeRepo {",
+            "    void safe() {",
+            "        ctx.selectFrom(TABLE).orderBy(TABLE.COL.asc()).fetch();",
+            "    }",
+            "}");
+        assertThat(scan("SomeRepo.java", synthetic)).isEmpty();
+    }
+
     // ── nexus-4okz4 increment 5: statement-granular falsification proof ──
 
     /**
@@ -1222,7 +1347,12 @@ class RawSqlGateTest {
     }
 
     /** Per-file scan: every {@code DSL.(field|condition|query|table)("...")} call site
-     * whose string-literal first argument is flagged by {@link #looksLikeAssembledSql}.
+     * whose string-literal first argument is flagged by {@link #looksLikeAssembledSql},
+     * PLUS every {@code DSL.sql(...)} call site unconditionally (critic finding,
+     * nexus-zrcj7 step 4 review, T2 [24235]: {@code DSL.sql(...)} is jOOQ's raw-SQL-
+     * fragment constructor -- it is raw SQL BY DEFINITION regardless of its argument's
+     * content, so unlike {@code DSL.field}/{@code condition}/{@code query}/{@code table}
+     * there is no bare-identifier pass-through category for it at all; any use is a hit).
      * Runs against {@link #blankComments} (like {@link #scanInlineNonLiteralArgs}) so a
      * javadoc/comment MENTION of one of these templates is never mistaken for a live
      * call site. {@code DSL.table(DSL.name(...))} -- the safe quoted-identifier idiom
@@ -1249,6 +1379,26 @@ class RawSqlGateTest {
                 + "DSL.excluded and friends) or, if the expression genuinely has no typed "
                 + "form, into a Liquibase function + generated jOOQ routine table (see "
                 + "EXEMPTION_REGISTRY for the genuinely-unavoidable exception list)");
+        }
+        // DSL.sql(...) needs no argument-content check (unconditionally raw), so this
+        // scans the FULLY blanked source (blank(), not blankComments()) -- unlike the
+        // field/condition/query/table matcher above, which needs the argument literal's
+        // CONTENT visible. Matching against blank() also protects this class's OWN
+        // synthetic test fixtures: a fixture string like {@code "... DSL.sql(\"1 = 1\")
+        // ..."} embeds the TEXT "DSL.sql(" inside an outer Java string literal in THIS
+        // file's own source, which blank() blanks out along with every other string
+        // literal's contents -- a live call site in real code is never inside a string
+        // literal, so it stays visible.
+        String fullyBlanked = blank(rawSource);
+        Matcher sqlMethod = Pattern.compile("\\bDSL\\.sql\\(").matcher(fullyBlanked);
+        while (sqlMethod.find()) {
+            int line = 1 + (int) fullyBlanked.substring(0, sqlMethod.start()).chars()
+                .filter(c -> c == '\n').count();
+            violations.add(fileName + ":" + line + "  DSL.sql(...) -- jOOQ's raw-SQL-"
+                + "fragment escape hatch is raw SQL by definition, regardless of its "
+                + "argument's content; there is no bare-identifier pass-through for this "
+                + "call -- move it onto a typed jOOQ DSL call or register a genuine "
+                + "EXEMPTION_REGISTRY entry");
         }
         return violations;
     }
@@ -1418,6 +1568,37 @@ class RawSqlGateTest {
             .isEmpty();
     }
 
+    /** Critic finding, T2 [24235]: {@code DSL.sql(...)} is raw SQL by definition --
+     * unconditionally flagged, with no bare-identifier pass-through category at all
+     * (unlike {@code DSL.field}/{@code condition}/{@code query}/{@code table}, whose
+     * argument content decides the verdict). */
+    @Test
+    void dslTemplate_dslSqlEscapeHatch_isAlwaysFlagged() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    void danger() {",
+            "        ctx.select(DSL.field(\"x\", Integer.class)).where(DSL.sql(\"1 = 1\")).fetch();",
+            "    }",
+            "}");
+        assertThat(scanDslTemplates("Whatever.java", synthetic))
+            .as("DSL.sql(...) must fail loud unconditionally")
+            .anySatisfy(h -> assertThat(h).contains("DSL.sql(...)"));
+    }
+
+    @Test
+    void dslTemplate_dslSqlJavadocMention_isNotFlagged() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    /** formerly used {@code DSL.sql(\"1 = 1\")} here */",
+            "    void safe() {",
+            "    }",
+            "}");
+        assertThat(scanDslTemplates("Whatever.java", synthetic))
+            .as("a javadoc/comment MENTION of DSL.sql(...) must never be mistaken for a "
+                + "live call site")
+            .isEmpty();
+    }
+
     // ── nexus-zrcj7 step 4 (Sam's no-SQL-strings-in-Java directive): the checked,
     //    ENFORCED exemption registry, promoted from the DRAFT comment this class
     //    carried through steps 1-3 ──
@@ -1426,15 +1607,27 @@ class RawSqlGateTest {
      * One raw-SQL-bearing method that remains genuinely UNCONVERTIBLE today.
      *
      * @param file        the bare file name, as used by {@link #SANCTIONED_STATEMENTS}'s
-     *                    own keys (all nine entries below live under {@code
+     *                    own keys (all six entries below live under {@code
      *                    dev.nexus.service.db}).
      * @param method      the exempted method's bare name.
-     * @param reason      one-line justification (why no typed jOOQ DSL form exists).
+     * @param reason      one-line justification (why no typed jOOQ DSL form exists) --
+     *                    say specifically WHY no typed form exists (DDL, session syntax,
+     *                    an admin meta-command, a system catalog jOOQ codegen does not
+     *                    model), never a generic "runs before a DSLContext exists" --
+     *                    that framing is a timing/sequencing fact about the ORIGINAL
+     *                    code, not a reason typed DSL is impossible: any bare {@code
+     *                    java.sql.Connection} can be wrapped via {@code DSL.using(conn,
+     *                    dialect)} at any point in its lifecycle (nexus-zrcj7 step 4
+     *                    review follow-up, critic T2 [24235] -- SchemaMigrator's
+     *                    countChangelogRows/countChangelogRowsSince/serverNow carried
+     *                    exactly this false reason and are converted, not exempted, as
+     *                    of this commit).
      * @param convertible {@code false} for every entry today (every convertible site
      *                    census turned up this cycle -- CatalogRepository's two
      *                    GREATEST(...) templates, PgVectorRepository.metadataCondition,
      *                    TaxonomyRepository.advanceTopicsIdSequence,
-     *                    TaxonomyCentroidRepository.annQuery -- is converted, not
+     *                    TaxonomyCentroidRepository.annQuery, and SchemaMigrator's
+     *                    databasechangelog/clock reads above -- is converted, not
      *                    exempted; the field stays for a FUTURE finding that is real but
      *                    not yet acted on, never as a place to park something merely
      *                    inconvenient).
@@ -1447,35 +1640,35 @@ class RawSqlGateTest {
      * SAME edit as the new {@link #EXEMPTION_REGISTRY} entry, never as a side effect of
      * an unrelated change. {@link #exemptionRegistry_sizeStaysAtOrBelowCeiling} pins it.
      */
-    private static final int EXEMPTION_REGISTRY_CEILING = 9;
+    private static final int EXEMPTION_REGISTRY_CEILING = 6;
 
     /**
-     * The nine sites this cycle's census confirmed have no typed jOOQ DSL form at all
-     * (DDL, session/transaction-control syntax, a PgBouncer admin meta-command, a
-     * Liquibase-bootstrap connection that predates any DSLContext, a system-catalog
-     * read jOOQ codegen does not model, and one EXPLAIN-pinned probe constant executed
-     * by name). Every entry MUST have a live {@link #SANCTIONED_STATEMENTS} registration
-     * for the same (file, method) pair AND a live method declaration in that file on
-     * disk — both checked by {@link #exemptionRegistry_everySiteStillExistsInSanctionedStatementsAndSource}.
+     * The six sites this cycle's census confirmed have no typed jOOQ DSL form at all —
+     * DDL, session/transaction-control syntax, a PgBouncer admin meta-command, a
+     * Postgres system-catalog read jOOQ codegen does not model, and one EXPLAIN-pinned
+     * probe constant executed by name. Every entry MUST have a live {@link
+     * #SANCTIONED_STATEMENTS} registration for the same (file, method) pair AND a live
+     * method declaration in that file on disk — both checked by {@link
+     * #exemptionRegistry_everySiteStillExistsInSanctionedStatementsAndSource}.
+     *
+     * <p>Three entries this registry carried through the first version of this commit
+     * (SchemaMigrator's {@code countChangelogRows}/{@code countChangelogRowsSince}/
+     * {@code serverNow}) are GONE, not merely re-justified: their stated reason ("no
+     * jOOQ typed-DSL form") was false — reading a table by name and reading the current
+     * timestamp both have typed jOOQ forms ({@code DSL.table(DSL.name(...))}, {@code
+     * DSL.currentTimestamp()}) — and the real, ARCHITECTURAL reason they were raw (no
+     * DSLContext exists yet on the bare Liquibase-bootstrap Connection) does not
+     * actually preclude typed DSL, since {@code DSL.using(conn, dialect)} wraps any
+     * plain {@code Connection} regardless of when it was opened (critic finding,
+     * nexus-zrcj7 step 4 review, T2 [24235]). All three are converted in SchemaMigrator.java.
      */
     private static final List<ExemptionEntry> EXEMPTION_REGISTRY = List.of(
         new ExemptionEntry("SchemaMigrator.java", "migrate",
-            "SET TIME ZONE 'UTC' on the bare Liquibase-bootstrap JDBC Connection, before "
-            + "any DSLContext exists — PostgreSQL session syntax, no jOOQ typed-DSL form.",
-            false),
-        new ExemptionEntry("SchemaMigrator.java", "countChangelogRows",
-            "Reads Liquibase's OWN databasechangelog bookkeeping table, unqualified, on "
-            + "the SAME bootstrap connection Liquibase itself uses — outside jOOQ "
-            + "codegen's modeled schemata by design.",
-            false),
-        new ExemptionEntry("SchemaMigrator.java", "countChangelogRowsSince",
-            "Same databasechangelog bootstrap-connection category as countChangelogRows, "
-            + "windowed by dateexecuted via a bound PreparedStatement.",
-            false),
-        new ExemptionEntry("SchemaMigrator.java", "serverNow",
-            "Bare server-clock read (now()::timestamp) on the migration connection "
-            + "itself — no table involved, no jOOQ typed form for a connection-scoped "
-            + "clock read.",
+            "SET TIME ZONE 'UTC' on the bare Liquibase-bootstrap JDBC Connection --  "
+            + "PostgreSQL session syntax, no jOOQ typed-DSL form for a SET statement at "
+            + "all (this is a genuine no-DSL-form gap, unlike the false reason SPOT-CHECKED "
+            + "and REMOVED from the countChangelogRows/countChangelogRowsSince/serverNow "
+            + "entries this same review round -- those had typed forms all along).",
             false),
         new ExemptionEntry("SchemaMigrator.java", "preflightChashConstraints",
             "ALTER TABLE ... {NO} FORCE ROW LEVEL SECURITY is DDL with no jOOQ typed-DSL "
