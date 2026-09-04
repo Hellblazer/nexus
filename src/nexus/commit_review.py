@@ -154,6 +154,15 @@ def commit_diff(repo: Path, sha: str, *, max_bytes: int) -> tuple[str, bool]:
     reviewer return a clean verdict over code it never saw, which is the
     exact failure the RDR-201 post-mortem calls "a rule proven below the
     layer that uses it".
+
+    ``-m --first-parent`` because a bare ``git show`` on a two-parent commit
+    emits the combined ``--cc`` diff, which shows only hunks that differ
+    from BOTH parents. Measured on the v7.29.0 back-merge (31b20c305,
+    reanalysis 2026-09-04): 2 of 13 files carried a patch body, the eleven
+    elided ones being the whole release version surface, and the reviewer
+    recorded "No findings" over them. Back-merges are mandatory after every
+    release, so the bare form fired on exactly the commits that matter.
+    The first-parent diff is what the merge brought onto the branch.
     """
     try:
         proc = subprocess.run(
@@ -161,6 +170,8 @@ def commit_diff(repo: Path, sha: str, *, max_bytes: int) -> tuple[str, bool]:
                 "git",
                 "show",
                 "--no-color",
+                "-m",
+                "--first-parent",
                 "--stat",
                 "--patch",
                 "--format=%H%n%s%n%an%n",
@@ -180,6 +191,21 @@ def commit_diff(repo: Path, sha: str, *, max_bytes: int) -> tuple[str, bool]:
     return text, False
 
 
+def commit_parent_count(repo: Path, sha: str) -> int:
+    """Number of parents of *sha*; 0 if git cannot answer (never raises)."""
+    try:
+        line = subprocess.run(
+            ["git", "rev-list", "--parents", "-n", "1", sha],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+    except (subprocess.CalledProcessError, OSError):
+        return 0
+    return max(len(line) - 1, 0)
+
+
 def commit_subject(repo: Path, sha: str) -> str:
     """Best-effort one-line subject for *sha*; empty string if unavailable."""
     try:
@@ -194,7 +220,7 @@ def commit_subject(repo: Path, sha: str) -> str:
         return ""
 
 
-def build_prompt(sha: str, diff_text: str, *, truncated: bool) -> str:
+def build_prompt(sha: str, diff_text: str, *, truncated: bool, merge: bool = False) -> str:
     """Assemble the fixed reviewer prompt.
 
     Repo-sandboxed by construction: the child gets this text and no tools,
@@ -207,6 +233,13 @@ def build_prompt(sha: str, diff_text: str, *, truncated: bool) -> str:
         "prefix of the change, not all of it. Do not report on what you "
         "cannot see, and do not claim the commit is clean.\n"
         if truncated
+        else ""
+    )
+    merge_note = (
+        "\nNOTE: this is a MERGE commit. The diff below is against its first "
+        "parent only: everything the merge brought onto the branch, whether "
+        "or not it also exists on the other parent. Review it as such.\n"
+        if merge
         else ""
     )
     return f"""You are reviewing a single git commit. You can see only the diff below.
@@ -222,7 +255,7 @@ Assign each finding exactly one verdict:
 
 For each finding give: verdict, a one-line summary, a reason grounded in the
 diff, and the file it concerns when identifiable.
-{truncation_note}
+{truncation_note}{merge_note}
 --- commit {sha} ---
 {diff_text}
 """
@@ -377,7 +410,12 @@ async def review_commit(
     usage: list[Any] = []
     try:
         payload = await dispatch(
-            build_prompt(sha, diff_text, truncated=truncated),
+            build_prompt(
+                sha,
+                diff_text,
+                truncated=truncated,
+                merge=commit_parent_count(repo, sha) > 1,
+            ),
             REVIEW_SCHEMA,
             timeout=cfg.timeout_seconds,
             model=cfg.model,

@@ -8,6 +8,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The per-commit reviewer saw only a combined diff on merge commits: a bare
+  `git show` on a two-parent commit emits hunks that differ from both
+  parents, so on the v7.29.0 back-merge it was handed 2 of 13 files (the
+  release version surface elided) and recorded "No findings". The diff is
+  now the first-parent diff, and the prompt says when the commit is a merge.
 - `nx census reviews` counted every `review-*` title in the shared `nexus`
   project as a commit review: 401 human and agent review notes reported as
   401 commits reviewed and clean, while the post-commit reviewer had never

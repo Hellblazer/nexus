@@ -24,6 +24,7 @@ from nexus.commit_review import (
     ReviewResult,
     build_prompt,
     commit_diff,
+    commit_parent_count,
     parse_findings,
     parse_record_verdicts,
     record_title,
@@ -121,6 +122,35 @@ def test_commit_diff_truncates_and_says_so(tiny_repo: Path) -> None:
     text, truncated = commit_diff(tiny_repo, sha, max_bytes=40)
     assert truncated is True
     assert len(text) <= 40
+
+
+def test_commit_diff_of_a_merge_shows_everything_the_merge_brought(tiny_repo: Path) -> None:
+    """A bare ``git show`` on a merge emits the combined diff, which hides
+    every file that matches either parent. On the v7.29.0 back-merge that
+    was 11 of 13 files, the whole version surface, reviewed as clean
+    (reanalysis 2026-09-04). The first-parent diff must carry the file
+    the merge brought in from the other branch.
+    """
+    _run(["git", "checkout", "-q", "-b", "side"], tiny_repo)
+    (tiny_repo / "version.py").write_text('VERSION = "2"\n')
+    _run(["git", "add", "version.py"], tiny_repo)
+    _run(["git", "commit", "-q", "-m", "chore: bump"], tiny_repo)
+    _run(["git", "checkout", "-q", "main"], tiny_repo)
+    (tiny_repo / "b.py").write_text("x = 1\n")
+    _run(["git", "add", "b.py"], tiny_repo)
+    _run(["git", "commit", "-q", "-m", "feat: b"], tiny_repo)
+    _run(["git", "merge", "-q", "--no-ff", "-m", "merge side", "side"], tiny_repo)
+    sha = _run(["git", "rev-parse", "HEAD"], tiny_repo).strip()
+    assert commit_parent_count(tiny_repo, sha) == 2
+    text, _ = commit_diff(tiny_repo, sha, max_bytes=100_000)
+    assert 'VERSION = "2"' in text, "the file the merge brought in must be in the diff the reviewer sees"
+    assert "version.py" in text
+    assert commit_parent_count(tiny_repo, "HEAD~1") == 1
+
+
+def test_build_prompt_names_a_merge_commit() -> None:
+    assert "MERGE commit" in build_prompt("a" * 40, "diff", truncated=False, merge=True)
+    assert "MERGE commit" not in build_prompt("a" * 40, "diff", truncated=False)
 
 
 def test_commit_diff_on_an_unknown_sha_raises(tiny_repo: Path) -> None:
