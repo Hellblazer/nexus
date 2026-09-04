@@ -94,10 +94,15 @@ RUN mkdir -p /home/nexus/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx \
 # bookworm ships Python 3.11; conexus needs 3.12+, so uv fetches a managed
 # standalone 3.12. The BuildKit uv cache mount persists downloads across
 # builds, keyed by nexus's uid (1000) so the unprivileged install can write it.
+# nexus-mt1tj: requirements.txt opens with the PyTorch CPU index (uv export omits
+# the index the lock resolved torch from). uv gives an extra index priority over
+# PyPI and refuses a package it finds there at any other version, so the plain
+# strategy failed on certifi. Every line is an exact pin from the lock, which is
+# what makes best-match across the two indexes safe here.
 COPY requirements.txt /tmp/requirements.txt
 RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
     uv venv --python 3.12 /home/nexus/nxenv \
-    && uv pip install --python /home/nexus/nxenv -r /tmp/requirements.txt
+    && uv pip install --python /home/nexus/nxenv --index-strategy unsafe-best-match -r /tmp/requirements.txt
 COPY conexus-*.whl /tmp/
 RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
     uv pip install --python /home/nexus/nxenv --no-deps /tmp/conexus-*.whl \

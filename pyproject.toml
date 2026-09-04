@@ -98,6 +98,21 @@ dependencies = [
     # the non-headless build unconditionally) and uuid7-standard (nothing
     # references it).
     "docling-slim[convert-core,format-pdf,models-local]>=2.125.0,<2.125.1",
+    # nexus-mt1tj: torch and torchvision are transitive (mineru[pipeline],
+    # docling) and nexus never imports them; they are declared here ONLY so
+    # that [tool.uv.sources] below can route the Linux resolution to the
+    # CPU index — uv applies sources to direct dependencies, never to
+    # transitive ones. Bounds follow what the lock already resolved.
+    # Linux pins the exact minor the lock already ran (2.8.0+cpu from the CPU
+    # index); every other platform keeps PyPI's resolution unchanged, so a
+    # macOS py3.13 box stays on the torch it had (2.10) rather than being
+    # dragged down by a Linux-motivated cap.
+    "torch>=2.8,<2.9; sys_platform == 'linux'",
+    "torch>=2.8,<2.9; sys_platform != 'linux' and python_version < '3.13'",
+    "torch>=2.10,<2.11; sys_platform != 'linux' and python_version >= '3.13'",
+    "torchvision>=0.23,<0.24; sys_platform == 'linux'",
+    "torchvision>=0.23,<0.24; sys_platform != 'linux' and python_version < '3.13'",
+    "torchvision>=0.25,<0.26; sys_platform != 'linux' and python_version >= '3.13'",
     "httpx>=0.27,<1.0",
     # RDR-161: pure-Python keyless-signature verification for
     # `nx daemon service install-binary`. Replaces a ~130MB/platform cosign
@@ -304,6 +319,28 @@ dev = [
 override-dependencies = [
     "av; sys_platform == 'never'",
 ]
+
+# nexus-mt1tj (Sam, 2026-09-04): CPU-only torch on Linux by default. The PyPI
+# torch wheel for Linux is the CUDA build (15 nvidia-* dists + triton, ~4.5 GB
+# nothing here uses: the engine embeds with ONNX and MinerU's pipeline runs
+# CPU on our path). The lock resolves torch/torchvision for Linux from the
+# CPU index instead, so every project sync (CI, the publish job, a checkout)
+# stops downloading the CUDA tree. Project settings never reach an installed
+# wheel, so install_generation.sh passes --torch-backend cpu on Linux for user
+# installs (NX_TORCH_BACKEND=auto opts a GPU box back in). macOS wheels carry
+# no CUDA payload and keep resolving from PyPI.
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.ruff]
 # nexus-ls88v (epic nexus-whh61 F7): enforce the structlog-only / no-print

@@ -218,3 +218,30 @@ def test_shape_sensitive_dependency_confines_to_the_locked_minor(name: str) -> N
         f"({_SHAPE_SENSITIVE[name]}). Cap at <{next_patch}, or bump lock and cap together "
         "on a green slow-gate run."
     )
+
+
+# nexus-mt1tj (Sam, 2026-09-04): CPU-only torch on Linux by default. The lock
+# routes torch/torchvision for Linux to the PyTorch CPU index, which is what
+# drops the 15 nvidia-* dists and triton from every Linux sync. A future
+# `uv lock --upgrade` that loses the [tool.uv.sources] routing would bring the
+# CUDA tree back silently; this pins the lock's shape.
+
+
+def _lock_packages() -> list[dict]:
+    with _LOCK.open("rb") as f:
+        return tomllib.load(f)["package"]
+
+
+def test_lock_carries_no_cuda_tree() -> None:
+    names = sorted(p["name"] for p in _lock_packages())
+    cuda = [n for n in names if n.startswith("nvidia-") or n == "triton"]
+    assert not cuda, f"CUDA payload is back in uv.lock: {cuda} (nexus-mt1tj)"
+
+
+def test_linux_torch_resolves_from_the_cpu_index() -> None:
+    torches = [p for p in _lock_packages() if p["name"] in ("torch", "torchvision")]
+    assert torches, "torch is not in uv.lock at all"
+    cpu = [p for p in torches if "download.pytorch.org/whl/cpu" in p.get("source", {}).get("registry", "")]
+    assert cpu, "no torch/torchvision entry resolves from the PyTorch CPU index (nexus-mt1tj)"
+    for p in cpu:
+        assert p["version"].endswith("+cpu") or p["name"] == "torchvision", (p["name"], p["version"])

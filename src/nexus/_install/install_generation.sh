@@ -153,10 +153,23 @@ uv venv --python "$PYTHON_VERSION" "$GEN" >&2
 # overrides ship beside this script and are handed to uv explicitly.
 OVERRIDES="$_here/overrides.txt"
 [ -f "$OVERRIDES" ] || _die "packaged overrides file is missing: $OVERRIDES"
+# nexus-mt1tj (Sam's ruling 2026-09-04: CPU-only torch on Linux by default).
+# On Linux the PyPI torch wheel is the CUDA build and drags 15 nvidia-* dists
+# plus triton, ~4.5 GB that nothing in nexus uses (the engine embeds with
+# ONNX; MinerU's pipeline runs CPU on our path). `--torch-backend` is a uv
+# pip flag, so like the overrides above it lives here in the install path,
+# never in wheel metadata; NX_TORCH_BACKEND=auto (or cu130 etc.) opts a GPU
+# box back in. macOS wheels have no CUDA payload, so no flag there.
+# The `${arr[@]+"${arr[@]}"}` expansion below is deliberate: macOS ships
+# bash 3.2, where an EMPTY array under `set -u` is an unbound variable.
+TORCH_ARGS=()
+if [ "$(uname -s)" = "Linux" ]; then
+    TORCH_ARGS=(--torch-backend "${NX_TORCH_BACKEND:-cpu}")
+fi
 if [ -n "$CONSTRAINTS" ]; then
-    uv pip install --python "$GEN/bin/python" --overrides "$OVERRIDES" --constraints "$CONSTRAINTS" "$SPEC" >&2
+    uv pip install --python "$GEN/bin/python" ${TORCH_ARGS[@]+"${TORCH_ARGS[@]}"} --overrides "$OVERRIDES" --constraints "$CONSTRAINTS" "$SPEC" >&2
 else
-    uv pip install --python "$GEN/bin/python" --overrides "$OVERRIDES" "$SPEC" >&2
+    uv pip install --python "$GEN/bin/python" ${TORCH_ARGS[@]+"${TORCH_ARGS[@]}"} --overrides "$OVERRIDES" "$SPEC" >&2
 fi
 
 # ── Receipt ──────────────────────────────────────────────────────────────────
