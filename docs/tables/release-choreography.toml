@@ -542,7 +542,7 @@ emit = { exit_code = "2", message_key = "paired_probe_unverifiable_exception" }
 id = "check_floor_paired::paired_probe_ack_via_exception"
 match = { function = "check_floor_paired" }
 guard = { "check_floor_paired.battery" = "passes", "check_floor_paired.probe" = "ms_error_below_floor" }
-emit = { exit_code = "0", message_key = "paired_probe_ack_via_exception" }
+emit = { exit_code = "0", message_key = "paired_probe_ack_via_exception", advisory = "passed-by-default", advisory_reason = "the cloud probe failed below floor and the pass rests on the verified --paired-deploy tag, not on a live engine at floor" }
 
 [[row]]
 id = "check_floor_paired::paired_probe_unverifiable_success"
@@ -554,7 +554,7 @@ emit = { exit_code = "2", message_key = "paired_probe_unverifiable_success" }
 id = "check_floor_paired::paired_probe_ack_via_success"
 match = { function = "check_floor_paired" }
 guard = { "check_floor_paired.battery" = "passes", "check_floor_paired.probe" = "success_below_floor" }
-emit = { exit_code = "0", message_key = "paired_probe_ack_via_success" }
+emit = { exit_code = "0", message_key = "paired_probe_ack_via_success", advisory = "passed-by-default", advisory_reason = "the cloud answered below floor and the pass rests on the verified --paired-deploy tag, not on a live engine at floor" }
 
 [[row]]
 id = "check_floor_paired::paired_probe_current"
@@ -602,7 +602,7 @@ emit = { exit_code = "1", message_key = "auto_below_via_exception_battery_blocks
 id = "check_floor_auto_paired::auto_below_via_exception_ack"
 match = { function = "check_floor_auto_paired" }
 guard = { "check_floor_auto_paired.probe" = "ms_error_below_floor", "check_floor_auto_paired.battery" = "passes" }
-emit = { exit_code = "0", message_key = "auto_below_via_exception_ack" }
+emit = { exit_code = "0", message_key = "auto_below_via_exception_ack", advisory = "passed-by-default", advisory_reason = "the cloud probe failed below floor and the pass rests on the auto-derived paired tag, not on a live engine at floor" }
 
 [[row]]
 id = "check_floor_auto_paired::auto_current_pin_blocks"
@@ -640,7 +640,7 @@ emit = { exit_code = "1", message_key = "auto_below_via_success_battery_blocks" 
 id = "check_floor_auto_paired::auto_below_via_success_ack"
 match = { function = "check_floor_auto_paired" }
 guard = { "check_floor_auto_paired.probe" = "success_below_floor", "check_floor_auto_paired.battery" = "passes" }
-emit = { exit_code = "0", message_key = "auto_below_via_success_ack" }
+emit = { exit_code = "0", message_key = "auto_below_via_success_ack", advisory = "passed-by-default", advisory_reason = "the cloud answered below floor and the pass rests on the auto-derived paired tag, not on a live engine at floor" }
 
 # --------------------------------------------------------------------
 # main_dispatch (hand-enumerated, 15 cells): mode (4 values) partitions

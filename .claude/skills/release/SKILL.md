@@ -109,8 +109,10 @@ All must pass. Integration is excluded from CI and is the last line of defense b
 
 Count the advisories too. A gate that passed on a fallback prints one
 `GATE PASSED-BY-DEFAULT: <gate> <reason>` line and still exits 0
-(nexus-1c7oq; producers: the choreography rows marked `advisory`, the
-evidence gate's borrowed-parent path, `local-service-gate.sh` under
+(nexus-1c7oq; producers: the choreography rows marked `advisory`, which
+include the four paired-acceptance rows where a below-floor cloud passes
+on the paired tag rather than a live engine at floor (Sam, 2026-09-04),
+the evidence gate's borrowed-parent path, `local-service-gate.sh` under
 `NEXUS_GATE_NO_VOYAGE=1`). `grep -c 'GATE PASSED-BY-DEFAULT:'` over the
 battery output; a non-zero count is not a failure, it is the list of greens
 that rest on a default, and each one is named in the ship record.
