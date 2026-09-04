@@ -15,6 +15,7 @@ import org.jooq.JSONB;
 import org.jooq.Record;
 import org.jooq.Result;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -1664,7 +1665,7 @@ public final class PgVectorRepository {
         org.jooq.Condition cond = ch.collection().eq(collection);
         if (where != null) {
             for (Map.Entry<String, Object> e : where.entrySet()) {
-                cond = cond.and(metadataCondition(e.getKey(), e.getValue()));
+                cond = cond.and(metadataCondition(ch.metadata(), e.getKey(), e.getValue()));
             }
         }
         org.jooq.Condition finalCond = cond;
@@ -1751,7 +1752,7 @@ public final class PgVectorRepository {
         org.jooq.Condition cond = ch.collection().eq(collection);
         if (where != null) {
             for (Map.Entry<String, Object> e : where.entrySet()) {
-                cond = cond.and(metadataCondition(e.getKey(), e.getValue()));
+                cond = cond.and(metadataCondition(ch.metadata(), e.getKey(), e.getValue()));
             }
         }
         org.jooq.Condition finalCond = cond;
@@ -3831,19 +3832,32 @@ public final class PgVectorRepository {
 
     /**
      * Typed jOOQ sibling of {@link #planWhere} (nexus-mzuj9, nexus-zrcj7): same Chroma
-     * operator-subset ({@code $eq}/{@code $ne}/{@code $in}/{@code $nin}, plain-scalar
-     * shorthand for {@code $eq}), expressed as a {@link org.jooq.Condition} via a
-     * {@code metadata ->> {0}} DSL.field template (bind placeholder, not string
-     * concatenation) instead of hand-built SQL text. Used by the plain-equality
-     * {@link #getWhere} path, which has no vector/trigram operator to entangle with.
+     * operator-subset ({@code $eq}/{@code $ne}/{@code $in}/{@code $nin}/{@code $gte}/
+     * {@code $lte}/{@code $gt}/{@code $lt}, plain-scalar shorthand for {@code $eq}),
+     * expressed as a {@link org.jooq.Condition} via jOOQ core's typed JSONB accessors
+     * ({@link DSL#jsonbGetAttributeAsText}/{@link DSL#jsonbGetAttribute}, the same idiom
+     * {@code CatalogRepository.DOC_META_DOC_ID} already uses) instead of a {@code
+     * DSL.field}/{@code DSL.condition} raw-text template (nexus-zrcj7: retired the last
+     * two, the {@code metadata ->> {0}} equality accessor and the range-operator {@code
+     * cmp}-spliced comparison template flagged as a KNOWN RESIDUAL by this class's own
+     * gate javadoc history). Used by the plain-equality {@link #getWhere}/
+     * {@link #getAllMetadata} paths, which have no vector/trigram operator to entangle
+     * with.
+     *
+     * @param metadataField the caller's typed {@code metadata} column ({@link
+     *                       DimTables.ChunkTable#metadata()}) — the accessor no longer
+     *                       relies on an unqualified {@code "metadata"} column name
+     *                       resolving generically against whatever table happens to be
+     *                       in the enclosing FROM clause.
      */
-    static org.jooq.Condition metadataCondition(String key, Object value) {
+    static org.jooq.Condition metadataCondition(
+            org.jooq.Field<JSONB> metadataField, String key, Object value) {
         if (key.startsWith("$")) {
             throw new IllegalArgumentException(
                 "compound where operator '" + key + "' is not supported on the vector "
                 + "bridge; express each field as its own predicate (all fields are ANDed)");
         }
-        org.jooq.Field<String> mv = DSL.field("metadata ->> {0}", String.class, key);
+        org.jooq.Field<String> mv = DSL.jsonbGetAttributeAsText(metadataField, key);
         if (!(value instanceof Map<?, ?> ops)) {
             return mv.eq(String.valueOf(value));
         }
@@ -3876,21 +3890,33 @@ public final class PgVectorRepository {
             case "$gte", "$lte", "$gt", "$lt" -> {
                 // nexus-4l80g: range operators, operand-typed (kept for the plain-
                 // equality getWhere path; the vector-search where-translator moved to
-                // planWhere's native jsonpath comparison, nexus-zrcj7).
-                String cmp = switch (operator) {
-                    case "$gte" -> ">=";
-                    case "$lte" -> "<=";
-                    case "$gt" -> ">";
-                    default -> "<";
-                };
+                // planWhere's native jsonpath comparison, nexus-zrcj7). nexus-zrcj7
+                // (this session): the numeric branch's "jsonb_typeof(...) = 'number'"
+                // guard is now DSL.function("jsonb_typeof", ...) (the same bound-
+                // PostgreSQL-function idiom TaxonomyRepository.advanceTopicsIdSequence
+                // uses), ANDed with a typed numeric-cast comparison; the string branch
+                // uses mv's own typed comparison methods directly. No operator text is
+                // ever spliced into a string template.
                 if (operand instanceof Number n) {
-                    yield DSL.condition(
-                        "jsonb_typeof(metadata->{0}) = 'number' AND (metadata->>{0})::numeric "
-                        + cmp + " {1}",
-                        DSL.val(key), DSL.val(toBigDecimalOperand(operator, key, n)));
+                    java.math.BigDecimal num = toBigDecimalOperand(operator, key, n);
+                    org.jooq.Field<String> typeOf = DSL.function("jsonb_typeof", SQLDataType.VARCHAR,
+                        DSL.jsonbGetAttribute(metadataField, key));
+                    org.jooq.Field<java.math.BigDecimal> numeric = mv.cast(SQLDataType.NUMERIC);
+                    org.jooq.Condition typeCond = typeOf.eq(DSL.inline("number"));
+                    org.jooq.Condition cmpCond = switch (operator) {
+                        case "$gte" -> numeric.greaterOrEqual(num);
+                        case "$lte" -> numeric.lessOrEqual(num);
+                        case "$gt"  -> numeric.greaterThan(num);
+                        default     -> numeric.lessThan(num);
+                    };
+                    yield typeCond.and(cmpCond);
                 } else if (operand instanceof String str) {
-                    yield DSL.condition("metadata->>{0} " + cmp + " {1}",
-                        DSL.val(key), DSL.val(str));
+                    yield switch (operator) {
+                        case "$gte" -> mv.greaterOrEqual(str);
+                        case "$lte" -> mv.lessOrEqual(str);
+                        case "$gt"  -> mv.greaterThan(str);
+                        default     -> mv.lessThan(str);
+                    };
                 } else {
                     throw new IllegalArgumentException(
                         operator + " for field '" + key + "' expects a numeric or string "

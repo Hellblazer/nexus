@@ -29,9 +29,16 @@ import static org.assertj.core.api.Assertions.within;
 
 /**
  * RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-jv3ue item 5) — EXPLAIN-based
- * plan-shape proof for {@link TaxonomyCentroidRepository#annQuery}'s raw-SQL ANN query,
+ * plan-shape proof for {@link TaxonomyCentroidRepository#annQuery}'s ANN query,
  * mirroring {@code PgVectorRepositoryRawSqlPlanShapeTest}'s methodology for the sibling
  * {@code nexus.chunks} unification.
+ *
+ * <p>nexus-zrcj7 step 4 (Sam's no-SQL-strings-in-Java directive): {@code annQuery}'s
+ * former string-concatenated raw SQL is retired onto {@code nexus.taxonomy_ann_query_
+ * <dim>} (vectors-013), an inlinable schema function — the EXPLAIN targets below now
+ * call the function directly rather than reproducing its retired inline query text, and
+ * carry a NEW inlining assertion (no {@code Function Scan}) alongside the pre-existing
+ * HNSW-index-binding proof.
  *
  * <p><strong>What this proves and why it matters.</strong> {@code annQuery}'s raw ANN
  * query was found hand-rolling {@code "nexus.taxonomy_centroids_" + dim} for the table
@@ -250,18 +257,21 @@ class TaxonomyCentroidAnnPlanShapeTest {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // annQuery's raw ANN query (embedding_<dim> <=> ?::vector, FROM
-    // nexus.taxonomy_centroids, WHERE embedding_<dim> IS NOT NULL AND collection = ?)
+    // annQuery's ANN query -- nexus.taxonomy_ann_query_<dim> (vectors-013, nexus-zrcj7
+    // step 4), retiring the former string-concatenated raw SQL onto an inlinable
+    // schema function (embedding_<dim> <=> p_embedding, FROM nexus.taxonomy_centroids,
+    // WHERE embedding_<dim> IS NOT NULL AND collection = / <> p_collection). EXPLAIN
+    // over a direct call to the FUNCTION rather than the retired inline query text --
+    // both the HNSW-index-binding proof (unchanged from before) AND a NEW inlining
+    // proof (no Function Scan node — mirrors CombinedQueryParityTest's own inlining
+    // group for the sibling combined-query functions).
     // ════════════════════════════════════════════════════════════════════════
 
     @Test
     void annQuery_shape_usesFullHnswIndex_1024() {
         String vec = "[1" + ",0".repeat(1023) + "]";
-        String sql =
-            "SELECT topic_id, (embedding_1024 <=> '" + vec + "'::vector) AS distance"
-            + " FROM nexus.taxonomy_centroids"
-            + " WHERE embedding_1024 IS NOT NULL AND collection = '" + COL_1024 + "'"
-            + " ORDER BY distance ASC, topic_id ASC LIMIT 10";
+        String sql = "SELECT * FROM nexus.taxonomy_ann_query_1024("
+            + "'" + vec + "'::vector, '" + COL_1024 + "', false, 10)";
         String plan = explain(sql);
         assertThat(plan)
             .as("annQuery's distance projection (1024-dim) must bind to the FULL"
@@ -271,38 +281,43 @@ class TaxonomyCentroidAnnPlanShapeTest {
             .as("must not degrade to a sequential scan of the unified (mixed-dim) table."
                 + " Plan was:%n%s", plan)
             .doesNotContain("Seq Scan");
+        assertThat(plan)
+            .as("a Function Scan node means taxonomy_ann_query_1024 is not inlinable — "
+                + "it must stay LANGUAGE sql/STABLE/SECURITY INVOKER with no SET clause. "
+                + "Plan was:%n%s", plan)
+            .doesNotContain("Function Scan");
     }
 
     @Test
     void annQuery_shape_usesFullHnswIndex_768() {
         String vec = "[1" + ",0".repeat(767) + "]";
-        String sql =
-            "SELECT topic_id, (embedding_768 <=> '" + vec + "'::vector) AS distance"
-            + " FROM nexus.taxonomy_centroids"
-            + " WHERE embedding_768 IS NOT NULL AND collection = '" + COL_768 + "'"
-            + " ORDER BY distance ASC, topic_id ASC LIMIT 10";
+        String sql = "SELECT * FROM nexus.taxonomy_ann_query_768("
+            + "'" + vec + "'::vector, '" + COL_768 + "', false, 10)";
         String plan = explain(sql);
         assertThat(plan)
             .as("annQuery's distance projection (768-dim) must bind to the FULL"
                 + " idx_taxonomy_centroids_embedding_768 HNSW index. Plan was:%n%s", plan)
             .contains("idx_taxonomy_centroids_embedding_768");
         assertThat(plan).as("no Seq Scan. Plan was:%n%s", plan).doesNotContain("Seq Scan");
+        assertThat(plan)
+            .as("no Function Scan (inlining proof). Plan was:%n%s", plan)
+            .doesNotContain("Function Scan");
     }
 
     @Test
     void annQuery_shape_usesFullHnswIndex_384() {
         String vec = "[1" + ",0".repeat(383) + "]";
-        String sql =
-            "SELECT topic_id, (embedding_384 <=> '" + vec + "'::vector) AS distance"
-            + " FROM nexus.taxonomy_centroids"
-            + " WHERE embedding_384 IS NOT NULL AND collection = '" + COL_384 + "'"
-            + " ORDER BY distance ASC, topic_id ASC LIMIT 10";
+        String sql = "SELECT * FROM nexus.taxonomy_ann_query_384("
+            + "'" + vec + "'::vector, '" + COL_384 + "', false, 10)";
         String plan = explain(sql);
         assertThat(plan)
             .as("annQuery's distance projection (384-dim) must bind to the FULL"
                 + " idx_taxonomy_centroids_embedding_384 HNSW index. Plan was:%n%s", plan)
             .contains("idx_taxonomy_centroids_embedding_384");
         assertThat(plan).as("no Seq Scan. Plan was:%n%s", plan).doesNotContain("Seq Scan");
+        assertThat(plan)
+            .as("no Function Scan (inlining proof). Plan was:%n%s", plan)
+            .doesNotContain("Function Scan");
     }
 
     // ════════════════════════════════════════════════════════════════════════

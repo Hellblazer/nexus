@@ -164,7 +164,11 @@ class JooqRecordReflectionFeatureTest {
     // backend-reaper-001 nexus.terminate_own_backends (RETURNS TABLE, +1).
     // catalog-035 nexus.catalog_fts_match is a scalar boolean function:
     // no Record type, no delta.
-    private static final int EXPECTED_RECORD_TYPES = 81;
+    // 81 -> 84: nexus-zrcj7 step 4 added vectors-013-taxonomy-ann-query.xml,
+    // nexus.taxonomy_ann_query_384/768/1024, three RETURNS TABLE functions
+    // retiring TaxonomyCentroidRepository#annQuery's raw SQL (same shape as
+    // plain_search_<dim>), one generated Record type each, +3.
+    private static final int EXPECTED_RECORD_TYPES = 84;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

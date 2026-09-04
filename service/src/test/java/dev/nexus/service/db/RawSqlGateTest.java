@@ -64,145 +64,76 @@ import java.util.stream.Stream;
  * -family call. It does NOT extend to raw SQL assembled DYNAMICALLY (a
  * {@code StringBuilder} chain across many lines, runtime-varying
  * WHERE-predicate loops) and funneled through a NAMED PRIVATE WRAPPER
- * method rather than a literal call — {@code PgVectorRepository.
- * searchWithTokens}/{@code hybridSearch} call their private {@code
- * rawVectorFetch(ctx, sql, binds)} BY NAME, which {@code RAW_EXECUTE}
- * cannot match at all (not "excused" — no anchor exists there for
- * statement-granularity to attach to). Confirmed empirically: appending an
- * entirely new raw-SQL predicate to {@code searchWithTokens}'s {@code
- * StringBuilder} produced ZERO gate signal before the fix below. {@link
- * #RAW_SQL_ASSEMBLY_SENTINELS} closes this SPECIFIC instance with a
- * coarser, whole-method-body tripwire (see its own javadoc) — it is a
- * targeted patch for the bead's first NAMED motivating file, not a general
- * solution to "a raw-SQL execution wrapper hidden behind an arbitrary
- * method name" recurring elsewhere in the codebase. That general problem is
- * tracked as nexus-8emxy (P2), not closed by this file.
+ * method rather than a literal call.
  *
- * <p><b>WIDENED SCOPE, SAME-FILE EVOLUTION (nexus-8emxy comment, 2026-08-09;
- * closed here):</b> the fix above is itself NAME-KEYED, exactly like {@link
- * #SANCTIONED_STATEMENTS} — a DIFFERENTLY-NAMED future method in {@code
- * PgVectorRepository.java} ITSELF that assembles SQL dynamically and calls
- * the same private {@code rawVectorFetch(ctx, sql, binds)} wrapper is
- * equally invisible to {@link #RAW_SQL_ASSEMBLY_SENTINELS}, which only ever
- * inspects the bodies of methods that are already keys in its map — a
- * caller that has not yet been named produces zero loop iterations, not a
- * failing one. {@link #RAW_SQL_WRAPPER_METHODS} / {@link
- * #scanWrapperCallSitesSentineled} INVERTS this failure mode: instead of
- * trusting a fixed allowlist of caller names, it finds every actual CALL
- * SITE of the registered wrapper method(s) by scanning the file for
- * invocations of the wrapper's own name, and requires each call site to
- * fall inside a method that already has a {@link #RAW_SQL_ASSEMBLY_SENTINELS}
- * registration. A brand-new method added anywhere in the file that calls
- * {@code rawVectorFetch} therefore FAILS the gate on sight — silent-miss
- * becomes loud-add. See {@link #wrapperCallSites_newUnsentineledCaller_isFlagged}
- * for the falsification proof and {@link
- * #wrapperCallSites_realPgVectorRepository_zeroRawVectorFetchCallSitesRemain}
- * for the non-overreach proof (the extension does not simply ban the
- * wrapper — nexus-zrcj7, 2026-09-03, retired the wrapper itself: the real tree
- * now carries ZERO rawVectorFetch call sites, which that test pins directly).
- * This closes the same-file half of nexus-8emxy's P2 for
- * {@code PgVectorRepository.java} specifically; a hypothetical brand-new
- * private raw-SQL wrapper method appearing in some OTHER file still needs a
- * conscious {@link #RAW_SQL_WRAPPER_METHODS} registration, AND that
- * registration is NOT mechanically forced by anything else in this class
- * (critic finding, nexus-8emxy review, 2026-08-21): {@link
- * #SANCTIONED_STATEMENTS} and {@link #RAW_SQL_WRAPPER_METHODS} are
- * INDEPENDENT maps checked by INDEPENDENT tests. Registering the new
- * wrapper's own body in {@code SANCTIONED_STATEMENTS} (forced by {@link
- * #RAW_EXECUTE} flagging its literal {@code .fetch(}/{@code .execute(}
- * call) satisfies only that one test; {@code RAW_SQL_WRAPPER_METHODS}
- * itself is never touched by that, and {@link #noUnsentineledRawSqlWrapperCallSites}
- * would still run zero checks against the new wrapper's callers unless a
- * human separately adds the entry. The honest claim is narrower: a new
- * wrapper elsewhere is *likely* to be caught by a reviewer's attention
- * (the maintainer is already editing this file for the first registration,
- * a natural point to notice the second), not that it is *structurally*
- * guaranteed the way same-file caller coverage now is.
+ * <p><b>HISTORY (nexus-8emxy, 2026-08-09 through 2026-08-21; RETIRED nexus-zrcj7
+ * step 4, 2026-09-03):</b> exactly one such wrapper ever existed in this codebase
+ * — {@code PgVectorRepository.rawVectorFetch(ctx, sql, binds)}, called BY NAME
+ * from {@code searchWithTokens}/{@code hybridSearch}, which {@code RAW_EXECUTE}
+ * could not match at all (confirmed empirically: appending an entirely new
+ * raw-SQL predicate to {@code searchWithTokens}'s {@code StringBuilder} produced
+ * ZERO gate signal). Two mechanisms closed it: a whole-method-body sentinel map
+ * (the exact canonical body text of every raw-SQL-assembling method, so ANY
+ * edit — not just a new statement — forced a reviewed registration update) and
+ * a companion wrapper-call-site scan (found every invocation of the wrapper's
+ * own name and required its enclosing method to already be sentineled, so a
+ * brand-new caller failed loud instead of producing zero signal). Both {@code
+ * searchWithTokens} and {@code hybridSearch} are retired onto generated jOOQ
+ * function tables (nexus-zrcj7 step 1: {@code plain_search_<dim>}/{@code
+ * text_gated_search_<dim>}, vectors-009/011) — {@code rawVectorFetch} itself is
+ * deleted, {@link #wrapperCallSites_realPgVectorRepository_zeroRawVectorFetchCallSitesRemain}
+ * pins that zero call sites remain in the real tree, and both maps (having had
+ * exactly one entry between them, now gone) were deleted outright at step 4
+ * rather than kept as permanently-empty machinery — recoverable from git
+ * history at the commit immediately preceding the deletion if a future raw-SQL-
+ * assembling wrapper ever needs this same shape of proof again. {@link
+ * #wrapperCallSites} survives as the one piece of that mechanism with an
+ * independent, standalone use.
  *
- * <p><b>KNOWN RESIDUAL — call shapes this gate does not scan at all</b>
- * (nexus-8emxy critique, 2026-08-21). Two call shapes carry raw or
- * caller-influenced SQL text and are invisible to every check in this
- * class — {@link #RAW_EXECUTE}, {@link #RAW_SQL_ASSEMBLY_SENTINELS}, and
- * {@link #RAW_SQL_WRAPPER_METHODS} alike — because none of them anchor on
- * these shapes at all, the same "not excused, structurally no anchor"
- * situation the class javadoc above describes for the wrapper problem:
- * <ul>
- *   <li><b>jOOQ's plain-SQL-template overloads</b> — {@code DSL.field("...",
- *       Class, binds...)}, {@code DSL.condition("...", binds...)}, {@code
- *       DSL.table("...", binds...)}, which parse a Java string as raw SQL
- *       text with {@code {0}}/{@code {1}} bind placeholders. Verified by a
- *       direct count against the live tree (2026-08-21): 67 call sites take
- *       an immediate string-literal first argument to one of these three
- *       methods, across 5 files ({@code CatalogRepository.java}, {@code
- *       LadderRepository.java}, {@code PipelineRepository.java}, {@code
- *       PgVectorRepository.java}, {@code RemapRepository.java}). Of those,
- *       60 are fully static literal identifier references with no {@code
- *       {n}} placeholder at all (e.g. {@code DSL.field("EXCLUDED.name",
- *       String.class)} — the Postgres {@code ON CONFLICT} pseudo-table,
- *       hardcoded, never runtime-varying); the remaining ~7 carry a genuine
- *       bind-placeholder template, 5 of them real code (2 in {@code
- *       PgVectorRepository.metadataCondition}, 3 in {@code
- *       CatalogRepository}) and 2 merely comment mentions. Separately,
- *       {@code StagingHandler.java} and {@code ChashCensus.java} use the
- *       differently-shaped, properly-quoting {@code DSL.field(DSL.name(...),
- *       Class)} / {@code DSL.table(DSL.name(...))} idiom to build genuinely
- *       DYNAMIC (loop-driven) identifiers — jOOQ's own safe quoted-identifier
- *       construction, not a raw-text template, but still a call shape this
- *       gate never inspects. Checked the one instance that concatenates
- *       non-constant text into a template rather than binding it —
- *       {@code metadataCondition}'s {@code cmp} comparator, spliced
- *       directly into {@code DSL.condition("metadata->>{0} " + cmp + "
- *       {1}", ...)} — and confirmed it safe today: {@code cmp} is drawn
- *       from a closed 4-branch {@code switch} over {@code $gte}/{@code
- *       $lte}/{@code $gt}/{@code $lt}, never caller-supplied text
- *       directly. No live defect exists today. Left unscanned deliberately
- *       rather than chased: scanning this shape well enough to be
- *       trustworthy (distinguishing a bind placeholder from a spliced
- *       comparator, distinguishing a closed-switch value from genuinely
- *       caller-derived text) is a materially different, larger mechanism
- *       than the wrapper-call-site check above, and no known instance
- *       needs it today — a bead for a mechanism verified safe with no
- *       known instance is backlog padding, not a fix.</li>
- *   <li><b>Method-reference call shapes.</b> {@link #wrapperCallSites}
- *       matches direct invocations ({@code rawVectorFetch(...)}) via a
- *       {@code \bname\s*\(} pattern; a method reference to the same wrapper
- *       ({@code this::rawVectorFetch} or {@code
- *       PgVectorRepository::rawVectorFetch} passed where a functional
- *       interface is expected) has no {@code (} immediately following the
- *       name and does not match at all. No such reference exists in the
- *       codebase today (the 5 real call sites are all direct invocations);
- *       if one is ever introduced, it would be exactly as invisible to
- *       {@link #scanWrapperCallSitesSentineled} as the original bug this
- *       bead closes.</li>
- * </ul>
+ * <p><b>DSL-TEMPLATE SCAN (nexus-zrcj7 step 4, 2026-09-03; closes a residual
+ * documented by nexus-8emxy's 2026-08-21 critique):</b> jOOQ's plain-SQL-template
+ * overloads — {@code DSL.field("...", Class, binds...)}, {@code
+ * DSL.condition("...", binds...)}, {@code DSL.query("...")}, {@code
+ * DSL.table("...", binds...)} — parse a Java string as raw SQL text and were
+ * invisible to every check above (none of them anchor on this call shape at
+ * all). A census at the time (2026-08-21) found 67 call sites across 5 files
+ * taking an immediate string-literal first argument to one of these methods:
+ * 60 were bare identifier references with no space or operator (e.g. {@code
+ * DSL.field("EXCLUDED.name", String.class)}, the Postgres {@code ON CONFLICT}
+ * pseudo-table, hardcoded and never runtime-varying) and left alone; the
+ * remaining handful genuinely assembled SQL text (an operator or a
+ * space-separated function call, e.g. {@code "metadata ->> {0}"} or {@code
+ * "GREATEST(a, b)"}) and were converted onto typed DSL this same step (see
+ * {@link #EXEMPTION_REGISTRY}'s javadoc for what, if anything, remains
+ * unconverted). {@link #scanDslTemplates} / {@link #looksLikeAssembledSql} close
+ * this gap going forward — see {@link #noRawSqlDslTemplatesInMainOrTestSources}.
+ *
+ * <p><b>KNOWN RESIDUAL — a call shape this gate still does not scan.</b>
+ * {@link #wrapperCallSites} matches direct invocations ({@code name(...)}) via
+ * a {@code \bname\s*\(} pattern; a method reference to a raw-SQL wrapper
+ * ({@code this::wrapperName} or {@code SomeClass::wrapperName} passed where a
+ * functional interface is expected) has no {@code (} immediately following the
+ * name and does not match at all. No such reference exists in the codebase
+ * today; if one is ever introduced calling a raw-SQL-assembling wrapper, it
+ * would be invisible to this gate.
  *
  * <p>Each sanctioned method's REGISTRATION (a key in {@link
  * #SANCTIONED_STATEMENTS}) still needs a {@code // SANCTIONED RAW
  * (nexus-mzuj9): <why>} comment at its definition site (auditable, not
- * silent). Three methods carry a registration with a genuinely EMPTY
- * statement multiset — {@code ChashRepository.lookup}, {@code
- * ChashSqlIdioms.contentCollapseDelete} — see their entries below for why:
- * each is a real, deliberate raw-SQL primitive, but this gate's
+ * silent). One method carries a registration with a genuinely EMPTY
+ * statement multiset — {@code ChashRepository.lookup} — see its entry below
+ * for why: it is a real, deliberate raw-SQL primitive, but this gate's
  * execute/fetch-call-shape detector structurally never observes a matching
- * call site inside the method's OWN body (one builds and returns a raw SQL
- * string without ever calling {@code execute}/{@code fetch} itself; the
- * other's argument is a named constant, not a literal, which evades the
- * name-based heuristic below — a pre-existing, documented KNOWN RESIDUAL).
- * NOT kept for detection speed — a registered zero-fingerprint entry and no
- * entry at all behave IDENTICALLY at scan time (both fail any future
- * literal match immediately; verified directly by falsifying {@code
- * RekeyOps.rekey}'s OWN removal below, which detects exactly as fast via
- * the plain unowned-violation path — only the failure MESSAGE differs).
- * Kept instead because these two methods genuinely CONTAIN/PRODUCE raw SQL
- * (unlike {@code RekeyOps.rekey}, whose "raw SQL" was entirely delegation
- * to elsewhere-registered primitives, hence removed outright below): the
- * registration is this class's own documented AUDIT-TRAIL invariant — "a
- * handful of read sites genuinely cannot be expressed as typed jOOQ DSL...
- * named here explicitly" (this class's own top-level javadoc). Dropping
- * these two entries would make them invisible to anyone reading {@link
- * #SANCTIONED_STATEMENTS} as the inventory of "where does raw SQL exist in
- * this codebase, and why" — a misleading omission given they demonstrably
- * DO belong in that inventory, gate-visibility of their call shape aside.
+ * call site inside the method's OWN body (its argument is a named constant,
+ * not a literal, which evades the name-based heuristic above — a
+ * pre-existing, documented KNOWN RESIDUAL). NOT kept for detection speed — a
+ * registered zero-fingerprint entry and no entry at all behave IDENTICALLY
+ * at scan time (both fail any future literal match immediately). Kept
+ * instead because the registration is this class's own documented
+ * AUDIT-TRAIL invariant — "a handful of read sites genuinely cannot be
+ * expressed as typed jOOQ DSL... named here explicitly" (this class's own
+ * top-level javadoc; see also {@link #EXEMPTION_REGISTRY}, the same
+ * inventory promoted to a checked structure at step 4).
  */
 class RawSqlGateTest {
 
@@ -222,6 +153,20 @@ class RawSqlGateTest {
      * A bare {@code .execute()}/{@code .fetch()}/{@code .fetchOne()} (jOOQ DSL
      * terminal, no string/variable argument) does not match.
      *
+     * <p>nexus-zrcj7 step 4 (Sam's no-SQL-strings-in-Java directive, widened scan
+     * deliverable): added {@code .prepareStatement("...")/.prepareStatement(sql...)} --
+     * raw JDBC's SQL-TEXT-BEARING call. {@code Connection.createStatement()} itself never
+     * carries SQL text (the text arrives on the SUBSEQUENT {@code .execute("...")}/
+     * {@code .executeQuery("...")}/{@code .executeUpdate("...")} call against the
+     * returned {@code Statement}, already covered by the alternatives above), but
+     * {@code PreparedStatement}'s SQL text is bound once, at {@code prepareStatement(...)}
+     * itself, and its later {@code .executeQuery()}/{@code .executeUpdate()} calls take
+     * NO string argument at all -- structurally invisible to every alternative above
+     * before this addition (confirmed empirically: {@code SchemaMigrator}'s three
+     * {@code conn.prepareStatement("...")} call sites, in {@code countChangelogRowsSince}
+     * and {@code preflightChashConstraints}, produced ZERO gate signal; see {@link
+     * #EXEMPTION_REGISTRY} for their disposition).
+     *
      * KNOWN RESIDUAL (accepted, documented per critique): a raw SQL
      * string bound to a variable NOT prefixed "sql" and passed to
      * .execute(var)/.fetch(var) evades the name heuristic — jOOQ's legitimate
@@ -235,101 +180,25 @@ class RawSqlGateTest {
         + "|\\.fetch\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.fetchOne\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.fetchAny\\(\\s*(\"|sql|SQL|new StringBuilder)"
-        + "|\\.resultQuery\\(\\s*(\"|sql|SQL|new StringBuilder))",
+        + "|\\.resultQuery\\(\\s*(\"|sql|SQL|new StringBuilder)"
+        + "|\\.prepareStatement\\(\\s*(\"|sql|SQL|new StringBuilder))",
         Pattern.DOTALL);
 
 
-    /*
-     * DRAFT step-4 exemption list (nexus-zrcj7, 2026-09-03) — NOT ENFORCED.
-     * A sibling doc comment, not a table this class reads: nothing here changes
-     * {@link #scan}'s behavior. It exists to separate the truly-unavoidable raw-SQL
-     * class from the convertible-but-not-yet-converted one BEFORE the gate is
-     * tightened to reject the latter — that tightening is deliberately left to a
-     * follow-up commit assigned after step 1 (PgVectorRepository's search-path
-     * retirement) lands, per the design record (T2
-     * {@code nexus/decision-zrcj7-no-sql-strings-design-2026-09-03}).
-     *
-     * <p><b>Genuinely unavoidable (stays exempt; each already has its own
-     * SANCTIONED_STATEMENTS entry above/below with the same reasoning
-     * inline):</b>
-     * <ul>
-     *   <li>{@code SchemaMigrator.migrate}/{@code countChangelogRows}/{@code
-     *       serverNow} — Liquibase bootstraps on a BARE JDBC {@code Connection}
-     *       before any {@code DSLContext} exists (Liquibase owns that
-     *       connection, not this codebase), plus reads of Liquibase's own
-     *       {@code databasechangelog} bookkeeping table, which sits outside
-     *       jOOQ codegen's modeled schemata.</li>
-     *   <li>{@code SchemaMigrator.preflightChashConstraints} — {@code ALTER
-     *       TABLE ... {NO} FORCE ROW LEVEL SECURITY} is DDL with no jOOQ
-     *       typed-DSL form at all.</li>
-     *   <li>{@code CatalogRepository.deferManifestChunkFk} — {@code SET
-     *       CONSTRAINTS ... DEFERRED} is PostgreSQL transaction-control
-     *       syntax; re-verified via Context7 against the jOOQ 3.21 manual
-     *       (nexus-zrcj7) — no matching DSL method (the closest hits,
-     *       {@code alterConstraint().enforced()/.notEnforced()}, are a
-     *       PERMANENT schema-level toggle, not this transaction-scoped
-     *       checking-mode statement).</li>
-     *   <li>{@code TenantScope.vacuumAnalyze} — {@code VACUUM} is PostgreSQL
-     *       maintenance syntax with no jOOQ typed-DSL form.</li>
-     *   <li>{@code PoolerModeCheck.fetchShowConfig} — {@code SHOW CONFIG} is a
-     *       PgBouncer admin-console meta-command, not SQL against any
-     *       nexus-owned table/schema.</li>
-     *   <li>{@code ChashRepository.lookup} — executes the PUBLISHED {@code
-     *       PROBE_SQL} constant BY NAME; a DSL rendering would decouple the
-     *       EXECUTED statement from the one {@code ChashProbePlanShapeTest}
-     *       EXPLAINs verbatim to pin index usage at 255k-row scale (see this
-     *       class's own top-level javadoc, "Three methods carry a
-     *       registration with a genuinely EMPTY statement multiset").</li>
-     * </ul>
-     *
-     * <p><b>Convertible, NOT true exemptions — deferred, not yet tightened
-     * against:</b>
-     * <ul>
-     *   <li>{@code TaxonomyRepository.advanceTopicsIdSequence} — {@code
-     *       setval(pg_get_serial_sequence(...), GREATEST(...))} is three
-     *       ordinary PostgreSQL functions, each a plain {@code
-     *       DSL.function(name, type, boundArgs...)} call away from typed DSL
-     *       (the same bound-value idiom {@code acquireSweepGateShared}/
-     *       {@code acquireIndexRunLock} already use); small, one call site,
-     *       fidelity-import path only.</li>
-     *   <li>{@code TaxonomyCentroidRepository.annQuery} — the pgvector
-     *       {@code <=>} distance operator over a DYNAMIC-dim embedding column
-     *       (384/768/1024) and centroid table name, built via string
-     *       concatenation. Since RDR-191 unified {@code
-     *       nexus.taxonomy_centroids} into one table with per-dim nullable
-     *       embedding columns, this is very likely expressible as a
-     *       {@code DimTables}-style per-dim {@code switch} selecting the
-     *       already-generated {@code TableField}/{@code Field} constant, then
-     *       the pgvector binding's own operator support (see {@code
-     *       PgVectorRepository}'s {@code Vector}/{@code VectorBinding}
-     *       precedent for {@code <=>}) — not confirmed against the live
-     *       generated DSL surface in this session (PgVectorRepository, where
-     *       that precedent lives, is out of scope here — a parallel worktree
-     *       is retiring its search paths this same cycle); largest of the
-     *       three, warrants its own review pass rather than a guess.</li>
-     * </ul>
-     *
-     * <p><b>Not found in the current tree (bead CENSUS listed these as
-     * candidates; both turned out to be inaccurate on inspection,
-     * nexus-zrcj7):</b>
-     * <ul>
-     *   <li>{@code BackendReaper} — carried NO {@link #SANCTIONED_STATEMENTS}
-     *       entry at all before this session: its raw SQL lived in a bare
-     *       {@code Connection.prepareStatement(String)} call, a shape {@link
-     *       #RAW_EXECUTE} never matched in the first place (not "excused" —
-     *       no anchor; the same structural gap this class's own "KNOWN
-     *       RESIDUAL" section documents for other call shapes). Now moot:
-     *       {@code BackendReaper.terminateOwnBackends} is retired onto
-     *       {@code nexus.terminate_own_backends} (backend-reaper-001), a
-     *       generated table function, so there is neither a stale entry to
-     *       remove nor a residual scan gap to worry about for this file.</li>
-     *   <li>{@code Main.java} — no raw SQL, no JDBC statement construction,
-     *       and no {@link #SANCTIONED_STATEMENTS} entry exist for it today;
-     *       the only hits are a javadoc mention of a {@code jdbc:} URL scheme
-     *       and a comment about grants. Nothing to exempt or convert.</li>
-     * </ul>
-     */
-    // ── end DRAFT step-4 exemption list ──
+    // ── nexus-zrcj7 step 4 (Sam directive 2026-09-03): the DRAFT, non-enforcing
+    //    step-4 exemption-list comment that lived here through steps 1-3 is
+    //    PROMOTED to the checked, enforced {@link #EXEMPTION_REGISTRY} below (a
+    //    Java structure this class actually reads and verifies, not a sibling doc
+    //    comment). Both entries the draft called "convertible, not true exemptions"
+    //    (TaxonomyRepository.advanceTopicsIdSequence, TaxonomyCentroidRepository.
+    //    annQuery) are CONVERTED this cycle, not carried forward as exemptions;
+    //    CatalogRepository's two GREATEST(...) raw-text templates (found by this
+    //    cycle's widened DSL-template scan, {@link #scanDslTemplates}) and
+    //    PgVectorRepository.metadataCondition's `metadata ->> {0}` accessor +
+    //    range-operator template (this class's own KNOWN RESIDUAL history) are
+    //    likewise converted, not exempted. See {@link #EXEMPTION_REGISTRY}'s own
+    //    javadoc for the resulting checked exemption set and its reduce-only
+    //    discipline.
 
     /**
      * Statement-granular escape hatch (nexus-mzuj9 origin, nexus-4okz4
@@ -367,26 +236,17 @@ class RawSqlGateTest {
         // 2026-09-03). rawVectorFetch (the single execution chokepoint for
         // searchWithTokens()/hybridSearch()'s raw SQL) is deleted outright --
         // both callers now go through generated jOOQ function tables
-        // (plain_search_<dim>/text_gated_search_<dim>, vectors-009/010) like every
+        // (plain_search_<dim>/text_gated_search_<dim>, vectors-009/011) like every
         // other combined-query shape. Per the dead-entry-avoidance discipline this
         // class already established (RekeyOps.java's entry, below), a registration
         // for a deleted method is removed outright, not kept as a no-op.
-        Map.entry("TaxonomyCentroidRepository.java", Map.of(
-            // Same pgvector `<=>` category as PgVectorRepository.rawVectorFetch.
-            // RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-jv3ue item 5):
-            // retargeted from a bare "embedding" column + a hand-rolled
-            // "nexus.taxonomy_centroids_<dim>" table name (the latter a table
-            // dropped by the unify changeset -- would have been a SILENT
-            // RUNTIME failure, invisible to this compile-time gate) to
-            // DimTables.embeddingColumn(dim)/CENTROIDS_TABLE_NAME (via
-            // centroidTable(dim)) plus an explicit "embedding_<dim> IS NOT
-            // NULL" guard -- see the method's own javadoc for why the guard
-            // is load-bearing, not cosmetic.
-            "annQuery", Map.of(
-                ".fetch( \"SELECT topic_id, (\" + embeddingCol + \" <=> ?::vector) AS distance FROM \" "
-                + "+ centroidTable(dim) + \" WHERE \" + embeddingCol + \" IS NOT NULL AND collection \" "
-                + "+ op + \" ?\" + \" ORDER BY distance ASC, topic_id ASC LIMIT ?\", "
-                + "vectorLiteral(embedding), collection, nResults)", 1))),
+        //
+        // TaxonomyCentroidRepository.java's "annQuery" entry: REMOVED (nexus-zrcj7
+        // step 4, 2026-09-03). annQuery's raw ctx.fetch(...) (the pgvector `<=>`
+        // distance query, string-concatenated table/column names) is retired onto
+        // nexus.taxonomy_ann_query_<dim> (vectors-013), a generated jOOQ function
+        // table -- same conversion, same reasoning, and the same dead-entry-
+        // avoidance discipline as the rawVectorFetch removal immediately above.
         Map.entry("CatalogRepository.java", Map.of(
             // nexus-zrcj7: acquireIndexRunLock's entry (SANCTIONED RAW,
             // nexus-5xn3k.2 — pg_advisory_xact_lock over a hashtext'd
@@ -429,13 +289,23 @@ class RawSqlGateTest {
             // nexus-c4143 root fix: pg_constraint is a Postgres SYSTEM CATALOG (jOOQ
             // codegen only covers the nexus/t1 application schemas, no generated table
             // exists for pg_catalog), and ALTER TABLE ... {NO} FORCE ROW LEVEL SECURITY
-            // is DDL jOOQ has no typed-DSL form for at all. Two DISTINCT statements
-            // (NO FORCE / FORCE), each executed once per loop iteration over
+            // is DDL jOOQ has no typed-DSL form for at all. Two DISTINCT ALTER TABLE
+            // statements (NO FORCE / FORCE), each executed once per loop iteration over
             // CHASH_LEN_CONSTRAINTS at runtime but appearing exactly once each in the
             // SOURCE — the fingerprint is a source-level construct, not a runtime count.
+            // nexus-zrcj7 step 4 (widened-scan follow-up): the method's two
+            // conn.prepareStatement("...") reads (existsNotValid probe against
+            // pg_constraint; the pre-fix violatingCount COUNT against the target table)
+            // were structurally invisible to RAW_EXECUTE before this cycle's
+            // .prepareStatement(...) alternative was added (this class's own KNOWN
+            // RESIDUAL history) -- both are the SAME bootstrap-JDBC-Connection /
+            // system-catalog category as the rest of this method and SchemaMigrator's
+            // other entries, registered here rather than left invisible.
             "preflightChashConstraints", Map.of(
                 ".execute(\"ALTER TABLE nexus.\" + table + \" NO FORCE ROW LEVEL SECURITY\")", 1,
-                ".execute(\"ALTER TABLE nexus.\" + table + \" FORCE ROW LEVEL SECURITY\")", 1),
+                ".execute(\"ALTER TABLE nexus.\" + table + \" FORCE ROW LEVEL SECURITY\")", 1,
+                ".prepareStatement( \"SELECT NOT convalidated FROM pg_constraint WHERE conname = ?\")", 1,
+                ".prepareStatement( \"SELECT COUNT(*) FROM nexus.\" + table + \" WHERE length(chash) != 32\")", 1),
             // SANCTIONED RAW (nexus-rph82): SET TIME ZONE is PostgreSQL session
             // syntax with no jOOQ typed-DSL form. Pins the migration connection's
             // session zone to UTC so databasechangelog.dateexecuted (stamped via
@@ -464,16 +334,18 @@ class RawSqlGateTest {
             // above); no table involved, no jOOQ typed form for a bare
             // server-clock read on a specific connection.
             "serverNow", Map.of(
-                ".executeQuery(\"SELECT now()::timestamp\")", 1))),
-        Map.entry("TaxonomyRepository.java", Map.of(
-            // SANCTIONED RAW (rdr155-p4b F-C): setval / pg_get_serial_sequence /
-            // sequence last_value are sequence-state functions with no generated
-            // jOOQ form (codegen models tables, not sequences); one statement on
-            // the fidelity-import path only, never serving-path.
-            "advanceTopicsIdSequence", Map.of(
-                ".execute( \"SELECT setval(pg_get_serial_sequence('nexus.topics', 'id'), \" "
-                + "+ \"GREATEST((SELECT last_value FROM nexus.topics_id_seq), ?))\", "
-                + "maxImportedId)", 1))),
+                ".executeQuery(\"SELECT now()::timestamp\")", 1),
+            // SANCTIONED RAW (nexus-x0s52, nexus-zrcj7 step 4): same databasechangelog
+            // bootstrap-connection category as countChangelogRows -- a windowed COUNT
+            // via a bound PreparedStatement, structurally invisible to RAW_EXECUTE
+            // before this cycle's .prepareStatement(...) widening.
+            "countChangelogRowsSince", Map.of(
+                ".prepareStatement( \"SELECT count(*) FROM databasechangelog WHERE dateexecuted >= ?\")", 1))),
+        // TaxonomyRepository.java's "advanceTopicsIdSequence" entry: REMOVED
+        // (nexus-zrcj7 step 4, 2026-09-03). Retired onto typed jOOQ DSL --
+        // DSL.function("setval"/"pg_get_serial_sequence", ...) + DSL.greatest(...)
+        // + a type-safe field(Select) scalar subquery over DSL.table(DSL.name(...))
+        // -- same dead-entry-avoidance discipline as the removals above.
         Map.entry("TenantScope.java", Map.of(
             // SANCTIONED RAW (nexus-0ys55): VACUUM is PostgreSQL maintenance syntax
             // with no jOOQ typed-DSL form at all — same category as ChashSqlIdioms'
@@ -1287,197 +1159,352 @@ class RawSqlGateTest {
             .isNotEmpty();
     }
 
-    // ── nexus-4okz4 increment 5 post-review fix (critic Critical, nexus-8emxy,
-    //    T2 critique-4okz4-increment5-2026-08-09): whole-method-body sentinels
-    //    for raw-SQL ASSEMBLY funneled through a named non-execute/fetch-shaped
-    //    wrapper ──
+    // ── nexus-zrcj7 step 4 (Sam's no-SQL-strings-in-Java directive): widened scan for
+    //    DSL.field/DSL.condition/DSL.query/DSL.table string-literal templates that carry
+    //    ASSEMBLED SQL TEXT rather than a bare protocol-constant identifier reference.
+    //    Scans BOTH src/main AND src/test -- the earlier RAW_EXECUTE-family scans
+    //    ({@link #noRawExecuteSqlInMainSources} etc.) stay src/main-only this cycle; see
+    //    this test's own javadoc for why the test-source population is a separate,
+    //    reported (not silently absorbed) finding ──
 
     /**
-     * Whole-method-body sentinels: {@code file.java -> {method name ->
-     * {expected canonical whole-body texts}}}. A STRUCTURALLY DIFFERENT
-     * mechanism from {@link #SANCTIONED_STATEMENTS} (which fingerprints ONE
-     * {@code .execute(}/{@code .fetch(}-shaped LITERAL call) — this exists
-     * because {@code PgVectorRepository.searchWithTokens}/{@code
-     * hybridSearch} build SQL DYNAMICALLY across many lines (a {@code
-     * StringBuilder} chain, runtime-varying WHERE-predicate loops, a
-     * selectivity-dependent branch between structurally different queries)
-     * and funnel the result through the PRIVATE WRAPPER {@code
-     * rawVectorFetch(ctx, sql, binds)} — called BY NAME, never via a
-     * literal {@code .execute(}/{@code .fetch(} at the CALL site. {@link
-     * #RAW_EXECUTE} anchors exclusively on those two call SHAPES, so it has
-     * NO anchor inside {@code searchWithTokens}/{@code hybridSearch} at
-     * all — not "excused," structurally INVISIBLE, statement-granular or
-     * not. Confirmed empirically (nexus-8emxy falsification, 2026-08-09):
-     * appending an entirely new raw-SQL predicate to {@code
-     * searchWithTokens}'s {@code StringBuilder} produced ZERO gate signal;
-     * {@code RawSqlGateTest} stayed 12/12 green with the probe in place.
-     *
-     * <p>This is a COARSER, whole-body tripwire, not a finer one: the
-     * method's ENTIRE whitespace-collapsed body text must match one of the
-     * registered snapshots EXACTLY. ANY edit — a new predicate, a changed
-     * literal, a restructured branch — changes the canonical text and
-     * fails the gate, forcing a maintainer to consciously update the
-     * registration (and thus review the diff) before it can land. This is
-     * STRONGER than statement-granular protection for these two methods
-     * (it also catches an EDITED existing statement, not just an ADDED
-     * one), traded against being unable to say WHICH statement inside the
-     * body changed — appropriate for a method whose danger is the shape of
-     * a dynamically-composed query, not a single fixed literal.
-     *
-     * <p>Registered under the bare method name — like {@link
-     * #SANCTIONED_STATEMENTS}, this matches EVERY same-named overload
-     * ({@link #sanctionedRegions} is name-only, not overload-aware).
-     * {@code searchWithTokens}/{@code hybridSearch} each have several thin
-     * one-line delegating overloads sharing the bare name with the one
-     * real SQL-assembling implementation; all bodies found are registered
-     * (harmless conservatism — a delegator's body is a natural, low-churn
-     * additional tripwire, not overreach).
+     * Marks a {@code DSL.field}/{@code DSL.condition}/{@code DSL.query}/{@code
+     * DSL.table} string-literal FIRST argument as assembled SQL TEXT rather than a bare
+     * identifier/pseudo-column reference: any whitespace character, or a substring
+     * matching one of PostgreSQL's comparison/JSON operators. Verified against the live
+     * tree's census (nexus-zrcj7 gate javadoc history, 67 call sites / 5 files): 60 bare
+     * references like {@code "EXCLUDED.name"} or {@code "catalog_owners.next_seq"} have
+     * NEITHER a space nor an operator and are left alone; every genuine fragment this
+     * cycle converted ({@code "metadata ->> {0}"}, {@code "GREATEST(catalog_owners.
+     * next_seq, EXCLUDED.next_seq)"}) has at least one.
      */
-    private static final Map<String, Map<String, java.util.Set<String>>> RAW_SQL_ASSEMBLY_SENTINELS =
-        Map.of();
+    private static final String[] SQL_OPERATOR_SUBSTRINGS =
+        {"->>", "->", "<=", ">=", "<>", "!=", "::", "=", "<", ">"};
 
-    // RETIRED (nexus-zrcj7, 2026-09-03): this map used to carry a PgVectorRepository.java
-    // entry naming searchWithTokens/hybridSearch, the two StringBuilder-assembled-raw-SQL
-    // methods this whole mechanism was built for (this class's own javadoc: "the
-    // bead's first NAMED motivating file"). Both methods are retired onto generated
-    // jOOQ function tables (plain_search_<dim>/text_gated_search_<dim>, vectors-
-    // 009/010) -- zero raw-SQL-assembling methods remain on the search path, the
-    // corpus this mechanism polices is now permanently empty by construction, and
-    // RAW_SQL_ASSEMBLY_SENTINELS above is Map.of() rather than carrying a stale or
-    // vacuous entry, matching the dead-entry-avoidance discipline this class already
-    // established elsewhere (SANCTIONED_STATEMENTS' RekeyOps.java removal, above;
-    // TombstoneFilterGateTest's floor_stagingPromoteOpsRawSqlSites retirement, same
-    // reasoning). {@link #noUnreviewedRawSqlAssemblyChanges} keeps running (walks
-    // src/main for every registered file -- there are none today, so it always
-    // finds zero violations) as a live, non-dormant guard should a FUTURE raw-SQL-
-    // assembling method ever need this registration again; only the DATA that named
-    // PgVectorRepository.java is gone, not the mechanism.
-    /** Per-file scan for {@link #RAW_SQL_ASSEMBLY_SENTINELS} violations:
-     * every registered method's CURRENT whole-body canonical text must
-     * match one of its declared snapshots exactly, and every declared
-     * snapshot must be matched by some current body (symmetric, same
-     * discipline as {@link #scan}'s stale-fingerprint sweep). */
-    static List<String> scanAssemblySentinels(String fileName, String rawSource) {
-        String blanked = blank(rawSource);
-        Map<String, java.util.Set<String>> methods =
-            RAW_SQL_ASSEMBLY_SENTINELS.getOrDefault(fileName, Map.of());
+    static boolean looksLikeAssembledSql(String literalBody) {
+        if (literalBody.chars().anyMatch(Character::isWhitespace)) {
+            return true;
+        }
+        for (String op : SQL_OPERATOR_SUBSTRINGS) {
+            if (literalBody.contains(op)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The literal TEXT between a string literal's opening quote (at {@code
+     * openQuoteIdx}) and its matching unescaped closing quote -- delimiters excluded,
+     * escape sequences copied through verbatim (mirrors {@link #firstArg}'s own
+     * quote-skipping, narrowed to just the literal body). */
+    static String stringLiteralBody(String src, int openQuoteIdx) {
+        StringBuilder sb = new StringBuilder();
+        int i = openQuoteIdx + 1;
+        while (i < src.length() && src.charAt(i) != '"') {
+            if (src.charAt(i) == '\\' && i + 1 < src.length()) {
+                sb.append(src.charAt(i));
+                i++;
+            }
+            sb.append(src.charAt(i));
+            i++;
+        }
+        return sb.toString();
+    }
+
+    /** Per-file scan: every {@code DSL.(field|condition|query|table)("...")} call site
+     * whose string-literal first argument is flagged by {@link #looksLikeAssembledSql}.
+     * Runs against {@link #blankComments} (like {@link #scanInlineNonLiteralArgs}) so a
+     * javadoc/comment MENTION of one of these templates is never mistaken for a live
+     * call site. {@code DSL.table(DSL.name(...))} -- the safe quoted-identifier idiom
+     * {@code ChashCensus.java}/{@code StagingPromoteOps.java} already use for dynamic
+     * relation names -- never matches: its first argument is a nested call, not an
+     * immediate string literal. */
+    static List<String> scanDslTemplates(String fileName, String rawSource) {
+        String commentsBlanked = blankComments(rawSource);
         List<String> violations = new ArrayList<>();
-        for (var entry : methods.entrySet()) {
-            String name = entry.getKey();
-            java.util.Set<String> expected = entry.getValue();
-            List<int[]> regions = sanctionedRegions(blanked, java.util.Set.of(name));
-            if (regions.isEmpty()) {
-                violations.add(fileName + "  SENTINEL METHOD NOT FOUND: " + name
-                    + " -- registered in RAW_SQL_ASSEMBLY_SENTINELS but no method of "
-                    + "that name exists in this file any more; remove or update the "
-                    + "registration");
+        Matcher m = Pattern.compile("\\bDSL\\.(field|condition|query|table)\\(\\s*\"")
+            .matcher(commentsBlanked);
+        while (m.find()) {
+            int openQuote = m.end() - 1;
+            String body = stringLiteralBody(commentsBlanked, openQuote);
+            if (!looksLikeAssembledSql(body)) {
                 continue;
             }
-            java.util.Set<String> actual = new java.util.LinkedHashSet<>();
-            for (int[] r : regions) {
-                actual.add(canonicalStatementText(rawSource, r));
-            }
-            for (String a : actual) {
-                if (!expected.contains(a)) {
-                    violations.add(fileName + "  SENTINEL BODY CHANGED in " + name
-                        + " -- this raw-SQL-assembling method's body no longer matches "
-                        + "any registered snapshot; review the diff for a new/edited raw "
-                        + "SQL fragment, then copy the canonical text below into "
-                        + "RAW_SQL_ASSEMBLY_SENTINELS verbatim: " + a);
-                }
-            }
-            for (String e : expected) {
-                if (!actual.contains(e)) {
-                    violations.add(fileName + "  STALE SENTINEL in " + name
-                        + " -- a registered snapshot no longer matches any method body "
-                        + "found; remove it: " + e);
-                }
-            }
+            int line = 1 + (int) commentsBlanked.substring(0, m.start()).chars()
+                .filter(c -> c == '\n').count();
+            violations.add(fileName + ":" + line + "  DSL." + m.group(1) + "(\"" + body
+                + "\", ...) -- string-literal argument carries assembled SQL text (a space "
+                + "or an operator), not a bare identifier reference; move it onto a typed "
+                + "jOOQ DSL call (DSL.jsonbGetAttribute(AsText)/DSL.greatest/DSL.function/"
+                + "DSL.excluded and friends) or, if the expression genuinely has no typed "
+                + "form, into a Liquibase function + generated jOOQ routine table (see "
+                + "EXEMPTION_REGISTRY for the genuinely-unavoidable exception list)");
         }
         return violations;
     }
 
+    /**
+     * Scans BOTH {@code src/main/java} AND {@code src/test/java} for {@link
+     * #scanDslTemplates} violations. Unlike the RAW_EXECUTE-family scans, this
+     * detector's src/test walk is SAFE to enable today: a census taken before this
+     * scan existed found ZERO real {@code DSL.field}/{@code DSL.condition}/{@code
+     * DSL.query}/{@code DSL.table} string-literal-first-argument call sites anywhere
+     * under {@code src/test/java} (the only hits were this class's OWN javadoc
+     * mentions, already excluded by the {@link #blankComments} pass). Extending
+     * {@link #noRawExecuteSqlInMainSources}'s RAW_EXECUTE-family walk to src/test the
+     * same way would NOT be safe today — a census taken the same session found 554
+     * pre-existing {@code .execute}/{@code .fetch}/{@code .resultQuery}-family raw-SQL
+     * call sites across 129 test files (EXPLAIN-based plan-shape harnesses, Testcontainers
+     * bootstrap DDL, Liquibase-driven schema tests), none reviewed or registered in any
+     * exemption structure. Widening that walk is a SEPARATE, much larger piece of work
+     * this bead's step 4 scope does not cover — reported, not silently absorbed here nor
+     * silently left unmentioned (see this session's final report / T2 write-back for the
+     * finding, per "stop and report" rather than either exploding the build or fabricating
+     * an unreviewed 554-entry exemption list).
+     */
     @Test
-    void noUnreviewedRawSqlAssemblyChanges() throws IOException {
-        Path root = Path.of("src", "main", "java");
-        assertThat(root).exists();
-
+    void noRawSqlDslTemplatesInMainOrTestSources() throws IOException {
         List<String> violations = new ArrayList<>();
-        try (Stream<Path> files = Files.walk(root)) {
-            files.filter(p -> p.toString().endsWith(".java")).forEach(p -> {
-                try {
-                    violations.addAll(scanAssemblySentinels(
-                        p.getFileName().toString(), Files.readString(p)));
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-            });
+        for (String root : List.of("main", "test")) {
+            Path r = Path.of("src", root, "java");
+            assertThat(r).exists();
+            try (Stream<Path> files = Files.walk(r)) {
+                files.filter(p -> p.toString().endsWith(".java")).forEach(p -> {
+                    try {
+                        violations.addAll(scanDslTemplates(
+                            p.getFileName().toString(), Files.readString(p)));
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+            }
         }
-
         assertThat(violations)
-            .as("a raw-SQL-ASSEMBLING method (StringBuilder-built SQL funneled through a "
-                + "named non-execute/fetch wrapper) changed body since its "
-                + "RAW_SQL_ASSEMBLY_SENTINELS snapshot was registered — review the diff for "
-                + "a new or edited raw SQL fragment, then update the registration to the new "
-                + "canonical text shown in the failure message")
+            .as("DSL.field/DSL.condition/DSL.query/DSL.table string-literal templates "
+                + "carrying assembled SQL text -- see scanDslTemplates's own javadoc")
             .isEmpty();
     }
 
-    // assemblySentinel_bodyChange_isFlagged: RETIRED (nexus-zrcj7, 2026-09-03). It
-    // proved a body that matches none of RAW_SQL_ASSEMBLY_SENTINELS's registered
-    // snapshots fails loud "even though a method of that name IS registered" -- a
-    // precondition (SOME method registered for PgVectorRepository.java) that no
-    // longer holds now that the map is Map.of() (searchWithTokens/hybridSearch
-    // retired onto generated jOOQ function tables, vectors-009/010: see the
-    // RAW_SQL_ASSEMBLY_SENTINELS retirement comment above). Same disposition as
-    // TombstoneFilterGateTest's floor_stagingPromoteOpsRawSqlSites: a proof whose
-    // fixture went permanently empty is removed, not adjusted to assert nothing.
-    // assemblySentinel_unregisteredFileOrMethod_isUnaffected (below) still covers
-    // the scan-logic-returns-empty-for-an-unregistered-file/method shape this test
-    // used to distinguish from -- PgVectorRepository.java now behaves exactly like
-    // that case, so no coverage is lost, only the SPECIFIC "registered but wrong
-    // body" branch, which nothing in the real tree can exercise any more.
-
     @Test
-    void assemblySentinel_unregisteredFileOrMethod_isUnaffected() {
+    void dslTemplate_operatorTemplate_isFlagged() {
         String synthetic = String.join("\n",
-            "public final class SomeOtherClass {",
-            "    void whatever() {",
-            "        rawVectorFetch(ctx, \"anything\");",
+            "public final class Whatever {",
+            "    void danger() {",
+            "        Field<String> mv = DSL.field(\"metadata ->> {0}\", String.class, key);",
             "    }",
             "}");
-        assertThat(scanAssemblySentinels("SomeOtherClass.java", synthetic)).isEmpty();
+        assertThat(scanDslTemplates("Whatever.java", synthetic))
+            .as("an operator embedded in a DSL.field string template must fail loud")
+            .anySatisfy(h -> assertThat(h).contains("metadata ->> {0}"));
     }
 
-    // ── nexus-8emxy (comment, 2026-08-09): SAME-FILE evolution closure --
-    //    invert the failure mode. RAW_SQL_ASSEMBLY_SENTINELS is name-keyed
-    //    (it only inspects methods already registered as keys); this finds
-    //    every actual CALL SITE of the wrapper by name and requires its
-    //    enclosing method to already be registered, so an unnamed future
-    //    caller fails loud instead of producing zero signal ──
+    @Test
+    void dslTemplate_greatestFunctionCallTemplate_isFlagged() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    void danger() {",
+            "        Field<Long> f = DSL.field(\"GREATEST(a.x, EXCLUDED.x)\", Long.class);",
+            "    }",
+            "}");
+        assertThat(scanDslTemplates("Whatever.java", synthetic))
+            .as("a space-separated function-call template must fail loud even with no "
+                + "explicit comparison operator")
+            .anySatisfy(h -> assertThat(h).contains("GREATEST"));
+    }
 
-    /** Private raw-SQL wrapper methods (by file) whose CALL SITES must each
-     * fall inside a method registered in {@link #RAW_SQL_ASSEMBLY_SENTINELS}
-     * for that same file. Unlike {@link #SANCTIONED_STATEMENTS} / {@link
-     * #RAW_SQL_ASSEMBLY_SENTINELS} (which enumerate TRUSTED caller method
-     * names — a list a new caller can simply not appear on), this registry
-     * enumerates WRAPPER method names — the dangerous thing whose every
-     * invocation must be found and checked, regardless of what calls it or
-     * what that caller happens to be named. Adding a private raw-SQL
-     * funnel method elsewhere already requires registering its own body in
-     * {@link #SANCTIONED_STATEMENTS} (its {@code .fetch(}/{@code .execute(}
-     * call is a literal {@link #RAW_EXECUTE} match); this map is the
-     * companion registration for treating it as a wrapper whose callers
-     * must all be accounted for. */
-    // Empty (nexus-zrcj7, 2026-09-03): the sole entry, PgVectorRepository.java's
-    // "rawVectorFetch", is REMOVED -- that method is deleted outright (searchWithTokens/
-    // hybridSearch retired onto generated jOOQ function tables, vectors-009/010), so
-    // there is no wrapper method left anywhere in this class's corpus to register. Kept
-    // as a live (not deleted) mechanism, dormant by construction until a future raw-
-    // SQL-assembling wrapper needs it again -- same "dormant, not enforced, noted per
-    // spec" disposition TombstoneFilterGateTest gives its own catalog_links case.
-    private static final Map<String, java.util.Set<String>> RAW_SQL_WRAPPER_METHODS =
-        Map.of();
+    @Test
+    void dslTemplate_bareExcludedIdentifierReference_isExcusedWithoutAnyRegistration() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    void safe() {",
+            "        Field<String> f = DSL.field(\"EXCLUDED.name\", String.class);",
+            "    }",
+            "}");
+        assertThat(scanDslTemplates("Whatever.java", synthetic))
+            .as("a bare ON CONFLICT pseudo-table identifier reference (no space, no "
+                + "operator) is not assembled SQL text and needs no exemption entry")
+            .isEmpty();
+    }
+
+    @Test
+    void dslTemplate_dslNameIdiomForDynamicRelationNames_isNeverMatched() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    void safe() {",
+            "        Table<?> t = DSL.table(DSL.name(\"staging\", \"chunks\"));",
+            "    }",
+            "}");
+        assertThat(scanDslTemplates("Whatever.java", synthetic))
+            .as("DSL.table(DSL.name(...)) is the safe quoted-identifier idiom, not a "
+                + "string-literal template -- its first argument is a nested call, never "
+                + "an immediate string literal, so the detector's own regex anchor never "
+                + "matches it")
+            .isEmpty();
+    }
+
+    @Test
+    void dslTemplate_javadocMentionOfATemplate_isNotFlagged() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    /** formerly a raw {@code DSL.field(\"GREATEST(a, b)\", Long.class)} template */",
+            "    void safe() {",
+            "    }",
+            "}");
+        assertThat(scanDslTemplates("Whatever.java", synthetic))
+            .as("a javadoc/comment MENTION of a retired template must never be mistaken "
+                + "for a live call site")
+            .isEmpty();
+    }
+
+    // ── nexus-zrcj7 step 4 (Sam's no-SQL-strings-in-Java directive): the checked,
+    //    ENFORCED exemption registry, promoted from the DRAFT comment this class
+    //    carried through steps 1-3 ──
+
+    /**
+     * One raw-SQL-bearing method that remains genuinely UNCONVERTIBLE today.
+     *
+     * @param file        the bare file name, as used by {@link #SANCTIONED_STATEMENTS}'s
+     *                    own keys (all nine entries below live under {@code
+     *                    dev.nexus.service.db}).
+     * @param method      the exempted method's bare name.
+     * @param reason      one-line justification (why no typed jOOQ DSL form exists).
+     * @param convertible {@code false} for every entry today (every convertible site
+     *                    census turned up this cycle -- CatalogRepository's two
+     *                    GREATEST(...) templates, PgVectorRepository.metadataCondition,
+     *                    TaxonomyRepository.advanceTopicsIdSequence,
+     *                    TaxonomyCentroidRepository.annQuery -- is converted, not
+     *                    exempted; the field stays for a FUTURE finding that is real but
+     *                    not yet acted on, never as a place to park something merely
+     *                    inconvenient).
+     */
+    record ExemptionEntry(String file, String method, String reason, boolean convertible) {}
+
+    /**
+     * REDUCE ONLY (Sam's step-4 directive: "the registry size ... may only go down").
+     * A new exemption is a deliberate, reviewed decision — bump this ceiling in the
+     * SAME edit as the new {@link #EXEMPTION_REGISTRY} entry, never as a side effect of
+     * an unrelated change. {@link #exemptionRegistry_sizeStaysAtOrBelowCeiling} pins it.
+     */
+    private static final int EXEMPTION_REGISTRY_CEILING = 9;
+
+    /**
+     * The nine sites this cycle's census confirmed have no typed jOOQ DSL form at all
+     * (DDL, session/transaction-control syntax, a PgBouncer admin meta-command, a
+     * Liquibase-bootstrap connection that predates any DSLContext, a system-catalog
+     * read jOOQ codegen does not model, and one EXPLAIN-pinned probe constant executed
+     * by name). Every entry MUST have a live {@link #SANCTIONED_STATEMENTS} registration
+     * for the same (file, method) pair AND a live method declaration in that file on
+     * disk — both checked by {@link #exemptionRegistry_everySiteStillExistsInSanctionedStatementsAndSource}.
+     */
+    private static final List<ExemptionEntry> EXEMPTION_REGISTRY = List.of(
+        new ExemptionEntry("SchemaMigrator.java", "migrate",
+            "SET TIME ZONE 'UTC' on the bare Liquibase-bootstrap JDBC Connection, before "
+            + "any DSLContext exists — PostgreSQL session syntax, no jOOQ typed-DSL form.",
+            false),
+        new ExemptionEntry("SchemaMigrator.java", "countChangelogRows",
+            "Reads Liquibase's OWN databasechangelog bookkeeping table, unqualified, on "
+            + "the SAME bootstrap connection Liquibase itself uses — outside jOOQ "
+            + "codegen's modeled schemata by design.",
+            false),
+        new ExemptionEntry("SchemaMigrator.java", "countChangelogRowsSince",
+            "Same databasechangelog bootstrap-connection category as countChangelogRows, "
+            + "windowed by dateexecuted via a bound PreparedStatement.",
+            false),
+        new ExemptionEntry("SchemaMigrator.java", "serverNow",
+            "Bare server-clock read (now()::timestamp) on the migration connection "
+            + "itself — no table involved, no jOOQ typed form for a connection-scoped "
+            + "clock read.",
+            false),
+        new ExemptionEntry("SchemaMigrator.java", "preflightChashConstraints",
+            "ALTER TABLE ... {NO} FORCE ROW LEVEL SECURITY is DDL with no jOOQ typed-DSL "
+            + "form; the constraint-validity probe reads pg_constraint, a Postgres system "
+            + "catalog jOOQ codegen does not model.",
+            false),
+        new ExemptionEntry("CatalogRepository.java", "deferManifestChunkFk",
+            "SET CONSTRAINTS ... DEFERRED is PostgreSQL transaction-control syntax with "
+            + "no jOOQ typed-DSL form (re-verified against the jOOQ 3.21 manual via "
+            + "Context7, nexus-zrcj7): the closest hits, alterConstraint().enforced()/"
+            + ".notEnforced(), are a PERMANENT schema-level toggle, not this "
+            + "transaction-scoped checking mode.",
+            false),
+        new ExemptionEntry("TenantScope.java", "vacuumAnalyze",
+            "VACUUM is PostgreSQL maintenance syntax with no jOOQ typed-DSL form at all.",
+            false),
+        new ExemptionEntry("PoolerModeCheck.java", "fetchShowConfig",
+            "SHOW CONFIG is a PgBouncer admin-console meta-command, not SQL against any "
+            + "nexus-owned table/schema — no jOOQ DSL form exists.",
+            false),
+        new ExemptionEntry("ChashRepository.java", "lookup",
+            "Executes the PUBLISHED PROBE_SQL constant BY NAME; a DSL rendering would "
+            + "decouple the EXECUTED statement from the one ChashProbePlanShapeTest "
+            + "EXPLAINs verbatim to pin index usage at 255k-row scale.",
+            false)
+    );
+
+    @Test
+    void exemptionRegistry_sizeStaysAtOrBelowCeiling() {
+        assertThat(EXEMPTION_REGISTRY.size())
+            .as("EXEMPTION_REGISTRY grew past its REDUCE-ONLY ceiling (%d) — a new raw-SQL "
+                + "exemption is a deliberate, reviewed decision: bump "
+                + "EXEMPTION_REGISTRY_CEILING in the SAME edit as the new entry, never as a "
+                + "side effect of an unrelated change", EXEMPTION_REGISTRY_CEILING)
+            .isLessThanOrEqualTo(EXEMPTION_REGISTRY_CEILING);
+    }
+
+    @Test
+    void exemptionRegistry_everySiteStillExistsInSanctionedStatementsAndSource() throws IOException {
+        for (ExemptionEntry e : EXEMPTION_REGISTRY) {
+            assertThat(SANCTIONED_STATEMENTS.getOrDefault(e.file(), Map.of()))
+                .as("exemption registry entry %s#%s has no matching SANCTIONED_STATEMENTS "
+                    + "registration -- either the entry is stale (method converted/removed) "
+                    + "or the SANCTIONED_STATEMENTS registration was dropped without "
+                    + "updating this registry", e.file(), e.method())
+                .containsKey(e.method());
+
+            Path path = Path.of("src", "main", "java", "dev", "nexus", "service", "db", e.file());
+            assertThat(path)
+                .as("exemption registry entry %s#%s names a file that no longer exists "
+                    + "under dev.nexus.service.db", e.file(), e.method())
+                .exists();
+            List<int[]> regions = sanctionedRegions(blank(Files.readString(path)),
+                java.util.Set.of(e.method()));
+            assertThat(regions)
+                .as("exemption registry entry %s#%s: method %s no longer has a live "
+                    + "declaration in %s -- stale exemption, remove or update this "
+                    + "registry entry", e.file(), e.method(), e.method(), e.file())
+                .isNotEmpty();
+        }
+    }
+
+    // ── RAW_SQL_ASSEMBLY_SENTINELS / RAW_SQL_WRAPPER_METHODS: DELETED (nexus-zrcj7
+    //    step 4, deliverable 4). Both maps had been Map.of() since PgVectorRepository's
+    //    rawVectorFetch wrapper (their sole former entry, "the bead's first NAMED
+    //    motivating file") was deleted outright at step 1 -- searchWithTokens/
+    //    hybridSearch retired onto generated jOOQ function tables (plain_search_<dim>/
+    //    text_gated_search_<dim>, vectors-009/011). This bead's own step 4 mandate
+    //    ("delete RAW_SQL_ASSEMBLY_SENTINELS if it is now empty") plus TaxonomyCentroid
+    //    Repository.annQuery's conversion this same step (the only other raw-SQL-
+    //    assembling method census ever found) means the corpus this pair of mechanisms
+    //    polices is not merely empty today but has no live candidate anywhere in the
+    //    tree. Deleted outright, per the dead-entry-avoidance discipline this class
+    //    already established for a dead REGISTRATION (SANCTIONED_STATEMENTS' RekeyOps.
+    //    java entry) -- here extended to the dead MECHANISM itself: scanAssemblySentinels/
+    //    noUnreviewedRawSqlAssemblyChanges/assemblySentinel_unregisteredFileOrMethod_
+    //    isUnaffected and scanWrapperCallSitesSentineled/noUnsentineledRawSqlWrapperCallSites
+    //    are deleted along with their maps -- all of them existed only to tolerate or
+    //    exercise machinery that, as of this commit, has nothing left to register.
+    //    {@link #wrapperCallSites} and {@link
+    //    #wrapperCallSites_realPgVectorRepository_zeroRawVectorFetchCallSitesRemain}
+    //    below are KEPT: neither depends on either deleted map -- the test reads the
+    //    real PgVectorRepository.java file directly and asserts zero rawVectorFetch call
+    //    sites remain, a standalone regression guard for this bead's own success
+    //    criterion, not scaffolding for the sentinel/wrapper-registry pair. If a FUTURE
+    //    raw-SQL-assembling method funneled through a named non-execute/fetch wrapper
+    //    ever resurfaces, this whole mechanism (whole-method-body sentinels keyed by
+    //    file->method->{expected canonical bodies}, plus a companion wrapper-name
+    //    registry whose every call site must fall inside an already-sentineled method)
+    //    is recoverable from git history at the commit immediately preceding this one --
+    //    write it back in rather than resurrecting it empty "just in case."
 
     /** Every CALL SITE start-offset of {@code name} in blanked source --
      * i.e. every {@code \bname(} match that is NOT that name's own
@@ -1525,104 +1552,21 @@ class RawSqlGateTest {
         return sites;
     }
 
-    /** Per-file scan (nexus-8emxy, same-file closure): every call site of a
-     * {@link #RAW_SQL_WRAPPER_METHODS}-registered wrapper must fall inside
-     * a method that already has a {@link #RAW_SQL_ASSEMBLY_SENTINELS}
-     * registration for the SAME file. The check does not need to know the
-     * enclosing method's NAME to be correct -- it only needs to know
-     * whether the call site sits inside the UNION of regions belonging to
-     * already-registered methods; a call site outside that union is
-     * uncovered regardless of what its enclosing method is called. */
-    static List<String> scanWrapperCallSitesSentineled(String fileName, String rawSource) {
-        java.util.Set<String> wrapperNames = RAW_SQL_WRAPPER_METHODS.getOrDefault(fileName, java.util.Set.of());
-        if (wrapperNames.isEmpty()) {
-            return List.of();
-        }
-        String blanked = blank(rawSource);
-        java.util.Set<String> sentineledNames =
-            RAW_SQL_ASSEMBLY_SENTINELS.getOrDefault(fileName, Map.of()).keySet();
-        List<int[]> sentineledRegions = sanctionedRegions(blanked, sentineledNames);
-
-        List<String> violations = new ArrayList<>();
-        for (String wrapperName : wrapperNames) {
-            for (int at : wrapperCallSites(blanked, wrapperName)) {
-                boolean covered = false;
-                for (int[] r : sentineledRegions) {
-                    if (r[0] <= at && at < r[1]) {
-                        covered = true;
-                        break;
-                    }
-                }
-                if (!covered) {
-                    int line = 1 + (int) blanked.substring(0, at).chars()
-                        .filter(c -> c == '\n').count();
-                    violations.add(fileName + ":" + line + "  UNSENTINELED WRAPPER CALL SITE: a call "
-                        + "to " + wrapperName + "(...) was found in a method with no "
-                        + "RAW_SQL_ASSEMBLY_SENTINELS registration for " + fileName + " -- add the "
-                        + "enclosing method's whole-body canonical text to RAW_SQL_ASSEMBLY_SENTINELS "
-                        + "(see its own javadoc) before this raw-SQL-assembling caller can be assumed "
-                        + "reviewed");
-                }
-            }
-        }
-        return violations;
-    }
-
-    @Test
-    void noUnsentineledRawSqlWrapperCallSites() throws IOException {
-        Path root = Path.of("src", "main", "java");
-        assertThat(root).exists();
-
-        List<String> violations = new ArrayList<>();
-        try (Stream<Path> files = Files.walk(root)) {
-            files.filter(p -> p.toString().endsWith(".java")).forEach(p -> {
-                try {
-                    violations.addAll(scanWrapperCallSitesSentineled(
-                        p.getFileName().toString(), Files.readString(p)));
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-            });
-        }
-
-        assertThat(violations)
-            .as("a call to a RAW_SQL_WRAPPER_METHODS-registered wrapper (e.g. "
-                + "PgVectorRepository.rawVectorFetch) was found outside every method already "
-                + "registered in RAW_SQL_ASSEMBLY_SENTINELS -- either the new caller genuinely "
-                + "needs review (add its whole-body snapshot to RAW_SQL_ASSEMBLY_SENTINELS) or "
-                + "it should be refactored to route through an already-sentineled method")
-            .isEmpty();
-    }
-
-    // wrapperCallSites_newUnsentineledCaller_isFlagged: RETIRED (nexus-zrcj7,
-    // 2026-09-03). It proved a brand-new, differently-named method calling
-    // rawVectorFetch fails loud even though the wrapper's OWN existence is what
-    // RAW_SQL_WRAPPER_METHODS registers ("PgVectorRepository.java" ->
-    // "rawVectorFetch") -- a precondition that no longer holds now that
-    // RAW_SQL_WRAPPER_METHODS is Map.of() (rawVectorFetch itself deleted;
-    // searchWithTokens/hybridSearch retired onto generated jOOQ function tables,
-    // vectors-009/010). scanWrapperCallSitesSentineled short-circuits to
-    // List.of() for any file with no registered wrapper name, so this synthetic
-    // source can no longer produce the finding it asserted. The falsification
-    // this test demonstrated (an unnamed future caller must produce a FAILING
-    // signal, not zero signal) is preserved for a FUTURE raw-SQL wrapper: the
-    // moment RAW_SQL_WRAPPER_METHODS names one again, this same shape of proof
-    // is the one to write back in.
-
     /** RENAMED and REPURPOSED (nexus-zrcj7, 2026-09-03; was
      * {@code wrapperCallSites_realPgVectorRepository_allFiveCallSitesAreSentineled},
      * which pinned "exactly 5 rawVectorFetch call sites, all inside
      * searchWithTokens/hybridSearch" as the non-overreach proof for the
      * nexus-8emxy extension). searchWithTokens and hybridSearch are now retired
      * onto generated jOOQ function tables (plain_search_<dim>/text_gated_search_
-     * <dim>, vectors-009/010) -- rawVectorFetch itself is deleted, so the "5 call
+     * <dim>, vectors-009/011) -- rawVectorFetch itself is deleted, so the "5 call
      * sites, all sentineled" shape this test used to pin can never recur. This is
      * exactly the bead's own success criterion made a standing regression guard:
-     * ZERO raw-SQL-assembling call sites on the search path, in the REAL tree, not
-     * just in RAW_SQL_ASSEMBLY_SENTINELS's (now-empty) data. Reads the real file
-     * directly (not the tree-walking {@link #noUnsentineledRawSqlWrapperCallSites}
-     * test) so this assertion is unambiguous even if some other file elsewhere in
-     * the walk were to fail. */
+     * ZERO raw-SQL-assembling call sites on the search path, in the REAL tree.
+     * KEPT after the RAW_SQL_ASSEMBLY_SENTINELS/RAW_SQL_WRAPPER_METHODS deletion
+     * (step 4, deliverable 4): this test and {@link #wrapperCallSites} are the only
+     * two survivors of that mechanism, and neither depends on either deleted map --
+     * it reads the real file directly, unambiguous regardless of anything else in
+     * the tree. */
     @Test
     void wrapperCallSites_realPgVectorRepository_zeroRawVectorFetchCallSitesRemain() throws IOException {
         Path path = Path.of("src", "main", "java", "dev", "nexus", "service", "vectors",
@@ -1633,11 +1577,11 @@ class RawSqlGateTest {
         assertThat(wrapperCallSites(blank(source), "rawVectorFetch"))
             .as("nexus-zrcj7: rawVectorFetch (and every call to it) is deleted outright -- "
                 + "searchWithTokens/hybridSearch now read through generated jOOQ function "
-                + "tables (plain_search_<dim>/text_gated_search_<dim>, vectors-009/010). A "
+                + "tables (plain_search_<dim>/text_gated_search_<dim>, vectors-009/011). A "
                 + "non-empty result here means a raw-SQL-assembling call was reintroduced; "
-                + "register the wrapper in RAW_SQL_WRAPPER_METHODS and its enclosing method's "
-                + "whole-body canonical text in RAW_SQL_ASSEMBLY_SENTINELS before this can "
-                + "pass again")
+                + "see git history at the commit preceding the RAW_SQL_ASSEMBLY_SENTINELS/ "
+                + "RAW_SQL_WRAPPER_METHODS deletion (nexus-zrcj7 step 4) for the mechanism "
+                + "to write back before this can pass again")
             .isEmpty();
     }
 }

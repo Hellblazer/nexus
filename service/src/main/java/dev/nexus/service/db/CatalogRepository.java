@@ -180,8 +180,14 @@ public final class CatalogRepository {
     // GREATEST for next_seq on owner ETL import: never downgrade a live-advanced sequence
     // counter on re-import. A faithful migration must carry next_seq from the source so the
     // first post-cutover registerDocument does not collide with an already-imported tumbler.
+    // nexus-zrcj7: retired from a raw DSL.field("GREATEST(catalog_owners.next_seq,
+    // EXCLUDED.next_seq)", ...) template onto jOOQ core's typed DSL.greatest(...) --
+    // same idiom already used at this file's claimNextSeqAtomic-family site (line ~1680,
+    // DSL.greatest(CATALOG_OWNERS.NEXT_SEQ, DSL.val(highWater))) -- combined with
+    // DSL.excluded(...), jOOQ's typed accessor for the ON CONFLICT pseudo-table (already
+    // used throughout this file for every other EXCLUDED.* merge column).
     private static final Field<Long>    EX_OWN_SEQ_GREATEST =
-        DSL.field("GREATEST(catalog_owners.next_seq, EXCLUDED.next_seq)", Long.class);
+        DSL.greatest(CATALOG_OWNERS.NEXT_SEQ, DSL.excluded(CATALOG_OWNERS.NEXT_SEQ));
 
     private static final Field<String>  EX_DOC_TITLE  = DSL.field("EXCLUDED.title",        String.class);
     private static final Field<String>  EX_DOC_AUTHOR = DSL.field("EXCLUDED.author",       String.class);
@@ -210,9 +216,12 @@ public final class CatalogRepository {
     // nexus-cefa1.2: EX_DOC_BIAT retired for the same reason as EX_DOC_IDXAT above —
     // CATALOG_DOCUMENTS.BIB_ENRICHED_AT is timestamptz now; use
     // DSL.excluded(CATALOG_DOCUMENTS.BIB_ENRICHED_AT) at the ON CONFLICT merge site.
-    // GREATEST for source_mtime ETL
+    // GREATEST for source_mtime ETL. nexus-zrcj7: retired from a raw DSL.field(
+    // "GREATEST(catalog_documents.source_mtime, EXCLUDED.source_mtime)", ...) template
+    // onto typed DSL.greatest(...) + DSL.excluded(...) -- same conversion as
+    // EX_OWN_SEQ_GREATEST above.
     private static final Field<Double>  EX_DOC_SMTIME_GREATEST =
-        DSL.field("GREATEST(catalog_documents.source_mtime, EXCLUDED.source_mtime)", Double.class);
+        DSL.greatest(CATALOG_DOCUMENTS.SOURCE_MTIME, DSL.excluded(CATALOG_DOCUMENTS.SOURCE_MTIME));
 
     private static final Field<String>  EX_LNK_FSPAN  = DSL.field("EXCLUDED.from_span",   String.class);
     private static final Field<String>  EX_LNK_TSPAN  = DSL.field("EXCLUDED.to_span",     String.class);
@@ -624,11 +633,16 @@ public final class CatalogRepository {
                 if (prefix == null || prefix.isBlank()) {
                     // Next owner number: MAX(int after the first dot) + 1 over
                     // '1.%' owners. RLS scopes this to the tenant.
+                    // nexus-zrcj7 (Sam's no-SQL-strings-in-Java directive, step 4
+                    // widened-scan follow-up): retired from a raw DSL.field(
+                    // "CAST(split_part(tumbler_prefix, '.', 2) AS INTEGER)", ...)
+                    // template onto DSL.splitPart(...) + Field.cast(SQLDataType.INTEGER)
+                    // -- jOOQ 3.21 has a typed splitPart(Field<String>, String, int)
+                    // wrapper (verified via Context7), so this needs no raw text at all.
                     Integer maxNum = ctx.select(
                             DSL.coalesce(
-                                DSL.max(DSL.field(
-                                    "CAST(split_part(tumbler_prefix, '.', 2) AS INTEGER)",
-                                    Integer.class)),
+                                DSL.max(DSL.splitPart(CATALOG_OWNERS.TUMBLER_PREFIX, ".", 2)
+                                    .cast(SQLDataType.INTEGER)),
                                 DSL.inline(0)))
                         .from(CATALOG_OWNERS)
                         .where(CATALOG_OWNERS.TUMBLER_PREFIX.like("1.%"))

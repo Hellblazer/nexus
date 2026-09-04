@@ -1044,6 +1044,18 @@
          own <include> comments for the identical reasoning). -->
     <include file="db/changelog/backend-reaper-001-terminate-own-backends.xml"/>
 
+    <!-- nexus-zrcj7 (Sam's no-SQL-strings-in-Java directive, step 4) —
+         nexus.taxonomy_ann_query_384/768/1024, retiring
+         TaxonomyCentroidRepository#annQuery's string-concatenated pgvector `<=>`
+         raw SQL onto an inlinable schema function, mirroring vectors-009's
+         plain_search_<dim> precedent. Depends only on nexus.taxonomy_centroids
+         (RDR-191 unification, taxonomy-0xx) and the vector extension (vectors-001).
+         Placed after backend-reaper-001-terminate-own-backends.xml (current tail)
+         and before the grants-nexus-svc.xml runAlways block, matching the
+         established late-append convention (D0.1; see backend-reaper-001's own
+         <include> comment for the identical reasoning). -->
+    <include file="db/changelog/vectors-013-taxonomy-ann-query.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
