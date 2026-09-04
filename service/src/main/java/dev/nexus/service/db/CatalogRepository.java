@@ -2672,16 +2672,29 @@ public final class CatalogRepository {
             // raw DSL.condition("...", DSL.val(query)) template (two variants,
             // separator vs no-separator). Retired onto catalog-035's
             // nexus.catalog_fts_match(fts_vector, query, has_separator) SQL
-            // function -- the exact same semantics, now server-side and typed
-            // through a DSL.function bound-value call (THE RULE's own
-            // sanctioned idiom) rather than caller-assembled SQL text. The
-            // third leg's AND-short-circuit inside the function replaces the
-            // Java-side hasSeparator branch on which SQL TEXT gets built.
+            // function -- the exact same semantics, now server-side, called
+            // through jOOQ's OWN generated Routines class (review finding,
+            // code-review round: a manual DSL.function(DSL.name(...)) call
+            // duplicates what codegen already produces, unlike this file's
+            // own Routines.purgeTrash call and BackendReaper's
+            // Tables.X.call() table-function wiring). p_fts_vector's SQL
+            // type (tsvector) has no jOOQ-recognized mapping, so codegen
+            // types the parameter Field<Object> and marks the generated
+            // overload @Deprecated ("Unknown data type") -- expected and
+            // harmless here, not a defect to work around; .coerce(Object
+            // .class) reinterprets the wildcard Field<?> from
+            // CATALOG_DOCUMENTS.field("fts_vector") as Field<Object> with no
+            // SQL rendering change (jOOQ 3.21 manual: coerce changes the
+            // Java type "without affecting the rendered SQL"). The third
+            // leg's AND-short-circuit inside the function replaces the
+            // Java-side hasSeparator branch on which SQL TEXT used to be
+            // chosen.
             boolean hasSeparator = query.chars()
                 .anyMatch(c -> c == '/' || c == '.' || c == '-' || c == '_');
-            Condition ftsMatch = DSL.condition(DSL.function(
-                DSL.name("nexus", "catalog_fts_match"), SQLDataType.BOOLEAN,
-                CATALOG_DOCUMENTS.field("fts_vector"), DSL.val(query), DSL.val(hasSeparator)));
+            Condition ftsMatch = DSL.condition(
+                dev.nexus.service.jooq.nexus.Routines.catalogFtsMatch(
+                    CATALOG_DOCUMENTS.field("fts_vector").coerce(Object.class),
+                    DSL.val(query), DSL.val(hasSeparator)));
             Condition where = ftsMatch.and(CATALOG_DOCUMENTS.DELETED_AT.isNull());
             if (contentType != null && !contentType.isBlank()) {
                 where = where.and(CATALOG_DOCUMENTS.CONTENT_TYPE.eq(contentType));
