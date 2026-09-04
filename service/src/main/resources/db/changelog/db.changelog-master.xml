@@ -1056,6 +1056,17 @@
          <include> comment for the identical reasoning). -->
     <include file="db/changelog/vectors-013-taxonomy-ann-query.xml"/>
 
+    <!-- nexus-zrcj7 (Sam's no-SQL-strings-in-Java directive) — nexus-cbo4a
+         batch 4: nexus.analyze_table(regclass), a plpgsql wrapper running
+         EXECUTE format('ANALYZE %s', target), retiring
+         PgContainerHelper#analyzeTable's raw ANALYZE statement text. No
+         dependency on any other changeset. Placed after
+         vectors-013-taxonomy-ann-query.xml (current tail) and before the
+         grants-nexus-svc.xml runAlways block, matching the established
+         late-append convention (D0.1; see vectors-013's own <include>
+         comment for the identical reasoning). -->
+    <include file="db/changelog/analyze-003-analyze-table-function.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

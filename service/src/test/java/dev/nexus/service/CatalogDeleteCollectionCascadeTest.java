@@ -4,15 +4,30 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
+import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_META;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -171,26 +186,31 @@ class CatalogDeleteCollectionCascadeTest {
     void deleteCollection_scopingAsymmetry_manifestRowNamingDeletedCollection_alsoRemoved() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + TENANT_F8D + "', '" + COLL_HOME + "')");
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + TENANT_F8D + "', '" + COLL_DEL + "')");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_F8D, COLL_HOME)
+               .execute();
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_F8D, COLL_DEL)
+               .execute();
             // The document is homed in COLL_HOME.
-            su.createStatement().execute("INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, physical_collection) "
-                + "VALUES ('" + TENANT_F8D + "', 'f8d-doc', 'F8D Doc', '" + COLL_HOME + "')");
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(TENANT_F8D, "f8d-doc", "F8D Doc", COLL_HOME)
+               .execute();
             // Its chunk content lives in COLL_DEL (the collection about to be deleted).
             // RDR-191 (nexus-o8dil.48): nexus.chunks unified -- embedding_1024
             // replaces the bare embedding column now that chunks_1024 is retired.
-            su.createStatement().execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_1024) "
-                + "VALUES ('" + TENANT_F8D + "', '" + COLL_DEL + "', '" + chash("f8dasym") + "', 'text', " + vec(1024) + "::vector)");
+            insertChunk1024(ctx, TENANT_F8D, COLL_DEL, chashBytes("f8dasym"), vector(1024));
             // The manifest row's OWN denormalized `collection` names COLL_DEL
             // too (drifted from the doc's real physical_collection -- the
             // exact shape F8c's reclassification-without-reindex leaves
             // behind), so it is reachable by neither scope symmetrically.
-            su.createStatement().execute("INSERT INTO nexus.catalog_document_chunks "
-                + "(tenant_id, doc_id, position, chash, collection) "
-                + "VALUES ('" + TENANT_F8D + "', 'f8d-doc', 0, '" + chash("f8dasym") + "', '" + COLL_DEL + "')");
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                           CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                           CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+               .values(TENANT_F8D, "f8d-doc", 0, chashBytes("f8dasym"), COLL_DEL)
+               .execute();
         }
 
         repo.deleteCollection(TENANT_F8D, COLL_DEL);
@@ -229,10 +249,13 @@ class CatalogDeleteCollectionCascadeTest {
     void deleteCollection_cascadesCatalogLinks_viaProductionCallPath() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + TENANT_LINK + "', '" + COLL_LINK_HOME + "')");
-            su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES ('" + TENANT_LINK + "', '" + COLL_LINK_OTHER + "')");
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_LINK, COLL_LINK_HOME)
+               .execute();
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(TENANT_LINK, COLL_LINK_OTHER)
+               .execute();
         }
 
         // dl-src is homed in the collection about to be deleted; dl-dst and
@@ -286,29 +309,32 @@ class CatalogDeleteCollectionCascadeTest {
 
     /** Seed one full collection (all lifecycle tables) for {@code tenant}. Superuser; bypasses RLS. */
     private static void seedFullCollection(Connection su, String tenant) throws Exception {
-        var st = su.createStatement();
-        st.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + tenant + "', '" + COLL + "')");
+        DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+           .values(tenant, COLL)
+           .execute();
         // catalog_documents + manifest
-        st.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-            + "VALUES ('" + tenant + "', 'dc-doc-1', 'Doc 1', '" + COLL + "')");
+        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                       CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+           .values(tenant, "dc-doc-1", "Doc 1", COLL)
+           .execute();
         // chunks: 2/1/1 across three dims, one unified nexus.chunks table (RDR-191).
-        st.execute(chunkInsert(tenant, 384, "dc384a"));
+        insertChunk384(ctx, tenant, COLL, chashBytes("dc384a"), vector(384));
         // RDR-194 P3d (nexus-tk070.p3d): dc384b and dc768a below are REPURPOSED
-        // (decode(hexChash(...),'hex') identity, not the file's own chash(seed)
-        // escape-format shape) to ALSO back the two topic_assignments rows
-        // further down via topic_assignments_chunk_fk -- reusing two of the
-        // four already-seeded chunks rather than minting two more, so the
-        // "chunks (unified, 2+1+1)" count assertion stays exactly 4. The two
-        // encodings are NOT interchangeable (chash(seed) stores raw ASCII bytes
-        // of a hex-digit-shaped string via bytea "escape format"; decode(...,
-        // 'hex') stores the genuine hex-decoded bytes), so this chunk's chash
-        // is no longer chash("dc384b") -- nothing else in this file references
-        // it by that name (unlike dc384a, reused by the manifest INSERT below).
-        st.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_384) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', decode('" + hexChash("dc-doc-1") + "', 'hex'), 'text', " + vec(384) + "::vector)");
-        st.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', decode('" + hexChash("dc-doc-2") + "', 'hex'), 'text', " + vec(768) + "::vector)");
-        st.execute(chunkInsert(tenant, 1024, "dc1024a"));
+        // (HexFormat.parseHex(hexChash(...)) identity, not the file's own
+        // chashBytes(seed) escape-format shape) to ALSO back the two
+        // topic_assignments rows further down via topic_assignments_chunk_fk --
+        // reusing two of the four already-seeded chunks rather than minting two
+        // more, so the "chunks (unified, 2+1+1)" count assertion stays exactly 4.
+        // The two encodings are NOT interchangeable (chashBytes(seed) stores raw
+        // ASCII bytes of a hex-digit-shaped string via bytea "escape format";
+        // HexFormat.parseHex(...) stores the genuine hex-decoded bytes), so this
+        // chunk's chash is no longer chashBytes("dc384b") -- nothing else in this
+        // file references it by that name (unlike dc384a, reused by the manifest
+        // INSERT below).
+        insertChunk384(ctx, tenant, COLL, hexChashBytes("dc-doc-1"), vector(384));
+        insertChunk768(ctx, tenant, COLL, hexChashBytes("dc-doc-2"), vector(768));
+        insertChunk1024(ctx, tenant, COLL, chashBytes("dc1024a"), vector(1024));
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires a
         // matching nexus.chunks row for the manifest insert below -- reuse dc384a's
         // chash (rather than minting a fifth, distinct chunk) so the "chunks
@@ -316,30 +342,43 @@ class CatalogDeleteCollectionCascadeTest {
         // nexus-7nrvr: catalog_document_chunks.collection is NOT NULL
         // (catalog-025-collection-not-null.xml) — the document above is
         // already registered under COLL, so stamp the manifest row the same.
-        st.execute("INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-            + "VALUES ('" + tenant + "', 'dc-doc-1', 0, '" + chash("dc384a") + "', '" + COLL + "')");
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                       CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                       CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+           .values(tenant, "dc-doc-1", 0, chashBytes("dc384a"), COLL)
+           .execute();
         // (chash_index seeds removed — RDR-187/nexus-piwya.9: router dropped)
         // topics: 1 (explicit id)
         long topicId = Math.abs((long) (tenant + COLL).hashCode());
-        st.execute("INSERT INTO nexus.topics (id, tenant_id, label, collection, doc_count, created_at, review_status) "
-            + "VALUES (" + topicId + ", '" + tenant + "', 'topic-dc', '" + COLL + "', 0, NOW(), 'pending')");
+        ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
+                       TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
+           .values(topicId, tenant, "topic-dc", COLL, 0, OffsetDateTime.now(), "pending")
+           .execute();
         // taxonomy_meta: 1 (fk-003-4 RESTRICT — must be purged before the registry row)
-        st.execute("INSERT INTO nexus.taxonomy_meta (tenant_id, collection) VALUES ('" + tenant + "', '" + COLL + "')");
+        ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+           .values(tenant, COLL)
+           .execute();
         // topic_assignments: 2, both with source_collection=COLL, referencing the topic
         // nexus-tk070.p3c: doc_id is bytea now — a genuine 64-hex chash, not the
         // catalog tumbler string (topic_assignments.doc_id is independent of
         // catalog_documents.tumbler; see the class javadoc / nexus-sa14p).
         // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk now requires a
-        // matching nexus.chunks row for each of these two INSERTs -- decode(...,
-        // 'hex') here (NOT a bare string literal, which would store the ASCII bytes
-        // of the hex STRING via bytea "escape format", never matching a real
-        // decode()'d chunks row) so both rows resolve against the two REPURPOSED
-        // chunks seeded above (dc384b's and dc768a's slots, now carrying
-        // hexChash("dc-doc-1")/hexChash("dc-doc-2") identities).
-        st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', decode('" + hexChash("dc-doc-1") + "', 'hex'), " + topicId + ", 'projection', '" + COLL + "', NOW())");
-        st.execute("INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by, source_collection, assigned_at) "
-            + "VALUES ('" + tenant + "', decode('" + hexChash("dc-doc-2") + "', 'hex'), " + topicId + ", 'projection', '" + COLL + "', NOW())");
+        // matching nexus.chunks row for each of these two INSERTs -- HexFormat.parseHex
+        // here (NOT a bare string literal, which would store the ASCII bytes of the
+        // hex STRING via bytea "escape format", never matching a real decoded row)
+        // so both rows resolve against the two REPURPOSED chunks seeded above (dc384b's
+        // and dc768a's slots, now carrying hexChash("dc-doc-1")/hexChash("dc-doc-2")
+        // identities).
+        ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                       TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                       TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+           .values(tenant, hexChashBytes("dc-doc-1"), topicId, "projection", COLL, OffsetDateTime.now())
+           .execute();
+        ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
+                       TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                       TOPIC_ASSIGNMENTS.ASSIGNED_AT)
+           .values(tenant, hexChashBytes("dc-doc-2"), topicId, "projection", COLL, OffsetDateTime.now())
+           .execute();
         // centroids: one per dim (cugrk), one unified nexus.taxonomy_centroids table
         // (RDR-191). PK is (tenant_id, collection, topic_id) -- three DIFFERENT
         // topic_ids, not the shared `topicId` above (which would collide on the
@@ -347,12 +386,18 @@ class CatalogDeleteCollectionCascadeTest {
         // tables and could legally share one topic_id).
         // hygiene-001 step 9b (nexus-tk070.p6a follow-on): label is NOT NULL now,
         // no default -- supply it explicitly.
-        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, embedding_384) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', " + topicId + ", '', " + vec(384) + "::vector)");
-        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, embedding_768) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', " + (topicId + 1) + ", '', " + vec(768) + "::vector)");
-        st.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, topic_id, label, embedding_1024) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', " + (topicId + 2) + ", '', " + vec(1024) + "::vector)");
+        ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                       TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_384)
+           .values(tenant, COLL, topicId, "", vector(384))
+           .execute();
+        ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                       TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_768)
+           .values(tenant, COLL, topicId + 1, "", vector(768))
+           .execute();
+        ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                       TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.EMBEDDING_1024)
+           .values(tenant, COLL, topicId + 2, "", vector(1024))
+           .execute();
         // document_aspects: 2, both doc-rooted at dc-doc-1 (the collection's only
         // registered catalog_documents row -- catalog_documents count elsewhere in
         // this fixture is asserted ==1, so a second row cannot be introduced here).
@@ -364,34 +409,77 @@ class CatalogDeleteCollectionCascadeTest {
         // cascade cannot reach) can no longer be discriminated here: the doc-less
         // state cannot exist, so both rows go by their `collection` tag
         // (deleteCollectionTxn step 5), ahead of the doc_id-keyed cascade (step 6).
-        st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', '/p/a1.md', NOW(), 'v1', 'docling', 'dc-doc-1', 'file:///p/a1.md')");
-        st.execute("INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, extractor_name, doc_id, source_uri) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', '/p/a2.md', NOW(), 'v1', 'docling', 'dc-doc-1', 'file:///p/a2.md')");
+        ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                       DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                       DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+           .values(tenant, COLL, "/p/a1.md", OffsetDateTime.now(), "v1", "docling", "dc-doc-1", "file:///p/a1.md")
+           .execute();
+        ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+                       DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                       DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+           .values(tenant, COLL, "/p/a2.md", OffsetDateTime.now(), "v1", "docling", "dc-doc-1", "file:///p/a2.md")
+           .execute();
         // document_highlights: 1 (doc-rooted). hygiene-001 step 3: source_uri NOT NULL now.
-        st.execute("INSERT INTO nexus.document_highlights (tenant_id, doc_id, collection, source_uri, highlights_md, ingested_at) "
-            + "VALUES ('" + tenant + "', 'dc-doc-1', '" + COLL + "', 'file:///dc-doc-1-hl', 'hi', NOW())");
+        ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
+                       DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.SOURCE_URI,
+                       DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+           .values(tenant, "dc-doc-1", COLL, "file:///dc-doc-1-hl", "hi", OffsetDateTime.now())
+           .execute();
         // aspect_extraction_queue: 2, both doc-rooted at dc-doc-1 (hygiene-001 step 2:
         // doc_id is NOT NULL now -- see the document_aspects comment above).
-        st.execute("INSERT INTO nexus.aspect_extraction_queue (tenant_id, collection, source_path, status, enqueued_at, doc_id) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', '/p/q1.md', 'pending', NOW(), 'dc-doc-1')");
-        st.execute("INSERT INTO nexus.aspect_extraction_queue (tenant_id, collection, source_path, status, enqueued_at, doc_id) "
-            + "VALUES ('" + tenant + "', '" + COLL + "', '/p/q2.md', 'pending', NOW(), 'dc-doc-1')");
+        ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                       ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, ASPECT_EXTRACTION_QUEUE.STATUS,
+                       ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
+           .values(tenant, COLL, "/p/q1.md", "pending", OffsetDateTime.now(), "dc-doc-1")
+           .execute();
+        ctx.insertInto(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID, ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                       ASPECT_EXTRACTION_QUEUE.SOURCE_PATH, ASPECT_EXTRACTION_QUEUE.STATUS,
+                       ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT, ASPECT_EXTRACTION_QUEUE.DOC_ID)
+           .values(tenant, COLL, "/p/q2.md", "pending", OffsetDateTime.now(), "dc-doc-1")
+           .execute();
     }
 
-    /** RDR-191 (nexus-o8dil.48): chunks_384/768/1024 unified into nexus.chunks --
-     *  {@code dim} now selects the target embedding_&lt;dim&gt; column, not a table. */
-    private static String chunkInsert(String tenant, int dim, String seed) {
-        return "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_" + dim + ") "
-            + "VALUES ('" + tenant + "', '" + COLL + "', '" + chash(seed) + "', 'text', " + vec(dim) + "::vector)";
+    /** RDR-191 (nexus-o8dil.48): chunks_384/768/1024 unified into nexus.chunks -- one
+     *  insert helper per dim since jOOQ's typed column list is fixed at compile time. */
+    private static void insertChunk384(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       CHUNKS.EMBEDDING_384)
+           .values(tenant, collection, chashBytes, "text", v)
+           .execute();
     }
 
-    private static String vec(int dim) {
-        return IntStream.range(0, dim).mapToObj(i -> "0.1").collect(Collectors.joining(",", "'[", "]'"));
+    private static void insertChunk768(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       CHUNKS.EMBEDDING_768)
+           .values(tenant, collection, chashBytes, "text", v)
+           .execute();
     }
 
-    private static String chash(String seed) {
-        return (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
+    private static void insertChunk1024(DSLContext ctx, String tenant, String collection, byte[] chashBytes, Vector v) {
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                       CHUNKS.EMBEDDING_1024)
+           .values(tenant, collection, chashBytes, "text", v)
+           .execute();
+    }
+
+    /** A pgvector value with every one of {@code dim} components equal to {@code 0.1}. */
+    private static Vector vector(int dim) {
+        float[] v = new float[dim];
+        java.util.Arrays.fill(v, 0.1f);
+        return Vector.of(v);
+    }
+
+    /** 32-char hex-alphabet label, stored as its own ASCII bytes (no real hash semantics --
+     *  matches the pre-conversion raw-SQL behavior of a bare string literal into a
+     *  {@code bytea} column via PostgreSQL's escape-format input, {@link #hexChash} below is
+     *  the genuine-hash counterpart). */
+    private static byte[] chashBytes(String seed) {
+        String label = (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
+        return label.getBytes(StandardCharsets.US_ASCII);
+    }
+
+    private static byte[] hexChashBytes(String seed) {
+        return java.util.HexFormat.of().parseHex(hexChash(seed));
     }
 
     /** Genuine 64-lowercase-hex sha256 chash — required for topic_assignments.doc_id

@@ -3,6 +3,9 @@ package dev.nexus.service;
 import dev.nexus.service.db.StagingPromoteOps;
 import dev.nexus.service.db.StagingPromoteOps.PromotePreconditionException;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -15,8 +18,8 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.OffsetDateTime;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -26,6 +29,12 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -110,6 +119,13 @@ class StagingPromoteOpsIntegrationTest {
             sb.append('0');
         }
         return sb.append(']').toString();
+    }
+
+    /** {@link #vec}'s all-zero pgvector value as a typed {@link Vector}, for jOOQ
+     *  inserts against the generated {@code CHUNKS.EMBEDDING_&lt;dim&gt;} columns
+     *  (nexus-cbo4a batch 4) -- a {@code float[]} defaults to all-zero components. */
+    private static Vector zeroVector(int dim) {
+        return Vector.of(new float[dim]);
     }
 
     @BeforeAll
@@ -340,10 +356,13 @@ class StagingPromoteOpsIntegrationTest {
         // and (b) surface the doc BY TITLE in the finalize envelope.
         String ghost = digestHex("knowledge note content that never landed");
         scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, content_type, file_path, chunk_count) "
-                + "VALUES (?, '5.5.5', 'orphaned-note-title', 'knowledge', '', 3) "
-                + "ON CONFLICT DO NOTHING", T1);
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH,
+                           CATALOG_DOCUMENTS.CHUNK_COUNT)
+               .values(T1, "5.5.5", "orphaned-note-title", "knowledge", "", 3)
+               .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+               .doNothing()
+               .execute();
             ctx.execute("INSERT INTO staging.document_chunks "
                 + "(tenant_id, doc_id, position, chash) VALUES (?, '5.5.5', 0, ?) "
                 + "ON CONFLICT DO NOTHING", T1, ghost);
@@ -386,8 +405,12 @@ class StagingPromoteOpsIntegrationTest {
         // to catalog_documents (fk_catalog_chunks_catalog_doc), so it must
         // register its own stub now.
         scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                + "VALUES (?, '1.1.1', 'promote-doc', ?) ON CONFLICT DO NOTHING", T1, COLL_A);
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(T1, "1.1.1", "promote-doc", COLL_A)
+               .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+               .doNothing()
+               .execute();
             return null;
         });
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk now requires
@@ -399,9 +422,12 @@ class StagingPromoteOpsIntegrationTest {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-                + "VALUES ('" + T1 + "', '1.1.1', 88, decode('" + ghost + "', 'hex'), '" + COLL_A + "')");
+            DSL.using(su, SQLDialect.POSTGRES)
+               .insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                           CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                           CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+               .values(T1, "1.1.1", 88, HexFormat.of().parseHex(ghost), COLL_A)
+               .execute();
             su.createStatement().execute(
                 "ALTER TABLE nexus.catalog_document_chunks "
                 + "ADD CONSTRAINT fk_catalog_chunks_chunk "
@@ -424,9 +450,12 @@ class StagingPromoteOpsIntegrationTest {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-                + "VALUES ('" + T1 + "', '1.1.1', 89, decode('" + ghost + "', 'hex'), '" + COLL_A + "')");
+            DSL.using(su, SQLDialect.POSTGRES)
+               .insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                           CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                           CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+               .values(T1, "1.1.1", 89, HexFormat.of().parseHex(ghost), COLL_A)
+               .execute();
             su.createStatement().execute(
                 "ALTER TABLE nexus.catalog_document_chunks "
                 + "ADD CONSTRAINT fk_catalog_chunks_chunk "
@@ -466,6 +495,10 @@ class StagingPromoteOpsIntegrationTest {
                 + "mystery_ref TEXT)");
             su.createStatement().execute(
                 "GRANT SELECT ON nexus.census_canary TO " + SVC_ROLE);
+            // nexus.census_canary: SANCTIONED RAW (nexus-cbo4a batch 4) -- this table is
+            // CREATEd ad hoc by this test method (immediately above) and DROPped again
+            // below; it is not part of the real product schema and so, like the staging.*
+            // tables, carries no generated jOOQ Table to build a typed insert from.
             su.createStatement().execute(
                 "INSERT INTO nexus.census_canary (tenant_id, mystery_ref) "
                 + "VALUES ('" + T1 + "', '0123456789abcdef0123456789abcdef')");
@@ -601,10 +634,12 @@ class StagingPromoteOpsIntegrationTest {
         assertThat(promoted.get("promoted")).isEqualTo(1);
 
         scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, physical_collection) "
-                + "VALUES (?, 'gate-doc-1', 'gate doc', ?) ON CONFLICT DO NOTHING",
-                T1, COLL_GATE);
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(T1, "gate-doc-1", "gate doc", COLL_GATE)
+               .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+               .doNothing()
+               .execute();
             ctx.execute("INSERT INTO staging.document_chunks "
                 + "(tenant_id, doc_id, position, chash) VALUES (?, 'gate-doc-1', 0, ?) "
                 + "ON CONFLICT DO NOTHING", T1, canonical);
@@ -717,23 +752,17 @@ class StagingPromoteOpsIntegrationTest {
             // -- held UNCOMMITTED.
             PgContainerHelper.setTenant(connA, TenantScope.DEFAULT_TENANT_GUC, T1, false);
             acquireGateShared(connA, T1, col);
-            try (var st = connA.prepareStatement(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
-                    + "ON CONFLICT DO NOTHING")) {
-                st.setString(1, T1);
-                st.setString(2, col);
-                st.execute();
-            }
-            try (var ps = connA.prepareStatement(
-                    "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_768) "
-                    + "VALUES (?, ?, decode(?, 'hex'), ?, ?::vector)")) {
-                ps.setString(1, T1);
-                ps.setString(2, col);
-                ps.setString(3, chash);
-                ps.setString(4, text);
-                ps.setString(5, vec(768));
-                ps.executeUpdate();
-            }
+            DSL.using(connA, SQLDialect.POSTGRES)
+               .insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(T1, col)
+               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .doNothing()
+               .execute();
+            DSL.using(connA, SQLDialect.POSTGRES)
+               .insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                           CHUNKS.EMBEDDING_768)
+               .values(T1, col, HexFormat.of().parseHex(chash), text, zeroVector(768))
+               .execute();
 
             // Connection B: an unrelated document's ordinary sweep for the SAME
             // collection -- short lock_timeout, must be refused while A holds
@@ -776,12 +805,18 @@ class StagingPromoteOpsIntegrationTest {
         assertThat(ops.promoteCollection(T1, colB, 768).get("promoted")).isEqualTo(1);
 
         scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, physical_collection) "
-                + "VALUES (?, 'multi-doc-a', 'multi doc a', ?) ON CONFLICT DO NOTHING", T1, colA);
-            ctx.execute("INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, physical_collection) "
-                + "VALUES (?, 'multi-doc-b', 'multi doc b', ?) ON CONFLICT DO NOTHING", T1, colB);
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(T1, "multi-doc-a", "multi doc a", colA)
+               .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+               .doNothing()
+               .execute();
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(T1, "multi-doc-b", "multi doc b", colB)
+               .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+               .doNothing()
+               .execute();
             ctx.execute("INSERT INTO staging.document_chunks "
                 + "(tenant_id, doc_id, position, chash) VALUES (?, 'multi-doc-a', 0, ?) "
                 + "ON CONFLICT DO NOTHING", T1, chashA);
@@ -873,10 +908,12 @@ class StagingPromoteOpsIntegrationTest {
             .isEqualTo(1);
 
         scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, physical_collection) "
-                + "VALUES (?, 'f12b-doc', 'f12b doc', ?) ON CONFLICT DO NOTHING",
-                T1, COLL_F12B);
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(T1, "f12b-doc", "f12b doc", COLL_F12B)
+               .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+               .doNothing()
+               .execute();
             ctx.execute("INSERT INTO staging.document_chunks "
                 + "(tenant_id, doc_id, position, chash) VALUES (?, 'f12b-doc', 0, ?) "
                 + "ON CONFLICT DO NOTHING", T1, canonical);
@@ -985,9 +1022,12 @@ class StagingPromoteOpsIntegrationTest {
         String newCanonical = digestHex(newText);
 
         scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, physical_collection) "
-                + "VALUES (?, ?, 'g7 doc', ?) ON CONFLICT DO NOTHING", T1, doc, COLL_G6);
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(T1, doc, "g7 doc", COLL_G6)
+               .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+               .doNothing()
+               .execute();
             return null;
         });
 
@@ -1044,9 +1084,12 @@ class StagingPromoteOpsIntegrationTest {
         String canonical = digestHex(text);
 
         scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, physical_collection) "
-                + "VALUES (?, ?, 'g8 ghost doc', '') ON CONFLICT DO NOTHING", T1, doc);
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(T1, doc, "g8 ghost doc", "")
+               .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+               .doNothing()
+               .execute();
             return null;
         });
 
@@ -1146,16 +1189,23 @@ class StagingPromoteOpsIntegrationTest {
         String legacyRef = "orphan-dim-" + dim + "-ref-" + order;
 
         scope.withTenant(T_DIM, ctx -> {
-            ctx.execute("INSERT INTO nexus.catalog_documents "
-                + "(tenant_id, tumbler, title, physical_collection) "
-                + "VALUES (?, ?, 'dim-check doc', ?) ON CONFLICT DO NOTHING", T_DIM, doc, coll);
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(T_DIM, doc, "dim-check doc", coll)
+               .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+               .doNothing()
+               .execute();
             // chunks_<dim> FK-references catalog_collections(tenant_id, name)
             // (fk-002-collection-registry.xml) — the orphan content INSERT
             // below needs the stub row promoteCollection's own step (4)
             // would normally create; this collection is never promoted
             // through that path so it must be stubbed directly here.
-            ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name, content_type) "
-                + "VALUES (?, ?, 'knowledge') ON CONFLICT DO NOTHING", T_DIM, coll);
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                           CATALOG_COLLECTIONS.CONTENT_TYPE)
+               .values(T_DIM, coll, "knowledge")
+               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .doNothing()
+               .execute();
             return null;
         });
         // The orphan itself: an empty-text staged chunk row at this dim —
@@ -1272,10 +1322,17 @@ class StagingPromoteOpsIntegrationTest {
         // (nullable, no default) unset.
         String doc = "aspects-promote-json-doc";
         scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
-                + "ON CONFLICT (tenant_id, name) DO NOTHING", T1, ASPECTS_PROMOTE_COLL);
-            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES (?, ?, ?) "
-                + "ON CONFLICT (tenant_id, tumbler) DO NOTHING", T1, doc, "aspects-promote-json fixture");
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(T1, ASPECTS_PROMOTE_COLL)
+               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .doNothing()
+               .execute();
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE)
+               .values(T1, doc, "aspects-promote-json fixture")
+               .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+               .doNothing()
+               .execute();
             ctx.execute("INSERT INTO staging.document_aspects "
                 + "(tenant_id, doc_id, collection, source_path, extracted_at, model_version, "
                 + "extractor_name, source_uri, extras) VALUES (?, ?, ?, ?, '', 'v1', 'ex', ?, ?)",
@@ -1318,10 +1375,17 @@ class StagingPromoteOpsIntegrationTest {
         // tell them apart (critique finding, cefa1.4).
         String doc = "aspects-promote-malformed-doc";
         scope.withTenant(T1, ctx -> {
-            ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
-                + "ON CONFLICT (tenant_id, name) DO NOTHING", T1, coll);
-            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) VALUES (?, ?, ?) "
-                + "ON CONFLICT (tenant_id, tumbler) DO NOTHING", T1, doc, "aspects-promote-malformed fixture");
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(T1, coll)
+               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .doNothing()
+               .execute();
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE)
+               .values(T1, doc, "aspects-promote-malformed fixture")
+               .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+               .doNothing()
+               .execute();
             ctx.execute("INSERT INTO staging.document_aspects "
                 + "(tenant_id, doc_id, collection, source_path, extracted_at, model_version, "
                 + "extractor_name, extras) VALUES (?, ?, ?, ?, '', 'v1', 'ex', ?)",
@@ -1368,8 +1432,11 @@ class StagingPromoteOpsIntegrationTest {
         // not a write-safety one.
         String badDocId = "some-memory-note-title-not-a-chash";
         scope.withTenant(T_REJECT, ctx -> {
-            ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES (?, ?) ON CONFLICT (tenant_id, name) DO NOTHING", T_REJECT, COLL_A);
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(T_REJECT, COLL_A)
+               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .doNothing()
+               .execute();
             ctx.execute("INSERT INTO staging.topic_assignments "
                 + "(tenant_id, doc_id, topic_id, topic_label, topic_collection) "
                 + "VALUES (?, ?, 999999, 'reject-topic', ?) ON CONFLICT DO NOTHING",
@@ -1420,11 +1487,19 @@ class StagingPromoteOpsIntegrationTest {
         String goodText = "resolvable topic assignment content " + System.nanoTime();
         String goodChash = digestHex(goodText);
         scope.withTenant(T_REJECT, ctx -> {
-            ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES (?, ?) ON CONFLICT (tenant_id, name) DO NOTHING", T_REJECT, COLL_A);
-            ctx.execute("INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
-                + "VALUES (?, 'reject-topic-resolvable', ?, now()) ON CONFLICT DO NOTHING",
-                T_REJECT, COLL_A);
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(T_REJECT, COLL_A)
+               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .doNothing()
+               .execute();
+            // No onConflict target here (the original bare "ON CONFLICT DO NOTHING" named
+            // none either): topics.id is an unsupplied identity column, so a fresh insert
+            // always gets a fresh id and can never collide with the table's own UNIQUE
+            // (tenant_id, id) -- the clause was already inert protection against a
+            // collision this insert shape cannot produce.
+            ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
+               .values(T_REJECT, "reject-topic-resolvable", COLL_A, OffsetDateTime.now())
+               .execute();
             ctx.execute("INSERT INTO staging.chunks "
                 + "(tenant_id, collection, dim, legacy_ref, chunk_text, embedding, model) "
                 + "VALUES (?, ?, 768, ?, ?, '" + vec(768) + "'::vector, 'bge-768') "
@@ -1480,11 +1555,16 @@ class StagingPromoteOpsIntegrationTest {
         // graceful count.
         String pendingChash = digestHex("chunk that has not promoted yet " + System.nanoTime());
         scope.withTenant(T_REJECT, ctx -> {
-            ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
-                + "VALUES (?, ?) ON CONFLICT (tenant_id, name) DO NOTHING", T_REJECT, COLL_A);
-            ctx.execute("INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
-                + "VALUES (?, 'reject-topic-pending', ?, now()) ON CONFLICT DO NOTHING",
-                T_REJECT, COLL_A);
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(T_REJECT, COLL_A)
+               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .doNothing()
+               .execute();
+            // No onConflict target (see the identical topics insert above): id is an
+            // unsupplied identity column, so a fresh row can never collide.
+            ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
+               .values(T_REJECT, "reject-topic-pending", COLL_A, OffsetDateTime.now())
+               .execute();
             ctx.execute("INSERT INTO staging.topic_assignments "
                 + "(tenant_id, doc_id, topic_id, topic_label, topic_collection) "
                 + "VALUES (?, ?, 999999, 'reject-topic-pending', ?) ON CONFLICT DO NOTHING",
@@ -1529,24 +1609,26 @@ class StagingPromoteOpsIntegrationTest {
         try (Connection conn = dsConnection()) {
             conn.setAutoCommit(true);
             PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, T_REJECT, false);
-            try (var st = conn.prepareStatement(
-                    "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
-                    + "ON CONFLICT DO NOTHING")) {
-                st.setString(1, T_REJECT);
-                st.setString(2, COLL_A);
-                st.execute();
-            }
-            try (var st = conn.prepareStatement(
-                    "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
-                    + "VALUES (?, 'reject-topic-fk-raw', ?, now()) RETURNING id")) {
-                st.setString(1, T_REJECT);
-                st.setString(2, COLL_A);
-                try (ResultSet rs = st.executeQuery()) {
-                    rs.next();
-                    topicId = rs.getLong(1);
-                }
-            }
+            var c = DSL.using(conn, SQLDialect.POSTGRES);
+            c.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+             .values(T_REJECT, COLL_A)
+             .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+             .doNothing()
+             .execute();
+            topicId = c.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
+                       .values(T_REJECT, "reject-topic-fk-raw", COLL_A, OffsetDateTime.now())
+                       .returningResult(TOPICS.ID)
+                       .fetchOne()
+                       .getValue(TOPICS.ID);
             long finalTopicId = topicId;
+            // Kept as a raw JDBC PreparedStatement (nexus-cbo4a batch 4, SANCTIONED RAW):
+            // the assertion below checks java.sql.SQLException.getSQLState() directly --
+            // jOOQ wraps every SQLException in its own DataAccessException (a
+            // RuntimeException, not a SQLException), which would fail
+            // isInstanceOf(SQLException.class) regardless of the real cause. Proving the
+            // FK is VALIDATEd via its raw JDBC SQLSTATE is this test's actual subject
+            // (see its javadoc), so the raw JDBC path is the correct tool here, not a
+            // shortcut around the DSL.
             assertThatThrownBy(() -> {
                     try (var ps = conn.prepareStatement(
                             "INSERT INTO nexus.topic_assignments "

@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-zrcj7 (Sam's no-SQL-strings-in-Java directive, 2026-09-03) — nexus-cbo4a
+    batch 4, Part A. Retires PgContainerHelper#analyzeTable's raw
+    `stmt.execute("ANALYZE " + ctx.render(table))` onto a schema-owned wrapper
+    function, mirroring backend-reaper-001's `terminate_own_backends` precedent
+    (a test-tree utility that needed a raw maintenance statement, moved server-side
+    rather than exempted).
+
+    nexus.analyze_table(target regclass) RETURNS void — LANGUAGE plpgsql, not sql:
+    ANALYZE is a utility statement, and PostgreSQL's SQL-language function bodies
+    accept only SELECT/INSERT/UPDATE/DELETE/VALUES/CALL — a bare ANALYZE is a syntax
+    error there. plpgsql's dynamic EXECUTE is the only way to run a utility command
+    from inside a function body (the same reason TenantScope#vacuumAnalyze and
+    PgContainerHelper#analyzeTable both build the statement text directly rather
+    than going through typed DSL — jOOQ has no typed form for ANALYZE either).
+
+    regclass parameter, not text: the caller passes an OID-typed table identity
+    (resolved by PostgreSQL itself from a jOOQ-generated Table's rendered, already
+    quoted/qualified name), never a bare string the function has to re-validate —
+    there is no injection surface to guard against the way TenantScope#vacuumAnalyze's
+    VACUUM_ALLOWED_TABLES allowlist has to for its caller-controlled bare string.
+    format('ANALYZE %s', target)'s %s against a regclass renders PostgreSQL's own
+    canonical (schema-qualified, quoted-if-needed) identifier for the target relation
+    — never string concatenation of caller-controlled text.
+
+    SECURITY DEFINER-free (SECURITY INVOKER, the default, stated explicitly to match
+    convention): ANALYZE runs under the CALLING role, so the caller's own MAINTAIN
+    grant on the target table (grants-003-purge-vacuum-maintain /
+    grants-005-chunks-unify-maintain) is what authorizes it — this wrapper adds no
+    privilege of its own, unlike a SECURITY DEFINER shape that would let any caller
+    ANALYZE any table regardless of ownership.
+
+    Deliberately VOLATILE (the default, no STABLE/IMMUTABLE): ANALYZE has a real
+    side effect (rewrites planner statistics), same category as
+    terminate_own_backends' pg_terminate_backend.
+
+    EXECUTE is granted explicitly to nexus_svc in grants-nexus-svc.xml (this
+    function is maintenance-shaped, not a read-only combined-query facade — the
+    same explicit-grant precedent as purge_trash/document_trash/document_restore,
+    not the PUBLIC-default convention vectors-007/009/011/013 document for the
+    search functions), rather than here, so grants-nexus-svc.xml stays the single
+    place nexus_svc's function-level grants are read together.
+
+    Placed after vectors-013-taxonomy-ann-query.xml (current tail) and before the
+    grants-nexus-svc.xml runAlways block, matching the established late-append
+    convention (D0.1; see vectors-013's own <include> comment for the identical
+    reasoning).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="analyze-003-1" author="nexus-cbo4a">
+        <comment>nexus.analyze_table(regclass): plpgsql wrapper running EXECUTE format('ANALYZE %s', target), retiring PgContainerHelper#analyzeTable's raw statement text (nexus-zrcj7 batch 4)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.analyze_table(target regclass) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $$
+BEGIN
+    EXECUTE format('ANALYZE %s', target);
+END;
+$$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.analyze_table(regclass)</rollback>
+    </changeSet>
+
+</databaseChangeLog>

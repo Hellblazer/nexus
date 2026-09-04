@@ -12,7 +12,9 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import dev.nexus.service.jooq.nexus.Routines;
 import org.jooq.DSLContext;
+import org.jooq.Name;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
@@ -22,7 +24,6 @@ import org.testcontainers.utility.DockerImageName;
 
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -369,20 +370,27 @@ public final class PgContainerHelper {
 
     /**
      * {@code ANALYZE table} on an existing, test-owned {@link Connection} (nexus-cbo4a
-     * batch 3) -- the test-tree counterpart to {@link TenantScope#vacuumAnalyze}.
+     * batch 3/4) -- the test-tree counterpart to {@link TenantScope#vacuumAnalyze}.
      *
-     * <p>SANCTIONED RAW: ANALYZE is PostgreSQL maintenance syntax, not DML -- jOOQ has
-     * no typed DSL form for it at all (same category {@link TenantScope#vacuumAnalyze}'s
-     * own SANCTIONED RAW comment documents for VACUUM; {@code RawSqlGateTest}'s
-     * {@code SANCTIONED_STATEMENTS} registry, src/main-only today). Table identity comes
-     * from a generated jOOQ {@link Table}, rendered through {@code ctx.render(table)}
-     * (properly quoted/qualified for the dialect) -- never a hand-typed schema-qualified
-     * string literal, so unlike {@code vacuumAnalyze}'s allowlist (needed there because
-     * VACUUM's callers pass a bare string) there is no caller-controlled name to
-     * validate: only a compile-time-checked generated {@code Table} reaches this method.
-     * Replaces the {@code su.createStatement().execute("ANALYZE " + <table literal>)} /
-     * {@code st.execute("ANALYZE " + <table literal>)} call sites the affected test
-     * classes used to build by hand.
+     * <p>Batch 4 (nexus-zrcj7): retired the raw {@code stmt.execute("ANALYZE " + ...)}
+     * onto {@code nexus.analyze_table(regclass)} (analyze-003-analyze-table-function.xml)
+     * -- ANALYZE is still PostgreSQL maintenance syntax with no typed jOOQ DSL form (same
+     * category {@link TenantScope#vacuumAnalyze}'s own SANCTIONED RAW comment documents
+     * for VACUUM), but that raw statement now lives server-side, inside a plpgsql wrapper
+     * function, rather than being assembled client-side. Table identity comes from a
+     * generated jOOQ {@link Table}, rendered through {@code ctx.render(table)} (properly
+     * quoted/qualified for the dialect) into the function's {@code regclass} argument --
+     * never a hand-typed schema-qualified string literal, so unlike {@code vacuumAnalyze}'s
+     * allowlist (needed there because VACUUM's callers pass a bare string) there is no
+     * caller-controlled name to validate: only a compile-time-checked generated
+     * {@code Table} reaches this method. {@code Routines.analyzeTable}'s generated
+     * {@code target} parameter is typed {@code Object} ({@code @Deprecated}, "Unknown data
+     * type") because {@code regclass} has no jOOQ-recognized Java mapping -- the same
+     * shape {@code CatalogRepository#searchDocuments}'s {@code Routines.catalogFtsMatch}
+     * call already carries for its {@code tsvector} parameter; jOOQ still renders an
+     * explicit {@code CAST(? AS "pg_catalog"."regclass")} around the bind value, so the
+     * rendered table-name string is parsed by PostgreSQL's own regclass input function,
+     * never string-concatenated into the query text.
      *
      * @param conn  the connection to run ANALYZE on; unlike {@code vacuumAnalyze}, ANALYZE
      *              has no autocommit/transaction-block restriction, so this method neither
@@ -391,8 +399,24 @@ public final class PgContainerHelper {
      */
     public static void analyzeTable(Connection conn, Table<?> table) throws SQLException {
         DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
-        try (Statement stmt = conn.createStatement()) {
-            stmt.execute("ANALYZE " + ctx.render(table));
-        }
+        Routines.analyzeTable(ctx.configuration(), ctx.render(table));
+    }
+
+    /**
+     * Overload for a table outside jOOQ codegen scope -- the {@code staging} schema is not
+     * one of service/pom.xml's jOOQ codegen {@code <schemata>} (only {@code nexus}/{@code t1}
+     * are), so no generated {@link Table} exists for e.g. {@code staging.document_chunks}.
+     * Takes a jOOQ-constructed qualified {@link Name} instead (e.g.
+     * {@code DSL.name("staging", "document_chunks")}) -- still never a hand-typed SQL
+     * string -- rendered via {@code ctx.render(DSL.table(qualifiedName))} exactly like the
+     * generated-{@code Table} overload above before reaching {@code nexus.analyze_table}.
+     *
+     * @param conn          the connection to run ANALYZE on
+     * @param qualifiedName the schema-qualified table identifier (e.g.
+     *                      {@code DSL.name("staging", "document_chunks")})
+     */
+    public static void analyzeTable(Connection conn, Name qualifiedName) throws SQLException {
+        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        Routines.analyzeTable(ctx.configuration(), ctx.render(DSL.table(qualifiedName)));
     }
 }
