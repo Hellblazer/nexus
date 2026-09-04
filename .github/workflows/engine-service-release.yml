@@ -160,8 +160,15 @@ jobs:
             > notes.md
           # Idempotent: a rerun of this job (e.g. `gh run rerun --failed`) must
           # not fail when the tag's release already exists from a prior attempt.
+          # nexus-cl14i: created as a DRAFT. Every downstream consumer keys on
+          # the tag (REQUIRED_ENGINE_VERSION, install-binary, deploy relays,
+          # check_engine_release_floor's isDraft check), and a draft is not
+          # resolvable by any of them, so a run that fails anywhere upstream
+          # of the binaries leaves NO consumable release, not a half-published
+          # one. promote-release (below) flips the draft flag only after both
+          # matrices succeeded and the full asset set is present.
           if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft \
               --title "nexus-service (native) ${tag}" --notes-file notes.md
           fi
 
@@ -884,3 +891,31 @@ jobs:
           # the PG-bundle assets; --clobber makes re-runs idempotent.
           gh release upload "$tag" --clobber \
             "dist/$ASSET.txz" "dist/$ASSET.txz.sha256" "dist/$ASSET.txz.sigstore.json"
+
+  # nexus-cl14i: the all-or-nothing gate. engine-service-v0.1.95 (run
+  # 33697831082) published a non-draft release carrying 9 PG-bundle assets
+  # and ZERO engine binaries after a transient upstream fetch failure skipped
+  # the whole native matrix; the tag existed, looked shipped, and was not
+  # installable. create-release now creates a DRAFT and this job is the only
+  # thing that publishes it: it needs BOTH matrices, requires both to have
+  # SUCCEEDED (fail-fast: false means a single leg's failure still fails the
+  # matrix result), asserts the complete asset set by name, and only then
+  # flips the draft flag. Any upstream failure leaves the draft in place: a
+  # rerun of the failed jobs re-uploads (--clobber) and this job promotes.
+  promote-release:
+    name: Promote GitHub Release (all assets present, engine-service-v* tag only)
+    runs-on: ubuntu-latest
+    needs: [create-release, build-publish, build-publish-pg-bundle]
+    if: ${{ startsWith(github.ref, 'refs/tags/engine-service-v') && needs.create-release.result == 'success' && needs.build-publish.result == 'success' && needs.build-publish-pg-bundle.result == 'success' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          sparse-checkout: scripts/promote_engine_release.sh
+          sparse-checkout-cone-mode: false
+      - name: Assert the complete asset set, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          scripts/promote_engine_release.sh "${GITHUB_REF_NAME}" "${GITHUB_REPOSITORY}"
