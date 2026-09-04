@@ -591,7 +591,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     ),
     # ── straddle-era FK test, Phase 5 LANDED (nexus-o8dil.49) ────────────────
     "service/src/test/java/dev/nexus/service/CollectionRegistryFkTest.java": (
-        13,
+        12,
         "RDR-156 nexus-70r3c.1 FK+hygiene suite. RDR-191 Phase 5 "
         "(nexus-o8dil.49, fk-004-chunks-collection-registry.xml) landed the "
         "unified chunks_collection_fk on 2026-08-15 — every test method that "
@@ -685,7 +685,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "mirrors CatalogDeleteCollectionCascadeTest's allowlist reason."
     ),
     "service/src/test/java/dev/nexus/service/CatalogRepositoryTest.java": (
-        3,
+        2,
         "Comments narrating the RDR-191 unification (chunks_384/768/1024 -> "
         "nexus.chunks, chunks_768 as a pre-unify FK-target example); "
         "historical only."
@@ -712,15 +712,16 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "under RDR-191 Phase 4; historical only."
     ),
     "service/src/test/java/dev/nexus/service/CollectionVectorStatsTest.java": (
-        4,
+        3,
         "Javadoc/comments narrating collection_vector_stats as aggregating "
         "across the (now-unified) chunks_384/768/1024; historical only."
     ),
-    "service/src/test/java/dev/nexus/service/CombinedQueryParityTest.java": (
-        1,
-        "Comment narrating the RDR-191 Phase 4 unification of "
-        "chunks_384/768/1024 into nexus.chunks; historical only."
-    ),
+    # WAS service/src/test/java/dev/nexus/service/CombinedQueryParityTest.java
+    # (1 hit) — nexus-cbo4a batch 1b's PgContainerHelper.bootstrapServiceRole
+    # conversion removed the hand-rolled bootstrap block the RDR-191 comment
+    # lived in. Zero live hits now, so per test_allowlists_are_not_stale's
+    # own discipline ("a pin of 0 is not a real exemption") the entry is
+    # removed outright rather than pinned at 0.
     # "service/src/test/java/dev/nexus/service/db/ManifestInsertGateTest.java"
     # entry REMOVED at nexus-lgdel.l1: the javadoc this pin covered
     # (RekeyOps.rekey's alias-map resolution joining against nexus.chunks,
@@ -757,18 +758,19 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "prefix-routing 400 against 'the chunks_384 table'; historical "
         "only, describes a fixed bug."
     ),
-    "service/src/test/java/dev/nexus/service/GraphHopParityTest.java": (
-        1,
-        "Comment narrating the RDR-191 Phase 4 unification of "
-        "chunks_384/768/1024 into nexus.chunks; historical only."
-    ),
+    # WAS service/src/test/java/dev/nexus/service/GraphHopParityTest.java
+    # (1 hit) — nexus-cbo4a batch 1b's PgContainerHelper.bootstrapServiceRole
+    # conversion removed the hand-rolled bootstrap block the RDR-191 comment
+    # lived in. Zero live hits now, so per test_allowlists_are_not_stale's
+    # own discipline ("a pin of 0 is not a real exemption") the entry is
+    # removed outright rather than pinned at 0.
     "service/src/test/java/dev/nexus/service/ManifestCollectionStampTest.java": (
         1,
         "Javadoc narrating a planted nexus.chunks row as 'RDR-191 unified; "
         "formerly chunks_1024'; historical only."
     ),
     "service/src/test/java/dev/nexus/service/ManifestFunctionsTest.java": (
-        2,
+        1,
         "Comment/javadoc narrating the RDR-191 unification of "
         "chunks_384/768/1024 into nexus.chunks; historical only."
     ),
@@ -782,18 +784,20 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "Comment narrating the RDR-191 changeset pair collapsing six "
         "per-dim tables into two unified tables; historical only."
     ),
-    "service/src/test/java/dev/nexus/service/PgVectorCombinedQueryContractTest.java": (
-        1,
-        "Comment narrating the RDR-191 Phase 4 unification of "
-        "chunks_384/768/1024 into nexus.chunks; historical only."
-    ),
-    "service/src/test/java/dev/nexus/service/PgVectorHybridSearchContractTest.java": (
-        1,
-        "Comment narrating the RDR-191 Phase 4 unification of "
-        "chunks_384/768/1024 into nexus.chunks; historical only."
-    ),
+    # WAS service/src/test/java/dev/nexus/service/PgVectorCombinedQueryContractTest.java
+    # (1 hit) — nexus-cbo4a batch 1b's PgContainerHelper.bootstrapServiceRole
+    # conversion removed the hand-rolled bootstrap block the RDR-191 comment
+    # lived in. Zero live hits now, so per test_allowlists_are_not_stale's
+    # own discipline ("a pin of 0 is not a real exemption") the entry is
+    # removed outright rather than pinned at 0.
+    # WAS service/src/test/java/dev/nexus/service/PgVectorHybridSearchContractTest.java
+    # (1 hit) — nexus-cbo4a batch 1b's PgContainerHelper.bootstrapServiceRole
+    # conversion removed the hand-rolled bootstrap block the RDR-191 comment
+    # lived in. Zero live hits now, so per test_allowlists_are_not_stale's
+    # own discipline ("a pin of 0 is not a real exemption") the entry is
+    # removed outright rather than pinned at 0.
     "service/src/test/java/dev/nexus/service/PgVectorRepositoryContractTest.java": (
-        2,
+        1,
         "Comment/javadoc narrating the RDR-191 Phase 4 unification and the "
         "pre-unify 'nothing in chunks_768' assertion shape it replaced; "
         "historical only."
@@ -823,7 +827,7 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
     # (5 hits) — deleted at nexus-lgdel.l1 alongside RekeyOps.java itself
     # (its SUBJECT was the deleted rekey rung's server-side correctness).
     "service/src/test/java/dev/nexus/service/SoftDeleteTest.java": (
-        3,
+        2,
         "Javadoc/comments narrating the pre-unify 384/768/1024 fixture "
         "shape and nexus.chunks as 'RDR-191 Phase 4 unified; formerly a "
         "chunks_384 row'; historical only."
@@ -834,16 +838,18 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "chunks_768 only, and the RDR-191 repoint collapsing "
         "chunks_384/768/1024; historical only."
     ),
-    "service/src/test/java/dev/nexus/service/TaxonomyCentroidHandlerTest.java": (
-        1,
-        "Comment narrating that the taxonomy_centroids_384/768/1024 tables "
-        "no longer exist; a completeness note, not a live reference."
-    ),
-    "service/src/test/java/dev/nexus/service/TaxonomyCentroidRepositoryTest.java": (
-        1,
-        "Comment narrating the RDR-191 Phase 4 lane D5 unification of "
-        "nexus.taxonomy_centroids_384/768/1024; historical only."
-    ),
+    # WAS service/src/test/java/dev/nexus/service/TaxonomyCentroidHandlerTest.java
+    # (1 hit) — nexus-cbo4a batch 1b's PgContainerHelper.bootstrapServiceRole
+    # conversion removed the hand-rolled bootstrap block the completeness-note
+    # comment lived in. Zero live hits now, so per test_allowlists_are_not_stale's
+    # own discipline ("a pin of 0 is not a real exemption") the entry is
+    # removed outright rather than pinned at 0.
+    # WAS service/src/test/java/dev/nexus/service/TaxonomyCentroidRepositoryTest.java
+    # (1 hit) — nexus-cbo4a batch 1b's PgContainerHelper.bootstrapServiceRole
+    # conversion removed the hand-rolled bootstrap block the RDR-191 comment
+    # lived in. Zero live hits now, so per test_allowlists_are_not_stale's
+    # own discipline ("a pin of 0 is not a real exemption") the entry is
+    # removed outright rather than pinned at 0.
     "service/src/test/java/dev/nexus/service/TaxonomyCentroidSchemaLiquibaseTest.java": (
         1,
         "Javadoc narrating nexus.taxonomy_centroids_384/768/1024 as unified "

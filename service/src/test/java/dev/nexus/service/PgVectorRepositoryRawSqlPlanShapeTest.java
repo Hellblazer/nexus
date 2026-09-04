@@ -7,12 +7,6 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -122,44 +116,19 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
         pg = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE
-                + "') THEN CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') "
-                + "THEN CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; "
-                + "END IF; END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
 
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            new Liquibase("db/changelog/db.changelog-master.xml",
-                          new ClassLoaderResourceAccessor(), db).update(new Contexts());
-        }
-
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chunks TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
-            // liveChunksPredicate (inlined into every site under test) reads these two
-            // tables via a correlated NOT EXISTS/EXISTS — grant so the plan resolves under
-            // the plain-LOGIN role, same as production (nexus-3ck2g class).
-            su.createStatement().execute(
-                "GRANT SELECT ON nexus.catalog_document_chunks, nexus.catalog_documents TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             // nexus-gjwhu (Deliverable 2): the SQL-function-family EXPLAIN proof below
             // (searchMetadataScoped_shape_..., searchGraphHop_shape_...,
             // searchTopicScoped_shape_...) calls the three combined-query functions
-            // directly under this same SVC_ROLE, so grant EXECUTE plus SELECT on the
-            // extra tables those functions join (catalog_links, topics,
-            // topic_assignments — not otherwise needed by the raw-SQL sites above).
+            // directly under this same SVC_ROLE. EXECUTE ON FUNCTION is not part of
+            // bootstrapServiceRole's fixed grant set -- kept as explicit grants
+            // (nexus-cbo4a batch 1b); the extra tables those functions join
+            // (catalog_links, topics, topic_assignments) already have SELECT via the
+            // helper's ALL TABLES IN SCHEMA nexus grant.
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.search_metadata_scoped_1024"
                 + "(vector, text[], text, text, int, text, text, jsonb, int) TO " + SVC_ROLE);
@@ -169,9 +138,6 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.search_topic_scoped_384"
                 + "(vector, text, text, int) TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT ON nexus.catalog_links, nexus.topics, nexus.topic_assignments TO "
-                + SVC_ROLE);
         }
 
         // Second role + pool, DEDICATED to the real-call companion test (found during
@@ -206,21 +172,9 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
         // still asserted via EXPLAIN on the untouched SVC_ROLE/tenantScope). A forced
         // Seq Scan gives an exact, deterministic answer regardless of ANN internals.
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '"
-                + SVC_ROLE_REALCALL + "') THEN CREATE ROLE " + SVC_ROLE_REALCALL
-                + " LOGIN PASSWORD '" + SVC_PASS + "' NOSUPERUSER NOBYPASSRLS; END IF; END $$");
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE_REALCALL);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chunks TO " + SVC_ROLE_REALCALL);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE_REALCALL);
-            su.createStatement().execute(
-                "GRANT SELECT ON nexus.catalog_document_chunks, nexus.catalog_documents TO "
-                + SVC_ROLE_REALCALL);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE_REALCALL + " SET search_path TO nexus, public");
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE_REALCALL, SVC_PASS);
+            // Planner GUCs, orthogonal to grants -- not part of bootstrapServiceRole's
+            // fixed grant set, kept as explicit ALTER ROLEs (nexus-cbo4a batch 1b).
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE_REALCALL + " SET enable_indexscan = off");
             su.createStatement().execute(

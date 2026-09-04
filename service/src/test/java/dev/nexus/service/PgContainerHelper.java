@@ -206,56 +206,6 @@ public final class PgContainerHelper {
     }
 
     /**
-     * Grants a test-local service role the SAME schema access production
-     * {@code nexus_svc} gets — {@code nexus} DML/sequences PLUS {@code
-     * staging} DML (nexus-kl2z6 increment 2, nexus-vc6dh). Call AFTER the
-     * master changelog has run (needs both schemas to exist) and BEFORE
-     * building the role's own {@code DataSource}.
-     *
-     * <p><b>Why this exists</b>: {@link
-     * dev.nexus.service.db.CatalogRepository#stagingHasRowsForTenant}
-     * reads {@code staging.document_chunks} inside EVERY sweep
-     * transaction now, unconditionally — a test-local role that only
-     * mirrors the OLD (pre-kl2z6) minimal {@code nexus}-only grant set
-     * fails that read with {@code permission denied for schema staging},
-     * which the sweep's fail-open discipline (by design, correctly)
-     * swallows into a silent {@code sweep_skipped}/{@code
-     * reason=sweep_failed} outcome rather than a loud test error —
-     * exactly the kind of masked signal nexus-vc6dh exists to keep
-     * honest. Confirmed NOT a production gap: production's {@code
-     * NX_DB_USER} is {@code nexus_svc} (default, {@code
-     * src/nexus/db/pg_provision.py}), and {@code nexus_svc} already gets
-     * this exact staging grant set from {@code staging-001-landing-
-     * tables.xml}'s {@code staging-4-svc-grants} changeset ({@code
-     * runAlways="true"}, unconditionally in the master changelog) — this
-     * helper exists purely because hand-rolled test-local roles
-     * (predating nexus-kl2z6) never mirrored that changeset. Found
-     * independently by two test classes
-     * ({@code CatalogManifestSweepRepositoryTest},
-     * {@code CatalogHandlerSweepAndChashesManyTest}) before this helper
-     * centralized the fix; a THIRD ({@code CombinedWriteRepositoryTest})
-     * carried the same latent gap without yet tripping over it.
-     *
-     * @param su      superuser connection (the role owner / grantor)
-     * @param svcRole the test-local service role name to grant
-     * @deprecated (nexus-cbo4a batch 1a) — delegates to {@link
-     *     #bootstrapServiceRole(Connection, String, String)} using this
-     *     class's own {@link #SVC_PASSWORD} as the role's password, since
-     *     this 2-arg signature has no password parameter of its own. Every
-     *     existing caller already creates {@code svcRole} (or relies on it
-     *     already existing) before invoking this method with SOME password —
-     *     {@code bootstrapServiceRole}'s own {@code CREATE ROLE ... IF NOT
-     *     EXISTS} guard is then a no-op and only the grants below actually
-     *     execute, exactly as before. Kept only so this method's 7 existing
-     *     call sites keep compiling unchanged; new callers should call
-     *     {@code bootstrapServiceRole} directly with their own role/password.
-     */
-    @Deprecated
-    public static void grantServiceSchemaAccess(Connection su, String svcRole) throws Exception {
-        bootstrapServiceRole(su, svcRole, SVC_PASSWORD);
-    }
-
-    /**
      * Run the PRODUCT master changelog ({@code db/changelog/db.changelog-master.xml})
      * against {@code su} — the single place every test class's own hand-rolled
      * {@code new Liquibase("db/changelog/db.changelog-master.xml", ...)} call

@@ -5,12 +5,6 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.TenantScope;
-import liquibase.Contexts;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -65,61 +59,10 @@ class PgVectorEmbedSkipIntegrationTest {
         pg = PgContainerHelper.start();
 
         try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '" + SVC_ROLE + "') THEN " +
-                "    CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS + "' NOSUPERUSER NOBYPASSRLS; " +
-                "  END IF; " +
-                "END $$");
-            su.createStatement().execute(
-                "DO $$ BEGIN " +
-                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN " +
-                "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass' NOSUPERUSER NOBYPASSRLS; " +
-                "  END IF; " +
-                "END $$");
+            PgContainerHelper.applyProductSchema(su);
         }
-
         try (Connection su = pg.createConnection("")) {
-            Database db = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(su));
-            Liquibase liquibase = new Liquibase(
-                "db/changelog/db.changelog-master.xml",
-                new ClassLoaderResourceAccessor(),
-                db);
-            liquibase.update(new Contexts());
-        }
-
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON " + DimTables.CHUNKS_TABLE_NAME + " TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, INSERT ON nexus.catalog_collections TO " + SVC_ROLE);
-            // nexus-3ck2g: the get-family's typed liveChunksCondition (RDR-156 Decision 6)
-            // joins catalog_document_chunks/catalog_documents for the first time from this
-            // role — this test's own repo.get() verification calls need SELECT on both so
-            // the tombstone-filter EXISTS subqueries can resolve.
-            su.createStatement().execute(
-                "GRANT SELECT ON nexus.catalog_document_chunks, nexus.catalog_documents TO " + SVC_ROLE);
-            // RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk's ON DELETE
-            // CASCADE means a DELETE on nexus.chunks can now cascade-delete matching
-            // nexus.topic_assignments rows -- Postgres's own FK/RI cascade mechanism
-            // is privilege-exempt, but the EXISTING taxonomy-003 doc_count triggers
-            // (trg_topic_assignments_doc_count_del, deliberately SECURITY INVOKER,
-            // never DEFINER -- taxonomy-003-doc-count-trigger.xml) fire as part of
-            // that SAME cascade and run an ordinary UPDATE nexus.topics under the
-            // INVOKING role's own privileges. This role never touched topic_
-            // assignments/topics before this FK existed, so it needs the grants
-            // that trigger's body requires: SELECT on topic_assignments (the
-            // recount subquery) and SELECT, UPDATE on topics (the recount itself).
-            su.createStatement().execute(
-                "GRANT SELECT ON nexus.topic_assignments TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "GRANT SELECT, UPDATE ON nexus.topics TO " + SVC_ROLE);
-            su.createStatement().execute(
-                "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
 
         var cfg = new HikariConfig();
