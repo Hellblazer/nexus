@@ -774,6 +774,94 @@ class StalenessCache:
     never_fresh: frozenset[str] = field(default_factory=frozenset)
 
 
+def apply_catalog_content_hashes(
+    cache: StalenessCache,
+    complete_doc_hashes: Mapping[str, str] | None,
+) -> int:
+    """Overlay the catalog fence's ``index_content_hash`` onto *cache*
+    (nexus-vayt7). Returns how many entries were rewritten.
+
+    The document-level content hash of record is the RUNFENCE
+    (``index_state='complete'``, ``index_content_hash``), written by the
+    same producer from the same digest ``check_staleness`` is handed.
+    Chunk metadata cannot carry it: chunks are content-addressed, one row
+    per distinct text per collection, stamped by whichever file wrote the
+    text first and never rewritten (RDR-181 embed-skip). On the nexus
+    checkout that left 536 of 1818 code docs reading as changed on every
+    run while the catalog said 'complete' with the current hash for
+    2114 of 2122 (measured 2026-09-04: ~650 of 2370 unchanged files
+    re-embedded and re-uploaded per post-commit run, ~10 min each).
+
+    Only docs already PRESENT in ``by_doc_id`` are rewritten: presence
+    proves the doc still has chunks in T3. A doc the catalog calls
+    'complete' but T3 no longer holds stays a cache miss, so the
+    ghost-heal path (miss -> re-index) is untouched. ``never_fresh`` is
+    consulted by ``check_staleness`` before ``by_doc_id`` and is not
+    affected here.
+    """
+    if not complete_doc_hashes:
+        return 0
+    applied = 0
+    for doc_id, fence_hash in complete_doc_hashes.items():
+        if not fence_hash:
+            continue
+        stored = cache.by_doc_id.get(doc_id)
+        if stored is None or stored[0] == fence_hash:
+            continue
+        cache.by_doc_id[doc_id] = (fence_hash, stored[1])
+        applied += 1
+    return applied
+
+
+def complete_doc_hashes_for(
+    catalog: object,
+    doc_ids: Iterable[str],
+    *,
+    known: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """``{doc_id: index_content_hash}`` for every *doc_ids* member fenced
+    ``'complete'`` in *catalog*, one ``all_documents()`` sweep
+    (nexus-vayt7). *known* entries are copied through untouched so the
+    hook's owner-scoped map (see ``indexer._catalog_hook``) is not
+    re-fetched; the sweep fills in the docs that map lives outside of.
+
+    Why a second source: the repo hook only sees ONE owner's entries, but a
+    chash in the rdr__ / docs__ collections can resolve to a document
+    registered under another owner (this checkout's RDRs sit under eight:
+    prose registrations with absolute paths under 1.10, rdr registrations
+    under 1.2, 1.5, 1.27 ...). Measured 2026-09-04 with only the hook map:
+    2325 of 2370 files skipped, and 40 of the 45 still re-indexed were
+    RDRs whose fence lived under one of those other owners.
+
+    Returns *known* alone when *catalog* is ``None`` or the sweep fails —
+    never raises; a missing overlay costs a re-index, not a run.
+    """
+    out: dict[str, str] = dict(known or {})
+    wanted = {d for d in doc_ids if d and d not in out}
+    if catalog is None or not wanted:
+        return out
+    try:
+        entries = catalog.all_documents()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 — best-effort overlay; a miss re-indexes, never fails the run
+        import structlog  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+        structlog.get_logger(__name__).warning(
+            "complete_doc_hashes_sweep_failed", wanted=len(wanted), exc_info=True,
+        )
+        return out
+    for e in entries:
+        doc_id = str(getattr(e, "tumbler", ""))
+        if doc_id not in wanted:
+            continue
+        if (
+            getattr(e, "index_state_reported", True)
+            and getattr(e, "index_state", None) == "complete"
+            and getattr(e, "index_content_hash", "")
+        ):
+            out[doc_id] = e.index_content_hash
+    return out
+
+
 def build_staleness_cache(col: object) -> StalenessCache:
     """Walk *col* once and index its chunks for fast staleness lookup.
 
@@ -902,6 +990,11 @@ def build_staleness_cache(col: object) -> StalenessCache:
     # for legacy chunks).
     metadatas = all_chunks.get("metadatas") or []
     chash_to_doc: dict[str, str] = {}
+    # nexus-vayt7: EVERY doc a chash maps to, not just sorted()[0]. Chunks
+    # are content-addressed (RDR-180), so a chash shared by N docs is one
+    # T3 row; a doc whose chunks are all shared was invisible here, a
+    # permanent cache miss re-indexed on every run.
+    chash_to_docs: dict[str, list[str]] = {}
     needed_chashes = [
         (m or {}).get("chunk_text_hash", "")
         for m in metadatas
@@ -915,7 +1008,9 @@ def build_staleness_cache(col: object) -> StalenessCache:
                 by_chash = _cat.docs_for_chashes(list(set(needed_chashes)))
                 for c, doc_ids in by_chash.items():
                     if doc_ids:
-                        chash_to_doc[c] = sorted(doc_ids)[0]
+                        ordered = sorted(doc_ids)
+                        chash_to_doc[c] = ordered[0]
+                        chash_to_docs[c] = ordered
         except Exception:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
             # nexus-8g79.8: pre-fix this swallowed the whole chash→doc_id
             # resolution silently, leaving every result without doc_id
@@ -938,12 +1033,27 @@ def build_staleness_cache(col: object) -> StalenessCache:
             continue
         value = (content_hash, model)
         doc_id = meta.get("doc_id", "")
+        shared_with: list[str] = []
         if not doc_id:
             chash = meta.get("chunk_text_hash", "")
             if chash:
                 doc_id = chash_to_doc.get(chash, "")
+                shared_with = chash_to_docs.get(chash, [])
         if doc_id:
-            cache.by_doc_id[doc_id] = value
+            # nexus-vayt7: the value recorded here is the chunk's FIRST
+            # writer's hash, not a document property (RDR-181 embed-skip
+            # never rewrites an existing row). It is the fallback for docs
+            # the catalog has no 'complete' fence for; the orchestrator
+            # overlays the fence hash via ``apply_catalog_content_hashes``
+            # for the rest. Presence (the key) is what matters: it proves
+            # the doc still has chunks in T3, which the ghost-heal miss
+            # relies on. A shared chunk never overwrites a value a doc's
+            # own unique chunk already recorded.
+            if len(shared_with) > 1:
+                for other in shared_with:
+                    cache.by_doc_id.setdefault(other, value)
+            else:
+                cache.by_doc_id[doc_id] = value
         # nexus-afudo: by_source_path population DELETED as dead code —
         # see StalenessCache's docstring. No chunk written since RDR-102
         # D2 (2026-05-02) carries a source_path key.

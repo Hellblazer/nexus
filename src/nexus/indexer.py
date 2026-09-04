@@ -989,8 +989,17 @@ def _catalog_hook(
     skip_housekeeping: bool = False,
     stale_fence_doc_ids: set[str] | None = None,
     on_phase: Callable[[str], None] | None = None,
+    complete_doc_hashes: dict[str, str] | None = None,
 ) -> dict[Path, str]:
     """Register/update indexed files in catalog. Silently skipped if catalog absent.
+
+    ``complete_doc_hashes`` (nexus-vayt7) is the sibling OUT-param of
+    ``stale_fence_doc_ids``: every EXISTING document whose reported
+    ``index_state`` is ``'complete'`` has ``tumbler -> index_content_hash``
+    added in place, from the same owner-scoped fetch. The orchestrator
+    overlays it onto the staleness caches, which otherwise key a doc's
+    content hash off content-addressed chunk metadata that is never
+    refreshed (see ``indexer_utils.apply_catalog_content_hashes``).
 
     ``on_phase`` (nexus-jg3x5): the orchestrator's ``[post]`` phase channel.
     When supplied, each link generator that can do work for this batch
@@ -1356,6 +1365,17 @@ def _catalog_hook(
                         and getattr(existing, "index_state", None) in ("indexing", "failed")
                     ):
                         stale_fence_doc_ids.add(str(existing.tumbler))
+                    # nexus-vayt7: the fence's content hash is the doc-level
+                    # hash of record; chunk metadata cannot carry one.
+                    if (
+                        complete_doc_hashes is not None
+                        and getattr(existing, "index_state_reported", True)
+                        and getattr(existing, "index_state", None) == "complete"
+                        and getattr(existing, "index_content_hash", "")
+                    ):
+                        complete_doc_hashes[str(existing.tumbler)] = (
+                            existing.index_content_hash
+                        )
             except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 # Per-file failure must NOT abort the rest of the loop.
                 # The previous behaviour swallowed every subsequent
@@ -4375,6 +4395,9 @@ def _run_index(
     # finds fenced 'indexing'/'failed' — reused to force those docs stale in
     # the staleness caches built further down, no extra catalog round trip.
     _stale_fence_doc_ids: set[str] = set()
+    # nexus-vayt7: tumbler -> index_content_hash for every doc fenced
+    # 'complete', from the same fetch; overlaid onto the caches below.
+    _complete_doc_hashes: dict[str, str] = {}
     file_to_doc_id = _catalog_hook(
         repo=repo,
         repo_name=_repo_basename,
@@ -4387,6 +4410,7 @@ def _run_index(
         skip_housekeeping=delta_changed is not None,
         stale_fence_doc_ids=_stale_fence_doc_ids,
         on_phase=on_phase,
+        complete_doc_hashes=_complete_doc_hashes,
     )
     if on_phase is not None:
         on_phase(
@@ -4453,11 +4477,43 @@ def _run_index(
         code_staleness.never_fresh = _never_fresh
         docs_staleness.never_fresh = _never_fresh
         rdr_staleness.never_fresh = _never_fresh
+    # nexus-vayt7: the catalog fence hash overrides the chunk-metadata hash
+    # for every 'complete' doc the cache holds. A doc_id belongs to one
+    # collection, so the same map is safe to apply to all three.
+    from nexus.indexer_utils import (  # noqa: PLC0415  — circular-dep avoidance (nexus.indexer_utils)
+        apply_catalog_content_hashes,
+        complete_doc_hashes_for,
+    )
+    # The hook map covers this repo's owner only; a chash in rdr__/docs__
+    # can resolve to a doc registered under another owner (this checkout's
+    # RDRs sit under eight). One all_documents() sweep fills those in.
+    _cached_doc_ids = (
+        set(code_staleness.by_doc_id)
+        | set(docs_staleness.by_doc_id)
+        | set(rdr_staleness.by_doc_id)
+    )
+    if _cached_doc_ids - set(_complete_doc_hashes):
+        from nexus.catalog.factory import make_catalog_reader as _mk_reader  # noqa: PLC0415  — circular-dep avoidance (nexus.catalog.factory)
+
+        try:
+            _fence_reader = _mk_reader()
+        except Exception:  # noqa: BLE001 — overlay is best-effort; a miss re-indexes, never fails the run
+            _fence_reader = None
+        _complete_doc_hashes = complete_doc_hashes_for(
+            _fence_reader, _cached_doc_ids, known=_complete_doc_hashes,
+        )
+    _fence_hash_applied = (
+        apply_catalog_content_hashes(code_staleness, _complete_doc_hashes)
+        + apply_catalog_content_hashes(docs_staleness, _complete_doc_hashes)
+        + apply_catalog_content_hashes(rdr_staleness, _complete_doc_hashes)
+    )
     _log.info(
         "staleness_caches_built",
         code_doc_ids=len(code_staleness.by_doc_id),
         docs_doc_ids=len(docs_staleness.by_doc_id),
         rdr_doc_ids=len(rdr_staleness.by_doc_id),
+        complete_fence_docs=len(_complete_doc_hashes),
+        fence_hash_overrides=_fence_hash_applied,
         elapsed_seconds=time.monotonic() - _staleness_t0,
     )
     if on_phase is not None:
