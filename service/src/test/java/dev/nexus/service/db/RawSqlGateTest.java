@@ -322,17 +322,13 @@ class RawSqlGateTest {
                 ".execute(\"ALTER TABLE nexus.\" + table + \" NO FORCE ROW LEVEL SECURITY\")", 1,
                 ".execute(\"ALTER TABLE nexus.\" + table + \" FORCE ROW LEVEL SECURITY\")", 1,
                 ".prepareStatement( \"SELECT NOT convalidated FROM pg_constraint WHERE conname = ?\")", 1,
-                ".prepareStatement( \"SELECT COUNT(*) FROM nexus.\" + table + \" WHERE length(chash) != 32\")", 1),
-            // SANCTIONED RAW (nexus-rph82): SET TIME ZONE is PostgreSQL session
-            // syntax with no jOOQ typed-DSL form. Pins the migration connection's
-            // session zone to UTC so databasechangelog.dateexecuted (stamped via
-            // the server's now() rendered in the SESSION zone) is not JVM-local
-            // against a GMT database — pgjdbc negotiates the session zone from
-            // the JVM default at CONNECT time, so a pool opened before
-            // pinJvmTimeZoneToUtc() still carries the old zone; this pins the
-            // session directly. One statement, executed once per migrate() call.
-            "migrate", Map.of(
-                ".execute(\"SET TIME ZONE 'UTC'\")", 1))),
+                ".prepareStatement( \"SELECT COUNT(*) FROM nexus.\" + table + \" WHERE length(chash) != 32\")", 1))),
+        // SchemaMigrator.java's "migrate" entry: REMOVED (nexus-zrcj7 step 4 critic
+        // follow-up, T2 [24242]). The SET TIME ZONE 'UTC' statement is retired onto
+        // its Postgres-documented equivalent, set_config('TimeZone', 'UTC', false),
+        // called through DSL.using(conn, SQLDialect.POSTGRES) -- same conversion
+        // shape and same dead-entry-avoidance discipline as the removal below.
+        //
         // SchemaMigrator.java's "countChangelogRows"/"serverNow"/"countChangelogRowsSince"
         // entries: REMOVED (nexus-zrcj7 step 4 review follow-up, critic T2 [24235]). All
         // three retired onto DSL.using(conn, SQLDialect.POSTGRES) over the SAME bare
@@ -1607,7 +1603,7 @@ class RawSqlGateTest {
      * One raw-SQL-bearing method that remains genuinely UNCONVERTIBLE today.
      *
      * @param file        the bare file name, as used by {@link #SANCTIONED_STATEMENTS}'s
-     *                    own keys (all six entries below live under {@code
+     *                    own keys (all five entries below live under {@code
      *                    dev.nexus.service.db}).
      * @param method      the exempted method's bare name.
      * @param reason      one-line justification (why no typed jOOQ DSL form exists) --
@@ -1640,36 +1636,34 @@ class RawSqlGateTest {
      * SAME edit as the new {@link #EXEMPTION_REGISTRY} entry, never as a side effect of
      * an unrelated change. {@link #exemptionRegistry_sizeStaysAtOrBelowCeiling} pins it.
      */
-    private static final int EXEMPTION_REGISTRY_CEILING = 6;
+    private static final int EXEMPTION_REGISTRY_CEILING = 5;
 
     /**
-     * The six sites this cycle's census confirmed have no typed jOOQ DSL form at all —
-     * DDL, session/transaction-control syntax, a PgBouncer admin meta-command, a
-     * Postgres system-catalog read jOOQ codegen does not model, and one EXPLAIN-pinned
-     * probe constant executed by name. Every entry MUST have a live {@link
+     * The five sites this cycle's census confirmed have no typed jOOQ DSL form at all —
+     * DDL, a PgBouncer admin meta-command, a transaction-control statement, a Postgres
+     * system-catalog read jOOQ codegen does not model, and one EXPLAIN-pinned probe
+     * constant executed by name. Every entry MUST have a live {@link
      * #SANCTIONED_STATEMENTS} registration for the same (file, method) pair AND a live
      * method declaration in that file on disk — both checked by {@link
      * #exemptionRegistry_everySiteStillExistsInSanctionedStatementsAndSource}.
      *
-     * <p>Three entries this registry carried through the first version of this commit
-     * (SchemaMigrator's {@code countChangelogRows}/{@code countChangelogRowsSince}/
-     * {@code serverNow}) are GONE, not merely re-justified: their stated reason ("no
-     * jOOQ typed-DSL form") was false — reading a table by name and reading the current
-     * timestamp both have typed jOOQ forms ({@code DSL.table(DSL.name(...))}, {@code
-     * DSL.currentTimestamp()}) — and the real, ARCHITECTURAL reason they were raw (no
-     * DSLContext exists yet on the bare Liquibase-bootstrap Connection) does not
+     * <p>Four entries this registry carried through earlier rounds of this same bead
+     * are GONE, not merely re-justified: their stated reason ("no jOOQ typed-DSL form")
+     * was false in every case — reading a table by name, reading the current timestamp,
+     * and pinning the session timezone all have typed jOOQ forms ({@code
+     * DSL.table(DSL.name(...))}, {@code DSL.currentTimestamp()}, {@code
+     * DSL.function("set_config", ...)}) — and the real, ARCHITECTURAL reason they were
+     * raw (no DSLContext exists yet on the bare Liquibase-bootstrap Connection) does not
      * actually preclude typed DSL, since {@code DSL.using(conn, dialect)} wraps any
-     * plain {@code Connection} regardless of when it was opened (critic finding,
-     * nexus-zrcj7 step 4 review, T2 [24235]). All three are converted in SchemaMigrator.java.
+     * plain {@code Connection} regardless of when it was opened (critic findings,
+     * nexus-zrcj7 step 4 review, T2 [24235] and T2 [24242]). SchemaMigrator's {@code
+     * countChangelogRows}/{@code countChangelogRowsSince}/{@code serverNow}/{@code
+     * migrate} are all converted; {@code preflightChashConstraints} is the sole
+     * SchemaMigrator survivor, confirmed genuinely unavoidable (DDL + a system-catalog
+     * read, neither of which set_config/currentTimestamp/table-by-name precedent
+     * applies to).
      */
     private static final List<ExemptionEntry> EXEMPTION_REGISTRY = List.of(
-        new ExemptionEntry("SchemaMigrator.java", "migrate",
-            "SET TIME ZONE 'UTC' on the bare Liquibase-bootstrap JDBC Connection --  "
-            + "PostgreSQL session syntax, no jOOQ typed-DSL form for a SET statement at "
-            + "all (this is a genuine no-DSL-form gap, unlike the false reason SPOT-CHECKED "
-            + "and REMOVED from the countChangelogRows/countChangelogRowsSince/serverNow "
-            + "entries this same review round -- those had typed forms all along).",
-            false),
         new ExemptionEntry("SchemaMigrator.java", "preflightChashConstraints",
             "ALTER TABLE ... {NO} FORCE ROW LEVEL SECURITY is DDL with no jOOQ typed-DSL "
             + "form; the constraint-validity probe reads pg_constraint, a Postgres system "

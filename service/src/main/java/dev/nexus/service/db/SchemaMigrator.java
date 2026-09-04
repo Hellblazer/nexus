@@ -146,8 +146,25 @@ public final class SchemaMigrator {
             // opened before the pin above still carries the old zone. Pin the
             // session too; the JVM pin covers client-side formatting, this covers
             // the stamp itself, and together they hold for every entry point.
-            try (var st = conn.createStatement()) {
-                st.execute("SET TIME ZONE 'UTC'");
+            //
+            // nexus-zrcj7 step 4 critic follow-up (T2 [24242]): retired the raw
+            // "SET TIME ZONE 'UTC'" statement onto its own Postgres-documented
+            // equivalent -- SET TIME ZONE 'UTC' IS set_config('TimeZone', 'UTC',
+            // false) (false = session-scoped, matching SET rather than SET LOCAL) --
+            // called through DSL.using(conn, SQLDialect.POSTGRES) over the SAME bare
+            // bootstrap Connection, same conversion shape as countChangelogRows/
+            // countChangelogRowsSince/serverNow below. The EXEMPTION_REGISTRY entry
+            // this statement carried ("PostgreSQL session syntax, no jOOQ typed-DSL
+            // form for a SET statement at all") is retired with it: set_config(...)
+            // is an ordinary PostgreSQL function, not the bare SET statement, so this
+            // was never actually a no-typed-form case either.
+            try {
+                DSL.using(conn, SQLDialect.POSTGRES)
+                    .select(DSL.function("set_config", SQLDataType.VARCHAR,
+                        DSL.val("TimeZone"), DSL.val("UTC"), DSL.val(false)))
+                    .fetchOne();
+            } catch (DataAccessException e) {
+                throw new SQLException("SET TIME ZONE 'UTC' (via set_config) failed", e);
             }
             preflightChashConstraints(conn);
 
