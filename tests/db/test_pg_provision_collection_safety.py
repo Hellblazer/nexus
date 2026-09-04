@@ -58,7 +58,7 @@ def test_lazy_resolver_uses_the_import_time_ambient_env(monkeypatch, tmp_path):
     """First-use resolution must see the AMBIENT env captured at collection
     start, not a per-test monkeypatched one — the exact contract the old
     import-time resolution existed to provide."""
-    from tests import _engine_substrate as es
+    from tests import _engine_substrate as es  # noqa: PLC0415 — deferred import, function-local by this file's convention
 
     ambient_bin = tmp_path / "ambient-pg" / "bin"
     ambient_bin.mkdir(parents=True)
@@ -76,7 +76,7 @@ def test_lazy_resolver_uses_the_import_time_ambient_env(monkeypatch, tmp_path):
         resolved = es._pg_bin()
         assert resolved == ambient_bin
         # And the test-time env is restored untouched afterwards.
-        import os
+        import os  # noqa: PLC0415 — deferred import, function-local by this file's convention
 
         assert os.environ["NEXUS_PG_BIN"] == str(tmp_path / "test-time-override")
     finally:
@@ -115,3 +115,105 @@ def test_verification_failure_still_re_raises(monkeypatch, tmp_path):
     monkeypatch.setattr("nexus.daemon.binary_install.install_pg_bundle", _tampered)
     with pytest.raises(BinaryVerificationError):
         sf._self_provision_pg_bundle()
+
+
+# nexus-9rnfr: one provisioner per box, TUF refresh retried under the lock.
+
+
+def _wire_fake_bundle(monkeypatch, tmp_path, install):
+    """Route the fixture's product seams at a fake: *install* records calls and
+    marks the cache provisioned; ``extracted_bin_dir`` reads that mark."""
+    state = {"provisioned": False, "calls": 0}
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+
+    def _install(tag, cache_dir):
+        state["calls"] += 1
+        install(state)
+        state["provisioned"] = True
+
+    monkeypatch.setattr("nexus.daemon.binary_install.install_pg_bundle", _install)
+    monkeypatch.setattr(
+        "nexus.db.pg_bundle.extracted_bin_dir",
+        lambda cache_dir: bin_dir if state["provisioned"] else None,
+    )
+    monkeypatch.setattr("nexus.db.pg_bundle.ensure_pg_bundle", lambda cache_dir, search_dirs: bin_dir)
+    return state, bin_dir
+
+
+def test_concurrent_provisioners_download_once_and_share_the_result(monkeypatch, tmp_path):
+    """Eight callers on a cold cache (the xdist shape): exactly one install,
+    every caller gets the bundle. Threads open the lock file separately, so
+    the flock they contend on is the cross-process one."""
+    import threading  # noqa: PLC0415 — deferred import, function-local by this file's convention
+    import time  # noqa: PLC0415 — deferred import, function-local by this file's convention
+
+    from tests.db import _service_fixture as sf  # noqa: PLC0415 — deferred import, function-local by this file's convention
+
+    _cold_cache(monkeypatch, tmp_path)
+    state, bin_dir = _wire_fake_bundle(monkeypatch, tmp_path, lambda st: time.sleep(0.3))
+
+    results: list[object] = []
+    def _go():
+        results.append(sf._self_provision_pg_bundle())
+    threads = [threading.Thread(target=_go) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert state["calls"] == 1, f"{state['calls']} downloads for one cold cache"
+    assert results == [bin_dir] * 8
+
+
+def test_tuf_refresh_failure_is_retried_then_succeeds(monkeypatch, tmp_path):
+    from nexus.daemon.binary_install import BinaryVerificationError  # noqa: PLC0415 — deferred import, function-local by this file's convention
+    from tests.db import _service_fixture as sf  # noqa: PLC0415 — deferred import, function-local by this file's convention
+
+    _cold_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(sf, "_TUF_RETRY_BACKOFF_S", 0.0)
+
+    def _flaky(st):
+        if st["calls"] < 3:
+            raise BinaryVerificationError(
+                "signature verification failed for nexus-pg-mac-arm64.txz: Failed to refresh TUF metadata"
+            )
+
+    state, bin_dir = _wire_fake_bundle(monkeypatch, tmp_path, _flaky)
+    assert sf._self_provision_pg_bundle() == bin_dir
+    assert state["calls"] == 3
+
+
+def test_a_real_verification_failure_is_not_retried(monkeypatch, tmp_path):
+    from nexus.daemon.binary_install import BinaryVerificationError  # noqa: PLC0415 — deferred import, function-local by this file's convention
+    from tests.db import _service_fixture as sf  # noqa: PLC0415 — deferred import, function-local by this file's convention
+
+    _cold_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(sf, "_TUF_RETRY_BACKOFF_S", 0.0)
+
+    def _tampered(st):
+        raise BinaryVerificationError("signature verification failed: identity mismatch")
+
+    state, _ = _wire_fake_bundle(monkeypatch, tmp_path, _tampered)
+    with pytest.raises(BinaryVerificationError):
+        sf._self_provision_pg_bundle()
+    assert state["calls"] == 1
+
+
+def test_kill_control_without_the_lock_every_caller_downloads(monkeypatch, tmp_path):
+    """Falsifiability: with the lock a no-op, the same eight callers race the
+    cold cache and several download — the shape nexus-9rnfr observed."""
+    import threading  # noqa: PLC0415 — deferred import, function-local by this file's convention
+    import time  # noqa: PLC0415 — deferred import, function-local by this file's convention
+
+    from tests.db import _service_fixture as sf  # noqa: PLC0415 — deferred import, function-local by this file's convention
+
+    _cold_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr("nexus._locking.lock_file", lambda fh, *, blocking: None)
+    monkeypatch.setattr("nexus._locking.unlock_file", lambda fh: None)
+    state, _ = _wire_fake_bundle(monkeypatch, tmp_path, lambda st: time.sleep(0.3))
+    threads = [threading.Thread(target=sf._self_provision_pg_bundle) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert state["calls"] > 1, "the lock is what serialises provisioning; without it the race is back"
