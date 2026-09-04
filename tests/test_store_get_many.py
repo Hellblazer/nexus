@@ -259,7 +259,27 @@ class TestStoreGetManyTruncation:
                 max_chars_per_doc=10,
             )
 
-        assert result["contents"][0] == ("x" * 10) + "…"
+        from nexus.mcp.core import display_truncation_marker
+
+        # nexus-lugwx: the cut announces itself where the model reads it.
+        assert result["contents"][0] == (
+            ("x" * 10) + "…" + display_truncation_marker(10)
+        )
+        assert "NOT a defect" in result["contents"][0]
+
+    def test_untruncated_content_carries_no_marker(self):
+        from nexus.mcp.core import store_get_many
+
+        store = {"doc-1": {"content": "x" * 10}}
+        mock_t3, _ = _make_stub_t3({"*": store})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(
+                ids=["doc-1"], collections="knowledge", structured=True,
+                max_chars_per_doc=10,
+            )
+
+        assert result["contents"][0] == "x" * 10
 
 
 class TestStoreGetManyMultiCollectionRouting:

@@ -418,6 +418,68 @@ class PgVectorHybridSearchContractTest {
             .containsExactly(WH_C1);
     }
 
+    // Tolerant-typing rule (nexus-zrcj7, T2 [24219] critique finding A): planWhere is
+    // SHARED between search() and hybridSearch()/text_gated_search_<dim> family, so the
+    // same numeric-vs-string cross-type matrix search() carries
+    // (PgVectorRepositoryContractTest) must hold here too — this file had exactly one
+    // where test before this fix (plain $ne), none exercising type mismatch.
+
+    @Test
+    void hybridSearch_whereEqNumeric_matchesBothJsonNumberAndJsonStringStoredValues() {
+        String col = "code__hybridsearcheqtyping__voyage-code-3__v1";
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("53fee991ee97e4a03d984ac944fc0c3676d3b715ff6e1b9e57eb348569db7d71",
+                    "7d3dfe0222b8df3275aa84403d462a577c2a8b11f5f76160923e29bb9f4a8bd4"),
+            List.of("tenant isolation policy hybrid eq typing num",
+                    "tenant isolation policy hybrid eq typing str"),
+            List.of(Map.of("year", 2020),      // JSON number
+                    Map.of("year", "2020")));  // JSON string
+
+        List<Map<String, Object>> rows =
+            repo1024.hybridSearch(TENANT_A, Q, List.of(col), 10, Map.of("year", 2020));
+
+        assertThat(ids(rows))
+            .as("hybridSearch's where must apply the SAME tolerant-typing rule as "
+                + "search(): {year: 2020} (a Java Integer operand) matches BOTH the "
+                + "JSON-number and JSON-string stored forms")
+            .containsExactlyInAnyOrder(
+                "53fee991ee97e4a03d984ac944fc0c3676d3b715ff6e1b9e57eb348569db7d71",
+                "7d3dfe0222b8df3275aa84403d462a577c2a8b11f5f76160923e29bb9f4a8bd4");
+    }
+
+    @Test
+    void hybridSearch_whereNeNumeric_excludesBothJsonNumberAndJsonStringStoredValues() {
+        String col = "code__hybridsearchnetyping__voyage-code-3__v1";
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("6b721b55e4c4c5508880c4989846c0f6d7349305dae8bf5b4754ba3b9d338baa",
+                    "091bfc5c542c33e9a855e7a66d436ddd4142e50291203acd5ced23c701ce89dc"),
+            List.of("tenant isolation policy hybrid ne typing num",
+                    "tenant isolation policy hybrid ne typing other"),
+            List.of(Map.of("year", 2020),      // JSON number, must be excluded
+                    Map.of("year", "2021")));  // JSON string, non-matching, must be kept
+
+        List<Map<String, Object>> rows = repo1024.hybridSearch(
+            TENANT_A, Q, List.of(col), 10, Map.of("year", Map.of("$ne", 2020)));
+
+        assertThat(ids(rows))
+            .as("hybridSearch's {year:{$ne:2020}} must exclude the JSON-number 2020 row "
+                + "(cross-type tolerance applies to $ne too) and keep the non-matching "
+                + "string row")
+            .containsExactly("091bfc5c542c33e9a855e7a66d436ddd4142e50291203acd5ced23c701ce89dc");
+    }
+
+    @Test
+    void hybridSearch_whereNonScalarOperand_failsLoud() {
+        // T2 [24220] review finding: a Map/List operand must fail loud (400) on the
+        // hybrid path too, not just plain search — planWhere is the shared translator.
+        assertThatThrownBy(() -> repo1024.hybridSearch(
+                TENANT_A, Q, List.of(COL_HY), 10, Map.of("kind", Map.of("$in", List.of(Map.of("nested", 1))))))
+            .as("a non-scalar $in item must fail loud, not serialize unquoted JSON into "
+                + "the jsonpath predicate and surface as an opaque 500")
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("scalar operand");
+    }
+
     @Test
     void hybridSearch_respectsNResultsLimit() {
         List<Map<String, Object>> rows =

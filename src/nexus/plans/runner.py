@@ -414,6 +414,33 @@ class PlanResult:
     #: chance to run" without re-deriving it from ``len(steps)`` vs
     #: ``total_planned_steps``.
     continuation_cut_applied: bool = False
+    #: nexus-ivv4d code-review follow-up (T2 [24198]): one
+    #: ``{step_index, tool, corpus, query}`` dict per ISOLATED dispatch
+    #: whose tool is in :data:`_CORPUS_QUERY_TOOLS`, captured with the
+    #: fully RESOLVED args — after the plan/scope/caller-scope/default
+    #: corpus fall-through (``_apply_scope_to_args`` ->
+    #: ``_apply_caller_scope_to_args`` -> ``_apply_default_corpus_to_args``)
+    #: has already run. A plan template that leaves ``corpus`` unset
+    #: shows the runner's OWN fill-in here, not an empty string — the
+    #: static ``plan_json`` a caller could re-parse instead only ever
+    #: shows what the plan AUTHOR wrote, not what actually dispatched.
+    #: In-process only, same precedent as :attr:`step_records` — no
+    #: wire/telemetry shape carries this.
+    resolved_step_args: list[dict[str, Any]] = field(default_factory=list)
+    #: nexus-4h0oh (RDR-200 Phase 1c): 1-indexed plan-step positions
+    #: (matching :attr:`budget_exhausted_at_step`'s convention) of
+    #: executed operator ("reduce") steps whose output is never
+    #: referenced, directly or transitively, by the plan's terminal
+    #: step — evidence the runner retrieved, reduced, and paid for,
+    #: then silently discarded because no fan-in step folded the
+    #: parallel branches back together. Empty when every reduce step
+    #: feeds the terminal step (the common case), the plan has no
+    #: reduce steps, or the run produced no output at all. Visibility
+    #: only: the runner WARNS (structlog ``nx_answer_discarded_reduce_
+    #: steps``) rather than refusing the run — see
+    #: :func:`_discarded_reduce_steps`'s docstring for the "smallest
+    #: change that makes the loss visible" rationale.
+    dropped_reduce_steps: list[int] = field(default_factory=list)
 
 
 # ── Embedding-domain mapping ────────────────────────────────────────────────
@@ -459,6 +486,16 @@ _RETRIEVAL_TOOLS: frozenset[str] = frozenset(
      "search_metadata_scoped", "search_topic_scoped", "search_graph_hop",
      "search_aspect_scoped"},
 )
+
+#: :data:`_RETRIEVAL_TOOLS` minus ``store_get_many`` (nexus-ivv4d code
+#: review, T2 [24198]): the corpus/query provenance capture below
+#: (``resolved_step_args``) exists to answer "what did this retrieval
+#: step search" — ``store_get_many`` is a hydration call keyed on
+#: ``ids``/``collections`` from a PRIOR step's output, never a
+#: ``corpus``/``query`` argument of its own, so including it would
+#: render a step basis line of ``corpus='' query=''`` that looks like a
+#: missing-scope defect rather than the tool simply having no such args.
+_CORPUS_QUERY_TOOLS: frozenset[str] = _RETRIEVAL_TOOLS - {"store_get_many"}
 
 #: Args keys that may carry a collection name. The runner extracts
 #: candidates from these to validate the cross-embedding guard, and
@@ -1092,6 +1129,88 @@ def _scan_var_refs(value: Any, found: set[str]) -> None:
             found.add(m.group(1))
 
 
+def _scan_step_refs(value: Any, found: set[int]) -> None:
+    """Collect every ``$stepN.<field>`` 0-based step index referenced by
+    *value* into *found*, IN PLACE.
+
+    Mirrors :func:`_resolve_value`'s own traversal exactly (see
+    :func:`_scan_var_refs`'s docstring for the same rationale) — list
+    elements are recursed into, a string is checked only when it is
+    EXACTLY a ``$stepN.field`` token, and dict values are NOT recursed
+    into.
+    """
+    if isinstance(value, list):
+        for item in value:
+            _scan_step_refs(item, found)
+        return
+    if isinstance(value, str):
+        m = _STEPREF_RE.match(value)
+        if m is not None:
+            found.add(int(m.group(1)) - 1)
+
+
+def _discarded_reduce_steps(
+    steps: list[dict[str, Any]],
+    step_outputs: list[dict[str, Any]],
+    *,
+    extract_tool: "Callable[[dict[str, Any]], str]",
+    is_operator_tool: "Callable[[str], bool]",
+) -> list[int]:
+    """0-based indices of executed operator ("reduce") steps whose
+    output is never referenced, directly or transitively, by the plan's
+    terminal (last-executed) step (nexus-4h0oh).
+
+    A parallel branch with no fan-in step folding it back in is exactly
+    this: the runner retrieved and reduced the content, paid the real
+    ``claude -p`` cost for it, and then ``PlanResult.final`` — always
+    ``step_outputs[-1]`` — never surfaces it. RDR-200 Phase 1c q23/q24
+    hit this live: three independent summarize steps under "return only
+    the final step" dropped two of three.
+
+    Computed by a backward reachability walk from the terminal step
+    through ``$stepN.<field>`` references in each step's ORIGINAL
+    (unresolved) ``args`` — the same reference shape
+    :func:`_resolve_value` substitutes, scanned via
+    :func:`_scan_step_refs`.
+
+    Excludes:
+      * the terminal step itself (trivially reachable from itself);
+      * any step whose recorded output is the bundle-intermediate
+        sentinel (``_bundled_intermediate``) — its content WAS
+        consumed, inline, by the next operator in its own bundle, not
+        dropped;
+      * anything past what actually executed — a budget/continuation
+        cut ending the run early is a different, already-visible
+        condition (``PlanResult.budget_exhausted_at_step`` /
+        ``continuation_cut_applied``), not evidence loss.
+    """
+    if not step_outputs:
+        return []
+    terminal_index = len(step_outputs) - 1
+    reachable: set[int] = set()
+    frontier = [terminal_index]
+    while frontier:
+        idx = frontier.pop()
+        if idx in reachable or idx < 0 or idx >= len(step_outputs):
+            continue
+        reachable.add(idx)
+        refs: set[int] = set()
+        # _resolve_args applies _resolve_value PER ARG VALUE (see its
+        # own body: ``{key: _resolve_value(val, ...) for key, val in
+        # args.items()}``) — mirror that here rather than scanning the
+        # whole args dict as one value, since _scan_step_refs (like
+        # _resolve_value) does not recurse into dicts.
+        for _arg_value in (steps[idx].get("args", {}) or {}).values():
+            _scan_step_refs(_arg_value, refs)
+        frontier.extend(r for r in refs if r not in reachable)
+    reduce_indices = {
+        i for i in range(len(step_outputs))
+        if is_operator_tool(extract_tool(steps[i]))
+        and not step_outputs[i].get("_bundled_intermediate")
+    }
+    return sorted(reduce_indices - reachable)
+
+
 def _validate_var_refs(
     steps: list[dict[str, Any]], bindings: dict[str, Any],
 ) -> None:
@@ -1220,6 +1339,135 @@ _INPUTS_TARGET: dict[str, str] = {
 }
 
 
+#: nexus-mm5tx (nexus-zekpl class): a catalog tumbler is 3+ dot-separated
+#: non-negative integers (``store.owner.document[.chunk]``); a T3 chash is
+#: 64 lowercase hex characters. A real sha256 chash containing only
+#: decimal digits is astronomically unlikely (1 in 16**64), so this
+#: heuristic has no practical false positive against real data.
+_TUMBLER_ID_RE = re.compile(r"^\d+(?:\.\d+){2,}$")
+
+
+def _is_tumbler_shaped(value: str) -> bool:
+    """True when *value* looks like a catalog document tumbler rather
+    than a T3 chunk chash. See :data:`_TUMBLER_ID_RE`."""
+    return bool(_TUMBLER_ID_RE.match(value))
+
+
+#: nexus-mm5tx follow-up (code-review T2 [24199]): fixed, machine-
+#: recognisable prefix for the short-circuit result text emitted when
+#: an operator's hydrated evidence filters to zero items (either the
+#: ids-auto-hydration branch or the nexus-yis0 pass-through branch).
+#: A downstream classifier (e.g. answer-runs) keys on this constant
+#: instead of parsing an operator's own free-text refusal prose —
+#: compare's "No comparison performed" was the live q12 symptom this
+#: closes. Kept as a bare prefix (not a full templated sentence) so a
+#: caller can reliably ``str.startswith`` it regardless of which
+#: operator or how many items were filtered.
+_NO_EVIDENCE_RESULT_PREFIX = "No evidence to reduce:"
+
+
+def _no_evidence_result_text(*, tool: str, filtered_count: int) -> str:
+    """Build the short-circuit result text for a zero-evidence hydration.
+
+    *filtered_count* is the number of hydrated items that were
+    attempted and came back empty (never a fabricated 0 when the count
+    is genuinely unknown — every call site below only calls this when
+    it has a real count in scope). Step-index attribution is
+    deliberately NOT baked into this text: neither
+    ``_hydrate_operator_args`` nor ``_default_dispatcher`` knows the
+    plan-step index (the same limitation documented on
+    ``PlanRunOperatorArgMissingError``'s call site), and ``plan_run``'s
+    own per-step ``nx_answer_step_start``/``nx_answer_step_complete``
+    structlog events already carry it — a caller correlates by log
+    timestamp/step context rather than by re-parsing this string.
+    """
+    return (
+        f"{_NO_EVIDENCE_RESULT_PREFIX} tool={tool}, "
+        f"{filtered_count} hydrated item(s) filtered to 0 before dispatch"
+    )
+
+
+def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
+    """Resolve document tumblers to T3 content via the catalog manifest
+    (nexus-mm5tx / nexus-zekpl class).
+
+    ``search_metadata_scoped`` / ``search_graph_hop`` /
+    ``search_aspect_scoped`` return document-level results keyed by
+    TUMBLER, not chash — feeding those ids straight into the chash-keyed
+    ``store_get_many`` hydrates every row to an empty string. This
+    resolves each tumbler's ``document_chunks`` manifest via the catalog
+    (chash + collection per chunk, position-ordered), batch-hydrates
+    every real chash through the existing ``store_get_many``, then
+    reassembles each document's content by joining its own chunks back
+    together in order — the full document, not just one matched
+    snippet.
+
+    Returns the same ``{contents, missing}`` shape ``store_get_many``
+    returns (aligned 1:1 with *tumbler_ids*), so it slots into the same
+    ``non_empty`` filtering the caller already does for the chash path.
+    """
+    from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.mcp_infra import get_catalog as _get_catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+    cat = _get_catalog()
+    if cat is None:
+        # code-review finding (T2 [24200]): get_catalog() is documented
+        # to return None when the catalog isn't initialized. An
+        # unguarded .get_manifests() call here would raise
+        # AttributeError, which _is_operator_error does not recognize —
+        # it would escape both the isolated dispatch path and the
+        # bundle-composition path (which sits outside any try/except)
+        # and crash the whole plan_run. Mirror core.py's own
+        # `if cat is None:` guard (e.g. query()'s catalog-param branch)
+        # and degrade to the same empty-content shape the zero-
+        # manifest-rows case below already returns.
+        _log.warning(
+            "hydrate_tumbler_ids_catalog_unavailable",
+            tumbler_count=len(tumbler_ids),
+        )
+        return {"contents": ["" for _ in tumbler_ids], "missing": list(tumbler_ids)}
+    manifests = cat.get_manifests(tumbler_ids)
+
+    flat_ids: list[str] = []
+    flat_collections: list[str] = []
+    owner: list[str] = []
+    for doc_id in tumbler_ids:
+        rows = manifests.get(doc_id) or []
+        for row in sorted(rows, key=lambda r: r.position):
+            if not row.collection:
+                # code-review finding (T2 [24200]): log the skip rather
+                # than dropping it silently, mirroring the sibling
+                # drop-path logging convention elsewhere in this
+                # function family (e.g. auto_hydration_overflow) — a
+                # developer debugging thin document content should not
+                # have to guess why a chunk went missing.
+                _log.warning(
+                    "hydrate_tumbler_ids_row_missing_collection",
+                    doc_id=doc_id, chash=row.chash, position=row.position,
+                )
+                continue
+            flat_ids.append(row.chash)
+            flat_collections.append(row.collection)
+            owner.append(doc_id)
+
+    if not flat_ids:
+        return {"contents": ["" for _ in tumbler_ids], "missing": list(tumbler_ids)}
+
+    hydrated = mcp_core.store_get_many(
+        ids=flat_ids, collections=flat_collections, structured=True,
+    )
+    chunk_contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
+
+    per_doc: dict[str, list[str]] = {doc_id: [] for doc_id in tumbler_ids}
+    for doc_id, content in zip(owner, chunk_contents):
+        if content:
+            per_doc[doc_id].append(content)
+
+    contents = ["\n\n".join(per_doc[doc_id]) for doc_id in tumbler_ids]
+    missing = [doc_id for doc_id in tumbler_ids if not per_doc[doc_id]]
+    return {"contents": contents, "missing": missing}
+
+
 def _hydrate_operator_args(
     tool: str, args: dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
@@ -1242,12 +1490,60 @@ def _hydrate_operator_args(
 
     resolved_tool = _OPERATOR_TOOL_MAP.get(tool, tool)
 
+    # nexus-mm5tx follow-up (code-review T2 [24199]): an EXPLICIT plan
+    # step whose tool is literally "store_get_many" is a DIFFERENT code
+    # path from the operator ids-auto-hydration branch below —
+    # "store_get_many" is never in _OPERATOR_RESOLVED_TOOLS, so the
+    # tumbler routing added just above for the operator path never
+    # fired for it. This is gate q12's ACTUAL repro shape: an explicit
+    # store_get_many step hydrates tumbler ids to "" directly, and the
+    # nexus-yis0 pass-through further down then filters those to
+    # items == [], and compare refuses. Route the SAME way: when the
+    # step's own ids are confidently tumbler-shaped, precompute the
+    # {contents, missing} result via the catalog manifest and stash it
+    # under a marker _default_dispatcher checks immediately after
+    # calling this function — short-circuiting the real store_get_many
+    # dispatch entirely, matching store_get_many's own documented
+    # structured=True return shape so no caller sees a difference.
+    # store_get_many is never a bundleable operator (BUNDLEABLE_OPERATORS
+    # doesn't include it), so this never fires inside the bundle-
+    # composition path.
+    if resolved_tool == "store_get_many" and "ids" in args:
+        ids = args["ids"]
+        id_list_raw = ids if isinstance(ids, list) else [ids]
+        if id_list_raw and all(_is_tumbler_shaped(str(i)) for i in id_list_raw):
+            _log.info(
+                "store_get_many_tumbler_route",
+                tool=tool, id_count=len(id_list_raw),
+            )
+            return resolved_tool, {
+                "_precomputed_result": _hydrate_tumbler_ids(
+                    [str(i) for i in id_list_raw],
+                ),
+            }
+
     if resolved_tool in _OPERATOR_RESOLVED_TOOLS and "ids" in args:
         ids = args["ids"]
         collections = args.get("collections", "knowledge")
-        hydrated = mcp_core.store_get_many(
-            ids=ids, collections=collections, structured=True,
-        )
+        id_list_raw = ids if isinstance(ids, list) else [ids]
+        # nexus-mm5tx (nexus-zekpl class): a tumbler-only id list is
+        # document-level output from search_metadata_scoped /
+        # search_graph_hop / search_aspect_scoped — route it through
+        # the catalog manifest instead of the chash-keyed
+        # store_get_many, which would hydrate every id to "".  A mixed
+        # or empty list is not confidently tumbler-shaped and falls
+        # through to the direct path unchanged.
+        if id_list_raw and all(_is_tumbler_shaped(str(i)) for i in id_list_raw):
+            _log.info(
+                "auto_hydration_tumbler_route",
+                tool=tool, resolved_tool=resolved_tool,
+                id_count=len(id_list_raw),
+            )
+            hydrated = _hydrate_tumbler_ids([str(i) for i in id_list_raw])
+        else:
+            hydrated = mcp_core.store_get_many(
+                ids=ids, collections=collections, structured=True,
+            )
         contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
         non_empty = [c for c in contents if c]
         original_count = len(non_empty)
@@ -1298,6 +1594,16 @@ def _hydrate_operator_args(
             args.setdefault("inputs", json.dumps(non_empty))
         if truncation_metadata is not None:
             args["_truncation_metadata"] = truncation_metadata
+        # nexus-mm5tx follow-up (code-review T2 [24199]): every id
+        # hydrated to empty content -- dispatching claude -p on an
+        # empty prompt wastes a real subprocess call and returns free-
+        # text refusal prose a caller can only detect by parsing
+        # English. Short-circuit BEFORE dispatch instead; see
+        # _default_dispatcher for where this marker is consumed.
+        if not non_empty:
+            args["_zero_evidence_text"] = _no_evidence_result_text(
+                tool=tool, filtered_count=len(contents),
+            )
 
     if resolved_tool == "operator_extract" and "template" in args and "fields" not in args:
         template = args.pop("template")
@@ -1315,9 +1621,35 @@ def _hydrate_operator_args(
     target_key = _INPUTS_TARGET.get(resolved_tool)
     if target_key and "inputs" in args and target_key not in args:
         value = args.pop("inputs")
-        if target_key == "items" and isinstance(value, list):
-            value = json.dumps(value)
+        _passthrough_count = len(value) if isinstance(value, list) else (1 if value else 0)
+        if isinstance(value, list):
+            # nexus-mm5tx (nexus-1lfk8 critique addendum): the inline
+            # ids-auto-hydration branch above already filters falsy
+            # content (``non_empty = [c for c in contents if c]``); this
+            # pass-through branch did not, so a tumbler/chash mismatch
+            # upstream (nexus-zekpl class) could hand an operator a list
+            # of literal empty strings verbatim. Filter here too, and
+            # warn loudly when anything was dropped — gate q12's compare
+            # step took exactly this path with ten empty strings.
+            original_count = len(value)
+            value = [v for v in value if v]
+            if len(value) != original_count:
+                _log.warning(
+                    "yis0_passthrough_empty_filtered",
+                    tool=tool, resolved_tool=resolved_tool,
+                    original_count=original_count, kept_count=len(value),
+                )
+            if target_key == "items":
+                value = json.dumps(value)
         args[target_key] = value
+        # nexus-mm5tx follow-up (code-review T2 [24199]): same zero-
+        # evidence short-circuit as the ids-auto-hydration branch above
+        # — see _default_dispatcher for where this marker is consumed.
+        _final_empty = value in ("", "[]") or (isinstance(value, list) and not value)
+        if _final_empty:
+            args.setdefault("_zero_evidence_text", _no_evidence_result_text(
+                tool=tool, filtered_count=_passthrough_count,
+            ))
 
     if resolved_tool == "operator_summarize" and isinstance(args.get("content"), list):
         args["content"] = "\n\n".join(str(x) for x in args["content"] if x)
@@ -1376,6 +1708,32 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
 
     # Auto-hydration + arg normalization: shared with the bundle path.
     resolved_tool, args = _hydrate_operator_args(tool, args)
+
+    # nexus-mm5tx follow-up (code-review T2 [24199]): an explicit
+    # store_get_many step with tumbler-shaped ids was resolved via the
+    # catalog manifest inside _hydrate_operator_args, which returns the
+    # already-complete {contents, missing} result under this marker
+    # rather than mutating args for a real dispatch — return it
+    # directly, skipping the real store_get_many call entirely.
+    _precomputed_result = args.pop("_precomputed_result", None)
+    if _precomputed_result is not None:
+        return _precomputed_result
+
+    # nexus-mm5tx follow-up (code-review T2 [24199]): hydration filtered
+    # this operator's evidence to zero items (either the ids-auto-
+    # hydration branch or the nexus-yis0 pass-through branch inside
+    # _hydrate_operator_args). Short-circuit BEFORE any model-tiering /
+    # kwargs-filtering / real dispatch work below — a claude -p call on
+    # an empty prompt is pure waste and its free-text refusal ("No
+    # comparison performed") is not machine-classifiable the way this
+    # fixed marker is.
+    _zero_evidence_text = args.pop("_zero_evidence_text", None)
+    if _zero_evidence_text is not None:
+        _log.info(
+            "nx_answer_zero_evidence_short_circuit",
+            tool=tool, resolved_tool=resolved_tool,
+        )
+        return {"text": _zero_evidence_text}
 
     # RDR-196 .p2d (nexus-nyry9.17): DEFAULT-ON per-operator tiering, plus
     # the .p2c measurement override and a kill switch — a 3-way branch on
@@ -1822,6 +2180,9 @@ async def plan_run(
     #: segment. See StepRecord's own docstring for the source/model/cost
     #: attribution rules.
     step_records: list[StepRecord] = []
+    #: nexus-ivv4d code-review follow-up (T2 [24198]). See
+    #: :attr:`PlanResult.resolved_step_args`'s own docstring.
+    resolved_step_args: list[dict[str, Any]] = []
     #: RDR-200 .p1c (nexus-4e75w.5): set True the moment the
     #: ``continuation_cut_at_step`` pre-segment check actually stops
     #: dispatch. See ``continuation_cut_at_step``'s own docstring
@@ -2027,6 +2388,24 @@ async def plan_run(
                     # including bundle-aware metadata propagation); the
                     # structlog warning still fires from _hydrate.
                     b_prepared.pop("_truncation_metadata", None)
+                    # nexus-mm5tx follow-up (code-review T2 [24199]):
+                    # strip the zero-evidence marker so it never leaks
+                    # into the bundled prompt, same as the truncation
+                    # marker above. KNOWN LIMITATION, disclosed rather
+                    # than silently absorbed: unlike the isolated
+                    # dispatch path (_default_dispatcher), the bundle
+                    # path does NOT skip dispatch for a step with zero
+                    # evidence — composing a fused multi-step prompt
+                    # with one step excluded is out of scope here (the
+                    # composer has no per-step exclusion mechanism, and
+                    # q12's actual repro is on the isolated path — a
+                    # bare store_get_many step never bundles). Warn so
+                    # this is at least observable.
+                    if b_prepared.pop("_zero_evidence_text", None) is not None:
+                        _log.warning(
+                            "nx_answer_zero_evidence_in_bundle_not_short_circuited",
+                            step_index=bi, tool=btool,
+                        )
                     bundle_steps.append(OperatorBundleStep(
                         plan_index=bi, tool=btool, args=b_prepared,
                         source_collections=source_collections,
@@ -2309,6 +2688,21 @@ async def plan_run(
             # ``threshold`` set by the plan author always wins.
             resolved = _apply_mode_to_args(tool, resolved)
 
+            # nexus-ivv4d code-review follow-up (T2 [24198]): capture the
+            # FULLY RESOLVED corpus/query — after every fall-through above
+            # has run — before dispatch, so a caller reading
+            # PlanResult.resolved_step_args afterward sees what actually
+            # searched even when the step errors or returns zero evidence
+            # (a result envelope's own "collections" field is empty in
+            # exactly that case, so it can never substitute for this).
+            if tool in _CORPUS_QUERY_TOOLS:
+                resolved_step_args.append({
+                    "step_index": index,
+                    "tool": tool,
+                    "corpus": resolved.get("corpus", ""),
+                    "query": resolved.get("query") or resolved.get("question") or "",
+                })
+
             # nexus-h33x8.6 a4: an active deadline threads the REMAINING
             # budget into an operator step's own ``timeout`` kwarg (dropped
             # harmlessly by the dispatcher for non-operator tools that don't
@@ -2444,6 +2838,26 @@ async def plan_run(
         exc.step_records = list(step_records)
         raise
 
+    # nexus-4h0oh: computed over the EXECUTED prefix only (step_outputs),
+    # never the full parsed `steps` — a budget/continuation cut ending the
+    # run early is a different, already-visible condition and must not be
+    # reported as discarded evidence (see _discarded_reduce_steps's own
+    # docstring). WARN, never refuse — visibility is the fix; see the
+    # PlanResult field's docstring for why.
+    _dropped_reduce_steps = [
+        i + 1 for i in _discarded_reduce_steps(
+            steps, step_outputs,
+            extract_tool=_extract_tool, is_operator_tool=is_operator_tool,
+        )
+    ]
+    if _dropped_reduce_steps:
+        _log.warning(
+            "nx_answer_discarded_reduce_steps",
+            dropped_step_indices=_dropped_reduce_steps,
+            terminal_step=len(step_outputs),
+            total_steps=len(steps),
+        )
+
     return PlanResult(
         steps=step_outputs,
         final=step_outputs[-1] if step_outputs else None,
@@ -2452,4 +2866,6 @@ async def plan_run(
         total_planned_steps=len(steps),
         step_records=step_records,
         continuation_cut_applied=continuation_cut_applied,
+        resolved_step_args=resolved_step_args,
+        dropped_reduce_steps=_dropped_reduce_steps,
     )

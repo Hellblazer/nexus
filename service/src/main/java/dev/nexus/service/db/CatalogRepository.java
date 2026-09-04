@@ -180,8 +180,14 @@ public final class CatalogRepository {
     // GREATEST for next_seq on owner ETL import: never downgrade a live-advanced sequence
     // counter on re-import. A faithful migration must carry next_seq from the source so the
     // first post-cutover registerDocument does not collide with an already-imported tumbler.
+    // nexus-zrcj7: retired from a raw DSL.field("GREATEST(catalog_owners.next_seq,
+    // EXCLUDED.next_seq)", ...) template onto jOOQ core's typed DSL.greatest(...) --
+    // same idiom already used at this file's claimNextSeqAtomic-family site (line ~1680,
+    // DSL.greatest(CATALOG_OWNERS.NEXT_SEQ, DSL.val(highWater))) -- combined with
+    // DSL.excluded(...), jOOQ's typed accessor for the ON CONFLICT pseudo-table (already
+    // used throughout this file for every other EXCLUDED.* merge column).
     private static final Field<Long>    EX_OWN_SEQ_GREATEST =
-        DSL.field("GREATEST(catalog_owners.next_seq, EXCLUDED.next_seq)", Long.class);
+        DSL.greatest(CATALOG_OWNERS.NEXT_SEQ, DSL.excluded(CATALOG_OWNERS.NEXT_SEQ));
 
     private static final Field<String>  EX_DOC_TITLE  = DSL.field("EXCLUDED.title",        String.class);
     private static final Field<String>  EX_DOC_AUTHOR = DSL.field("EXCLUDED.author",       String.class);
@@ -210,9 +216,12 @@ public final class CatalogRepository {
     // nexus-cefa1.2: EX_DOC_BIAT retired for the same reason as EX_DOC_IDXAT above —
     // CATALOG_DOCUMENTS.BIB_ENRICHED_AT is timestamptz now; use
     // DSL.excluded(CATALOG_DOCUMENTS.BIB_ENRICHED_AT) at the ON CONFLICT merge site.
-    // GREATEST for source_mtime ETL
+    // GREATEST for source_mtime ETL. nexus-zrcj7: retired from a raw DSL.field(
+    // "GREATEST(catalog_documents.source_mtime, EXCLUDED.source_mtime)", ...) template
+    // onto typed DSL.greatest(...) + DSL.excluded(...) -- same conversion as
+    // EX_OWN_SEQ_GREATEST above.
     private static final Field<Double>  EX_DOC_SMTIME_GREATEST =
-        DSL.field("GREATEST(catalog_documents.source_mtime, EXCLUDED.source_mtime)", Double.class);
+        DSL.greatest(CATALOG_DOCUMENTS.SOURCE_MTIME, DSL.excluded(CATALOG_DOCUMENTS.SOURCE_MTIME));
 
     private static final Field<String>  EX_LNK_FSPAN  = DSL.field("EXCLUDED.from_span",   String.class);
     private static final Field<String>  EX_LNK_TSPAN  = DSL.field("EXCLUDED.to_span",     String.class);
@@ -286,11 +295,13 @@ public final class CatalogRepository {
     // is_note_shaped(entry) predicate (indexer_utils.py) — a manifest-less
     // MCP store_put / nx store put note's OWN catalog_documents row stamps
     // its identity chash into metadata->>'doc_id' (catalog/store_hook.py
-    // ::catalog_store_hook_tracked, meta={"doc_id": doc_id}). Same jOOQ raw-
-    // template idiom PgVectorRepository already uses for JSONB extraction
-    // (DSL.field("metadata ->> {0}", ...)), qualified to CATALOG_DOCUMENTS
-    // explicitly since this field is used in subqueries alongside other
-    // tables.
+    // ::catalog_store_hook_tracked, meta={"doc_id": doc_id}). nexus-zrcj7:
+    // formerly a raw-template DSL.field("{0} ->> 'doc_id'", ...) -- retired
+    // onto jOOQ core's typed JSONB accessor (DSL.jsonbGetAttributeAsText),
+    // verified present in jOOQ 3.20/3.21 via Context7 (json-attribute-
+    // access-as-text; the API is overloaded for both JSON and JSONB, per
+    // the manual's own "Most JSON functions ... are overloaded to provide
+    // both JSON and JSONB variants" note) -- no raw SQL text involved.
     //
     // TEXT, deliberately NOT compared to a ChashHex-converted chash field
     // directly: ChashHex's Converter operates ONLY at the JDBC value-binding
@@ -300,9 +311,9 @@ public final class CatalogRepository {
     // `metadata->>'doc_id' = chunks.chash` (text = bytea) and PostgreSQL
     // rejects it with no implicit cast. Every call site instead compares
     // against `encode(chunks.chash, 'hex')` (an explicit TEXT-to-TEXT
-    // comparison) — see sweepChunks.
+    // comparison, via DSL.function -- see sweepChunks).
     private static final Field<String>  DOC_META_DOC_ID =
-        DSL.field("{0} ->> 'doc_id'", String.class, CATALOG_DOCUMENTS.METADATA);
+        DSL.jsonbGetAttributeAsText(CATALOG_DOCUMENTS.METADATA, "doc_id");
     private static final Field<String>  EX_CHK_COLL   = DSL.field("EXCLUDED.collection",  String.class);
     private static final Field<Integer> EX_CHK_IDX   = DSL.field("EXCLUDED.chunk_index",  Integer.class);
     private static final Field<Integer> EX_CHK_LST   = DSL.field("EXCLUDED.line_start",   Integer.class);
@@ -622,11 +633,16 @@ public final class CatalogRepository {
                 if (prefix == null || prefix.isBlank()) {
                     // Next owner number: MAX(int after the first dot) + 1 over
                     // '1.%' owners. RLS scopes this to the tenant.
+                    // nexus-zrcj7 (Sam's no-SQL-strings-in-Java directive, step 4
+                    // widened-scan follow-up): retired from a raw DSL.field(
+                    // "CAST(split_part(tumbler_prefix, '.', 2) AS INTEGER)", ...)
+                    // template onto DSL.splitPart(...) + Field.cast(SQLDataType.INTEGER)
+                    // -- jOOQ 3.21 has a typed splitPart(Field<String>, String, int)
+                    // wrapper (verified via Context7), so this needs no raw text at all.
                     Integer maxNum = ctx.select(
                             DSL.coalesce(
-                                DSL.max(DSL.field(
-                                    "CAST(split_part(tumbler_prefix, '.', 2) AS INTEGER)",
-                                    Integer.class)),
+                                DSL.max(DSL.splitPart(CATALOG_OWNERS.TUMBLER_PREFIX, ".", 2)
+                                    .cast(SQLDataType.INTEGER)),
                                 DSL.inline(0)))
                         .from(CATALOG_OWNERS)
                         .where(CATALOG_OWNERS.TUMBLER_PREFIX.like("1.%"))
@@ -1523,16 +1539,23 @@ public final class CatalogRepository {
         // already-taken child sequence number to a NEW document. See
         // TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
         // tumbler is "<prefix>.<n>"; the child segment starts one char past the dot.
+        // nexus-zrcj7: retired the two raw-template DSL.field/DSL.condition
+        // "substring(tumbler FROM {0})" calls onto typed DSL --
+        // Field.substring(int) (jOOQ core, renders identically to Postgres's
+        // substring(field, pos)), .cast(Long.class), and .likeRegex(...)
+        // (renders to Postgres's `~` operator -- confirmed via Context7,
+        // jOOQ 3.21 manual's like-regex-predicate dialect table). The CAST
+        // only ever runs over rows the WHERE clause's likeRegex has already
+        // confirmed are all-digits, exactly as before.
         int childStart = ownerPrefix.length() + 2;
-        Long max = ctx.select(DSL.field(
-                    "COALESCE(MAX(CAST(substring(tumbler FROM {0}) AS BIGINT)), 0)",
-                    Long.class, DSL.val(childStart)))
+        Field<String> childSegment = CATALOG_DOCUMENTS.TUMBLER.substring(childStart);
+        Field<Long> childSeq = childSegment.cast(Long.class);
+        Long max = ctx.select(DSL.coalesce(DSL.max(childSeq), 0L))
                .from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
                       .and(CATALOG_DOCUMENTS.TUMBLER.like(ownerPrefix + ".%"))
                       // digits only — a deeper address like "1.2.3" is not a child seq
-                      .and(DSL.condition("substring(tumbler FROM {0}) ~ '^[0-9]+$'",
-                                         DSL.val(childStart))))
+                      .and(childSegment.likeRegex("^[0-9]+$")))
                .fetchOne(0, Long.class);
         return max == null ? 0L : max;
     }
@@ -2283,9 +2306,7 @@ public final class CatalogRepository {
         // nexus-erwvd: same server-side, olderThanInterval-derived threshold expression
         // agedTombstoneCount uses (nexus-ff85q) — identical dialect, identical clock, no
         // second Java-computed cutoff to drift against the SQL function's own NOW() call.
-        Field<OffsetDateTime> threshold = DSL.field(
-            "now() - {0}", OffsetDateTime.class,
-            DSL.val(olderThanInterval(olderThanDays), SQLDataType.INTERVAL));
+        Field<OffsetDateTime> threshold = agedThreshold(olderThanDays);
         Condition hasManifest = DSL.exists(
             ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
@@ -2340,6 +2361,21 @@ public final class CatalogRepository {
     }
 
     /**
+     * The identical {@code NOW() - {interval}} threshold expression {@link #strandedChunkCount}
+     * and {@link #agedTombstoneCount} both need (nexus-ff85q) — one shared, typed-DSL
+     * definition rather than two copies drifting apart. nexus-zrcj7: retired from a raw
+     * {@code DSL.field("now() - {0}", ...)} template onto {@code DSL.currentOffsetDateTime()
+     * .sub(Number)} (jOOQ core's generic Field arithmetic — {@code org.jooq.types.Interval}
+     * subtypes, including {@link org.jooq.types.YearToSecond}, extend {@code java.lang.Number}
+     * specifically so they compose with it). {@code currentOffsetDateTime()} renders to
+     * Postgres's {@code now()} (confirmed via Context7, jOOQ 3.21 manual's current-timestamp
+     * dialect table) — same server clock, same value, as before.
+     */
+    private static Field<OffsetDateTime> agedThreshold(int olderThanDays) {
+        return DSL.currentOffsetDateTime().sub(olderThanInterval(olderThanDays));
+    }
+
+    /**
      * Aged-tombstone document count (nexus-3ck2g E3) — mirrors {@code nexus.purge_trash}'s
      * Step 4 WHERE ({@code deleted_at IS NOT NULL AND deleted_at <= NOW() - older_than}).
      *
@@ -2353,9 +2389,7 @@ public final class CatalogRepository {
      * same clock as the DELETE it previews.
      */
     private static long agedTombstoneCount(DSLContext ctx, String tenant, int olderThanDays) {
-        Field<OffsetDateTime> threshold = DSL.field(
-            "now() - {0}", OffsetDateTime.class,
-            DSL.val(olderThanInterval(olderThanDays), SQLDataType.INTERVAL));
+        Field<OffsetDateTime> threshold = agedThreshold(olderThanDays);
         // TOMBSTONE-EXEMPT (nexus-mqd6t): this read's whole PURPOSE (nexus-3ck2g E3) is
         // counting the TOMBSTONED population itself (deleted_at IS NOT NULL), mirroring
         // nexus.purge_trash's own Step 4 WHERE -- the inverse of every other CATALOG_DOCUMENTS
@@ -2647,19 +2681,34 @@ public final class CatalogRepository {
             // folded, so an unfolded query stops matching accented input that
             // matched before. Injection safety is unchanged: fold_diacritics
             // and translate wrap the BIND PARAMETER, never the literal.
+            //
+            // nexus-zrcj7: the whole three-leg OR expression above used to be a
+            // raw DSL.condition("...", DSL.val(query)) template (two variants,
+            // separator vs no-separator). Retired onto catalog-035's
+            // nexus.catalog_fts_match(fts_vector, query, has_separator) SQL
+            // function -- the exact same semantics, now server-side, called
+            // through jOOQ's OWN generated Routines class (review finding,
+            // code-review round: a manual DSL.function(DSL.name(...)) call
+            // duplicates what codegen already produces, unlike this file's
+            // own Routines.purgeTrash call and BackendReaper's
+            // Tables.X.call() table-function wiring). p_fts_vector's SQL
+            // type (tsvector) has no jOOQ-recognized mapping, so codegen
+            // types the parameter Field<Object> and marks the generated
+            // overload @Deprecated ("Unknown data type") -- expected and
+            // harmless here, not a defect to work around; .coerce(Object
+            // .class) reinterprets the wildcard Field<?> from
+            // CATALOG_DOCUMENTS.field("fts_vector") as Field<Object> with no
+            // SQL rendering change (jOOQ 3.21 manual: coerce changes the
+            // Java type "without affecting the rendered SQL"). The third
+            // leg's AND-short-circuit inside the function replaces the
+            // Java-side hasSeparator branch on which SQL TEXT used to be
+            // chosen.
             boolean hasSeparator = query.chars()
                 .anyMatch(c -> c == '/' || c == '.' || c == '-' || c == '_');
-            Condition ftsMatch = hasSeparator
-                ? DSL.condition(
-                    "fts_vector @@ plainto_tsquery('english', nexus.fold_diacritics({0})) "
-                    + "OR fts_vector @@ plainto_tsquery('simple', nexus.fold_diacritics({0})) "
-                    + "OR fts_vector @@ plainto_tsquery('simple', "
-                    + "nexus.fold_diacritics(translate({0}, '/.-_', '    ')))",
-                    DSL.val(query))
-                : DSL.condition(
-                    "fts_vector @@ plainto_tsquery('english', nexus.fold_diacritics({0})) "
-                    + "OR fts_vector @@ plainto_tsquery('simple', nexus.fold_diacritics({0}))",
-                    DSL.val(query));
+            Condition ftsMatch = DSL.condition(
+                dev.nexus.service.jooq.nexus.Routines.catalogFtsMatch(
+                    CATALOG_DOCUMENTS.field("fts_vector").coerce(Object.class),
+                    DSL.val(query), DSL.val(hasSeparator)));
             Condition where = ftsMatch.and(CATALOG_DOCUMENTS.DELETED_AT.isNull());
             if (contentType != null && !contentType.isBlank()) {
                 where = where.and(CATALOG_DOCUMENTS.CONTENT_TYPE.eq(contentType));
@@ -3137,7 +3186,16 @@ public final class CatalogRepository {
                    // (jOOQ logs "API misuse ... not present in table" and get(0,...) silently
                    // reads the wrong column). .returningResult(...) requests EXACTLY this
                    // field and nothing else, independent of the table's real column list.
-                   .returningResult(DSL.field("(xmax = 0)", Boolean.class))
+                   // nexus-zrcj7: retired from a raw DSL.field("(xmax = 0)", ...)
+                   // literal onto a safely-quoted dynamic identifier reference
+                   // (DSL.field(DSL.name(...), type) -- this class's own
+                   // established idiom for a column jOOQ codegen does not model,
+                   // here Postgres's xmax system column) plus DSL.field(Condition)
+                   // to convert the resulting Condition back to a Field<Boolean>
+                   // (confirmed via Context7, jOOQ 3.21 manual's boolean-column
+                   // page -- Condition and Field<Boolean> convert both directions).
+                   .returningResult(DSL.field(
+                       DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)))
                    .fetchOne();
                 return rec != null && Boolean.TRUE.equals(rec.value1());
             } catch (org.jooq.exception.DataAccessException e) {
@@ -4952,7 +5010,13 @@ public final class CatalogRepository {
                 .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection))
                 .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
                 .and(CATALOG_DOCUMENTS.FILE_PATH.isNull().or(CATALOG_DOCUMENTS.FILE_PATH.eq("")))
-                .and(DOC_META_DOC_ID.eq(DSL.field("encode({0}, 'hex')", String.class, CHUNKS.CHASH)))))
+                // nexus-zrcj7: encode(chash,'hex') as a bound-value DSL.function call
+                // (THE RULE's own "DSL.function with bound values only" sanction) --
+                // no raw SQL text. See DOC_META_DOC_ID's own javadoc for why an
+                // explicit TEXT cast is required here rather than reusing
+                // CHUNKS_CHASH_HEX (a bytea-typed field at the SQL level).
+                .and(DOC_META_DOC_ID.eq(
+                    DSL.function("encode", String.class, CHUNKS.CHASH, DSL.inline("hex"))))))
             // nexus-kl2z6 increment 2 / nexus-vc6dh STAGING GUARD (§4.2).
             .and(stagingActive ? stagingGuardCondition(ctx, tenant, CHUNKS.CHASH) : DSL.noCondition());
     }
@@ -5321,10 +5385,14 @@ public final class CatalogRepository {
      * CONCURRENT manifest write ({@link #writeManifestRows}, hence {@link
      * #writeManifest}/{@link #writeManifestMany}/{@link #appendManifestChunks})
      * for the SAME document. Follows the {@code pg_advisory_xact_lock(hashtext(...))}
-     * idiom in {@code RekeyOps.rekey}/{@code StagingPromoteOps.promoteCollection}
-     * (RekeyOps.java:101, StagingPromoteOps.java:126) — xact-scoped (auto-released
-     * at commit/rollback, no explicit unlock needed) and safely re-entrant: two
-     * acquisitions of the same key by the SAME transaction never self-deadlock.
+     * idiom of {@link #acquireSweepGateShared}/{@link #acquireSweepGateExclusive}
+     * (nexus-zrcj7: retired from a raw {@code ctx.execute("SELECT
+     * pg_advisory_xact_lock(hashtext('...' || ? || ':' || ?))", ...)} onto the
+     * same typed {@code DSL.function(...)} composition those two already use —
+     * no {@code RawSqlGateTest.SANCTIONED_STATEMENTS} entry needed any more) —
+     * xact-scoped (auto-released at commit/rollback, no explicit unlock needed)
+     * and safely re-entrant: two acquisitions of the same key by the SAME
+     * transaction never self-deadlock.
      *
      * <p><strong>What this protects against.</strong> {@code manifest_verify()}'s
      * SELECT and {@code completeIndexRun}'s final UPDATE run under READ COMMITTED,
@@ -5342,10 +5410,14 @@ public final class CatalogRepository {
      * pipeline; this lock is the belt for a MIS-sequenced or out-of-band writer.
      */
     private static void acquireIndexRunLock(DSLContext ctx, String tenant, String docId) {
-        // SANCTIONED RAW (nexus-5xn3k.2): advisory-lock primitive, no jOOQ
-        // DSL form — registered in RawSqlGateTest.SANCTIONED_METHODS.
-        ctx.execute("SELECT pg_advisory_xact_lock(hashtext('indexrun:' || ? || ':' || ?))",
-                    tenant, docId);
+        // nexus-zrcj7: typed jOOQ function(...) composition (house rule --
+        // RawSqlGateTest), mirroring acquireSweepGateShared's idiom exactly.
+        // The key text is built with plain Java string concatenation (a VALUE,
+        // never SQL text) and bound whole via DSL.val -- identical resulting
+        // hashtext() input to the former SQL-side 'indexrun:' || ? || ':' || ?.
+        ctx.select(DSL.function("pg_advisory_xact_lock", Object.class,
+                   DSL.function("hashtext", Integer.class, DSL.val("indexrun:" + tenant + ":" + docId))))
+           .fetch();
     }
 
     // RDR-191 Phase 6 (nexus-o8dil.33): the PUBLIC manifestVerify(tenant, docId)
@@ -6271,9 +6343,15 @@ public final class CatalogRepository {
      * the rows expected to be non-conformant, but this keeps the ORDER BY itself
      * total rather than erroring on an unexpected shape.
      */
-    private static final Field<Integer> COL_VERSION_NUM = DSL.field(
-        "CASE WHEN {0} ~ '^v[0-9]+$' THEN CAST(substring({0} from 2) as integer) ELSE 0 END",
-        Integer.class, CATALOG_COLLECTIONS.MODEL_VERSION);
+    // nexus-zrcj7: retired from a raw DSL.field("CASE WHEN {0} ~ ... END", ...)
+    // template onto jOOQ's typed CASE builder (DSL.when/.otherwise) plus
+    // Field.likeRegex/.substring/.cast -- CASE guarantees short-circuit
+    // evaluation (unlike AND/OR), so the substring/cast below still only ever
+    // runs on rows the WHEN's likeRegex has already confirmed are "v<digits>".
+    private static final Field<Integer> COL_VERSION_NUM = DSL.when(
+            CATALOG_COLLECTIONS.MODEL_VERSION.likeRegex("^v[0-9]+$"),
+            CATALOG_COLLECTIONS.MODEL_VERSION.substring(2).cast(Integer.class))
+        .otherwise(0);
 
     /** Find highest-versioned collection for (content_type, owner_id, embedding_model). */
     public Map<String, Object> collectionForTuple(String tenant, String contentType,
@@ -8634,10 +8712,19 @@ public final class CatalogRepository {
      * When metaJson is null, returns a typed null placeholder.
      * This avoids the set(Field<T>,T) vs set(Field<T>,Field<T>) overload ambiguity
      * that arises when T=Object.
+     *
+     * <p>nexus-zrcj7: retired from a raw {@code DSL.field("CAST(? AS jsonb)",
+     * String.class, metaJson)} / {@code DSL.field("CAST(NULL AS jsonb)", ...)}
+     * template onto typed {@code Field.cast(DataType)} / {@code DSL.castNull
+     * (DataType)}, followed by {@code .coerce(String.class)} to bring the Java
+     * type back to {@code Field<String>} without emitting a second SQL cast
+     * (confirmed via Context7, jOOQ 3.21 manual's cast-expressions page: coerce
+     * changes the Java type "without affecting the rendered SQL"). Renders the
+     * identical {@code CAST(? AS jsonb)} / {@code CAST(NULL AS jsonb)} SQL.
      */
     private static Field<String> jsonbVal(String metaJson) {
         return metaJson != null
-            ? DSL.field("CAST(? AS jsonb)", String.class, metaJson)
-            : DSL.field("CAST(NULL AS jsonb)", String.class);
+            ? DSL.val(metaJson).cast(SQLDataType.JSONB).coerce(String.class)
+            : DSL.castNull(SQLDataType.JSONB).coerce(String.class);
     }
 }

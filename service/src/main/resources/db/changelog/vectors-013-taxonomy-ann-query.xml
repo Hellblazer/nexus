@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-zrcj7 (Sam directive 2026-09-03: no SQL strings in Java, anywhere) — step 4,
+    deliverable (3): nexus.taxonomy_ann_query_384/768/1024, the schema function retiring
+    TaxonomyCentroidRepository#annQuery's string-concatenated raw SQL (the pgvector
+    `<=>` distance operator has no jOOQ typed-DSL form — same category PgVectorRepository's
+    former searchWithTokens/hybridSearch raw SQL was in, see vectors-009/vectors-011).
+
+    Design of record: T2 nexus/decision-zrcj7-no-sql-strings-design-2026-09-03 [24207]
+    named this "very likely expressible ... not confirmed against the live generated DSL
+    surface in this session ... warrants its own review pass rather than a guess" —
+    confirmed here: jOOQ 3.21 has no typed wrapper for a custom infix operator like
+    pgvector's `<=>` (verified via Context7 against the jOOQ 3.21 manual's JSON/scalar-
+    subquery/comparison-predicate pages; the closest jOOQ gets is Field.eq/lt/gt-family
+    methods over the STANDARD comparison operators, not an arbitrary vendor operator).
+    Rather than leave the operator itself in a raw-text DSL.condition/DSL.field template
+    (which is exactly the shape step 4's widened gate scan now catches), the entire ANN
+    query moves server-side into an inlinable SQL function, mirroring the EXACT precedent
+    PgVectorRepository's own search paths already established this same bead
+    (plain_search_&lt;dim&gt;, vectors-009) — Java calls the generated jOOQ function table,
+    never assembles the `<=>` text itself.
+
+    Signature: taxonomy_ann_query_&lt;dim&gt;(p_embedding vector(&lt;dim&gt;), p_collection
+    text, p_cross_collection boolean, p_n int) RETURNS TABLE(topic_id bigint,
+    distance float8). p_cross_collection selects the comparator TaxonomyCentroidRepository
+    #annQuery previously spliced as a Java string ("=" same-collection / "&lt;&gt;"
+    cross-collection projection, RDR-075 SC-6) — expressed here as an in-function CASE,
+    never string concatenation on the Java side.
+
+    embedding_&lt;dim&gt; IS NOT NULL guard (unchanged from the pre-existing raw SQL, RDR-191
+    Phase 4 nexus-jv3ue item 5): nexus.taxonomy_centroids is a mixed-dim table (a
+    collection can legitimately hold centroids at two dims mid-migration — see this
+    function's Java caller's own javadoc), so a foreign-dim row must be excluded rather
+    than ranked with a NULL distance under LIMIT.
+
+    ORDER BY distance ASC, topic_id ASC LIMIT p_n — byte-for-byte the same tie-break and
+    limit clause the retired raw SQL carried (determinism under LIMIT, matching every
+    sibling combined-query function's convention).
+
+    LANGUAGE sql, STABLE, SECURITY INVOKER, NOT STRICT (the default) — same discipline as
+    plain_search_&lt;dim&gt;/hybrid_search_&lt;dim&gt;/every other combined-query function.
+    SECURITY INVOKER means FORCE RLS on nexus.taxonomy_centroids is the tenant-isolation
+    boundary, not this function (unchanged from before: the pre-existing raw SQL relied
+    on the SAME RLS boundary via TenantScope#withTenant, never an explicit tenant_id
+    predicate in the query text). No function-level SET clause (would disable planner
+    inlining) — TaxonomyCentroidAnnPlanShapeTest's inlining assertion pins that this
+    function inlines: no Function Scan, the per-dim HNSW index survives.
+
+    EXECUTE defaults to PUBLIC for functions (vectors-007/vectors-009 precedent) — no
+    explicit GRANT EXECUTE here.
+
+    Placed after backend-reaper-001-terminate-own-backends.xml (current tail) and before
+    the grants-nexus-svc.xml runAlways block, matching the established late-append
+    convention (D0.1; see vectors-011's / catalog-035's / backend-reaper-001's own
+    <include> comments for the identical reasoning).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-013-1" author="nexus-zrcj7">
+        <comment>taxonomy_ann_query_384/768/1024: retires TaxonomyCentroidRepository#annQuery's raw SQL onto an inlinable schema function, nexus-zrcj7</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_384(
+    p_embedding         vector(384),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_384 &lt;=&gt; p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_384 IS NOT NULL
+       AND (CASE WHEN p_cross_collection THEN collection &lt;&gt; p_collection
+                 ELSE collection = p_collection END)
+     ORDER BY embedding_384 &lt;=&gt; p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_768(
+    p_embedding         vector(768),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_768 &lt;=&gt; p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_768 IS NOT NULL
+       AND (CASE WHEN p_cross_collection THEN collection &lt;&gt; p_collection
+                 ELSE collection = p_collection END)
+     ORDER BY embedding_768 &lt;=&gt; p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.taxonomy_ann_query_1024(
+    p_embedding         vector(1024),
+    p_collection        text,
+    p_cross_collection  boolean,
+    p_n                 int
+) RETURNS TABLE(topic_id bigint, distance float8)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT topic_id,
+           (embedding_1024 &lt;=&gt; p_embedding)::float8 AS distance
+      FROM nexus.taxonomy_centroids
+     WHERE embedding_1024 IS NOT NULL
+       AND (CASE WHEN p_cross_collection THEN collection &lt;&gt; p_collection
+                 ELSE collection = p_collection END)
+     ORDER BY embedding_1024 &lt;=&gt; p_embedding, topic_id ASC
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.taxonomy_ann_query_384(vector, text, boolean, int);
+DROP FUNCTION IF EXISTS nexus.taxonomy_ann_query_768(vector, text, boolean, int);
+DROP FUNCTION IF EXISTS nexus.taxonomy_ann_query_1024(vector, text, boolean, int);
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

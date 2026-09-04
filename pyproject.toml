@@ -12,7 +12,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "7.28.0"
+version = "7.29.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -80,7 +80,10 @@ dependencies = [
     # arc — pinned to 0.x for now; tracked as nexus-8g79.35.
     "tree-sitter-language-pack>=0.7.1,<1.0",
     "voyageai>=0.2,<1.0",
-    "docling>=2.76.0,<3",
+    # Same discipline as mineru: docling is the formula screen and the fallback
+    # extractor for every PDF; its output shape is gated, so the cap sits at the
+    # locked minor.
+    "docling>=2.125.0,<2.125.1",
     "python-pptx>=1.0.0,<2",
     "opencv-python-headless>=4.0.0,<5",
     "httpx>=0.27,<1.0",
@@ -135,7 +138,15 @@ dependencies = [
     # nexus-l2ku5 sibling (2026-08-14): was fully unconstrained, the other
     # open door in the unbounded-dependency class. Floor taken from
     # uv.lock's resolved 3.1.11; capped at the next major.
-    "mineru[pipeline]>=3.1.11,<4",
+    # nexus-jd8fi drift: pinned to the minor every fixture and slow gate is
+    # locked against; tests/test_dependency_bounds_lint.py holds cap and lock
+    # together. Gated 2026-09-03: 3.4.5 REFUSED (drops one letter from every
+    # "ff" ligature, "efficient" -> "eficient", 67 words to 0 in one paper);
+    # 3.1.15 REFUSED (wraps plain text as inline math, "B,C," and "m.", and
+    # splits "aggregation"). Even a patch changes the output shape, so the cap
+    # is the exact patch. Bump deliberately, with the -m slow MinerU tests,
+    # the MVV and the shakedown, never by widening this cap.
+    "mineru[pipeline]>=3.1.11,<3.1.12",
 ]
 
 [project.optional-dependencies]

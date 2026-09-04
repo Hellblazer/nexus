@@ -743,6 +743,207 @@ class TestRunRecording:
         assert warn.call_args.args[0] == "nx_answer_runs"
 
 
+# ── Zero-evidence fallback provenance (nexus-ivv4d) ────────────────────────
+
+
+class TestZeroEvidenceFallbackProvenance:
+    """nexus-ivv4d: the zero-evidence fallback ("No matching evidence
+    found ... retrieval steps returned zero results") is the ONE outcome
+    where the matched plan's own parameters (plan_id, each retrieval
+    step's tool/corpus/query) ARE the finding — RDR-200 Phase 1c found it
+    recorded none of them, unlike every other degenerate shape which
+    leaks at least step vocabulary or collections. Both the returned
+    text and the telemetry row's ``final_text`` share the same string
+    (``no_match`` in the guard), so asserting on the returned text also
+    covers the telemetry row.
+    """
+
+    @pytest.mark.asyncio
+    async def test_zero_evidence_message_names_plan_id_and_step_basis(self):
+        from nexus.mcp.core import nx_answer
+
+        plan_json = json.dumps({
+            "steps": [
+                {"tool": "search", "args": {"query": "widget frobnication", "corpus": "rdr"}},
+                {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
+            ],
+        })
+
+        def fake_match(question, **kwargs):
+            return [_make_match(plan_id=42, confidence=0.60, plan_json=plan_json)]
+
+        plan_run_result = MagicMock()
+        plan_run_result.steps = [
+            {"ids": [], "collections": [], "distances": []},
+            {"text": "nothing to summarize"},
+        ]
+        plan_run_result.step_records = []
+
+        library = MagicMock()
+        db_stub = MagicMock(plans=library)
+        db_stub.conn = MagicMock()
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
+             patch("nexus.plans.runner.plan_run",
+                   AsyncMock(return_value=plan_run_result)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            result = await nx_answer(question="what is widget frobnication")
+
+        assert "No matching evidence found" in result
+        assert "plan_id=42" in result, result
+        assert "search" in result and "rdr" in result and "widget frobnication" in result
+
+    @pytest.mark.asyncio
+    async def test_zero_evidence_provenance_lands_in_telemetry_row(self):
+        """The recorded ``final_text`` for the telemetry row must carry the
+        same provenance as the returned text — not just the user-facing
+        string."""
+        from nexus.mcp.core import nx_answer
+
+        two_step_plan_json = json.dumps({
+            "steps": [
+                {"tool": "search", "args": {"query": "distributed consensus", "corpus": "docs"}},
+                {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
+            ],
+        })
+
+        def fake_match_multi(question, **kwargs):
+            return [_make_match(plan_id=99, confidence=0.60, plan_json=two_step_plan_json)]
+
+        plan_run_result = MagicMock()
+        plan_run_result.steps = [
+            {"ids": [], "collections": []},
+            {"text": "nothing"},
+        ]
+        plan_run_result.step_records = []
+
+        library = MagicMock()
+        db_stub = MagicMock(plans=library)
+        db_stub.conn = MagicMock()
+
+        seen: dict = {}
+
+        def _spy(*args, **kwargs):
+            seen.update(kwargs)
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match_multi), \
+             patch("nexus.plans.runner.plan_run",
+                   AsyncMock(return_value=plan_run_result)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None), \
+             patch("nexus.mcp.core._nx_answer_record_run", side_effect=_spy):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="tell me about distributed consensus")
+
+        assert "99" in seen.get("final_text", "")
+        assert "distributed consensus" in seen.get("final_text", "")
+        assert "docs" in seen.get("final_text", "")
+
+    @pytest.mark.asyncio
+    async def test_unset_template_corpus_renders_the_runtime_resolved_value(
+        self,
+    ):
+        """Code review follow-up (T2 [24198]): a plan template that
+        leaves ``corpus`` unset does not mean the step searched nothing
+        -- the runner fills it in at dispatch time (plan scope -> caller
+        scope -> ``_PLAN_STEP_DEFAULT_CORPUS``). The static template
+        alone renders ``corpus=''`` for exactly the corpus-scoping-
+        failure class this diagnostic exists to expose; the fallback
+        message must instead show what the runner's
+        ``PlanResult.resolved_step_args`` says actually ran."""
+        from nexus.mcp.core import nx_answer
+
+        # Template deliberately leaves corpus unset on the search step.
+        plan_json = json.dumps({
+            "steps": [
+                {"tool": "search", "args": {"query": "widget frobnication"}},
+                {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
+            ],
+        })
+
+        def fake_match(question, **kwargs):
+            return [_make_match(plan_id=55, confidence=0.60, plan_json=plan_json)]
+
+        plan_run_result = MagicMock()
+        plan_run_result.steps = [
+            {"ids": [], "collections": [], "distances": []},
+            {"text": "nothing to summarize"},
+        ]
+        plan_run_result.step_records = []
+        # The runner's own resolved-at-dispatch corpus -- what the
+        # step-shape fall-through actually filled in.
+        plan_run_result.resolved_step_args = [
+            {"step_index": 0, "tool": "search",
+             "corpus": "knowledge,code,docs,rdr", "query": "widget frobnication"},
+        ]
+
+        library = MagicMock()
+        db_stub = MagicMock(plans=library)
+        db_stub.conn = MagicMock()
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
+             patch("nexus.plans.runner.plan_run",
+                   AsyncMock(return_value=plan_run_result)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            result = await nx_answer(question="what is widget frobnication")
+
+        assert "plan_id=55" in result, result
+        assert "knowledge,code,docs,rdr" in result, result
+        # The template's own empty corpus must NOT appear as corpus=''.
+        assert "corpus=''" not in result, result
+
+    @pytest.mark.asyncio
+    async def test_missing_resolved_step_args_falls_back_to_static_template(
+        self,
+    ):
+        """A test double / older PlanResult with no resolved_step_args
+        attribute at all (a bare, unconfigured MagicMock) must fall back
+        to the static-template renderer cleanly, never raise."""
+        from nexus.mcp.core import nx_answer
+
+        plan_json = json.dumps({
+            "steps": [
+                {"tool": "search", "args": {"query": "widget frobnication", "corpus": "rdr"}},
+                {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
+            ],
+        })
+
+        def fake_match(question, **kwargs):
+            return [_make_match(plan_id=42, confidence=0.60, plan_json=plan_json)]
+
+        plan_run_result = MagicMock()
+        plan_run_result.steps = [
+            {"ids": [], "collections": [], "distances": []},
+            {"text": "nothing to summarize"},
+        ]
+        plan_run_result.step_records = []
+        # NOT set: plan_run_result.resolved_step_args stays an
+        # unconfigured MagicMock attribute (not a list).
+
+        library = MagicMock()
+        db_stub = MagicMock(plans=library)
+        db_stub.conn = MagicMock()
+
+        with patch("nexus.plans.matcher.plan_match", side_effect=fake_match), \
+             patch("nexus.plans.runner.plan_run",
+                   AsyncMock(return_value=plan_run_result)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            result = await nx_answer(question="what is widget frobnication")
+
+        assert "plan_id=42" in result, result
+        assert "rdr" in result and "widget frobnication" in result
+
+
 # ── Plan-run use_count / success_count / failure_count telemetry ──────────────
 
 
@@ -3843,6 +4044,117 @@ class TestNxAnswerBudgetUsdEnforcement:
             "cap must be applied to the raw text BEFORE the warning is "
             "composed, so the warning survives capping"
         )
+
+
+class TestNxAnswerDroppedReduceStepsEnvelope:
+    """nexus-4h0oh follow-up (code-review T2 [24199]):
+    ``PlanResult.dropped_reduce_steps`` never reached the ``nx_answer``
+    caller. Thread it into the structured envelope the same way
+    ``budget_warnings`` is threaded (a closure-scoped accumulator
+    ``_result`` reads directly, never a per-call-site parameter) --
+    always present, ``[]`` when empty -- and into the text-mode return
+    as a one-line notice when non-empty."""
+
+    @pytest.mark.asyncio
+    async def test_dropped_reduce_steps_surfaces_in_structured_envelope(
+        self, tmp_path,
+    ):
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(
+            steps=[{"text": "final answer"}],
+            dropped_reduce_steps=[2, 4],
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            text_result = await nx_answer("q")
+            struct_result = await nx_answer("q", structured=True)
+
+        assert isinstance(struct_result, dict)
+        assert struct_result["dropped_reduce_steps"] == [2, 4]
+        assert isinstance(text_result, str)
+        assert "2" in text_result and "4" in text_result
+        assert "final answer" in text_result, (
+            "the notice must not replace the real answer, only precede it"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_dropped_reduce_steps_yields_empty_list_and_no_notice(
+        self, tmp_path,
+    ):
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(steps=[{"text": "final answer"}])
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            text_result = await nx_answer("q")
+            struct_result = await nx_answer("q", structured=True)
+
+        assert struct_result["dropped_reduce_steps"] == []
+        assert "dropped reduce" not in text_result.lower()
+        assert text_result == "final answer"
+
+    @pytest.mark.asyncio
+    async def test_dropped_reduce_steps_coexists_with_budget_warning(
+        self, tmp_path,
+    ):
+        """Both notices must survive together -- the marker-convergence
+        rule that governs budget_warnings/exhaustion co-occurrence must
+        extend to this new line, not silently drop one when both fire."""
+        import nexus.mcp_infra as _infra
+        import nexus.plans.runner as _runner
+        from nexus.plans.runner import PlanResult
+
+        match = _make_match(confidence=0.75)
+        run_result = PlanResult(
+            steps=[{"text": "the real answer"}],
+            dropped_reduce_steps=[2],
+        )
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[match]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch("nexus.mcp.core.scratch", MagicMock()),
+            patch.object(_runner, "plan_run", AsyncMock(return_value=run_result)),
+        ):
+            from nexus.mcp.core import nx_answer
+            text_result = await nx_answer("q", budget_usd=0.05)
+            struct_result = await nx_answer(
+                "q", budget_usd=0.05, structured=True,
+            )
+
+        assert "budget warning (over-cap)" in text_result
+        assert "2" in text_result
+        assert "the real answer" in text_result
+        assert struct_result["dropped_reduce_steps"] == [2]
+        over_cap_entries = [
+            w for w in struct_result["budget_warnings"] if w["kind"] == "over-cap"
+        ]
+        assert len(over_cap_entries) == 1
 
 
 class TestNxAnswerClassifyPlanPrefixedOperatorNames:

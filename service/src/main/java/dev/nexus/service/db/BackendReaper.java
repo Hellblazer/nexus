@@ -1,17 +1,21 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 package dev.nexus.service.db;
 
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.exception.DataAccessException;
+import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HexFormat;
 import java.util.Properties;
 import java.util.concurrent.ThreadLocalRandom;
+
+import static dev.nexus.service.jooq.nexus.Tables.TERMINATE_OWN_BACKENDS;
 
 /**
  * Terminates this process's own Postgres backends at shutdown (nexus-g17tf).
@@ -86,19 +90,26 @@ public final class BackendReaper {
         props.setProperty("ApplicationName", applicationName + "/reaper");
         props.setProperty("connectTimeout", Integer.toString(CONNECT_TIMEOUT_SECONDS));
         props.setProperty("socketTimeout", Integer.toString(CONNECT_TIMEOUT_SECONDS * 2));
-        try (Connection c = DriverManager.getConnection(jdbcUrl, props);
-             PreparedStatement ps = c.prepareStatement(
-                 "SELECT pid, pg_terminate_backend(pid) FROM pg_stat_activity"
-                 + " WHERE application_name = ? AND pid <> pg_backend_pid()")) {
-            ps.setString(1, applicationName);
+        // nexus-zrcj7: the raw PreparedStatement over pg_stat_activity +
+        // pg_terminate_backend is retired onto backend-reaper-001's
+        // nexus.terminate_own_backends(text) table function, called through
+        // its jOOQ-generated table reference -- same FRESH, never-pool-
+        // borrowed Connection as before, just wrapped in a DSLContext
+        // (DSL.using(connection, ...), the same idiom PoolerModeCheck /
+        // HealthHandler / VersionHandler already use for a bootstrap
+        // connection) rather than a hand-built PreparedStatement.
+        try (Connection c = DriverManager.getConnection(jdbcUrl, props)) {
+            DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+            var rows = ctx
+                .selectFrom(TERMINATE_OWN_BACKENDS.call(applicationName))
+                .fetch();
             int terminated = 0;
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    if (rs.getBoolean(2)) {
-                        terminated++;
-                    } else {
-                        log.warn("event=backend_terminate_refused pid={}", rs.getInt(1));
-                    }
+            for (var rec : rows) {
+                if (Boolean.TRUE.equals(rec.get(TERMINATE_OWN_BACKENDS.TERMINATED))) {
+                    terminated++;
+                } else {
+                    log.warn("event=backend_terminate_refused pid={}",
+                             rec.get(TERMINATE_OWN_BACKENDS.PID));
                 }
             }
             if (terminated == 0 && activeConnections > 0) {
@@ -111,7 +122,7 @@ public final class BackendReaper {
                          applicationName, terminated, activeConnections);
             }
             return terminated;
-        } catch (SQLException e) {
+        } catch (SQLException | DataAccessException e) {
             log.warn("event=backend_reaper_failed application_name={} error=\"{}\"",
                      applicationName, e.getMessage());
             return -1;

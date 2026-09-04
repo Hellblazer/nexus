@@ -60,10 +60,13 @@ class TestMineruStart:
         kw = mock_popen.call_args.kwargs
         assert kw.get("start_new_session") is True
         env = kw.get("env", {})
-        for key in ("MINERU_TABLE_ENABLE", "MINERU_PROCESSING_WINDOW_SIZE",
+        for key in ("MINERU_PROCESSING_WINDOW_SIZE",
                      "MINERU_VIRTUAL_VRAM_SIZE", "MINERU_API_OUTPUT_ROOT",
                      "MINERU_API_TASK_RETENTION_SECONDS"):
             assert key in env
+        # nexus-jd8fi: MinerU lets this env var override every request's own
+        # table_enable field; exporting it made the per-request flag a no-op.
+        assert "MINERU_TABLE_ENABLE" not in env
 
     def test_start_already_running(self, runner, pid_file):
         _write_pid(pid_file)

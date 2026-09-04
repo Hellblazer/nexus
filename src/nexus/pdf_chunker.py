@@ -26,6 +26,13 @@ from nexus.md_chunker import classify_section_type
 _log = structlog.get_logger()
 
 _DEFAULT_CHUNK_CHARS = 1500   # ~450 tokens at 3.3 chars/token
+
+# nexus-jd8fi: MinerU renders a recognised table as one ``<table>...</table>``
+# run with no sentence boundary inside it. Real tables run 2200-5000 chars
+# against a 1500-char window, so a window-only split cuts them mid-row and
+# a value lands in a chunk with no header to say what it is.
+_TABLE_RE = re.compile(r"<table\b.*?</table>", re.DOTALL | re.IGNORECASE)
+_ROW_END = "</tr>"
 _DEFAULT_OVERLAP = 0.20
 
 # Heading detectors. Order matters: markdown wins because MinerU/Docling
@@ -196,17 +203,53 @@ class PDFChunker:
         start = 0
         chunk_index = 0
 
+        tables = [(m.start(), m.end()) for m in _TABLE_RE.finditer(text)]
+
+        def _table_at(pos: int) -> tuple[int, int] | None:
+            for t_start, t_end in tables:
+                if t_start < pos < t_end:
+                    return t_start, t_end
+            return None
+
         while start < len(text):
             end = min(start + self.chunk_chars, len(text))
+            # A break placed by the table rules; the next chunk starts exactly
+            # there (no prose overlap into or out of a table).
+            table_break = False
 
-            # Prefer to break at a sentence boundary in the last 20% of the window
             if end < len(text):
-                search_start = end - max(1, int(self.chunk_chars * 0.2))
-                sentence_end = text.rfind(". ", search_start, end)
-                if sentence_end != -1:
-                    end = sentence_end + 1  # include the period
+                inside = _table_at(end)
+                if inside is None:
+                    # Prefer to break at a sentence boundary in the last 20% of
+                    # the window, unless that boundary sits inside a table.
+                    search_start = end - max(1, int(self.chunk_chars * 0.2))
+                    sentence_end = text.rfind(". ", search_start, end)
+                    if sentence_end != -1 and _table_at(sentence_end + 1) is None:
+                        end = sentence_end + 1  # include the period
+                else:
+                    t_start, _t_end = inside
+                    if t_start > start:
+                        # The table starts inside this window and does not
+                        # fit: end the chunk before it so the table opens the
+                        # next chunk whole (or at least with its header row).
+                        end = t_start
+                        table_break = True
+                    else:
+                        # Already inside a table longer than the window:
+                        # break after the last complete row.
+                        row_end = text.rfind(_ROW_END, start, end)
+                        if row_end > start:
+                            end = row_end + len(_ROW_END)
+                            table_break = True
 
             chunk_text = text[start:end].strip()
+            # A chunk that opens mid-table repeats the table's header row so
+            # its cells stay readable (and retrievable) on their own.
+            opening = _table_at(start)
+            if chunk_text and opening is not None:
+                header = self._table_header(text, opening[0])
+                if header and start >= opening[0] + len(header):
+                    chunk_text = f"{header}\n{chunk_text}"
             if chunk_text:
                 page_number = self._page_for(start, page_boundaries)
                 chunk_type = "table_page" if page_number in table_pages else "text"
@@ -230,7 +273,12 @@ class PDFChunker:
                 )
                 chunk_index += 1
 
+            # Overlap is for prose. A break the table rules placed, or an
+            # overlap that would reopen the next chunk mid-row, starts the
+            # next chunk exactly at ``end``.
             next_start = end - self.overlap_chars
+            if table_break or _table_at(next_start) is not None:
+                next_start = end
             if next_start <= start:
                 break
             start = next_start
@@ -240,6 +288,15 @@ class PDFChunker:
             if len(c.text.encode()) > SAFE_CHUNK_BYTES:
                 c.text = c.text.encode()[:SAFE_CHUNK_BYTES].decode("utf-8", errors="ignore")
         return chunks
+
+    @staticmethod
+    def _table_header(text: str, table_start: int) -> str:
+        """``<table>`` opening plus the first complete row, or ``""``."""
+        open_end = text.find(">", table_start)
+        row_end = text.find(_ROW_END, table_start)
+        if open_end == -1 or row_end == -1:
+            return ""
+        return text[table_start:row_end + len(_ROW_END)]
 
     def _page_for(self, char_pos: int, page_boundaries: list[dict]) -> int:
         """Return the 1-indexed page number that contains *char_pos*, or 0."""

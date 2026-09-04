@@ -1,6 +1,7 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.JSONB;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -1269,15 +1270,27 @@ public final class TaxonomyRepository {
      * import-during-serving path ever appears, revisit with a lock on the
      * sequence or an advisory lock keyed on the table.
      */
-    // SANCTIONED RAW (rdr155-p4b F-C): setval / pg_get_serial_sequence /
-    // sequence last_value are sequence-state functions with no generated
-    // jOOQ form (codegen models tables, not sequences); one statement,
-    // import-path only, never serving-path.
+    // nexus-zrcj7 (Sam's no-SQL-strings-in-Java directive): retired from a raw
+    // ctx.execute("SELECT setval(pg_get_serial_sequence(...), GREATEST(...))", ...)
+    // template onto typed jOOQ DSL -- setval/pg_get_serial_sequence are ordinary
+    // PostgreSQL functions (DSL.function(name, type, boundArgs...), the same idiom
+    // this class already uses at set_config/pg_advisory_xact_lock/hashtext above);
+    // GREATEST is jOOQ core's own DSL.greatest(...); the scalar subquery
+    // "(SELECT last_value FROM nexus.topics_id_seq)" is jOOQ's type-safe
+    // field(Select) scalar-subquery wrapping (manual: "SQL building > Column
+    // expressions > Scalar subqueries") over DSL.table(DSL.name(...)) + a
+    // DSL.name(...)-addressed column -- the same safe quoted-identifier idiom
+    // ChashCensus.java / StagingPromoteOps.java already use for a schema-qualified
+    // relation this class has no generated Table for (a bare PostgreSQL sequence
+    // read as a one-row relation, which jOOQ codegen does not model as a Table).
     private static void advanceTopicsIdSequence(DSLContext ctx, long maxImportedId) {
-        ctx.execute(
-            "SELECT setval(pg_get_serial_sequence('nexus.topics', 'id'), "
-            + "GREATEST((SELECT last_value FROM nexus.topics_id_seq), ?))",
-            maxImportedId);
+        Field<Long> lastValue = field(name("last_value"), Long.class);
+        Field<Long> lastValueSubquery =
+            field(select(lastValue).from(table(name("nexus", "topics_id_seq"))));
+        ctx.select(function("setval", Long.class,
+                function("pg_get_serial_sequence", String.class, val("nexus.topics"), val("id")),
+                greatest(lastValueSubquery, val(maxImportedId))))
+           .fetch();
     }
 
     /**

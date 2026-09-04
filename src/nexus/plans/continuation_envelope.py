@@ -747,6 +747,39 @@ def _dynamic_fence(content: str) -> str:
     return "`" * max(3, longest + 1)
 
 
+def _render_provenance_lines(hydrated_bundles: list[dict[str, Any]]) -> list[str]:
+    """One line per hydrated evidence item: originating step, collection,
+    distance (nexus-kim0o).
+
+    RDR-200 specifies ``hydrated_bundles`` as provenance-only
+    ``{step_index, collection, items[{id, chash, tumbler, collection,
+    distance}]}`` on the STRUCTURED envelope, but the text-mode
+    instruction — what every recorded RDR-200 arm actually consumed —
+    rendered none of it: 15 of 24 Phase 1b arm-runs had zero collection
+    and zero distance fields, forcing the reach analysis to infer
+    collections from evidence content. Returns ``[]`` for an empty/absent
+    *hydrated_bundles* so the caller adds no empty labeled section.
+    """
+    lines: list[str] = []
+    for bundle in hydrated_bundles:
+        if not isinstance(bundle, dict):
+            continue
+        step_index = bundle.get("step_index")
+        for item in bundle.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            collection = item.get("collection", "")
+            distance = item.get("distance")
+            dist_str = (
+                f"{distance:.4f}" if isinstance(distance, (int, float)) else "n/a"
+            )
+            lines.append(
+                f"  step{step_index}: collection={collection!r} "
+                f"distance={dist_str} id={item.get('id', '')!r}"
+            )
+    return lines
+
+
 def render_continuation_text(envelope: dict[str, Any]) -> str:
     """Text-mode reduction instruction — RDR-200 §What the caller
     actually does. The return value IS the instruction: a short
@@ -772,6 +805,7 @@ def render_continuation_text(envelope: dict[str, Any]) -> str:
     continuation_id = envelope["continuation_id"]
     prompt_fence = _dynamic_fence(prompt)
     schema_fence = _dynamic_fence(schema_json)
+    provenance_lines = _render_provenance_lines(envelope.get("hydrated_bundles") or [])
 
     lines = [
         "This question required a composed retrieval reduction. The "
@@ -790,6 +824,16 @@ def render_continuation_text(envelope: dict[str, Any]) -> str:
         prompt,
         prompt_fence,
         "",
+    ]
+    if provenance_lines:
+        lines += [
+            "Retrieval provenance for the evidence above (reference "
+            "only, not part of the reduction task — each line names "
+            "the originating step, collection, and vector distance):",
+            *provenance_lines,
+            "",
+        ]
+    lines += [
         "Required output: emit ONE JSON object conforming to this "
         "schema.",
         f"{schema_fence}json",

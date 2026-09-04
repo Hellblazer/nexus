@@ -84,6 +84,14 @@ public final class EmbedderRouter implements Embedder {
      * @param inputType     {@code "document"} for indexing, {@code "query"} for search
      */
     public EmbedderRouter(Embedder localEmbedder, String inputType) {
+        // nexus-00wsf review fold: this constructor does NOT apply admission
+        // control itself — see AdmissionControlledEmbedder's javadoc. A
+        // caller who wants the local (bge/ONNX) embed path gated wraps
+        // localEmbedder in an AdmissionControlledEmbedder BEFORE passing it
+        // in (Main.java does this, sharing ONE LocalOnnxAdmission across the
+        // doc and query routers so the bound is process-wide, not per-router
+        // — wrapping here, once per router, produced a per-router bound
+        // instead and was the exact defect this comment replaces).
         this.localEmbedder       = localEmbedder;
         this.voyageCodeEmbedder  = null;
         this.cceEmbedder         = null;

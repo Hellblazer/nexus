@@ -210,6 +210,19 @@ class TestMineruRunViaServer:
         data = mock_post.call_args.kwargs.get("data") or mock_post.call_args[1].get("data", {})
         assert data["table_enable"] == "true"
 
+    def test_table_enable_defaults_to_true(self, extractor: PDFExtractor, dummy_pdf: Path) -> None:
+        """nexus-jd8fi: with no ``mineru_table_enable`` key the request carries
+        ``true``. The old ``false`` default rendered every table as an image
+        reference, so an indexed paper carried no tabular value at all."""
+        with (
+            patch("nexus.pdf_extractor.httpx.post", return_value=_mock_post_ok()) as mock_post,
+            _patch_config(_MINERU_CFG),
+        ):
+            extractor._mineru_run_via_server(dummy_pdf, 0, 5)
+
+        data = mock_post.call_args.kwargs.get("data") or mock_post.call_args[1].get("data", {})
+        assert data["table_enable"] == "true"
+
     def test_end_none_sends_sentinel(self, extractor: PDFExtractor, dummy_pdf: Path) -> None:
         with (
             patch("nexus.pdf_extractor.httpx.post", return_value=_mock_post_ok()) as mock_post,

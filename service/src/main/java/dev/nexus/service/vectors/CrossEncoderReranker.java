@@ -146,6 +146,13 @@ public final class CrossEncoderReranker implements Reranker {
             OrtSession          sess = null;
             HuggingFaceTokenizer tok = null;
             try (var sessionOpts = new OrtSession.SessionOptions()) {
+                // nexus-00wsf: the intra-op width of this SHARED session comes from one
+                // resolver (OnnxThreadPolicy: ORT's own default unless an operator overrides);
+                // concurrency is bounded by LocalOnnxAdmission, never by this number.
+                var intraOp = OnnxThreadPolicy.intraOpThreads();
+                if (intraOp.isPresent()) {
+                    sessionOpts.setIntraOpNumThreads(intraOp.getAsInt());
+                }
                 OrtEnvironment env = OrtEnvironment.getEnvironment();
                 sess = env.createSession(modelPath, sessionOpts);
                 tok = HuggingFaceTokenizer.builder()

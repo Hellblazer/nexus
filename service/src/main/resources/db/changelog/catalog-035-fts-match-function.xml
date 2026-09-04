@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-zrcj7 (Sam's no-SQL-strings-in-Java directive, 2026-09-03). Pure
+    retirement, no behaviour change (decision record: T2
+    nexus/decision-zrcj7-no-sql-strings-design-2026-09-03).
+
+    THE MOVE. CatalogRepository#searchDocuments used to assemble its FTS
+    match condition as a caller-built raw-SQL template (two variants, one
+    per hasSeparator branch) via DSL.condition("...", DSL.val(query)). This
+    function moves the exact same three-leg OR expression server-side, with
+    the separator branch folded into a third boolean parameter instead of a
+    Java-side choice between two SQL text variants:
+
+        leg 1: fts_vector @@ plainto_tsquery('english', fold_diacritics(query))
+        leg 2: fts_vector @@ plainto_tsquery('simple',  fold_diacritics(query))
+        leg 3 (only when p_has_separator): fts_vector @@ plainto_tsquery('simple',
+               fold_diacritics(translate(query, '/.-_', '    ')))
+
+    Called from Java via a single DSL.function(...) bound-value call (THE
+    RULE's own sanctioned idiom) rather than caller-assembled SQL text;
+    see CatalogRepository#searchDocuments and catalog-017/memory-002's
+    nexus.fold_diacritics, which this function composes with unchanged.
+
+    STABLE not IMMUTABLE: plainto_tsquery depends on the text-search
+    configuration's dictionaries, which PostgreSQL itself classifies as
+    STABLE, not IMMUTABLE, matching vectors-007-hybrid-search-functions.xml's
+    own STABLE marking for the same reason. SECURITY INVOKER (the default,
+    stated explicitly to match this repo's other LANGUAGE sql functions):
+    FORCE RLS on nexus.catalog_documents applies to the CALLER's session,
+    not a function owner. Not STRICT: a NULL p_query would otherwise short-
+    circuit to NULL instead of the caller-visible boolean the WHERE clause
+    needs (searchDocuments already refuses a null/blank query before this is
+    ever called, but the function itself makes no such assumption).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-035-0" author="nexus-zrcj7">
+        <comment>nexus.catalog_fts_match: server-side FTS match predicate for CatalogRepository#searchDocuments, retiring its raw DSL.condition template</comment>
+        <sql splitStatements="true">
+CREATE OR REPLACE FUNCTION nexus.catalog_fts_match(
+    p_fts_vector    tsvector,
+    p_query         text,
+    p_has_separator boolean
+) RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT p_fts_vector @@ plainto_tsquery('english', nexus.fold_diacritics(p_query))
+        OR p_fts_vector @@ plainto_tsquery('simple', nexus.fold_diacritics(p_query))
+        OR (p_has_separator AND p_fts_vector @@ plainto_tsquery('simple',
+                nexus.fold_diacritics(translate(p_query, '/.-_', '    '))))
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.catalog_fts_match(tsvector, text, boolean);
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

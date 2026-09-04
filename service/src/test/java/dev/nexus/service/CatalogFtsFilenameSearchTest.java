@@ -14,6 +14,8 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
+import java.sql.ResultSet;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -147,6 +149,161 @@ class CatalogFtsFilenameSearchTest {
         // the new leg opens no match-all hole.
         assertThat(repo.searchDocuments(TENANT, "---", null, 10)).isEmpty();
         assertThat(repo.searchDocuments(TENANT, "/._-", null, 10)).isEmpty();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // nexus-zrcj7 code-review finding (T2 [24213]): catalog_fts_match (catalog-035)
+    // is a new function with no inlining/EXPLAIN parity test, unlike every other
+    // combined-query function in this codebase (CombinedQueryParityTest's GROUP 3).
+    // A GIN index exists on catalog_documents.fts_vector (catalog-017), so this is
+    // a real perf surface: a non-inlinable (or non-indexable) rewrite would turn
+    // every searchDocuments() call into a sequential scan without any functional
+    // test here ever noticing, since GROUP 3-style checks assert PLAN SHAPE, not
+    // query correctness.
+    //
+    // Mirrors CombinedQueryParityTest's own GROUP 3 technique (enable_seqscan=off
+    // to eliminate the cheap alternative at unit scale, then assert the GIN index
+    // name appears and no Function Scan/InitPlan node exists — a plpgsql body or a
+    // non-inlined SQL function would show one of those instead of the expanded
+    // `fts_vector @@ ...` predicate). Unlike GROUP 3's vector-ANN functions,
+    // catalog_fts_match's caller (searchDocuments) is a single-table predicate with
+    // no join, so there is no "index survives the join" claim to make here — only
+    // the inlining + GIN-index-selected claim.
+    //
+    // Seeded via repo.registerDocumentMany/registerDocument — the repository, not
+    // raw SQL — per the review instruction. The EXPLAIN invocation itself follows
+    // CombinedQueryParityTest's own established, already-reviewed pattern (a raw
+    // JDBC "EXPLAIN " + <call the function/table by name>): there is no jOOQ API
+    // that hands back a real PostgreSQL EXPLAIN plan for an arbitrary query, and
+    // the point of this test is to inspect the SQL FUNCTION's inlining, a Postgres
+    // planner property independent of how Java invokes it — the same function
+    // definition underlies both this diagnostic call and CatalogRepository's own
+    // (Routines-mediated) call.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    private static final String TENANT_EXPLAIN = "fts-fname-explain-tenant";
+
+    /**
+     * A rare, single-lexeme, separator-free term (so hasSeparator=false and only
+     * the english+simple legs of catalog_fts_match apply — the simplest case to
+     * reason about) that appears in exactly ONE seeded document out of {@link
+     * #EXPLAIN_FILLER_DOCS} + 1, making the predicate genuinely selective.
+     */
+    private static final String RARE_TERM = "zqxvwunmarker99187";
+    // Comparable to CombinedQueryParityTest's own GROUP-3 EXPLAIN_ROWS (500):
+    // a real but modest fixture so the predicate's selectivity is genuine
+    // (1 of 501) without needing a large seed just to force a cost crossover
+    // (see explainRareTermPlan's javadoc -- the diagnostic query is built to
+    // remove the one pre-existing competing index from consideration
+    // entirely, rather than out-scaling it).
+    private static final int EXPLAIN_FILLER_DOCS = 500;
+
+    private String seedExplainFixture() {
+        // nexus-zrcj7 review fixture: a DEDICATED owner prefix, disjoint from
+        // "9.3" (used by this file's other fixtures under TENANT). This test's
+        // `repo` runs over PgContainerHelper.superuserDataSource -- a real
+        // Postgres SUPERUSER connection, which unconditionally bypasses RLS
+        // (including FORCE ROW LEVEL SECURITY) regardless of TenantScope's GUC.
+        // getDocument's tumbler-only WHERE relies on RLS for tenant scoping,
+        // which is a safe assumption under production's nexus_svc role but not
+        // under this file's superuser pool -- a colliding tumbler VALUE under a
+        // different tenant (e.g. reusing "9.3") is visible cross-tenant here and
+        // trips TooManyRowsException on ANY OTHER test in this file that looks
+        // up a "9.3.N" tumbler. Disjoint prefix avoids the collision outright.
+        List<Map<String, Object>> filler = new ArrayList<>(EXPLAIN_FILLER_DOCS);
+        for (int i = 0; i < EXPLAIN_FILLER_DOCS; i++) {
+            filler.add(Map.of(
+                "title", "Quarterly Status Report " + i, "content_type", "rdr",
+                "file_path", "docs/filler/report-" + i + ".md"));
+        }
+        repo.registerDocumentMany(TENANT_EXPLAIN, "zrcj7-explain", filler);
+        return repo.registerDocument(TENANT_EXPLAIN, "zrcj7-explain", Map.of(
+            "title", RARE_TERM + " Findings", "content_type", "rdr",
+            "file_path", "docs/rare/" + RARE_TERM + ".md"));
+    }
+
+    /**
+     * EXPLAIN (no ANALYZE) a searchDocuments-shaped query over {@link
+     * #RARE_TERM}'s predicate alone, with enable_seqscan AND enable_indexscan
+     * disabled — mirrors CombinedQueryParityTest's own {@code explain(...)}
+     * helper (penalize every non-target access method), scoped to a single-
+     * table (no-join) query.
+     *
+     * <p>Deliberately carries NO {@code tenant_id}/{@code deleted_at} filter,
+     * unlike searchDocuments' real WHERE (which adds {@code deleted_at IS
+     * NULL} — {@code tenant_id} scoping is RLS, not an explicit predicate,
+     * and this diagnostic connection is a superuser that bypasses RLS
+     * entirely). Both columns are covered by {@code
+     * idx_catalog_documents_collection_live} (catalog-003), a partial index
+     * on {@code (tenant_id, physical_collection) WHERE deleted_at IS NULL}
+     * — measured directly: with either filter present, that PRE-EXISTING,
+     * unrelated index competes for the optimizer's choice and can win on
+     * cost even at 5000 fixture rows (tsvector {@code @@} selectivity is
+     * planner-estimated via a fixed default fraction, not real per-value
+     * statistics, so raising row count alone does not force a crossover).
+     * Dropping both filters removes that partial index from consideration
+     * altogether (its WHERE clause can no longer be proven satisfied), so
+     * the fts predicate's OWN indexability — what this test exists to pin —
+     * decides the plan without an unrelated index's presence as a confound.
+     */
+    private String explainRareTermPlan() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            // Real row-count statistics, mirroring CombinedQueryParityTest's own
+            // GROUP-3 fixture comment verbatim: without this the planner
+            // under-estimates the bulk-loaded table to rows=1 (default-selectivity
+            // guesswork, no ANALYZE ever run).
+            su.createStatement().execute("ANALYZE nexus.catalog_documents");
+            su.createStatement().execute("SET enable_seqscan = off");
+            su.createStatement().execute("SET enable_indexscan = off");
+            ResultSet rs = su.createStatement().executeQuery(
+                "EXPLAIN SELECT tumbler FROM nexus.catalog_documents "
+                + "WHERE nexus.catalog_fts_match(fts_vector, '" + RARE_TERM + "', false) "
+                + "ORDER BY tumbler LIMIT 50");
+            StringBuilder sb = new StringBuilder();
+            while (rs.next()) sb.append(rs.getString(1)).append('\n');
+            return sb.toString();
+        }
+    }
+
+    @Test
+    void catalog_fts_match_inlines_and_uses_gin_index_when_selective() throws Exception {
+        String rareDoc = seedExplainFixture();
+
+        // CONTROL: the real repository code path (Routines.catalogFtsMatch, not
+        // this test's diagnostic raw call) finds the seeded document — proves the
+        // EXPLAIN'd query below is behaviorally representative of production, not
+        // just structurally similar.
+        assertThat(repo.searchDocuments(TENANT_EXPLAIN, RARE_TERM, null, 50).stream()
+                       .map(d -> String.valueOf(d.get("tumbler"))))
+            .as("the same rare term must be findable through CatalogRepository"
+                + ".searchDocuments, the production caller of catalog_fts_match")
+            .contains(rareDoc);
+
+        String plan = explainRareTermPlan();
+        assertThat(plan)
+            .as("a selective catalog_fts_match predicate must use the GIN index "
+                + "idx_catalog_documents_fts (catalog-017) — a non-inlined or "
+                + "non-indexable rewrite falls back to a sequential scan invisible "
+                + "to every functional test in this file. Plan was:%n%s", plan)
+            .contains("idx_catalog_documents_fts");
+        assertThat(plan)
+            .as("a Function Scan node means catalog_fts_match is not inlinable "
+                + "(e.g. a plpgsql body, or SECURITY DEFINER) — EXPLAIN cannot then "
+                + "see the index scan; catalog-035 must stay an inlinable LANGUAGE "
+                + "sql, non-SECURITY-DEFINER function. Plan was:%n%s", plan)
+            .doesNotContain("Function Scan");
+        assertThat(plan)
+            .as("an InitPlan means catalog_fts_match is evaluated as a separate "
+                + "one-shot subplan rather than inlined into the WHERE expression "
+                + "the GIN index can see. Plan was:%n%s", plan)
+            .doesNotContain("InitPlan");
+        assertThat(plan)
+            .as("with enable_seqscan=off and a genuinely selective predicate, a "
+                + "Seq Scan on catalog_documents means the GIN index was not "
+                + "actually usable for this rewrite of the expression. Plan "
+                + "was:%n%s", plan)
+            .doesNotContain("Seq Scan on catalog_documents");
     }
 
     // ── nexus-p5qk8: manifest writes refresh indexed_at ──────────────────

@@ -989,6 +989,73 @@
          taxonomy-015's own <include> comments for the identical reasoning). -->
     <include file="db/changelog/telemetry-008-step-cache-tokens.xml"/>
 
+    <!-- nexus-zrcj7 (Sam directive 2026-09-03: no SQL strings in Java, anywhere) —
+         nexus.plain_search_384/768/1024: retires PgVectorRepository#searchWithTokens's
+         raw SQL onto an inlinable schema function. Depends only on nexus.chunks/
+         catalog_document_chunks/catalog_documents, all of which exist well before
+         this point. Placed after telemetry-008-step-cache-tokens.xml (current tail)
+         and before the grants-nexus-svc.xml runAlways block, matching the
+         established late-append convention (D0.1). See the file's own header for
+         the where/jsonpath split and the tombstone-filter derivation. -->
+    <include file="db/changelog/vectors-009-plain-search.xml"/>
+
+    <!-- nexus-zrcj7 (T2 critic follow-up, 2026-09-04) — nexus.text_gate_probe_384/768/
+         1024 (SETOF bytea: the bounded gate-selectivity probe, projecting the gate's
+         own matched chashes, not a COUNT), nexus.text_gated_search_hnsw_first_384/768/
+         1024 (the retired Java HNSW-first dense-gate branch, restored as an inlinable
+         schema function so the HNSW index stays reachable), and
+         nexus.text_gated_search_by_chash_384/768/1024 (ranks ONLY over the probe's
+         chash set + scope, no text-gate re-evaluation — single-gate-eval,
+         nexus-x7z7l/conexus-qsa). Together these restore the lcogi/x7z7l
+         selectivity-aware two-branch dispatch. Supersedes an earlier vectors-010
+         (nexus.text_gated_search_&lt;dim&gt;, a single materializing-CTE design) and
+         vectors-012 (a COUNT-only probe revision that lost single-gate-eval), both
+         deleted outright rather than left as dead schema objects: neither ever
+         shipped in any engine tag, vectors-010 had zero production callers once this
+         file's dispatch existed, and vectors-012's rollback recreating the probe as
+         an int-returning stub was itself a defect (T2 [24223] finding 1 — a
+         rollback that would make hybridSearch silently return nothing, forever;
+         see this file's own header for the full derivation). Depends only on
+         nexus.chunks/catalog_document_chunks/catalog_documents. Placed after
+         vectors-009-plain-search.xml (current tail) and before the
+         grants-nexus-svc.xml runAlways block, matching the established late-append
+         convention (D0.1). -->
+    <include file="db/changelog/vectors-011-hybrid-selectivity-dispatch.xml"/>
+    <!-- nexus-zrcj7 (Sam's no-SQL-strings-in-Java directive) — moves
+         CatalogRepository#searchDocuments's raw-template FTS match
+         expression server-side as nexus.catalog_fts_match(tsvector, text,
+         boolean). Depends only on nexus.fold_diacritics (memory-002-0) and
+         catalog_documents.fts_vector (catalog-017-0), both long-settled.
+         Placed after telemetry-008-step-cache-tokens.xml (current tail) and
+         before the grants-nexus-svc.xml runAlways block, matching the
+         established late-append convention (D0.1; see taxonomy-013's /
+         taxonomy-014's / taxonomy-015's / telemetry-008's own <include>
+         comments for the identical reasoning). -->
+    <include file="db/changelog/catalog-035-fts-match-function.xml"/>
+
+    <!-- nexus-zrcj7 (Sam's no-SQL-strings-in-Java directive) — table-valued
+         nexus.terminate_own_backends(text) wrapping BackendReaper's
+         shutdown-hook pg_stat_activity + pg_terminate_backend statement.
+         No dependency on any other changeset (pg_stat_activity is a system
+         view). Placed after catalog-035-fts-match-function.xml (current
+         tail) and before the grants-nexus-svc.xml runAlways block, matching
+         the established late-append convention (D0.1; see taxonomy-013's /
+         taxonomy-014's / taxonomy-015's / telemetry-008's / catalog-035's
+         own <include> comments for the identical reasoning). -->
+    <include file="db/changelog/backend-reaper-001-terminate-own-backends.xml"/>
+
+    <!-- nexus-zrcj7 (Sam's no-SQL-strings-in-Java directive, step 4) —
+         nexus.taxonomy_ann_query_384/768/1024, retiring
+         TaxonomyCentroidRepository#annQuery's string-concatenated pgvector `<=>`
+         raw SQL onto an inlinable schema function, mirroring vectors-009's
+         plain_search_<dim> precedent. Depends only on nexus.taxonomy_centroids
+         (RDR-191 unification, taxonomy-0xx) and the vector extension (vectors-001).
+         Placed after backend-reaper-001-terminate-own-backends.xml (current tail)
+         and before the grants-nexus-svc.xml runAlways block, matching the
+         established late-append convention (D0.1; see backend-reaper-001's own
+         <include> comment for the identical reasoning). -->
+    <include file="db/changelog/vectors-013-taxonomy-ann-query.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

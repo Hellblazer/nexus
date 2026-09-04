@@ -15,6 +15,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_1024;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_384;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_768;
+
 /**
  * RDR-156 bead nexus-t1hnc.2 — pgvector taxonomy-centroid repository.
  *
@@ -158,29 +162,25 @@ public final class TaxonomyCentroidRepository {
         if (nResults < 1) {
             throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
         }
-        String op = crossCollection ? "<>" : "=";
-        String embeddingCol = DimTables.embeddingColumn(dim);
-        // SANCTIONED RAW (nexus-mzuj9): the pgvector `<=>` distance operator ordered directly
-        // off a bind-parameter vector literal has no jOOQ DSL form (same category as
-        // PgVectorRepository's search()/hybridSearch() — see that class's rawVectorFetch
-        // javadoc). Registered in RawSqlGateTest's sanctioned method allowlist.
-        //
-        // RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-jv3ue item 5): table name
-        // consulted from DimTables.CENTROIDS_TABLE_NAME (was a hand-rolled
-        // "nexus.taxonomy_centroids_" + dim string that resolves to a table DROPped by
-        // the unify changeset — a silent RUNTIME failure, not a compile error, since this
-        // is plain string interpolation). Embedding column consulted from
-        // DimTables.embeddingColumn(dim) rather than the former bare "embedding" (every
-        // dim's rows now share the one physical table, so an unqualified "embedding"
-        // column no longer exists at all post-unification). The explicit
-        // "embedding_<dim> IS NOT NULL" guard is NEW and load-bearing: unlike
-        // PgVectorRepository's searchWithTokens (dim-homogeneous by collection, D2's
-        // hazard analysis), a centroid collection can legitimately hold rows at two
-        // dims mid-migration (this class's own dimensionProbe javadoc) — without the
-        // guard, ordering by "embedding_<dim> <=> ?::vector" would compute a NULL
-        // distance for foreign-dim rows and additionally defeats the embedding_<dim>
-        // partial-population correlation the HNSW index needs to be selective.
-        Result<Record> result = tenantScope.withTenant(tenant, ctx -> {
+        // nexus-zrcj7 (Sam's no-SQL-strings-in-Java directive, step 4): retired the
+        // former string-concatenated raw SQL (pgvector `<=>` has no jOOQ typed-DSL
+        // form) onto nexus.taxonomy_ann_query_<dim> (vectors-013), an inlinable schema
+        // function mirroring PgVectorRepository's plain_search_<dim> precedent
+        // (vectors-009) — same "move the whole query server-side" resolution rather
+        // than a DSL.field/DSL.condition raw-text template. The embedding_<dim> IS NOT
+        // NULL guard and the crossCollection ("=" vs "<>") comparator selection both
+        // moved into the function body (a CASE expression, never Java string
+        // concatenation) — see the changeset's own header for the full derivation of
+        // why both are load-bearing (a centroid collection can hold rows at two dims
+        // mid-migration; this class's own dimensionProbe javadoc).
+        Vector queryVec = Vector.of(embedding);
+        org.jooq.Table<?> fn = switch (dim) {
+            case 384  -> TAXONOMY_ANN_QUERY_384.call(queryVec, collection, crossCollection, nResults);
+            case 768  -> TAXONOMY_ANN_QUERY_768.call(queryVec, collection, crossCollection, nResults);
+            case 1024 -> TAXONOMY_ANN_QUERY_1024.call(queryVec, collection, crossCollection, nResults);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
             // Filtered-ANN recall: the collection predicate + RLS narrow the candidate set;
             // keep HNSW scanning past ef_search so a narrow collection returns its full set
             // (RDR-156 — without this, filtered HNSW silently under-returns). SET LOCAL is
@@ -197,12 +197,7 @@ public final class TaxonomyCentroidRepository {
             // collection set's selectivity (a cached generic HNSW plan on a tiny
             // collection ran ~30s and returned EMPTY in production).
             PgSession.setSearchPlanCacheMode(ctx);
-            return ctx.fetch(
-                "SELECT topic_id, (" + embeddingCol + " <=> ?::vector) AS distance FROM "
-                + centroidTable(dim)
-                + " WHERE " + embeddingCol + " IS NOT NULL AND collection " + op + " ?"
-                + " ORDER BY distance ASC, topic_id ASC LIMIT ?",
-                vectorLiteral(embedding), collection, nResults);
+            return ctx.selectFrom(fn).fetch();
         });
         List<AnnHit> hits = new ArrayList<>(result.size());
         for (Record rec : result) {
@@ -400,31 +395,14 @@ public final class TaxonomyCentroidRepository {
         });
     }
 
-    // ── Internal helpers ────────────────────────────────────────────────────────
-
-    /**
-     * RDR-191 Phase 4 (repoint-batch lane D5, bead nexus-jv3ue item 5): the
-     * raw-string table-name channel now consults {@link
-     * DimTables#CENTROIDS_TABLE_NAME} — {@code dim} stays a parameter for
-     * call-site symmetry with {@link DimTables#embeddingColumn(int)} (every
-     * caller already has {@code dim} in scope for the column choice right
-     * alongside the table name), even though the table name itself no
-     * longer varies by dim post-unification. Was {@code
-     * "nexus.taxonomy_centroids_" + dim}, a hand-rolled string resolving to
-     * a table the unify changeset DROPs.
-     */
-    private static String centroidTable(int dim) {
-        return DimTables.CENTROIDS_TABLE_NAME;
-    }
-
-    /** pgvector cast-safe text literal: {@code [f1,f2,...]}. */
-    private static String vectorLiteral(float[] vec) {
-        StringBuilder sb = new StringBuilder(vec.length * 8 + 2).append('[');
-        for (int i = 0; i < vec.length; i++) {
-            if (i > 0) sb.append(',');
-            sb.append(vec[i]);
-        }
-        return sb.append(']').toString();
-    }
+    // centroidTable(int)/vectorLiteral(float[]): REMOVED (nexus-zrcj7, step 4). Both
+    // existed solely to serve annQuery's former string-concatenated raw SQL (the
+    // table-name text and the pgvector cast-safe literal respectively); annQuery now
+    // reads through nexus.taxonomy_ann_query_<dim> (vectors-013) via the typed
+    // Vector/VectorBinding path (Vector.of(embedding) passed straight to the generated
+    // function's Vector-bound parameter), so neither has a remaining caller. Per the
+    // dead-entry-avoidance discipline this bead already established elsewhere
+    // (RawSqlGateTest's own RekeyOps.java removal), a helper with no remaining caller
+    // is deleted outright, not kept as a no-op.
 
 }

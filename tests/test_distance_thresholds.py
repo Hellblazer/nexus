@@ -317,11 +317,15 @@ class TestTidyMarksDisplayTruncation:
         })
 
         def fake_hydrate(_ids, _cols, *, max_chars_per_doc, structured):
-            # Reproduce store_get_many's real truncation shape (core.py:4407),
-            # rather than asserting against a hand-written marker.
+            # Reproduce store_get_many's real truncation shape (nexus-lugwx:
+            # ellipsis plus display_truncation_marker), rather than asserting
+            # against a hand-written marker.
             out = body
             if max_chars_per_doc > 0 and len(out) > max_chars_per_doc:
-                out = out[:max_chars_per_doc] + "\u2026"
+                out = (
+                    out[:max_chars_per_doc] + "\u2026"
+                    + core.display_truncation_marker(max_chars_per_doc)
+                )
             return {"contents": [out]}
         monkeypatch.setattr(core, "store_get_many", fake_hydrate)
         return core._tidy_prefetch("t", "knowledge")

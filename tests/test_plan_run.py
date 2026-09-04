@@ -87,6 +87,86 @@ async def test_run_resolves_caller_var_in_args() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolved_step_args_captures_runtime_corpus_not_template(
+) -> None:
+    """nexus-ivv4d code review follow-up (T2 [24198]): PlanResult.
+    resolved_step_args must carry the FULLY RESOLVED corpus/query — the
+    plan template here leaves corpus unset entirely, so a caller reading
+    it back must see the runner's own ``_PLAN_STEP_DEFAULT_CORPUS``
+    fall-through, not an empty string."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "$intent"}},
+        ],
+        "required_bindings": ["intent"],
+    }
+    disp = _FakeDispatcher([{"text": "ok"}])
+    result = await plan_run(
+        _match(plan), {"intent": "how does X work"}, dispatcher=disp,
+    )
+
+    assert result.resolved_step_args == [
+        {
+            "step_index": 0, "tool": "search",
+            "corpus": _PLAN_STEP_DEFAULT_CORPUS, "query": "how does X work",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resolved_step_args_excludes_store_get_many() -> None:
+    """store_get_many carries no corpus/query args of its own -- a
+    step_index entry for it would read as a spurious ``corpus=''
+    query=''`` rather than "not applicable"."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "$intent", "corpus": "rdr"}},
+            {"tool": "store_get_many", "args": {"ids": "$step1.ids"}},
+        ],
+        "required_bindings": ["intent"],
+    }
+    disp = _FakeDispatcher([
+        {"ids": ["a"], "collections": ["rdr__1-1"]},
+        {"contents": {"a": "text"}, "missing": []},
+    ])
+    result = await plan_run(
+        _match(plan), {"intent": "how does X work"}, dispatcher=disp,
+    )
+
+    assert len(result.resolved_step_args) == 1
+    assert result.resolved_step_args[0]["tool"] == "search"
+
+
+@pytest.mark.asyncio
+async def test_resolved_step_args_excludes_operator_steps() -> None:
+    """An operator step (summarize/rank/...) has no corpus/query args --
+    only tools in _CORPUS_QUERY_TOOLS are captured."""
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "$intent", "corpus": "rdr"}},
+            {"tool": "summarize", "args": {"content": "$step1.ids"}},
+        ],
+        "required_bindings": ["intent"],
+    }
+    disp = _FakeDispatcher([
+        {"ids": ["a"], "collections": ["rdr__1-1"]},
+        {"text": "a summary"},
+    ])
+    result = await plan_run(
+        _match(plan), {"intent": "how does X work"}, dispatcher=disp,
+    )
+
+    assert len(result.resolved_step_args) == 1
+    assert result.resolved_step_args[0]["step_index"] == 0
+
+
+@pytest.mark.asyncio
 async def test_run_caller_binding_overrides_default() -> None:
     """default_bindings + caller_bindings: caller wins on conflict."""
     from nexus.plans.runner import plan_run
@@ -1714,6 +1794,461 @@ class TestHydrateInputsTranslation:
         assert args["groups"] == json.dumps(groups_list)
 
 
+# ── nexus-mm5tx: yis0 pass-through falsy filtering ──────────────────────────
+
+
+class TestYis0PassthroughFalsyFiltering:
+    """nexus-mm5tx (nexus-1lfk8 critique addendum, T2 [23962]): the
+    nexus-yis0 ``inputs`` -> operator-arg-name pass-through branch (fed
+    by a prior EXPLICIT ``store_get_many``-shaped step's ``contents``,
+    referenced via ``inputs: $stepN.contents`` -- distinct from the
+    inline ``ids``-auto-hydration branch a few lines above it, which
+    already filters via ``non_empty = [c for c in contents if c]``)
+    copied a list verbatim with NO falsy filtering. A tumbler/chash
+    mismatch upstream (nexus-zekpl class) can hand this branch a list
+    of empty strings; gate q12's compare step took exactly this path
+    and received ten empty strings, refusing with 'No comparison
+    performed' instead of surfacing the emptiness loudly.
+    """
+
+    def test_empty_strings_are_filtered_from_list_passthrough(self):
+        import structlog.testing
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        with structlog.testing.capture_logs() as captured:
+            tool, args = _hydrate_operator_args(
+                "compare", {"inputs": ["a body", "", "b body", ""]},
+            )
+        assert tool == "operator_compare"
+        assert args["items"] == json.dumps(["a body", "b body"])
+        warnings = [
+            e for e in captured
+            if e.get("event") == "yis0_passthrough_empty_filtered"
+        ]
+        assert len(warnings) == 1, f"expected one warning, got {captured}"
+        assert warnings[0]["original_count"] == 4
+        assert warnings[0]["kept_count"] == 2
+
+    def test_all_empty_list_passthrough_yields_empty_items_and_warns(self):
+        """The degenerate case from the live q12 repro: EVERY hydrated
+        content is empty. Filtering must still fire -- the operator
+        then receives an empty items list (surfacing loudly downstream
+        as 'No comparison performed') rather than ten literal empty
+        strings passed through as if they were real content."""
+        import structlog.testing
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        with structlog.testing.capture_logs() as captured:
+            tool, args = _hydrate_operator_args(
+                "compare", {"inputs": ["" for _ in range(10)]},
+            )
+        assert tool == "operator_compare"
+        assert args["items"] == json.dumps([])
+        warnings = [
+            e for e in captured
+            if e.get("event") == "yis0_passthrough_empty_filtered"
+        ]
+        assert len(warnings) == 1
+        assert warnings[0]["original_count"] == 10
+        assert warnings[0]["kept_count"] == 0
+
+    def test_no_warning_when_nothing_filtered(self):
+        """The common, healthy case (no empty entries) must not emit
+        the filtering warning -- it is a signal, not routine noise."""
+        import structlog.testing
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        with structlog.testing.capture_logs() as captured:
+            tool, args = _hydrate_operator_args(
+                "compare", {"inputs": ["a", "b"]},
+            )
+        assert args["items"] == json.dumps(["a", "b"])
+        warnings = [
+            e for e in captured
+            if e.get("event") == "yis0_passthrough_empty_filtered"
+        ]
+        assert warnings == []
+
+    def test_scalar_inputs_passthrough_unaffected(self):
+        """A scalar (non-list) ``inputs`` value (summarize's content
+        string case) is untouched by the filtering -- filtering only
+        applies to list-valued pass-through."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "summarize", {"inputs": "already a string"},
+        )
+        assert tool == "operator_summarize"
+        assert args == {"content": "already a string"}
+
+
+# ── nexus-mm5tx: tumbler-aware auto-hydration ───────────────────────────────
+
+
+class TestTumblerAwareHydration:
+    """nexus-mm5tx (nexus-zekpl class, live twice in the RDR-200 gate
+    waves 2026-09-01): ``search_metadata_scoped`` / ``search_graph_hop``
+    / ``search_aspect_scoped`` return DOCUMENT-level results keyed by
+    catalog TUMBLER (``store.owner.document``), not T3 chash. The
+    inline ``ids``-auto-hydration branch of ``_hydrate_operator_args``
+    is chash-keyed (``store_get_many``) -- fed a tumbler id list
+    directly, every lookup misses and every content string hydrates to
+    ``""``. This resolves each tumbler's ``document_chunks`` manifest
+    via the catalog (chash + collection per chunk, position-ordered),
+    batch-hydrates the real chashes through the existing
+    ``store_get_many``, and reassembles each document's content by
+    joining its own chunks back together in order.
+    """
+
+    def test_tumbler_ids_route_through_catalog_manifest(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.catalog.types import ManifestRow
+        from nexus.plans.runner import _hydrate_operator_args
+
+        manifests = {
+            "1.1.5": [
+                ManifestRow(position=0, chash="a" * 64,
+                            collection="knowledge__x__voyage-context-3__v1"),
+                ManifestRow(position=1, chash="b" * 64,
+                            collection="knowledge__x__voyage-context-3__v1"),
+            ],
+            "1.1.6": [
+                ManifestRow(position=0, chash="c" * 64,
+                            collection="knowledge__x__voyage-context-3__v1"),
+            ],
+        }
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
+        fake_hydrated = {
+            "contents": ["chunk A body", "chunk B body", "chunk C body"],
+            "missing": [],
+        }
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ) as mock_hydrate:
+            tool, args = _hydrate_operator_args(
+                "summarize", {"ids": ["1.1.5", "1.1.6"]},
+            )
+        assert tool == "operator_summarize"
+        assert args["content"] == (
+            "chunk A body\n\nchunk B body\n\nchunk C body"
+        )
+        # store_get_many must see the real CHASHES, never the original
+        # tumbler ids.
+        call_kwargs = mock_hydrate.call_args.kwargs
+        assert call_kwargs["ids"] == ["a" * 64, "b" * 64, "c" * 64]
+        assert call_kwargs["collections"] == [
+            "knowledge__x__voyage-context-3__v1",
+        ] * 3
+
+    def test_chash_shaped_ids_bypass_tumbler_route(self):
+        """A normal chash id list (64-hex) must not be mis-routed
+        through the tumbler/manifest path -- it goes straight to
+        store_get_many exactly as before nexus-mm5tx."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        chash_ids = ["a" * 64, "b" * 64]
+        with patch(
+            "nexus.mcp_infra.get_catalog",
+        ) as mock_get_catalog, patch(
+            "nexus.mcp.core.store_get_many",
+            return_value={"contents": ["x", "y"]},
+        ) as mock_hydrate:
+            tool, args = _hydrate_operator_args(
+                "summarize", {"ids": chash_ids},
+            )
+        assert tool == "operator_summarize"
+        assert args["content"] == "x\n\ny"
+        mock_get_catalog.assert_not_called()
+        mock_hydrate.assert_called_once()
+        assert mock_hydrate.call_args.kwargs["ids"] == chash_ids
+
+    def test_mixed_ids_bypass_tumbler_route(self):
+        """A mixed ids list (some tumbler-shaped, some not) is not
+        confidently tumbler-shaped -- falls back to the direct
+        store_get_many path unchanged, rather than guessing."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        mixed_ids = ["1.1.5", "a" * 64]
+        with patch(
+            "nexus.mcp_infra.get_catalog",
+        ) as mock_get_catalog, patch(
+            "nexus.mcp.core.store_get_many",
+            return_value={"contents": ["x", "y"]},
+        ):
+            _, args = _hydrate_operator_args("summarize", {"ids": mixed_ids})
+        mock_get_catalog.assert_not_called()
+        assert args["content"] == "x\n\ny"
+
+    def test_tumbler_with_no_manifest_rows_yields_empty_content(self):
+        """A tumbler the catalog has no manifest for (deleted /
+        never-chunked document) hydrates to empty content -- the outer
+        non_empty filter then drops it, same as any other empty
+        hydration result."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: {"1.1.5": []})
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many",
+        ) as mock_hydrate:
+            tool, args = _hydrate_operator_args(
+                "summarize", {"ids": ["1.1.5"]},
+            )
+        assert tool == "operator_summarize"
+        # No chashes to hydrate -- store_get_many is never called for an
+        # all-empty-manifest batch.
+        mock_hydrate.assert_not_called()
+        assert args["content"] == ""
+
+    def test_get_catalog_none_degrades_instead_of_raising(self):
+        """Code-review finding (T2 [24200]): _get_catalog() is
+        documented to return None when the catalog isn't initialized.
+        An unguarded call would raise AttributeError from inside
+        _hydrate_tumbler_ids, which _is_operator_error does not
+        recognize -- it would escape both the isolated dispatch path
+        and the bundle-composition path (which sits outside any
+        try/except) and crash the whole plan_run. Mirror core.py's
+        `if cat is None: return "Error: ..."` guard and degrade to the
+        same empty-content shape the zero-manifest-rows case already
+        returns."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=None,
+        ), patch(
+            "nexus.mcp.core.store_get_many",
+        ) as mock_hydrate:
+            tool, args = _hydrate_operator_args(
+                "summarize", {"ids": ["1.1.5", "1.1.6"]},
+            )
+        assert tool == "operator_summarize"
+        mock_hydrate.assert_not_called()
+        assert args["content"] == ""
+
+    def test_manifest_row_missing_collection_is_logged_not_silent(self):
+        """Code-review finding (T2 [24200]): a manifest row with no
+        stamped collection was silently skipped. Log it, mirroring the
+        sibling drop-path logging convention (auto_hydration_overflow
+        etc.) -- an operator dev debugging why a document's content is
+        thin should not have to guess."""
+        import structlog.testing
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.catalog.types import ManifestRow
+        from nexus.plans.runner import _hydrate_operator_args
+
+        manifests = {
+            "1.1.5": [
+                ManifestRow(position=0, chash="a" * 64, collection=None),
+                ManifestRow(position=1, chash="b" * 64,
+                            collection="knowledge__x__voyage-context-3__v1"),
+            ],
+        }
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
+        fake_hydrated = {"contents": ["chunk B body"], "missing": []}
+        with structlog.testing.capture_logs() as captured, patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ) as mock_hydrate:
+            tool, args = _hydrate_operator_args(
+                "summarize", {"ids": ["1.1.5"]},
+            )
+        assert tool == "operator_summarize"
+        # Only the row WITH a collection is hydrated.
+        assert mock_hydrate.call_args.kwargs["ids"] == ["b" * 64]
+        assert args["content"] == "chunk B body"
+        warnings = [
+            e for e in captured
+            if e.get("event") == "hydrate_tumbler_ids_row_missing_collection"
+        ]
+        assert len(warnings) == 1, f"expected one warning, got {captured}"
+        assert warnings[0]["doc_id"] == "1.1.5"
+        assert warnings[0]["chash"] == "a" * 64
+
+
+class TestStoreGetManyExplicitStepTumblerRouting:
+    """Code-review follow-up (T2 [24199]): an EXPLICIT ``store_get_many``
+    plan step (``tool: store_get_many``) is a different code path from
+    the operator ids-auto-hydration branch inside
+    ``_hydrate_operator_args`` -- ``store_get_many`` is never in
+    ``_OPERATOR_RESOLVED_TOOLS``, so the tumbler-routing added for
+    nexus-mm5tx never fired for it. This is gate q12's ACTUAL repro
+    shape: an explicit store_get_many step hydrates tumbler ids to
+    empty strings, and the nexus-yis0 pass-through then filters those
+    to ``items == []``, and compare refuses.
+    """
+
+    @pytest.mark.asyncio
+    async def test_explicit_store_get_many_step_hydrates_tumbler_ids(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.catalog.types import ManifestRow
+        from nexus.plans.runner import _default_dispatcher
+
+        manifests = {
+            "1.1.5": [
+                ManifestRow(position=0, chash="a" * 64,
+                            collection="knowledge__x__voyage-context-3__v1"),
+            ],
+        }
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
+        fake_hydrated = {"contents": ["chunk A body"], "missing": []}
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ) as mock_hydrate:
+            result = await _default_dispatcher(
+                "store_get_many",
+                {"ids": ["1.1.5"], "collections": "knowledge"},
+            )
+        assert result == {"contents": ["chunk A body"], "missing": []}
+        call_kwargs = mock_hydrate.call_args.kwargs
+        assert call_kwargs["ids"] == ["a" * 64]
+        assert call_kwargs["collections"] == [
+            "knowledge__x__voyage-context-3__v1",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_explicit_store_get_many_step_chash_ids_unaffected(self):
+        """Regression: a chash-id store_get_many step must still reach
+        the real store_get_many dispatch unchanged."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _default_dispatcher
+
+        with patch(
+            "nexus.mcp_infra.get_catalog",
+        ) as mock_get_catalog, patch(
+            "nexus.mcp.core.store_get_many",
+            return_value={"contents": ["x"], "missing": []},
+        ) as mock_hydrate:
+            result = await _default_dispatcher(
+                "store_get_many",
+                {"ids": ["a" * 64], "collections": "knowledge"},
+            )
+        mock_get_catalog.assert_not_called()
+        mock_hydrate.assert_called_once()
+        assert result == {"contents": ["x"], "missing": []}
+
+
+# ── nexus-mm5tx follow-up: zero-evidence short-circuit (T2 [24199]) ────────
+
+
+class TestZeroEvidenceShortCircuit:
+    """Code-review follow-up (T2 [24199]): when hydration filters an
+    operator's evidence down to zero items, dispatch must never reach
+    claude -p at all -- return a fixed, machine-recognisable result
+    text instead, so the answer-runs classifier can key on a constant
+    rather than parsing an operator's free-text refusal prose (e.g.
+    compare's "No comparison performed", the actual live q12 symptom).
+    """
+
+    def test_ids_branch_sets_marker_when_all_empty(self):
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _NO_EVIDENCE_RESULT_PREFIX, _hydrate_operator_args
+
+        with patch(
+            "nexus.mcp.core.store_get_many",
+            return_value={"contents": ["", ""]},
+        ):
+            _, args = _hydrate_operator_args("compare", {"ids": ["a", "b"]})
+        assert "_zero_evidence_text" in args
+        assert args["_zero_evidence_text"].startswith(_NO_EVIDENCE_RESULT_PREFIX)
+
+    def test_ids_branch_no_marker_when_some_content(self):
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        with patch(
+            "nexus.mcp.core.store_get_many",
+            return_value={"contents": ["real body", ""]},
+        ):
+            _, args = _hydrate_operator_args("compare", {"ids": ["a", "b"]})
+        assert "_zero_evidence_text" not in args
+
+    def test_yis0_branch_sets_marker_when_all_empty(self):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        _, args = _hydrate_operator_args("compare", {"inputs": ["", ""]})
+        assert "_zero_evidence_text" in args
+
+    def test_yis0_branch_no_marker_when_some_content(self):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        _, args = _hydrate_operator_args("compare", {"inputs": ["a", ""]})
+        assert "_zero_evidence_text" not in args
+
+    @pytest.mark.asyncio
+    async def test_ids_branch_all_empty_short_circuits_before_dispatch(self):
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _NO_EVIDENCE_RESULT_PREFIX, _default_dispatcher
+
+        with patch(
+            "nexus.mcp.core.store_get_many",
+            return_value={"contents": ["", "", ""]},
+        ), patch(
+            "nexus.mcp.core.operator_compare",
+        ) as mock_compare:
+            result = await _default_dispatcher(
+                "compare", {"ids": ["c1", "c2", "c3"], "focus": "diffs"},
+            )
+        mock_compare.assert_not_called()
+        assert result["text"].startswith(_NO_EVIDENCE_RESULT_PREFIX)
+
+    @pytest.mark.asyncio
+    async def test_yis0_passthrough_all_empty_short_circuits_before_dispatch(self):
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _NO_EVIDENCE_RESULT_PREFIX, _default_dispatcher
+
+        with patch("nexus.mcp.core.operator_compare") as mock_compare:
+            result = await _default_dispatcher(
+                "compare", {"inputs": ["", "", ""], "focus": "diffs"},
+            )
+        mock_compare.assert_not_called()
+        assert result["text"].startswith(_NO_EVIDENCE_RESULT_PREFIX)
+
+    @pytest.mark.asyncio
+    async def test_non_empty_content_dispatches_normally(self):
+        from unittest.mock import AsyncMock, patch
+
+        from nexus.plans.runner import _default_dispatcher
+
+        with patch(
+            "nexus.mcp.core.operator_compare",
+            new=AsyncMock(return_value={"text": "real comparison"}),
+        ) as mock_compare:
+            result = await _default_dispatcher(
+                "compare", {"inputs": ["a", "b"], "focus": "diffs"},
+            )
+        mock_compare.assert_called_once()
+        assert result == {"text": "real comparison"}
+
+
 @pytest.mark.asyncio
 async def test_bundle_path_strips_truncation_marker_before_composition(monkeypatch) -> None:
     """RDR-093 Phase 1+2 review observation: the bundle-path strip
@@ -2063,6 +2598,204 @@ class TestPlanRunBundledAggregateCount:
         for agg in aggregate_out["aggregates"]:
             assert isinstance(agg.get("key_value"), str)
             assert isinstance(agg.get("summary"), str)
+
+
+# ── nexus-4h0oh: dropped reduce-step (fan-in) detection ─────────────────────
+
+
+class TestDiscardedReduceSteps:
+    """nexus-4h0oh: a plan whose terminal step does not depend on every
+    prior reduce (operator) step silently discards those branches --
+    ``PlanResult.final`` is always ``step_outputs[-1]``, so N independent
+    search+summarize branches with no fan-in step folding them back
+    together means N-1 branches were retrieved, reduced, and paid for,
+    then never surfaced. RDR-200 Phase 1c q23/q24 hit this live: three
+    independent summarize steps under 'return only the final step'
+    dropped two of three.
+
+    Smallest-change choice: WARN (structlog + a ``PlanResult`` field),
+    never REFUSE -- a plan whose terminal step genuinely only needs one
+    branch (a filter chain, a single-path pipeline) is not a bug, and a
+    hard refusal would break every plan that happens to retrieve more
+    than it reduces. Visibility, not enforcement.
+    """
+
+    def _op_names(self, names: set[str]):
+        return lambda t: t in names
+
+    def _tool(self, step: dict) -> str:
+        return step.get("tool", "")
+
+    def test_unit_no_fan_in_flags_both_earlier_branches(self):
+        """Direct unit test of the detection helper (no dispatch)."""
+        from nexus.plans.runner import _discarded_reduce_steps
+
+        steps = [
+            {"tool": "search", "args": {"query": "a"}},
+            {"tool": "summarize", "args": {"content": "$step1.text"}},
+            {"tool": "search", "args": {"query": "b"}},
+            {"tool": "summarize", "args": {"content": "$step3.text"}},
+            {"tool": "search", "args": {"query": "c"}},
+            {"tool": "summarize", "args": {"content": "$step5.text"}},
+        ]
+        step_outputs = [{"text": f"out{i}"} for i in range(6)]
+        dropped = _discarded_reduce_steps(
+            steps, step_outputs,
+            extract_tool=self._tool,
+            is_operator_tool=self._op_names({"summarize"}),
+        )
+        # 0-based indices of the two discarded summarize branches.
+        assert dropped == [1, 3]
+
+    def test_unit_fan_in_step_clears_every_branch(self):
+        """A terminal compare step referencing every branch leaves
+        nothing dropped."""
+        from nexus.plans.runner import _discarded_reduce_steps
+
+        steps = [
+            {"tool": "search", "args": {"query": "a"}},
+            {"tool": "summarize", "args": {"content": "$step1.text"}},
+            {"tool": "search", "args": {"query": "b"}},
+            {"tool": "summarize", "args": {"content": "$step3.text"}},
+            {"tool": "compare",
+             "args": {"items": ["$step2.text", "$step4.text"]}},
+        ]
+        step_outputs = [{"text": f"out{i}"} for i in range(5)]
+        dropped = _discarded_reduce_steps(
+            steps, step_outputs,
+            extract_tool=self._tool,
+            is_operator_tool=self._op_names({"summarize", "compare"}),
+        )
+        assert dropped == []
+
+    def test_unit_bundled_intermediate_output_is_never_flagged(self):
+        """A reduce step whose recorded output is the bundle-
+        intermediate sentinel was consumed inline by the next operator
+        in its own bundle -- it was not dropped, just fused."""
+        from nexus.plans.bundle import BUNDLED_INTERMEDIATE
+        from nexus.plans.runner import _discarded_reduce_steps
+
+        steps = [
+            {"tool": "extract", "args": {"inputs": "x"}},
+            {"tool": "summarize", "args": {"inputs": "$step1.contents"}},
+        ]
+        step_outputs = [dict(BUNDLED_INTERMEDIATE), {"text": "final"}]
+        dropped = _discarded_reduce_steps(
+            steps, step_outputs,
+            extract_tool=self._tool,
+            is_operator_tool=self._op_names({"extract", "summarize"}),
+        )
+        assert dropped == []
+
+    def test_unit_no_step_outputs_returns_empty(self):
+        from nexus.plans.runner import _discarded_reduce_steps
+
+        dropped = _discarded_reduce_steps(
+            [], [], extract_tool=self._tool,
+            is_operator_tool=self._op_names(set()),
+        )
+        assert dropped == []
+
+    @pytest.mark.asyncio
+    async def test_plan_run_no_fan_in_populates_result_field_and_warns(self) -> None:
+        """Full plan_run() integration: the field is 1-indexed (matching
+        ``budget_exhausted_at_step``'s convention) and a single
+        structured warning event fires naming the dropped positions."""
+        import structlog.testing
+
+        from nexus.plans.runner import plan_run
+
+        plan = {
+            "steps": [
+                {"tool": "search", "args": {"query": "a"}},
+                {"tool": "summarize", "args": {"content": "$step1.text"}},
+                {"tool": "search", "args": {"query": "b"}},
+                {"tool": "summarize", "args": {"content": "$step3.text"}},
+            ],
+        }
+        disp = _FakeDispatcher([
+            {"text": "search-a"}, {"text": "summary-a"},
+            {"text": "search-b"}, {"text": "summary-b"},
+        ])
+        with structlog.testing.capture_logs() as captured:
+            result = await plan_run(_match(plan), {}, dispatcher=disp)
+
+        assert result.dropped_reduce_steps == [2]
+        warnings = [
+            e for e in captured
+            if e.get("event") == "nx_answer_discarded_reduce_steps"
+        ]
+        assert len(warnings) == 1, f"expected one warning, got {captured}"
+        assert warnings[0]["dropped_step_indices"] == [2]
+        assert warnings[0]["terminal_step"] == 4
+
+    @pytest.mark.asyncio
+    async def test_plan_run_fan_in_clears_result_field_and_no_warning(self) -> None:
+        import structlog.testing
+
+        from nexus.plans.runner import plan_run
+
+        plan = {
+            "steps": [
+                {"tool": "search", "args": {"query": "a"}},
+                {"tool": "summarize", "args": {"content": "$step1.text"}},
+                {"tool": "search", "args": {"query": "b"}},
+                {"tool": "summarize", "args": {"content": "$step3.text"}},
+                {"tool": "compare",
+                 "args": {"items": ["$step2.text", "$step4.text"]}},
+            ],
+        }
+        disp = _FakeDispatcher([
+            {"text": "search-a"}, {"text": "summary-a"},
+            {"text": "search-b"}, {"text": "summary-b"},
+            {"text": "cmp"},
+        ])
+        with structlog.testing.capture_logs() as captured:
+            result = await plan_run(_match(plan), {}, dispatcher=disp)
+
+        assert result.dropped_reduce_steps == []
+        warnings = [
+            e for e in captured
+            if e.get("event") == "nx_answer_discarded_reduce_steps"
+        ]
+        assert warnings == []
+
+    @pytest.mark.asyncio
+    async def test_plan_run_no_operator_steps_clears_result_field(self) -> None:
+        """A plan with no reduce steps at all (plain retrieval) never
+        flags anything -- this must not regress the common case."""
+        from nexus.plans.runner import plan_run
+
+        plan = {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+        disp = _FakeDispatcher([{"text": "r"}])
+        result = await plan_run(_match(plan), {}, dispatcher=disp)
+        assert result.dropped_reduce_steps == []
+
+    @pytest.mark.asyncio
+    async def test_plan_run_continuation_cut_never_flags_unexecuted_steps(self) -> None:
+        """A continuation stop-before-cut that halts the run early must
+        not report never-dispatched steps as 'dropped' -- that is a
+        different, already-visible condition
+        (``continuation_cut_applied`` / ``budget_exhausted_at_step``)."""
+        from nexus.plans.runner import plan_run
+
+        plan = {
+            "steps": [
+                {"tool": "search", "args": {"query": "a"}},
+                {"tool": "summarize", "args": {"content": "$step1.text"}},
+                {"tool": "search", "args": {"query": "b"}},
+                {"tool": "summarize", "args": {"content": "$step3.text"}},
+            ],
+        }
+        disp = _FakeDispatcher([
+            {"text": "search-a"}, {"text": "summary-a"},
+        ])
+        result = await plan_run(
+            _match(plan), {}, dispatcher=disp, continuation_cut_at_step=2,
+        )
+        assert result.continuation_cut_applied is True
+        assert len(result.steps) == 2
+        assert result.dropped_reduce_steps == []
 
 
 # ── nx_answer step progress logs (nexus-0qi9) ───────────────────────────────
@@ -3270,3 +4003,77 @@ class TestPartialStepRecordsOnException(object):
         assert step_records is not None
         assert len(step_records) == 1
         assert step_records[0].step_index == 0
+
+
+# ── operator hydration carries the display-truncation marker (nexus-lugwx) ──
+
+
+class TestHydrationCarriesDisplayTruncationMarker:
+    """nexus-lugwx: ``store_get_many`` cuts each document at
+    ``max_chars_per_doc``. Before this bead it appended a bare ellipsis, so a
+    tool-free operator read the mid-sentence cut as a broken document (the
+    nexus-c0sdc defect, first fixed for nx_tidy alone). The marker now lives
+    at the cut inside store_get_many, so BOTH runner paths carry it without
+    re-detecting anything: ``ids``-in-args auto-hydration, and the explicit
+    ``store_get_many`` step feeding ``inputs: $stepN.contents`` (the shape
+    every built-in plan uses). The stub reproduces store_get_many's REAL
+    shape via the same helper it uses, so it stays honest if that changes.
+    """
+
+    @staticmethod
+    def _stub(monkeypatch, bodies: list[str]) -> None:
+        from nexus.mcp import core as mcp_core
+
+        def fake_store_get_many(*, ids, collections, structured, max_chars_per_doc=4000):
+            cut = [
+                b[:max_chars_per_doc] + "…"
+                + mcp_core.display_truncation_marker(max_chars_per_doc)
+                if len(b) > max_chars_per_doc else b
+                for b in bodies
+            ]
+            return {"contents": cut, "missing": []}
+
+        monkeypatch.setattr(mcp_core, "store_get_many", fake_store_get_many)
+
+    def test_ids_branch_summarize_content_carries_marker(self, monkeypatch):
+        from nexus.plans.runner import _hydrate_operator_args
+
+        self._stub(monkeypatch, ["word " * 1500])  # 7500 chars, cut
+        tool, args = _hydrate_operator_args("summarize", {"ids": ["a"]})
+        assert tool == "operator_summarize"
+        assert "TRUNCATED FOR DISPLAY" in args["content"]
+        assert "NOT a defect" in args["content"]
+
+    def test_ids_branch_marker_rides_inside_json_items(self, monkeypatch):
+        """rank/compare/filter receive a JSON list; the marker must ride
+        inside the item string, where the model reads it."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        self._stub(monkeypatch, ["x" * 9000, "short"])
+        _, args = _hydrate_operator_args("rank", {"ids": ["a", "b"], "criterion": "c"})
+        items = json.loads(args["items"])
+        assert len(items) == 2
+        assert "TRUNCATED FOR DISPLAY" in items[0]
+        assert "TRUNCATED FOR DISPLAY" not in items[1]
+
+    def test_inputs_branch_preserves_marker_from_explicit_step(self, monkeypatch):
+        """The built-in plans' shape: an explicit store_get_many step, then
+        ``inputs: $stepN.contents`` on the operator. The runner must pass the
+        marked text through unchanged on this path too."""
+        from nexus.mcp import core as mcp_core
+        from nexus.plans.runner import _hydrate_operator_args
+
+        marked = "x" * 4000 + "…" + mcp_core.display_truncation_marker(4000)
+        _, args = _hydrate_operator_args("summarize", {"inputs": [marked, "short"]})
+        assert "TRUNCATED FOR DISPLAY" in args["content"]
+        _, args = _hydrate_operator_args("compare", {"inputs": [marked], "focus": "f"})
+        assert "TRUNCATED FOR DISPLAY" in json.loads(args["items"])[0]
+
+    def test_short_document_is_not_marked(self, monkeypatch):
+        """Marking an intact document would teach the model to discount a
+        real truncation it should report."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        self._stub(monkeypatch, ["a complete short note."])
+        _, args = _hydrate_operator_args("summarize", {"ids": ["a"]})
+        assert args["content"] == "a complete short note."

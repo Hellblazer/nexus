@@ -201,3 +201,71 @@ def test_chunker_pre_heading_chunks_get_empty_section():
     # Some later chunk hits the introduction
     intro_types = [c.metadata["section_type"] for c in chunks if c.metadata["section_type"] == "introduction"]
     assert intro_types, "Expected at least one chunk tagged 'introduction'"
+
+
+# ── nexus-jd8fi: HTML tables from MinerU survive the window ──────────────────
+
+def _row(label: str, value: str) -> str:
+    return f"<tr><td>{label}</td><td>{value}</td></tr>"
+
+
+def _table(rows: int, label: str = "Detector") -> str:
+    body = "".join(_row(f"{label}-{i}", f"{i * 11}.{i}%") for i in range(rows))
+    return f"<table><tr><td>Detector</td><td>FPR</td></tr>{body}</table>"
+
+
+def test_table_that_fits_is_pushed_whole_into_the_next_chunk() -> None:
+    prose = "Prose sentence number one. " * 8  # 216 chars
+    table = _table(6)                            # ~330 chars
+    text = prose + table + "\nTable 12. Detectors.\n" + "Trailing prose. " * 4
+    chunker = PDFChunker(chunk_chars=400, overlap_percent=0.1)
+    chunks = chunker.chunk(text, {})
+    tables = [c for c in chunks if "<table>" in c.text]
+    assert len(tables) == 1
+    assert tables[0].text.count("<table>") == 1 and "</table>" in tables[0].text
+    # Every cell is in the same chunk as its header.
+    assert "Detector-5" in tables[0].text and "<td>FPR</td>" in tables[0].text
+    # No chunk carries a torn table.
+    for c in chunks:
+        assert c.text.count("<table>") == c.text.count("</table>"), c.text
+
+
+def test_oversized_table_breaks_at_rows_and_repeats_header() -> None:
+    table = _table(40)  # ~1800 chars
+    text = "Intro. " + table + " Outro sentence."
+    chunker = PDFChunker(chunk_chars=500, overlap_percent=0.2)
+    chunks = chunker.chunk(text, {})
+    table_chunks = [c for c in chunks if "<td>" in c.text]
+    assert len(table_chunks) >= 3
+    for c in table_chunks:
+        # Never cut inside a tag or a cell: the chunk text ends on a row (or
+        # the table's own close) and starts on a row or the header.
+        assert c.text.rstrip().endswith(("</tr>", "</table>", "Outro sentence.")), c.text[-60:]
+        assert "<td>FPR</td>" in c.text, "continuation chunk lost its header row"
+    # Every row is present exactly once across the chunks (no overlap
+    # duplication of table rows, no dropped rows).
+    joined = "".join(c.text for c in table_chunks)
+    for i in range(40):
+        assert joined.count(f"<td>Detector-{i}</td>") == 1, i
+    # Offsets still index the source text: chunk_start_char lands on a row.
+    for c in table_chunks[1:]:
+        assert text[c.metadata["chunk_start_char"]:].startswith("<tr>")
+
+
+def test_sentence_boundary_inside_a_table_is_not_used() -> None:
+    # A cell containing ". " must not attract the sentence-boundary search.
+    table = "<table><tr><td>Note</td></tr><tr><td>See sec. 3 for detail</td></tr></table>"
+    text = "Lead in text here. " * 3 + table + " After. " * 3
+    chunker = PDFChunker(chunk_chars=len("Lead in text here. " * 3) + len(table) - 10, overlap_percent=0.1)
+    chunks = chunker.chunk(text, {})
+    for c in chunks:
+        assert c.text.count("<table>") == c.text.count("</table>"), c.text
+
+
+def test_prose_without_tables_is_unchanged_by_table_rules() -> None:
+    text = "Sentence one is here. " * 60
+    before = PDFChunker(chunk_chars=300, overlap_percent=0.2).chunk(text, {})
+    assert all("<table>" not in c.text for c in before)
+    assert len(before) > 1
+    # Overlap still applies to prose: consecutive chunks share text.
+    assert before[1].metadata["chunk_start_char"] < before[0].metadata["chunk_end_char"]

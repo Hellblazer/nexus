@@ -6,6 +6,109 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.29.0] - 2026-09-04
+
+Engine identity: `engine-service-v0.1.100` (was v0.1.98). Deployed and
+cloud-gated before the floor moved; seven additive schema changesets.
+v0.1.99 was cut and deployed first and then superseded the same day: its
+intra-op thread policy capped the shared ONNX session at two threads and
+made local indexing about 3.4x slower (nexus-00wsf); v0.1.100 leaves
+ORT's default unless an operator overrides it.
+
+### Engine
+- No SQL strings in Java (nexus-zrcj7): the vector search paths, the catalog
+  FTS match, the shutdown reaper, the taxonomy sequence and centroid ANN
+  query, and the migrator's bootstrap reads now run through generated jOOQ
+  DSL or Liquibase SQL functions jOOQ generates tables for. Hybrid search is
+  a probe (gate chashes) plus a by-chash cosine rank, with the HNSW-first
+  dense-gate branch preserved as its own function; order and distance are
+  byte-equivalent to the retired path. `RawSqlGateTest` now scans raw JDBC
+  statements, `DSL.sql`, raw where-string overloads and SQL-bearing DSL
+  templates, with a five-entry reduce-only exemption registry.
+- Local embeds and reranks are admission-controlled process-wide (one
+  shared gate, bounded interactive wait), and the ONNX intra-op thread count
+  is an explicit operator override only, never derived (nexus-00wsf; the
+  original "CPU spin" was attention-tensor thrash, fixed since v0.1.81).
+- The engine release workflow creates the GitHub release as a draft and
+  publishes it only after both build matrices succeed and all 21 assets are
+  attached, so a tag can no longer exist without its binaries (nexus-cl14i).
+
+### Changed
+- RDR-200 nx_answer continuation mode is parked: three ship-gate runs showed
+  a session searching on its own beats the plan-plus-handoff. The opt-in
+  code stays dormant; the headless path remains the default.
+- Plugin skills `using-nx-skills` and `orchestration` reworded in plain
+  register (nexus-ht9m5).
+
+### Fixed
+
+- Fresh installs ran a MinerU no gate had seen. `mineru>=3.1.11,<4` let a
+  fresh resolution land on 3.4.5 (published 2026-08-14) while `uv.lock` and
+  every test stayed on 3.1.11; the same shape holds for docling (2.76.0
+  locked, 2.125.0 installed). The pin is now `<3.2`, the minor the fixtures
+  are locked against; a lint ties that cap to the lock for shape-sensitive
+  packages; the dependency drift watch reports any version change in that
+  set, not only major jumps, and now actually runs weekly; and the developer
+  reinstall constrains to `uv.lock` so the box matches the gates. Bumping
+  MinerU or docling is a deliberate lock-and-cap change on a green slow-gate
+  run. First such pass, same day: docling moves to 2.125.0 (cap `<2.126`),
+  the version every fresh install has run since mid-August, gated by the
+  unit suite, fresh-install MVV and shakedown; mineru stays at exactly
+  3.1.11 (cap `<3.1.12`), because both candidates were gated and refused:
+  3.4.5 collapses every "ff" ligature ("efficient" becomes "eficient", 67
+  words to 0 in one fixture paper) and 3.1.15 wraps plain text as inline
+  math and splits a word. The slow MinerU test now locks the ligature
+  count. A PDF indexed on a fresh install between 2026-08-14 and this
+  release ran 3.4.5 and carries the mangled words until re-indexed.
+- PDF indexing dropped every table (nexus-jd8fi). `pdf.mineru_table_enable`
+  defaulted to `false`, and the MinerU server was spawned with
+  `MINERU_TABLE_ENABLE` exported, which MinerU lets override the per-request
+  flag; every table came out as `![](images/<sha>.jpg)` and no tabular value
+  was indexed. Measured on the Pangram 4 Technical Report: pages 18-21 gave
+  0 tables and 4515 chars off, 6 tables and 13890 chars on. The default is now
+  `true`, the env var is no longer exported so each request's flag governs,
+  and any remaining image reference (a figure, or a table MinerU could not
+  read) is indexed as a caption-anchored marker such as
+  `[Table 6 not extracted as text; values not indexed]` instead of an empty
+  line. MinerU-extracted tables now populate `table_regions`, so their chunks
+  carry `chunk_type=table_page` as docling's already did. `PDFChunker` is
+  table-aware: a table that fits the window moves whole into the next
+  chunk, an oversized one breaks after a complete row and each
+  continuation chunk repeats the header row, so a cell value is never
+  torn from its column name (real tables run 2200 to 5000 chars against
+  the 1500-char window). Documents indexed before this need a re-index
+  to pick up their tables.
+- `store_get_many` cut long documents at the display cap with a bare
+  ellipsis, so every tool-free reader downstream (nx_tidy, the plan
+  runner's operators) reported healthy entries as truncated and asked for
+  re-ingestion. The cut now carries a "TRUNCATED FOR DISPLAY, not a defect"
+  marker at the point it happens (nexus-lugwx, generalising nexus-c0sdc).
+- Plan runner: document tumblers returned by the metadata-, topic-, graph-
+  and aspect-scoped searches hydrated to empty strings on both the operator
+  auto-hydration path and an explicit `store_get_many` step; they now
+  resolve through the catalog manifest. An operator whose evidence filters
+  to nothing no longer dispatches a model call and returns a fixed
+  "No evidence to reduce" result instead (nexus-mm5tx).
+- Plan runner: parallel reduce steps with no fan-in were reduced, paid for,
+  and discarded silently. They are now detected and reported in
+  `nx_answer`'s envelope as `dropped_reduce_steps`, with a one-line notice
+  in text mode (nexus-4h0oh).
+- `nx_answer`: the zero-evidence fallback now names the matched plan and each
+  retrieval step's tool, resolved corpus and query, in the return and the
+  telemetry row (nexus-ivv4d); the continuation text instruction carries
+  collection and distance per evidence item (nexus-kim0o).
+- `nx answer-runs` under-counted degenerate runs about 9x: the listing
+  reroute, budget-warning-only and empty-hydration bodies are now
+  classified, with error rows checked first and the reroute header anchored
+  to the first line (nexus-x79ne).
+- Operator dispatch: a child's cold start no longer consumes the processing
+  budget (the timeout now runs in two phases, first output then the rest,
+  bounded by an optional absolute deadline); both pipes are drained from
+  spawn so a verbose child can no longer deadlock the dispatch, and post-kill
+  cleanup is bounded rather than waiting on pipe EOF (nexus-tx5hd). A real
+  killed-child test now proves the partial-output drain recovers streamed
+  output (nexus-q4o43).
+
 ## [7.28.0] - 2026-09-03
 
 Engine identity: `engine-service-v0.1.98` (was v0.1.95). Three engine cuts

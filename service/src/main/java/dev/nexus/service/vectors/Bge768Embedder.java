@@ -198,6 +198,13 @@ public final class Bge768Embedder implements Embedder {
         HuggingFaceTokenizer tok  = null;
         // SessionOptions is AutoCloseable; it holds no state once createSession returns.
         try (var sessionOpts = new OrtSession.SessionOptions()) {
+            // nexus-00wsf: the intra-op width of this SHARED session comes from one
+            // resolver (OnnxThreadPolicy: ORT's own default unless an operator overrides);
+            // concurrency is bounded by LocalOnnxAdmission, never by this number.
+            var intraOp = OnnxThreadPolicy.intraOpThreads();
+            if (intraOp.isPresent()) {
+                sessionOpts.setIntraOpNumThreads(intraOp.getAsInt());
+            }
             sess = ortEnv.createSession(modelPath, sessionOpts);
 
             tok = HuggingFaceTokenizer.builder()

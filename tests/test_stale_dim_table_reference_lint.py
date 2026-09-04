@@ -321,7 +321,10 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "does not move this pin.)"
     ),
     "service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java": (
-        12,
+        11,
+        "12 -> 11 at nexus-zrcj7 (2026-09-03): retiring the raw search SQL "
+        "onto schema functions deleted one historical-prose hit with the "
+        "code it annotated; still zero executable per-dim SQL. Earlier: "
         "Line-by-line audited at the nexus-74zvm/3rprg commit (the dim-"
         "predicate work that had this file in flux during the lint's own "
         "drafting): all 12 hits are historical/decision prose — the D1-"

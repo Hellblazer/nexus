@@ -27,9 +27,3 @@ nothing.
 mechanize, it matters enough to ship.
 
 ---
-
-
-## Awaiting the next release or plugin cut (pinned: v7.28.0)
-
-Nothing pending. v7.28.0 advanced the pin with no plugin-surface change
-since v7.27.0.

@@ -37,7 +37,13 @@ public final class PgSession {
         "enable_indexscan",
         "enable_seqscan",
         "enable_bitmapscan",
-        "enable_sort"
+        "enable_sort",
+        // nexus-zrcj7 (T2 critic follow-up, 2026-09-04): EXPLAIN-based plan-shape test
+        // discipline (a positive "must use the HNSW index" assertion) needs every
+        // non-index access path penalized, hash joins included -- this GUC is set only
+        // from test code (PlainSearchTextGatedSearchExplainTest et al.), never from
+        // production PgVectorRepository dispatch paths.
+        "enable_hashjoin"
     );
 
     /**

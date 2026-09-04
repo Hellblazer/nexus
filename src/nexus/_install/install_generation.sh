@@ -51,18 +51,27 @@ SOURCE=""
 VERSION=""
 EXTRAS=""
 PYTHON_VERSION="3.12"
+CONSTRAINTS=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --source)  SOURCE="${2-}";          shift 2 ;;
-        --version) VERSION="${2-}";         shift 2 ;;
-        --extras)  EXTRAS="${2-}";          shift 2 ;;
-        --python)  PYTHON_VERSION="${2-}";  shift 2 ;;
+        --source)      SOURCE="${2-}";          shift 2 ;;
+        --version)     VERSION="${2-}";         shift 2 ;;
+        --extras)      EXTRAS="${2-}";          shift 2 ;;
+        --python)      PYTHON_VERSION="${2-}";  shift 2 ;;
+        --constraints) CONSTRAINTS="${2-}";     shift 2 ;;
         *) _die "unknown argument: $1" ;;
     esac
 done
 
 [ -n "$SOURCE" ] || _die "--source is required (a checkout path, or a distribution name)"
+# nexus-jd8fi drift: a checkout install resolves against PyPI afresh unless
+# told otherwise, so a dev box ran mineru 3.4.5 while uv.lock and every gate
+# ran 3.1.11. The caller (scripts/reinstall-tool.sh) exports the lock as a
+# constraints file and passes it here; uv then cannot resolve past the lock.
+if [ -n "$CONSTRAINTS" ] && [ ! -f "$CONSTRAINTS" ]; then
+    _die "--constraints file does not exist: $CONSTRAINTS"
+fi
 
 # Resolves NX_TOOLS_DIR through the shared contract, so a relative override is
 # refused here exactly as it is everywhere else rather than being resolved
@@ -138,7 +147,11 @@ trap _cleanup_incomplete EXIT
 # the shared bin entries — and those must be nexus-owned regular files (.4),
 # never uv-owned symlinks.
 uv venv --python "$PYTHON_VERSION" "$GEN" >&2
-uv pip install --python "$GEN/bin/python" "$SPEC" >&2
+if [ -n "$CONSTRAINTS" ]; then
+    uv pip install --python "$GEN/bin/python" --constraints "$CONSTRAINTS" "$SPEC" >&2
+else
+    uv pip install --python "$GEN/bin/python" "$SPEC" >&2
+fi
 
 # ── Receipt ──────────────────────────────────────────────────────────────────
 # base_interpreter holds pyvenv.cfg's `home` value verbatim. That field is what

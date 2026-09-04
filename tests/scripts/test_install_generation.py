@@ -437,3 +437,47 @@ def test_stamp_exhaustion_fails_loudly(env) -> None:
 
     assert result.returncode != 0
     assert "collision" in result.stderr.lower()
+
+
+# ── --constraints (nexus-jd8fi drift) ─────────────────────────────────────────
+
+def _run_builder(tmp_path: Path, *extra: str) -> tuple[subprocess.CompletedProcess, Path]:
+    bin_dir = tmp_path / "bin"
+    argv_log = tmp_path / "uv-argv.log"
+    _stub_uv(bin_dir, argv_log=argv_log)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "NX_TOOLS_DIR": str(tmp_path / "tools"),
+    }
+    (tmp_path / "tools").mkdir(exist_ok=True)
+    proc = subprocess.run(
+        ["bash", str(_INSTALLER), "--source", "conexus", *extra],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    return proc, argv_log
+
+
+def test_constraints_file_is_handed_to_uv_pip_install(tmp_path: Path) -> None:
+    """The lock, exported as constraints, reaches uv: a checkout install must
+    not resolve past what the lock and the gates ran (mineru 3.4.5 vs 3.1.11)."""
+    constraints = tmp_path / "constraints.txt"
+    constraints.write_text("mineru==3.1.11\n")
+    proc, argv_log = _run_builder(tmp_path, "--constraints", str(constraints))
+    assert proc.returncode == 0, proc.stderr
+    install_lines = [ln for ln in argv_log.read_text().splitlines() if "pip install" in ln]
+    assert len(install_lines) == 1, argv_log.read_text()
+    assert f"--constraints {constraints}" in install_lines[0]
+
+
+def test_missing_constraints_file_refuses_before_building(tmp_path: Path) -> None:
+    proc, argv_log = _run_builder(tmp_path, "--constraints", str(tmp_path / "absent.txt"))
+    assert proc.returncode == 64
+    assert "constraints" in proc.stderr
+    assert not argv_log.exists() or "pip install" not in argv_log.read_text()
+
+
+def test_no_constraints_flag_installs_unconstrained(tmp_path: Path) -> None:
+    proc, argv_log = _run_builder(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert "--constraints" not in argv_log.read_text()

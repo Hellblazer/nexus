@@ -31,6 +31,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>nexus-g17tf extends the pairing: every such site must ALSO bound the
  * statement ({@link PgSession#setSearchStatementTimeout}) so an orphaned or
  * pathological scan cancels instead of pinning xmin for hours.
+ *
+ * <p>nexus-zrcj7 (2026-09-03): briefly loosened this to a strict-pair-plus-
+ * superset relationship when {@code text_gated_search_<dim>}'s single
+ * materializing-CTE design replaced {@link PgVectorRepository#hybridSearch}'s
+ * HNSW-first branch entirely. RESTORED to the original strict 4-way equality
+ * here (coordinator finding, confirmed by EXPLAIN evidence the single-function
+ * design did not preserve dense-gate HNSW reachability, T2 nexus/finding-
+ * zrcj7-dense-gate-hnsw-not-preserved [24216]): the lcogi/x7z7l selectivity-
+ * aware two-branch dispatch is back (vectors-011, {@code
+ * text_gate_probe_<dim>} + {@code text_gated_search_hnsw_first_<dim>}), so
+ * hybridSearch's {@code withTenant} block sets all four GUCs again, exactly
+ * as before.
  */
 class HnswServingGucParityTest {
 
@@ -87,16 +99,28 @@ class HnswServingGucParityTest {
     }
 
     /**
-     * nexus-g17tf (substantive-critic finding, 2026-09-02): the HNSW-literal
-     * pairing above cannot see a vector read that never sets
-     * {@code hnsw.iterative_scan} — hybridSearch's selective-gate branch ranks
-     * by chash with no HNSW at all, and its gate probe is a trigram
-     * heap-recheck. So the bound is ALSO required by shape: every
-     * {@code tenantScope.withTenant(} block that performs a raw fetch must set
-     * the statement timeout BEFORE its first {@code rawVectorFetch(}.
+     * REPURPOSED, not retired (nexus-zrcj7, 2026-09-03; coordinator pushback — was
+     * {@code everyRawFetchingTenantBlockBoundsItsStatementsFirst}, anchored on the now-
+     * deleted {@code rawVectorFetch(} literal). The invariant nexus-g17tf named — every
+     * {@code tenantScope.withTenant(} block that performs a vector-ranking FETCH must set
+     * {@code setSearchStatementTimeout}/{@code setSearchPlanCacheMode} BEFORE that fetch —
+     * still applies to every current fetch shape (jOOQ generated-function-table SELECTs,
+     * {@link #exactSelectFrom}'s own supplier, {@code runCombinedQuery}/{@code
+     * runCombinedQueryWithChash}'s {@code ctx.selectFrom(fn).fetch()}), so this scans for
+     * their literal anchors instead of the retired wrapper's name. The anchors are
+     * {@code .selectFrom(fn)} — the exact identifier {@code fn} every vector-ranking
+     * dispatch site binds its switch-selected {@code Table<?>} to — and {@code
+     * .selectFrom(probeFn)} — {@code hybridSearch}'s text_gate_probe_&lt;dim&gt; fetch
+     * (T2 [24224] review finding: this anchor was missing, so the probe fetch fell
+     * outside this gate's coverage; a LATER {@code .selectFrom(fn)} in the same block
+     * happened to still pass, masking the gap rather than failing on it). NOT bare
+     * {@code .selectFrom(}, which also matches unrelated GC/quarantine call sites
+     * ({@code quarantineOrphans}/{@code expireQuarantine}'s {@code ctx.selectFrom(
+     * GC_QUARANTINE_ORPHANS.call(...))}) that never need these GUCs and would otherwise
+     * false-positive as "unbounded".
      */
     @Test
-    void everyRawFetchingTenantBlockBoundsItsStatementsFirst() {
+    void everyFetchingTenantBlockBoundsItsStatementsFirst() {
         Path root = Path.of("src", "main", "java");
         List<String> unbounded = new ArrayList<>();
         int fetchingBlocks = 0;
@@ -115,7 +139,8 @@ class HnswServingGucParityTest {
                     // a call of the block above it.
                     int end = body.indexOf("\n    }\n", at);
                     String block = body.substring(at, end < 0 ? body.length() : end);
-                    int fetch = block.indexOf("rawVectorFetch(");
+                    int fetch = firstIndexOfAny(block, "exactSelectFrom(", ".selectFrom(fn)",
+                        ".selectFrom(probeFn)");
                     if (fetch < 0) {
                         continue;
                     }
@@ -131,16 +156,25 @@ class HnswServingGucParityTest {
             throw new UncheckedIOException(e);
         }
         assertThat(unbounded)
-            .as("withTenant blocks that rawVectorFetch without first calling both "
-                + "PgSession.setSearchStatementTimeout (nexus-g17tf) and "
+            .as("withTenant blocks that fetch (exactSelectFrom/.selectFrom(fn)) without first "
+                + "calling both PgSession.setSearchStatementTimeout (nexus-g17tf) and "
                 + "PgSession.setSearchPlanCacheMode (nexus-6nkn3)")
             .isEmpty();
-        // Non-vacuity: the two raw-SQL search blocks (searchWithTokens and
-        // hybridSearch) must be visible. The combined-query paths fetch through
-        // jOOQ, not rawVectorFetch, and are covered by the HNSW-literal pairing.
+        // Non-vacuity: at least the four known production sites (PgVectorRepository:
+        // searchWithTokens/exactSelectFrom, hybridSearch, runCombinedQuery,
+        // runCombinedQueryWithChash) must be visible.
         assertThat(fetchingBlocks)
-            .as("raw-fetching withTenant blocks visible to the sweep")
-            .isGreaterThanOrEqualTo(2);
+            .as("fetching withTenant blocks visible to the sweep")
+            .isGreaterThanOrEqualTo(4);
+    }
+
+    private static int firstIndexOfAny(String haystack, String... needles) {
+        int best = -1;
+        for (String n : needles) {
+            int idx = haystack.indexOf(n);
+            if (idx >= 0 && (best < 0 || idx < best)) best = idx;
+        }
+        return best;
     }
 
     private static int lineOf(String body, int index) {

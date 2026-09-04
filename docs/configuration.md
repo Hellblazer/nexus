@@ -81,7 +81,7 @@ Used by `nx enrich bib` to fetch bibliographic metadata (year, venue, authors, c
 | `client.host` | `NX_CLIENT_HOST` | `localhost` | Legacy ChromaDB host override; no-op as of 6.0 (the managed/local service URL is `NX_SERVICE_URL`). |
 | `pdf.extractor` | — | `auto` | PDF extraction backend: `auto`, `docling`, or `mineru`. Set globally with `nx config set pdf.extractor=mineru` |
 | `pdf.mineru_server_url` | — | `http://127.0.0.1:8010` | MinerU API server URL. Auto-updated when `nx mineru start` binds a port |
-| `pdf.mineru_table_enable` | — | `false` | Enable table extraction in MinerU. Slower; use when PDFs contain structured tables |
+| `pdf.mineru_table_enable` | — | `true` | Table extraction in MinerU. Off, every table becomes an image reference and its values are not indexed; the chunk then carries a `[Table N not extracted as text; values not indexed]` marker. Set `false` only for corpora with no tables where the table models' memory matters |
 | `pdf.mineru_page_batch` | — | `1` | Pages per MinerU request. Increase for faster throughput at the cost of memory |
 | `voyageai.read_timeout_seconds` | `NX_VOYAGEAI_READ_TIMEOUT_SECONDS` | `120` | Request timeout (seconds) for Voyage AI API calls. Increase for large PDF indexing |
 | `search.hybrid_default` | — | `false` | Default ripgrep hybrid search mode for `nx search`. Set `true` to always run hybrid |
@@ -120,7 +120,7 @@ indexing:
 pdf:
   extractor: mineru             # auto | docling | mineru (default: auto)
   mineru_server_url: http://127.0.0.1:8010  # MinerU API endpoint (default)
-  mineru_table_enable: false    # enable table extraction (default: false)
+  mineru_table_enable: true     # table extraction (default: true; off = tables indexed as markers only)
   mineru_page_batch: 1          # pages per MinerU request (default: 1)
 ```
 

@@ -1,0 +1,205 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-zrcj7 (Sam directive 2026-09-03: no SQL strings in Java, anywhere) — step 1,
+    deliverable (b): nexus.plain_search_384/768/1024, the schema function retiring
+    PgVectorRepository#searchWithTokens's StringBuilder-assembled raw SQL (the
+    /v1/vectors/search serving path, no prior SQL function existed for it — unlike
+    hybridSearch, which already had an unwired sibling in vectors-007).
+
+    Design of record: T2 nexus/decision-zrcj7-no-sql-strings-design-2026-09-03 [24207].
+    Signature: plain_search_<dim>(p_query vector(<dim>), p_collections text[],
+    p_where jsonb, p_where_path text, p_n int) RETURNS TABLE(id text, content text,
+    collection text, distance float8, metadata jsonb). The metadata column carries
+    the chunk's raw JSONB metadata (searchWithTokens's raw SQL already flattened it
+    into the response row via fromJson(metadata_json) — a wire-contract requirement
+    the other combined-query functions do not carry because their own callers never
+    flattened metadata into the row). Byte-for-byte the same row shape as
+    search_metadata_scoped_&lt;dim&gt;/search_topic_scoped_&lt;dim&gt; (id is the chunk
+    chash hex, chunk-level — same identity convention as {@code search}), plus the
+    same ORDER BY distance ASC, id ASC tie-break searchWithTokens's raw SQL already
+    carried (determinism under LIMIT).
+
+    p_where_path is declared text, not jsonpath: jOOQ's PostgreSQL codegen has no
+    built-in mapping for the jsonpath pseudo-type (only vector carries a forcedType/
+    binding in pom.xml today), so the boundary type is the well-supported text, cast
+    to jsonpath INSIDE the function body (`p_where_path::jsonpath`) — a stable,
+    inlinable cast, functionally identical to declaring the parameter jsonpath and
+    zero jOOQ-codegen risk.
+
+    p_where / p_where_path together replace appendWherePredicate's raw-SQL Chroma
+    operator translation (nexus-05bfd): a plain-scalar or {@code $eq} field becomes
+    JSONB containment in p_where (c.metadata @&gt; p_where) — the SAME predicate every
+    other combined-query shape (catalog-008/vectors-006/vectors-007/vectors-008)
+    already uses for equality, replacing appendWherePredicate's TEXT-comparison
+    quirk (metadata-&gt;&gt;'k' = 'v') with type-preserving JSON equality, consistent
+    with the sibling functions' own established convention. Every other operator
+    ({@code $ne}/{@code $in}/{@code $nin}/{@code $gte}/{@code $lte}/{@code $gt}/
+    {@code $lt}) compiles server-side (PgVectorRepository.planWhere, Java) into ONE
+    jsonpath predicate-check expression, ANDed together, bound as a plain text VALUE
+    — never SQL string concatenation. Null semantics (T2 [24207]): {@code $ne} ->
+    {@code (!exists($."k") || $."k" != v)} (an ABSENT key is KEPT, matching
+    appendWherePredicate's IS DISTINCT FROM semantics); {@code $nin} ->
+    {@code (!exists($."k") || !($."k" == a || ...))}; {@code $in} ->
+    {@code ($."k" == a || ...)}; range operators use jsonpath's OWN native
+    comparison typing (a type-mismatched comparison is simply false/unknown under
+    jsonpath's default lax mode) rather than appendWherePredicate's hand-rolled
+    jsonb_typeof guard. Compound {@code $and}/{@code $or} field keys stay refused
+    (PgVectorRepository.planWhere fails loud before this function is ever called,
+    same as appendWherePredicate's own contract).
+
+    Tombstone-filtered — the SAME dead-set single-NOT-EXISTS form as
+    hybrid_search_&lt;dim&gt; (vectors-007) / search_aspect_scoped_&lt;dim&gt;
+    (vectors-008), byte-for-byte PgVectorRepository#liveChunksPredicate's SQL text
+    with the alias substituted for `c` — true parity with searchWithTokens's inlined
+    live_chunks predicate (RDR-156 Decision 6, nexus-3ck2g). Never a JOIN to
+    nexus.live_chunks — that would drop the HNSW/GIN index binds on the base table.
+
+    embedding_&lt;dim&gt; IS NOT NULL guard (nexus-74zvm precedent, vectors-006):
+    nexus.chunks is a mixed-dim table (exactly one embedding_* column non-null per
+    row, vectors-004's CHECK) — excludes a foreign-dim row rather than ranking it
+    with a NULL distance under LIMIT.
+
+    LANGUAGE sql, STABLE, SECURITY INVOKER, NOT STRICT (the default — a NULL p_where/
+    p_where_path must not null the whole result; a NULL p_query would still null the
+    whole result, exactly as searchWithTokens's raw SQL already required a non-NULL
+    query vector) — same discipline as every sibling combined-query function.
+    SECURITY INVOKER means FORCE RLS on nexus.chunks/catalog_document_chunks/
+    catalog_documents is the tenant-isolation boundary, not this function. No
+    function-level SET clause (would disable planner inlining — CombinedQueryParityTest's
+    EXPLAIN group, extended by nexus-zrcj7's own parity suite, pins that this function
+    inlines: no Function Scan, the HNSW index idx_chunks_embedding_&lt;dim&gt; survives).
+    pg_trgm plays no role here (that is text_gated_search_&lt;dim&gt;'s concern,
+    vectors-010) so no word_similarity_threshold GUC dependency exists.
+
+    EXECUTE defaults to PUBLIC for functions (vectors-007 precedent — hybrid_search_
+    &lt;dim&gt; issues no explicit grant either); no explicit GRANT EXECUTE here.
+
+    Placed after telemetry-008-step-cache-tokens.xml (current tail) and before the
+    grants-nexus-svc.xml runAlways block — the established late-append convention
+    (D0.1; see vectors-008's / telemetry-008's own &lt;include&gt; comments for the
+    identical reasoning) rather than spliced back into the vectors-00N block.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-009-1" author="nexus-zrcj7">
+        <comment>plain_search_384/768/1024: retires PgVectorRepository#searchWithTokens's raw SQL onto an inlinable schema function, nexus-zrcj7</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.plain_search_384(
+    p_query        vector(384),
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 &lt;=&gt; p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_384 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_384 &lt;=&gt; p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.plain_search_768(
+    p_query        vector(768),
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 &lt;=&gt; p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_768 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_768 &lt;=&gt; p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+
+CREATE OR REPLACE FUNCTION nexus.plain_search_1024(
+    p_query        vector(1024),
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_n            int
+) RETURNS TABLE(id text, content text, collection text, distance float8, metadata jsonb)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 &lt;=&gt; p_query)::float8,
+           c.metadata
+      FROM nexus.chunks c
+     WHERE c.collection = ANY(p_collections)
+       AND c.embedding_1024 IS NOT NULL
+       AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                         JOIN nexus.catalog_documents d
+                           ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+                        WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+                          AND d.deleted_at IS NOT NULL
+                          AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2
+                                            JOIN nexus.catalog_documents d2
+                                              ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id
+                                           WHERE m2.tenant_id = m.tenant_id AND m2.chash = m.chash
+                                             AND d2.deleted_at IS NULL)))
+       AND (p_where IS NULL OR c.metadata @&gt; p_where)
+       AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+     ORDER BY c.embedding_1024 &lt;=&gt; p_query, encode(c.chash, 'hex')
+     LIMIT p_n
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.plain_search_384(vector, text[], jsonb, text, int);
+DROP FUNCTION IF EXISTS nexus.plain_search_768(vector, text[], jsonb, text, int);
+DROP FUNCTION IF EXISTS nexus.plain_search_1024(vector, text[], jsonb, text, int);
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

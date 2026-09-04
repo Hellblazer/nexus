@@ -1,0 +1,51 @@
+name: Dependency drift watch (weekly)
+
+# nexus-jd8fi drift (2026-09-03). scripts/check_dependency_drift.py existed
+# since the 2026-08-14 gap audit and was scheduled nowhere, so the question
+# it asks ("what would a fresh PyPI resolution change?") was never asked:
+# mineru drifted 3.1.11 -> 3.4.5 and docling 2.76.0 -> 2.125.0 under every
+# fresh install while uv.lock and every gate stayed put. This is the
+# schedule. It runs `uv lock --upgrade --dry-run` (never writes the lock)
+# with --fail-on shape: the run is red only for an UNACKNOWLEDGED change in
+# the shape-sensitive set. Leading-component drift in the transitive graph
+# is routine (20 packages on 2026-09-03) and is rendered in the log and the
+# step summary, never as a failure, so this weekly cannot sit permanently
+# red and bury other workflows' signal in the shared scheduled-failure
+# tracking issue. A refused version is acknowledged in the script's
+# SHAPE_SENSITIVE_ACKNOWLEDGED map, which is what clears a red.
+#
+# CI-cost discipline (CLAUDE.md DIRECTIVES): one ubuntu job, no build, no
+# tests, seconds of runtime. Weekly + manual dispatch only.
+
+on:
+  schedule:
+    - cron: "23 11 * * 1"   # 11:23 UTC Mondays, staggered off the 10:17 / 10:47 Monday slots
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-drift-watch
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    name: fresh-resolution drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Ask what a fresh PyPI resolution would change
+        run: |
+          set -uo pipefail
+          # The script's exit code is the verdict; capture it without a pipe
+          # (tests/test_workflow_run_pipefail_lint.py) and without -e.
+          set +e
+          uv run --no-sync --python 3.12 python scripts/check_dependency_drift.py --fail-on shape > drift.txt 2>&1
+          rc=$?
+          set -e
+          cat drift.txt
+          { echo '```'; cat drift.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"

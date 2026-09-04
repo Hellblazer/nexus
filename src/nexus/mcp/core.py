@@ -1625,17 +1625,18 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
         ), False
     blocks: list[str] = []
     for i, (doc_id, raw) in enumerate(zip(ids, contents), start=1):
-        # nexus-c0sdc: store_get_many truncates at _TIDY_MAX_CHARS_PER_ENTRY and
-        # appends a bare "…" with no marker. The tool-free child then sees an
-        # ellipsis mid-sentence and correctly concludes the ENTRY is broken —
-        # so tidy told operators to re-ingest healthy 6-9 KB documents. Silent
-        # truncation is against house doctrine (nexus-2xjge) and it inverts
-        # tidy's purpose for exactly the entries most worth consolidating: the
-        # long, dense ones are the ones that get cut. Detect the cut on the RAW
-        # body (before strip(), which would change the length) and say so.
+        # nexus-c0sdc: store_get_many truncates at _TIDY_MAX_CHARS_PER_ENTRY.
+        # Before nexus-lugwx it appended a bare "…" with no marker, so the
+        # tool-free child saw an ellipsis mid-sentence and concluded the
+        # ENTRY was broken — tidy told operators to re-ingest healthy 6-9 KB
+        # documents. Silent truncation is against house doctrine
+        # (nexus-2xjge) and it inverts tidy's purpose for exactly the entries
+        # most worth consolidating. The body now carries the marker from the
+        # cut itself; the header repeats it so the prompt's caveat has a
+        # header to point at.
         raw = raw or ""
-        display_truncated = (
-            len(raw) == _TIDY_MAX_CHARS_PER_ENTRY + 1 and raw.endswith("…")
+        display_truncated = raw.endswith(
+            display_truncation_marker(_TIDY_MAX_CHARS_PER_ENTRY)
         )
         body = raw.strip()
         if not body:
@@ -4201,6 +4202,18 @@ def _fallback_get_by_ids_individually(
     return id_to_entry
 
 
+def display_truncation_marker(cap: int) -> str:
+    """The suffix ``store_get_many`` appends after the ellipsis when it cuts a
+    document at ``cap`` chars (nexus-lugwx). Self-describing where the model
+    reads it, so a cut is never mistaken for a defect in the stored document.
+    Callers that want to know whether a body was cut test ``endswith`` on
+    this, never on the ellipsis alone."""
+    return (
+        f" [TRUNCATED FOR DISPLAY at {cap} chars"
+        " — a display limit, NOT a defect in the stored document]"
+    )
+
+
 @mcp.tool(
     title="Batch-Retrieve Documents",
     annotations={"readOnlyHint": True},
@@ -4229,7 +4242,9 @@ def store_get_many(
             in parallel-stream form a list aligned 1:1 with the outer
             ``ids`` length performs per-stream collection routing
             (each id in stream i is hydrated from ``collections[i]``).
-        max_chars_per_doc: Per-document truncation cap (default 4 KB).
+        max_chars_per_doc: Per-document truncation cap (default 4 KB). A cut
+            body ends in an ellipsis plus ``display_truncation_marker(cap)``
+            so a reader never mistakes the cut for a defect (nexus-lugwx).
         structured: Return ``{contents, missing}`` dict when True;
             human-readable string when False.
         limit_per_source: Cap input IDs before hydration (RDR-097 P1.0).
@@ -4422,7 +4437,14 @@ def store_get_many(
 
             body = str(entry.get("content") or "")
             if max_chars_per_doc > 0 and len(body) > max_chars_per_doc:
-                body = body[:max_chars_per_doc] + "…"
+                # nexus-lugwx: say so AT the cut. A bare ellipsis reads as a
+                # broken document to every tool-free consumer downstream
+                # (nx_tidy, the plan runner's operators); marking here means
+                # no caller has to re-detect the cut (nexus-2xjge doctrine).
+                body = (
+                    body[:max_chars_per_doc] + "…"
+                    + display_truncation_marker(max_chars_per_doc)
+                )
             contents.append(body)
 
         if structured:
@@ -6409,6 +6431,126 @@ def _nx_answer_is_empty_retrieval(steps: "list") -> bool:
     return had_retrieval and total_evidence == 0
 
 
+def _plan_retrieval_step_basis(plan_json: str | dict | None) -> list[dict[str, Any]]:
+    """Render *plan_json*'s retrieval-shaped steps as ``{step, tool,
+    corpus, query}`` dicts, in step order.
+
+    nexus-ivv4d (RDR-200 Phase 1c): the zero-evidence fallback is the one
+    outcome where the matched plan's own parameters — which corpus each
+    retrieval step scoped to, what it searched for — ARE the finding, and
+    the return carried none of them. Every other degenerate shape leaks
+    at least step vocabulary (a budget-warning ``basis:`` string) or
+    collections (a listing reroute); this renders the same kind of
+    signal for the zero-evidence path specifically.
+
+    Reads the STEP DECLARATIONS from the matched plan template (unresolved
+    ``$binding`` placeholders included) rather than the executed runner
+    output — a zero-evidence run's step outputs carry no corpus/query
+    fields at all (that is the defect), so the template is the only place
+    this information exists. ``query`` is read from either the ``query``
+    (``search``-shaped tools) or ``question`` (``query``-shaped tool) args
+    key. Best-effort: any malformed ``plan_json`` yields ``[]`` rather than
+    raising — this is diagnostic text, never load-bearing.
+    """
+    if isinstance(plan_json, str):
+        try:
+            plan = json.loads(plan_json)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    elif isinstance(plan_json, dict):
+        plan = plan_json
+    else:
+        return []
+    if not isinstance(plan, dict):
+        return []
+    steps = plan.get("steps")
+    if not isinstance(steps, list):
+        return []
+    from nexus.plans.runner import _CORPUS_QUERY_TOOLS  # noqa: PLC0415 — deferred; matches this module's convention
+
+    basis: list[dict[str, Any]] = []
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        tool = step.get("tool")
+        # nexus-x79ne code review (T2 [24198]): excludes ``store_get_many``
+        # — a hydration call with no corpus/query args of its own, whose
+        # inclusion here rendered a misleading ``corpus='' query=''`` line
+        # that reads as a missing-scope defect rather than "not applicable".
+        if not isinstance(tool, str) or tool not in _CORPUS_QUERY_TOOLS:
+            continue
+        args = step.get("args") if isinstance(step.get("args"), dict) else {}
+        corpus = args.get("corpus", "")
+        query = args.get("query")
+        if query is None:
+            query = args.get("question", "")
+        basis.append({
+            "step": index,
+            "tool": tool,
+            "corpus": str(corpus) if corpus is not None else "",
+            "query": str(query) if query is not None else "",
+        })
+    return basis
+
+
+def _render_retrieval_step_basis_text(plan_json: str | dict | None) -> str:
+    """Human-readable ``step0=search(corpus='rdr', query='...')`` join of
+    :func:`_plan_retrieval_step_basis`, for the zero-evidence fallback
+    message (nexus-ivv4d). Returns a named placeholder rather than an
+    empty string when the plan has no retrieval-shaped steps, so the
+    absence itself is visible rather than reading as an omission bug.
+    """
+    basis = _plan_retrieval_step_basis(plan_json)
+    if not basis:
+        return "(no retrieval-shaped steps in plan)"
+    return "; ".join(
+        f"step{b['step']}={b['tool']}(corpus={b['corpus']!r}, query={b['query']!r})"
+        for b in basis
+    )
+
+
+def _render_zero_evidence_step_basis_text(
+    *, resolved_step_args: "list[dict[str, Any]] | None", plan_json: str | dict | None,
+) -> str:
+    """Prefer the RUNNER'S resolved corpus/query per step over the static
+    plan template (nexus-ivv4d code review, T2 [24198]).
+
+    A plan template that leaves ``corpus`` unset does not mean "no
+    corpus" — the runner fills it in at dispatch time via a
+    plan-scope -> caller-scope -> ``_PLAN_STEP_DEFAULT_CORPUS``
+    fall-through (``nexus.plans.runner``: ``_apply_scope_to_args`` ->
+    ``_apply_caller_scope_to_args`` -> ``_apply_default_corpus_to_args``).
+    :func:`_render_retrieval_step_basis_text` reading the STATIC template
+    alone rendered ``corpus=''`` for exactly the corpus-scoping-failure
+    class this diagnostic exists to expose — the runner's own
+    ``PlanResult.resolved_step_args`` (captured post-fall-through, at
+    dispatch time, before the tool call — a zero-evidence result
+    envelope's own ``collections`` field is empty in exactly this case,
+    so it can never substitute) is the ground truth when available.
+
+    Falls back to the static-template renderer only when
+    *resolved_step_args* is empty/``None`` — e.g. a ``PlanResult`` from
+    before this field existed, or a run whose only steps were
+    operator/bundle steps with no isolated corpus/query-shaped dispatch
+    at all.
+
+    Defensive ``isinstance`` check (not a bare truthy/``None`` check,
+    same posture as ``_budget_exhausted_response``'s own guard): a bare
+    ``MagicMock``'s unconfigured ``.resolved_step_args`` attribute is
+    itself a (truthy, non-``None``, non-iterable-as-a-list) ``MagicMock``
+    — a test double built before this field existed must fall back
+    cleanly, never raise.
+    """
+    if isinstance(resolved_step_args, list) and resolved_step_args:
+        return "; ".join(
+            f"step{a.get('step_index')}={a.get('tool', '')}"
+            f"(corpus={str(a.get('corpus') or '')!r}, "
+            f"query={str(a.get('query') or '')!r})"
+            for a in resolved_step_args
+        )
+    return _render_retrieval_step_basis_text(plan_json)
+
+
 #: Common English stop-words stripped when synthesizing a grown plan's
 #: ``name`` from the question. Kept narrow on purpose; aggressive
 #: filtering drops the content words R10 needs for match-text signal.
@@ -7711,6 +7853,19 @@ async def nx_answer(
     #: can take after a warning is emitted carries all of them, in both
     #: shapes.
     _budget_warning_entries: "list[dict[str, str]]" = []
+    #: nexus-4h0oh follow-up (code-review T2 [24199]): 1-indexed plan-
+    #: step positions from a real ``PlanResult.dropped_reduce_steps``
+    #: (see that field's own docstring in ``plans/runner.py``) — read by
+    #: ``_result``'s closure directly, the SAME "closure-scoped
+    #: accumulator, never a per-call-site parameter" pattern
+    #: ``_budget_warning_entries`` above uses, so every exit path this
+    #: call can take after a real ``plan_run`` call carries it without
+    #: threading a new kwarg through every one of ``_result``'s many
+    #: call sites. Stays ``[]`` on every path that never reaches a real
+    #: ``PlanResult`` (single-step fast path, any error before Step 4,
+    #: a stub result) — the same "no plan_run, nothing to drop" reading
+    #: ``step_records``'s own default in ``_result`` already gives.
+    _dropped_reduce_steps: "list[int]" = []
 
     # RDR-137 followup (nexus-n1908): normalize a malformed comma-list
     # scope to broad search (with a warning) so it doesn't filter
@@ -7785,12 +7940,32 @@ async def nx_answer(
             _pre_cap_chars - _TEXT_RESULT_CAP_CHARS
             if _pre_cap_chars > _TEXT_RESULT_CAP_CHARS else None
         )
-        if not _budget_warning_text:
+        # nexus-4h0oh follow-up (code-review T2 [24199]): a one-line
+        # text-mode notice naming the discarded parallel-branch step
+        # positions, read from the SAME closure-scoped accumulator
+        # pattern as `_budget_warning_entries` above (see
+        # `_dropped_reduce_steps`'s own declaration). Folded into the
+        # SAME prepend/append composition as the budget-warning line so
+        # the two notices stack correctly and neither displaces the
+        # exhaustion marker's required leading position — generalising
+        # the existing two-branch logic rather than duplicating it.
+        _dropped_reduce_text = (
+            "[dropped reduce-step branches (evidence retrieved and "
+            "reduced but never referenced by the final step): "
+            + ", ".join(str(i) for i in _dropped_reduce_steps) + "]"
+            if _dropped_reduce_steps else None
+        )
+        _extra_lines = [
+            line for line in (_budget_warning_text, _dropped_reduce_text)
+            if line
+        ]
+        _extra_text = "\n".join(_extra_lines) if _extra_lines else None
+        if not _extra_text:
             _text = text
         elif text.startswith(NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX):
-            _text = f"{text}\n{_budget_warning_text}"
+            _text = f"{text}\n{_extra_text}"
         else:
-            _text = f"{_budget_warning_text}\n{text}"
+            _text = f"{_extra_text}\n{text}"
         if not structured:
             return _text
         # RDR-196 .p1e (nexus-nyry9.11): per-step breakdown in the
@@ -7843,6 +8018,15 @@ async def nx_answer(
             # `budget_exhausted_at_step` above and the same empty-list
             # convention as `chunks`.
             "budget_warnings": list(_budget_warning_entries),
+            # nexus-4h0oh follow-up (code-review T2 [24199]): 1-indexed
+            # plan-step positions of executed operator ("reduce") steps
+            # whose output the terminal step never referenced — see
+            # `_dropped_reduce_steps`'s own declaration and
+            # `PlanResult.dropped_reduce_steps`'s docstring in
+            # plans/runner.py for the full contract. Always present,
+            # ``[]`` (not None) when empty, same convention as
+            # `budget_warnings`/`chunks` above.
+            "dropped_reduce_steps": list(_dropped_reduce_steps),
             # RDR-196 Phase 3 Step 1 (nexus-nyry9.20): the Step 1 plan-
             # choice decision, when it ran (None on force_dynamic, a
             # plan-miss, or any error path before Step 1's hit branch —
@@ -8817,6 +9001,19 @@ async def nx_answer(
             step_count=len(_exc_step_records),
             step_records=_exc_step_records,
         )
+    # nexus-4h0oh follow-up (code-review T2 [24199]): set the closure
+    # accumulator IMMEDIATELY after a successful plan_run call, BEFORE
+    # ``_budget_exhausted_response(result)`` below has a chance to
+    # build (and return) an envelope via ``_result`` — a partial run
+    # that got budget-cut can still carry real dropped_reduce_steps
+    # from the steps that DID execute, and that envelope must not read
+    # a stale empty accumulator. Defensive isinstance check, same
+    # landmine as ``_result_step_records``'s own comment below (a
+    # MagicMock test double's unconfigured attribute access is a
+    # truthy non-list MagicMock, not a raise).
+    _dropped_reduce_steps = getattr(result, "dropped_reduce_steps", None)
+    if not isinstance(_dropped_reduce_steps, list):
+        _dropped_reduce_steps = []
     # nexus-yg49g: the success record USED to be here — before final_text is
     # even extracted (below) and ~60 lines before the empty-retrieval guard that
     # already knows the run produced nothing. It could not have been right: at
@@ -9028,6 +9225,14 @@ async def nx_answer(
         _result_step_records = getattr(result, "step_records", None)
         if not isinstance(_result_step_records, list):
             _result_step_records = []
+        # nexus-4h0oh follow-up (code-review T2 [24199]): same closure-
+        # accumulator refresh as the primary plan_run call above — this
+        # fallback re-run REPLACES `result`, so `_dropped_reduce_steps`
+        # must be re-derived from it too, not left stale from the
+        # discarded prefix-only run.
+        _dropped_reduce_steps = getattr(result, "dropped_reduce_steps", None)
+        if not isinstance(_dropped_reduce_steps, list):
+            _dropped_reduce_steps = []
         _budget_response = _budget_exhausted_response(result)
         if _budget_response is not None:
             return _budget_response
@@ -9115,10 +9320,21 @@ async def nx_answer(
         # telemetry: _nx_answer_record_run below stores the final_text, and the
         # structured event above marks this branch specifically.
         _nx_answer_record_outcome(best.plan_id, success=False)
+        # nexus-ivv4d: name plan_id + each retrieval step's tool/corpus/query
+        # so WHICH plan-side factor produced the miss is readable from the
+        # return text (and, since it feeds final_text below, the telemetry
+        # row) instead of requiring a separate artifact correlation pass.
+        # nexus-ivv4d code review (T2 [24198]): prefer the runner's
+        # RESOLVED corpus/query (result.resolved_step_args) over the
+        # static plan template — a template that leaves corpus unset
+        # otherwise renders corpus='' for exactly the corpus-scoping
+        # failure class this diagnostic exists to expose.
         no_match = (
             f"No matching evidence found for {question!r}"
             + (f" in scope {scope!r}" if scope else "")
-            + ". The plan's retrieval steps returned zero results — "
+            + f". The plan's retrieval steps returned zero results "
+            f"(plan_id={best.plan_id}, basis: "
+            f"{_render_zero_evidence_step_basis_text(resolved_step_args=getattr(result, 'resolved_step_args', None), plan_json=best.plan_json)}) — "
             "rephrase the question, correct/widen the scope, or use "
             "search/query directly."
         )

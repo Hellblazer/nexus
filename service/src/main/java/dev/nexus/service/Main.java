@@ -172,13 +172,30 @@ public final class Main {
             log.info("event=onnx_model_root root={} source={}",
                     onnxRoot.root(), onnxRoot.source());
             Bge768Embedder bge = new Bge768Embedder();
-            docEmbedRouter = new EmbedderRouter(bge, "document");
-            qryEmbedRouter = new EmbedderRouter(bge, "query");
+            // nexus-00wsf residual, review round 2 (T2 [24238]/[24239]): ONE
+            // LocalOnnxAdmission per process, shared by BOTH routers and the
+            // reranker below — wrapping "bge" separately per router (round 1's
+            // defect) gave each router its own semaphore and doubled the
+            // effective bound instead of capping the process-wide total.
+            // Document embeds block (bulk indexing is not latency-sensitive);
+            // query embeds and reranks use the bounded-timeout acquire so a
+            // bulk-indexing burst cannot stall interactive search unboundedly.
+            var localOnnxAdmission = dev.nexus.service.vectors.LocalOnnxAdmission.fromEnv();
+            docEmbedRouter = new EmbedderRouter(
+                    new dev.nexus.service.vectors.AdmissionControlledEmbedder(bge, localOnnxAdmission, false),
+                    "document");
+            qryEmbedRouter = new EmbedderRouter(
+                    new dev.nexus.service.vectors.AdmissionControlledEmbedder(bge, localOnnxAdmission, true),
+                    "query");
             // RDR-188 P1.3: local no-Voyage posture reranks with the ms-marco
             // cross-encoder. Lazy init (ctor touches no I/O): a not-yet-provisioned
             // model degrades the fused stage LOUD per request instead of failing
             // boot, and is picked up on first rerank once `nx init` lands it.
-            reranker = new dev.nexus.service.vectors.CrossEncoderReranker();
+            // Shares localOnnxAdmission with the routers above (finding 4): rerank
+            // only ever runs on the search/query response path, never bulk
+            // indexing, so it is always interactive=true here.
+            reranker = new dev.nexus.service.vectors.AdmissionControlledReranker(
+                    new dev.nexus.service.vectors.CrossEncoderReranker(), localOnnxAdmission, true);
             log.warn("event=embedding_mode_banner mode={} models={} reranker={} backend=pgvector "
                     + "voyage_collections=REFUSED_422 hint=\"set NX_VOYAGE_API_KEY (or let "
                     + "the supervisor plumb it from VOYAGE_API_KEY / config.yml credentials) "
@@ -275,10 +292,12 @@ public final class Main {
             dev.nexus.service.db.BackendReaper.terminateOwnBackends(
                     dbUrl, dbUser, dbPass, applicationName,
                     ds.getHikariPoolMXBean().getActiveConnections());
-            // doc and qry routers share the SAME local embedder instance (the
-            // native ONNX session + tokenizer), so closing one is sufficient for
-            // THAT resource (a second close is harmless — close() swallows it).
-            // But each router owns its OWN CceEmbedder with its OWN bounded
+            // doc and qry routers each hold their OWN AdmissionControlledEmbedder
+            // (different acquisition policy — see LocalOnnxAdmission), but both
+            // wrap the SAME underlying "bge" delegate, so closing either
+            // AdmissionControlledEmbedder.close() reaches the same native ONNX
+            // session + tokenizer; a second close is harmless (close() swallows
+            // it). But each router owns its OWN CceEmbedder with its OWN bounded
             // virtual-thread executor for the parallel per-chunk fan-out
             // (nexus-9okyk) — both routers must be closed to shut both down.
             docEmbedRouter.close();
