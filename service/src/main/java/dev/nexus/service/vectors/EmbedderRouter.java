@@ -84,16 +84,19 @@ public final class EmbedderRouter implements Embedder {
      * @param inputType     {@code "document"} for indexing, {@code "query"} for search
      */
     public EmbedderRouter(Embedder localEmbedder, String inputType) {
-        // nexus-00wsf residual: gate the local (bge/ONNX) embed path with a
-        // bounded in-flight admission semaphore — see AdmissionControlledEmbedder.
-        // Wrapped BEFORE modelToken()/field/map so the map key and the
-        // dispatched instance are always the same (wrapped) identity.
-        Embedder admissionGated = new AdmissionControlledEmbedder(localEmbedder);
-        this.localEmbedder       = admissionGated;
+        // nexus-00wsf review fold: this constructor does NOT apply admission
+        // control itself — see AdmissionControlledEmbedder's javadoc. A
+        // caller who wants the local (bge/ONNX) embed path gated wraps
+        // localEmbedder in an AdmissionControlledEmbedder BEFORE passing it
+        // in (Main.java does this, sharing ONE LocalOnnxAdmission across the
+        // doc and query routers so the bound is process-wide, not per-router
+        // — wrapping here, once per router, produced a per-router bound
+        // instead and was the exact defect this comment replaces).
+        this.localEmbedder       = localEmbedder;
         this.voyageCodeEmbedder  = null;
         this.cceEmbedder         = null;
         this.inputType           = inputType;
-        this.modelEmbedders      = Map.of(admissionGated.modelToken(), admissionGated);
+        this.modelEmbedders      = Map.of(localEmbedder.modelToken(), localEmbedder);
     }
 
     /**
@@ -105,10 +108,7 @@ public final class EmbedderRouter implements Embedder {
      * @param inputType     {@code "document"} or {@code "query"}
      */
     public EmbedderRouter(OnnxEmbedder onnxEmbedder, String voyageApiKey, String inputType) {
-        // nexus-00wsf residual: same admission gate as the local-mode
-        // constructor — this ONNX fallback is still the "local embed path".
-        Embedder admissionGatedOnnx = new AdmissionControlledEmbedder(onnxEmbedder);
-        this.localEmbedder      = admissionGatedOnnx;
+        this.localEmbedder      = onnxEmbedder;
         this.voyageCodeEmbedder = new VoyageEmbedder(voyageApiKey, "voyage-code-3", inputType);
         this.cceEmbedder        = new CceEmbedder(voyageApiKey, inputType);
         this.inputType          = inputType;
@@ -119,7 +119,7 @@ public final class EmbedderRouter implements Embedder {
         // identity actually dispatched.
         VoyageEmbedder voyage3 = new VoyageEmbedder(voyageApiKey, "voyage-3", inputType);
         this.modelEmbedders     = Map.of(
-                admissionGatedOnnx.modelToken(), admissionGatedOnnx,
+                onnxEmbedder.modelToken(),       onnxEmbedder,
                 voyageCodeEmbedder.modelToken(), voyageCodeEmbedder,
                 cceEmbedder.modelToken(),        cceEmbedder,
                 voyage3.modelToken(),            voyage3);

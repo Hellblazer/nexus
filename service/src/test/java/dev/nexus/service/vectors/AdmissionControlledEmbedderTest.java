@@ -4,11 +4,12 @@ package dev.nexus.service.vectors;
 
 import org.junit.jupiter.api.Test;
 
+import java.sql.SQLTransientConnectionException;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -16,15 +17,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * nexus-00wsf residual — bounded admission control on the local (bge/ONNX)
- * embed path.
+ * nexus-00wsf residual, review round 2 (T2 [24238]/[24239]) — {@link
+ * AdmissionControlledEmbedder} gated through a SHARED {@link
+ * LocalOnnxAdmission}.
  *
- * <p>Mirrors {@code TenantScopeAdmissionTest}'s deterministic, latch-based
- * concurrency proof (no mocking framework, no wall-clock sleeps): N workers
- * race a wrapped fake embedder whose {@code embed()} blocks until released,
- * and the test asserts the observed peak concurrency never exceeds the
- * configured permit count, then that every worker eventually completes once
- * released (no deadlock, no starvation).
+ * <p>{@link #twoRoutersOverOneSharedAdmission_combinedPeakEqualsOnePermitSet}
+ * is the review's explicitly requested regression test: it reproduces
+ * {@code Main.java}'s actual wiring shape (two {@link EmbedderRouter}
+ * instances — document, query — both wrapping the SAME delegate through the
+ * SAME {@link LocalOnnxAdmission}) and proves the combined bound is ONE
+ * permit set, not two. Round 1's defect (a semaphore owned per {@code
+ * AdmissionControlledEmbedder} instance, one constructed per router) would
+ * fail this test by admitting up to {@code 2 * permits} at once.
  */
 class AdmissionControlledEmbedderTest {
 
@@ -70,29 +74,24 @@ class AdmissionControlledEmbedderTest {
 
     @Test
     void concurrentEmbeds_neverExceedConfiguredPermits() throws Exception {
-        // 2 permits, 5 concurrent callers. Every caller blocks inside embed()
-        // until released, so peak-observed concurrency is a direct proxy for
-        // "how many delegate.embed() calls were allowed to run at once".
+        // 2 permits, 5 concurrent callers, all non-interactive (document-path:
+        // blocking acquire). Every caller blocks inside embed() until released,
+        // so peak-observed concurrency is a direct proxy for "how many
+        // delegate.embed() calls were allowed to run at once".
         CountDownLatch release = new CountDownLatch(1);
         BlockingFakeEmbedder fake = new BlockingFakeEmbedder(release);
-        AdmissionControlledEmbedder gated = new AdmissionControlledEmbedder(fake, 2);
+        LocalOnnxAdmission admission = new LocalOnnxAdmission(2, 5000);
+        AdmissionControlledEmbedder gated = new AdmissionControlledEmbedder(fake, admission, false);
 
         int callers = 5;
         ExecutorService pool = Executors.newFixedThreadPool(callers);
         try {
-            List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+            List<Future<?>> futures = new java.util.ArrayList<>();
             for (int i = 0; i < callers; i++) {
                 futures.add(pool.submit(() -> gated.embed(List.of("x"))));
             }
-            // Give the two admitted workers time to actually enter embed() and
-            // register themselves before checking the ceiling never rises above it.
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-            while (fake.live.get() < 2 && System.nanoTime() < deadline) {
-                Thread.onSpinWait();
-            }
-            // Hold briefly so any THIRD admission (a bug) has a chance to show up
-            // in peak before we release.
-            Thread.sleep(200);
+            waitForLive(fake, 2);
+            Thread.sleep(200); // headroom for a bug to over-admit before we assert
             assertThat(fake.peak.get())
                     .as("peak concurrent delegate.embed() calls must never exceed the permit bound")
                     .isEqualTo(2);
@@ -109,9 +108,87 @@ class AdmissionControlledEmbedderTest {
     }
 
     @Test
-    void embed_delegatesResultAndModelToken() {
+    void twoRoutersOverOneSharedAdmission_combinedPeakEqualsOnePermitSet() throws Exception {
+        // Reproduces Main.java's actual production wiring: ONE delegate, ONE
+        // LocalOnnxAdmission, TWO AdmissionControlledEmbedder wrappers (doc:
+        // non-interactive, query: interactive), TWO EmbedderRouter instances.
+        // Concurrent traffic through BOTH routers must still respect a SINGLE
+        // combined permit ceiling.
+        CountDownLatch release = new CountDownLatch(1);
+        BlockingFakeEmbedder fake = new BlockingFakeEmbedder(release);
+        LocalOnnxAdmission admission = new LocalOnnxAdmission(3, 5000);
+
+        AdmissionControlledEmbedder docGated = new AdmissionControlledEmbedder(fake, admission, false);
+        AdmissionControlledEmbedder qryGated = new AdmissionControlledEmbedder(fake, admission, true);
+        EmbedderRouter docRouter = new EmbedderRouter(docGated, "document");
+        EmbedderRouter qryRouter = new EmbedderRouter(qryGated, "query");
+
+        int callersPerRouter = 4; // 8 total callers racing 3 combined permits
+        ExecutorService pool = Executors.newFixedThreadPool(callersPerRouter * 2);
+        try {
+            List<Future<?>> futures = new java.util.ArrayList<>();
+            for (int i = 0; i < callersPerRouter; i++) {
+                futures.add(pool.submit(() -> docRouter.embed(List.of("doc"))));
+                futures.add(pool.submit(() -> qryRouter.embed(List.of("qry"))));
+            }
+            waitForLive(fake, 3);
+            Thread.sleep(200);
+            assertThat(fake.peak.get())
+                    .as("combined peak across BOTH routers must equal the ONE shared permit set, "
+                            + "not permits-per-router")
+                    .isEqualTo(3);
+
+            release.countDown();
+            for (var f : futures) {
+                f.get(10, TimeUnit.SECONDS);
+            }
+            assertThat(fake.peak.get()).isEqualTo(3);
+            assertThat(fake.live.get()).isZero();
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void interactiveEmbed_admittedPromptlyWhenPermitFree() {
+        LocalOnnxAdmission admission = new LocalOnnxAdmission(2, 1000);
         AdmissionControlledEmbedder gated = new AdmissionControlledEmbedder(
-                new BlockingFakeEmbedder(new CountDownLatch(0)), 4);
+                new BlockingFakeEmbedder(new CountDownLatch(0)), admission, true);
+        assertThat(gated.embed(List.of("a", "b"))).hasSize(2);
+    }
+
+    @Test
+    void interactiveEmbed_failsLoudWithTypedRetryableSignal_whenAdmissionQueueFull() throws Exception {
+        // 1 permit, held by a blocked non-interactive caller for the whole test;
+        // the interactive caller must time out and fail loud rather than wait
+        // forever or silently degrade.
+        CountDownLatch release = new CountDownLatch(1);
+        BlockingFakeEmbedder fake = new BlockingFakeEmbedder(release);
+        LocalOnnxAdmission admission = new LocalOnnxAdmission(1, 150); // 150ms query timeout
+        AdmissionControlledEmbedder blockingGated = new AdmissionControlledEmbedder(fake, admission, false);
+        AdmissionControlledEmbedder interactiveGated = new AdmissionControlledEmbedder(fake, admission, true);
+
+        ExecutorService pool = Executors.newFixedThreadPool(1);
+        try {
+            Future<?> holder = pool.submit(() -> blockingGated.embed(List.of("holds the only permit")));
+            waitForLive(fake, 1);
+
+            assertThatThrownBy(() -> interactiveGated.embed(List.of("query text")))
+                    .isInstanceOf(RuntimeException.class)
+                    .hasRootCauseInstanceOf(SQLTransientConnectionException.class);
+
+            release.countDown();
+            holder.get(10, TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void embed_delegatesResultAndModelToken() {
+        LocalOnnxAdmission admission = new LocalOnnxAdmission(4, 1000);
+        AdmissionControlledEmbedder gated = new AdmissionControlledEmbedder(
+                new BlockingFakeEmbedder(new CountDownLatch(0)), admission, false);
         assertThat(gated.modelToken()).isEqualTo("fake-local");
         assertThat(gated.embed(List.of("a", "b"))).hasSize(2);
     }
@@ -119,51 +196,16 @@ class AdmissionControlledEmbedderTest {
     @Test
     void close_delegatesToWrappedEmbedder() {
         BlockingFakeEmbedder fake = new BlockingFakeEmbedder(new CountDownLatch(0));
-        AdmissionControlledEmbedder gated = new AdmissionControlledEmbedder(fake, 4);
+        AdmissionControlledEmbedder gated = new AdmissionControlledEmbedder(
+                fake, new LocalOnnxAdmission(4, 1000), false);
         gated.close();
         assertThat(fake.closeCount.get()).isEqualTo(1);
     }
 
-    @Test
-    void constructor_refusesNonPositivePermits() {
-        Embedder fake = new BlockingFakeEmbedder(new CountDownLatch(0));
-        assertThatThrownBy(() -> new AdmissionControlledEmbedder(fake, 0))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new AdmissionControlledEmbedder(fake, -1))
-                .isInstanceOf(IllegalArgumentException.class);
-    }
-
-    // ── permitsFromEnv resolver ─────────────────────────────────────────────
-
-    @Test
-    void permitsFromEnv_defaultsToHalfAvailableCores_minimumOne() {
-        assertThat(AdmissionControlledEmbedder.permitsFromEnv(name -> null, 16)).isEqualTo(8);
-        assertThat(AdmissionControlledEmbedder.permitsFromEnv(name -> null, 1)).isEqualTo(1);
-        assertThat(AdmissionControlledEmbedder.permitsFromEnv(name -> null, 3)).isEqualTo(1);
-    }
-
-    @Test
-    void permitsFromEnv_explicitOverrideWins() {
-        Map<String, String> env = Map.of(AdmissionControlledEmbedder.PERMITS_ENV, "5");
-        assertThat(AdmissionControlledEmbedder.permitsFromEnv(env::get, 16)).isEqualTo(5);
-    }
-
-    @Test
-    void permitsFromEnv_refusesZeroOrNegativeOverride() {
-        Map<String, String> zero = Map.of(AdmissionControlledEmbedder.PERMITS_ENV, "0");
-        assertThatThrownBy(() -> AdmissionControlledEmbedder.permitsFromEnv(zero::get, 16))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining(AdmissionControlledEmbedder.PERMITS_ENV);
-
-        Map<String, String> negative = Map.of(AdmissionControlledEmbedder.PERMITS_ENV, "-3");
-        assertThatThrownBy(() -> AdmissionControlledEmbedder.permitsFromEnv(negative::get, 16))
-                .isInstanceOf(IllegalArgumentException.class);
-    }
-
-    @Test
-    void permitsFromEnv_refusesNonNumericOverride() {
-        Map<String, String> junk = Map.of(AdmissionControlledEmbedder.PERMITS_ENV, "not-a-number");
-        assertThatThrownBy(() -> AdmissionControlledEmbedder.permitsFromEnv(junk::get, 16))
-                .isInstanceOf(IllegalArgumentException.class);
+    private static void waitForLive(BlockingFakeEmbedder fake, int target) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (fake.live.get() < target && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
     }
 }
