@@ -73,6 +73,7 @@ def _link(from_t: str, to_t: str, link_type: str) -> CatalogLink:
 class _FakeCatalog:
     entries: list[CatalogEntry]
     links: list[CatalogLink] = field(default_factory=list)
+    written: list = field(default_factory=list)
 
     def all_documents(self, content_type: str | None = None) -> list[CatalogEntry]:
         return [e for e in self.entries if content_type is None or e.content_type == content_type]
@@ -82,6 +83,14 @@ class _FakeCatalog:
 
     def links_from(self, tumbler: object, link_type: str = "", link_types: list[str] | None = None) -> list[CatalogLink]:
         return [l for l in self.links if str(l.from_tumbler) == str(tumbler) and (not link_type or l.link_type == link_type)]
+
+    def link_if_absent(self, from_t, to_t, link_type, created_by, **_):
+        key = (str(from_t), str(to_t), link_type)
+        if any((str(l.from_tumbler), str(l.to_tumbler), l.link_type) == key for l in self.links):
+            return False
+        self.links.append(_link(str(from_t), str(to_t), link_type))
+        self.written.append((key, created_by))
+        return True
 
     def links_to(self, tumbler: object, link_type: str = "", link_types: list[str] | None = None) -> list[CatalogLink]:
         return [l for l in self.links if str(l.to_tumbler) == str(tumbler) and (not link_type or l.link_type == link_type)]
@@ -533,3 +542,50 @@ def test_set_status_finds_a_zero_padded_t2_title(tmp_path, monkeypatch):
     _install(monkeypatch, tmp_path, _FakeCatalog(entries=[_entry(tmp_path, 14, 1)]), t2)
     assert _flip(tmp_path, 14, "closed").exit_code == 0
     assert t2.puts[0]["title"] == "014"
+
+
+# ---------------------------------------------------------------------------
+# Sam's ruling 2026-09-04 (nexus-y8bkt): the edge is part of the lifecycle
+# ---------------------------------------------------------------------------
+
+
+def _write_rdr_with_successor(rdr_dir: Path, num: int, status: str, successor: str) -> Path:
+    p = _write_rdr(rdr_dir, num, status)
+    text = p.read_text()
+    p.write_text(text.replace("---\n", f"---\nsuperseded_by: {successor}\n", 1) if text.startswith("---\n") else text)
+    return p
+
+
+def test_flip_to_superseded_writes_the_edge_the_walk_will_need(tmp_path, monkeypatch):
+    """Before this, the edge existed only if an index run had seeded it
+    from frontmatter; on the live tenant none had (2026-09-04, zero
+    extractor edges), so the marker walk had nothing to walk."""
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr_with_successor(rdr_dir, 159, "closed", "RDR-185")
+    _write_rdr(rdr_dir, 185, "closed")
+    cat = _FakeCatalog(entries=[_entry(tmp_path, 159, 1), _entry(tmp_path, 185, 2)])
+    project = _project(tmp_path)
+    t2 = _FakeT2Client({(project, "159"): {"content": "status: closed\n", "tags": "rdr"}})
+    _install(monkeypatch, tmp_path, cat, t2)
+
+    result = _flip(tmp_path, 159, "superseded")
+    assert result.exit_code == 0, result.output
+    assert cat.written == [(("1.7.2", "1.7.1", "supersedes"), "nx rdr set-status")]
+    assert "catalog edge ensured: RDR-185 supersedes RDR-159" in result.output
+    # idempotent: the next lifecycle action on this pair writes nothing new
+    assert cat.link_if_absent("1.7.2", "1.7.1", "supersedes", "again") is False
+
+
+def test_flip_to_superseded_with_an_unindexed_successor_says_so_and_still_flips(tmp_path, monkeypatch):
+    rdr_dir = _rdr_dir(tmp_path)
+    _write_rdr_with_successor(rdr_dir, 159, "closed", "RDR-185")
+    cat = _FakeCatalog(entries=[_entry(tmp_path, 159, 1)])
+    project = _project(tmp_path)
+    t2 = _FakeT2Client({(project, "159"): {"content": "status: closed\n", "tags": "rdr"}})
+    _install(monkeypatch, tmp_path, cat, t2)
+
+    result = _flip(tmp_path, 159, "superseded")
+    assert result.exit_code == 0, result.output
+    assert cat.written == []
+    assert "catalog edge not written: RDR-185 has no canonical catalog tumbler" in result.output
+    assert "status -> superseded" in result.output

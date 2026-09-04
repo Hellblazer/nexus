@@ -620,6 +620,42 @@ def _supersedes_neighbours(
     return numbers, unmapped, None
 
 
+#: created_by stamped on the edge set-status writes; the dependency
+#: generator's own edges say ``rdr_dependency_extractor``.
+_SET_STATUS_LINK_AUTHOR = "nx rdr set-status"
+
+
+def _ensure_supersedes_edge(
+    cat: object, repo_root: str, rdr_num: int, successor: str,
+) -> tuple[str | None, str | None]:
+    """Write the ``successor -> predecessor`` supersedes edge for a flip to
+    ``superseded`` (Sam's ruling 2026-09-04: the edge is part of the
+    lifecycle, not only of the next index run). Returns ``(edge text,
+    note)``: the text when the edge exists after this call (created or
+    already there), the note when it could not be written. Never raises;
+    the flip already stands."""
+    from nexus.catalog.link_generator import rdr_resolution  # noqa: PLC0415 — deferred import, see _default_catalog_reader
+
+    m = re.search(r"\d+", successor or "")
+    if not m:
+        return None, f"superseded_by {successor!r} names no RDR number; no edge written"
+    succ_num = int(m.group(0))
+    try:
+        owner, prefix = _rdr_repo_scope(cat, repo_root)
+        if owner is None:
+            return None, "no catalog owner registered for this repo (never indexed); no edge written"
+        resolved, number_index = rdr_resolution(cat, owner, repo_source_prefix=prefix)
+        tumblers = {n: resolved[k] for n, k in number_index.items() if resolved.get(k) is not None}
+        me, succ = tumblers.get(rdr_num), tumblers.get(succ_num)
+        if me is None or succ is None:
+            missing = [f"RDR-{n}" for n, t in ((rdr_num, me), (succ_num, succ)) if t is None]
+            return None, f"{', '.join(missing)} has no canonical catalog tumbler; no edge written"
+        cat.link_if_absent(succ, me, _MARKER_LINK_TYPE, _SET_STATUS_LINK_AUTHOR)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001 — report-only leg
+        return None, f"{type(exc).__name__}: {exc}"
+    return f"RDR-{succ_num} supersedes RDR-{rdr_num}", None
+
+
 def _t2_rdr_titles(number: int) -> tuple[str, ...]:
     """The title shapes a record's T2 entry is found under, in lookup
     order: bare (``"42"``), zero-padded (``"042"`` -- the early records,
@@ -1181,6 +1217,14 @@ def set_status(
             click.echo(f"updated T2 {repo_name}_rdr/{t2_title} status -> {new_status}")
         if t2_note:
             click.echo(t2_note, err=True)
+        if new_status == "superseded":
+            edge, edge_note = _ensure_supersedes_edge(
+                _catalog_reader_factory(), repo_root, int(flipped_num_match.group(0)), superseded_by,
+            )
+            if edge:
+                click.echo(f"catalog edge ensured: {edge}")
+            if edge_note:
+                click.echo(f"catalog edge not written: {edge_note}", err=True)
         marked, missing, notes = _mark_dependents_needs_reexamination(
             int(flipped_num_match.group(0)), current_status, new_status, repo_root, repo_name,
         )

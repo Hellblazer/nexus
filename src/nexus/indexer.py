@@ -1183,6 +1183,14 @@ def _catalog_hook(
         # nexus-xedhp: changed-but-existing docs, batched via update_many
         # (Pass 1b, below) instead of an inline per-file writer.update().
         changed_batch: list[tuple[Path, dict]] = []
+        # Sam's ruling 2026-09-04 (nexus-y8bkt): supersedes edges are part
+        # of indexing. Link generation below is incremental over NEW
+        # registrations, so an RDR whose frontmatter gained supersedes /
+        # superseded_by after it was first registered never got its edge
+        # (measured: zero extractor edges on a tenant with 189 RDRs). An
+        # existing RDR whose CONTENT hash changed is re-fed to the
+        # dependency generator as if new; head-hash-only bumps are not.
+        relink_rdr_tumblers: list = []
         for abs_path, content_type, collection_name in indexed_files:
             if _batch_producer and await_fair_window(
                 writer.is_interactive_write_pending, on_locked,
@@ -1336,6 +1344,12 @@ def _catalog_hook(
                             and existing.meta.get("content_hash", "") != file_hash
                         )
                     )
+                    if (
+                        content_type == "rdr"
+                        and file_hash
+                        and existing.meta.get("content_hash", "") != file_hash
+                    ):
+                        relink_rdr_tumblers.append(existing.tumbler)
                     if changed:
                         # nexus-xedhp: accumulate for the batched update_many
                         # below instead of an inline per-file writer.update()
@@ -1602,16 +1616,21 @@ def _catalog_hook(
             else:
                 _log.debug("rdr_dependency_links_skipped_no_owner", repo=repo_name)
             for _kind, _gen in _generators:
+                _seed_tumblers = new_tumblers
+                _seed_types = new_content_types
+                if _kind == "rdr-dependency" and relink_rdr_tumblers:
+                    _seed_tumblers = [*new_tumblers, *relink_rdr_tumblers]
+                    _seed_types = {*new_content_types, "rdr"}
                 _announce = on_phase is not None and incremental_generator_applies(
-                    _kind, new_tumblers, new_content_types,
+                    _kind, _seed_tumblers, _seed_types,
                 )
                 if _announce:
                     on_phase(f"Catalog linking: {_kind}…")
                 _lg_t = time.monotonic()
                 try:
                     _link_counts[_kind] = _gen(
-                        cat, writer=writer, new_tumblers=new_tumblers,
-                        new_content_types=new_content_types,
+                        cat, writer=writer, new_tumblers=_seed_tumblers,
+                        new_content_types=_seed_types,
                     )
                 except Exception:
                     # Close the phase before the outer handler logs and
