@@ -9,7 +9,6 @@ import pytest
 from click.testing import CliRunner
 
 import nexus.commands.rdr as rdr_mod
-from nexus.operators.model_tiers import resolve_model_for_tier
 from nexus.commands.rdr import rdr as rdr_cli
 from nexus.rdr_repeat import (
     PLAN_SCHEMA,
@@ -172,7 +171,7 @@ def _install_fake_dispatch(monkeypatch: pytest.MonkeyPatch, by_model: dict[str, 
 
 def test_repeat_dispatches_both_tiers_and_prints_the_diff(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "rdr-999-example.md").write_text(RDR_TEXT)
-    cheap, strong = resolve_model_for_tier("cheap"), resolve_model_for_tier("strong")
+    cheap, strong = "haiku", "sonnet"
     calls = _install_fake_dispatch(
         monkeypatch,
         {
@@ -193,11 +192,11 @@ def test_repeat_json_output(tmp_path: Path, monkeypatch) -> None:
     same = {"steps": [{"title": "Add checker", "files": ["a.py"], "decisions": []}]}
     _install_fake_dispatch(
         monkeypatch,
-        {resolve_model_for_tier("cheap"): same, resolve_model_for_tier("strong"): same},
+        {"haiku": same, "sonnet": same},
     )
     res = CliRunner().invoke(rdr_cli, ["repeat", str(f), "--json"])
     assert res.exit_code == 0, res.output
-    doc = json.loads(res.output)
+    doc = json.loads(res.stdout)
     assert doc["rdr"] == "rdr-999-example" and doc["divergence"]["count"] == 0
     assert len(doc["plans"]) == 2
 
@@ -224,11 +223,11 @@ def test_repeat_reports_a_dispatch_failure_without_a_traceback(tmp_path: Path, m
     assert "Traceback" not in res.output
 
 
-def test_repeat_refuses_two_tiers_that_are_one_model(tmp_path: Path, monkeypatch) -> None:
+def test_repeat_refuses_two_models_that_are_one(tmp_path: Path, monkeypatch) -> None:
     """Per-commit reviewer FILE finding on 4b65a7ffa: one model twice is a
     self-diff, not a repeatability check."""
     f = tmp_path / "rdr-999-example.md"
     f.write_text(RDR_TEXT)
     calls = _install_fake_dispatch(monkeypatch, {})
-    res = CliRunner().invoke(rdr_cli, ["repeat", str(f), "--tiers", "cheap,cheap"])
+    res = CliRunner().invoke(rdr_cli, ["repeat", str(f), "--models", "haiku,haiku"])
     assert res.exit_code == 2 and "two readers" in res.output and calls == []
