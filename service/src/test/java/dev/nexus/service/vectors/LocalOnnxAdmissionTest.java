@@ -58,13 +58,29 @@ class LocalOnnxAdmissionTest {
     // ── queryTimeoutMsFromEnv ────────────────────────────────────────────
 
     @Test
-    void queryTimeoutMsFromEnv_defaultsToTheSuppliedSearchStatementTimeout() {
+    void queryTimeoutMsFromEnv_defaultsToOneThirdOfTheSearchStatementTimeout() {
+        // Review round 3: the admission wait precedes PgSession's
+        // statement-timeout GUC on the later PG statement, so the two
+        // windows are additive, not shared — defaulting to the FULL
+        // search-statement-timeout (round 2's default) let a contended
+        // search take ~2x the intended SLA. One third keeps
+        // admission + embed + PG-statement within roughly the old envelope.
         assertThat(LocalOnnxAdmission.queryTimeoutMsFromEnv(name -> null, 30_000L))
-                .isEqualTo(30_000L);
+                .isEqualTo(10_000L);
+        assertThat(LocalOnnxAdmission.queryTimeoutMsFromEnv(name -> null, 9_000L))
+                .isEqualTo(3_000L);
     }
 
     @Test
-    void queryTimeoutMsFromEnv_explicitOverrideWins() {
+    void queryTimeoutMsFromEnv_defaultNeverGoesToZero_forATinySearchStatementTimeout() {
+        // searchStatementTimeoutMs=2 -> 2/3=0 by integer division; the
+        // Math.max(1, ...) floor keeps the derived default positive so the
+        // constructor's own positivity check never rejects it.
+        assertThat(LocalOnnxAdmission.queryTimeoutMsFromEnv(name -> null, 2L)).isEqualTo(1L);
+    }
+
+    @Test
+    void queryTimeoutMsFromEnv_explicitOverrideWins_andIsNotDivided() {
         Map<String, String> env = Map.of(LocalOnnxAdmission.QUERY_TIMEOUT_ENV, "5000");
         assertThat(LocalOnnxAdmission.queryTimeoutMsFromEnv(env::get, 30_000L)).isEqualTo(5000L);
     }
@@ -140,5 +156,22 @@ class LocalOnnxAdmissionTest {
         RuntimeException e = LocalOnnxAdmission.admissionTimeoutException("interactive embed", 250);
         assertThat(e.getCause()).isInstanceOf(SQLTransientConnectionException.class);
         assertThat(e.getMessage()).contains("interactive embed").contains("250");
+    }
+
+    // ── real entry points ────────────────────────────────────────────────
+
+    @Test
+    void fromEnv_realEntryPoint_constructsAValidInstance() {
+        // No overrides in the test process env: exercises the real
+        // permits/query-timeout derivation (including the 1/3-of-search-
+        // statement-timeout default) end to end.
+        LocalOnnxAdmission admission = LocalOnnxAdmission.fromEnv();
+        assertThat(admission.permits()).isPositive();
+        assertThat(admission.queryTimeoutMs()).isPositive();
+    }
+
+    @Test
+    void queryTimeoutMsFromEnv_realEntryPoint_returnsPositiveValue() {
+        assertThat(LocalOnnxAdmission.queryTimeoutMsFromEnv()).isPositive();
     }
 }

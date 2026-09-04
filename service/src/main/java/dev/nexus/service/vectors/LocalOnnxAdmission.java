@@ -62,11 +62,34 @@ import java.util.function.Function;
  *       waits forever.</li>
  * </ul>
  *
+ * <p><b>The admission wait and the PG statement timeout are ADDITIVE, not
+ * shared (review round 3 finding).</b> {@link #tryAcquire(long)} runs
+ * BEFORE the caller ever reaches {@code PgSession.setSearchStatementTimeout}
+ * on the subsequent PG statement — the two budgets stack (admission wait +
+ * embed time + PG statement time), they do not bound the same window. Round
+ * 2 defaulted the query-admission timeout to the FULL search-statement-
+ * timeout value, which meant a contended search could take up to roughly
+ * 2x the intended SLA before the client's own retry logic even started.
+ * {@link #queryTimeoutMsFromEnv()} now defaults to ONE THIRD of the search-
+ * statement-timeout budget instead, so admission-wait + embed + PG-statement
+ * stays within roughly the OLD single-budget envelope rather than doubling
+ * it. {@code NX_QUERY_EMBED_ADMISSION_TIMEOUT_MS} still overrides this
+ * directly when an operator wants a different split.
+ *
  * <p><b>Unmeasured (critic finding 3).</b> Neither this class nor its
  * callers assert or claim a specific query-path latency number from the
  * admission bound or the paired {@link OnnxThreadPolicy} intra-op cap — the
  * effect is real by construction (bounded concurrency vs. none) but has not
  * been benchmarked end-to-end.
+ *
+ * <p><b>Follow-up, not implemented here (review round 3).</b> A tighter fix
+ * for the additive-budget problem than a smaller shared timeout would be a
+ * permits-conditional interactive reservation (dedicate one permit
+ * exclusively to interactive callers whenever {@code permits > 1}, so a
+ * query never queues behind bulk indexing at all) or priority preemption
+ * (an interactive waiter jumps ahead of already-queued non-interactive
+ * waiters); this round scopes to fixing the double-budget default, not
+ * eliminating admission contention between the two caller classes.
  */
 public final class LocalOnnxAdmission {
 
@@ -82,11 +105,23 @@ public final class LocalOnnxAdmission {
     private final long     queryTimeoutMs;
     private final Semaphore inFlight;
 
-    /** Production factory: permits and query timeout resolved from real env/cores. */
+    /**
+     * Production factory: permits and query timeout resolved from real
+     * env/cores. Logs ONE combined boot line naming both the derived
+     * timeout AND the search-statement-timeout it was derived from, so the
+     * additive-not-shared relationship documented in the class javadoc is
+     * inspectable at boot, not just in a source comment.
+     */
     public static LocalOnnxAdmission fromEnv() {
-        return new LocalOnnxAdmission(
-                permitsFromEnv(),
-                queryTimeoutMsFromEnv());
+        long searchStatementTimeoutMs =
+                dev.nexus.service.db.PgSession.startupSearchStatementTimeoutMs();
+        int  permits        = permitsFromEnv();
+        long queryTimeoutMs = queryTimeoutMsFromEnv(System::getenv, searchStatementTimeoutMs);
+        log.info("event=local_onnx_admission_configured permits={} query_timeout_ms={} "
+                + "search_statement_timeout_ms={} "
+                + "note=admission_wait_precedes_pg_statement_timeout_budgets_are_additive",
+                permits, queryTimeoutMs, searchStatementTimeoutMs);
+        return new LocalOnnxAdmission(permits, queryTimeoutMs);
     }
 
     /**
@@ -107,8 +142,11 @@ public final class LocalOnnxAdmission {
         // Fair: a burst of concurrent local-embed requests cannot starve an
         // earlier arrival — same fairness choice as TenantScope.ADMISSION.
         this.inFlight = new Semaphore(permits, true);
-        log.info("event=local_onnx_admission_configured permits={} query_timeout_ms={}",
-                permits, queryTimeoutMs);
+        // Boot-time visibility lives in fromEnv() (the one production call
+        // site), which also logs the search-statement-timeout this
+        // constructor's queryTimeoutMs was derived from — logging again
+        // here would duplicate that line for every fromEnv() call and add
+        // noise to the many direct-construction tests in this package.
     }
 
     /** The configured concurrent-local-ONNX-call ceiling. */
@@ -199,25 +237,38 @@ public final class LocalOnnxAdmission {
 
     // ── query-embed admission timeout resolver ──────────────────────────
 
-    /** Production entry point: real env, default sourced from the search statement timeout. */
+    /** Production entry point: real env, default derived from the search statement timeout. */
     static long queryTimeoutMsFromEnv() {
         return queryTimeoutMsFromEnv(
                 System::getenv, dev.nexus.service.db.PgSession.startupSearchStatementTimeoutMs());
     }
 
     /**
-     * Env-injectable resolver. Default = the search statement-timeout budget
-     * (review finding 3's explicit sizing instruction) — an UPPER-BOUND
-     * proxy, not a guarantee of remaining request budget: it does not
-     * account for time already spent elsewhere in the request before the
-     * embed call runs. {@code NX_QUERY_EMBED_ADMISSION_TIMEOUT_MS} overrides
-     * it; a non-positive or non-numeric override is REFUSED loudly, same
-     * discipline as {@link #permitsFromEnv}.
+     * Env-injectable resolver.
+     *
+     * <p>Default = ONE THIRD of {@code searchStatementTimeoutMs} (review
+     * round 3 — see the class javadoc's "additive, not shared" section).
+     * Round 2 defaulted this to the FULL search-statement-timeout value,
+     * reasoning it should be "sized to the search statement-timeout
+     * budget" — true in spirit, wrong in arithmetic: the admission wait
+     * happens BEFORE {@code PgSession.setSearchStatementTimeout} is ever
+     * applied to the later PG statement, so the two windows stack instead
+     * of sharing a budget, and a full-budget default let a contended
+     * search take up to ~2x the intended SLA before the client's retry
+     * even started. Dividing by three keeps
+     * {@code admission-wait + embed + PG-statement} within roughly the OLD
+     * single-budget envelope. Still an UPPER-BOUND proxy either way, not a
+     * guarantee of remaining request budget: neither this default nor an
+     * override accounts for time already spent elsewhere in the request
+     * before the embed call runs. {@code
+     * NX_QUERY_EMBED_ADMISSION_TIMEOUT_MS} overrides the derived default
+     * outright; a non-positive or non-numeric override is REFUSED loudly,
+     * same discipline as {@link #permitsFromEnv}.
      */
-    static long queryTimeoutMsFromEnv(Function<String, String> env, long defaultMs) {
+    static long queryTimeoutMsFromEnv(Function<String, String> env, long searchStatementTimeoutMs) {
         String raw = env.apply(QUERY_TIMEOUT_ENV);
         if (raw == null || raw.isBlank()) {
-            return defaultMs;
+            return Math.max(1, searchStatementTimeoutMs / 3);
         }
         long parsed;
         try {
