@@ -6,8 +6,46 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.30.0] - 2026-09-04
+
+Engine identity unchanged: `engine-service-v0.1.100`.
+
 ### Fixed
 
+- Local mode no longer embeds client-side when the engine embeds
+  (nexus-b7s8t). `nx index repo` and `nx index rdr` ran the bge ONNX model
+  on every chunk while the service-backed vector client discarded the
+  vectors and the engine embedded again. On one engine, in a 600 s window
+  on the same repo, the 7.29.1 client landed 38 files at 894% CPU and
+  8.2 GB resident; this client lands 336 files at 100% CPU and 305 MB.
+- `nx` commands no longer load onnxruntime they never use (nexus-ct17r).
+  `nexus.pdf_extractor` imported MinerU at module scope, which pulled in
+  magika and onnxruntime on every `nx store put`; ORT's telemetry then
+  raced interpreter teardown ("recursive_mutex lock failed", Abort trap 6).
+  MinerU is resolved on the first PDF extraction, and the fastembed probe
+  no longer imports it.
+- The `av` exclusion reaches user installs (nexus-heykz). uv reads
+  `[tool.uv] override-dependencies` from the invoking project, never from
+  the wheel, so every user install carried PyAV and its ffmpeg-62 dylibs
+  beside opencv's ffmpeg-61. The overrides file now ships in the wheel and
+  `nx self install` hands it to uv; the fresh-install probe asserts av is
+  absent. A bare `uv tool install conexus` still carries av until
+  `nx self install` moves the box onto the generation layout (README).
+- Git bundles and data containers are never indexed as prose
+  (nexus-b9m7a). A `.bundle` whose first 13 KB is a text ref list passed
+  the 8 KB binary sniff, registered a catalog document on every run,
+  produced no chunk and was re-stamped by every HEAD change, which doctor
+  reported as an unfenced producer. The sniff reads 64 KB, and `.bundle`,
+  `.pack`, `.idx`, `.npz`, `.npy`, `.parquet`, `.pkl`, `.pickle`, `.onnx`
+  and `.safetensors` are skipped by extension.
+- MinerU per-page workers no longer leave orphans (nexus-5ny9r). The
+  worker's multiprocessing pool child and resource tracker survived every
+  page reparented to init (324 on one box after a 38-page run) because the
+  post-exit sweep resolved the group from an already-reaped pid. The sweep
+  now uses the session id recorded at spawn. A cached "no live MinerU
+  server" verdict expires after 60 s with one health probe, so a server
+  started mid-run is picked up instead of every remaining page paying the
+  subprocess cost; a version-skew verdict never rechecks.
 - `nx census reviews` reports the current repo's post-commit hook state
   (armed, stale, not installed, unmanaged) first, using the same comparison
   `nx doctor` makes and honouring `core.hooksPath`, instead of asking whether
@@ -20,6 +58,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   #1402 is pinned to its refusing cell, and the inversion incident's failure
   class is asserted while the incident itself is stated as outside the
   table's inputs.
+
+### Changed
+
+- Dependencies (nexus-jpsn1): `python-pptx`, `opencv-python-headless` and
+  `uuid7-standard` are dropped (nothing imported them); `docling` is
+  declared as `docling-slim[convert-core,format-pdf,models-local]` at the
+  same locked 2.125.0 (the meta-package's `standard` extra added rapidocr,
+  faker and polyfactory that nexus never used); `uvicorn` loses its
+  `[standard]` extra (nx-mcp is stdio-only, and watchfiles cost 115 ms on
+  every MCP spawn). 22 distributions leave the lock. A dev venv that
+  carried python-pptx beside MinerU's pypptx-with-oxml (both own `pptx/`)
+  needs one `uv sync --reinstall-package pypptx-with-oxml`.
+- Release gates time their index runs (nexus-98zsp). The sandbox shakedown
+  and the shakeout compare seconds per chunk against a committed
+  per-corpus, per-box-class baseline at a 2x ceiling and print the
+  engine's ONNX thread and admission lines beside the number; a missing
+  baseline is recorded and reported, never a pass. v0.1.99's 8x embed
+  slowdown had passed every gate because none read a clock.
+- The test substrate provisions its PG bundle once per box under xdist
+  (nexus-9rnfr), serialised with a lock beside the per-tag cache, and
+  retries a sigstore TUF-refresh failure under it.
 
 ## [7.29.1] - 2026-09-04
 
