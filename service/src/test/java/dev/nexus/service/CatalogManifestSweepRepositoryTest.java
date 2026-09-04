@@ -204,7 +204,7 @@ class CatalogManifestSweepRepositoryTest {
             "embedding_model", "minilm-l6-v2-384", "model_version", "v1"));
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("SET nexus.tenant = '" + tenant + "'");
+            PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             // RDR-191 (nexus-o8dil.48): chunks_384 unified into nexus.chunks
             // (vectors-004-unify-chunks.xml) -- embedding_384 replaces the bare
@@ -542,17 +542,13 @@ class CatalogManifestSweepRepositoryTest {
 
             // Writer B: take the gate SHARED exactly as writeManifestRows
             // now does, and hold it open (uncommitted).
-            try (var stB = connB.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
-                stB.execute();
-            }
+            PgContainerHelper.setTenant(connB, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             acquireGateShared(connB, TENANT_A, col1);
 
             // Sweeper A: short lock_timeout, attempt the EXCLUSIVE gate —
             // must be refused (55P03) while B holds SHARED, BEFORE any
             // DELETE statement runs at all.
-            try (var stA = connA.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
-                stA.execute();
-            }
+            PgContainerHelper.setTenant(connA, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             assertThatThrownBy(() -> acquireGateExclusive(connA, TENANT_A, col1, 1000))
                 .as("A's exclusive acquire must be refused, not silently granted, while B holds SHARED")
                 .isInstanceOf(SQLException.class)
@@ -598,9 +594,7 @@ class CatalogManifestSweepRepositoryTest {
             connA.setAutoCommit(false);
             connB.setAutoCommit(false);
 
-            try (var stB = connB.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
-                stB.execute();
-            }
+            PgContainerHelper.setTenant(connB, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             acquireGateShared(connB, TENANT_A, col2);
             try (var psB = connB.prepareStatement(
                     "INSERT INTO nexus.catalog_document_chunks "
@@ -614,9 +608,7 @@ class CatalogManifestSweepRepositoryTest {
             }
             connB.commit();   // B fully committed before A even starts.
 
-            try (var stA = connA.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
-                stA.execute();
-            }
+            PgContainerHelper.setTenant(connA, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             acquireGateExclusive(connA, TENANT_A, col2, 2000);
             int deletedByA;
             try (var psA = connA.prepareStatement(SWEEP_GUARD_DELETE_SQL)) {
@@ -761,9 +753,7 @@ class CatalogManifestSweepRepositoryTest {
 
         try (Connection external = dsConnection()) {
             external.setAutoCommit(false);
-            try (var st = external.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
-                st.execute();
-            }
+            PgContainerHelper.setTenant(external, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             acquireGateShared(external, TENANT_A, col);
 
             // Replace with a manifest that drops x, sweep=true. The sweeper's
@@ -831,9 +821,7 @@ class CatalogManifestSweepRepositoryTest {
     private void assertWriterBlocksOnExternalExclusiveGate(String collection, Runnable writerCall) throws Exception {
         try (Connection external = dsConnection()) {
             external.setAutoCommit(false);
-            try (var st = external.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
-                st.execute();
-            }
+            PgContainerHelper.setTenant(external, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             // Generous lock_timeout on the EXTERNAL holder's own acquire —
             // it is uncontended, so this returns immediately; it only bounds
             // this helper's own acquisition, never the writer's (writers take

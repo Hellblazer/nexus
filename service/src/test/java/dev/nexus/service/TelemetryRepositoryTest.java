@@ -226,8 +226,7 @@ class TelemetryRepositoryTest {
 
         // Verify via raw query
         try (Connection conn = pg.createConnection("")) {
-            conn.createStatement().execute(
-                "SET nexus.tenant = '" + TENANT_A + "'");
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             var rs = conn.createStatement().executeQuery(
                 "SELECT ts FROM nexus.tier_writes WHERE session_id='sess-tier-fid' AND tool='memory_put'");
             assertThat(rs.next()).as("tier_writes row must exist").isTrue();
@@ -256,7 +255,7 @@ class TelemetryRepositoryTest {
             3, "It is the storage migration RDR.", 0.003, 1500, PAST_TS);
 
         try (Connection conn = pg.createConnection("")) {
-            conn.createStatement().execute("SET nexus.tenant = '" + TENANT_A + "'");
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             var rs = conn.createStatement().executeQuery(
                 "SELECT created_at FROM nexus.nx_answer_runs WHERE question='What is the meaning of RDR-152?'");
             assertThat(rs.next()).as("nx_answer_runs row must exist").isTrue();
@@ -287,7 +286,7 @@ class TelemetryRepositoryTest {
             "sess-tier-live", PAST_TS, "store_put", "T3", "developer", "proj-live", "doc.md");
 
         try (Connection conn = pg.createConnection("")) {
-            conn.createStatement().execute("SET nexus.tenant = '" + TENANT_A + "'");
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             var rs = conn.createStatement().executeQuery(
                 "SELECT tier, tool FROM nexus.tier_writes "
                 + "WHERE session_id='sess-tier-live' AND tool='store_put'");
@@ -444,7 +443,7 @@ class TelemetryRepositoryTest {
             2, "live answer text", 0.002, 900, PAST_TS);
 
         try (Connection conn = pg.createConnection("")) {
-            conn.createStatement().execute("SET nexus.tenant = '" + TENANT_A + "'");
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             var rs = conn.createStatement().executeQuery(
                 "SELECT step_count, final_text FROM nexus.nx_answer_runs "
                 + "WHERE question='live record question?'");
@@ -471,7 +470,7 @@ class TelemetryRepositoryTest {
             "ChromaDB timeout", PAST_TS, null, false, "single");
 
         try (Connection conn = pg.createConnection("")) {
-            conn.createStatement().execute("SET nexus.tenant = '" + TENANT_A + "'");
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             var rs = conn.createStatement().executeQuery(
                 "SELECT occurred_at FROM nexus.hook_failures WHERE doc_id='doc-hook-001'");
             assertThat(rs.next()).as("hook_failures row must exist").isTrue();
@@ -502,7 +501,7 @@ class TelemetryRepositoryTest {
 
         assertThat(deleted).as("trim must delete exactly the two aged rows").isEqualTo(2);
         try (Connection conn = pg.createConnection("")) {
-            conn.createStatement().execute("SET nexus.tenant = '" + tenant + "'");
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
             var rs = conn.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.hook_failures WHERE tenant_id='" + tenant + "'");
             rs.next();
@@ -731,7 +730,7 @@ class TelemetryRepositoryTest {
             "2025-01-01T00:00:00Z", 30, 0.5, 1, "2025-01-01T00:00:00Z");
 
         try (Connection conn = pg.createConnection("")) {
-            conn.createStatement().execute("SET nexus.tenant = '" + TENANT_A + "'");
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             var rs = conn.createStatement().executeQuery(
                 "SELECT embedded_at FROM nexus.frecency WHERE chunk_id='3115d480cb3cef4722d35d5608cf43e4ae6dae56c3eedafccbb1efa83dec6efb'");
             assertThat(rs.next()).isTrue();
@@ -920,7 +919,7 @@ class TelemetryRepositoryTest {
             null);  // target_title — must stay NULL
 
         try (Connection conn = pg.createConnection("")) {
-            conn.createStatement().execute("SET nexus.tenant = '" + TENANT_A + "'");
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             var rs = conn.createStatement().executeQuery(
                 "SELECT agent, project, target_title " +
                 "FROM nexus.tier_writes " +
@@ -1104,8 +1103,7 @@ class TelemetryRepositoryTest {
         assertThatThrownBy(() -> {
             try (Connection conn = svcDs.getConnection()) {
                 conn.setAutoCommit(true);
-                conn.createStatement().execute(
-                    "SET nexus.tenant = '" + TENANT_A + "'");
+                PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
                 // Attempt to insert with a different tenant_id — RLS WITH CHECK must reject
                 conn.createStatement().execute(
                     "INSERT INTO nexus.relevance_log " +
@@ -1930,7 +1928,7 @@ class TelemetryRepositoryTest {
 
     private long fetchNxAnswerRunId(String tenant, String question) {
         try (Connection conn = pg.createConnection("")) {
-            conn.createStatement().execute("SET nexus.tenant = '" + tenant + "'");
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
             var rs = conn.createStatement().executeQuery(
                 "SELECT id FROM nexus.nx_answer_runs WHERE tenant_id='" + tenant
                 + "' AND question='" + question + "'");
@@ -1943,7 +1941,7 @@ class TelemetryRepositoryTest {
 
     private boolean nxAnswerRunExists(String tenant, String question) {
         try (Connection conn = pg.createConnection("")) {
-            conn.createStatement().execute("SET nexus.tenant = '" + tenant + "'");
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
             var rs = conn.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.nx_answer_runs WHERE tenant_id='" + tenant
                 + "' AND question='" + question + "'");
@@ -1998,10 +1996,7 @@ class TelemetryRepositoryTest {
     private long countNxAnswerStepsForRunUnderTenantGuc(long runId, String tenantGuc) {
         try (Connection conn = svcDs.getConnection()) {
             conn.setAutoCommit(false);
-            try (var ps = conn.prepareStatement("SELECT set_config('nexus.tenant', ?, true)")) {
-                ps.setString(1, tenantGuc);
-                ps.execute();
-            }
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenantGuc, true);
             long count;
             try (var ps = conn.prepareStatement(
                     "SELECT COUNT(*) FROM nexus.nx_answer_steps WHERE run_id = ?")) {
@@ -2019,7 +2014,7 @@ class TelemetryRepositoryTest {
 
     private int countSearchTelemetryRows(String tenant) {
         try (Connection conn = pg.createConnection("")) {
-            conn.createStatement().execute("SET nexus.tenant = '" + tenant + "'");
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
             var rs = conn.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.search_telemetry WHERE tenant_id='" + tenant + "'");
             rs.next();
@@ -2031,7 +2026,7 @@ class TelemetryRepositoryTest {
 
     private int countHookFailuresRows(String tenant) {
         try (Connection conn = pg.createConnection("")) {
-            conn.createStatement().execute("SET nexus.tenant = '" + tenant + "'");
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
             var rs = conn.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.hook_failures WHERE tenant_id='" + tenant + "'");
             rs.next();

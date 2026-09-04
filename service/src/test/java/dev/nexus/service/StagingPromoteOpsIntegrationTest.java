@@ -613,9 +613,7 @@ class StagingPromoteOpsIntegrationTest {
 
         try (Connection external = dsConnection()) {
             external.setAutoCommit(false);
-            try (var st = external.prepareStatement("SET nexus.tenant = '" + T1 + "'")) {
-                st.execute();
-            }
+            PgContainerHelper.setTenant(external, TenantScope.DEFAULT_TENANT_GUC, T1, false);
             // Generous lock_timeout on the EXTERNAL holder's own acquire --
             // it is uncontended, so this returns immediately; it never bounds
             // finalizeTenant's own wait (finalizeTenant takes the gate SHARED
@@ -670,9 +668,7 @@ class StagingPromoteOpsIntegrationTest {
 
         try (Connection external = dsConnection()) {
             external.setAutoCommit(false);
-            try (var st = external.prepareStatement("SET nexus.tenant = '" + T1 + "'")) {
-                st.execute();
-            }
+            PgContainerHelper.setTenant(external, TenantScope.DEFAULT_TENANT_GUC, T1, false);
             acquireGateExclusive(external, T1, COLL_GATE2, 60_000);
 
             ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -719,9 +715,7 @@ class StagingPromoteOpsIntegrationTest {
             // Connection A: exactly what promoteCollection's fixed content-
             // insert step now does -- take the gate SHARED, then land the row
             // -- held UNCOMMITTED.
-            try (var st = connA.prepareStatement("SET nexus.tenant = '" + T1 + "'")) {
-                st.execute();
-            }
+            PgContainerHelper.setTenant(connA, TenantScope.DEFAULT_TENANT_GUC, T1, false);
             acquireGateShared(connA, T1, col);
             try (var st = connA.prepareStatement(
                     "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
@@ -744,9 +738,7 @@ class StagingPromoteOpsIntegrationTest {
             // Connection B: an unrelated document's ordinary sweep for the SAME
             // collection -- short lock_timeout, must be refused while A holds
             // SHARED, so its guarded DELETE never even runs.
-            try (var st = connB.prepareStatement("SET nexus.tenant = '" + T1 + "'")) {
-                st.execute();
-            }
+            PgContainerHelper.setTenant(connB, TenantScope.DEFAULT_TENANT_GUC, T1, false);
             assertThatThrownBy(() -> acquireGateExclusive(connB, T1, col, 1000))
                 .as("a concurrent unrelated document's sweep must be refused the gate while "
                     + "promoteCollection's content-insert transaction holds it SHARED")
@@ -804,9 +796,7 @@ class StagingPromoteOpsIntegrationTest {
         // this call would NOT block.
         try (Connection external = dsConnection()) {
             external.setAutoCommit(false);
-            try (var st = external.prepareStatement("SET nexus.tenant = '" + T1 + "'")) {
-                st.execute();
-            }
+            PgContainerHelper.setTenant(external, TenantScope.DEFAULT_TENANT_GUC, T1, false);
             acquireGateExclusive(external, T1, colB, 60_000);
 
             ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -1538,9 +1528,7 @@ class StagingPromoteOpsIntegrationTest {
         long topicId;
         try (Connection conn = dsConnection()) {
             conn.setAutoCommit(true);
-            try (var st = conn.prepareStatement("SET nexus.tenant = '" + T_REJECT + "'")) {
-                st.execute();
-            }
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, T_REJECT, false);
             try (var st = conn.prepareStatement(
                     "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?) "
                     + "ON CONFLICT DO NOTHING")) {

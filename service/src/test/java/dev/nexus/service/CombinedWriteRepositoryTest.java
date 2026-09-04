@@ -154,7 +154,7 @@ class CombinedWriteRepositoryTest {
             "embedding_model", "minilm-l6-v2-384", "model_version", "v1"));
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("SET nexus.tenant = '" + tenant + "'");
+            PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
             String zeroVec = "[" + "0,".repeat(383) + "0]";
             var ps = su.prepareStatement(
                 "INSERT INTO " + DimTables.CHUNKS_TABLE_NAME + " (tenant_id, collection, chash, chunk_text, " + DimTables.embeddingColumn(384) + ")"
@@ -212,9 +212,7 @@ class CombinedWriteRepositoryTest {
 
         try (Connection external = dsConnection()) {
             external.setAutoCommit(false);
-            try (var st = external.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
-                st.execute();
-            }
+            PgContainerHelper.setTenant(external, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             acquireGateExclusive(external, TENANT_A, col, 60_000);
 
             ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -455,9 +453,7 @@ class CombinedWriteRepositoryTest {
 
         try (Connection external = dsConnection()) {
             external.setAutoCommit(false);
-            try (var st = external.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
-                st.execute();
-            }
+            PgContainerHelper.setTenant(external, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             // Hold EXCLUSIVE on B (writtenInto), NOT A -- if the engine only
             // ever gates on the doc's OWN collection (A), this acquire has no
             // effect on the combined write at all and it proceeds unblocked,
@@ -507,9 +503,7 @@ class CombinedWriteRepositoryTest {
 
         try (Connection external = dsConnection()) {
             external.setAutoCommit(false);
-            try (var st = external.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
-                st.execute();
-            }
+            PgContainerHelper.setTenant(external, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             acquireGateExclusive(external, TENANT_A, col, 60_000);
 
             ExecutorService executor = Executors.newSingleThreadExecutor();

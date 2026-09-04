@@ -2048,7 +2048,7 @@ class CatalogRepositoryTest {
         // Connect as svc role, set GUC = TENANT_A, try to insert row with tenant_id = TENANT_B
         try (Connection conn = svcDs.getConnection()) {
             conn.setAutoCommit(false);
-            conn.createStatement().execute("SET LOCAL nexus.tenant = '" + TENANT_A + "'");
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
             var ex = assertThrows(PSQLException.class, () ->
                 conn.createStatement().execute(
                     "INSERT INTO nexus.catalog_documents " +
@@ -3230,9 +3230,7 @@ class CatalogRepositoryTest {
         //    The embedding column is vector(768): we cast a text literal.
         try (var su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute(
-                "SET nexus.tenant = '" + SPAN_TENANT + "'"
-            );
+            PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, SPAN_TENANT, false);
             // Build a zero-vector literal: '[0,0,...,0]' with 768 zeros.
             String zeroVec = "[" + "0,".repeat(767) + "0]";
             // RDR-191 (nexus-o8dil.48): chunks_768 unified into nexus.chunks --

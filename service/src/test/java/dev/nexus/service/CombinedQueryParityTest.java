@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -766,8 +767,7 @@ class CombinedQueryParityTest {
         }
         // svc + GUC=A: cannot see tenant-B's collection at all.
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             assertThat(callMeta(svc, 1024, COLL_B, "paper", null, null, null, 10))
                 .as("svc GUC=A must see ZERO tenant-B rows (function is SECURITY "
                     + "INVOKER — caller RLS on nexus.chunks/catalog applies)").isEmpty();
@@ -777,7 +777,7 @@ class CombinedQueryParityTest {
         }
         // svc + no GUC: nothing.
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute("RESET nexus.tenant");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, null, false);
             assertThat(callMeta(svc, 1024, COLL_M, "paper", null, null, null, 10))
                 .as("svc with no nexus.tenant GUC sees nothing (RLS matches NULL)")
                 .isEmpty();
@@ -794,8 +794,7 @@ class CombinedQueryParityTest {
                 .containsExactly(chashOf("b2"));
         }
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             assertThat(callTopic(svc, 1024, COLL_B, TOPIC_VEC, 10))
                 .as("svc GUC=A must see ZERO tenant-B topic rows (SECURITY INVOKER — "
                     + "caller RLS on nexus.chunks applies)").isEmpty();

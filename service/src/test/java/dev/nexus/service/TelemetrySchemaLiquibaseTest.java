@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -165,7 +166,7 @@ class TelemetrySchemaLiquibaseTest {
     void nxAnswerSteps_sourceCheckRejectsUnknownValue() throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            su.createStatement().execute("SET nexus.tenant = 'schema-check-tenant'");
+            PgContainerHelper.setTenant(su, TenantScope.DEFAULT_TENANT_GUC, "schema-check-tenant", false);
             su.createStatement().execute(
                 "INSERT INTO nexus.nx_answer_runs (tenant_id, question, created_at) " +
                 "VALUES ('schema-check-tenant', 'check q', now())");

@@ -834,7 +834,7 @@ class TaxonomyRepositoryTest {
             try (Connection c = svcDsForCheck.getConnection()) {
                 c.setAutoCommit(false);
                 // Stamp GUC as 'injector-tenant'
-                c.createStatement().execute("SELECT set_config('nexus.tenant', 'injector-tenant', true)");
+                PgContainerHelper.setTenant(c, TenantScope.DEFAULT_TENANT_GUC, "injector-tenant", true);
                 // Attempt INSERT with a different tenant_id → WITH CHECK rejects
                 var e = assertThrows(PSQLException.class,
                     () -> c.createStatement().execute(

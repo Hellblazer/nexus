@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
 import org.postgresql.util.PSQLException;
@@ -733,8 +734,7 @@ class ForeignKeyConstraintTest {
 
         // Query via svc role with Tenant-B GUC — must see 0 rows
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_B + "', true)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_B, true);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.catalog_documents " +
                 "WHERE tumbler='rls-check-tumbler'");
@@ -763,8 +763,7 @@ class ForeignKeyConstraintTest {
         }
 
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_B + "', true)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_B, true);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.topic_assignments WHERE doc_id=decode('" + hexChash("rls-ta-tumbler") + "', 'hex')");
             rs.next();
@@ -787,8 +786,7 @@ class ForeignKeyConstraintTest {
         }
 
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_B + "', true)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_B, true);
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.document_aspects WHERE doc_id='rls-asp-tumbler'");
             rs.next();

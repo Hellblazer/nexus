@@ -383,9 +383,7 @@ class ChashRepositoryTest {
             String oldCollection, String newCollection) throws Exception {
         try (Connection external = dsConnection()) {
             external.setAutoCommit(false);
-            try (var st = external.prepareStatement("SET nexus.tenant = '" + TENANT_A + "'")) {
-                st.execute();
-            }
+            PgContainerHelper.setTenant(external, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             acquireGateExclusive(external, TENANT_A, gatedCollection, 60_000);
 
             ExecutorService executor = Executors.newSingleThreadExecutor();

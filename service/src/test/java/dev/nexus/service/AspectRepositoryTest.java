@@ -412,8 +412,7 @@ class AspectRepositoryTest {
         assertThatThrownBy(() -> {
             try (var conn = svcDs.getConnection()) {
                 conn.setAutoCommit(true);
-                conn.createStatement().execute(
-                    "SET LOCAL nexus.tenant = '" + TENANT_A + "'");
+                PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
                 conn.createStatement().execute(
                     "INSERT INTO nexus.document_aspects " +
                     "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name) " +

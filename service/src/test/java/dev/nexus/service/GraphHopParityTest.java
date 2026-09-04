@@ -3,6 +3,7 @@ package dev.nexus.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import java.sql.Connection;
 import java.sql.ResultSet;
@@ -453,8 +454,7 @@ class GraphHopParityTest {
         }
         // svc + GUC=A: cannot traverse into tenant-B at all (catalog_links RLS).
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute(
-                "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
             assertThat(callGraph(svc, 1024, COLL_B, "b0", "cites", 1, "out", 10))
                 .as("svc GUC=A sees ZERO tenant-B rows — the recursive CTE over "
                     + "catalog_links is also RLS-scoped (SECURITY INVOKER)").isEmpty();
@@ -464,7 +464,7 @@ class GraphHopParityTest {
         }
         // svc + no GUC: nothing.
         try (Connection svc = svcDs.getConnection()) {
-            svc.createStatement().execute("RESET nexus.tenant");
+            PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, null, false);
             assertThat(callGraph(svc, 1024, COLL_G, "g0", "cites", 1, "out", 10))
                 .as("svc with no nexus.tenant GUC sees nothing (RLS matches NULL)")
                 .isEmpty();

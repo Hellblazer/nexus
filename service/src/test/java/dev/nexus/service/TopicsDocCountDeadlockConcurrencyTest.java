@@ -407,11 +407,7 @@ class TopicsDocCountDeadlockConcurrencyTest {
             barrier.await(BARRIER_AWAIT_S, TimeUnit.SECONDS);
             try (Connection conn = svcDs.getConnection()) {
                 conn.setAutoCommit(false);
-                try (PreparedStatement setTenant = conn.prepareStatement(
-                        "SELECT set_config('nexus.tenant', ?, true)")) {
-                    setTenant.setString(1, TENANT);
-                    setTenant.execute();
-                }
+                PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT, true);
                 StringBuilder sql = new StringBuilder(
                     "INSERT INTO nexus.topic_assignments"
                     + " (tenant_id, doc_id, topic_id, assigned_by, source_collection) VALUES ");
