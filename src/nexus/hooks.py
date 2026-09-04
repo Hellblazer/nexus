@@ -278,19 +278,16 @@ def _pending_fix_now_notice() -> str:
 
         from nexus.commands._helpers import t2_handle  # noqa: PLC0415 — deferred; T2 dep off the hot path
         from nexus.commit_review import (  # noqa: PLC0415 — deferred with its sibling
-            REVIEW_PROJECT,
-            is_review_record,
+            iter_review_records,
             parse_record_verdicts,
         )
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=_FIX_NOW_NOTICE_WINDOW_DAYS)
         with t2_handle() as db:
-            rows = db.memory.get_all(project=REVIEW_PROJECT) or []
+            rows = iter_review_records(db.memory)
 
         commits = 0
         for row in rows:
-            if not is_review_record(row):
-                continue
             stamp = str(row.get("timestamp", "") or "")
             if stamp:
                 try:

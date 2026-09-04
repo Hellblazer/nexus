@@ -16,7 +16,7 @@ import click
 
 from nexus.commands._helpers import t2_handle
 from nexus.commit_review import (
-    is_review_record,
+    iter_review_records,
     REVIEW_PROJECT,
     VERDICTS,
     parse_record_verdicts,
@@ -133,19 +133,20 @@ def review_show_cmd(rev: str, repo: Path) -> None:
 
 
 def _iter_review_records(db) -> list[dict]:
-    """Review records only, selected by title prefix.
+    """Review records only: listed by the reviewer's ``agent`` attribution,
+    then confirmed by the record's own first line (``iter_review_records``).
 
     The records share the ``nexus`` project with thousands of unrelated
-    entries (Sam's ruling, 2026-09-02), so the prefix filter is load
-    bearing: without it the census would count every note in the project
-    as a review that found nothing.
+    entries (Sam's ruling, 2026-09-02). A title-prefix sieve over a
+    whole-project download counted 401 human notes as reviews on
+    2026-09-04; the agent filter is server-side and a foreign writer
+    cannot produce it by accident.
     """
     try:
-        rows = list(db.memory.get_all(project=REVIEW_PROJECT) or [])
+        return iter_review_records(db.memory)
     except Exception as exc:  # noqa: BLE001 - a census must report, not crash
         click.echo(f"nx census reviews: T2 unreachable ({exc})", err=True)
         sys.exit(1)
-    return [r for r in rows if is_review_record(r)]
 
 
 def reviews_census(db, *, limit: int | None = None) -> dict[str, int]:

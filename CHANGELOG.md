@@ -12,7 +12,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (armed, stale, not installed, unmanaged) first, using the same comparison
   `nx doctor` makes and honouring `core.hooksPath`, instead of asking whether
   the hook is installed; a truncated review record states characters
-  reviewed of characters total. RDR-201 amended after the intrastate
+  reviewed of characters total. Review records are now listed by the
+  reviewer's `agent` attribution (server-side filter) before the first-line
+  check, retiring the whole-project download. RDR-201 amended after the intrastate
   reanalysis: the lifecycle table header no longer claims an omitted status
   goes uncaught, the checker's guard-independence limit is documented, GH
   #1402 is pinned to its refusing cell, and the inversion incident's failure

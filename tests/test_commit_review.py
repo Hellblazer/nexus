@@ -17,6 +17,7 @@ import pytest
 
 from nexus.commands.review_cmd import reviews_census
 from nexus.commit_review import (
+    REVIEW_AGENT,
     REVIEW_PROJECT,
     VERDICTS,
     CommitReviewError,
@@ -60,6 +61,31 @@ def tiny_repo(tmp_path: Path) -> Path:
     _run(["git", "add", "a.py"], repo)
     _run(["git", "commit", "-q", "-m", "feat: add f"], repo)
     return repo
+
+
+def _fake_memory(rows: list[dict]):
+    """A T2 memory store double with the two calls iter_review_records makes:
+    list_entries(project, agent) returns summaries filtered server-side by
+    agent, get(project, title) returns the full row. get_all is deliberately
+    absent: the whole-project download is what the selector retired."""
+
+    class FakeMemory:
+        def list_entries(self, project, agent=None):
+            assert project == REVIEW_PROJECT
+            return [
+                {"title": r["title"], "agent": r.get("agent")}
+                for r in rows
+                if agent is None or r.get("agent") == agent
+            ]
+
+        def get(self, project=None, title=None, id=None):
+            assert project == REVIEW_PROJECT
+            for r in rows:
+                if r["title"] == title:
+                    return r
+            return None
+
+    return FakeMemory
 
 
 # ── the verdict vocabulary ────────────────────────────────────────────────────
@@ -542,26 +568,27 @@ def test_census_counts_across_records_built_by_the_renderer() -> None:
             "content": render_record(
                 sha=sha, subject=subject, findings=findings, cost_usd=0.01
             ),
+            "agent": REVIEW_AGENT,
         }
 
-    class FakeMemory:
-        def get_all(self, project):
-            assert project == REVIEW_PROJECT
-            return [
-                _row("a" * 40, "one", [Finding("FIX-NOW", "s", "r")]),
-                _row("b" * 40, "two", [Finding("DROP", "s", "r"), Finding("FILE", "s", "r")]),
-                _row("c" * 40, "clean", []),
-                # A NEIGHBOUR in the same project that is not a review. The
-                # prefix filter must drop it; counted, it would read as a
-                # commit that was reviewed and found clean.
-                {"title": "continuation-state.md", "content": "unrelated note"},
-                # The neighbours that DID get counted (2026-09-04): 401
-                # human and agent review notes whose titles start with the
-                # prefix. The record's first line is what distinguishes a
-                # commit review from a note about a review.
-                {"title": "review-completed", "content": "Reviewed nexus-x; clean."},
-                {"title": "review-range-abc123def456", "content": "Range review of ...\nVerdicts: FIX-NOW=3"},
-            ]
+    rows = [
+        _row("a" * 40, "one", [Finding("FIX-NOW", "s", "r")]),
+        _row("b" * 40, "two", [Finding("DROP", "s", "r"), Finding("FILE", "s", "r")]),
+        _row("c" * 40, "clean", []),
+        # A NEIGHBOUR in the same project that is not a review. Counted, it
+        # would read as a commit that was reviewed and found clean.
+        {"title": "continuation-state.md", "content": "unrelated note", "agent": "developer"},
+        # The neighbours that DID get counted (2026-09-04): 401 human and
+        # agent review notes whose titles start with the prefix. These two
+        # even carry the reviewer's agent attribution, so only the record's
+        # first line separates them.
+        {"title": "review-completed", "content": "Reviewed nexus-x; clean.", "agent": REVIEW_AGENT},
+        {"title": "review-range-abc123def456", "content": "Range review.\nVerdicts: FIX-NOW=3", "agent": REVIEW_AGENT},
+        # A real record shape written under a different attribution: the
+        # agent filter drops it before the marker is consulted.
+        {**_row("d" * 40, "foreign", [Finding("FIX-NOW", "s", "r")]), "agent": "someone-else"},
+    ]
+    FakeMemory = _fake_memory(rows)
 
     class FakeDB:
         memory = FakeMemory()
@@ -627,9 +654,9 @@ class TestSessionStartNotice:
 
         from nexus import hooks as hooks_mod
 
-        class FakeMemory:
-            def get_all(self, project):
-                return rows
+        FakeMemory = _fake_memory(
+            [{**r, "agent": r.get("agent", REVIEW_AGENT)} for r in rows]
+        )
 
         class FakeDB:
             memory = FakeMemory()

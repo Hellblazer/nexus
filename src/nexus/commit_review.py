@@ -80,6 +80,35 @@ RECORD_PREFIX: Final = "review-"
 RECORD_MARKER: Final = "Commit review: "
 
 
+#: The ``agent`` attribution every review record is written with. The
+#: engine filters ``GET /v1/memory/list?project=&agent=`` on it server-side,
+#: so consumers fetch only the reviewer's own rows instead of downloading
+#: the whole shared project and sieving it (critique [24283] (a)): a
+#: foreign note cannot carry this attribution by accident, where a title
+#: prefix can and did.
+REVIEW_AGENT: Final = "commit-review"
+
+
+def iter_review_records(memory) -> list[dict]:
+    """Every record the reviewer wrote, with content, from a T2 memory store.
+
+    Lists by ``agent`` (a summary view: id, title, timestamp), then fetches
+    each candidate's content and keeps only rows :func:`is_review_record`
+    accepts. Two selectors, both required: the attribution says who wrote
+    it, the first line says what it is. Raises whatever the store raises;
+    callers decide how to report an unreachable T2.
+    """
+    out: list[dict] = []
+    for summary in memory.list_entries(project=REVIEW_PROJECT, agent=REVIEW_AGENT) or []:
+        title = str(summary.get("title", ""))
+        if not title.startswith(RECORD_PREFIX):
+            continue
+        row = memory.get(project=REVIEW_PROJECT, title=title)
+        if row and is_review_record(row):
+            out.append(row)
+    return out
+
+
 def is_review_record(row: dict) -> bool:
     """True only for a record :func:`render_record` wrote.
 
@@ -528,7 +557,7 @@ async def review_commit(
             content=content,
             tags="commit-review,nexus-jh86x",
             ttl=cfg.ttl_days,
-            agent="commit-review",
+            agent=REVIEW_AGENT,
         )
     except Exception as exc:  # noqa: BLE001 - a hook must never block a commit
         _log.warning("commit_review_write_failed", sha=sha[:12], error=str(exc))
