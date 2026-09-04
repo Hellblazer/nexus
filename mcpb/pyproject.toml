@@ -15,3 +15,9 @@ dependencies = [
 
 [tool.uv]
 package = false
+# nexus-heykz: same `av` exclusion as the root pyproject.toml and
+# src/nexus/_install/overrides.txt (the bundle env is built by `uv sync` here,
+# which reads THIS table). Pinned to parity by tests/test_install_source_wiring_pins.py.
+override-dependencies = [
+    "av; sys_platform == 'never'",
+]

@@ -1,0 +1,8 @@
+# uv override-dependencies for every generation build (nexus-heykz).
+# The twin of pyproject.toml's [tool.uv] override-dependencies: uv reads that
+# table from the INVOKING project, never from an installed wheel, so it
+# protected only developers running from the checkout. This file ships in the
+# wheel and install_generation.sh hands it to `uv pip install --overrides`.
+# tests/test_install_source_wiring_pins.py pins the three copies (this file,
+# pyproject.toml, mcpb/pyproject.toml) to the same entries.
+av; sys_platform == 'never'

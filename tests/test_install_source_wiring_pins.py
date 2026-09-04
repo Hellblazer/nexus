@@ -11,6 +11,7 @@ nexus-cp9b8 shape). Every one of these lines was measured absent on
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -108,3 +109,28 @@ def test_doctor_points_a_reclaimed_shim_at_nx_self_install_not_a_repo_script() -
     body = text[text.index("uv has taken them back"):text.index("def _check_shims_match_template")]
     assert "nx self install" in body
     assert "reinstall-tool" not in body
+
+
+# nexus-heykz: the three copies of the `av` override agree.
+
+
+def _override_entries_from_toml(path: str) -> list[str]:
+    data = tomllib.loads(_text(path))
+    return sorted(data["tool"]["uv"]["override-dependencies"])
+
+
+def _override_entries_from_overrides_txt() -> list[str]:
+    lines = _text("src/nexus/_install/overrides.txt").splitlines()
+    return sorted(ln.strip() for ln in lines if ln.strip() and not ln.lstrip().startswith("#"))
+
+
+def test_the_av_override_is_identical_across_its_three_homes() -> None:
+    """pyproject's [tool.uv] override protects only checkout runs; the wheel
+    ships src/nexus/_install/overrides.txt for the generation installer and
+    mcpb/pyproject.toml carries its own for the bundle's `uv sync`. Drift
+    between them is exactly how every user install got av (nexus-heykz)."""
+    root = _override_entries_from_toml("pyproject.toml")
+    mcpb = _override_entries_from_toml("mcpb/pyproject.toml")
+    shipped = _override_entries_from_overrides_txt()
+    assert root == mcpb == shipped, (root, mcpb, shipped)
+    assert any(entry.startswith("av;") or entry.startswith("av ") for entry in root)
