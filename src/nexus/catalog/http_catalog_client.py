@@ -1299,9 +1299,17 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return tumbler
 
     def register_many(
-        self, owner: Tumbler | str, docs: list[dict]
-    ) -> list[Tumbler]:
+        self, owner: Tumbler | str, docs: list[dict], *, with_created: bool = False
+    ) -> list[Tumbler] | list[tuple[Tumbler, bool]]:
         """Batch-register documents; returns tumblers aligned 1:1 with *docs*.
+
+        ``with_created=True`` returns ``(tumbler, created)`` pairs instead,
+        mirroring :meth:`register`'s flag: the server has always answered
+        with a ``created`` list (``false`` where the doc reconciled onto an
+        existing live row by source_uri, possibly under ANOTHER owner), and
+        dropping it is how the indexer reported "199 new" on every run for
+        198 RDRs that were never new (nexus-53cae, 2026-09-04). The per-doc
+        fallback asks :meth:`register` for the same flag.
 
         nexus-9dvqy (duoak.11 sink #2): replaces the per-file ``register()``
         loop in the indexer's catalog hook. The single-doc path pays one
@@ -1324,7 +1332,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # above; an explicit per-doc allow_cross_project always wins.
         if os.environ.get(_CROSS_PROJECT_OVERRIDE_ENV) == "1":
             docs = [{"allow_cross_project": True, **d} for d in docs]
-        out: list[Tumbler] = []
+        out: list[tuple[Tumbler, bool]] = []
         for start in range(0, len(docs), _REGISTER_MANY_PAGE):
             page = docs[start : start + _REGISTER_MANY_PAGE]
             try:
@@ -1338,7 +1346,17 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                         f"register_many returned {len(tumblers)} tumblers "
                         f"for {len(page)} docs"
                     )
-                out.extend(Tumbler.parse(t) for t in tumblers)
+                # A server without the list (none deployed since the flag
+                # shipped) reads as all-created, the pre-flag reading.
+                created = (result or {}).get("created") or [True] * len(page)
+                if len(created) != len(page):
+                    raise ValueError(
+                        f"register_many returned {len(created)} created flags "
+                        f"for {len(page)} docs"
+                    )
+                out.extend(
+                    (Tumbler.parse(t), bool(c)) for t, c in zip(tumblers, created)
+                )
             except Exception:  # noqa: BLE001 — page failed; fall back to resilient per-doc register
                 _log.warning(
                     "register_many_page_failed_falling_back_per_doc",
@@ -1349,8 +1367,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 for d in page:
                     title = d.get("title", "")
                     rest = {k: v for k, v in d.items() if k != "title"}
-                    out.append(self.register(owner, title, **rest))
-        return out
+                    out.append(self.register(owner, title, with_created=True, **rest))
+        if with_created:
+            return out
+        return [t for t, _ in out]
 
     def resolve(
         self, tumbler: Tumbler | str, *, follow_alias: bool = True

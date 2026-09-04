@@ -907,6 +907,41 @@ class TestHttpCatalogClientRoundTrip:
         assert [str(t) for t in out2] == ["1.1.1", "1.1.2", "1.1.3"]
         assert all(isinstance(t, Tumbler) for t in out2)
 
+    def test_register_many_with_created_carries_the_servers_flags(
+        self, client: HttpCatalogClient
+    ) -> None:
+        """nexus-53cae: the server has always sent ``created``; the client
+        dropped it, and the indexer counted a reconciled row as new. Also on
+        the per-doc fallback, where register() supplies the flag."""
+        docs = [{"title": f"d{i}", "file_path": f"{i}.py"} for i in range(3)]
+
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            assert path == "/doc/register_many"
+            return {"tumblers": ["1.1.1", "1.10.41", "1.1.2"], "created": [True, False, True]}
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        out = client.register_many("1.1", docs, with_created=True)
+        assert [(str(t), c) for t, c in out] == [("1.1.1", True), ("1.10.41", False), ("1.1.2", True)]
+        # The bare call is unchanged for existing callers.
+        assert [str(t) for t in client.register_many("1.1", docs)] == ["1.1.1", "1.10.41", "1.1.2"]
+
+        def _short_created(path: str, body: dict | None = None) -> Any:
+            if path == "/doc/register_many":
+                return {"tumblers": ["1.1.1", "1.1.2", "1.1.3"], "created": [True]}
+            return {"tumbler": "1.10.7", "created": False}
+
+        client._post = _short_created  # type: ignore[method-assign]
+        # A malformed created list fails the page, and the per-doc fallback's
+        # flags come from register(with_created=True).
+        out2 = client.register_many("1.1", docs, with_created=True)
+        assert [(str(t), c) for t, c in out2] == [("1.10.7", False)] * 3
+
+        def _no_created(path: str, body: dict | None = None) -> Any:
+            return {"tumblers": ["1.1.1", "1.1.2", "1.1.3"]}
+
+        client._post = _no_created  # type: ignore[method-assign]
+        assert [c for _, c in client.register_many("1.1", docs, with_created=True)] == [True] * 3
+
     def test_update_many_pages_falls_back_and_handles_empty(
         self, client: HttpCatalogClient
     ) -> None:
