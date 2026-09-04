@@ -14,6 +14,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fired on the box. The census now also requires the record's own first
   line, `Commit review: `, which only the reviewer writes, and reports zero
   records honestly when the hook is not armed.
+
 - The sn plugin drifted from the Serena it launches (nexus-jbt5x). Its
   auto-approve list named 27 tools of which 4 no longer exist in the
   context, so 22 live ones (the whole LSP-backend navigation set,
@@ -31,6 +32,43 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wire is deleted, and both guidance sections inject for every subagent
   (the task-text heuristic had dropped Serena for any brief containing
   "investigate" or "dependency").
+
+## [7.29.0] - 2026-09-04
+
+Engine identity: `engine-service-v0.1.100` (was v0.1.98). Deployed and
+cloud-gated before the floor moved; seven additive schema changesets.
+v0.1.99 was cut and deployed first and then superseded the same day: its
+intra-op thread policy capped the shared ONNX session at two threads and
+made local indexing about 3.4x slower (nexus-00wsf); v0.1.100 leaves
+ORT's default unless an operator overrides it.
+
+### Engine
+- No SQL strings in Java (nexus-zrcj7): the vector search paths, the catalog
+  FTS match, the shutdown reaper, the taxonomy sequence and centroid ANN
+  query, and the migrator's bootstrap reads now run through generated jOOQ
+  DSL or Liquibase SQL functions jOOQ generates tables for. Hybrid search is
+  a probe (gate chashes) plus a by-chash cosine rank, with the HNSW-first
+  dense-gate branch preserved as its own function; order and distance are
+  byte-equivalent to the retired path. `RawSqlGateTest` now scans raw JDBC
+  statements, `DSL.sql`, raw where-string overloads and SQL-bearing DSL
+  templates, with a five-entry reduce-only exemption registry.
+- Local embeds and reranks are admission-controlled process-wide (one
+  shared gate, bounded interactive wait), and the ONNX intra-op thread count
+  is an explicit operator override only, never derived (nexus-00wsf; the
+  original "CPU spin" was attention-tensor thrash, fixed since v0.1.81).
+- The engine release workflow creates the GitHub release as a draft and
+  publishes it only after both build matrices succeed and all 21 assets are
+  attached, so a tag can no longer exist without its binaries (nexus-cl14i).
+
+### Changed
+- RDR-200 nx_answer continuation mode is parked: three ship-gate runs showed
+  a session searching on its own beats the plan-plus-handoff. The opt-in
+  code stays dormant; the headless path remains the default.
+- Plugin skills `using-nx-skills` and `orchestration` reworded in plain
+  register (nexus-ht9m5).
+
+### Fixed
+
 - Fresh installs ran a MinerU no gate had seen. `mineru>=3.1.11,<4` let a
   fresh resolution land on 3.4.5 (published 2026-08-14) while `uv.lock` and
   every test stayed on 3.1.11; the same shape holds for docling (2.76.0

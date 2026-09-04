@@ -4,6 +4,11 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.29.0] - 2026-09-04
+
+Plugin version aligned with conexus 7.29.0. Skills `using-nx-skills` and
+`orchestration` reworded in plain register (nexus-ht9m5); no behavioural change.
+
 ## [7.28.0] - 2026-09-03
 
 Plugin version aligned with conexus 7.28.0. No plugin-side changes.

@@ -478,7 +478,17 @@ class TestRequiredEngineVersion:
         # p95 2665ms -> 652ms), v0.1.98 (nexus-bq06h exact fallback on an
         # empty HNSW result). Ledger all-additive, so the engine went live
         # ahead of the client tag and this bump opens no refusal window.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 98)
+        # ->(0,1,99) 2026-09-04: v0.1.99 (nexus-zrcj7 no-SQL-strings retirement
+        # of the search paths onto schema functions, nexus-00wsf embed admission
+        # control, nexus-cl14i draft-then-promote release gate). Seven additive
+        # changesets; PITR fork walk clean, STEP-6 green twice, parity
+        # byte-identical to the 0.1.98 baseline, cloud-client-path 4/4. Engine
+        # live 08:24Z before this bump, so no refusal window.
+        # ->(0,1,100) 2026-09-04: v0.1.100 fixes v0.1.99's intra-op cap on the
+        # shared ONNX session (cores/permits capped the whole engine at 2
+        # embedding threads; measured 377s -> 109s on a 30-file index). No
+        # changeset. Deployed and gated before this bump.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 100)
 
 
 class TestParseEngineVersion:
