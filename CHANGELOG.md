@@ -8,6 +8,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The sn plugin drifted from the Serena it launches (nexus-jbt5x). Its
+  auto-approve list named 27 tools of which 4 no longer exist in the
+  context, so 22 live ones (the whole LSP-backend navigation set,
+  `jet_brains_debug`, the inspections, `replace_in_files`, `serena_info`)
+  prompted on every call; its injected guidance told subagents to load three tools the
+  `claude-code` context excludes; a grep-to-Serena routing hook removed from
+  `hooks.json` in June still shipped with its vendored framework, twenty
+  tests, and a claimed slot in the four-hook budget; and `.mcp.json`
+  resolved Serena at git HEAD and Context7 at npx latest. Serena is now pinned to a
+  revision and Context7 to a version (their own dependencies still resolve
+  at spawn), the allowlist and the section are checked against a snapshot
+  that `scripts/sync_sn_serena_tools.py` generates from the pin the way
+  Serena's own registry discovers tools (`remove_project` and
+  `open_dashboard` are refused by a named deny set), the dead
+  wire is deleted, and both guidance sections inject for every subagent
+  (the task-text heuristic had dropped Serena for any brief containing
+  "investigate" or "dependency").
 - Fresh installs ran a MinerU no gate had seen. `mineru>=3.1.11,<4` let a
   fresh resolution land on 3.4.5 (published 2026-08-14) while `uv.lock` and
   every test stayed on 3.1.11; the same shape holds for docling (2.76.0

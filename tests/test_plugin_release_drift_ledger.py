@@ -71,8 +71,11 @@ MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 #:                             covered via the hooks/ prefix.)
 #:   retrieval-agents.txt      no live reference in the tree.
 #:
-#: sn ships its own routing guard (grep_for_symbols_redirects_to_serena.py) and
-#: is pinned independently, so it is exposed to the identical inertness class.
+#: sn ships its own hooks (subagent injection, MCP auto-approval) and is
+#: pinned independently, so it is exposed to the identical inertness class.
+#: Each plugin's .mcp.json is on the surface too (nexus-jbt5x): the MCP
+#: server spec is loaded from the pinned tag exactly like a hook, and a
+#: server pin that changes on develop is inert until the ref advances.
 SURFACE_BY_PLUGIN: dict[str, tuple[str, ...]] = {
     "conexus": (
         "conexus/hooks/",
@@ -80,9 +83,11 @@ SURFACE_BY_PLUGIN: dict[str, tuple[str, ...]] = {
         "conexus/skills/",
         "conexus/agents/",
         "conexus/resources/",
+        "conexus/.mcp.json",
     ),
     "sn": (
         "sn/hooks/",
+        "sn/.mcp.json",
     ),
 }
 
@@ -291,10 +296,13 @@ def _require_or_skip() -> None:
 
 def test_the_surface_prefixes_all_exist() -> None:
     """A renamed or deleted directory would silently shrink coverage to zero."""
-    missing = [p for p in SURFACE if not (REPO_ROOT / p).is_dir()]
+    missing = [
+        p for p in SURFACE
+        if not ((REPO_ROOT / p).is_dir() if p.endswith("/") else (REPO_ROOT / p).is_file())
+    ]
     assert not missing, (
-        f"SURFACE names directories that do not exist: {missing}. Either the "
-        "plugin layout moved (update SURFACE) or a directory was deleted. Until "
+        f"SURFACE names paths that do not exist: {missing}. Either the "
+        "plugin layout moved (update SURFACE) or a path was deleted. Until "
         "corrected, the drift check is watching nothing."
     )
 

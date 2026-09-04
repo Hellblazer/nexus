@@ -133,8 +133,21 @@ class TestSnPermissionHook:
         output = _run_hook(SN_SCRIPT, "Read")
         assert output == ""
 
-    def test_output_is_valid_json(self) -> None:
+    def test_ignores_context_excluded_serena_tool(self) -> None:
+        """search_for_pattern is excluded by the claude-code context; no wildcard approves it."""
         output = _run_hook(SN_SCRIPT, "mcp__plugin_sn_serena__search_for_pattern")
+        assert output == ""
+
+    def test_approves_every_snapshot_tool(self) -> None:
+        """The allowlist is the generated snapshot, not a hand-kept case list (nexus-jbt5x)."""
+        snapshot = SN_SCRIPT.parent / "serena-tools.txt"
+        names = [l.strip() for l in snapshot.read_text().splitlines() if l.strip() and not l.startswith("#")]
+        assert len(names) > 20
+        for name in names:
+            assert _parse_decision(_run_hook(SN_SCRIPT, f"mcp__plugin_sn_serena__{name}")) == "allow", name
+
+    def test_output_is_valid_json(self) -> None:
+        output = _run_hook(SN_SCRIPT, "mcp__plugin_sn_serena__replace_in_files")
         data = json.loads(output)
         assert "hookSpecificOutput" in data
         assert data["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
@@ -149,7 +162,7 @@ class TestHookAgreement:
     def test_same_decision_structure(self) -> None:
         """nx and sn hooks use the same JSON envelope for allow decisions."""
         nx_out = json.loads(_run_hook(NX_SCRIPT, "mcp__plugin_conexus_nexus__search"))
-        sn_out = json.loads(_run_hook(SN_SCRIPT, "mcp__plugin_sn_serena__find_file"))
+        sn_out = json.loads(_run_hook(SN_SCRIPT, "mcp__plugin_sn_serena__jet_brains_find_symbol"))
 
         # Same top-level keys
         assert set(nx_out.keys()) == set(sn_out.keys())

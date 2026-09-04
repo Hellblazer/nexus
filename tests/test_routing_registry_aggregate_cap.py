@@ -14,9 +14,11 @@ four. Adding a fifth routing hook in ANY plugin (nx, sn, or a future
 plugin) requires either consolidation or a budget revision in a
 successor RDR.
 
-Currently in scope: ``conexus/hooks/scripts/routing/registry.yaml`` and
-``sn/hooks/scripts/routing/registry.yaml``. Extend ``_REGISTRY_PATHS``
-when a third plugin ships a routing registry.
+Currently in scope: ``conexus/hooks/scripts/routing/registry.yaml``. sn's
+registry was deleted with its unregistered grep redirect (nexus-jbt5x; the
+hook itself left hooks.json at a69bea883, the registry kept claiming a
+slot for two months). Extend ``_REGISTRY_PATHS`` when another plugin ships
+a routing registry; ``_HOOKS_JSON_PATHS`` below still counts sn's manifest.
 
 CORRECTION (2026-08-23). The registry count alone does not measure the
 budget. ``src/nexus/commands/hook.py`` says it outright -- "registry.yaml
@@ -42,7 +44,6 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent
 
 _REGISTRY_PATHS: tuple[pathlib.Path, ...] = (
     REPO_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "registry.yaml",
-    REPO_ROOT / "sn" / "hooks" / "scripts" / "routing" / "registry.yaml",
 )
 
 AGGREGATE_CAP = 4

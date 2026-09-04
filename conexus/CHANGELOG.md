@@ -10,6 +10,14 @@ Plugin version aligned with conexus 7.28.0. No plugin-side changes.
 
 ## [Unreleased]
 
+- sn plugin (nexus-jbt5x): Serena and Context7 pinned in `sn/.mcp.json`; the
+  auto-approve list is generated from the pinned Serena's tool set the way its
+  registry discovers tools (22 live tools had been prompting, 4 listed ones no
+  longer exist; `remove_project` and `open_dashboard` are refused by a deny set); the injected
+  Serena section matches that set per backend; both sections inject for every
+  subagent; the unregistered grep-to-Serena routing hook and its vendored
+  framework are deleted.
+
 ## [7.27.0] - 2026-09-02
 
 Advancing `source.ref` to `v7.27.0` is what makes the eight plugin changes

@@ -10,15 +10,17 @@ message naming the preferred invocation.
 **Each plugin owns the routing rules whose deny message redirects to a
 tool the plugin ships.** The nx-side rule under this directory
 (`phase_review_close_requires_gate`) redirects to commands or skills
-that nx ships. The `grep_for_symbols_redirects_to_serena`
-rule lives in `sn/hooks/scripts/routing/` because it redirects to Serena
-MCP tools that sn ships; installing nx without sn means the hook does
-not exist, which is the right default.
+that nx ships. sn's `grep_for_symbols_redirects_to_serena` rule was the
+worked example: it lived under `sn/hooks/scripts/routing/` because it
+redirected to Serena MCP tools that sn ships. Its registration was
+removed at a69bea883 (it silently blocked bash greps on code files) and
+the orphaned script, vendored framework, and registry were deleted at
+nexus-jbt5x, so today only nx ships routing rules.
 
 The framework (`_lib.py` + `_run_python_hook.sh`) is canonical in nx
-and vendored into each plugin that ships a routing rule. The
-byte-equality CI guard at `tests/test_routing_lib_drift.py` refuses
-drift between copies. See RDR-125 § A2 / A3 for why vendoring is the
+and is vendored into any plugin that ships a routing rule; with no
+vendored copy left, the byte-equality guard (`tests/test_routing_lib_drift.py`)
+went with sn's copy and should return with the next vendoring. See RDR-125 § A2 / A3 for why vendoring is the
 chosen mechanism (hook scripts run system python with no `conexus`
 venv on `sys.path`; the clean import path is blocked by the stdlib-
 only startup-budget contract).

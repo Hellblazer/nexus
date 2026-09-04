@@ -4,39 +4,36 @@
 
 ### Setup — load tools before first use
 
-Tool names vary by backend (JetBrains vs LSP). Load via ToolSearch with both variants — only the available ones resolve:
+Tool names vary by backend. The JetBrains backend prefixes `jet_brains_`; the LSP backend is unprefixed. Load both variants via ToolSearch; only the available ones resolve:
 
 ```
-# Symbol tools (one of each pair will resolve depending on backend)
 ToolSearch("select:mcp__plugin_sn_serena__jet_brains_find_symbol,mcp__plugin_sn_serena__find_symbol")
 ToolSearch("select:mcp__plugin_sn_serena__jet_brains_find_referencing_symbols,mcp__plugin_sn_serena__find_referencing_symbols")
 ToolSearch("select:mcp__plugin_sn_serena__jet_brains_get_symbols_overview,mcp__plugin_sn_serena__get_symbols_overview")
-ToolSearch("select:mcp__plugin_sn_serena__jet_brains_type_hierarchy,mcp__plugin_sn_serena__type_hierarchy")
+ToolSearch("select:mcp__plugin_sn_serena__jet_brains_type_hierarchy,mcp__plugin_sn_serena__jet_brains_find_implementations,mcp__plugin_sn_serena__find_implementations")
 ToolSearch("select:mcp__plugin_sn_serena__jet_brains_rename,mcp__plugin_sn_serena__rename_symbol")
-
-# These names are the same on both backends
-ToolSearch("select:mcp__plugin_sn_serena__replace_symbol_body,mcp__plugin_sn_serena__insert_before_symbol,mcp__plugin_sn_serena__insert_after_symbol")
-ToolSearch("select:mcp__plugin_sn_serena__search_for_pattern,mcp__plugin_sn_serena__find_file,mcp__plugin_sn_serena__list_dir")
+ToolSearch("select:mcp__plugin_sn_serena__replace_in_files,mcp__plugin_sn_serena__replace_symbol_body,mcp__plugin_sn_serena__insert_before_symbol,mcp__plugin_sn_serena__insert_after_symbol")
 ```
 
 Then call `mcp__plugin_sn_serena__initial_instructions` for full backend-specific usage guidance.
 
 ### Task → Tool Mapping
 
-| Task | Tool (use whichever resolved above) |
-|------|-------------------------------------|
-| Find symbol definition | `find_symbol` / `jet_brains_find_symbol` |
-| Find all callers/references | `find_referencing_symbols` / `jet_brains_find_referencing_symbols` |
-| File structure overview | `get_symbols_overview` / `jet_brains_get_symbols_overview` |
-| Class/type hierarchy | `type_hierarchy` / `jet_brains_type_hierarchy` |
-| Replace function body | `replace_symbol_body` |
-| Insert code at symbol | `insert_before_symbol` / `insert_after_symbol` |
-| Rename across codebase | `rename_symbol` / `jet_brains_rename` |
-| Find files (gitignore-aware) | `find_file` |
-| List directory (gitignore-aware) | `list_dir` |
-| Text/pattern search | `search_for_pattern` |
+| Task | JetBrains backend | LSP backend |
+|------|-------------------|-------------|
+| Find symbol definition | `jet_brains_find_symbol` | `find_symbol` |
+| Find all callers/references | `jet_brains_find_referencing_symbols` | `find_referencing_symbols` |
+| File structure overview | `jet_brains_get_symbols_overview` | `get_symbols_overview` |
+| Class/type hierarchy | `jet_brains_type_hierarchy` | none; `find_implementations` covers the downward direction |
+| Implementations of an interface | `jet_brains_find_implementations` | `find_implementations` |
+| Inline a symbol / delete safely | `jet_brains_inline_symbol` / `jet_brains_safe_delete` | `safe_delete_symbol` |
+| Rename across codebase | `jet_brains_rename` | `rename_symbol` |
+| Replace function body | `replace_in_files` | `replace_symbol_body` |
+| Insert code at symbol | `replace_in_files` | `insert_before_symbol` / `insert_after_symbol` |
+| Move a symbol | `jet_brains_move` | (Edit) |
+| Static analysis on a file | `jet_brains_run_inspections` | `get_diagnostics_for_file` |
 
-Standard tools for: broad text search (Grep), reading known files (Read), writing new files (Write).
+`find_file`, `list_dir`, and `search_for_pattern` are excluded in this context: use Glob, Bash, and Grep. Standard tools for broad text search (Grep), reading known files (Read), writing new files (Write).
 
 ### Rules
 
