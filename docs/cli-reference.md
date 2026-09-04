@@ -961,8 +961,10 @@ Per content-type report showing what percentage of catalog entries have at least
 ### nx catalog suggest-links
 
 ```
-nx catalog suggest-links [--limit N]
+nx catalog suggest-links [--limit N] [--threshold X]
 ```
+
+`--threshold` is reserved for a future similarity threshold and is unused today.
 
 Find unlinked code-RDR pairs by module name overlap. Read-only — shows potential links without creating them.
 
@@ -998,8 +1000,11 @@ imports; normal index runs are incremental.
 ```
 nx catalog generate-links [--citations/--no-citations] [--filepath/--no-filepath]
                           [--prose/--no-prose] [--pdf/--no-pdf]
-                          [--rdr-dependency/--no-rdr-dependency] [--dry-run]
+                          [--rdr-dependency/--no-rdr-dependency] [--dry-run] [--sample N]
 ```
+
+`--dry-run` prints what each generator would create, `--sample N` proposed
+links per generator to show under it (default 5).
 
 Auto-generate typed links from metadata cross-matching. Five generators, all
 enabled by default: `--citations` (citation links from bibliographic
@@ -1082,7 +1087,7 @@ Idempotent: re-running on the same `SOURCE_DIR` is a no-op once entries are reso
 ### nx catalog prune-stale
 
 ```
-nx catalog prune-stale [--collection NAME] [--owner PREFIX] [--source-dir DIR] [--no-dry-run --confirm]
+nx catalog prune-stale [--collection NAME] [--owner PREFIX] [--source-dir DIR] [--dry-run/--no-dry-run] [--confirm]
 ```
 
 Drop catalog entries whose `file_path` is missing on disk. This is the supported stale-content sweep: `nx t3 prune-stale` was retired in 7.0.0 (nexus-bm8dd), and this verb followed by `nx t3 gc` replaces it. Pairs naturally with `remediate-paths`: run the remediator first to repair what's recoverable, then prune the rest. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete. **Not reversible in-product** (the pre-delete snapshots died with the local catalog, 7.0.0/nexus-i711w).
@@ -1360,8 +1365,9 @@ Note: this verb reclaims storage; it is not the search-visibility fix for a dele
 ### nx catalog orphan-backfill
 
 ```
-nx catalog orphan-backfill dt-link COLLECTION [--min-score 0.75] [--owner PREFIX] [--no-dry-run]
-nx catalog orphan-backfill synthetic COLLECTION [--owner PREFIX] [--no-dry-run]
+nx catalog orphan-backfill dt-link COLLECTION [--min-score 0.75] [--owner PREFIX] [--dry-run/--no-dry-run]
+nx catalog orphan-backfill synthetic COLLECTION [--owner PREFIX] [--dry-run/--no-dry-run]
+nx catalog orphan-backfill link-existing COLLECTION [--dry-run/--no-dry-run]
 nx catalog orphan-backfill dump-csv COLLECTION [--out-dir DIR] [--min-score 0.75]
 nx catalog orphan-backfill apply-csv COLLECTION CSV_PATH [--owner PREFIX]
 nx catalog orphan-backfill link-existing COLLECTION [--by title|content_hash] [--also-synthetic] [--no-dry-run]
@@ -1385,7 +1391,7 @@ T3 vector-store maintenance commands. As of 6.0 the live T3 store is Postgres 17
 
 ### nx t3 prune-stale — RETIRED in 7.0.0
 
-Exits with an error explaining what to run instead. It swept chunks by their `source_path` metadata; RDR-102 D2 removed that key from the chunk schema, so the sweep matched nothing and reported a clean "0 stale" on every collection regardless of how many indexed files had been deleted from disk (nexus-bm8dd). It also resolved paths through the local catalog, which has not existed since 7.0.0/nexus-i711w.
+Exits with an error explaining what to run instead, whatever flags are passed (`--dry-run` included; it is kept so old invocations parse). It swept chunks by their `source_path` metadata; RDR-102 D2 removed that key from the chunk schema, so the sweep matched nothing and reported a clean "0 stale" on every collection regardless of how many indexed files had been deleted from disk (nexus-bm8dd). It also resolved paths through the local catalog, which has not existed since 7.0.0/nexus-i711w.
 
 Use the catalog-native pipeline:
 
@@ -1450,7 +1456,7 @@ Carve-outs:
 ### nx t3 backfill-manifest
 
 ```
-nx t3 backfill-manifest [-c COLLECTION] [--no-dry-run] [-n N] [--resume] [--only-gapped]
+nx t3 backfill-manifest [-c COLLECTION] [--no-dry-run] [-n N | --limit N] [--resume] [--only-gapped]
 ```
 
 Backfill the `document_chunks` manifest from T3 chunk metadata (RDR-108 D2). Reads each catalog document's T3 chunk metadata (`doc_id`, `chunk_index`, `chunk_text_hash`, span coordinates) and writes one manifest row per chunk, so the catalog can answer "what chunks compose this Document, in what order?" without consulting T3. Omitting `-c` processes every collection registered in the catalog; `-n` caps documents per collection.
@@ -1626,9 +1632,9 @@ taxonomy:
 
 | Subcommand | Description |
 |------------|-------------|
-| `status` | Collections, topic count, coverage, review state. `-c NAME` filters to one collection, `-n N` caps to the top N collections by doc count (default: all), `--summary` shows only the totals line, `--needs-review` shows only collections with pending topics |
+| `status` | Collections, topic count, coverage, review state. `-c NAME` filters to one collection, `-n N` / `--limit N` caps to the top N collections by doc count (default: all), `--summary` shows only the totals line, `--needs-review` shows only collections with pending topics |
 | `discover` | Discover topics via HDBSCAN. `--all` for all collections, `-c NAME` for one, `--force` to re-cluster |
-| `list` | Topic tree with doc counts. `-c NAME` filters by collection, `-d N` sets tree depth (default: 2) |
+| `list` | Topic tree with doc counts. `-c NAME` filters by collection, `-d N` / `--depth N` sets tree depth (default: 2) |
 | `show ID` | Documents assigned to a topic. `-n N` limits results (default: 20) |
 | `review` | Interactive review: accept, rename, merge, delete, skip. `-c NAME` to filter, `-n N` topics per session (default: 15). `--auto` swaps in batched `claude_dispatch` verdicts (default limit 5000); `--yes` skips the destructive-action confirm, `--dry-run` applies nothing, `--batch-size N` sets topics per dispatch (default: 40) |
 | `label` | Batch-relabel topics with Claude haiku. `--all` relabels accepted topics too |
@@ -2554,7 +2560,7 @@ silently truncating.
 ### nx plan list
 
 ```
-nx plan list [--scope S] [--origin builtin|grown|user] [--name SUBSTR] [-n N] [--json] [--include-disabled]
+nx plan list [--scope S] [--origin builtin|grown|user] [--name SUBSTR] [-n N | --limit N] [--json] [--include-disabled]
 ```
 
 Tabulates plans: id, origin, verb, scope, use count, last used, name. Origin is
@@ -3768,6 +3774,6 @@ RDR (Research-Design-Review) authoring helpers.
 | `lint [PATHS]` | Lint RDR frontmatter/structure; reports findings per file. `--root DIR` scans a directory other than `docs/rdr/` |
 | `set-status STATUS` | Flip an RDR's `status:` frontmatter field and README row (refused unless the lifecycle table allows the transition); then append `needs-reexamination` to the T2 entry of every RDR joined to it by a `supersedes` edge (RDR-201 P3.3). `--date YYYY-MM-DD` sets `accepted_date`/`closed_date` (default today, UTC); `--root DIR` names the repo root (default git toplevel) |
 | `preamble` | Subgroup backing the RDR lifecycle skills (`rdr-list`, `rdr-create`, `rdr-show`, `rdr-gate`, `rdr-accept`, `rdr-close`, `rdr-research`, `rdr-audit`, `phase-review-gate`) |
-| `repeat RDR` | Multi-model repeatability diff (nexus-axwpn): send the RDR's Technical Design (or `Proposed Design` / `Design`) section to two model tiers (`--tiers cheap,strong`), ask each for an implementation plan, and report where the plans diverge in steps, files and decisions. A divergence is a place the text left open, not a verdict on a model. `RDR` is a path or a number resolved under `--root` (default `docs/rdr/`); `--json` emits both plans and the diff. Exits 0 with the report, 2 when the RDR has no design section, 1 when a dispatch fails. Writes nothing |
+| `repeat RDR` | Multi-model repeatability diff (nexus-axwpn): send the RDR's Technical Design (or `Proposed Design` / `Design`) section to two model tiers (`--tiers cheap,strong`), ask each for an implementation plan, and report where the plans diverge in steps, files and decisions. A divergence is a place the text left open, not a verdict on a model. `RDR` is a path or a number resolved under `--root` (default `docs/rdr/`); `--timeout` (seconds per dispatch, default 300) and `--max-budget-usd` (per dispatch, default 0.50) bound each reader; `--json` emits both plans and the diff. Exits 0 with the report, 2 when the RDR has no design section, 1 when a dispatch fails. Writes nothing |
 
 Run `nx rdr --help` / `nx rdr preamble --help` for the full subcommand list. The `preamble` subcommands are primarily invoked by the conexus RDR-lifecycle skills.

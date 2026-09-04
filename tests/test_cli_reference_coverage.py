@@ -17,6 +17,7 @@ name that is not in the document reds the check.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import click
@@ -66,15 +67,38 @@ def walk(root: click.Group, prefix: str = "nx") -> tuple[list[str], list[tuple[s
     return commands, options
 
 
+def _sections(doc: str) -> list[str]:
+    """The reference split at its ``##``/``###`` headings, each piece one
+    section body. Coverage is judged inside a section that names the
+    command, so ``--dry-run`` under ``nx catalog prune-stale`` cannot vouch
+    for ``--dry-run`` on an undocumented command elsewhere (critique
+    [24392] finding 2: 32 commands shared that flag, 11 leaves shared
+    ``list``)."""
+    return re.split(r"\n#{2,3} ", "\n" + doc)
+
+
+def _mentioning_sections(path: str, doc: str) -> list[str]:
+    """Sections that name *path*: its full path, or its leaf in backticks
+    together with its parent group's name."""
+    parts = path.split(" ")
+    leaf = parts[-1]
+    parent = parts[-2] if len(parts) > 2 else ""
+    out = []
+    for sec in _sections(doc):
+        if path in sec or (f"`{leaf}" in sec and (not parent or parent in sec)):
+            out.append(sec)
+    return out
+
+
 def _allowlisted_command(path: str) -> bool:
     return any(path == p or path.startswith(p + " ") for p in COMMAND_ALLOWLIST)
 
 
 def _command_documented(path: str, doc: str) -> bool:
-    """The full path, or the leaf name in backticks (the reference's
-    subcommand tables list leaves under a group heading)."""
-    leaf = path.rsplit(" ", 1)[-1]
-    return path in doc or f"`{leaf}" in doc
+    """The full path anywhere, or the leaf name in backticks inside a
+    section that also names its parent group (the reference's subcommand
+    tables list leaves under a group heading)."""
+    return bool(_mentioning_sections(path, doc))
 
 
 def test_every_command_is_in_the_reference() -> None:
@@ -96,7 +120,9 @@ def test_every_option_is_in_the_reference() -> None:
     missing = [
         (p, o)
         for p, o in options
-        if not _allowlisted_command(p) and (p, o) not in OPTION_ALLOWLIST and o not in doc
+        if not _allowlisted_command(p)
+        and (p, o) not in OPTION_ALLOWLIST
+        and not any(o in sec for sec in _mentioning_sections(p, doc))
     ]
     assert not missing, (
         f"{len(missing)} option(s) absent from docs/cli-reference.md; add the literal "
@@ -114,7 +140,9 @@ def test_allowlists_carry_no_dead_rows() -> None:
     dead_opts = [k for k in OPTION_ALLOWLIST if k not in live_opts]
     assert not dead_opts, f"OPTION_ALLOWLIST names options that no longer exist: {dead_opts}"
     doc = REFERENCE.read_text()
-    now_documented = [k for k in OPTION_ALLOWLIST if k[1] in doc]
+    now_documented = [
+        k for k in OPTION_ALLOWLIST if any(k[1] in sec for sec in _mentioning_sections(k[0], doc))
+    ]
     assert not now_documented, f"OPTION_ALLOWLIST rows whose option is documented after all: {now_documented}"
 
 
