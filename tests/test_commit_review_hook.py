@@ -25,6 +25,7 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.commands.hooks import _REVIEW_STANZA, _STANZA, _install_hook, _stanza_for, hook_stanza_state
+from nexus.commit_review import pop_review_queue, review_queue_path
 
 SENTINEL_BEGIN = "# >>> nexus managed begin >>>"
 SENTINEL_END = "# <<< nexus managed end <<<"
@@ -342,7 +343,7 @@ def test_the_reviewer_still_runs_in_a_linked_worktree(
     assert "index repo" not in text, "indexing a worktree is still correctly skipped"
 
 
-def test_a_second_concurrent_review_is_skipped_but_says_so(
+def test_a_second_concurrent_review_is_queued_and_says_so(
     sandbox_repo: Path, tmp_path: Path, fake_home: Path
 ) -> None:
     """The review's OWN pgrep guard may serialise, but never in silence.
@@ -366,7 +367,7 @@ def test_a_second_concurrent_review_is_skipped_but_says_so(
         decoy.wait(timeout=10)
 
     log = fake_home / ".config" / "nexus" / "index.log"
-    assert "SKIPPED (review already running)" in _await_file(log)
+    assert "QUEUED (review already running)" in _await_file(log)
 
 
 # ── the census can answer the hook-armed question itself (nexus-trwxr) ────────
@@ -405,3 +406,85 @@ def test_hook_stanza_state_honours_core_hookspath(tmp_path):
     _install_hook(custom, "post-commit")
     assert hook_stanza_state(repo) == "armed"
     assert not (repo / ".git" / "hooks" / "post-commit").exists()
+
+
+# ── a burst is queued, not dropped (2026-09-04, session nexus-65) ─────────────
+
+
+def test_a_second_concurrent_review_is_queued_where_the_drainer_reads(
+    sandbox_repo: Path, tmp_path: Path, fake_home: Path
+) -> None:
+    """The hook's shell path and the Python reader must name the same file.
+
+    Before this, a pgrep hit logged SKIPPED and the commit was never
+    reviewed: 6 of 9 commits in one push. The hook appends HEAD to the
+    queue in the common git dir, and ``review_queue_path`` is what
+    ``nx review commit --drain`` pops; if the two paths drift the queue
+    fills and nothing drains it, silently.
+    """
+    CliRunner().invoke(main, ["hooks", "install", str(sandbox_repo)])
+    shim_dir, calls = _nx_recorder(tmp_path)
+
+    decoy = _decoy_process(f"nx review commit HEAD --repo {sandbox_repo}")
+    try:
+        found = subprocess.run(
+            ["pgrep", "-f", f"nx review commit .* --repo {sandbox_repo}"],
+            capture_output=True, text=True,
+        )
+        assert found.returncode == 0, "decoy reviewer not visible to pgrep; test is vacuous"
+        _commit_with_recorder(sandbox_repo, shim_dir, "queued.txt", fake_home)
+    finally:
+        decoy.terminate()
+        decoy.wait(timeout=10)
+
+    head = _git(sandbox_repo, "rev-parse", "HEAD").stdout.strip()
+    queue = review_queue_path(sandbox_repo)
+    assert _await_file(queue).strip() == head, f"queue at {queue} did not receive HEAD"
+    log = (fake_home / ".config" / "nexus" / "index.log").read_text()
+    assert "QUEUED (review already running)" in log
+    assert "review commit" not in (calls.read_text() if calls.exists() else "")
+    assert pop_review_queue(sandbox_repo) == [head]
+    assert not queue.exists(), "pop must take the file, not copy it"
+
+
+def test_the_uncontended_dispatch_passes_drain(
+    sandbox_repo: Path, tmp_path: Path, fake_home: Path
+) -> None:
+    """The reviewer that runs is the one that empties the queue, so the
+    hook must ask it to. A hook that queues but dispatches without --drain
+    fills a file nobody reads."""
+    CliRunner().invoke(main, ["hooks", "install", str(sandbox_repo)])
+    shim_dir, calls = _nx_recorder(tmp_path)
+    _commit_with_recorder(sandbox_repo, shim_dir, "drain.txt", fake_home)
+    text = _await_file(calls)
+    assert "review commit" in text and "--drain" in text, text
+
+
+def test_a_worktree_commit_queues_into_the_shared_queue(
+    sandbox_repo: Path, tmp_path: Path, fake_home: Path
+) -> None:
+    """One queue per repository: a linked worktree's hook writes where the
+    primary's drainer reads, because both resolve the COMMON git dir."""
+    CliRunner().invoke(main, ["hooks", "install", str(sandbox_repo)])
+    shim_dir, _ = _nx_recorder(tmp_path)
+    wt = tmp_path / "queue-wt"
+    assert _git(sandbox_repo, "worktree", "add", "-q", "-b", "queue-branch", str(wt)).returncode == 0
+    assert review_queue_path(wt) == review_queue_path(sandbox_repo)
+
+    decoy = _decoy_process(f"nx review commit HEAD --repo {wt}")
+    try:
+        _commit_with_recorder(wt, shim_dir, "wt-queued.txt", fake_home)
+    finally:
+        decoy.terminate()
+        decoy.wait(timeout=10)
+    head = _git(wt, "rev-parse", "HEAD").stdout.strip()
+    assert _await_file(review_queue_path(sandbox_repo)).strip() == head
+
+
+def test_the_stanza_refuses_to_queue_into_the_filesystem_root() -> None:
+    """Review [24406] Major: with an empty common dir the queue path
+    degraded to ``/nx-review-queue`` and the log still said QUEUED. The
+    stanza must test the dir before writing and log a distinct line."""
+    assert '[ -n "$_NX_REVIEW_COMMON" ]' in _REVIEW_STANZA
+    assert "NOT QUEUED (queue unwritable" in _REVIEW_STANZA
+    assert '"$_NX_REVIEW_COMMON/nx-review-queue"' in _REVIEW_STANZA
