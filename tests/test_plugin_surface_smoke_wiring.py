@@ -28,8 +28,11 @@ WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "plugin-surface-smoke.yml"
 
 #: AGENTS.md step 6 ("Run sandbox smoke") names these inputs as requiring
 #: `release-sandbox.sh smoke` before merge. Kept independent of the workflow
-#: file's own `paths:` list so a drift in either direction is caught: the
-#: workflow's copy is the wire, this is the mandate it must satisfy.
+#: file's own `paths:` list, spelled as directory prefixes (trailing "/")
+#: or exact filenames -- `_expected_glob` below converts a prefix to the
+#: `**`-suffixed glob form the workflow actually uses, so the two direction
+#: checks below (missing / undocumented-extra) compare like with like
+#: instead of doing substring containment.
 MANDATED_SURFACE = [
     "pyproject.toml",
     "uv.lock",
@@ -39,6 +42,25 @@ MANDATED_SURFACE = [
     "src/nexus/commands/doctor.py",
     "src/nexus/commands/upgrade.py",
 ]
+
+#: Entries the workflow's `paths:` list carries beyond MANDATED_SURFACE,
+#: each with its own reason -- self-reference so a change that narrows or
+#: removes the filter still re-runs the gate to prove the narrowing was
+#: safe. A path here that is NOT one of these three is undocumented drift
+#: (nexus-98gpl review Important #1/#2: `sn/**` was exactly this, added
+#: with no causal link to anything release-sandbox.sh smoke touches, and
+#: nothing tested the workflow for extras beyond the mandated list).
+KNOWN_EXTRAS = {
+    "tests/e2e/release-sandbox.sh",
+    "tests/test_plugin_surface_smoke_wiring.py",
+    ".github/workflows/plugin-surface-smoke.yml",
+}
+
+
+def _expected_glob(prefix: str) -> str:
+    """Directory prefixes are spelled with a trailing `**` glob in the
+    workflow; exact filenames pass through unchanged."""
+    return f"{prefix}**" if prefix.endswith("/") else prefix
 
 
 def _workflow() -> dict:
@@ -136,25 +158,56 @@ class TestConcurrencyAndTriggerShape:
 class TestPathFilterCoversTheMandatedSurface:
     """A surface prefix outside the trigger paths is a surface whose plugin
     changes never trigger the gate -- exactly the undeclared-drift shape
-    the RDR-197 gap called out."""
+    the RDR-197 gap called out. Both directions are tested: a MANDATED
+    entry missing from the workflow (silent coverage loss) and a workflow
+    entry not accounted for by either MANDATED_SURFACE or KNOWN_EXTRAS
+    (silent scope creep -- the `sn/**` finding from the nexus-98gpl
+    review, which nothing here used to catch)."""
 
-    def test_the_path_filter_covers_every_mandated_prefix(self) -> None:
+    @staticmethod
+    def _workflow_paths() -> list[str]:
         wf = _workflow()
         on = wf[True] if True in wf else wf["on"]
-        patterns = " ".join(on["pull_request"]["paths"])
-        missing = [p for p in MANDATED_SURFACE if p.rstrip("/") not in patterns]
+        return on["pull_request"]["paths"]
+
+    def test_the_path_filter_covers_every_mandated_prefix(self) -> None:
+        patterns = self._workflow_paths()
+        missing = [p for p in MANDATED_SURFACE if _expected_glob(p) not in patterns]
         assert not missing, (
             f"AGENTS.md step-6 surface prefixes not covered by the "
             f"workflow's path filter: {missing}. A plugin change there "
             f"would merge without this gate ever running."
         )
 
+    def test_the_path_filter_has_no_undocumented_extras(self) -> None:
+        """The converse of the test above: every workflow path entry must
+        be either a mandated prefix or a named-and-justified KNOWN_EXTRAS
+        entry. An addition that is neither is undeclared scope creep --
+        it makes the gate fire on inputs release-sandbox.sh smoke never
+        touches, which is a cost-discipline violation in the causal sense
+        even though it does not break correctness."""
+        mandated_globs = {_expected_glob(p) for p in MANDATED_SURFACE}
+        extras = set(self._workflow_paths()) - mandated_globs
+        undocumented = extras - KNOWN_EXTRAS
+        assert not undocumented, (
+            f"workflow path filter entries not in MANDATED_SURFACE or "
+            f"KNOWN_EXTRAS: {undocumented}. Either it belongs in "
+            f"MANDATED_SURFACE (name the AGENTS.md step-6 line that "
+            f"requires it) or KNOWN_EXTRAS (name what release-sandbox.sh "
+            f"smoke actually touches there), or it should not be in the "
+            f"filter at all."
+        )
+        stale = KNOWN_EXTRAS - extras
+        assert not stale, (
+            f"KNOWN_EXTRAS names entries the workflow's path filter no "
+            f"longer carries: {stale}. Remove them from KNOWN_EXTRAS so "
+            f"this test keeps proving something."
+        )
+
     def test_the_path_filter_includes_itself(self) -> None:
         """The self-referential entry plugin-drift-ledger.yml also carries:
         a change that disables the filter must itself trip the filter."""
-        wf = _workflow()
-        on = wf[True] if True in wf else wf["on"]
-        patterns = " ".join(on["pull_request"]["paths"])
+        patterns = self._workflow_paths()
         assert ".github/workflows/plugin-surface-smoke.yml" in patterns, (
             "the workflow no longer watches its own file -- a change that "
             "narrows or removes the path filter would not re-run the gate "
@@ -169,12 +222,45 @@ class TestNotWiredAsARequiredCheck:
     skip.md) -- documented here so a future edit toward 'required' is a
     deliberate decision, not an accident."""
 
+    def test_the_job_has_no_job_level_conditional(self) -> None:
+        """Structural check (nexus-98gpl review Suggestion): the shape a
+        REQUIRED path-filtered check needs is a job-level `if:` that lets
+        the job no-op under some condition while the JOB itself still
+        reports a status (skipped == success for branch protection). This
+        workflow relies on the workflow-level `paths:` filter instead --
+        the job carries no `if:` of its own. A job-level `if:` appearing
+        here is exactly the shape a quiet move to 'required' would need."""
+        wf = _workflow()
+        assert "if" not in wf["jobs"]["smoke"], (
+            "the smoke job gained a job-level `if:` condition -- this is "
+            "the structural shape a required-check skip shim needs "
+            "(skipped == success for branch protection); if this job is "
+            "becoming a required check, replace the workflow-level "
+            "`paths:` filter with this job-level skip deliberately and "
+            "update this test alongside that change, rather than letting "
+            "both exist as an accident"
+        )
+
+    def test_no_step_swallows_its_own_failure(self) -> None:
+        """A `continue-on-error: true` step lets a real failure pass
+        silently while the job still reports success -- the other half of
+        the required-check-skip-shim shape, applied per-step instead of
+        per-job."""
+        steps = _job_steps()
+        offenders = [s.get("name", "<unnamed>") for s in steps if s.get("continue-on-error")]
+        assert not offenders, (
+            f"step(s) {offenders} set continue-on-error: true -- a real "
+            f"failure there would be swallowed and the job would still "
+            f"report green, defeating the entire point of an advisory "
+            f"gate (which exists to be looked at when red, not to hide "
+            f"reds)"
+        )
+
     def test_the_job_has_no_job_level_skip_shim(self) -> None:
-        """A job-level always-run-then-skip pattern is the shape a REQUIRED
-        path-filtered check needs (skipped == success for branch
-        protection). Its presence here would be a signal this job was
-        quietly turned into a required check without updating this test or
-        the workflow's own non-gating header comment."""
+        """Weaker naming-convention tripwire, kept alongside the two
+        structural checks above (nexus-98gpl review: acceptable as a
+        tripwire, do not over-trust alone). A step literally named with
+        'required' would be an odd, easy-to-notice signal on its own."""
         steps = _job_steps()
         names = " ".join(s.get("name", "") for s in steps).lower()
         assert "required" not in names, (

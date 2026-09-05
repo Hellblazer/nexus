@@ -55,12 +55,14 @@
 
 name: plugin surface smoke
 
+permissions:
+  contents: read
+
 on:
   pull_request:
     branches: [main, develop]
     paths:
       - 'conexus/**'
-      - 'sn/**'
       - '.claude-plugin/**'
       - 'src/nexus/mcp/**'
       - 'src/nexus/commands/doctor.py'
@@ -87,7 +89,22 @@ jobs:
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           python-version: "3.12"
+          # nexus-2ivn: setup-uv's bundled enable-cache only restores ~1MB
+          # of metadata; the real wheel cache lives at UV_CACHE_DIR
+          # (${{ runner.temp }}/setup-uv-cache), which the explicit
+          # actions/cache step below targets directly — same fix ci.yml's
+          # jobs and local-service-gate-nightly.yml already carry. Without
+          # it every run here re-downloads the full dependency set
+          # (torch ~847MB included) from PyPI from scratch.
           enable-cache: false
+
+      - name: Cache uv wheel cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
 
       - name: Prime bge-768 ONNX (cache or self-hosted asset)
         # Same composite action local-service-gate-nightly.yml uses. Its
