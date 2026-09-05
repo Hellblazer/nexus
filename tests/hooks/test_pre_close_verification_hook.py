@@ -30,6 +30,7 @@ import shutil as _shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 import pytest
@@ -1260,15 +1261,46 @@ class TestF5RemedyRoundTripReal:
     # left to round-trip.
     @pytest.mark.parametrize("remedy_kind", ["t1_scratch"])
     def test_printed_remedy_satisfies_the_hooks_own_lookup(
-        self, remedy_kind, mock_config_env, t2_service_env
+        self, remedy_kind, mock_config_env, t2_service_env, tmp_path: Path
     ) -> None:
         real_nx_dir = self._real_nx_dir()
         if real_nx_dir is None:
             pytest.skip("dev checkout `nx` console script not found next to sys.executable")
         real_nx = str(real_nx_dir / "nx")
 
-        bead_id = "nexus-r5a01"  # single remedy form post-fgekf; dead t2 branch removed
-        session_id = f"cr4lp-close-f5-{remedy_kind}"
+        # nexus-gjv9b fix-pass (coordinator-flagged): TWO independent
+        # sources of flake, both fixed here.
+        #
+        # (1) Fixed session/bead ids: this test writes a real T1 scratch
+        # marker via the real `nx` CLI with no teardown, so a second run
+        # against the same live substrate found its own prior marker and
+        # failed its own "no marker -> deny" precondition. A fresh uuid
+        # suffix per invocation makes every run start against a marker
+        # that provably cannot exist yet. ``[a-z0-9]+`` only (no hyphen)
+        # keeps bead_id inside the single `\bnexus-[a-z0-9]+\b` token the
+        # hook's own bead-id regex expects
+        # (pre_close_verification_hook.sh:357) -- a hyphenated suffix
+        # would sit OUTSIDE that token and be silently ignored.
+        #
+        # (2) Real mint_token bleed-through: this test's subprocesses
+        # inherited the REAL ``~/.config/nexus`` (no NEXUS_CONFIG_DIR
+        # override existed before this fix), so on a box with a mint_token
+        # credential actually configured (RDR-005 step (d)) the shared-
+        # CLI-dedicated-scope fallback tries to mint a fresh T1 session
+        # using that REAL credential against THIS TEST's ephemeral
+        # engine (t2_service_env) and gets a 401 -- "T1 unreachable ...
+        # closing anyway" -- which ALSO satisfies 'allow' where the
+        # precondition expects 'deny', independent of (1). Isolating
+        # NEXUS_CONFIG_DIR to an empty per-test directory means
+        # get_credential("mint_token") resolves to nothing, so the T1
+        # lookup falls back to the NX_SERVICE_TOKEN this test's
+        # t2_service_env fixture already provides -- the same isolation
+        # discipline test_session_end_capability_census.py and
+        # test_routing_hooks.py already apply for their own env leaks.
+        run_suffix = uuid.uuid4().hex[:8]
+        bead_id = f"nexus-r5a01{run_suffix}"  # single remedy form post-fgekf; dead t2 branch removed
+        session_id = f"cr4lp-close-f5-{remedy_kind}-{run_suffix}"
+        isolated_cfg_dir = str(tmp_path / "isolated-nexus-config")
 
         write_env = os.environ.copy()
         write_env["NX_SESSION_ID"] = session_id
@@ -1286,6 +1318,14 @@ class TestF5RemedyRoundTripReal:
             "nexus-cr4lp F5 remedy round-trip test: writes to the "
             "hermetic t2_service_env test engine only, never production"
         )
+        # nexus-gjv9b review fold-in teardown fix: isolate NEXUS_CONFIG_DIR
+        # on the write subprocess too, same rationale as the module-level
+        # _ROUTING_ENGINE_ISOLATED_CONFIG_DIR default in _run_hook --
+        # without it a real mint_token credential configured on this box
+        # (RDR-005 step (d)) makes the T1 write's own session resolution
+        # attempt a real mint against THIS test's ephemeral engine and get
+        # a 401, masking the very precondition this test exists to prove.
+        write_env["NEXUS_CONFIG_DIR"] = isolated_cfg_dir
 
         # nexus-a2qhz round-2 fold-in: _run_hook now strips NX_SERVICE_URL
         # (alongside HOST/PORT/TOKEN) unconditionally unless a caller
@@ -1328,12 +1368,14 @@ class TestF5RemedyRoundTripReal:
                 # precondition probe hitting the real T1 codepath instead
                 # of failing open.
                 "NX_ALLOW_PROD_WRITE": write_env["NX_ALLOW_PROD_WRITE"],
+                "NEXUS_CONFIG_DIR": isolated_cfg_dir,
+                "NX_CLOSE_GATE_DEADLINE_SECONDS": "15",
             },
         )
         reason = _get_reason(json.loads(probe.stdout))
         assert _get_decision(json.loads(probe.stdout)) == "deny", (
             "precondition: with no marker written the hook must deny, or this "
-            "test never exercises the remedy it is here to verify"
+            f"test never exercises the remedy it is here to verify -- got: {probe.stdout}"
         )
 
         want = "nx scratch put"  # the only remedy form post-fgekf
@@ -1366,6 +1408,8 @@ class TestF5RemedyRoundTripReal:
                 "NX_SERVICE_URL": _service_url,
                 "NX_SERVICE_TOKEN": _service_token,
                 "NX_ALLOW_PROD_WRITE": write_env["NX_ALLOW_PROD_WRITE"],
+                "NEXUS_CONFIG_DIR": isolated_cfg_dir,
+                "NX_CLOSE_GATE_DEADLINE_SECONDS": "15",
             },
         )
         parsed = json.loads(result.stdout)
