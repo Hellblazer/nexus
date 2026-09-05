@@ -687,12 +687,32 @@ def _boot() -> dict:
             # The suite issues thousands of tiny transactions; keep fsync off
             # for the throwaway test cluster.
             f.write("fsync = off\nsynchronous_commit = off\nfull_page_writes = off\n")
-        subprocess.run(
+        _start = subprocess.run(
             [str(bin_dir / "pg_ctl"), "-D", pgdata, "-l",
              os.path.join(pgdata, "pg.log"),
              "-o", f"-p {pg_port} -k {pgdata}", "start", "-w"],
-            check=True, capture_output=True,
+            capture_output=True, text=True, check=False,
         )
+        if _start.returncode != 0:
+            # Carry pg_ctl's stderr and the log tail out (rbc7k critique):
+            # CalledProcessError drops stderr, which is where PG names the
+            # shmget ENOSPC that the throwaway helper retries and this
+            # shared boot deliberately does not. Stop a half-started
+            # postmaster first so it cannot outlive its pgdata holding a
+            # SysV segment.
+            subprocess.run(
+                [str(bin_dir / "pg_ctl"), "-D", pgdata, "stop", "-m", "immediate"],
+                capture_output=True, check=False,
+            )
+            try:
+                _log_tail = open(os.path.join(pgdata, "pg.log")).read()[-2000:]
+            except OSError:
+                _log_tail = "<no pg.log>"
+            shutil.rmtree(pgdata, ignore_errors=True)
+            raise RuntimeError(
+                f"nexus test substrate: pg_ctl start failed (rc={_start.returncode}) "
+                f"for {pgdata}:\n{_start.stderr}\n--- pg.log tail ---\n{_log_tail}"
+            )
     postmaster_pid = _read_postmaster_pid(pgdata)
     # Checkpoint 2 of 3 (nexus-ui654 follow-up, critic Q3): UPDATE the
     # sidecar (not re-create -- `started_at` stays pinned to the earliest
