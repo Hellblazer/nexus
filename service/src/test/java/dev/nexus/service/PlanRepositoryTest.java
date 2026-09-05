@@ -5,6 +5,10 @@ import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
+import org.jooq.DSLContext;
+import org.jooq.JSONB;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -13,6 +17,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 
+import static dev.nexus.service.jooq.nexus.Tables.PLANS;
 import static org.assertj.core.api.Assertions.*;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -685,11 +690,11 @@ class PlanRepositoryTest {
 
     @Test
     @Order(14)
-    void rlsWithCheck_crossTenantInsert_rejected() {
+    void rlsWithCheck_crossTenantInsert_rejected() throws Exception {
         // The service role has FORCE RLS with tenant_isolation WITH CHECK.
-        // Attempting to INSERT with tenant_id != GUC must raise a PSQLException.
+        // Attempting to INSERT with tenant_id != GUC must raise a jOOQ
+        // DataAccessException wrapping the underlying RLS violation.
         // We stamp TENANT_A in the GUC but try to insert with TENANT_B manually.
-        // TenantScope.withTenant stamps the GUC, so we reach below it via raw SQL.
         // isLocal=true (SET LOCAL) needs an explicit transaction to survive to the
         // guarded INSERT — autoCommit=true (the prior shape here) discards the GUC
         // before the INSERT runs, so the test would exercise RLS default-deny (no
@@ -697,23 +702,48 @@ class PlanRepositoryTest {
         // mismatch (nexus-gcbp4). The INSERT is expected to throw, so rollback()
         // runs in a finally — this pooled connection must not return to svcDs with
         // an open transaction and a stale GUC still stamped.
-        assertThatThrownBy(() -> {
-            try (var conn = svcDs.getConnection()) {
-                conn.setAutoCommit(false);
-                try {
-                    // Set GUC to TENANT_A but try to insert with TENANT_B — WITH CHECK violation
-                    PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
-                    conn.createStatement().execute(
-                        "INSERT INTO nexus.plans (tenant_id, project, query, plan_json) " +
-                        "VALUES ('" + TENANT_B + "', 'bad-proj', 'RLS violation test', '{}')");
-                } finally {
-                    conn.rollback();
-                }
+        try (var conn = svcDs.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                // Set GUC to TENANT_A but try to insert with TENANT_B — WITH CHECK violation
+                PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
+                DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+
+                // Positive control (nexus-492qf): a matching-tenant INSERT under the
+                // SAME GUC must succeed — proves the WITH CHECK rejection asserted
+                // below is driven by the tenant_id/GUC mismatch, not by the GUC having
+                // silently gone missing (an unset GUC would ALSO reject this insert
+                // under FORCE RLS, matching-tenant included, making the negative
+                // assertion pass vacuously). Runs BEFORE the failing statement: once a
+                // statement inside a transaction errors, Postgres aborts the whole
+                // transaction and rejects every later command until rollback.
+                // created_at and verb are NOT NULL with no default (plans-001-baseline
+                // / hygiene-001-11's later SET NOT NULL on verb). Discovered while
+                // adding this control: the ORIGINAL negative INSERT below (both
+                // before and after nexus-gcbp4) omitted both, so it was throwing on a
+                // NOT NULL violation, not the claimed RLS WITH CHECK mismatch — a
+                // second, independent vacuity bug this control also fixes by giving
+                // both statements the same column set, differing only in tenant_id.
+                ctx.insertInto(PLANS,
+                        PLANS.TENANT_ID, PLANS.PROJECT, PLANS.QUERY, PLANS.PLAN_JSON,
+                        PLANS.CREATED_AT, PLANS.VERB)
+                    .values(TENANT_A, "good-proj", "RLS positive control", JSONB.valueOf("{}"),
+                            OffsetDateTime.now(), "query")
+                    .execute();
+
+                assertThatThrownBy(() ->
+                    ctx.insertInto(PLANS,
+                            PLANS.TENANT_ID, PLANS.PROJECT, PLANS.QUERY, PLANS.PLAN_JSON,
+                            PLANS.CREATED_AT, PLANS.VERB)
+                        .values(TENANT_B, "bad-proj", "RLS violation test", JSONB.valueOf("{}"),
+                                OffsetDateTime.now(), "query")
+                        .execute())
+                .as("RLS WITH CHECK must reject INSERT where tenant_id != nexus.tenant GUC")
+                .isInstanceOf(org.jooq.exception.DataAccessException.class);
+            } finally {
+                conn.rollback();
             }
-        })
-        .as("RLS WITH CHECK must reject INSERT where tenant_id != nexus.tenant GUC")
-        .isInstanceOfAny(org.postgresql.util.PSQLException.class,
-                         java.sql.SQLException.class);
+        }
     }
 
     @Test

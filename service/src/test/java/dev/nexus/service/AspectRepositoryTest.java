@@ -4,6 +4,9 @@ import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
@@ -16,6 +19,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.*;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static org.assertj.core.api.Assertions.*;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -408,7 +413,25 @@ class AspectRepositoryTest {
     }
 
     @Test @Order(14)
-    void rls_withCheck_crossTenantInsert_rejected() {
+    void rls_withCheck_crossTenantInsert_rejected() throws Exception {
+        // document_aspects.collection FK's (tenant_id, collection) to
+        // catalog_collections(tenant_id, name) (fk-003-1) — seed both stub rows via
+        // superuser (bypasses RLS) so the positive- and negative-control INSERTs
+        // below fail (or succeed) on the tenant_id mismatch alone, never on a
+        // missing collection registration.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext suCtx = DSL.using(su, SQLDialect.POSTGRES);
+            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                .values(TENANT_A, "good-coll")
+                .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME).doNothing()
+                .execute();
+            suCtx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+                .values(TENANT_B, "bad-coll")
+                .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME).doNothing()
+                .execute();
+        }
+
         // isLocal=true (SET LOCAL) needs an explicit transaction to survive to the
         // guarded INSERT — autoCommit=true (the prior shape here) discards the GUC
         // before the INSERT runs, so the test would exercise RLS default-deny (no
@@ -416,22 +439,51 @@ class AspectRepositoryTest {
         // mismatch (nexus-gcbp4). The INSERT is expected to throw, so rollback()
         // runs in a finally — this pooled connection must not return to svcDs with
         // an open transaction and a stale GUC still stamped.
-        assertThatThrownBy(() -> {
-            try (var conn = svcDs.getConnection()) {
-                conn.setAutoCommit(false);
-                try {
-                    PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
-                    conn.createStatement().execute(
-                        "INSERT INTO nexus.document_aspects " +
-                        "(tenant_id, collection, source_path, extracted_at, model_version, extractor_name) " +
-                        "VALUES ('" + TENANT_B + "', 'bad-coll', 'bad.pdf', now(), 'v1', 'bad')");
-                } finally {
-                    conn.rollback();
-                }
+        try (var conn = svcDs.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, true);
+                DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+
+                // Positive control (nexus-492qf): a matching-tenant INSERT under the
+                // SAME GUC must succeed — proves the WITH CHECK rejection asserted
+                // below is driven by the tenant_id/GUC mismatch, not by the GUC having
+                // silently gone missing (an unset GUC would ALSO reject this insert
+                // under FORCE RLS, matching-tenant included, making the negative
+                // assertion pass vacuously). Runs BEFORE the failing statement: once a
+                // statement inside a transaction errors, Postgres aborts the whole
+                // transaction and rejects every later command until rollback.
+                // doc_id/source_uri are NOT NULL here (hygiene-001-1) and doc_id is
+                // FK'd to catalog_documents(tenant_id, tumbler) — "1.2.3" is the
+                // TENANT_A tumbler this class's @BeforeAll already seeds for exactly
+                // this purpose. Discovered while adding this control: the ORIGINAL
+                // negative INSERT below (both before and after nexus-gcbp4) omitted
+                // both columns, so it was throwing on a NOT NULL violation, not the
+                // claimed RLS WITH CHECK mismatch — a second, independent vacuity bug
+                // this control also fixes by giving both statements the same column
+                // set, differing only in tenant_id.
+                ctx.insertInto(DOCUMENT_ASPECTS,
+                        DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH,
+                        DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                        DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                    .values(TENANT_A, "good-coll", "good.pdf", OffsetDateTime.now(), "v1", "good",
+                            "1.2.3", "file:///good.pdf")
+                    .execute();
+
+                assertThatThrownBy(() ->
+                    ctx.insertInto(DOCUMENT_ASPECTS,
+                            DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH,
+                            DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
+                            DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
+                        .values(TENANT_B, "bad-coll", "bad.pdf", OffsetDateTime.now(), "v1", "bad",
+                                "1.2.3", "file:///bad.pdf")
+                        .execute())
+                .as("RLS WITH CHECK must reject aspect INSERT where tenant_id != nexus.tenant GUC")
+                .isInstanceOf(org.jooq.exception.DataAccessException.class);
+            } finally {
+                conn.rollback();
             }
-        })
-        .as("RLS WITH CHECK must reject aspect INSERT where tenant_id != nexus.tenant GUC")
-        .isInstanceOfAny(org.postgresql.util.PSQLException.class, java.sql.SQLException.class);
+        }
     }
 
     @Test @Order(15)
