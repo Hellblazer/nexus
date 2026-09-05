@@ -553,21 +553,45 @@ class TestIndexFailuresCheckRoutes:
     whose reader never raises reproduces the aspect-queue check's original
     defect for a second queue). Written FAIL-FIRST rather than retrofitted.
 
-    Fold-in (T2 critique-nexus-nukn3-410720f6a [24569], Critical finding):
-    the check now scopes its gate to the LATEST run and exempts a stale
-    one, rather than gating on the all-time total -- these tests assert
-    the two-query shape that scoping requires (an unscoped call to find
-    the newest row's run_id, then a run_id-scoped call for the exact
-    latest-run count)."""
+    Fold-in round 1 (T2 critique-nexus-nukn3-410720f6a [24569], Critical
+    finding): the check now scopes its gate to the LATEST run and exempts
+    a stale one, rather than gating on the all-time total.
+
+    Fold-in round 2 (T2 critique-nexus-nukn3-37262c4a1 [24596], Critical
+    finding): the gate is now scoped to the latest UNACKNOWLEDGED run --
+    a durable ``nx index failures --acknowledge`` adjudication is excluded
+    from the gate so a recurring failure for an acknowledged file does not
+    gate forever just because every re-index mints a fresh run_id. These
+    tests assert the resulting THREE-query shape: an unscoped all-time
+    call, an unscoped unacknowledged-only call (finds the latest
+    unacknowledged run's id), and a run_id + unacknowledged_only scoped
+    call for the exact gating count."""
 
     @staticmethod
-    def _scoped_mock(all_time: dict, by_run_id: dict | None = None):
-        """A list_index_failures side_effect: the unscoped call (run_id="")
-        returns *all_time*; a run_id-scoped call returns *by_run_id*."""
-        def _side_effect(*, run_id: str = "", days: int = 0, limit: int = 100):
+    def _scoped_mock(
+        all_time: dict,
+        unacked_all_time: dict | None = None,
+        by_run_id_unacked: dict | None = None,
+    ):
+        """A list_index_failures side_effect routed by (run_id,
+        unacknowledged_only): the plain unscoped call returns *all_time*;
+        the unscoped unacknowledged_only call returns *unacked_all_time*
+        (defaults to *all_time* when every failure is unacknowledged, the
+        common test shape); a run_id + unacknowledged_only scoped call
+        returns *by_run_id_unacked*."""
+        def _side_effect(*, run_id: str = "", days: int = 0, limit: int = 100,
+                          unacknowledged_only: bool = False):
             if run_id:
-                assert by_run_id is not None, f"unexpected scoped call with run_id={run_id}"
-                return by_run_id
+                assert unacknowledged_only, (
+                    "the run-scoped gate call must always pass "
+                    "unacknowledged_only=True"
+                )
+                assert by_run_id_unacked is not None, (
+                    f"unexpected scoped call with run_id={run_id}"
+                )
+                return by_run_id_unacked
+            if unacknowledged_only:
+                return unacked_all_time if unacked_all_time is not None else all_time
             return all_time
         return _side_effect
 
@@ -614,7 +638,7 @@ class TestIndexFailuresCheckRoutes:
         with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
             store.return_value.list_index_failures.side_effect = self._scoped_mock(
                 all_time={"rows": [row], "total": 1, "oldest_occurred_at": now_iso},
-                by_run_id={"rows": [row], "total": 1, "oldest_occurred_at": now_iso},
+                by_run_id_unacked={"rows": [row], "total": 1, "oldest_occurred_at": now_iso},
             )
             runner = CliRunner()
             with runner.isolation() as (out, err, _):
@@ -667,6 +691,42 @@ class TestIndexFailuresCheckRoutes:
         assert "FAIL" not in printed
         assert "1 recorded failure" in printed, printed
         assert "no longer gates" in printed
+
+    def test_all_failures_acknowledged_does_not_signal_failure(
+        self, service_mode: None,
+    ) -> None:
+        """Fold-in round 2's motivating case: a FRESH, recurring failure
+        that is fully covered by a durable acknowledgment must not gate,
+        even though the all-time total is nonzero and the failure recurred
+        just now (the exact shape a stale-only fix cannot self-heal)."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        row = {
+            "run_id": "run-9", "file_path": "/repo/known-encrypted.pdf",
+            "error_class": "UnextractableContentError",
+            "error": "encrypted", "occurred_at": now_iso,
+        }
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.list_index_failures.side_effect = self._scoped_mock(
+                all_time={"rows": [row], "total": 2, "oldest_occurred_at": now_iso},
+                unacked_all_time={"rows": [], "total": 0, "oldest_occurred_at": ""},
+            )
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                exit_code = None
+                try:
+                    doctor_mod._run_check_index_failures()
+                except click.exceptions.Exit as exc:
+                    exit_code = exc.exit_code
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert exit_code is None, printed
+        assert "FAIL" not in printed
+        assert "2 recorded failure" in printed, printed
+        assert "acknowledged" in printed
 
     def test_unreachable_service_reports_UNKNOWN_not_zero(
         self, service_mode: None,

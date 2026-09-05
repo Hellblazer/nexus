@@ -235,7 +235,7 @@ _SETATTR_EXEMPT: frozenset[str] = frozenset({
     # time from one whose module-level import already captured the real
     # (unpoisoned) function; only literally replacing the function object
     # and observing whether the replacement propagates proves the shape.
-    "tests/test_health_service_checks.py:2668",
+    "tests/test_health_service_checks.py:2669",
     # test_backfill_state_path_uses_config_module_attr_not_frozen_import:
     # same class, for nexus.commands.t3._backfill_state_path(). Proves the
     # consumer reads nexus.config.nexus_config_dir via module-attribute

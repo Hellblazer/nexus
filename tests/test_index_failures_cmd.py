@@ -172,3 +172,110 @@ def test_clear_route_absent_on_old_engine_is_a_click_exception() -> None:
     assert result.exit_code != 0
     assert not isinstance(result.exception, httpx.HTTPStatusError)
     assert "route not found" in result.output.lower()
+
+
+# ── nx index failures --acknowledge (fold-in round 2: the critic's Critical
+# finding that --clear alone is undone by the next re-index) ────────────────
+
+
+def test_acknowledge_requires_file_or_error_class() -> None:
+    with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore"):
+        result = CliRunner().invoke(main, ["index", "failures", "--acknowledge"])
+
+    assert result.exit_code != 0
+    assert "--file" in result.output and "--error-class" in result.output
+
+
+def test_acknowledge_by_explicit_error_class_skips_lookup() -> None:
+    with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+        result = CliRunner().invoke(main, [
+            "index", "failures", "--acknowledge",
+            "--error-class", "UnextractableContentError",
+            "--reason", "known limitation",
+        ])
+
+    assert result.exit_code == 0, result.output
+    store.return_value.list_index_failures.assert_not_called()
+    store.return_value.acknowledge_index_failure.assert_called_once_with(
+        error_class="UnextractableContentError", file_path="", reason="known limitation",
+    )
+    assert "Acknowledged" in result.output
+
+
+def test_acknowledge_by_file_resolves_error_class_from_the_backlog() -> None:
+    with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+        store.return_value.list_index_failures.return_value = {
+            "rows": [{
+                "run_id": "run-1", "file_path": "/repo/broken.pdf",
+                "error_class": "UnextractableContentError",
+                "error": "encrypted", "occurred_at": "2026-09-05T00:00:00Z",
+                "acknowledged": False,
+            }],
+            "total": 1, "oldest_occurred_at": "2026-09-05T00:00:00Z",
+        }
+        result = CliRunner().invoke(main, [
+            "index", "failures", "--acknowledge", "--file", "/repo/broken.pdf",
+        ])
+
+    assert result.exit_code == 0, result.output
+    store.return_value.acknowledge_index_failure.assert_called_once_with(
+        error_class="UnextractableContentError", file_path="/repo/broken.pdf", reason="",
+    )
+
+
+def test_acknowledge_by_file_with_no_recorded_failure_is_a_click_exception() -> None:
+    with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+        store.return_value.list_index_failures.return_value = {
+            "rows": [], "total": 0, "oldest_occurred_at": "",
+        }
+        result = CliRunner().invoke(main, [
+            "index", "failures", "--acknowledge", "--file", "/repo/never-failed.pdf",
+        ])
+
+    assert result.exit_code != 0
+    assert "no recorded failure" in result.output.lower()
+    store.return_value.acknowledge_index_failure.assert_not_called()
+
+
+def test_clear_and_acknowledge_are_mutually_exclusive() -> None:
+    with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore"):
+        result = CliRunner().invoke(main, [
+            "index", "failures", "--clear", "--acknowledge",
+            "--error-class", "X", "--run-id", "r1",
+        ])
+
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output.lower()
+
+
+def test_acknowledged_rows_are_marked_in_the_list_view() -> None:
+    with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+        store.return_value.list_index_failures.return_value = {
+            "rows": [{
+                "run_id": "run-1", "file_path": "/repo/broken.pdf",
+                "error_class": "UnextractableContentError",
+                "error": "encrypted", "occurred_at": "2026-09-05T00:00:00Z",
+                "acknowledged": True,
+            }],
+            "total": 1, "oldest_occurred_at": "2026-09-05T00:00:00Z",
+        }
+        result = CliRunner().invoke(main, ["index", "failures"])
+
+    assert result.exit_code == 0, result.output
+    assert "[ACKNOWLEDGED]" in result.output
+
+
+def test_acknowledge_route_absent_on_old_engine_is_a_click_exception() -> None:
+    response = MagicMock(status_code=404)
+    with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+        store.return_value.acknowledge_index_failure.side_effect = httpx.HTTPStatusError(
+            "404", request=MagicMock(), response=response,
+        )
+        result = CliRunner().invoke(main, [
+            "index", "failures", "--acknowledge",
+            "--error-class", "UnextractableContentError",
+        ])
+
+    assert result.exit_code != 0
+    assert not isinstance(result.exception, httpx.HTTPStatusError)
+    assert "route not found" in result.output.lower()

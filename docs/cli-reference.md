@@ -311,17 +311,22 @@ nx search "" --corpus knowledge --where extraction_method=mineru --files
 ```
 nx index failures [--run-id ID] [--days N] [--limit N]
 nx index failures --clear [--run-id ID] [--older-than-days N]
+nx index failures --acknowledge (--file PATH | --error-class CLASS) [--reason TEXT]
 ```
 
-Lists, or clears, durable per-file index-failure records (nexus-nukn3, Sam's design: "when a file fails, ENQUEUE the failure and move on"). A `repo` run that skips a file it cannot extract (`nexus.errors.UnextractableContentError`) now writes a durable row — file path, error class, reason, run id — to `nexus.index_failures` (engine-side PG table, event-log shape, mirrors `hook_failures`) instead of only a log line and an in-memory counter that die with the process. `nx index repo`'s systemic-skip floor (nexus-deyd5) reads this same durable count rather than the in-memory list.
+Lists, clears, or acknowledges durable per-file index-failure records (nexus-nukn3, Sam's design: "when a file fails, ENQUEUE the failure and move on"). A `repo` run that skips a file it cannot extract (`nexus.errors.UnextractableContentError`) now writes a durable row — file path, error class, reason, run id — to `nexus.index_failures` (engine-side PG table, event-log shape, mirrors `hook_failures`) instead of only a log line and an in-memory counter that die with the process. `nx index repo`'s systemic-skip floor (nexus-deyd5) reads this same durable count rather than the in-memory list.
 
 | Flag | Description |
 |------|-------------|
 | `--run-id ID` | Only show (or, with `--clear`, only clear) failures from this run (default: every run) |
-| `--days N` | Only show failures within the last N days (default: `0`, unbounded). Ignored with `--clear` |
-| `--limit N` | Max rows to print (default: `100`). The printed count is always the exact total, independent of this cap. Ignored with `--clear` |
-| `--clear` | Delete rows instead of listing them, scoped by `--run-id` and/or `--older-than-days` (at least one is required — an unscoped `--clear` is refused) |
+| `--days N` | Only show failures within the last N days (default: `0`, unbounded). Ignored with `--clear`/`--acknowledge` |
+| `--limit N` | Max rows to print (default: `100`). The printed count is always the exact total, independent of this cap. Ignored with `--clear`/`--acknowledge` |
+| `--clear` | Delete rows instead of listing them, scoped by `--run-id` and/or `--older-than-days` (at least one is required — an unscoped `--clear` is refused). Mutually exclusive with `--acknowledge` |
 | `--older-than-days N` | With `--clear`: also delete rows older than N days (default: `0`, no age bound). Combine with `--run-id`, or use alone to age-sweep every run |
+| `--acknowledge` | Durably adjudicate a recurring failure instead of listing or clearing. Requires `--file` and/or `--error-class`. Mutually exclusive with `--clear` |
+| `--file PATH` | With `--acknowledge`: the file to acknowledge (file-scoped — only that exact file + error-class pair is covered going forward). Omit `--error-class` to auto-resolve the file's most recently recorded error class |
+| `--error-class CLASS` | With `--acknowledge`: the error class to acknowledge. Alone (no `--file`), covers ANY file with this error class — a corpus-wide exemption for a known systemic issue |
+| `--reason TEXT` | With `--acknowledge`: optional free-text note, shown against the acknowledged row(s) in the list view |
 
 ```bash
 nx index failures                              # every recorded failure
@@ -329,9 +334,11 @@ nx index failures --run-id abc123               # one run only
 nx index failures --days 7                      # last week
 nx index failures --clear --run-id abc123        # retire one run
 nx index failures --clear --older-than-days 90   # age-sweep
+nx index failures --acknowledge --file broken.pdf --reason "known encrypted PDF"
+nx index failures --acknowledge --error-class UnextractableContentError
 ```
 
-`--clear` is the immediate remedy for `nx doctor --check-index-failures`'s fail-first gate: an operator who has adjudicated a failure (accepted it as permanent, or fixed and re-indexed the file) retires its row(s) right away rather than waiting out doctor's own 30-day staleness window. An unreachable service, or a `--clear`/route call against an engine that predates nexus-nukn3, raises a clean `ClickException` naming the condition rather than a raw traceback.
+`--clear` is a ONE-TIME delete: the next index run that hits the same file mints a fresh row (and a fresh run id), so a permanently unextractable file re-indexed on a cadence undoes a bare `--clear` every time. `--acknowledge` is the durable fix — it writes a permanent `kind='acknowledgment'` marker into the same table that the read path (and the doctor gate) treats as "known", so a recurring failure for an acknowledged file no longer gates while a genuinely new file, or a new error class for that same file, still does. Acknowledged rows are marked `[ACKNOWLEDGED]` in the list view. An unreachable service, or a `--clear`/`--acknowledge` call against an engine that predates the corresponding nexus-nukn3 route, raises a clean `ClickException` naming the condition rather than a raw traceback.
 
 Pairs with `nx doctor --check-index-failures` for a pass/fail signal on the backlog; this verb answers *which* files.
 
@@ -2597,7 +2604,7 @@ nx doctor --check-index-failures     # Surface the durable index-failures backlo
 
 The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reports the `aspect_extraction_queue` row count plus per-status breakdown (`pending`, `processing`, `failed`, `completed`), the oldest non-completed `enqueued_at` as a lag indicator, and the top failed rows with their `last_error`. The same data surfaces in the `nx console` Aspect Queue card on `/health` for live monitoring. Pre-RDR-089 databases (no queue table) report cleanly as "table not present" rather than erroring. A transport failure (service unreachable) reports UNKNOWN and exits 0 — not reporting pass or fail; a reachable queue with one or more `failed` rows is a real backlog signal and exits 1 with a `✗ FAIL:` marker, matching the other promoted supplementary checks (nexus-fylxo).
 
-The `--check-index-failures` flag (introduced nexus-nukn3, also part of the default sweep) reports the `nexus.index_failures` all-time row count (see `nx index failures` above) as information, and gates the sweep on the LATEST run that recorded any failure — not the all-time total. Deliberately written FAIL-FIRST: this is the exact bead nexus-fylxo names as the trap to avoid, a durable failure queue whose reader never raises reproduces the aspect-queue check's original silent-backlog defect for a second queue. Scoping the gate to the latest run (rather than the earlier all-time-cumulative design) closes a second trap the critic found in review: an unscoped all-time gate turns the FIRST permanent extraction failure in a tenant's history into an unfixable FAIL forever. A failure older than 30 days no longer gates at all (the check self-heals over time even with no operator action); `nx index failures --clear` retires an adjudicated row immediately instead of waiting out that window. A transport failure reports UNKNOWN and exits 0; a fresh (within 30 days) latest-run failure exits 1 with a `✗ FAIL:` marker naming that run's count.
+The `--check-index-failures` flag (introduced nexus-nukn3, also part of the default sweep) reports the `nexus.index_failures` all-time row count (see `nx index failures` above) as information, and gates the sweep on the LATEST run that recorded any UNACKNOWLEDGED failure — never the all-time total, and never a failure an operator has durably acknowledged. Deliberately written FAIL-FIRST: this is the exact bead nexus-fylxo names as the trap to avoid, a durable failure queue whose reader never raises reproduces the aspect-queue check's original silent-backlog defect for a second queue. Two rounds of scoping close two separate traps found in review: (1) an unscoped all-time gate turned the FIRST permanent extraction failure in a tenant's history into an unfixable FAIL forever — fixed by gating on the latest run instead, with a failure older than 30 days no longer gating at all (self-heals over time with no operator action); (2) staleness alone did not self-heal a corpus re-indexed on a cadence SHORTER than that window, since every run mints a fresh run id for the identical recurring failure — fixed by `nx index failures --acknowledge`, a durable adjudication the gate excludes regardless of how many times it recurs under a new run id. `nx index failures --clear` remains the immediate one-time remedy for a failure an operator has already handled and does not want to wait out the staleness window for. A transport failure reports UNKNOWN and exits 0; a fresh (within 30 days), unacknowledged latest-run failure exits 1 with a `✗ FAIL:` marker naming that run's count.
 
 ---
 

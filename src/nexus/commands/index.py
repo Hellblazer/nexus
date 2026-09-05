@@ -236,11 +236,51 @@ def index() -> None:
     help="With --clear: also delete rows older than N days (0 = no age "
     "bound; combine with --run-id, or use alone to age-sweep every run).",
 )
+@click.option(
+    "--acknowledge",
+    "acknowledge",
+    is_flag=True,
+    default=False,
+    help="Durably adjudicate a recurring failure instead of listing or "
+    "clearing rows -- the fix for nx doctor --check-index-failures gating "
+    "forever on a PERMANENTLY unextractable file that is re-indexed on a "
+    "cadence: unlike --clear, this survives the next index run minting a "
+    "fresh run_id for the same failure. Requires --file and/or "
+    "--error-class.",
+)
+@click.option(
+    "--file",
+    "file_path",
+    default=None,
+    help="With --acknowledge: the file to acknowledge (file-scoped -- only "
+    "that exact file+error-class pair is covered going forward). Combine "
+    "with --error-class to skip the lookup, or omit it to auto-resolve "
+    "the file's most recently recorded error_class.",
+)
+@click.option(
+    "--error-class",
+    "error_class",
+    default=None,
+    help="With --acknowledge: the error class to acknowledge. Alone (no "
+    "--file), covers ANY file with this error_class -- the broader, "
+    "corpus-wide exemption for a known systemic issue (e.g. scanned PDFs "
+    "with no OCR configured).",
+)
+@click.option(
+    "--reason",
+    "reason",
+    default=None,
+    help="With --acknowledge: optional free-text note, shown in the list "
+    "view against the acknowledged row(s).",
+)
 def index_failures_cmd(
     run_id: str | None, days: int, limit: int,
     clear: bool, older_than_days: int,
+    acknowledge: bool, file_path: str | None, error_class: str | None,
+    reason: str | None,
 ) -> None:
-    """List, or clear, durable per-file index-failure records (nexus-nukn3).
+    """List, clear, or acknowledge durable per-file index-failure records
+    (nexus-nukn3).
 
     A repo-index run that skips a file it could not extract writes a
     durable row here (file path, error class, reason, run id) instead of
@@ -256,10 +296,25 @@ def index_failures_cmd(
       nx index failures --days 7                      # last week
       nx index failures --clear --run-id abc123        # retire one run
       nx index failures --clear --older-than-days 90   # age-sweep
+      nx index failures --acknowledge --file broken.pdf --reason "encrypted"
+      nx index failures --acknowledge --error-class UnextractableContentError
+
+    \b
+    ``--clear`` is a ONE-TIME delete: the next index run that hits the same
+    file mints a fresh row (and a fresh run_id), so a permanently
+    unextractable file re-indexed on a cadence undoes a bare ``--clear``
+    every time. ``--acknowledge`` is the durable fix -- it writes a
+    permanent marker the read path (and the doctor gate) treats as
+    "known", so a recurring failure for an acknowledged file no longer
+    gates, while a genuinely NEW file or a NEW error class for that same
+    file still does.
     """
     import httpx  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    if clear and acknowledge:
+        raise click.UsageError("--clear and --acknowledge are mutually exclusive.")
 
     try:
         store = HttpTelemetryStore()
@@ -267,6 +322,68 @@ def index_failures_cmd(
         raise click.ClickException(
             f"index_failures: service backend unreachable ({exc})."
         ) from exc
+
+    if acknowledge:
+        if not file_path and not error_class:
+            raise click.UsageError(
+                "--acknowledge requires --file and/or --error-class."
+            )
+        resolved_class = error_class
+        if not resolved_class:
+            # Auto-resolve: the file's most recently recorded error_class.
+            # No file_path filter exists on list_index_failures (a small
+            # table; fetch a wide page and filter client-side rather than
+            # growing the wire contract for a one-shot CLI lookup).
+            try:
+                candidates = store.list_index_failures(limit=1000)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    raise click.ClickException(
+                        "index_failures/list route not found on this engine "
+                        "-- the engine predates nexus-nukn3."
+                    ) from exc
+                raise click.ClickException(f"index_failures: request failed ({exc}).") from exc
+            except (httpx.HTTPError, RuntimeError) as exc:
+                raise click.ClickException(
+                    f"index_failures: service backend unreachable ({exc})."
+                ) from exc
+            matching = [
+                row for row in candidates["rows"] if row.get("file_path") == file_path
+            ]
+            if not matching:
+                raise click.ClickException(
+                    f"no recorded failure for {file_path!r} -- pass "
+                    "--error-class explicitly to acknowledge it anyway."
+                )
+            resolved_class = str(matching[0].get("error_class") or "")
+            if not resolved_class:
+                raise click.ClickException(
+                    f"the recorded failure for {file_path!r} has no "
+                    "error_class -- pass --error-class explicitly."
+                )
+        try:
+            store.acknowledge_index_failure(
+                error_class=resolved_class, file_path=file_path or "",
+                reason=reason or "",
+            )
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise click.ClickException(
+                    "index_failures/acknowledge route not found on this "
+                    "engine -- the engine predates nexus-nukn3's "
+                    "--acknowledge support. Upgrade the engine "
+                    "(nx upgrade / redeploy)."
+                ) from exc
+            raise click.ClickException(f"index_failures --acknowledge failed: {exc}.") from exc
+        except (httpx.HTTPError, RuntimeError) as exc:
+            raise click.ClickException(
+                f"index_failures: service backend unreachable ({exc})."
+            ) from exc
+        scope = f"{file_path!r} + {resolved_class}" if file_path else f"any file with {resolved_class}"
+        click.echo(f"Acknowledged: {scope}.")
+        return
 
     if clear:
         # CLI-side guard, ahead of the client/engine's own (redundant on
@@ -322,10 +439,14 @@ def index_failures_cmd(
 
     click.echo(f"index_failures: {total} row(s){scope} (showing {len(rows)}):")
     for row in rows:
+        # nexus-nukn3 fold-in (critic Critical finding): "ack shown in the
+        # list" -- a row covered by a durable acknowledgment is marked so
+        # an operator can tell a gate-exempt recurrence from a fresh one.
+        ack_marker = " [ACKNOWLEDGED]" if row.get("acknowledged") else ""
         click.echo(
             f"  {row.get('occurred_at', '?')}  {row.get('file_path', '?')}  "
             f"[{row.get('error_class', '?')}] {row.get('error', '')}  "
-            f"(run {row.get('run_id', '?')})"
+            f"(run {row.get('run_id', '?')}){ack_marker}"
         )
     if total > len(rows):
         click.echo(f"\n({total - len(rows)} more not shown — raise --limit to see them.)")

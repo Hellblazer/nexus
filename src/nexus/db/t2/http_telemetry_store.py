@@ -51,6 +51,7 @@ Route mapping (matches TelemetryHandler Java):
     POST /v1/telemetry/index_failures/record_batch  — record_index_failures_batch
     GET  /v1/telemetry/index_failures/list          — list_index_failures
     POST /v1/telemetry/index_failures/trim          — trim_index_failures
+    POST /v1/telemetry/index_failures/acknowledge   — acknowledge_index_failure
     POST /v1/telemetry/capability_census/record — record_capability_census (nexus-gjv9b
                                            PART 1: upsert on (tenant_id, session_id))
     GET  /v1/telemetry/capability_census/query  — query_capability_census
@@ -915,6 +916,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         run_id: str = "",
         days: int = 0,
         limit: int = 100,
+        unacknowledged_only: bool = False,
     ) -> dict[str, Any]:
         """Read index failures, newest first, optionally scoped to one
         ``run_id`` (blank = every run).
@@ -927,10 +929,19 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         :meth:`list_hook_failures`: a caller reading a count (the
         deyd5 systemic-skip floor, ``nx doctor --check-index-failures``)
         must never under-report because the backlog exceeded ``limit``.
+
+        Each row carries an ``acknowledged`` boolean (nexus-nukn3 fold-in,
+        critic Critical finding: the doctor gate needs a durable
+        adjudication that survives a fresh ``run_id`` every re-run --
+        ``nx index failures --acknowledge``). ``unacknowledged_only=True``
+        additionally excludes any covered row from both ``rows`` and
+        ``total`` -- the doctor gate's and the deyd5 floor's input.
         """
         params: dict[str, Any] = {"days": days, "limit": limit}
         if run_id:
             params["run_id"] = run_id
+        if unacknowledged_only:
+            params["unacknowledged_only"] = True
         resp = self._get("/v1/telemetry/index_failures/list", params)
         if not isinstance(resp, dict):  # defensive: a stripped proxy response
             return {"rows": [], "total": 0, "oldest_occurred_at": ""}
@@ -940,18 +951,63 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "oldest_occurred_at": str(resp.get("oldest_occurred_at") or ""),
         }
 
-    def trim_index_failures(self, *, run_id: str = "", days: int = 0) -> int:
-        """Delete index_failures rows by ``run_id`` and/or age (nexus-nukn3
-        fold-in, the critic's Critical finding on the original cut: an
-        all-time, fail-first doctor check with no remedy is unfixable
-        forever once a permanent extraction failure exists. This is the
-        remedy -- ``nx index failures --clear``.
+    def acknowledge_index_failure(
+        self,
+        *,
+        error_class: str,
+        file_path: str = "",
+        reason: str = "",
+    ) -> None:
+        """Durably acknowledge a recurring index failure (nexus-nukn3
+        fold-in, critic Critical finding: a fresh ``run_id`` every run
+        means ``--clear`` alone is undone by the very next index run for a
+        PERMANENTLY unextractable file re-indexed on a cadence). Writes a
+        ``kind='acknowledgment'`` row into the same ``nexus.index_failures``
+        table -- an operator's adjudication that survives re-runs, unlike a
+        one-time ``--clear``.
+
+        Calls ``POST /v1/telemetry/index_failures/acknowledge``.
+
+        Args:
+            error_class: REQUIRED, non-blank. An acknowledgment with no
+                error_class would cover every failure for its file (or,
+                blank ``file_path`` too, every failure in the tenant),
+                which is never the intended scope.
+            file_path: file-scoped when non-blank (only that exact
+                ``(file_path, error_class)`` pair is covered going
+                forward); ``""`` (default) for an error-class-scoped
+                acknowledgment covering ANY file with ``error_class``.
+            reason: optional free-text note (shown in ``nx index
+                failures``'s error column for the acknowledgment).
+        """
+        if not error_class:
+            raise ValueError(
+                "acknowledge_index_failure requires a non-blank error_class"
+            )
+        payload: dict[str, Any] = {"error_class": error_class}
+        if file_path:
+            payload["file_path"] = file_path
+        if reason:
+            payload["reason"] = reason
+        self._post("/v1/telemetry/index_failures/acknowledge", payload)
+
+    def trim_index_failures(
+        self, *, run_id: str = "", days: int = 0, dry_run: bool = False,
+    ) -> int:
+        """Delete (or, with ``dry_run=True``, COUNT without deleting)
+        index_failures rows by ``run_id`` and/or age (nexus-nukn3 fold-in,
+        the critic's Critical finding on the original cut: an all-time,
+        fail-first doctor check with no remedy is unfixable forever once a
+        permanent extraction failure exists. This is the remedy -- ``nx
+        index failures --clear``.
 
         Calls ``POST /v1/telemetry/index_failures/trim``. At least one of
         ``run_id``/``days`` is required -- refusing here (before the wire
         call) mirrors the engine's own 400 boundary, so a caller gets the
         same clear refusal message regardless of which side would have
-        caught it first.
+        caught it first. Never deletes a ``kind='acknowledgment'`` row --
+        only failures age out; an acknowledgment is a durable policy
+        marker.
         """
         if not run_id and days < 1:
             raise ValueError(
@@ -963,6 +1019,8 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             payload["run_id"] = run_id
         if days > 0:
             payload["days"] = days
+        if dry_run:
+            payload["dry_run"] = True
         resp = self._post("/v1/telemetry/index_failures/trim", payload)
         return int(resp.get("deleted", 0))
 

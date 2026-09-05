@@ -609,6 +609,68 @@ class TestIndexFailuresRoundTrip:
         assert tel_store.list_index_failures(run_id=run_a, limit=100)["total"] == 0
         assert tel_store.list_index_failures(run_id=run_b, limit=100)["total"] == 1
 
+    def test_trim_dry_run_previews_without_deleting(self, tel_store):
+        run_id = f"itest-trim-dryrun-{time.time_ns()}"
+        tel_store.record_index_failure(
+            run_id=run_id, file_path="/repo/a.pdf",
+            error_class="UnextractableContentError", error="boom",
+        )
+
+        previewed = tel_store.trim_index_failures(run_id=run_id, dry_run=True)
+
+        assert previewed == 1
+        assert tel_store.list_index_failures(run_id=run_id, limit=100)["total"] == 1
+
+        deleted = tel_store.trim_index_failures(run_id=run_id)
+        assert deleted == 1
+
+    def test_acknowledge_requires_non_blank_error_class(self, tel_store):
+        with pytest.raises(ValueError):
+            tel_store.acknowledge_index_failure(error_class="")
+
+    def test_acknowledge_by_file_covers_recurring_failure_across_runs(self, tel_store):
+        """THE fold-in round 2 non-vacuity proof, against the REAL engine:
+        an acknowledged file's failure recurring under a FRESH run_id must
+        be excluded from unacknowledged_only, while a brand new file still
+        shows up."""
+        file_path = f"/repo/broken-{time.time_ns()}.pdf"
+        tel_store.record_index_failure(
+            run_id="run-1", file_path=file_path,
+            error_class="UnextractableContentError", error="encrypted",
+        )
+        tel_store.acknowledge_index_failure(
+            error_class="UnextractableContentError", file_path=file_path,
+            reason="known encrypted PDF",
+        )
+        # A re-run mints a NEW run_id for the identical failure.
+        tel_store.record_index_failure(
+            run_id="run-2", file_path=file_path,
+            error_class="UnextractableContentError", error="encrypted",
+        )
+
+        scoped_unacked = tel_store.list_index_failures(
+            run_id="run-2", unacknowledged_only=True, limit=100,
+        )
+        assert scoped_unacked["total"] == 0
+
+        # The plain list shows both recurrences, marked acknowledged.
+        plain = tel_store.list_index_failures(limit=1000)
+        matching = [r for r in plain["rows"] if r.get("file_path") == file_path]
+        assert len(matching) == 2
+        assert all(r.get("acknowledged") is True for r in matching)
+
+        # A NEW, unrelated file in the same run still shows up unacknowledged.
+        other_path = f"/repo/other-{time.time_ns()}.pdf"
+        tel_store.record_index_failure(
+            run_id="run-2", file_path=other_path,
+            error_class="UnextractableContentError", error="boom",
+        )
+        scoped_unacked_2 = tel_store.list_index_failures(
+            run_id="run-2", unacknowledged_only=True, limit=100,
+        )
+        assert scoped_unacked_2["total"] == 1
+        assert scoped_unacked_2["rows"][0]["file_path"] == other_path
+
 
 class TestNxAnswerStepsRoundTrip:
     """RDR-196 .p1d (nexus-nyry9.10): direct-store-read proof that

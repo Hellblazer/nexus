@@ -1062,6 +1062,14 @@ def _run_check_aspect_queue() -> None:
 
 # ── --check-index-failures (nexus-nukn3) ─────────────────────────────────────
 
+#: Shared default retention/staleness window (days), one named constant
+#: (fold-in, critic Significant finding T2 critique-nexus-nukn3-37262c4a1
+#: [24596]: this literal and --trim-telemetry's --days default were two
+#: independent `30`s that could silently drift apart). Both
+#: :data:`_INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS` below and the
+#: ``--days`` click option on ``doctor_cmd`` derive from this ONE source.
+_DEFAULT_TELEMETRY_RETENTION_DAYS: int = 30
+
 #: A recorded failure older than this many days no longer gates the default
 #: sweep (nexus-nukn3 fold-in, critic Critical finding T2
 #: critique-nexus-nukn3-410720f6a [24569]). The ORIGINAL cut gated on the
@@ -1070,13 +1078,26 @@ def _run_check_aspect_queue() -> None:
 #: turned the default `nx doctor` sweep into an unfixable FAIL forever --
 #: the mirror image of the nexus-fylxo trap this check exists to avoid (a
 #: check that can never return to green is operationally the same failure
-#: as one nobody reads). Scoping the gate to the LATEST run, and further
-#: exempting it once it is this stale, means the check self-heals over time
-#: even with no operator action; `nx index failures --clear` is the
-#: immediate remedy for an operator who has already adjudicated a row.
-#: Matches the trim family's existing --days=30 default (trim_hook_failures
-#: / trim_search_telemetry) rather than inventing a new retention constant.
-_INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS: int = 30
+#: as one nobody reads). Scoping the gate to the LATEST UNACKNOWLEDGED run,
+#: and further exempting it once it is this stale, means the check
+#: self-heals over time even with no operator action.
+#:
+#: SECOND fold-in (critic Critical finding T2
+#: critique-nexus-nukn3-37262c4a1 [24596]): staleness alone does not
+#: self-heal a corpus re-indexed ON A CADENCE shorter than this window --
+#: every run mints a fresh ``run_id`` for the identical recurring failure,
+#: so the "latest run" is always freshly-timestamped and the gate never
+#: ages out. ``nx index failures --acknowledge`` is the real remedy for
+#: that case: a durable adjudication (a `kind='acknowledgment'` row in the
+#: SAME table) that the query layer treats as covering every future
+#: recurrence of that exact (file, error_class) -- see
+#: ``HttpTelemetryStore.list_index_failures``'s ``unacknowledged_only``
+#: param and ``TelemetryRepository.getIndexFailures``'s Java-side
+#: implementation. This constant now only matters for the residual case of
+#: an UNACKNOWLEDGED failure that simply stopped recurring (the file was
+#: fixed or removed, but the operator never ran `nx index failures
+#: --clear`) -- `--clear` is still the IMMEDIATE remedy for that case.
+_INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS: int = _DEFAULT_TELEMETRY_RETENTION_DAYS
 
 
 def _index_failure_is_stale(occurred_at_iso: str, staleness_days: int) -> bool:
@@ -1110,14 +1131,26 @@ def _report_index_failures_service() -> None:
     this bead: nexus-fylxo found ``--check-aspect-queue`` printing a
     failed-row backlog without ever raising or emitting a ✗/FAIL: marker.
 
-    FAIL-FIRST, but scoped (fold-in, critic Critical finding — see
-    :data:`_INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS`'s own docstring for
-    the full rationale): the gate fires on the LATEST run that recorded any
-    failure, provided that run is itself recent; the all-time count across
-    every run is always shown as information, never as the gating number.
-    A transport error is reported as UNKNOWN (never a false "0 failures")
-    and does not raise — matching ``_report_aspect_queue_service``'s own
-    posture for the identical failure mode.
+    FAIL-FIRST, but scoped TWICE over (two fold-in rounds, both Critical
+    findings — see :data:`_INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS`'s own
+    docstring for the full rationale of each):
+
+    1. The gate fires on the LATEST run that recorded any UNACKNOWLEDGED
+       failure — an operator's durable ``nx index failures --acknowledge``
+       adjudication is excluded from the gate (and from ``rows``/``total``
+       when queried with ``unacknowledged_only``) so a permanently
+       unextractable file re-indexed on a cadence does not gate forever
+       just because every run mints a fresh ``run_id`` for it.
+    2. That latest-unacknowledged run must itself be recent (within
+       :data:`_INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS`) — a genuinely
+       stale, never-acknowledged failure self-heals out of the gate over
+       time even with no operator action.
+
+    The ALL-TIME count across every run (acknowledged or not) is always
+    shown as information, never as the gating number. A transport error is
+    reported as UNKNOWN (never a false "0 failures") and does not raise —
+    matching ``_report_aspect_queue_service``'s own posture for the
+    identical failure mode.
     """
     import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
 
@@ -1125,7 +1158,7 @@ def _report_index_failures_service() -> None:
 
     try:
         store = HttpTelemetryStore()
-        newest = store.list_index_failures(limit=1)
+        all_time = store.list_index_failures(limit=1)
     except (httpx.HTTPError, RuntimeError) as exc:
         # RuntimeError: store construction resolves the service endpoint and
         # raises ServiceEndpointUnresolvableError (a RuntimeError, not an
@@ -1138,9 +1171,22 @@ def _report_index_failures_service() -> None:
         )
         return
 
-    total_all_time = newest["total"]
+    total_all_time = all_time["total"]
     click.echo(f"index_failures: {total_all_time} recorded failure(s) all-time (service backend)")
-    rows = newest["rows"]
+    if not total_all_time:
+        return
+
+    # The gate's own input: the latest run among UNACKNOWLEDGED failures
+    # only — an acknowledged file's recurring failure must never surface
+    # here (fold-in round 2, critic Critical finding).
+    newest_unacked = store.list_index_failures(limit=1, unacknowledged_only=True)
+    total_unacknowledged = newest_unacked["total"]
+    if total_all_time > total_unacknowledged:
+        click.echo(
+            f"({total_all_time - total_unacknowledged} of those are "
+            "acknowledged — see: nx index failures)"
+        )
+    rows = newest_unacked["rows"]
     if not rows:
         return
 
@@ -1151,7 +1197,7 @@ def _report_index_failures_service() -> None:
         latest_occurred_at, _INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS,
     ):
         click.echo(
-            f"\nThe most recent recorded failure is from "
+            f"\nThe most recent recorded (unacknowledged) failure is from "
             f"{latest_occurred_at or 'an unknown time'} — older than "
             f"{_INDEX_FAILURES_LATEST_RUN_STALENESS_DAYS} days, so it no "
             "longer gates the sweep. See it (or the rest of the backlog) "
@@ -1160,34 +1206,43 @@ def _report_index_failures_service() -> None:
         )
         return
 
-    # Re-query scoped to exactly the latest run — `newest["total"]` above is
-    # the ALL-TIME count, not this run's; using it here would resurrect the
-    # original bug under a different variable name.
-    latest = store.list_index_failures(run_id=latest_run_id, limit=20)
+    # Re-query scoped to exactly the latest run — `newest_unacked["total"]`
+    # above is the ALL-TIME unacknowledged count, not this run's; using it
+    # here would resurrect the original bug under a different variable
+    # name.
+    latest = store.list_index_failures(
+        run_id=latest_run_id, limit=20, unacknowledged_only=True,
+    )
     latest_total = latest["total"]
     if not latest_total:
-        # Defensive only — latest_row itself proves at least 1 row exists
-        # for latest_run_id; a mismatch here would mean the two queries
-        # disagree, not that the backlog is actually empty.
+        # Defensive only — latest_row itself proves at least 1 unacknowledged
+        # row exists for latest_run_id; a mismatch here would mean the two
+        # queries disagree, not that the backlog is actually empty.
         return
 
-    click.echo(f"\n{latest_total} failure(s) in the latest run ({latest_run_id}):")
+    click.echo(f"\n{latest_total} unacknowledged failure(s) in the latest run ({latest_run_id}):")
     for row in latest["rows"][:20]:
         click.echo(
             f"  {row.get('file_path', '?')} :: {row.get('error_class', '?')}"
         )
-    if total_all_time > latest_total:
+    if total_unacknowledged > latest_total:
         click.echo(
-            f"\n({total_all_time - latest_total} more from older run(s) -- "
-            "see: nx index failures)"
+            f"\n({total_unacknowledged - latest_total} more unacknowledged "
+            "from older run(s) -- see: nx index failures)"
         )
     click.echo(f"\nSee them all with: nx index failures --run-id {latest_run_id}")
     click.echo(
-        f"Clear adjudicated rows with: nx index failures --clear "
+        f"Clear this run's rows with: nx index failures --clear "
         f"--run-id {latest_run_id}"
     )
     click.echo(
-        f"\n✗ FAIL: {latest_total} failed index-file(s) in the latest run.",
+        "Acknowledge a PERMANENTLY unextractable file (survives future "
+        "re-indexes minting a fresh run_id) with: nx index failures "
+        "--acknowledge --file <path> [--reason <text>]"
+    )
+    click.echo(
+        f"\n✗ FAIL: {latest_total} unacknowledged failed index-file(s) in "
+        "the latest run.",
         err=True,
     )
     raise click.exceptions.Exit(1)
@@ -2081,7 +2136,7 @@ def _run_supplementary_checks() -> None:
 @click.option(
     "--days",
     "days",
-    default=30,
+    default=_DEFAULT_TELEMETRY_RETENTION_DAYS,
     type=click.IntRange(min=1),
     show_default=True,
     help="Retention window for --trim-telemetry (days; minimum 1).",
