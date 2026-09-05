@@ -654,7 +654,10 @@ def _repo_home_for(reader, writer, file_path, content_type: str):
     if content_type == "paper":
         return None
     try:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance
+        # Module import, not ``from nexus.config import nexus_config_dir``:
+        # the by-value form is the nexus-78blw leak class the config-dir
+        # lint ratchets (tests/test_nexus_config_dir_setattr_lint.py).
+        from nexus import config as _nx_config  # noqa: PLC0415 — circular-dep avoidance
         from nexus.repo_identity import (  # noqa: PLC0415 — circular-dep avoidance
             _repo_identity_with_main,
             canonicalize_worktree_path,
@@ -665,7 +668,7 @@ def _repo_home_for(reader, writer, file_path, content_type: str):
         # ~/.config is a dotfiles checkout: ``nx dt index`` stages
         # DEVONthink content under <catalog>/.dt-content there (critique
         # [24433] Significant 2).
-        if p.is_relative_to(Path(nexus_config_dir()).resolve()):
+        if p.is_relative_to(Path(_nx_config.nexus_config_dir()).resolve()):
             return None
         # A file inside a nested agent worktree (<primary>/.claude/worktrees/
         # <agent>/<rel>) is the primary's file when the primary holds it:

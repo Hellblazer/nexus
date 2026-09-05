@@ -471,7 +471,7 @@ _MODULE_LEVEL_BY_VALUE_IMPORT_CEILING = 0
 # `from nexus.config import nexus_config_dir` import (inside
 # remediation_opt_in()) was deleted with the whole file, shrinking the
 # total by 1.
-_TOTAL_BY_VALUE_IMPORT_CEILING = 79  # +1: doc_indexer.py repo-owner registration, function-scoped (nexus-3o4lt); was 78 for upgrade_finish.py (nexus-06fu4)
+_TOTAL_BY_VALUE_IMPORT_CEILING = 78  # +1: upgrade_finish.py aspect-worker respawn (nexus-06fu4/restart-stale fix); the 3o4lt bump to 79 was reverted by switching doc_indexer to a module import
 
 
 def test_module_level_by_value_import_ratchet() -> None:
