@@ -50,9 +50,11 @@ mechanize, it matters enough to ship.
   absolute paths for edits, `git status --short` after every write.
 - `sn/hooks/scripts/serena-section.md` (nexus-ftpk3): states the
   fixed-at-startup root rule under the routing table header.
-- `sn/hooks/scripts/session-start.sh` (nexus-ftpk3): one line telling the
-  main session how worktree dispatches are handled and to verify the
-  primary tree after a fan-out.
+- `sn/hooks/scripts/session-start.sh` (nexus-ftpk3): the reminder body moved
+  to a sibling file (heredoc past 512B deadlocks under bash 5.3 on macOS);
+  one line added on how worktree dispatches are handled.
+- `sn/hooks/scripts/session-start-section.md` (nexus-ftpk3): NEW. The
+  SessionStart reminder body, read by `session-start.sh`.
 
 - `conexus/skills/rdr-research/SKILL.md` (nexus-zu1q0): the add step now shells
   out to `nx rdr preamble rdr-research -- add <id> <text>`, which computes the
