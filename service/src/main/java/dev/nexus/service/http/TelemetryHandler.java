@@ -56,6 +56,10 @@ import java.util.Map;
  *                                              nx index failures --clear remedy (nexus-nukn3
  *                                              fold-in, critic finding: an all-time fail-first
  *                                              check with no clear path is unfixable forever)
+ *   POST /v1/telemetry/index_failures/acknowledge  durable adjudication (nx index failures
+ *                                              --acknowledge) that survives a fresh run_id
+ *                                              on the next index run (nexus-nukn3 second
+ *                                              fold-in, critic Critical finding)
  *   POST /v1/telemetry/frecency/upsert         upsert frecency record
  *   GET  /v1/telemetry/frecency/get            get frecency by chunk_id
  *   POST /v1/telemetry/import                  fidelity ETL for all 6 tables
@@ -143,6 +147,7 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/index_failures/record_batch"  -> handleIndexFailureRecordBatch(exchange, tenant, method);
                 case "/index_failures/list"         -> handleIndexFailureList(exchange, tenant, method);
                 case "/index_failures/trim"          -> handleIndexFailureTrim(exchange, tenant, method);
+                case "/index_failures/acknowledge"    -> handleIndexFailureAcknowledge(exchange, tenant, method);
                 case "/frecency/upsert"        -> handleFrecencyUpsert(exchange, tenant, method);
                 case "/frecency/get"           -> handleFrecencyGet(exchange, tenant, method);
                 case "/import"                 -> handleImport(exchange, tenant, method);
@@ -573,6 +578,10 @@ public final class TelemetryHandler implements HttpHandler {
      * one run (blank/absent = all runs), {@code ?days=N} bounds the window (0 =
      * unbounded), {@code ?limit=N} caps the returned page. {@code total} is
      * computed over the WHOLE predicate — see {@link TelemetryRepository#getIndexFailures}.
+     * {@code ?unacknowledged_only=true} (fold-in, critic Critical finding)
+     * excludes any row covered by a durable acknowledgment from both
+     * {@code rows} and {@code total} — the doctor gate's and the deyd5
+     * floor's input.
      */
     private void handleIndexFailureList(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "GET");
@@ -580,7 +589,26 @@ public final class TelemetryHandler implements HttpHandler {
         String runId = params.getOrDefault("run_id", "");
         int days  = parseIntParam(params, "days", 0);
         int limit = parseIntParam(params, "limit", 100);
-        HttpUtil.send(ex, 200, json(repo.getIndexFailures(tenant, runId, days, limit)));
+        boolean unacknowledgedOnly = "true".equalsIgnoreCase(params.get("unacknowledged_only"));
+        HttpUtil.send(ex, 200, json(repo.getIndexFailures(tenant, runId, days, limit, unacknowledgedOnly)));
+    }
+
+    /**
+     * POST /v1/telemetry/index_failures/acknowledge — the durable-adjudication
+     * remedy (nexus-nukn3 fold-in, critic Critical finding: a fresh {@code run_id}
+     * every run means {@code --clear} alone is undone by the next index run).
+     * Body: {@code file_path} (optional; blank = error-class-scoped, covers ANY
+     * file with {@code error_class}), {@code error_class} (REQUIRED, non-blank),
+     * {@code reason} (optional, free text).
+     */
+    private void handleIndexFailureAcknowledge(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String filePath   = optStr(body, "file_path");
+        String errorClass = optStr(body, "error_class");
+        String reason     = optStr(body, "reason");
+        repo.recordIndexFailureAcknowledgment(tenant, filePath, errorClass, reason);
+        HttpUtil.send(ex, 200, json(Map.of("ok", true)));
     }
 
     /**
@@ -589,20 +617,23 @@ public final class TelemetryHandler implements HttpHandler {
      * and/or {@code days}; AT LEAST ONE is required — refusing here (400) is what
      * keeps an unscoped body from silently clearing a tenant's entire history,
      * since {@link TelemetryRepository#trimIndexFailures} itself has no opinion
-     * (see that method's own javadoc).
+     * (see that method's own javadoc). {@code dry_run=true} (fold-in suggestion,
+     * code review [24595]) previews the count that WOULD be deleted, using the
+     * identical predicate, without deleting anything.
      */
     private void handleIndexFailureTrim(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
         var body = readBody(ex);
         String runId = optStr(body, "run_id");
         int days = optInt(body, "days", 0);
+        boolean dryRun = Boolean.TRUE.equals(body.get("dry_run"));
         if (runId.isBlank() && days <= 0) {
             throw new IllegalArgumentException(
                 "index_failures/trim requires run_id and/or days >= 1 -- refusing an "
                 + "unscoped clear of the entire tenant history");
         }
-        int deleted = repo.trimIndexFailures(tenant, runId, days);
-        HttpUtil.send(ex, 200, json(Map.of("deleted", deleted)));
+        int deleted = repo.trimIndexFailures(tenant, runId, days, dryRun);
+        HttpUtil.send(ex, 200, json(Map.of("deleted", deleted, "dry_run", dryRun)));
     }
 
     // ── capability_census (nexus-gjv9b PART 1) ──────────────────────────────────

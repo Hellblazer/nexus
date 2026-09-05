@@ -1084,6 +1084,17 @@
          telemetry-011 on the same rebase. -->
     <include file="db/changelog/telemetry-011-routing-events.xml"/>
 
+    <!-- nexus-nukn3 fold-in (critic Critical, T2
+         critique-nexus-nukn3-37262c4a1 [24596]) — nexus.index_failures.kind:
+         a durable, re-run-surviving acknowledgment shape so an operator's
+         adjudication is not undone by the next index run minting a fresh
+         run_id for the same recurring failure. Depends only on
+         telemetry-009-index-failures.xml (the table). Placed after
+         telemetry-011-routing-events.xml (current tail) and before the
+         grants-nexus-svc.xml runAlways block, matching the established
+         late-append convention (D0.1). -->
+    <include file="db/changelog/telemetry-012-index-failures-kind.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

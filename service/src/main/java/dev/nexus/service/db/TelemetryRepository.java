@@ -1437,6 +1437,34 @@ public final class TelemetryRepository {
     }
 
     /**
+     * Correlated EXISTS: true when a {@code kind='acknowledgment'} row covers
+     * the CALLER's {@code (error_class, file_path)} — an exact file+class
+     * match (file-scoped ack), or a blank-{@code file_path} acknowledgment
+     * for that {@code error_class} (error-class-scoped, corpus-wide ack).
+     * References the OUTER (unaliased) {@code INDEX_FAILURES} table's columns,
+     * so this may only be used inside a query whose FROM is the unaliased
+     * table — every {@code getIndexFailures} caller satisfies that.
+     *
+     * <p>One shared definition of "covered" for both the per-row
+     * {@code acknowledged} flag and the {@code unacknowledgedOnly} filter —
+     * nexus-nukn3 fold-in (critic Critical finding, T2
+     * critique-nexus-nukn3-37262c4a1 [24596]): the durable-adjudication
+     * fix. An acknowledgment row's own {@code run_id} is always {@code ''}
+     * (see {@link #recordIndexFailureAcknowledgment}), so it never appears
+     * in a {@code kind='failure'}-filtered result itself.
+     */
+    private static org.jooq.Condition indexFailureIsAcknowledged() {
+        var ack = INDEX_FAILURES.as("ifa");
+        return exists(
+            selectOne()
+                .from(ack)
+                .where(ack.KIND.eq("acknowledgment"))
+                .and(ack.ERROR_CLASS.eq(INDEX_FAILURES.ERROR_CLASS))
+                .and(ack.FILE_PATH.eq("").or(ack.FILE_PATH.eq(INDEX_FAILURES.FILE_PATH)))
+        );
+    }
+
+    /**
      * List index failures, newest first (read surface — {@code nx index failures},
      * {@code nx doctor --check-index-failures}).
      *
@@ -1446,19 +1474,32 @@ public final class TelemetryRepository {
      * non-vacuity shape as {@link #getHookFailures}: a caller reading a count
      * (the deyd5 systemic-skip floor, doctor's backlog check) must never
      * under-report because the backlog exceeded one page.
+     *
+     * <p>Only {@code kind='failure'} rows are ever returned here (an
+     * acknowledgment row is a durable marker, not a failure to list); each
+     * returned row carries an {@code acknowledged} boolean (see
+     * {@link #indexFailureIsAcknowledged}) — the fold-in's "ack shown in the
+     * list" requirement. {@code unacknowledgedOnly=true} additionally
+     * excludes covered rows from both {@code rows} and {@code total} — the
+     * doctor gate's and the deyd5 floor's input, so a permanently
+     * acknowledged file never re-triggers either once adjudicated.
      */
     public Map<String, Object> getIndexFailures(String tenant,
                                                 String runId,
                                                 int days,
-                                                int limit) {
+                                                int limit,
+                                                boolean unacknowledgedOnly) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var cond = noCondition();
+            var cond = INDEX_FAILURES.KIND.eq("failure");
             if (runId != null && !runId.isBlank()) {
                 cond = cond.and(INDEX_FAILURES.RUN_ID.eq(runId));
             }
             if (days > 0) {
                 OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
                 cond = cond.and(INDEX_FAILURES.OCCURRED_AT.ge(cutoff));
+            }
+            if (unacknowledgedOnly) {
+                cond = cond.and(indexFailureIsAcknowledged().not());
             }
 
             var agg = ctx.select(count(), min(INDEX_FAILURES.OCCURRED_AT))
@@ -1474,7 +1515,8 @@ public final class TelemetryRepository {
                 INDEX_FAILURES.FILE_PATH,
                 INDEX_FAILURES.ERROR_CLASS,
                 INDEX_FAILURES.ERROR,
-                INDEX_FAILURES.OCCURRED_AT)
+                INDEX_FAILURES.OCCURRED_AT,
+                when(indexFailureIsAcknowledged(), inline(true)).otherwise(inline(false)))
                 .from(INDEX_FAILURES)
                 .where(cond)
                 .orderBy(INDEX_FAILURES.OCCURRED_AT.desc(), INDEX_FAILURES.ID.desc())
@@ -1488,6 +1530,7 @@ public final class TelemetryRepository {
                     m.put("error_class", str(r.value4()));
                     m.put("error",       str(r.value5()));
                     m.put("occurred_at", utcIso(r.value6()));
+                    m.put("acknowledged", Boolean.TRUE.equals(r.value7()));
                     return m;
                 });
 
@@ -1496,6 +1539,46 @@ public final class TelemetryRepository {
             out.put("total", total);
             out.put("oldest_occurred_at", oldest != null ? utcIso(oldest) : "");
             return out;
+        });
+    }
+
+    /**
+     * Record a durable acknowledgment (nexus-nukn3 fold-in, critic Critical
+     * finding: the latest-run-within-window doctor gate never self-heals for
+     * a permanently unextractable file re-indexed on a cadence, since every
+     * run mints a fresh {@code run_id} for the same failure). Writes a
+     * {@code kind='acknowledgment'} row into the SAME table — {@code run_id}
+     * is always {@code ''} (an acknowledgment is not tied to any one run),
+     * {@code occurred_at} is stamped {@code now()}.
+     *
+     * @param filePath   file-scoped when non-blank (only that exact
+     *                   {@code (file_path, error_class)} pair is covered
+     *                   going forward); {@code ''} for an error-class-scoped
+     *                   acknowledgment covering ANY file with {@code errorClass}.
+     * @param errorClass REQUIRED, non-blank — an acknowledgment with no
+     *                   error_class would cover every failure for its file
+     *                   (or, blank file_path too, every failure in the
+     *                   tenant), which is never the intended scope.
+     */
+    public void recordIndexFailureAcknowledgment(String tenant,
+                                                 String filePath,
+                                                 String errorClass,
+                                                 String reason) {
+        if (errorClass == null || errorClass.isBlank()) {
+            throw new IllegalArgumentException(
+                "index_failures acknowledgment requires a non-blank error_class");
+        }
+        tenantScope.withTenant(tenant, ctx -> {
+            ctx.insertInto(INDEX_FAILURES)
+                .set(INDEX_FAILURES.TENANT_ID, tenant)
+                .set(INDEX_FAILURES.RUN_ID, "")
+                .set(INDEX_FAILURES.FILE_PATH, str(filePath))
+                .set(INDEX_FAILURES.ERROR_CLASS, errorClass)
+                .set(INDEX_FAILURES.ERROR, str(reason))
+                .set(INDEX_FAILURES.OCCURRED_AT, OffsetDateTime.now(ZoneOffset.UTC))
+                .set(INDEX_FAILURES.KIND, "acknowledgment")
+                .execute();
+            return null;
         });
     }
 
@@ -1517,14 +1600,31 @@ public final class TelemetryRepository {
      * wants one (unlike the boundary, this method has no opinion).
      */
     public int trimIndexFailures(String tenant, String runId, int days) {
+        return trimIndexFailures(tenant, runId, days, false);
+    }
+
+    /**
+     * Delete (or, with {@code dryRun=true}, COUNT without deleting) as above
+     * (fold-in suggestion, code review [24595]). Same dry-run-reuses-the-
+     * delete's-own-predicate discipline as {@link #trimHookFailures(String, int, boolean)}.
+     *
+     * <p>Always scoped to {@code kind='failure'} rows — an acknowledgment is a
+     * durable policy marker, never swept by an age-based {@code --older-than-days}
+     * clear (only a row it would otherwise have failed to gate on).
+     */
+    public int trimIndexFailures(String tenant, String runId, int days, boolean dryRun) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var cond = noCondition();
+            var cond = INDEX_FAILURES.KIND.eq("failure");
             if (runId != null && !runId.isBlank()) {
                 cond = cond.and(INDEX_FAILURES.RUN_ID.eq(runId));
             }
             if (days > 0) {
                 OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
                 cond = cond.and(INDEX_FAILURES.OCCURRED_AT.lt(cutoff));
+            }
+            if (dryRun) {
+                Integer cnt = ctx.selectCount().from(INDEX_FAILURES).where(cond).fetchOne(0, Integer.class);
+                return cnt != null ? cnt : 0;
             }
             return ctx.deleteFrom(INDEX_FAILURES).where(cond).execute();
         });

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-nukn3 fold-in (critic Critical finding, T2
+    critique-nexus-nukn3-37262c4a1 [24596]): the latest-run-within-30-days
+    doctor gate never self-heals for a permanently unextractable file in a
+    corpus that is re-indexed on a cadence: every run mints a fresh run_id
+    for the SAME failure, so the gate stays red forever and a clear call
+    (the nx index failures clear flag) is undone by the very next run.
+    The fix is an ADJUDICATION that survives re-runs: an acknowledge verb
+    on nx index failures writes a durable row into the SAME table (not a
+    second mechanism) discriminated by a
+    new `kind` column, so an acknowledged file's recurring failure is
+    recorded but no longer gates, while a genuinely NEW file or a NEW
+    error class for an already-acknowledged file still does.
+
+    kind values: 'failure' (the existing per-run row shape, DEFAULT so
+    every historical row backfills correctly with no data migration) and
+    'acknowledgment' (an operator's durable adjudication; run_id is
+    always '' for these rows, since an acknowledgment is not tied to any
+    one run). error_class NOT NULL DEFAULT '' already exists; an
+    acknowledgment row's `file_path` is either a specific path (file
+    scoped: only that exact (file_path, error_class) pair is covered
+    going forward) or '' (error-class scoped: ANY file with that
+    error_class is covered, the broader corpus-wide exemption for a known
+    systemic issue).
+
+    Partial index on kind='acknowledgment' rows only: the read path's
+    NOT EXISTS coverage-check subquery (TelemetryRepository.getIndexFailures
+    with unacknowledgedOnly=true) probes this exact shape per failure row,
+    and the acknowledgment set is expected to stay small relative to the
+    failure log.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: index_failures.kind column ───────────────────────── -->
+    <changeSet id="telemetry-012-1" author="nexus-nukn3">
+        <comment>Add nexus.index_failures.kind ('failure' | 'acknowledgment') for durable, re-run-surviving adjudication</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.index_failures
+    ADD COLUMN kind TEXT NOT NULL DEFAULT 'failure';
+
+ALTER TABLE nexus.index_failures
+    ADD CONSTRAINT index_failures_kind_chk CHECK (kind IN ('failure', 'acknowledgment'));
+
+-- Partial index: the coverage-check subquery only ever probes
+-- kind='acknowledgment' rows, keyed by (tenant_id, error_class, file_path).
+CREATE INDEX idx_index_failures_ack_lookup
+    ON nexus.index_failures (tenant_id, error_class, file_path)
+    WHERE kind = 'acknowledgment';
+        </sql>
+        <rollback>
+            DROP INDEX IF EXISTS nexus.idx_index_failures_ack_lookup;
+            ALTER TABLE nexus.index_failures DROP CONSTRAINT IF EXISTS index_failures_kind_chk;
+            ALTER TABLE nexus.index_failures DROP COLUMN IF EXISTS kind;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
