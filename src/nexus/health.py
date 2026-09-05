@@ -3055,6 +3055,10 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.frecency",
     "nexus.gc_audit",
     "nexus.hook_failures",
+    # nexus.index_failures: nexus-nukn3, durable per-file index-failure
+    # record (telemetry-009-index-failures.xml). Event-log shape, same RLS
+    # posture as hook_failures (ENABLE + FORCE + tenant_isolation).
+    "nexus.index_failures",
     "nexus.ladder_completions",
     "nexus.memory",
     # "nexus.migration_jobs" REMOVED (nexus-tk070.p5b, reworked

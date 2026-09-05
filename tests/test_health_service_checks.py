@@ -943,6 +943,7 @@ _ALL_TENANT_TABLES = [
     "nexus.frecency",
     "nexus.gc_audit",  # nexus-jqvzk: destructive-T3-op audit record (catalog-018)
     "nexus.hook_failures",
+    "nexus.index_failures",  # nexus-nukn3: telemetry-009-index-failures.xml (mirrors health._RLS_TENANT_TABLES)
     "nexus.ladder_completions",
     "nexus.memory",
     # ("nexus.migration_jobs" removed — nexus-tk070.p5b, reworked
