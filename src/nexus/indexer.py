@@ -69,7 +69,12 @@ DEFAULT_IGNORE: list[str] = _DEFAULT_IGNORE
 # History:
 #   v1-v3: pre-versioning (no version stamp in collection metadata)
 #   v4:    RDR-028 language registry + RDR-014 CCE prefixes
-PIPELINE_VERSION: str = "4"
+#   v5:    RDR-200 Phase 1c evidence hygiene, nexus-4jj40 -- code chunk
+#          classification gained section_type="imports"; a routine
+#          `nx index repo`/`--force-stale` run must re-chunk already-
+#          indexed code to apply the new stamp (check_staleness alone
+#          never fires on unchanged content).
+PIPELINE_VERSION: str = "5"
 
 # Concurrent ChunkBatcher flush workers during a repo index run. 3 is the
 # empirical choice from the 3midv sweep (sequential flushes cost 76-112s of

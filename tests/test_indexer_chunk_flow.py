@@ -210,6 +210,157 @@ def test_import_only_chunk_no_overlapping_node_is_not_import_only() -> None:
     assert _is_import_only_chunk(source, "python", 100, 200) is False
 
 
+# ── Comment handling (round 4 fold-in, T2 critique [24606] Critical 1) ──────────
+#
+# A comment must never disqualify an otherwise import-only chunk (a BSD/SPDX
+# license header preceding package+imports, or a trailing Javadoc summary),
+# but a chunk of comments ALONE (no header statement) must still be "mixed".
+
+def test_import_only_chunk_java_license_header_does_not_disqualify() -> None:
+    """A block-comment license header preceding package+imports must not
+    flip the chunk to 'mixed' -- this is the exact CHOAM.java failure mode
+    T2 [24606] Critical 1 found (a BSD-3-Clause header made the chunk
+    classify False pre-fix)."""
+    source = b"""/*
+ * Copyright (c) 2026 Example Corp. All rights reserved.
+ * Licensed under the BSD 3-Clause License.
+ */
+package com.example.foo;
+
+import java.util.List;
+"""
+    # lines 0-6 (0-indexed): block_comment, package_declaration, blank, import
+    assert _is_import_only_chunk(source, "java", 0, 6) is True
+
+
+def test_import_only_chunk_java_trailing_javadoc_does_not_disqualify() -> None:
+    """A trailing Javadoc comment (the class's one-line summary, sitting
+    in the SAME chunk as the tail imports but before the class body
+    starts) must not flip the chunk to 'mixed' either -- the other half
+    of the CHOAM.java failure mode."""
+    source = b"""import java.util.List;
+import java.util.Map;
+
+/**
+ * Foo does the thing.
+ */
+"""
+    assert _is_import_only_chunk(source, "java", 0, 5) is True
+
+
+def test_import_only_chunk_java_comments_only_is_not_import_only() -> None:
+    """A chunk of comments alone, with no package/import statement at
+    all, must still classify False -- this function finds import-only
+    chunks specifically; a bare comment block is not one, even though it
+    is separately non-evidentiary."""
+    source = b"""/*
+ * Copyright (c) 2026 Example Corp. All rights reserved.
+ */
+"""
+    assert _is_import_only_chunk(source, "java", 0, 2) is False
+
+
+def test_import_only_chunk_python_module_docstring_counts_as_evidence() -> None:
+    """A module docstring is real, author-written content (module
+    purpose, usage notes) -- unlike a comment, it usually carries
+    evidentiary value, so a chunk mixing a docstring with imports must
+    stay 'mixed' and never be stamped 'imports' (documented design
+    decision, T2 critique [24606] item 1)."""
+    source = b'"""Module docstring explaining purpose."""\nimport os\nimport sys\n'
+    assert _is_import_only_chunk(source, "python", 0, 2) is False
+
+
+def test_import_only_chunk_python_comment_header_does_not_disqualify() -> None:
+    """A '#' comment header (e.g. a license notice) preceding imports
+    must not disqualify the chunk, matching the Java case."""
+    source = b"# Copyright (c) 2026 Example Corp.\n# SPDX-License-Identifier: MIT\nimport os\nimport sys\n"
+    assert _is_import_only_chunk(source, "python", 0, 3) is True
+
+
+# ── Real-file end-to-end split (round 4 fold-in): a license-headed Java ─────────
+# file large enough for the REAL CodeSplitter (~1500-char budget, T2 [24606]
+# Observation 2) to separate the header from the class body into distinct
+# chunks -- not hand-picked line ranges. Reproduces the shape of the bead's
+# own cited evidence (delos/choam/CHOAM.java): a multi-line license header,
+# package, many imports, and a class Javadoc split so the header chunk
+# stands alone.
+
+def _license_headed_java_source(import_count: int = 60) -> str:
+    license_header = (
+        "/*\n"
+        " * Copyright (c) 2026 Example Corp. All rights reserved.\n"
+        " * Licensed under the BSD 3-Clause License.\n"
+        " * See the LICENSE file for details.\n"
+        " */\n"
+    )
+    package_line = "package com.example.widget;\n\n"
+    imports = "\n".join(
+        f"import com.example.widget.pkg{i}.Thing{i};" for i in range(import_count)
+    ) + "\n\n"
+    javadoc = "/**\n * WidgetProcessor handles the processing of widgets.\n */\n"
+    class_body = (
+        "public class WidgetProcessor {\n"
+        "    private int count;\n\n"
+        "    public WidgetProcessor() {\n"
+        "        this.count = 0;\n"
+        "    }\n\n"
+        "    public void process(String input) {\n"
+        "        if (input == null) {\n"
+        "            throw new IllegalArgumentException(\"input must not be null\");\n"
+        "        }\n"
+        "        count += 1;\n"
+        "    }\n\n"
+        "    public int getCount() {\n"
+        "        return count;\n"
+        "    }\n"
+        "}\n"
+    )
+    return license_header + package_line + imports + javadoc + class_body
+
+
+def test_real_file_license_header_chunk_stamped_class_chunk_not(tmp_path) -> None:
+    """End-to-end through the REAL chunk_file() AST splitter -- not a
+    hand-picked line range. A license-headed, twenty-plus-import Java
+    file big enough to force a real chunk boundary between the header
+    and the class body: every chunk before the class declaration must
+    classify import-only, and the chunk containing the class declaration
+    must not."""
+    from nexus.chunker import chunk_file
+
+    content = _license_headed_java_source()
+    source_bytes = content.encode("utf-8")
+    java_file = tmp_path / "WidgetProcessor.java"
+    java_file.write_text(content)
+
+    chunks = chunk_file(java_file, content)
+    # Non-vacuity guard: this fixture is sized to force a real split (a
+    # future CodeSplitter/llama-index change that raised the byte budget
+    # enough to collapse this back to one chunk would otherwise let this
+    # test pass by having nothing left to check.
+    assert len(chunks) >= 2, (
+        f"fixture must produce >= 2 chunks to exercise the header/class "
+        f"split; got {len(chunks)} -- widen the fixture (more imports)"
+    )
+
+    class_chunk_seen = False
+    for chunk in chunks:
+        is_import_only = _is_import_only_chunk(
+            source_bytes, "java", chunk["line_start"] - 1, chunk["line_end"] - 1,
+        )
+        if "class WidgetProcessor" in chunk["text"]:
+            class_chunk_seen = True
+            assert is_import_only is False, (
+                f"class-declaration chunk wrongly classified import-only: "
+                f"{chunk['text'][:80]!r}"
+            )
+        else:
+            assert is_import_only is True, (
+                f"header-region chunk wrongly classified mixed: "
+                f"{chunk['text'][:80]!r}"
+            )
+    assert class_chunk_seen, "fixture's class declaration must land in some chunk"
+
+
 def test_import_only_chunk_csharp_header() -> None:
     """C#: using directives only -> import-only."""
     source = b"""using System;

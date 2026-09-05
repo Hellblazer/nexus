@@ -8,7 +8,11 @@ from unittest.mock import MagicMock
 
 def test_pipeline_version_constant():
     from nexus.indexer import PIPELINE_VERSION
-    assert PIPELINE_VERSION == "4"
+    # v5: RDR-200 Phase 1c evidence hygiene, nexus-4jj40 round 4 fold-in --
+    # code chunk classification gained section_type="imports", which
+    # invalidates existing chunk-level metadata for already-indexed
+    # content the same way the v4 chunking-registry change did.
+    assert PIPELINE_VERSION == "5"
     assert isinstance(PIPELINE_VERSION, str)
 
 

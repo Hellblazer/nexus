@@ -332,11 +332,40 @@ _IMPORT_NODE_TYPES: dict[str, frozenset[str]] = {
     "tsx": frozenset({"import_statement"}),
     "go": frozenset({"package_clause", "import_declaration"}),
     "c_sharp": frozenset({"using_directive"}),
-    "kotlin": frozenset({"package_header", "import_list", "import_header"}),
+    "kotlin": frozenset({"package_header", "import_list"}),
     "rust": frozenset({"use_declaration"}),
     "cpp": frozenset({"preproc_include"}),
     "c": frozenset({"preproc_include"}),
     "scala": frozenset({"package_clause", "import_declaration"}),
+}
+
+# Tree-sitter node types for a line or block COMMENT, per language --
+# verified empirically against tree-sitter-language-pack (round 4 fix,
+# nexus-4jj40 / T2 critique [24606] Critical 1). A comment neither counts
+# as evidence nor disqualifies a chunk from being import-only: a BSD/SPDX
+# license header preceding ``package``+imports, or a Javadoc summary
+# trailing the tail imports, is itself non-evidentiary boilerplate, and
+# the pre-fix classifier's "every overlapping node must be a header type"
+# rule wrongly treated either as disqualifying "other content" -- verified
+# against delos/choam's real CHOAM.java, where 2 of its 3 header-region
+# chunks failed to classify for exactly this reason. A language's comment
+# node type(s) are listed here ONLY when distinct from its entry in
+# ``_IMPORT_NODE_TYPES`` (never overlapping); a language with no entry
+# here simply has no comment nodes filtered, matching the pre-fix
+# behaviour for that language.
+_COMMENT_NODE_TYPES: dict[str, frozenset[str]] = {
+    "java": frozenset({"line_comment", "block_comment"}),
+    "python": frozenset({"comment"}),
+    "javascript": frozenset({"comment"}),
+    "typescript": frozenset({"comment"}),
+    "tsx": frozenset({"comment"}),
+    "go": frozenset({"comment"}),
+    "c_sharp": frozenset({"comment"}),
+    "kotlin": frozenset({"line_comment", "multiline_comment"}),
+    "rust": frozenset({"line_comment", "block_comment"}),
+    "cpp": frozenset({"comment"}),
+    "c": frozenset({"comment"}),
+    "scala": frozenset({"comment", "block_comment"}),
 }
 
 
@@ -347,7 +376,7 @@ def _is_import_only_chunk(
     chunk_end_0idx: int,
 ) -> bool:
     """True when every top-level node overlapping the chunk's line range is
-    a package/module declaration or import statement.
+    a package/module declaration or import statement, IGNORING comments.
 
     Only top-level (direct root children) nodes are examined: import and
     package statements are never nested inside a method or class body, so
@@ -355,16 +384,38 @@ def _is_import_only_chunk(
     non-empty ``class_ctx``/``method_ctx`` for it) can never satisfy this
     by construction -- callers should skip the call entirely in that case.
 
+    Comment nodes (``_COMMENT_NODE_TYPES``) are filtered out of the
+    overlap set before classification: a comment neither counts as
+    evidence nor disqualifies a chunk (round 4 fix, T2 [24606] Critical
+    1) -- a license header or a trailing Javadoc summary sitting beside
+    real header statements must not flip an otherwise-import-only chunk
+    to "mixed". A chunk of comments ALONE (no header statement at all)
+    still classifies ``False``: this function's job is to find import-only
+    chunks specifically, not to generally suppress comment-only chunks,
+    and stamping a bare comment block as ``section_type="imports"`` would
+    misdescribe it.
+
+    A module/file DOCSTRING is deliberately NOT comment-equivalent here.
+    Python's module docstring is a top-level ``expression_statement``
+    (wrapping a ``string``), never a ``comment`` node -- it is real,
+    author-written content that usually carries evidentiary value (module
+    purpose, usage notes), so a chunk mixing a docstring with imports
+    stays "mixed" and is never stamped ``imports``. This is a considered
+    per-language design decision, not an oversight: only line/block
+    COMMENT node types are neutral; nothing else is.
+
     Returns ``False`` (never import-only) for: a language absent from
     ``_IMPORT_NODE_TYPES``, a parser/parse failure, an empty overlap (no
-    top-level node touches the chunk range at all), or a chunk that mixes
-    header statements with ANY other top-level content (a docstring, a
+    top-level node touches the chunk range at all), a chunk of comments
+    with no header statement, or a chunk that mixes header statements
+    with ANY other non-comment top-level content (a docstring, a
     constant, a class) -- classification is per chunk content, never per
     path or owner.
     """
     header_types = _IMPORT_NODE_TYPES.get(language)
     if not header_types:
         return False
+    comment_types = _COMMENT_NODE_TYPES.get(language, frozenset())
 
     try:
         from tree_sitter_language_pack import get_parser  # lazy import  # noqa: PLC0415 (deferred import; rare/branch-local path or circular-dep / startup-cost avoidance)
@@ -383,7 +434,12 @@ def _is_import_only_chunk(
     ]
     if not overlapping:
         return False
-    return all(node.type in header_types for node in overlapping)
+    substantive = [node for node in overlapping if node.type not in comment_types]
+    if not substantive:
+        # Comments only, no header statement at all -- not an import-only
+        # chunk; there is nothing to classify as "imports".
+        return False
+    return all(node.type in header_types for node in substantive)
 
 
 def index_code_file(ctx: IndexContext, file_path: Path) -> int:
