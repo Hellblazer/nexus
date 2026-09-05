@@ -184,6 +184,7 @@ class TestSupplementaryChecks:
         "--- taxonomy ---",
         "--- aspect-queue ---",
         "--- t1 ---",
+        "--- engine-activity ---",
     ])
     def test_each_promoted_check_runs(self, runner, mock_reg, marker):
         result = _invoke(runner, mock_reg)
@@ -209,6 +210,7 @@ class TestSupplementaryChecks:
         for absent in (
             "--check-resources", "--check-plan-library",
             "--check-taxonomy", "--check-aspect-queue", "--check-t1",
+            "--check-engine-activity",
         ):
             assert absent not in tail
 
@@ -1087,6 +1089,69 @@ class TestCheckWalRetention:
         assert "[ ]" in result.output
         assert "UNMEASURED" in result.output
         assert "grants-004-monitor-wal-visibility" in result.output
+
+
+# ── --check-engine-activity (nexus-s71lr) ────────────────────────────────────
+
+
+class TestCheckEngineActivity:
+    """"What is the engine doing right now" -- bead nexus-s71lr deliverable 3.
+    Always exit 0 (informational, same posture as --check-wal-retention); the
+    real GET /v1/status probe is proven at the http_engine_status unit-test
+    layer (tests/test_http_engine_status.py) -- these tests exercise the CLI
+    wiring only, via a monkeypatched fetch_engine_status."""
+
+    def test_flag_dispatches_to_the_check(self, runner: CliRunner, monkeypatch) -> None:
+        calls = {"n": 0}
+
+        def _fake_fetch(**kwargs):
+            calls["n"] += 1
+            return {"embedding_mode": "onnx-local", "local_embed_activity": None}
+
+        monkeypatch.setattr("nexus.db.http_engine_status.fetch_engine_status", _fake_fetch)
+        result = runner.invoke(main, ["doctor", "--check-engine-activity"])
+        assert result.exit_code == 0, result.output
+        assert calls["n"] == 1  # dispatch really reached _run_check_engine_activity
+
+    def test_reachable_engine_renders_the_activity_line(
+        self, runner: CliRunner, monkeypatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "nexus.db.http_engine_status.fetch_engine_status",
+            lambda **kwargs: {
+                "embedding_mode": "onnx-local",
+                "local_embed_activity": {
+                    "active": True, "chunks_done_total": 128, "sub_batches_total": 8,
+                    "last_chunks_per_sec": 7.7, "last_activity_age_ms": 230,
+                    "queue_depth": 0, "thread_width": 4,
+                },
+            },
+        )
+        result = runner.invoke(main, ["doctor", "--check-engine-activity"])
+        assert result.exit_code == 0, result.output
+        assert "Engine activity:" in result.output
+        assert "chunks_done=128" in result.output
+
+    def test_unreachable_engine_renders_unknown_and_exits_zero(
+        self, runner: CliRunner, monkeypatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "nexus.db.http_engine_status.fetch_engine_status", lambda **kwargs: None,
+        )
+        result = runner.invoke(main, ["doctor", "--check-engine-activity"])
+        assert result.exit_code == 0, result.output
+        assert "UNKNOWN" in result.output
+
+    def test_promoted_into_the_default_sweep(self, runner: CliRunner, monkeypatch) -> None:
+        calls = {"n": 0}
+
+        def _fake_fetch(**kwargs):
+            calls["n"] += 1
+            return None
+
+        monkeypatch.setattr("nexus.db.http_engine_status.fetch_engine_status", _fake_fetch)
+        runner.invoke(main, ["doctor"])
+        assert calls["n"] == 1, "the default sweep must run engine-activity too, not only --check-engine-activity"
 
 
 # ── --json on the main sweep (nexus-0vycz) ──────────────────────────────────

@@ -1060,6 +1060,34 @@ def _run_check_aspect_queue() -> None:
     _report_aspect_queue_service()
 
 
+# ── --check-engine-activity (nexus-s71lr) ────────────────────────────────────
+
+
+def _report_engine_activity() -> None:
+    """"What is the engine doing right now" — bead nexus-s71lr deliverable 3.
+
+    One unauthenticated GET (``fetch_engine_status``), always exit 0 —
+    informational only, same posture as ``--check-wal-retention``: there is
+    no pass/fail state here, only "here is the live counter reading, or
+    UNKNOWN if the endpoint could not be reached" (a pre-nexus-s71lr engine,
+    or the service down, both report cleanly as UNKNOWN rather than a
+    traceback or a false "everything is fine").
+    """
+    from nexus.db.http_engine_status import fetch_engine_status, format_engine_activity_line  # noqa: PLC0415 — deferred to keep CLI startup fast
+    status = fetch_engine_status()
+    click.echo(format_engine_activity_line(status))
+
+
+def _run_check_engine_activity() -> None:
+    """Report the engine's live embed-activity counters from GET /v1/status.
+
+    Bead nexus-s71lr: the client-side half of "is the engine still
+    embedding, or has it hung" — the SAME question the engine's own
+    rate-limited progress log line answers, without tailing logs.
+    """
+    _report_engine_activity()
+
+
 # ── --check-tier-discipline (nexus-a52i) ─────────────────────────────────────
 
 
@@ -1466,6 +1494,13 @@ def _run_check_mineru() -> None:
 #                                          | this is informational" by its
 #                                          | own docstring -- no failure
 #                                          | state to surface.
+#   --check-engine-activity       | YES       | ONE unauthenticated GET
+#                                          | (GET /v1/status), same cost
+#                                          | class as --check-aspect-queue;
+#                                          | always exit 0 (informational,
+#                                          | like --check-wal-retention) --
+#                                          | "what is the engine doing right
+#                                          | now" (nexus-s71lr).
 #
 # Non-gating by design: a supplementary check's failure is printed, never
 # folded into the default sweep's exit code. Two of the five (schema-
@@ -1483,7 +1518,7 @@ def _run_check_mineru() -> None:
 #: ``_run_check_taxonomy`` / ``_run_check_t1`` are defined further down
 #: this file, after ``doctor_cmd``).
 _SUPPLEMENTARY_CHECK_NAMES: tuple[str, ...] = (
-    "resources", "plan-library", "taxonomy", "aspect-queue", "t1",
+    "resources", "plan-library", "taxonomy", "aspect-queue", "t1", "engine-activity",
 )
 
 #: The remaining opt-in-only flags -- named in the summary line at the end
@@ -1519,6 +1554,7 @@ def _run_supplementary_checks() -> None:
         "taxonomy": _run_check_taxonomy,
         "aspect-queue": _run_check_aspect_queue,
         "t1": _run_check_t1,
+        "engine-activity": _run_check_engine_activity,
     }
     click.echo(
         "\nSupplementary checks (cheap/read-only subset of the opt-in "
@@ -1779,6 +1815,17 @@ def _run_supplementary_checks() -> None:
          "nexus-bb5c8.",
 )
 @click.option(
+    "--check-engine-activity",
+    "check_engine_activity",
+    is_flag=True,
+    default=False,
+    help="Report the engine's live embed-activity counters (GET /v1/status): "
+         "is it actively embedding right now, chunks/s, queue depth, thread "
+         "width. Also part of the default sweep. Always exit 0 — "
+         "informational, UNKNOWN (never a traceback) when the endpoint is "
+         "unreachable or predates the route. nexus-s71lr.",
+)
+@click.option(
     "--days",
     "days",
     default=30,
@@ -1813,6 +1860,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_aspect_queue: bool,
                check_t1: bool,
                check_wal_retention: bool,
+               check_engine_activity: bool,
                check_tier_discipline: bool,
                check_storage_boundary: bool,
                fail_on_violation: bool,
@@ -1837,6 +1885,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             "--check-aspect-queue": check_aspect_queue,
             "--check-t1": check_t1,
             "--check-wal-retention": check_wal_retention,
+            "--check-engine-activity": check_engine_activity,
             "--fix": fix,
             "--fix-paths": fix_paths,
             "--clean-checkpoints": clean_checkpoints,
@@ -1910,6 +1959,10 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_wal_retention:
         _run_check_wal_retention()
+        return
+
+    if check_engine_activity:
+        _run_check_engine_activity()
         return
 
     if check_tier_discipline:

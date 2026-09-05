@@ -446,4 +446,45 @@ class VoyageEmbedderBatchSplitTest {
             logs.stop();
         }
     }
+
+    // ── Bead nexus-s71lr, code-review-expert pass 2 finding a: cloud-mode users
+    //    get the same rate-limited progress line Bge768Embedder emits ──────────
+
+    @Test
+    void embedProgressLineFiresEvenOnTheFastSingleBatchPath() throws Exception {
+        var root = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            VoyageEmbedder e = embedder("voyage-code-3");
+            e.embed(List.of("The quick brown fox jumps over the lazy dog."));
+
+            var progressLines = logs.list.stream()
+                    .filter(ev -> ev.getLevel() == ch.qos.logback.classic.Level.INFO)
+                    .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                    .filter(m -> m.startsWith("event=embed_progress"))
+                    .toList();
+
+            // EmbedProgressGate's "first call ever" exemption -- a fresh embedder
+            // instance's very first sub-batch always logs, exactly like Bge768Embedder.
+            assertThat(progressLines)
+                    .as("the fast (single-batch) path must not stay silent -- the exact "
+                        + "gap this bead closes for cloud-mode embedders")
+                    .isNotEmpty();
+            assertThat(progressLines.get(0))
+                    .contains("embedder=voyage")
+                    .contains("model=voyage-code-3")
+                    .contains("sub_batch=")
+                    .contains("sub_batch_size=")
+                    .contains("chunks_done=")
+                    .contains("chunks_total=1")
+                    .contains("elapsed_s=")
+                    .contains("chunks_per_sec=");
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
 }

@@ -141,6 +141,16 @@ public final class Bge768Embedder implements Embedder {
      */
     private static final long PROGRESS_LOG_INTERVAL_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
 
+    /**
+     * Bead nexus-s71lr, deliverable 2: how long after the last completed sub-batch
+     * {@link #activitySnapshot()} still reports {@code active=true}. Twice the log
+     * interval above — long enough that a normal ~5s-cadenced bulk run reads
+     * continuously active between log lines, short enough that a genuinely stalled
+     * embed (the exact "13-minute silent hang" the bead reports) reads inactive
+     * well before an operator would otherwise give up waiting.
+     */
+    private static final long ACTIVE_WINDOW_NANOS = 2 * PROGRESS_LOG_INTERVAL_NANOS;
+
     private final OrtEnvironment      ortEnv;
     private final OrtSession          session;
     private final HuggingFaceTokenizer tokenizer;
@@ -159,6 +169,37 @@ public final class Bge768Embedder implements Embedder {
 
     /** Bead nexus-s71lr: shared rate limiter for the embed-progress INFO log below. */
     private final EmbedProgressGate progressGate = new EmbedProgressGate(PROGRESS_LOG_INTERVAL_NANOS);
+
+    /** Bead nexus-s71lr, deliverable 2: lifetime activity counters served by
+     * {@code GET /v1/status} via {@link #activitySnapshot()}. */
+    private final EmbedActivityTracker activityTracker = new EmbedActivityTracker(ACTIVE_WINDOW_NANOS);
+
+    /**
+     * Bead nexus-s71lr, code-review-expert pass 2 (finding c): "queue depth" +
+     * "thread width" for the progress log line + {@link #activitySnapshot()},
+     * READ from the admission gate rather than recomputed. Composition runs the
+     * other way at construction time — {@code AdmissionControlledEmbedder} wraps
+     * THIS class and holds the {@link LocalOnnxAdmission} reference, so this
+     * embedder has no admission-gate reference of its own until one is wired in
+     * post-construction. {@code null} (the default, and every direct test
+     * construction of this class) means "no admission gate wired" — the log line
+     * and {@link #activitySnapshot()} both omit/sentinel these two fields rather
+     * than fabricate a value, never silently reporting 0.
+     */
+    private volatile LocalOnnxAdmission admissionGate;
+
+    /**
+     * Wire the process-wide admission gate this embedder is served through, so
+     * the progress log line and {@link #activitySnapshot()} can report REAL
+     * queue-depth/thread-width instead of omitting them. Called exactly once,
+     * from {@code Main.java}'s local-mode branch, immediately after both this
+     * embedder and the {@link LocalOnnxAdmission} it will be wrapped by are
+     * constructed — composition-root wiring, not a service locator (this class
+     * never looks the gate up itself).
+     */
+    public void setAdmissionGate(LocalOnnxAdmission gate) {
+        this.admissionGate = gate;
+    }
 
     /** Construct with the canonical bge artifact paths. */
     public Bge768Embedder() {
@@ -264,6 +305,20 @@ public final class Bge768Embedder implements Embedder {
     }
 
     /**
+     * Bead nexus-s71lr, deliverable 2 — a point-in-time snapshot of this embedder's
+     * lifetime activity counters, served by {@code GET /v1/status}
+     * ({@code dev.nexus.service.http.StatusHandler}) so a client can poll "is the
+     * engine still embedding, or has it hung?" without tailing logs. Public: the
+     * status handler lives in a different package.
+     */
+    public EmbedActivitySnapshot activitySnapshot() {
+        LocalOnnxAdmission gate = admissionGate;
+        int queueDepth  = gate != null ? gate.queueLength() : -1;
+        int threadWidth = gate != null ? gate.permits() : -1;
+        return activityTracker.snapshot(System.nanoTime(), queueDepth, threadWidth);
+    }
+
+    /**
      * Tokenizes the whole input once (cheap relative to an ONNX forward pass), then
      * greedily partitions it into sub-batches bounded by {@link #MAX_PADDED_TOKEN_AREA}
      * — never re-ordering, so results concatenate directly in input order. Each
@@ -319,18 +374,35 @@ public final class Bge768Embedder implements Embedder {
             results.addAll(runOnnxSubBatch(encodings, start, end, groupMaxLen));
             chunksDone += end - start;
 
+            long nowNanos = System.nanoTime();
+            double elapsedSec = (nowNanos - callStartNanos) / 1_000_000_000.0;
+            double chunksPerSec = elapsedSec > 0.0 ? chunksDone / elapsedSec : 0.0;
+
+            // Bead nexus-s71lr, deliverable 2: update the wire-visible activity counters
+            // on EVERY sub-batch, unconditionally — GET /v1/status must reflect true
+            // current state regardless of how often the log line below is allowed to
+            // fire (never throttled the way the log is).
+            activityTracker.record(end - start, chunksPerSec, nowNanos);
+
             // Bead nexus-s71lr: the fix for "the engine logs nothing between per-document
             // upserts" — a structured INFO line per sub-batch, rate-limited (progressGate,
             // shared across every concurrent embed() call on this instance) to about once
             // per PROGRESS_LOG_INTERVAL_NANOS so a large bulk run does not flood INFO.
-            long nowNanos = System.nanoTime();
             if (progressGate.shouldLog(nowNanos)) {
-                double elapsedSec = (nowNanos - callStartNanos) / 1_000_000_000.0;
-                double chunksPerSec = elapsedSec > 0.0 ? chunksDone / elapsedSec : 0.0;
+                // code-review-expert pass 2 finding c: queue_depth/thread_width READ from
+                // the admission gate (never recomputed), omitted entirely when no gate is
+                // wired (every direct test construction of this class) rather than
+                // fabricating a 0/absent value.
+                LocalOnnxAdmission gate = admissionGate;
+                String admissionFields = gate != null
+                        ? String.format(" queue_depth=%d thread_width=%d",
+                                gate.queueLength(), gate.permits())
+                        : "";
                 log.info("event=bge768_embed_progress sub_batch={} sub_batch_size={} max_len={} "
-                        + "chunks_done={} chunks_total={} elapsed_s={} chunks_per_sec={}",
+                        + "chunks_done={} chunks_total={} elapsed_s={} chunks_per_sec={}{}",
                         subBatchIndex, end - start, groupMaxLen, chunksDone, n,
-                        String.format("%.1f", elapsedSec), String.format("%.1f", chunksPerSec));
+                        String.format("%.1f", elapsedSec), String.format("%.1f", chunksPerSec),
+                        admissionFields);
             }
             subBatchIndex++;
             start = end;

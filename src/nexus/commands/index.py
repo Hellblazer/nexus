@@ -1984,48 +1984,68 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         # only once at the end (which would see only the LAST file's count).
         from nexus.mcp_infra import get_reconciled_collections_count  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached when non-zero
         reconciled_total = 0
-        for i, pdf in enumerate(pdfs, 1):
-            click.echo(f"[{i}/{total}] {pdf.name}…", nl=False)
-            t0 = _time.monotonic()
-            reset_identity_drop_collectors()
-            try:
-                n = index_pdf(
-                    pdf, corpus=corpus, collection_name=collection,
-                    force=force, enrich=enrich, extractor=extractor,
-                    on_formula_oom=on_formula_oom, streaming=streaming,
-                    allow_degraded_extraction=allow_degraded_extraction,
-                )
-                elapsed = _time.monotonic() - t0
-                total_chunks += n
-                reconciled_total += get_reconciled_collections_count()
-                click.echo(f" — {n} chunks, {elapsed:.1f}s")
-                if emit_identity_drop_summary(indexed_count=1):
-                    failures.append((
-                        pdf,
-                        f"indexed ({n} chunk(s)) but catalog document "
-                        f"identity failed to register — orphaned (no "
-                        f"tumbler); re-run or 'nx catalog reconcile' to "
-                        f"repair",
-                    ))
-            except Exception as exc:  # noqa: BLE001 — per-PDF batch isolation: one file's failure must not abort the batch; recorded and logged via log.warning
-                elapsed = _time.monotonic() - t0
-                # nexus-2t63u round 2: a reconcile can succeed BEFORE a
-                # later failure in the same file's run (e.g. the fence
-                # refusal case) — count it here too, before the next
-                # iteration's reset zeroes the collector.
-                reconciled_total += get_reconciled_collections_count()
-                # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02):
-                # a completion-stamp refusal already lands here (Exception
-                # covers it) and is never folded into a success line — but
-                # give it the same dedicated wording as the single-file
-                # branches instead of the raw exception text.
-                msg = (
-                    _index_run_refused_message(exc, target_collection=collection or "", corpus=corpus)
-                    if isinstance(exc, IndexRunVerifyRefused) else str(exc)
-                )
-                failures.append((pdf, msg))
-                _log.warning("batch_index_failed", path=str(pdf), error=msg)
-                click.echo(f" — FAILED ({elapsed:.1f}s): {exc}")
+        # nexus-s71lr: `nx index pdf --dir` echoes `[i/total] name…` with
+        # nl=False and only completes the line AFTER index_pdf returns — a
+        # single slow PDF (the bead's own complaint class) is silence between
+        # those two echoes. Mirrors `nx index rdr`'s heartbeat exactly:
+        # touch()-ed per file so "Xs elapsed" measures the CURRENT file's
+        # silence, armed immediately before the loop (nothing risky between
+        # arm() and the try/finally that guards it — code-review-expert
+        # finding d) so a raise anywhere in the loop always reaches disarm().
+        file_heartbeat = _PhaseHeartbeat(
+            is_tty=sys.stdout.isatty(),
+            echo=lambda msg, nl: click.echo(msg, nl=nl, err=True),
+            interval=5.0,
+            prefix="embed",
+        )
+        file_heartbeat.arm(f"0/{total} PDF(s)")
+        try:
+            for i, pdf in enumerate(pdfs, 1):
+                click.echo(f"[{i}/{total}] {pdf.name}…", nl=False)
+                t0 = _time.monotonic()
+                reset_identity_drop_collectors()
+                try:
+                    n = index_pdf(
+                        pdf, corpus=corpus, collection_name=collection,
+                        force=force, enrich=enrich, extractor=extractor,
+                        on_formula_oom=on_formula_oom, streaming=streaming,
+                        allow_degraded_extraction=allow_degraded_extraction,
+                    )
+                    elapsed = _time.monotonic() - t0
+                    total_chunks += n
+                    reconciled_total += get_reconciled_collections_count()
+                    click.echo(f" — {n} chunks, {elapsed:.1f}s")
+                    if emit_identity_drop_summary(indexed_count=1):
+                        failures.append((
+                            pdf,
+                            f"indexed ({n} chunk(s)) but catalog document "
+                            f"identity failed to register — orphaned (no "
+                            f"tumbler); re-run or 'nx catalog reconcile' to "
+                            f"repair",
+                        ))
+                except Exception as exc:  # noqa: BLE001 — per-PDF batch isolation: one file's failure must not abort the batch; recorded and logged via log.warning
+                    elapsed = _time.monotonic() - t0
+                    # nexus-2t63u round 2: a reconcile can succeed BEFORE a
+                    # later failure in the same file's run (e.g. the fence
+                    # refusal case) — count it here too, before the next
+                    # iteration's reset zeroes the collector.
+                    reconciled_total += get_reconciled_collections_count()
+                    # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02):
+                    # a completion-stamp refusal already lands here (Exception
+                    # covers it) and is never folded into a success line — but
+                    # give it the same dedicated wording as the single-file
+                    # branches instead of the raw exception text.
+                    msg = (
+                        _index_run_refused_message(exc, target_collection=collection or "", corpus=corpus)
+                        if isinstance(exc, IndexRunVerifyRefused) else str(exc)
+                    )
+                    failures.append((pdf, msg))
+                    _log.warning("batch_index_failed", path=str(pdf), error=msg)
+                    click.echo(f" — FAILED ({elapsed:.1f}s): {exc}")
+                finally:
+                    file_heartbeat.touch(f"{i}/{total} PDF(s), {total_chunks:,} chunks")
+        finally:
+            file_heartbeat.disarm()
 
         batch_elapsed = _time.monotonic() - batch_start
         summary_line = (
@@ -2544,7 +2564,6 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
         interval=5.0,
         prefix="embed",
     )
-    file_heartbeat.arm(f"0/{len(rdr_files)} RDR document(s)")
 
     def on_file(fpath: Path, chunks: int, elapsed: float) -> None:
         nonlocal n
@@ -2584,6 +2603,12 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
             # floats or ints, got [[np.float32(...)..."
             return [[float(x) for x in v] for v in _local_ef(texts)], model
 
+    # nexus-s71lr code-review-expert fix: arm() moved here, immediately
+    # before the try/finally — everything above (embed_fn resolution:
+    # imports + LocalEmbeddingFunction() construction, either of which can
+    # raise) used to run AFTER arm(), so a raise there left the heartbeat
+    # armed with no disarm ever reached (a leaked background thread).
+    file_heartbeat.arm(f"0/{len(rdr_files)} RDR document(s)")
     try:
         results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection,
                                         content_type="rdr", force=force, on_file=on_file,

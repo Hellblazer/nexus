@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import contextlib
+import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1341,28 +1342,46 @@ def test_phase_heartbeat_custom_prefix() -> None:
         assert "[post]" not in msg
 
 
-def test_phase_heartbeat_touch_resets_elapsed_without_new_thread() -> None:
+def test_phase_heartbeat_touch_resets_elapsed_without_new_thread(monkeypatch) -> None:
     """nexus-s71lr: ``touch()`` restarts the elapsed clock (so the next
     tick reports time since the touch, not since the original ``arm()``)
-    and updates the label, WITHOUT spawning a new background thread."""
-    from nexus.commands.index import _PhaseHeartbeat
+    and updates the label, WITHOUT spawning a new background thread.
+
+    code-review-expert (nexus-s71lr pass 2): the prior version of this test
+    never asserted the REPORTED elapsed number, so a ``touch()`` that
+    silently skipped resetting ``_start_mono`` would still pass (both
+    "since arm" and "since touch" round to the same tiny sub-second value
+    under real ``time.sleep``). Fixed by faking ``time.monotonic`` so the
+    two candidate elapsed values (53s "since arm" vs. 3s "since touch")
+    are unambiguous in the tick text itself.
+    """
+    import nexus.commands.index as index_mod
+
+    fake_now = [0.0]
+    monkeypatch.setattr(index_mod.time, "monotonic", lambda: fake_now[0])
+
     calls: list[str] = []
-    hb = _PhaseHeartbeat(is_tty=False, echo=lambda msg, nl: calls.append(msg), interval=0.05)
-    hb.arm("0/2 files")
+    hb = index_mod._PhaseHeartbeat(
+        is_tty=False, echo=lambda msg, nl: calls.append(msg), interval=0.02,
+    )
+    hb.arm("0/2 files")  # _start_mono captured at fake_now[0] == 0.0
     thread_after_arm = hb._thread  # noqa: SLF001 -- white-box: proving no thread churn
-    time.sleep(0.03)
-    hb.touch("1/2 files")
+    fake_now[0] = 50.0
+    hb.touch("1/2 files")  # _start_mono reset to fake_now[0] == 50.0
     assert hb._thread is thread_after_arm, "touch() must not spawn a new thread"  # noqa: SLF001
-    time.sleep(0.03)  # 0.06s since touch(), 0.09s since the original arm()
+    fake_now[0] = 53.0  # 3s since touch(), 53s since the original arm()
+    time.sleep(0.05)  # real wall-clock wait so the 0.02s-interval thread ticks at least once
     hb.disarm()
     ticks = [c for c in calls if "still running" in c]
     assert ticks, "expected at least one tick"
-    # The label reflects the touch(), and no tick claims >=90ms elapsed --
-    # if the clock were NOT reset by touch(), the interval-0.05s tick would
-    # have fired at ~90ms (0.03+0.03+0.03 since arm), past the touch point.
     for msg in ticks:
         assert "1/2 files" in msg
         assert "0/2 files" not in msg
+        # The discriminating assertion: 3s (since touch), never 53s (since
+        # the original arm) -- a touch() that failed to reset _start_mono
+        # would report 53s here.
+        assert "(3s elapsed)" in msg
+        assert "(53s elapsed)" not in msg
 
 
 def test_phase_heartbeat_touch_before_arm_is_a_noop() -> None:
@@ -2147,3 +2166,79 @@ def test_pdf_dir_batch_identity_drop_surfaces_as_failure_entry(runner, home):
     assert "1 failure(s)" in result.output, result.output
     assert "identity" in result.output.lower()
     assert "1 of 2 file(s) failed" in result.output, result.output
+
+
+# ── nexus-s71lr: --dir in-loop heartbeat, always on (not --monitor-gated) ───
+
+
+def test_pdf_dir_heartbeat_ticks_during_a_slow_file_by_default(runner, home, monkeypatch):
+    """`nx index pdf --dir` echoes `[i/total] name…` with nl=False and only
+    completes the line AFTER index_pdf returns -- a slow PDF is silence
+    between those two echoes, the exact class the bead reports. Must
+    produce a "[embed] ... still running" line even WITHOUT --monitor."""
+    import nexus.commands.index as index_mod
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
+
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+
+    d = home / "pdfs"
+    d.mkdir()
+    (d / "a.pdf").write_bytes(b"fake pdf a")
+
+    def _slow_index_pdf(path, **kwargs):
+        time.sleep(0.09)  # several 0.02s intervals elapse with nothing done
+        return 3
+
+    with patch("nexus.doc_indexer.index_pdf", side_effect=_slow_index_pdf):
+        result = runner.invoke(
+            main, ["index", "pdf", "--dir", str(d), "--extractor", "docling"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "[embed]" in result.output
+    assert "still running" in result.output
+    assert "elapsed)" in result.output
+
+
+def test_pdf_dir_heartbeat_silent_on_a_fast_run(runner, home):
+    """The default (real, non-fast) heartbeat interval must NOT fire for a
+    normal, fast batch -- no flooding for the common case."""
+    d = home / "pdfs"
+    d.mkdir()
+    (d / "a.pdf").write_bytes(b"fake pdf a")
+
+    with patch("nexus.doc_indexer.index_pdf", return_value=3):
+        result = runner.invoke(
+            main, ["index", "pdf", "--dir", str(d), "--extractor", "docling"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "[embed]" not in result.output
+    assert "still running" not in result.output
+
+
+def test_pdf_dir_heartbeat_disarmed_after_batch_completes(runner, home, monkeypatch):
+    """No leaked background thread once the --dir batch finishes."""
+    import nexus.commands.index as index_mod
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
+
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+
+    d = home / "pdfs"
+    d.mkdir()
+    (d / "a.pdf").write_bytes(b"fake pdf a")
+
+    with patch("nexus.doc_indexer.index_pdf", return_value=3):
+        result = runner.invoke(
+            main, ["index", "pdf", "--dir", str(d), "--extractor", "docling"],
+        )
+
+    assert result.exit_code == 0, result.output
+    time.sleep(0.05)
+    assert not any(t.name == "nx-phase-heartbeat" for t in threading.enumerate())

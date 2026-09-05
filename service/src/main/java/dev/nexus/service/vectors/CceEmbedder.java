@@ -161,6 +161,14 @@ public final class CceEmbedder implements Embedder {
      *  Retry-After, the 429 budget arithmetic, and the shared auth arm. */
     private final VoyageRetryLoop retryLoop;
 
+    /**
+     * Bead nexus-s71lr, code-review-expert pass 2 finding a — same mechanism as
+     * {@link Bge768Embedder#progressGate} / {@code VoyageEmbedder}'s own copy:
+     * rate-limited to about once per 5s, per instance.
+     */
+    private static final long PROGRESS_LOG_INTERVAL_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+    private final EmbedProgressGate progressGate = new EmbedProgressGate(PROGRESS_LOG_INTERVAL_NANOS);
+
     /** Terminal-failure vocabulary handed to {@link #retryLoop} — CCE has no
      *  special statuses beyond the loop's shared arms. */
     private static final VoyageRetryLoop.Failures CCE_FAILURES = new VoyageRetryLoop.Failures() {
@@ -378,6 +386,12 @@ public final class CceEmbedder implements Embedder {
             }));
         }
         List<T> results = new ArrayList<>(n);
+        // Bead nexus-s71lr (code-review-expert pass 2 finding a): this call's own
+        // clock — CCE embeds one text per API call (per this class's own "CRITICAL:
+        // per-text not batch" contract above), so "sub_batch_size" here is always 1;
+        // the progress line still needs the SAME rate limiting as Bge768/Voyage, since
+        // a large bulk run is exactly N single-text completions in a tight loop.
+        long callStartNanos = System.nanoTime();
         for (int i = 0; i < n; i++) {
             try {
                 results.add(futures.get(i).get());
@@ -390,6 +404,16 @@ public final class CceEmbedder implements Embedder {
                 Thread.currentThread().interrupt();
                 cancelFrom(futures, i + 1);
                 throw new RuntimeException("CCE parallel embed interrupted", e);
+            }
+            int chunksDone = i + 1;
+            long nowNanos = System.nanoTime();
+            if (progressGate.shouldLog(nowNanos)) {
+                double elapsedSec = (nowNanos - callStartNanos) / 1_000_000_000.0;
+                double chunksPerSec = elapsedSec > 0.0 ? chunksDone / elapsedSec : 0.0;
+                log.info("event=embed_progress embedder=cce chunks_done={} chunks_total={} "
+                        + "elapsed_s={} chunks_per_sec={}",
+                        chunksDone, n, String.format("%.1f", elapsedSec),
+                        String.format("%.1f", chunksPerSec));
             }
         }
         return results;

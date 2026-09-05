@@ -133,6 +133,11 @@ public final class Main {
         String voyageKey = System.getenv("NX_VOYAGE_API_KEY");
         EmbedderRouter docEmbedRouter;
         EmbedderRouter qryEmbedRouter;
+        // Bead nexus-s71lr, deliverable 2: non-null ONLY in the local-mode branch
+        // below (bge is that branch's own Bge768Embedder) — null in cloud/voyage
+        // mode, where GET /v1/status reports local_embed_activity: null rather
+        // than fabricating a value for an embedder that does not exist here.
+        java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier = null;
         // nexus-pebfx.2: LOUD one-line embedding-mode banner. The 2026-06-10
         // migration ran for hours against silent ONNX-384 fallback because the
         // mode was invisible; onnx-local now logs at WARN and names the refusal
@@ -181,6 +186,12 @@ public final class Main {
             // query embeds and reranks use the bounded-timeout acquire so a
             // bulk-indexing burst cannot stall interactive search unboundedly.
             var localOnnxAdmission = dev.nexus.service.vectors.LocalOnnxAdmission.fromEnv();
+            // Bead nexus-s71lr: composition-root wiring so the progress log line and
+            // GET /v1/status can report REAL queue-depth/thread-width (read from this
+            // same admission gate) instead of omitting them. bge itself never looks
+            // the gate up — it is handed the reference exactly once, here.
+            bge.setAdmissionGate(localOnnxAdmission);
+            localEmbedActivitySupplier = bge::activitySnapshot;
             docEmbedRouter = new EmbedderRouter(
                     new dev.nexus.service.vectors.AdmissionControlledEmbedder(bge, localOnnxAdmission, false),
                     "document");
@@ -238,7 +249,8 @@ public final class Main {
             System.exit(1);
         }
 
-        var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo, reranker);
+        var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo, reranker,
+                localEmbedActivitySupplier);
         service.start();
 
         log.info("event=service_ready port={}", service.getPort());

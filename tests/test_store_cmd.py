@@ -525,3 +525,78 @@ def test_store_get_custom_collection(runner, mock_store):
     mock_store.get_by_id.assert_called_once_with(
         "code__myrepo__voyage-code-3__v1", "abc123",
     )
+
+
+# ── nexus-s71lr: `nx store import` in-loop heartbeat, always on ────────────
+#
+# import_collection is one opaque call with no per-record progress callback
+# at all -- worse than the per-file loops (not even a start/end line per
+# record). Reuses the same `_PhaseHeartbeat` mechanism as `nx index rdr` /
+# `nx index pdf --dir`: ticks every 5s for as long as the call is in flight.
+
+
+def test_store_import_heartbeat_ticks_during_a_slow_import(runner, tmp_path, monkeypatch):
+    import time
+    import nexus.commands.index as index_mod
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
+
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+
+    dummy = tmp_path / "dummy.nxexp"
+    dummy.write_bytes(b"not a real file -- import_collection is fully mocked below")
+
+    def _slow_import_collection(**kwargs):
+        time.sleep(0.09)  # several 0.02s intervals elapse with nothing done
+        return {"imported_count": 5, "collection_name": "knowledge__x__voyage-context-3__v1",
+                "elapsed_seconds": 0.09}
+
+    with patch("nexus.commands.store._t3", return_value=MagicMock()), \
+         patch("nexus.exporter.import_collection", side_effect=_slow_import_collection):
+        result = runner.invoke(main, ["store", "import", str(dummy)])
+
+    assert result.exit_code == 0, result.output
+    assert "[embed]" in result.output
+    assert "still running" in result.output
+    assert "elapsed)" in result.output
+
+
+def test_store_import_heartbeat_silent_on_a_fast_import(runner, tmp_path):
+    dummy = tmp_path / "dummy.nxexp"
+    dummy.write_bytes(b"not a real file -- import_collection is fully mocked below")
+
+    fake_result = {"imported_count": 5, "collection_name": "knowledge__x__voyage-context-3__v1",
+                   "elapsed_seconds": 0.01}
+    with patch("nexus.commands.store._t3", return_value=MagicMock()), \
+         patch("nexus.exporter.import_collection", return_value=fake_result):
+        result = runner.invoke(main, ["store", "import", str(dummy)])
+
+    assert result.exit_code == 0, result.output
+    assert "[embed]" not in result.output
+    assert "still running" not in result.output
+
+
+def test_store_import_heartbeat_disarmed_on_exception(runner, tmp_path, monkeypatch):
+    import threading
+    import time
+    import nexus.commands.index as index_mod
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
+
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+
+    dummy = tmp_path / "dummy.nxexp"
+    dummy.write_bytes(b"not a real file -- import_collection is fully mocked below")
+
+    with patch("nexus.commands.store._t3", return_value=MagicMock()), \
+         patch("nexus.exporter.import_collection",
+               side_effect=RuntimeError("boom")):
+        result = runner.invoke(main, ["store", "import", str(dummy)])
+
+    assert result.exit_code != 0
+    time.sleep(0.05)
+    assert not any(t.name == "nx-phase-heartbeat" for t in threading.enumerate())

@@ -280,3 +280,33 @@ def test_index_rdr_heartbeat_disarmed_on_exception(
     # of the live threads are the heartbeat's.
     time.sleep(0.05)
     assert not any(t.name == "nx-phase-heartbeat" for t in threading.enumerate())
+
+
+def test_index_rdr_heartbeat_never_armed_if_embed_fn_setup_raises(
+    runner: CliRunner, repo_with_rdrs: Path, monkeypatch,
+) -> None:
+    """code-review-expert (nexus-s71lr pass 2): the heartbeat used to arm()
+    BEFORE the local embed_fn setup (imports + LocalEmbeddingFunction()
+    construction), so a raise in that window left it armed with no
+    try/finally reached yet -- a leaked background thread. arm() now runs
+    immediately before the try/finally that guards the actual indexing
+    call, so a raise in the setup window must leave NOTHING armed at all
+    (not merely disarmed-after-the-fact)."""
+    import nexus.commands.index as index_mod
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
+
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+
+    # index_rdr_cmd imports is_local_mode from nexus.config INSIDE the
+    # function body (deferred import), so patching the source module is
+    # what actually takes effect at call time.
+    with patch("nexus.config.is_local_mode",
+               side_effect=RuntimeError("setup boom")):
+        result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs)])
+
+    assert result.exit_code != 0
+    time.sleep(0.05)
+    assert not any(t.name == "nx-phase-heartbeat" for t in threading.enumerate())

@@ -697,23 +697,43 @@ def import_cmd(
     db = _t3()
     input_path = Path(file)
 
+    # nexus-s71lr: "nx store put"/import bulk writes had NO progress signal at
+    # all -- import_collection is one opaque call with no per-record callback,
+    # so a large .nxexp file is total silence until it returns (worse than the
+    # per-file loops: not even a start/end line per record). Reuses the exact
+    # `_PhaseHeartbeat` mechanism `nx index rdr` / `nx index pdf --dir` arm:
+    # ticks every 5s for as long as the call is in flight, disarmed in
+    # finally so a raise from import_collection itself never leaks the
+    # background thread (code-review-expert finding d: arm() sits immediately
+    # before the try/finally that guards it, nothing risky in between).
+    from nexus.commands.index import _PhaseHeartbeat  # noqa: PLC0415 — deferred cross-module import; avoids a hard import-time coupling between two independently-loadable command modules
+    file_heartbeat = _PhaseHeartbeat(
+        is_tty=sys.stdout.isatty(),
+        echo=lambda msg, nl: click.echo(msg, nl=nl, err=True),
+        interval=5.0,
+        prefix="embed",
+    )
+    file_heartbeat.arm(f"importing {input_path.name}")
     try:
-        result = import_collection(
-            db=db,
-            input_path=input_path,
-            target_collection=collection,
-            remaps=parsed_remaps,
-            assume_model=assume_model,
-            skip_existing=skip_existing,
-        )
-    except FormatVersionError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except EmbeddingDimensionMismatch as exc:
-        raise click.ClickException(str(exc)) from exc
-    except EmbeddingModelMismatch as exc:
-        raise click.ClickException(str(exc)) from exc
-    except Exception as exc:
-        raise click.ClickException(f"Import failed: {exc}") from exc
+        try:
+            result = import_collection(
+                db=db,
+                input_path=input_path,
+                target_collection=collection,
+                remaps=parsed_remaps,
+                assume_model=assume_model,
+                skip_existing=skip_existing,
+            )
+        except FormatVersionError as exc:
+            raise click.ClickException(str(exc)) from exc
+        except EmbeddingDimensionMismatch as exc:
+            raise click.ClickException(str(exc)) from exc
+        except EmbeddingModelMismatch as exc:
+            raise click.ClickException(str(exc)) from exc
+        except Exception as exc:
+            raise click.ClickException(f"Import failed: {exc}") from exc
+    finally:
+        file_heartbeat.disarm()
 
     click.echo(
         f"Imported {result['imported_count']} records into "

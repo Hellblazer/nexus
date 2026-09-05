@@ -296,6 +296,25 @@ public final class NexusService {
                         EmbedderRouter docEmbedderRouter,
                         PgVectorRepository pgVectorRepository,
                         dev.nexus.service.vectors.Reranker reranker) throws IOException {
+        this(port, token, dataSource, docEmbedderRouter, pgVectorRepository, reranker, null);
+    }
+
+    /**
+     * Full constructor, additionally wired for {@code GET /v1/status} (bead
+     * nexus-s71lr, deliverable 2).
+     *
+     * @param localEmbedActivitySupplier reads the live {@code
+     *        Bge768Embedder.activitySnapshot()} for the local-mode branch
+     *        (see {@code Main.java}); {@code null} in cloud/voyage mode or any
+     *        caller that has no local embedder to report on — {@code
+     *        StatusHandler} reports {@code local_embed_activity: null} rather
+     *        than fabricating a value.
+     */
+    public NexusService(int port, String token, DataSource dataSource,
+                        EmbedderRouter docEmbedderRouter,
+                        PgVectorRepository pgVectorRepository,
+                        dev.nexus.service.vectors.Reranker reranker,
+                        java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier) throws IOException {
         this.tenantScope = new TenantScope(dataSource);
 
         // Token lifecycle (RDR-152 bead nexus-gmiaf.32.2): resolve bearer→tenant
@@ -338,6 +357,13 @@ public final class NexusService {
         // /version — unauthenticated app+schema+embedding-mode handshake
         // (nexus-pebfx.4 + nexus-pebfx.5)
         server.createContext("/version", new VersionHandler(dataSource, docEmbedderRouter));
+
+        // /v1/status — unauthenticated live embed-activity counters (bead
+        // nexus-s71lr, deliverable 2). Same no-auth posture as /health and
+        // /version: operational telemetry, not user data. Deliberately
+        // OUTSIDE the /v1/* auth-filter block below.
+        server.createContext("/v1/status",
+                new dev.nexus.service.http.StatusHandler(docEmbedderRouter, localEmbedActivitySupplier));
 
         // /v1/* — auth filter applied
         var authFilter = List.of(new AuthFilter(tokenCache, tokenStore));

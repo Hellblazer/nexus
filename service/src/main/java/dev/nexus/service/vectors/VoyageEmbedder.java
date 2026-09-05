@@ -216,6 +216,21 @@ public final class VoyageEmbedder implements Embedder {
     private final VoyageRetryLoop retryLoop;
 
     /**
+     * Bead nexus-s71lr, code-review-expert pass 2 finding a: the engine progress
+     * line originally fired only from {@link Bge768Embedder} — cloud-mode users
+     * (this class) got nothing between per-document upserts, the identical
+     * silence class the bead exists to close. Mirrors {@link
+     * Bge768Embedder#PROGRESS_LOG_INTERVAL_NANOS} / {@code progressGate} exactly:
+     * rate-limited to about once per 5s, per instance (each of {@code
+     * EmbedderRouter}'s doc/query routers constructs its OWN {@code
+     * VoyageEmbedder}, so this is not process-wide the way {@code
+     * LocalOnnxAdmission} is — an acceptable bound: at most one line per 5s PER
+     * embedder instance, never per-chunk).
+     */
+    private static final long PROGRESS_LOG_INTERVAL_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+    private final EmbedProgressGate progressGate = new EmbedProgressGate(PROGRESS_LOG_INTERVAL_NANOS);
+
+    /**
      * Non-vacuity test instrument (RDR-195, mirrors {@link Bge768Embedder#onnxInvocationCount}):
      * counts every REAL Voyage POST this instance has sent (including internal 429/5xx
      * retries within a single {@link #callApi} call), since construction or the last
@@ -379,9 +394,28 @@ public final class VoyageEmbedder implements Embedder {
         // RATE_LIMIT_BUDGET_MS's javadoc for why per-sub-batch would re-arm.
         long deadlineNanos = retryLoop.newDeadlineNanos();
         List<SubBatchResponse> out = new ArrayList<>();
+        // Bead nexus-s71lr (code-review-expert pass 2 finding a): this call's own
+        // clock, for the progress line below — mirrors Bge768Embedder.embedSubBatched
+        // exactly.
+        long callStartNanos = System.nanoTime();
+        int chunksDone = 0;
+        int batchIndex = 0;
         for (List<String> batch : planned) {
             AtomicInteger subRequestBudget = new AtomicInteger(0);
             collectWithHalving(batch, subRequestBudget, out, 0, deadlineNanos);
+            chunksDone += batch.size();
+
+            long nowNanos = System.nanoTime();
+            if (progressGate.shouldLog(nowNanos)) {
+                double elapsedSec = (nowNanos - callStartNanos) / 1_000_000_000.0;
+                double chunksPerSec = elapsedSec > 0.0 ? chunksDone / elapsedSec : 0.0;
+                log.info("event=embed_progress embedder=voyage model={} sub_batch={} "
+                        + "sub_batch_size={} chunks_done={} chunks_total={} elapsed_s={} "
+                        + "chunks_per_sec={}",
+                        model, batchIndex, batch.size(), chunksDone, texts.size(),
+                        String.format("%.1f", elapsedSec), String.format("%.1f", chunksPerSec));
+            }
+            batchIndex++;
         }
         return out;
     }

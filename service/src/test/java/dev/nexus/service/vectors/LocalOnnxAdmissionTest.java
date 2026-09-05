@@ -174,4 +174,56 @@ class LocalOnnxAdmissionTest {
     void queryTimeoutMsFromEnv_realEntryPoint_returnsPositiveValue() {
         assertThat(LocalOnnxAdmission.queryTimeoutMsFromEnv()).isPositive();
     }
+
+    // ── nexus-s71lr deliverable 1/2: queue depth + thread width, READ not
+    //    computed, for the engine progress log line + GET /v1/status ───────
+
+    @Test
+    void queueLength_zeroWhenNoWaitersAndPermitsFree() throws InterruptedException {
+        LocalOnnxAdmission admission = new LocalOnnxAdmission(2, 1000);
+        assertThat(admission.queueLength()).isZero();
+        admission.acquireInterruptible();
+        // One permit held, one free -- still nobody WAITING (queueLength
+        // counts blocked acquirers, not in-flight holders).
+        assertThat(admission.queueLength()).isZero();
+    }
+
+    @Test
+    void queueLength_countsThreadsBlockedOnAFullyHeldPermitSet() throws Exception {
+        LocalOnnxAdmission admission = new LocalOnnxAdmission(1, 1000);
+        admission.acquireInterruptible(); // the one permit is now held
+
+        Thread waiter = new Thread(() -> {
+            try {
+                admission.acquireInterruptible();
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        waiter.start();
+        // Poll rather than a fixed sleep -- bounded, avoids a flaky race
+        // against the waiter thread actually reaching the blocking acquire.
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+        while (admission.queueLength() == 0 && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        assertThat(admission.queueLength()).isEqualTo(1);
+
+        admission.release();
+        waiter.join(2000);
+        assertThat(waiter.isAlive()).isFalse();
+    }
+
+    @Test
+    void inFlightCount_reflectsHeldPermitsNotQueueLength() throws InterruptedException {
+        LocalOnnxAdmission admission = new LocalOnnxAdmission(3, 1000);
+        assertThat(admission.inFlightCount()).isZero();
+        admission.acquireInterruptible();
+        admission.acquireInterruptible();
+        assertThat(admission.inFlightCount()).isEqualTo(2);
+        admission.release();
+        assertThat(admission.inFlightCount()).isEqualTo(1);
+        admission.release();
+        assertThat(admission.inFlightCount()).isZero();
+    }
 }
