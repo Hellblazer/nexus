@@ -555,6 +555,13 @@
              ${jooq.generated.dir} (do NOT `mvn clean` after downloading them). -->
         <profile>
             <id>prebuilt-jooq</id>
+            <properties>
+                <!-- A release build never runs tests, and its test sources need the
+                     test-only jOOQ codegen this profile skips (nexus-cbo4a batch 5),
+                     so skip test COMPILATION too: -DskipTests alone still runs
+                     testCompile and burned engine-service-v0.1.103 on all three legs. -->
+                <maven.test.skip>true</maven.test.skip>
+            </properties>
             <build>
                 <plugins>
                     <plugin>
