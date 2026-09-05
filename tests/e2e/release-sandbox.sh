@@ -99,6 +99,34 @@ _index_floor_check() {
     fi
 }
 
+# nexus-s71lr: an `nx index repo`/`nx index rdr` step's whole stdout+stderr is
+# redirected into a log file and only tailed AFTER the command returns (see
+# steps 2/11 and 4/11 below) -- a stall was invisible in THIS transcript even
+# after the client-side heartbeat fix (index.py's _PhaseHeartbeat / tightened
+# ETA ticker), because those lines land in the log file, never on this
+# script's own stdout, until the command finishes. Backgrounds `tail -f` on
+# the log file for the DURATION of the foreground command so the same
+# heartbeat/eta lines the CLI now prints by default become visible live in
+# THIS transcript too, not only in the post-hoc `tail -5`. The log file is
+# touched first so `tail -f` has something to open immediately even if the
+# indexed command is slow to produce its first byte.
+#
+# UNTESTED end-to-end at authoring time (no Docker / live shakedown run
+# available in the authoring sandbox) -- rehearse this step live before
+# relying on it for a real release shakedown.
+_start_live_log_tail() {
+    local log_file="$1"
+    : > "$log_file"
+    tail -n +1 -f "$log_file" &
+    echo $!
+}
+
+_stop_live_log_tail() {
+    local tail_pid="$1"
+    kill "$tail_pid" 2>/dev/null || true
+    wait "$tail_pid" 2>/dev/null || true
+}
+
 # nexus-98zsp: indexing wall-clock floor. engine-service-v0.1.99 shipped an
 # 8x embed slowdown through every gate because none of them timed an index
 # run; this is the only place a real corpus is indexed pre-release.
@@ -930,11 +958,17 @@ case "$MODE" in
         mkdir -p "$SANDBOX/logs"
         INDEX_REPO_LOG="$SANDBOX/logs/shakedown-index-repo.log"
         INDEX_REPO_T0=$SECONDS
+        # nexus-s71lr: live-tail this step's own log so a stall (the eta
+        # ticker / heartbeat lines nx index now prints by default) is visible
+        # in THIS transcript, not only in the post-hoc tail -5 below.
+        _REPO_TAIL_PID=$(_start_live_log_tail "$INDEX_REPO_LOG")
         if ! nx index repo "$FIXTURE_DIR" >"$INDEX_REPO_LOG" 2>&1; then
+            _stop_live_log_tail "$_REPO_TAIL_PID"
             tail -5 "$INDEX_REPO_LOG" | sed 's/^/  /'
             echo "  [FAIL] nx index repo exited non-zero" >&2
             SHAKEDOWN_FAILED+=("2/11 nx index repo")
         else
+            _stop_live_log_tail "$_REPO_TAIL_PID"
             tail -5 "$INDEX_REPO_LOG" | sed 's/^/  /'
             _throughput_step "2/11 index-repo" "sandbox-repo-fixture" "$INDEX_REPO_LOG" $((SECONDS - INDEX_REPO_T0))
             # Chunk floor is 3x the doc floor (same 1:3 ratio as the PDF
@@ -1048,11 +1082,17 @@ case "$MODE" in
         read -r ODOCS_BEFORE OCHUNKS_BEFORE < <(_catalog_counts)
         INDEX_RDR_LOG="$SANDBOX/logs/shakedown-index-rdr.log"
         INDEX_RDR_T0=$SECONDS
+        # nexus-s71lr: this is the EXACT command the bead's own reproduction
+        # used (212 RDR files, 13 minutes, no output) -- live-tail so its
+        # heartbeat lines are visible in THIS transcript while it runs.
+        _RDR_TAIL_PID=$(_start_live_log_tail "$INDEX_RDR_LOG")
         if ! nx index rdr "$REPO_ROOT" >"$INDEX_RDR_LOG" 2>&1; then
+            _stop_live_log_tail "$_RDR_TAIL_PID"
             tail -5 "$INDEX_RDR_LOG" | sed 's/^/  /'
             echo "  [FAIL] nx index rdr exited non-zero" >&2
             SHAKEDOWN_FAILED+=("4/11 nx index rdr")
         else
+            _stop_live_log_tail "$_RDR_TAIL_PID"
             tail -5 "$INDEX_RDR_LOG" | sed 's/^/  /'
             _throughput_step "4/11 index-rdr" "sandbox-rdr-corpus" "$INDEX_RDR_LOG" $((SECONDS - INDEX_RDR_T0))
             # 1:3 doc:chunk ratio floor, matching the other steps; live
