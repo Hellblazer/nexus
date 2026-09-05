@@ -979,6 +979,30 @@ def _catalog_progress(
         write(stripped + "\n")
 
 
+def _register_time_meta(rel_path: str, file_hash: str) -> dict | None:
+    """Build a register/update-time ``meta`` dict for *rel_path*.
+
+    nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round 3):
+    stamps :data:`nexus.catalog.types.NON_EVIDENTIARY_META_KEY` for a
+    file under :data:`nexus.catalog.types.FIXTURE_PATH_MARKER` (fixture
+    DATA, never a sibling test MODULE — see ``is_fixture_path``'s
+    docstring). ``None`` when there is nothing to stamp at all (no
+    content hash AND not a fixture path), preserving the pre-existing
+    "meta: None when file_hash is empty" behaviour exactly.
+    """
+    from nexus.catalog.types import (  # noqa: PLC0415 — deliberate function-scoped import (avoid a module-level catalog dep in the indexer)
+        NON_EVIDENTIARY_META_KEY,
+        is_fixture_path,
+    )
+
+    meta: dict = {}
+    if file_hash:
+        meta["content_hash"] = file_hash
+    if is_fixture_path(rel_path):
+        meta[NON_EVIDENTIARY_META_KEY] = True
+    return meta or None
+
+
 def _catalog_hook(
     repo: Path,
     repo_name: str,
@@ -1323,7 +1347,7 @@ def _catalog_hook(
                         "file_path": rel_path,
                         "physical_collection": collection_name,
                         "head_hash": head_hash,
-                        "meta": {"content_hash": file_hash} if file_hash else None,
+                        "meta": _register_time_meta(rel_path, file_hash),
                         "source_mtime": source_mtime,
                     }))
                 else:
@@ -1362,7 +1386,7 @@ def _catalog_hook(
                             "tumbler": str(existing.tumbler),
                             "head_hash": head_hash,
                             "physical_collection": collection_name,
-                            "meta": {"content_hash": file_hash} if file_hash else None,
+                            "meta": _register_time_meta(rel_path, file_hash),
                             "source_mtime": source_mtime,
                         }))
                     file_to_doc_id[abs_path] = str(existing.tumbler)

@@ -11,6 +11,7 @@ continue to work unchanged.
 """
 from __future__ import annotations
 
+from pathlib import PurePosixPath
 from typing import NotRequired, TypedDict
 
 
@@ -149,6 +150,58 @@ def _normalize_source_uri(
 # cleanup script that legitimately needs to register rows across project
 # boundaries). Never the right answer for normal indexing.
 _CROSS_PROJECT_OVERRIDE_ENV = "NEXUS_CATALOG_ALLOW_CROSS_PROJECT"
+
+
+# ── Non-evidentiary document stamp (nexus-4jj40, RDR-200 Phase 1c ──────────
+# evidence hygiene, review round 3)
+#
+# A boolean key in ``Document.meta`` marking a document as unfit to serve
+# as retrieval/rank-candidate evidence — e.g. a test fixture indexed
+# alongside real code, or an RDR gate/question doc that quotes verbatim
+# paper-question text and so retrieves as false-positive "evidence" for
+# the very questions it describes. Read by
+# ``nexus.plans.runner`` (both the tumbler- and chash-shaped hydration
+# paths) to exclude a document's content from an items/inputs candidate
+# list without touching its collection or content_type.
+#
+# Two ways this gets set:
+#   1. AUTOMATIC, at ``nx index repo`` register time, for a file under
+#      :data:`FIXTURE_PATH_MARKER` (see :func:`is_fixture_path`) — fixture
+#      DATA, never a test MODULE that exercises real code (a sibling
+#      ``tests/test_foo.py`` is never auto-stamped).
+#   2. MANUAL, via the EXISTING ``nx catalog update --meta
+#      '{"non_evidentiary": true}'`` command — no new CLI. This is how an
+#      operator marks a document the automatic rule can't reach (e.g. a
+#      test module, or an RDR gate/question doc under ``docs/rdr/``).
+#
+# Round 2 of this bead's review shipped a hard-coded source_uri path-
+# prefix rule instead (``/tests/`` + ``/docs/rdr/rdr-200-phase1``) —
+# removed entirely: a global "/tests/" marker drops any conexus user's
+# real test-file evidence in ANY indexed repo, which is exactly the kind
+# of blast radius a per-document, operator-controlled stamp avoids.
+NON_EVIDENTIARY_META_KEY: str = "non_evidentiary"
+
+#: Path-segment marker (POSIX-style, no leading/trailing slash) identifying
+#: fixture DATA directories auto-stamped at register time. Segment-anchored
+#: — matched via :func:`is_fixture_path`, never a bare substring test, so
+#: ``tests/myfixtures/`` and ``mytests/fixtures/`` do not false-match.
+FIXTURE_PATH_MARKER: str = "tests/fixtures"
+
+
+def is_fixture_path(rel_path: str) -> bool:
+    """True when *rel_path* sits under a :data:`FIXTURE_PATH_MARKER`
+    directory (``.../tests/fixtures/...``), as consecutive path
+    SEGMENTS — never a bare substring test. ``tests/myfixtures/x.json``
+    and ``mytests/fixtures/x.json`` are both false: the segments must
+    match exactly, in order, adjacently.
+    """
+    parts = PurePosixPath(rel_path).parts
+    marker_parts = tuple(FIXTURE_PATH_MARKER.split("/"))
+    n = len(marker_parts)
+    return any(
+        parts[i:i + n] == marker_parts
+        for i in range(len(parts) - n + 1)
+    )
 
 
 @dataclass

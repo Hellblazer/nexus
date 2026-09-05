@@ -1950,7 +1950,20 @@ class TestTumblerAwareHydration:
     def test_chash_shaped_ids_bypass_tumbler_route(self):
         """A normal chash id list (64-hex) must not be mis-routed
         through the tumbler/manifest path -- it goes straight to
-        store_get_many exactly as before nexus-mm5tx."""
+        store_get_many exactly as before nexus-mm5tx.
+
+        nexus-4jj40 review round 3: this test used to assert
+        get_catalog() was NEVER called on the chash path at all. That
+        changed on purpose -- the chash path now ALSO resolves the
+        non_evidentiary stamp via docs_for_chashes/resolve_many (see
+        ``_resolve_non_evidentiary_chashes``), so get_catalog() and
+        docs_for_chashes DO fire here. What the original nexus-mm5tx
+        assertion actually protected was N-PER-ID fan-out, not catalog
+        access per se, so this now asserts AT MOST ONE call to
+        docs_for_chashes -- a single batched lookup for the WHOLE id
+        list, never one per id -- which is the real invariant worth
+        keeping pinned.
+        """
         from unittest.mock import patch
 
         from nexus.plans.runner import _hydrate_operator_args
@@ -1967,14 +1980,22 @@ class TestTumblerAwareHydration:
             )
         assert tool == "operator_summarize"
         assert args["content"] == "x\n\ny"
-        mock_get_catalog.assert_not_called()
         mock_hydrate.assert_called_once()
         assert mock_hydrate.call_args.kwargs["ids"] == chash_ids
+        # AT MOST ONE batched catalog lookup for the whole id list --
+        # never one per id (2 ids here; call_count > 1 would mean fan-out).
+        assert mock_get_catalog.return_value.docs_for_chashes.call_count <= 1
 
     def test_mixed_ids_bypass_tumbler_route(self):
         """A mixed ids list (some tumbler-shaped, some not) is not
         confidently tumbler-shaped -- falls back to the direct
-        store_get_many path unchanged, rather than guessing."""
+        store_get_many path unchanged, rather than guessing.
+
+        nexus-4jj40 review round 3: see
+        test_chash_shaped_ids_bypass_tumbler_route's docstring -- the
+        same "at most one batched lookup, never per-id" contract
+        replaces the old "never called at all" assertion here too.
+        """
         from unittest.mock import patch
 
         from nexus.plans.runner import _hydrate_operator_args
@@ -1987,8 +2008,8 @@ class TestTumblerAwareHydration:
             return_value={"contents": ["x", "y"]},
         ):
             _, args = _hydrate_operator_args("summarize", {"ids": mixed_ids})
-        mock_get_catalog.assert_not_called()
         assert args["content"] == "x\n\ny"
+        assert mock_get_catalog.return_value.docs_for_chashes.call_count <= 1
 
     def test_tumbler_with_no_manifest_rows_yields_empty_content(self):
         """A tumbler the catalog has no manifest for (deleted /
@@ -2400,65 +2421,50 @@ class TestEvidenceHygiene:
         assert "real evidence one" in composed_prompt
 
 
-class TestSourceUriExclusion:
-    """RDR-200 Phase 1c evidence hygiene (nexus-4jj40), review round 2:
-    replaces the removed category-based rule with a source-path
-    exclusion keyed on the catalog's ``Document.source_uri`` (the two
-    concrete leaks the bead cites: ``tests/`` fixtures and
-    ``docs/rdr/rdr-200-phase1*`` gate/question docs).
+class TestNonEvidentiaryStamp:
+    """RDR-200 Phase 1c evidence hygiene (nexus-4jj40), review round 3:
+    replaces round 2's hard-coded source_uri path-prefix rule (a global
+    ``"/tests/"`` marker drops any conexus USER's real test-file evidence
+    in ANY indexed repo) with a per-document catalog stamp -- a boolean
+    ``non_evidentiary`` key in ``Document.meta``, set either by an
+    operator (``nx catalog update --meta '{"non_evidentiary": true}'``,
+    no new CLI) or automatically by ``nx index repo`` for files under
+    ``tests/fixtures/`` (see ``TestFixturePathAutoStamp`` in
+    tests/test_indexer.py for the write side).
     """
 
-    def test_matches_tests_directory(self) -> None:
-        from nexus.plans.runner import _source_uri_is_non_evidentiary
+    def test_entry_is_non_evidentiary_true_when_stamped(self) -> None:
+        from types import SimpleNamespace
 
-        assert _source_uri_is_non_evidentiary(
-            "file:///Users/x/nexus/tests/test_operator_dispatch.py"
+        from nexus.plans.runner import _entry_is_non_evidentiary
+
+        entry = SimpleNamespace(meta={"non_evidentiary": True})
+        assert _entry_is_non_evidentiary(entry)
+
+    def test_entry_is_non_evidentiary_false_when_absent(self) -> None:
+        from types import SimpleNamespace
+
+        from nexus.plans.runner import _entry_is_non_evidentiary
+
+        assert not _entry_is_non_evidentiary(SimpleNamespace(meta={}))
+        assert not _entry_is_non_evidentiary(
+            SimpleNamespace(meta={"non_evidentiary": False}),
         )
 
-    def test_matches_rdr_200_phase1_gate_docs(self) -> None:
-        from nexus.plans.runner import _source_uri_is_non_evidentiary
+    def test_entry_is_non_evidentiary_false_when_meta_malformed(self) -> None:
+        from types import SimpleNamespace
 
-        assert _source_uri_is_non_evidentiary(
-            "file:///Users/x/nexus/docs/rdr/rdr-200-phase1-questions.md"
-        )
-        assert _source_uri_is_non_evidentiary(
-            "file:///Users/x/nexus/docs/rdr/rdr-200-phase1c-prereg.md"
-        )
+        from nexus.plans.runner import _entry_is_non_evidentiary
 
-    def test_real_code_is_not_excluded(self) -> None:
-        from nexus.plans.runner import _source_uri_is_non_evidentiary
+        assert not _entry_is_non_evidentiary(SimpleNamespace(meta=None))
+        assert not _entry_is_non_evidentiary(SimpleNamespace())  # no meta attr at all
 
-        assert not _source_uri_is_non_evidentiary(
-            "file:///Users/x/nexus/src/nexus/plans/runner.py"
-        )
+    # ── Tumbler-shaped hydration (document-level results) ───────────────
 
-    def test_real_rdr_doc_is_not_excluded(self) -> None:
-        from nexus.plans.runner import _source_uri_is_non_evidentiary
-
-        assert not _source_uri_is_non_evidentiary(
-            "file:///Users/x/nexus/docs/rdr/rdr-201-catalog-canonical.md"
-        )
-
-    def test_segment_anchored_no_false_positive_on_similar_dirname(self) -> None:
-        """"mytests/" must not match the "/tests/" marker."""
-        from nexus.plans.runner import _source_uri_is_non_evidentiary
-
-        assert not _source_uri_is_non_evidentiary(
-            "file:///Users/x/nexus/mytests/foo.py"
-        )
-
-    def test_empty_source_uri_is_never_excluded(self) -> None:
-        from nexus.plans.runner import _source_uri_is_non_evidentiary
-
-        assert not _source_uri_is_non_evidentiary("")
-
-    def test_tumbler_hydration_drops_fixture_keeps_real_code(self) -> None:
-        """A genuine code candidate (source_uri under src/) survives
-        alongside an excluded test-fixture candidate (source_uri under
-        tests/) in the SAME hydration batch -- the reviewer's "a
-        genuine code candidate survives alongside a paper candidate"
-        case, adapted to the source_uri mechanism that replaced the
-        category rule."""
+    def test_tumbler_hydration_drops_stamped_keeps_unstamped(self) -> None:
+        """A genuine code candidate (unstamped) survives alongside an
+        excluded test-fixture candidate (stamped) in the SAME hydration
+        batch."""
         from types import SimpleNamespace
         from unittest.mock import patch
 
@@ -2476,8 +2482,8 @@ class TestSourceUriExclusion:
             )],
         }
         entries = {
-            "1.1.5": SimpleNamespace(source_uri="file:///repo/tests/test_foo.py"),
-            "1.1.6": SimpleNamespace(source_uri="file:///repo/src/nexus/plans/runner.py"),
+            "1.1.5": SimpleNamespace(meta={"non_evidentiary": True}),
+            "1.1.6": SimpleNamespace(meta={}),
         }
         fake_catalog = SimpleNamespace(
             get_manifests=lambda ids: manifests,
@@ -2492,17 +2498,19 @@ class TestSourceUriExclusion:
             _, args = _hydrate_operator_args(
                 "rank", {"ids": ["1.1.5", "1.1.6"]},
             )
-        # Only the non-excluded tumbler's chash ("1.1.6" -> b*64) ever
-        # reaches store_get_many -- the fixture tumbler ("1.1.5") was
+        # Only the unstamped tumbler's chash ("1.1.6" -> b*64) ever
+        # reaches store_get_many -- the stamped tumbler ("1.1.5") was
         # dropped before its chash was even collected.
         call_kwargs = mock_hydrate.call_args.kwargs
         assert call_kwargs["ids"] == ["b" * 64]
         assert json.loads(args["items"]) == ["def real_function(): pass"]
 
-    def test_resolve_many_failure_degrades_to_leave_every_candidate_in(self) -> None:
+    def test_tumbler_resolve_many_failure_degrades_to_leave_every_candidate_in(
+        self,
+    ) -> None:
         """A resolve_many failure must never crash the hydration or
         exclude a document it couldn't classify -- degrade to "no
-        source_uri for anything", same as the pre-existing
+        stamp for anything", same as the pre-existing
         get_manifests-catalog-None guard."""
         from types import SimpleNamespace
         from unittest.mock import patch
@@ -2530,6 +2538,139 @@ class TestSourceUriExclusion:
             _, args = _hydrate_operator_args("rank", {"ids": ["1.1.5"]})
         mock_hydrate.assert_called_once()
         assert json.loads(args["items"]) == ["some content"]
+
+    # ── Chash-shaped hydration (plain search() results) ─────────────────
+
+    def test_chash_hydration_drops_stamped_keeps_unstamped(self) -> None:
+        """The chash-shaped path (round 2 left uncovered) now ALSO
+        excludes a stamped document's chunk, via docs_for_chashes then
+        resolve_many, while an unstamped chash in the SAME batch
+        survives."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        chash_stamped = "a" * 64
+        chash_ok = "b" * 64
+        fake_catalog = SimpleNamespace(
+            docs_for_chashes=lambda chashes: {
+                chash_stamped: ["1.1.5"], chash_ok: ["1.1.6"],
+            },
+            resolve_many=lambda ids: {
+                "1.1.5": SimpleNamespace(meta={"non_evidentiary": True}),
+                "1.1.6": SimpleNamespace(meta={}),
+            },
+        )
+        fake_hydrated = {
+            "contents": ["operator test fixture JSON", "a real paper passage"],
+        }
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            _, args = _hydrate_operator_args(
+                "rank", {"ids": [chash_stamped, chash_ok]},
+            )
+        assert json.loads(args["items"]) == ["a real paper passage"]
+
+    def test_chash_hydration_keeps_ordinary_candidates_when_nothing_stamped(
+        self,
+    ) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        chash_a, chash_b = "a" * 64, "b" * 64
+        fake_catalog = SimpleNamespace(
+            docs_for_chashes=lambda chashes: {chash_a: ["1.1.5"], chash_b: ["1.1.6"]},
+            resolve_many=lambda ids: {
+                "1.1.5": SimpleNamespace(meta={}), "1.1.6": SimpleNamespace(meta={}),
+            },
+        )
+        fake_hydrated = {"contents": ["passage one", "passage two"]}
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            _, args = _hydrate_operator_args(
+                "rank", {"ids": [chash_a, chash_b]},
+            )
+        assert json.loads(args["items"]) == ["passage one", "passage two"]
+
+    def test_chash_hydration_batched_not_per_id(self) -> None:
+        """docs_for_chashes and resolve_many must each fire AT MOST ONCE
+        for the WHOLE id list, never once per id."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        chashes = [f"{i:064x}" for i in range(5)]
+        calls: dict[str, int] = {"docs_for_chashes": 0, "resolve_many": 0}
+
+        def _docs_for_chashes(cs):
+            calls["docs_for_chashes"] += 1
+            return {}
+
+        def _resolve_many(ids):
+            calls["resolve_many"] += 1
+            return {}
+
+        fake_catalog = SimpleNamespace(
+            docs_for_chashes=_docs_for_chashes, resolve_many=_resolve_many,
+        )
+        fake_hydrated = {"contents": [f"body-{i}" for i in range(5)]}
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            _hydrate_operator_args("rank", {"ids": chashes})
+        assert calls["docs_for_chashes"] <= 1
+        # resolve_many is never reached here -- docs_for_chashes returned
+        # no docs at all, so there is nothing to resolve.
+        assert calls["resolve_many"] == 0
+
+    def test_chash_hydration_get_catalog_none_degrades(self) -> None:
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        fake_hydrated = {"contents": ["passage one", "passage two"]}
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=None,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            _, args = _hydrate_operator_args(
+                "rank", {"ids": ["a" * 64, "b" * 64]},
+            )
+        assert json.loads(args["items"]) == ["passage one", "passage two"]
+
+    def test_chash_hydration_docs_for_chashes_failure_degrades(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        def _boom(chashes):
+            raise RuntimeError("catalog unreachable")
+
+        fake_catalog = SimpleNamespace(docs_for_chashes=_boom, resolve_many=lambda ids: {})
+        fake_hydrated = {"contents": ["passage one", "passage two"]}
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            _, args = _hydrate_operator_args(
+                "rank", {"ids": ["a" * 64, "b" * 64]},
+            )
+        assert json.loads(args["items"]) == ["passage one", "passage two"]
 
 
 @pytest.mark.asyncio

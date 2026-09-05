@@ -166,6 +166,60 @@ class TestCatalogHookDocuments:
         assert len(entries) == 2
 
 
+class TestFixturePathAutoStamp:
+    """nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round 3):
+    ``nx index repo`` auto-stamps ``non_evidentiary`` in ``Document.meta``
+    for files under ``tests/fixtures/`` (fixture DATA), never for a
+    sibling test MODULE that exercises real code -- see
+    ``nexus.catalog.types.is_fixture_path``'s docstring.
+    """
+
+    def test_fixture_path_is_stamped(self, tmp_path, monkeypatch):
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        fixture = tmp_path / "tests" / "fixtures" / "sample.json"
+        fixture.parent.mkdir(parents=True)
+        fixture.write_text("{}")
+
+        _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="abc123",
+            indexed_files=[(fixture, "code", "code__nexus")],
+        )
+        owner = cat.owner_for_repo("571b8edd")
+        entry = cat.by_file_path(owner, "tests/fixtures/sample.json")
+        assert entry is not None
+        assert entry.meta.get("non_evidentiary") is True
+
+    def test_sibling_test_module_is_not_stamped(self, tmp_path, monkeypatch):
+        """A test MODULE living beside tests/fixtures/ (same tests/
+        directory, but NOT under the fixtures/ subdirectory) is never
+        auto-stamped -- the bead's own cited leaks (tests/test_*.py
+        files) are marked manually via `nx catalog update --meta`, not
+        by this automatic rule."""
+        from nexus.indexer import _catalog_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        test_module = tmp_path / "tests" / "test_operator_dispatch.py"
+        test_module.parent.mkdir(parents=True)
+        test_module.write_text("def test_x(): pass")
+
+        _catalog_hook(
+            repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
+            head_hash="abc123",
+            indexed_files=[(test_module, "code", "code__nexus")],
+        )
+        owner = cat.owner_for_repo("571b8edd")
+        entry = cat.by_file_path(owner, "tests/test_operator_dispatch.py")
+        assert entry is not None
+        assert not entry.meta.get("non_evidentiary")
+
+
 class _SpyProxy:
     """Counting proxy around a real reader/writer (integration over mocks).
 

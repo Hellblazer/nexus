@@ -1428,21 +1428,14 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
         return {"contents": ["" for _ in tumbler_ids], "missing": list(tumbler_ids)}
     manifests = cat.get_manifests(tumbler_ids)
 
-    # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round 2):
-    # best-effort source_uri exclusion — one extra batched round trip
-    # (``resolve_many``, the same batched primitive ``search_engine.py``'s
-    # ``_attach_display_paths`` uses) alongside the ``get_manifests`` call
-    # this function already makes. A ``resolve_many`` failure, or a
-    # tumbler it cannot resolve, degrades to "no source_uri for this id"
-    # — never raises, never excludes a document it cannot classify (see
-    # ``_source_uri_is_non_evidentiary``). This path only covers TUMBLER-
-    # shaped ids (document-level results from search_metadata_scoped /
-    # search_graph_hop / search_aspect_scoped / query()); the far more
-    # common chash-shaped path (plain ``search()`` results, below in
-    # ``_hydrate_operator_args``) is NOT covered — a pinned test
-    # (``test_chash_shaped_ids_bypass_tumbler_route``) asserts that path
-    # never calls the catalog at all, and there is no batched chash ->
-    # source_uri primitive that would not violate it.
+    # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round 3):
+    # best-effort non_evidentiary-stamp exclusion — one extra batched
+    # round trip (``resolve_many``, the same batched primitive
+    # ``search_engine.py``'s ``_attach_display_paths`` uses) alongside the
+    # ``get_manifests`` call this function already makes. A
+    # ``resolve_many`` failure, or a tumbler it cannot resolve, degrades
+    # to "no stamp for this id" — never raises, never excludes a document
+    # it cannot classify (see ``_entry_is_non_evidentiary``).
     try:
         catalog_entries = cat.resolve_many(tumbler_ids)
     except Exception:  # noqa: BLE001 — best-effort exclusion; a lookup failure must degrade to "leave every candidate in", never crash the hydration
@@ -1453,7 +1446,7 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
         catalog_entries = {}
     excluded_doc_ids = {
         doc_id for doc_id, entry in catalog_entries.items()
-        if _source_uri_is_non_evidentiary(getattr(entry, "source_uri", "") or "")
+        if _entry_is_non_evidentiary(entry)
     }
 
     flat_ids: list[str] = []
@@ -1501,47 +1494,92 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
     return {"contents": contents, "missing": missing}
 
 
-#: RDR-200 Phase 1c evidence hygiene (nexus-4jj40). Source-path markers
-#: matched against the catalog's ``Document.source_uri`` (a
-#: ``file://<abspath>`` URI — see
-#: :func:`nexus.catalog.types._normalize_source_uri`), identifying the
-#: bead's own two cited leaks: nexus's operator_check/groupby test
-#: fixtures (indexed under this repo's ``tests/`` directory) and the
-#: RDR-200 Phase 1 gate/question docs themselves
-#: (``docs/rdr/rdr-200-phase1*`` — Phase 1's frozen question set quotes
-#: near-verbatim paper-question text and so retrieves as false-positive
-#: "evidence" for the very questions it describes). Anchored with a
-#: leading ``/`` so a path-segment boundary is required — ``"/tests/"``
-#: matches ``".../nexus/tests/test_foo.py"`` but not
-#: ``".../mytests/foo.py"``. A candidate with NO resolvable source_uri is
-#: left in untouched (see :func:`_hydrate_tumbler_ids`) — best-effort
-#: exclusion, never a silent drop of evidence this cannot classify.
+#: RDR-200 Phase 1c evidence hygiene (nexus-4jj40). Review round 3
+#: replaces round 2's hard-coded source_uri path-prefix rule (a global
+#: ``"/tests/"`` marker drops any conexus USER's real test-file evidence
+#: in ANY indexed repo, not just this one's) with a per-document catalog
+#: stamp: :data:`nexus.catalog.types.NON_EVIDENTIARY_META_KEY` in
+#: ``Document.meta``. An operator sets it via the EXISTING
+#: ``nx catalog update --meta '{"non_evidentiary": true}'`` command (no
+#: new CLI); ``nx index repo`` auto-stamps it at register time ONLY for
+#: files under ``tests/fixtures/`` (fixture DATA, never a sibling test
+#: MODULE — see ``nexus.catalog.types.is_fixture_path``'s docstring;
+#: ``nexus.indexer._register_time_meta`` is the write side). A document
+#: with no resolvable catalog entry, or whose ``meta`` carries no stamp
+#: at all, is left in untouched — best-effort exclusion, never a silent
+#: drop of evidence this cannot classify.
 #:
-#: A CATEGORY-based rule (drop "code" whenever "paper" shared the batch)
-#: stood here before this review round. Removed entirely: it dropped
-#: EVERY code-category candidate whenever a paper candidate shared the
-#: batch — breaking a legitimate "paper's algorithm plus its
-#: implementation" plan — and never touched the bead's own cited RDR-200
-#: gate-doc leak in the first place (category "prose", indistinguishable
-#: from any other legitimate RDR/docs markdown file).
-_NON_EVIDENTIARY_SOURCE_PATH_MARKERS: tuple[str, ...] = (
-    "/tests/",
-    "/docs/rdr/rdr-200-phase1",
-)
+#: Round 1 of this bead's review shipped a category-based rule (drop
+#: "code" whenever "paper" shared the batch); round 2 shipped the
+#: source_uri path-prefix rule above. Both removed entirely: category
+#: dropped EVERY code-category candidate whenever a paper candidate
+#: shared the batch (breaking a legitimate "paper's algorithm plus its
+#: implementation" plan); source_uri's global "/tests/" marker is unsafe
+#: for any OTHER conexus user's repo, not just this one's fixtures.
 
 
-def _source_uri_is_non_evidentiary(source_uri: str) -> bool:
-    """True when *source_uri* sits under a known non-evidentiary path.
+def _entry_is_non_evidentiary(entry: Any) -> bool:
+    """True when *entry* (a ``CatalogEntry``) carries the non_evidentiary
+    stamp in its ``meta`` dict. A missing/malformed ``meta`` is never
+    non-evidentiary — a caller with no resolvable stamp must leave the
+    candidate in, never exclude it."""
+    from nexus.catalog.types import NON_EVIDENTIARY_META_KEY  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-    See :data:`_NON_EVIDENTIARY_SOURCE_PATH_MARKERS`. An empty
-    *source_uri* is never non-evidentiary — a caller with no resolvable
-    source_uri must leave the candidate in, never exclude it.
-    """
-    if not source_uri:
+    meta = getattr(entry, "meta", None)
+    if not isinstance(meta, dict):
         return False
-    return any(
-        marker in source_uri for marker in _NON_EVIDENTIARY_SOURCE_PATH_MARKERS
-    )
+    return bool(meta.get(NON_EVIDENTIARY_META_KEY))
+
+
+def _resolve_non_evidentiary_chashes(chashes: list[str]) -> set[str]:
+    """Best-effort, batched chash -> "belongs to a non_evidentiary-
+    stamped document" set, for the chash-shaped hydration path (plain
+    ``search()`` results).
+
+    Two batched round trips total for the WHOLE input list, never one
+    per chash: ``docs_for_chashes`` (chash -> [doc_id, ...], the same
+    primitive ``search_engine.py``'s ``_attach_doc_ids_from_catalog``
+    already uses) then ``resolve_many`` (doc_id -> ``CatalogEntry``, the
+    same primitive :func:`_hydrate_tumbler_ids` uses for the tumbler-
+    shaped path). Either call failing, the catalog being unavailable, or
+    *chashes* being empty degrades to an empty set — never raises, never
+    excludes a chash it cannot classify.
+    """
+    from nexus.mcp_infra import get_catalog as _get_catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+    if not chashes:
+        return set()
+    cat = _get_catalog()
+    if cat is None:
+        return set()
+    try:
+        chash_to_docs = cat.docs_for_chashes(chashes)
+        if not isinstance(chash_to_docs, dict) or not chash_to_docs:
+            return set()
+        all_doc_ids = sorted({
+            doc_id for docs in chash_to_docs.values() for doc_id in (docs or [])
+        })
+        if not all_doc_ids:
+            return set()
+        entries = cat.resolve_many(all_doc_ids)
+        if not isinstance(entries, dict):
+            return set()
+    except Exception:  # noqa: BLE001 — best-effort exclusion; ANY failure here (a raised exception or a malformed/unconfigured catalog return) must degrade to "leave every candidate in", never crash the hydration
+        _log.warning(
+            "resolve_non_evidentiary_chashes_failed",
+            chash_count=len(chashes),
+        )
+        return set()
+    non_evidentiary_doc_ids = {
+        doc_id for doc_id, entry in entries.items()
+        if _entry_is_non_evidentiary(entry)
+    }
+    if not non_evidentiary_doc_ids:
+        return set()
+    return {
+        chash for chash, docs in chash_to_docs.items()
+        if any(doc_id in non_evidentiary_doc_ids for doc_id in (docs or []))
+    }
 
 
 def _drop_intent_from_list_args(
@@ -1647,11 +1685,28 @@ def _hydrate_operator_args(
                 id_count=len(id_list_raw),
             )
             hydrated = _hydrate_tumbler_ids([str(i) for i in id_list_raw])
+            excluded_ids: set[str] = set()
         else:
             hydrated = mcp_core.store_get_many(
                 ids=ids, collections=collections, structured=True,
             )
-        contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
+            # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review
+            # round 3): the chash-shaped path -- the far more common
+            # shape (plain search() results) round 2 left uncovered.
+            # docs_for_chashes + resolve_many, one batched call each
+            # (never one per chash), mirroring _hydrate_tumbler_ids'
+            # own resolve_many use for the tumbler-shaped path.
+            excluded_ids = _resolve_non_evidentiary_chashes(
+                [str(i) for i in id_list_raw],
+            )
+        contents_raw = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
+        if excluded_ids:
+            contents = [
+                "" if str(cid) in excluded_ids else c
+                for cid, c in zip(id_list_raw, contents_raw)
+            ]
+        else:
+            contents = contents_raw
         non_empty = [c for c in contents if c]
         original_count = len(non_empty)
         truncation_metadata: dict[str, Any] | None = None
