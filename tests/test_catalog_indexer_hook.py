@@ -949,6 +949,78 @@ class TestRunHousekeeping:
         links = cat.links_from(new_t)
         assert any(str(l.to_tumbler) == str(other_t) for l in links)
 
+    def test_rename_carries_non_evidentiary_stamp_to_new_entry(self, tmp_path, monkeypatch):
+        """nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round
+        4): a manually-stamped document survives a rename. Without this,
+        the old entry's non_evidentiary meta key is discarded when
+        _run_housekeeping deletes it -- the new entry (registered at the
+        new path by an earlier pass in the SAME index run) never
+        inherits it, so the very next `nx index repo` after a `git mv`
+        silently un-stamps the document."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="fff777")
+        owner_t = cat.owner_for_repo("fff777")
+        # Old entry, manually stamped non_evidentiary by an operator --
+        # NOT under tests/fixtures/, so nothing auto-derives this stamp
+        # from its path.
+        old_t = cat.register(
+            owner_t, "old_name.py", content_type="code",
+            file_path="src/old_name.py",
+            meta={"content_hash": "deadbeef5678", "non_evidentiary": True},
+        )
+        # New entry already registered at the new path (an earlier pass
+        # in the same run), with its OWN freshly-computed content_hash
+        # but no stamp of its own -- the new path isn't a fixture path
+        # either.
+        new_t = cat.register(
+            owner_t, "new_name.py", content_type="code",
+            file_path="src/new_name.py",
+            meta={"content_hash": "deadbeef5678"},
+        )
+
+        _run_housekeeping(cat, owner_t, indexed_set={"src/new_name.py"})
+
+        assert cat.resolve(old_t) is None  # old entry still deleted
+        new_entry = cat.resolve(new_t)
+        assert new_entry is not None
+        assert new_entry.meta.get("non_evidentiary") is True
+        # The new entry's OWN content_hash is authoritative and untouched.
+        assert new_entry.meta.get("content_hash") == "deadbeef5678"
+
+    def test_rename_does_not_stamp_new_entry_when_old_entry_unstamped(
+        self, tmp_path, monkeypatch,
+    ):
+        """The transfer is conditional -- an ordinary (unstamped) rename
+        must not acquire a stamp from nowhere."""
+        from nexus.indexer import _run_housekeeping
+
+        catalog_dir, cat = self._make_cat(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("nexus", "repo", repo_hash="fff888")
+        owner_t = cat.owner_for_repo("fff888")
+        old_t = cat.register(
+            owner_t, "old_name.py", content_type="code",
+            file_path="src/old_name.py",
+            meta={"content_hash": "cafef00d"},
+        )
+        new_t = cat.register(
+            owner_t, "new_name.py", content_type="code",
+            file_path="src/new_name.py",
+            meta={"content_hash": "cafef00d"},
+        )
+
+        _run_housekeeping(cat, owner_t, indexed_set={"src/new_name.py"})
+
+        assert cat.resolve(old_t) is None
+        new_entry = cat.resolve(new_t)
+        assert new_entry is not None
+        assert not new_entry.meta.get("non_evidentiary")
+
     def test_rename_not_triggered_without_content_hash(self, tmp_path, monkeypatch):
         """Orphan without content_hash follows normal miss_count path, not rename."""
         from nexus.indexer import _run_housekeeping

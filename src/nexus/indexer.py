@@ -1859,6 +1859,25 @@ def _run_housekeeping(
         orphan_hash = (entry.meta or {}).get("content_hash", "")
         if orphan_hash and orphan_hash in hash_to_entry:
             new_entry = hash_to_entry[orphan_hash]
+            # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review
+            # round 4): carry the non_evidentiary stamp across a
+            # rename. The old entry is about to be deleted below —
+            # without this, a manually-stamped document (`nx catalog
+            # update --meta '{"non_evidentiary": true}'`) is silently
+            # un-stamped by the very next `nx index repo` after a
+            # `git mv`. Only THIS one key transfers: the new entry's
+            # OWN meta (its freshly-computed content_hash, its own
+            # path's auto-stamp, if any) is authoritative for the new
+            # file and must not be clobbered by the old entry's other
+            # fields. A no-op when the new entry already carries the
+            # stamp (e.g. renamed INTO tests/fixtures/).
+            from nexus.catalog.types import NON_EVIDENTIARY_META_KEY  # noqa: PLC0415 — deliberate function-scoped import (avoid a module-level catalog dep in the indexer)
+            old_meta = entry.meta or {}
+            if old_meta.get(NON_EVIDENTIARY_META_KEY):
+                new_meta = dict(new_entry.meta or {})
+                if not new_meta.get(NON_EVIDENTIARY_META_KEY):
+                    new_meta[NON_EVIDENTIARY_META_KEY] = True
+                    w.update(new_entry.tumbler, meta=new_meta)
             # Transfer links from old entry to new entry
             old_links = cat.links_from(entry.tumbler)
             for lnk in old_links:

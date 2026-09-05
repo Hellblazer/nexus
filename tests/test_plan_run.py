@@ -2575,6 +2575,59 @@ class TestNonEvidentiaryStamp:
             )
         assert json.loads(args["items"]) == ["a real paper passage"]
 
+    def test_chash_shared_by_stamped_and_unstamped_document_survives(self) -> None:
+        """nexus-4jj40 review round 4: a chash owned by BOTH a stamped
+        and an unstamped document (identical chunk text indexed in
+        more than one document, RDR-180) is excluded only when EVERY
+        owning document is stamped -- the prior any()-based check would
+        have dropped this chash just for touching one stamped doc."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        shared_chash = "a" * 64
+        fake_catalog = SimpleNamespace(
+            docs_for_chashes=lambda chashes: {shared_chash: ["1.1.5", "1.1.6"]},
+            resolve_many=lambda ids: {
+                "1.1.5": SimpleNamespace(meta={"non_evidentiary": True}),
+                "1.1.6": SimpleNamespace(meta={}),
+            },
+        )
+        fake_hydrated = {"contents": ["shared passage"]}
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            _, args = _hydrate_operator_args("rank", {"ids": [shared_chash]})
+        assert json.loads(args["items"]) == ["shared passage"]
+
+    def test_chash_owned_only_by_stamped_documents_is_excluded(self) -> None:
+        """The all()-owners-stamped case still excludes, same as a
+        single-owner stamped chash."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        shared_chash = "a" * 64
+        fake_catalog = SimpleNamespace(
+            docs_for_chashes=lambda chashes: {shared_chash: ["1.1.5", "1.1.6"]},
+            resolve_many=lambda ids: {
+                "1.1.5": SimpleNamespace(meta={"non_evidentiary": True}),
+                "1.1.6": SimpleNamespace(meta={"non_evidentiary": True}),
+            },
+        )
+        fake_hydrated = {"contents": ["fixture passage"]}
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            _, args = _hydrate_operator_args("rank", {"ids": [shared_chash]})
+        assert json.loads(args["items"]) == []
+
     def test_chash_hydration_keeps_ordinary_candidates_when_nothing_stamped(
         self,
     ) -> None:

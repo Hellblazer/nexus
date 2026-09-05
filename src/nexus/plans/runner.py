@@ -1578,7 +1578,17 @@ def _resolve_non_evidentiary_chashes(chashes: list[str]) -> set[str]:
         return set()
     return {
         chash for chash, docs in chash_to_docs.items()
-        if any(doc_id in non_evidentiary_doc_ids for doc_id in (docs or []))
+        # nexus-4jj40 (review round 4): all(), not any() -- a chash
+        # SHARED by a stamped and an unstamped document (identical
+        # chunk text indexed in more than one document, RDR-180) is
+        # excluded only when EVERY owning document is stamped. any()
+        # would drop a genuinely evidentiary chash just because it
+        # happens to ALSO belong to one non_evidentiary document.
+        # all() on an empty (docs or []) is vacuously True in Python,
+        # but that can never fire here: chash_to_docs only ever
+        # contains keys docs_for_chashes itself returned with at
+        # least one doc_id, never an empty list.
+        if docs and all(doc_id in non_evidentiary_doc_ids for doc_id in docs)
     }
 
 
