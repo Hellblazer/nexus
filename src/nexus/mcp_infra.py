@@ -1463,7 +1463,7 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     # in doc_indexer.py/pipeline_stages.py route through the same helper.
     from nexus.indexer_utils import orphaned_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
 
-    orphaned = orphaned_chashes(reader, doc_id, dropped)
+    orphaned = orphaned_chashes(reader, doc_id, dropped, collection=collection)
     shared = len(dropped) - len(orphaned)
     if not orphaned:
         return
@@ -1612,7 +1612,7 @@ def _sweep_superseded_vectors_many(
     from nexus.indexer_utils import orphaned_chashes  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
 
     _batch_label = f"write_many_batch[{len(dropped_by_doc)}_docs]"
-    orphaned = orphaned_chashes(reader, _batch_label, candidates)
+    orphaned = orphaned_chashes(reader, _batch_label, candidates, collection=collection)
     shared = len(candidates) - len(orphaned)
     if not orphaned:
         return

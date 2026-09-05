@@ -76,6 +76,34 @@ def test_chunk_shared_with_another_document_is_NOT_deleted() -> None:
     assert col.delete.call_args.kwargs["ids"] == ["mine"], "shared row must survive"
 
 
+def test_chunk_shared_with_a_document_in_a_DIFFERENT_physical_collection_IS_deleted() -> None:
+    """nexus-flkdc: docs_for_chashes is a catalog-WIDE reverse lookup, not
+    scoped to a physical_collection. A document living in a DIFFERENT
+    physical_collection (e.g. the same paper re-registered elsewhere —
+    chash is a hash of the raw text, collection-independent) must not
+    permanently pin a T3 row in the collection actually being swept: the
+    delete() call below only ever touches THIS collection's rows, so a
+    reference from another collection can never be the thing keeping
+    this row alive."""
+    from types import SimpleNamespace
+
+    cat = _cat({"cross-collection": ["doc-A", "doc-other"]})
+    cat.resolve_many.return_value = {
+        "doc-other": SimpleNamespace(physical_collection="other-coll"),
+    }
+    col = MagicMock()
+    with patch("nexus.db.make_t3", return_value=MagicMock(
+            get_collection=MagicMock(return_value=col))):
+        _sweep_superseded_vectors(cat, "doc-A", {"cross-collection"},
+                                  _chunks("new"), "coll", reader=cat,
+                                  notes_provider=_notes())
+    col.delete.assert_called_once()
+    assert col.delete.call_args.kwargs["ids"] == ["cross-collection"], (
+        "a reference from a document in a DIFFERENT physical collection "
+        "must not pin this row"
+    )
+
+
 # ── nexus-39upx hazard 2 (RDR-145): the manifest-less-note guard ───────────
 #
 # docs_for_chashes (hazard 1's guard, above) only sees MANIFESTED
