@@ -777,9 +777,31 @@ class RefreshableHttpStoreMixin:
             kwargs["timeout"] = timeout
         return self._send("POST", path, **kwargs)
 
-    def _get(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
-        """GET *path*; self-heals once on a retryable error."""
-        return self._send("GET", path, params=params, idempotent=idempotent)
+    def _get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        idempotent: bool = True,
+        timeout: float | None = None,
+    ) -> Any:
+        """GET *path*; self-heals once on a retryable error.
+
+        ``timeout`` (nexus-m20mf P3 fold-in, round-2 critique finding 2):
+        the SAME optional per-request override :meth:`_post` has carried
+        since nexus-y9t08 -- ``None`` (default) means "no override, ride
+        the client-wide default exactly as before this kwarg existed".
+        Added specifically so a caller needing a strict per-call cap (e.g.
+        ``HttpAspectQueue``'s diagnostic queue-depth probe, which must
+        never block longer than a couple of seconds even against a
+        shared, longer-timeout client) can get one WITHOUT giving up a
+        shared client -- see :meth:`_post`'s docstring for the full
+        rationale, identical here.
+        """
+        kwargs: dict[str, Any] = {"params": params, "idempotent": idempotent}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return self._send("GET", path, **kwargs)
 
     def _delete(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
         """DELETE *path*; self-heals once on a retryable error.

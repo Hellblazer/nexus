@@ -140,9 +140,16 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             f"/v1/aspects/queue{path}", body, idempotent=idempotent, mutates=mutates
         )
 
-    def _get(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
+    def _get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        idempotent: bool = True,
+        timeout: float | None = None,
+    ) -> Any:
         q = {k: str(v) for k, v in (params or {}).items() if v is not None}
-        return super()._get(f"/v1/aspects/queue{path}", q, idempotent=idempotent)
+        return super()._get(f"/v1/aspects/queue{path}", q, idempotent=idempotent, timeout=timeout)
 
     # ── Public API — mirrors AspectExtractionQueue ────────────────────────────
 
@@ -338,9 +345,17 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         r = self._post("/reclaim_stale", {"timeout_seconds": timeout_seconds})
         return int(r.get("reclaimed", 0))
 
-    def pending_count(self) -> int:
-        """Return the number of rows currently in 'pending' status."""
-        r = self._get("/pending_count")
+    def pending_count(self, *, timeout: float | None = None) -> int:
+        """Return the number of rows currently in 'pending' status.
+
+        ``timeout`` (nexus-m20mf P3 fold-in): optional per-request
+        override -- lets a caller sharing this store's client across a
+        longer-timeout run (e.g. an ``index_repository()`` shared pool)
+        still cap THIS specific call strictly, without needing its own
+        dedicated short-timeout client. ``None`` (default): no override,
+        unchanged from before this kwarg existed.
+        """
+        r = self._get("/pending_count", timeout=timeout)
         return int(r.get("count", 0))
 
     def is_drained(self) -> bool:

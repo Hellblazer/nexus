@@ -68,6 +68,7 @@ import json
 import os
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -91,6 +92,10 @@ _ECHO_ENTERED_EVENT: threading.Event | None = None
 #: at once via ``_HOLD_ECHO_EVENT.set()``.
 _HELD_ECHO_COUNT: list[int] = []
 _HELD_ECHO_COUNT_LOCK = threading.Lock()
+#: nexus-m20mf P3 fold-in (code-review test gap): seconds to sleep before
+#: responding to POST /v1/telemetry/hook_failures/record. 0.0 (the
+#: reset-per-test default) is a no-op for every other test in this file.
+_HOOK_FAILURE_RECORD_DELAY_S: float = 0.0
 #: nexus-m20mf P3: X-Nexus-Tenant header value received on each /v1/echo
 #: request, in arrival order -- lets a test prove auth/tenant headers are
 #: still built PER REQUEST even when multiple stores share one headerless
@@ -134,7 +139,7 @@ _MINT_FORCE_STATUS: int | None = None
 
 def _reset_fake_service_state() -> None:
     global _VALID_BEARER, _ALWAYS_401, _MINTED_DATA_TOKEN, _MINT_CALLS, _MINT_FORCE_STATUS
-    global _HOLD_ECHO_EVENT, _ECHO_ENTERED_EVENT
+    global _HOLD_ECHO_EVENT, _ECHO_ENTERED_EVENT, _HOOK_FAILURE_RECORD_DELAY_S
     _VALID_BEARER = _INITIAL_BEARER
     _ALWAYS_401 = False
     _REQUEST_COUNT.clear()
@@ -145,6 +150,7 @@ def _reset_fake_service_state() -> None:
     _HOLD_ECHO_EVENT = None
     _ECHO_ENTERED_EVENT = None
     _RECEIVED_TENANTS.clear()
+    _HOOK_FAILURE_RECORD_DELAY_S = 0.0
     with _HELD_ECHO_COUNT_LOCK:
         _HELD_ECHO_COUNT.clear()
 
@@ -212,6 +218,22 @@ class _FakeHandler(BaseHTTPRequestHandler):
         self._record("POST", path)
         if path == "/v1/data-tokens/mint":
             self._handle_mint()
+            return
+        if path == "/v1/telemetry/hook_failures/record":
+            # nexus-m20mf P3 fold-in (code-review test gap): a real route
+            # for the ACTUAL endpoint HttpTelemetryStore.record_hook_failure
+            # calls, so a pool-exhaustion test driving _persist_hook_failure
+            # end to end sees genuine contention on a real, slow-responding
+            # route -- not an instant 404 that resolves too fast for the
+            # excess concurrent callers to ever queue long enough to hit
+            # PoolTimeout. _HOOK_FAILURE_RECORD_DELAY_S (0.0 by default, a
+            # no-op for every other test) holds each accepted connection
+            # open for that long before responding 200.
+            if _HOOK_FAILURE_RECORD_DELAY_S:
+                time.sleep(_HOOK_FAILURE_RECORD_DELAY_S)
+            length = int(self.headers.get("Content-Length", "0"))
+            _ = json.loads(self.rfile.read(length)) if length else {}
+            self._send(200, {"ok": True})
             return
         if path != "/v1/echo":
             self._send(404, {"error": "not found"})
@@ -1327,6 +1349,54 @@ class TestPostPerRequestTimeoutOverride:
         assert "timeout" not in captured[-1]
 
 
+class TestGetPerRequestTimeoutOverride:
+    """nexus-m20mf P3 fold-in (round-2 critique finding 2): ``_get`` gains
+    the SAME optional per-call ``timeout=`` override ``_post`` has carried
+    since nexus-y9t08 -- previously ``_get`` had none, which was the
+    self-inflicted reason ``aspect_worker._best_effort_queue_depth`` was
+    left unable to share a pool while keeping its strict 2s cap (its
+    ONLY read is a GET via ``HttpAspectQueue.pending_count``)."""
+
+    def test_get_with_timeout_reaches_the_request(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = _make_echo_store()
+        captured: list[dict[str, Any]] = []
+        real_request_once = store._request_once
+
+        def _capturing(method: str, path: str, **kwargs: Any) -> Any:
+            captured.append(kwargs)
+            return real_request_once(method, path, **kwargs)
+
+        monkeypatch.setattr(store, "_request_once", _capturing)
+
+        result = store._get("/v1/echo", timeout=2.0)
+
+        assert result == {"echo": "get-ok"}
+        assert captured[-1].get("timeout") == 2.0
+
+    def test_get_without_timeout_omits_the_override(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Asserting ABSENCE (not a specific value) -- byte-identical to
+        pre-existing ``_get`` behavior for every caller that passes
+        nothing, matching ``_post``'s own regression pin."""
+        store = _make_echo_store()
+        captured: list[dict[str, Any]] = []
+        real_request_once = store._request_once
+
+        def _capturing(method: str, path: str, **kwargs: Any) -> Any:
+            captured.append(kwargs)
+            return real_request_once(method, path, **kwargs)
+
+        monkeypatch.setattr(store, "_request_once", _capturing)
+
+        result = store._get("/v1/echo")
+
+        assert result == {"echo": "get-ok"}
+        assert "timeout" not in captured[-1]
+
+
 # ── nexus-wrwb7: mint_token resolution-seam (RDR-005 2a self-minting) ───────
 
 
@@ -1862,11 +1932,11 @@ class TestSharedClient:
             _stop_fake_server(server)
 
     def test_pool_exhaustion_beyond_production_limit_is_caught_not_crashed(
-        self,
+        self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """nexus-m20mf P3 fold-in (critic item C3): push CONCURRENCY
-        deliberately PAST the production pool size (16) through the ACTUAL
-        best-effort hook-failure recording path
+        """nexus-m20mf P3 fold-in (critic item C3, code-review test gap):
+        push CONCURRENCY deliberately PAST the production pool size (16)
+        through the ACTUAL best-effort hook-failure recording path
         (``hook_registry._persist_hook_failure`` -> ``mcp_infra.t2_ctx()``)
         and confirm the documented conclusion end to end: a
         ``PoolTimeout`` on this path is CAUGHT and logged
@@ -1876,18 +1946,32 @@ class TestSharedClient:
         failure mode, extended here to the shared-client-under-real-
         contention case the critic named.
 
+        Code-review test gap fix: the fake server previously had NO route
+        for ``/v1/telemetry/hook_failures/record`` (the real endpoint this
+        path calls), so every request 404'd IMMEDIATELY -- fast enough
+        that the excess concurrent callers never actually had to queue for
+        a connection, and the caught exception was an ``HTTPStatusError``
+        from the 404, not a ``PoolTimeout`` from real contention. The test
+        passed with the shared-client mechanism reverted entirely (it
+        never even exercised the pool). Fixed two ways: (1) a real route
+        that SLEEPS before responding, so accepted connections stay
+        checked out long enough for the pool to genuinely run out; (2) a
+        PROBE phase that calls the underlying telemetry-store method
+        DIRECTLY (bypassing ``_persist_hook_failure``'s swallow) so the
+        test can assert on the ACTUAL exception type -- ``httpx.PoolTimeout``
+        specifically, not merely "some exception".
+
         Mechanism: ``max_connections`` set BELOW the concurrency this test
         drives (not the full 16, to keep the test fast and deterministic
         rather than needing 17+ real threads) -- the PROPERTY under test
         (PoolTimeout is caught, not crashed) does not depend on the exact
-        pool size, only on PoolTimeout actually firing under contention,
-        which a small pool reproduces reliably and quickly."""
+        pool size, only on PoolTimeout actually firing under contention."""
+        global _HOOK_FAILURE_RECORD_DELAY_S
         import nexus.hook_registry as hook_registry_mod
-        from nexus.mcp_infra import use_shared_t2_client_for_index_run
+        from nexus.mcp_infra import t2_ctx, use_shared_t2_client_for_index_run
 
         server, port = _start_threaded_fake_server()
         try:
-            base_url = f"http://127.0.0.1:{port}"
             monkey_env = {
                 "NX_SERVICE_HOST": "127.0.0.1",
                 "NX_SERVICE_PORT": str(port),
@@ -1896,14 +1980,63 @@ class TestSharedClient:
             saved_env = {k: os.environ.get(k) for k in monkey_env}
             saved_url = os.environ.pop("NX_SERVICE_URL", None)
             os.environ.update(monkey_env)
+            # Held long enough (0.6s) that a 0.3s pool timeout cannot be
+            # outlasted by a connection freeing up mid-wait -- deterministic,
+            # not a race against real network/server latency.
+            _HOOK_FAILURE_RECORD_DELAY_S = 0.6
             try:
+                n_concurrent = 6  # deliberately > max_connections=2
+
+                # ── Phase 1: PROBE -- direct, unwrapped call, real exception type ──
+                probe_pool = httpx.Client(
+                    limits=httpx.Limits(max_connections=2, max_keepalive_connections=2),
+                    timeout=httpx.Timeout(5.0, pool=0.3),
+                )
+                probe_errors: list[BaseException] = []
+
+                def _probe(i: int) -> None:
+                    try:
+                        with t2_ctx(client=probe_pool) as t2:
+                            t2.telemetry.record_hook_failure(
+                                doc_id=f"probe-{i}", collection="code__test",
+                                hook_name="stress_test_probe", error="boom",
+                                chain="single",
+                            )
+                    except BaseException as exc:  # noqa: BLE001 — captured to assert its TYPE below, not swallowed
+                        probe_errors.append(exc)
+
+                try:
+                    threads = [threading.Thread(target=_probe, args=(i,)) for i in range(n_concurrent)]
+                    for t in threads:
+                        t.start()
+                    for t in threads:
+                        t.join(timeout=10.0)
+                        assert not t.is_alive(), "probe phase hung"
+                finally:
+                    probe_pool.close()
+
+                pool_timeouts = [e for e in probe_errors if isinstance(e, httpx.PoolTimeout)]
+                assert pool_timeouts, (
+                    f"expected at least one REAL httpx.PoolTimeout among the "
+                    f"{n_concurrent} unwrapped probe calls against a "
+                    f"max_connections=2 pool holding each connection 0.6s "
+                    f"(pool timeout 0.3s) -- got {probe_errors!r}. If this "
+                    f"list is empty, the harness is not actually exercising "
+                    f"pool exhaustion (e.g. the delay route regressed to an "
+                    f"instant 404), which would make the wrapped assertion "
+                    f"below pass for the wrong reason."
+                )
+                assert all(
+                    isinstance(e, httpx.PoolTimeout) for e in probe_errors
+                ), f"expected every probe error to be httpx.PoolTimeout specifically; got {[type(e).__name__ for e in probe_errors]}"
+
+                # ── Phase 2: the ACTUAL best-effort wrapper never propagates ──
                 small_pool = httpx.Client(
                     limits=httpx.Limits(max_connections=2, max_keepalive_connections=2),
                     timeout=httpx.Timeout(5.0, pool=0.3),
                 )
-                n_concurrent = 6  # deliberately > max_connections=2
                 errors: list[BaseException] = []
-                completed = []
+                completed: list[int] = []
 
                 def _record(i: int) -> None:
                     try:
@@ -1916,6 +2049,23 @@ class TestSharedClient:
                     except BaseException as exc:  # noqa: BLE001 — best-effort function must never raise; captured to PROVE it, not to swallow a real bug
                         errors.append(exc)
 
+                # Instrumented so a REVERTED sharing mechanism (each
+                # _persist_hook_failure call building its own unshared
+                # client instead of picking up small_pool via
+                # current_index_run_t2_client()) is caught here too: with
+                # 6 independent unshared clients there is no pool
+                # contention at all, every call succeeds trivially, and
+                # `errors == []` below would pass for the WRONG reason
+                # (code-review test-gap class) unless this also asserts
+                # genuine sharing happened.
+                client_construction_tally: list[int] = []
+                orig_client_init = httpx.Client.__init__
+
+                def _counting_client_init(self: httpx.Client, *args: Any, **kwargs: Any) -> None:
+                    client_construction_tally.append(1)
+                    orig_client_init(self, *args, **kwargs)
+
+                monkeypatch.setattr(httpx.Client, "__init__", _counting_client_init)
                 try:
                     with use_shared_t2_client_for_index_run(small_pool):
                         threads = [
@@ -1931,21 +2081,34 @@ class TestSharedClient:
                                 "hung instead of failing loud+caught"
                             )
                 finally:
+                    monkeypatch.undo()
                     small_pool.close()
 
+                assert client_construction_tally == [], (
+                    f"expected ZERO additional httpx.Client() constructions "
+                    f"during phase 2 -- all {n_concurrent} concurrent "
+                    f"_persist_hook_failure calls must share small_pool via "
+                    f"current_index_run_t2_client(), not build their own; "
+                    f"got {len(client_construction_tally)}, meaning the "
+                    f"sharing mechanism was NOT actually exercised and the "
+                    f"errors==[] assertion below would be vacuous (no real "
+                    f"contention occurred)"
+                )
                 assert errors == [], (
                     f"_persist_hook_failure must NEVER propagate -- it is "
                     f"documented best-effort, and this is exactly the "
                     f"contention shape (shared client, more concurrent "
-                    f"callers than pool slots) that must degrade to a "
+                    f"callers than pool slots, PROVEN above to actually "
+                    f"raise httpx.PoolTimeout) that must degrade to a "
                     f"caught, logged drop rather than a crash. Got: {errors!r}"
                 )
                 # Every call site completed (either it actually persisted,
-                # or it hit PoolTimeout/whatever and was silently caught) --
+                # or it hit PoolTimeout and was silently caught) --
                 # "completed" here means "the function returned", the whole
                 # point of best-effort.
                 assert len(completed) == n_concurrent
             finally:
+                _HOOK_FAILURE_RECORD_DELAY_S = 0.0
                 for k, v in saved_env.items():
                     if v is None:
                         os.environ.pop(k, None)
