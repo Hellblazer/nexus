@@ -399,6 +399,18 @@ def pytest_sessionfinish(session, exitstatus):
 #: 40-minute battery to find out which -- and the rerun appends to the log
 #: again. The guard's real subject is in-place mutation of production STATE
 #: (``backfill_state.json``, ``last_seen_version``), which still fails.
+#:
+#: ``index.log``: git's own post-commit hook (``.git/hooks/post-commit``,
+#: ``nexus managed`` block) fires on every commit made from this box,
+#: hardcodes ``"$HOME/.config/nexus/index.log"`` (bypasses NEXUS_CONFIG_DIR
+#: entirely, same as this hook script's ``nx index repo ...
+#: --on-locked=skip`` background dispatch), and appends a dated header line
+#: + indexer output on each run -- a commit landing during a test run (this
+#: session's own orchestrator committing pathspec-limited diffs) touches
+#: this file independent of pytest. This is the ONLY set that governs it
+#: (nexus-wjkc7): it must NOT also appear in
+#: ``_REAL_CONFIG_DIR_ALLOWLIST_PREFIXES``, which would exempt it from the
+#: diff entirely and make this stricter, size-checked rule unreachable.
 _APPEND_ONLY_REAL_CONFIG_LOGS = frozenset({
     "routing_log.jsonl",
     "index.log",
@@ -432,36 +444,30 @@ _APPEND_ONLY_REAL_CONFIG_LOGS = frozenset({
 _AMBIENT_DAEMON_DIRS: tuple[str, ...] = ("logs/",)
 
 
-#: The verbs :func:`_diff_config_dir_snapshots` prefixes onto each entry it
-#: returns. :func:`_split_appends_from_state` consumes those entries, so it
-#: must strip the verb before treating the remainder as a path -- it did not
-#: until 2026-09-02 (nexus-ist38), which made the whole benign-append split
-#: DEAD: every entry was looked up as ``"MODIFIED routing_log.jsonl"``, found
+#: A :func:`_diff_config_dir_snapshots` entry: ``(verb, rel_path)``, e.g.
+#: ``("MODIFIED", "routing_log.jsonl")``. Until 2026-09-02 (nexus-ist38) the
+#: diff instead returned ``"<VERB> <path>"`` strings, and
+#: :func:`_split_appends_from_state` consumed them as if they were bare
+#: paths -- every entry looked up as ``"MODIFIED routing_log.jsonl"``, found
 #: in neither snapshot nor the append-only set, and reported as a state
-#: mutation. The tests covering the split all fed it BARE paths, so they
+#: mutation. The tests covering the split all fed it bare paths, so they
 #: passed while the guard they exist for failed runs over a growing log.
-#: An entry that resolves to neither snapshot now raises rather than
+#: nexus-wjkc7 removed the string encoding entirely (rather than adding a
+#: verb-stripping helper) so the two functions can no longer disagree about
+#: entry shape: there is exactly one shape, and a caller cannot pass the
+#: wrong one. A path resolving to neither snapshot still raises rather than
 #: defaulting to "state" -- see :func:`_split_appends_from_state`.
-_DIFF_VERBS: tuple[str, ...] = ("ADDED ", "MODIFIED ", "REMOVED ")
-
-
-def _rel_path_of_diff_entry(entry: str) -> str:
-    """The path half of a ``_diff_config_dir_snapshots`` entry (verb stripped),
-    or *entry* itself when it carries no verb."""
-    for verb in _DIFF_VERBS:
-        if entry.startswith(verb):
-            return entry[len(verb):]
-    return entry
+_DiffEntry = tuple[str, str]
 
 
 def _split_appends_from_state(
-    changed: list[str],
+    changed: list[_DiffEntry],
     before: dict[str, tuple[int, int]],
     after: dict[str, tuple[int, int]],
-) -> tuple[list[str], list[str]]:
-    """Split :func:`_diff_config_dir_snapshots` entries (``"<VERB> <path>"``,
-    or a bare path) into (state_mutations, benign_appends), preserving each
-    entry verbatim in whichever list it lands.
+) -> tuple[list[_DiffEntry], list[_DiffEntry]]:
+    """Split :func:`_diff_config_dir_snapshots` entries (``(verb, rel_path)``
+    pairs) into (state_mutations, benign_appends), preserving each entry
+    verbatim in whichever list it lands.
 
     Two ways to be benign. (1) The path lives under a directory a live daemon
     owns (:data:`_AMBIENT_DAEMON_DIRS`), in which case any change is ambient
@@ -472,23 +478,22 @@ def _split_appends_from_state(
     size alone distinguishes it without reading content (which this guard
     deliberately never does; the directory can hold a live user's real data).
     """
-    state: list[str] = []
-    appends: list[str] = []
+    state: list[_DiffEntry] = []
+    appends: list[_DiffEntry] = []
     for entry in changed:
-        rel = _rel_path_of_diff_entry(entry)
+        _verb, rel = entry
         b, a = before.get(rel), after.get(rel)
         if b is None and a is None:
             # Unreachable for a well-formed entry: _diff_config_dir_snapshots
-            # only emits paths drawn from one snapshot or the other, so
-            # "in neither" means the entry did not parse as a path -- which
-            # is exactly the signature of the unstripped-verb defect this
-            # function shipped with (nexus-ist38). Silently classifying it as
-            # state is what made that defect survive: it looked like a
+            # only emits paths drawn from one snapshot or the other, so "in
+            # neither" means the caller handed this function something it
+            # did not itself produce. Silently classifying it as state is
+            # what let the nexus-ist38 defect survive: it looked like a
             # cautious default and was a dead classifier. Fail loud instead.
             raise AssertionError(
                 f"real-config-dir guard: diff entry {entry!r} resolves to no "
-                f"path in either snapshot. _DIFF_VERBS={_DIFF_VERBS} may be "
-                "out of step with _diff_config_dir_snapshots's own prefixes."
+                "path in either snapshot -- caller did not pass a "
+                "_diff_config_dir_snapshots-produced entry."
             )
         name = rel.rsplit("/", 1)[-1]
         if rel.startswith(_AMBIENT_DAEMON_DIRS):
@@ -641,15 +646,15 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # `db/t1.py:840`/`mcp/core.py:1253`. `grep -rn "t1_addr\." src/`
     # returns zero live writers -- a dead carve-out is a vacuous
     # allowlist entry that would mask a real leak of that exact shape.
-    # Git's own post-commit hook (`.git/hooks/post-commit`, `nexus
-    # managed` block) -- fires on every commit made from this box,
-    # hardcodes `"$HOME/.config/nexus/index.log"` (bypasses
-    # NEXUS_CONFIG_DIR entirely, same as this hook script's `nx index
-    # repo ... --on-locked=skip` background dispatch), and appends a
-    # dated header line + indexer output on each run. A commit landing
-    # during a test run (this session's own orchestrator committing
-    # pathspec-limited diffs) touches this file independent of pytest.
-    "index.log",
+    # `index.log` itself is NOT here (nexus-wjkc7): it is a top-level file
+    # that is only ever appended to (see `_APPEND_ONLY_REAL_CONFIG_LOGS`
+    # above), so the append-only rule -- stricter, since it still catches a
+    # truncation or in-place rewrite -- is the one rule that should govern
+    # it. Having it in BOTH sets made the append-only rule for it dead code:
+    # this allowlist's prefix match runs first, inside
+    # `_diff_config_dir_snapshots`, so a change to `index.log` never even
+    # reached `_split_appends_from_state` to be classified.
+    #
     # The SAME post-commit hook's background `nx index repo ...` dispatch
     # writes its per-run log via ``open_run_log(f"index-{basename}-{hash8}")``
     # (src/nexus/commands/index.py:514) under the REAL ``logs/`` dir --
@@ -723,24 +728,33 @@ def _is_allowlisted_config_dir_path(rel_path: str) -> bool:
 
 def _diff_config_dir_snapshots(
     before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]
-) -> list[str]:
-    """Pure diff: return one ``"ADDED "/"MODIFIED "/"REMOVED " + rel_path``
-    entry per non-allowlisted change between two snapshots. Split out from
-    ``_check_real_config_dir_mutations`` so it is unit-testable without a
-    real filesystem or a full pytest session (non-vacuity pin below)."""
-    changed: list[str] = []
+) -> list[_DiffEntry]:
+    """Pure diff: return one ``(verb, rel_path)`` pair -- verb one of
+    ``"ADDED"``/``"MODIFIED"``/``"REMOVED"`` -- per non-allowlisted change
+    between two snapshots. Split out from ``_check_real_config_dir_mutations``
+    so it is unit-testable without a real filesystem or a full pytest
+    session (non-vacuity pin below)."""
+    changed: list[_DiffEntry] = []
     for rel, after_stat in after.items():
         if _is_allowlisted_config_dir_path(rel):
             continue
         before_stat = before.get(rel)
         if before_stat is None:
-            changed.append(f"ADDED {rel}")
+            changed.append(("ADDED", rel))
         elif before_stat != after_stat:
-            changed.append(f"MODIFIED {rel}")
+            changed.append(("MODIFIED", rel))
     for rel in before:
         if rel not in after and not _is_allowlisted_config_dir_path(rel):
-            changed.append(f"REMOVED {rel}")
+            changed.append(("REMOVED", rel))
     return sorted(changed)
+
+
+def _format_diff_entry(entry: _DiffEntry) -> str:
+    """Render a ``(verb, rel_path)`` pair as the ``"<VERB> <path>"`` text
+    the guard prints -- the ONLY place that string shape is constructed
+    (nexus-wjkc7); every internal consumer works on the tuple."""
+    verb, rel = entry
+    return f"{verb} {rel}"
 
 
 def _check_real_config_dir_mutations(session) -> None:
@@ -797,13 +811,13 @@ def _check_real_config_dir_mutations(session) -> None:
             f"under the REAL ~/.config/nexus/ during the session "
             f"(an append-only log grew, or a live daemon wrote/rotated its own "
             f"output): "
-            f"{', '.join(benign_appends)}\n"
+            f"{', '.join(_format_diff_entry(e) for e in benign_appends)}\n"
             f"  Reported, not failed: these are append-only logs, not state. "
             f"A truncation or in-place rewrite of the same file WOULD fail.\n"
         )
     if not changed:
         return
-    names = ", ".join(changed[:10])
+    names = ", ".join(_format_diff_entry(e) for e in changed[:10])
     suffix = "" if len(changed) <= 10 else f" (+{len(changed) - 10} more)"
     session.exitstatus = 1
     print(
