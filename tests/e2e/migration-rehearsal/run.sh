@@ -53,6 +53,18 @@ unset FORCE_COLOR CLICOLOR_FORCE
 # invoked FROM, not the repo root the next line cd's into.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# nexus-f2g8u: silent-exit guard. Armed as early as possible — before any
+# other trap this script installs — so no exit path anywhere below can
+# terminate the harness with zero diagnostic on either stream (observed
+# once at Step 11c of the 7.27.0 release, exit 1 after a SUCCESSFUL wheel
+# build with nothing printed on stdout or stderr). See the lib file's own
+# header for the mechanism; every later EXIT-trap reassignment in this file
+# chains `diag_exit_guard` first rather than clobbering it.
+# shellcheck source=../lib/exit_diagnostics.sh disable=SC1091
+source "$SCRIPT_DIR/../lib/exit_diagnostics.sh"
+diag_arm_err_trap
+trap 'diag_exit_guard' EXIT
+
 cd "$(git rev-parse --show-toplevel)"
 HERE="tests/e2e/migration-rehearsal"
 IMAGE="nexus-migration-rehearsal"
@@ -333,7 +345,7 @@ _guided_restore() {
 # stamp it; _guided_restore puts exactly these back on exit.
 RELEASE_PROPS_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/release.properties.snapshot.XXXXXX")"
 cp "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT"
-trap '_guided_restore' EXIT
+trap 'diag_exit_guard; _guided_restore' EXIT
 
 [ "$COLD" = 1 ] && [ "$GUIDED" = 1 ] && { echo "--cold and --guided are different flows; pick one" >&2; exit 2; }
 
@@ -471,7 +483,7 @@ source "$SCRIPT_DIR/../../../scripts/lib/build-lease.sh"
 # evaluation instead of the documented exit 2. LOCKDIR cannot be referenced
 # by a trap before this line, where it is first assigned — reassign the
 # trap to the lock-aware form only now that it is safe to do so.
-trap '_guided_restore; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+trap 'diag_exit_guard; _guided_restore; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
 echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
 # Test seam (RDR-184 P0.2, nexus-ccs9v.2): tests/e2e/lib/harness_lock_test.sh
 # sets this to prove a concurrent invocation gets PAST the lock without ever
@@ -634,7 +646,7 @@ echo "[stage] Staging a minimal build context + building image (COLD=$COLD HOLE_
 # repo .dockerignore excludes dist/, and the inputs live in three different
 # trees — staging sidesteps both without touching the shared .dockerignore.
 STAGE="$(mktemp -d)"
-trap '_guided_restore; rm -rf "$STAGE"; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+trap 'diag_exit_guard; _guided_restore; rm -rf "$STAGE"; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
 cp "$(ls -t dist/conexus-*.whl | head -1)"            "$STAGE/"   # keep real PEP 427 name
 # Lock-derived dependency manifest for the split install layer (Dockerfile /
 # .cold / .fullstack): the wheel's bytes churn every build (embedded mtimes),
@@ -830,7 +842,7 @@ DCFG="$HOME/.docker/config.json"
 if [ -f "$DCFG" ] && grep -q '"credsStore"' "$DCFG"; then
   cp "$DCFG" "$STAGE/.docker-config.bak"
   python3 -c "import json,os;p=os.path.expanduser('~/.docker/config.json');d=json.load(open(p));d.pop('credsStore',None);json.dump(d,open(p,'w'),indent=2)"
-  trap '_guided_restore; cp "$STAGE/.docker-config.bak" "$DCFG"; rm -rf "$STAGE"; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+  trap 'diag_exit_guard; _guided_restore; cp "$STAGE/.docker-config.bak" "$DCFG"; rm -rf "$STAGE"; build_lease_release service 2>/dev/null || true; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
   echo "      (temporarily stripped credsStore from ~/.docker/config.json — restored on exit)"
 fi
 
