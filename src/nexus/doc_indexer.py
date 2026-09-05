@@ -7,6 +7,7 @@ override the collection name for other prefixes (e.g. ``rdr__``).
 from __future__ import annotations
 
 import hashlib
+import threading
 
 from nexus.chunk_identity import chunk_id_from_hash as _chunk_id_from_hash
 import time
@@ -438,6 +439,44 @@ def _index_run_fresh(col: Any, doc_id: str, content_hash: str) -> bool:
     return _manifest_is_fully_present(col, doc_id)
 
 
+# nexus-hg2dw round 3 (T2 code-review-nexus-hg2dw-52d06c8c5 [24626]
+# finding 2): a fence-begin failure is fail-open by design (the fence is
+# advisory, never a lock) and already logged per-doc at WARNING — but a
+# per-doc log line is easy to miss across a large run, and gives no sense
+# of scale ("was this one flaky doc, or is the catalog unreachable for
+# the whole run?"). This counter answers that at the RUN level: reset at
+# the top of `_run_index` (mirrors the existing process-lifetime-global
+# reset pattern for the catalog/T2/taxonomy op-stats counters,
+# nexus-jb4pp), incremented here and in `_fence_begin_many` on every
+# failure, and read once at the end of the run to emit a single summary
+# line when non-zero. Thread-safe: `run_file_loop` can drive these calls
+# concurrently.
+_fence_begin_failure_lock = threading.Lock()
+_fence_begin_failure_count = 0
+
+
+def reset_fence_begin_failure_count() -> None:
+    """Zero the per-run fence-begin failure counter. Call once at the top
+    of a run so the end-of-run summary covers exactly THIS run, not
+    cumulative-since-process-start (the same rationale as
+    ``reset_service_catalog_op_stats`` / ``reset_taxonomy_assign_run_stats``)."""
+    global _fence_begin_failure_count
+    with _fence_begin_failure_lock:
+        _fence_begin_failure_count = 0
+
+
+def fence_begin_failure_count() -> int:
+    """Snapshot of this run's fence-begin failure count so far."""
+    with _fence_begin_failure_lock:
+        return _fence_begin_failure_count
+
+
+def _record_fence_begin_failure(n: int = 1) -> None:
+    global _fence_begin_failure_count
+    with _fence_begin_failure_lock:
+        _fence_begin_failure_count += n
+
+
 def _fence_begin(doc_id: str, content_hash: str, collection: str) -> None:
     """Advisory: stamp ``index_state='indexing'`` BEFORE the first chunk
     upsert (memo §3.5 T0, nexus-5xn3k.4). Never raises — the fence is a
@@ -451,6 +490,7 @@ def _fence_begin(doc_id: str, content_hash: str, collection: str) -> None:
         w = make_catalog_writer()
         w.begin_index_run(doc_id, content_hash, uuid4().hex, collection)
     except Exception:  # noqa: BLE001 — boundary catch: begin is an advisory write; indexing must proceed (memo §3.4 fail-open contract)
+        _record_fence_begin_failure()
         _log.warning("index_run_begin_failed", doc_id=doc_id, collection=collection)
     finally:
         close = getattr(w, "close", None)
@@ -488,6 +528,7 @@ def _fence_begin_many(pairs: list[tuple[str, str]], collection: str) -> None:
             collection=collection,
         )
     except Exception:  # noqa: BLE001 — boundary catch: begin is an advisory write; indexing must proceed (memo §3.4 fail-open contract)
+        _record_fence_begin_failure(len(pairs))
         _log.warning("index_run_begin_many_failed", collection=collection, doc_count=len(pairs))
     finally:
         close = getattr(w, "close", None)

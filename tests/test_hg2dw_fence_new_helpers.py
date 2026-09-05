@@ -156,3 +156,71 @@ class TestReconcileNeedsFenceDegradedFallback:
                  side_effect=RuntimeError("boom"),
              ):
             _reconcile_needs_fence({"needs_fence": needs_fence, "owner": None})  # must not raise
+
+
+class TestFenceBeginFailureCounter:
+    """T2 code-review-nexus-hg2dw-52d06c8c5 [24626] finding 2: a
+    fail-open fence-begin failure is counted (not just per-doc logged) so
+    a run-level summary line can name a burst of these instead of only a
+    WARNING per file, which is easy to miss on a large run."""
+
+    def setup_method(self) -> None:
+        import nexus.doc_indexer as doc_indexer_mod
+        doc_indexer_mod.reset_fence_begin_failure_count()
+
+    def teardown_method(self) -> None:
+        import nexus.doc_indexer as doc_indexer_mod
+        doc_indexer_mod.reset_fence_begin_failure_count()
+
+    def test_reset_then_zero(self) -> None:
+        from nexus.doc_indexer import fence_begin_failure_count
+        assert fence_begin_failure_count() == 0
+
+    def test_fence_begin_failure_increments_by_one(self) -> None:
+        from nexus.doc_indexer import _fence_begin, fence_begin_failure_count
+
+        with patch("nexus.catalog.factory.make_catalog_writer", side_effect=RuntimeError("catalog down")):
+            _fence_begin("1.1.1", "hash", "docs__repo__voyage-context-3__v1")  # must not raise
+
+        assert fence_begin_failure_count() == 1
+
+    def test_fence_begin_success_does_not_increment(self) -> None:
+        from nexus.doc_indexer import _fence_begin, fence_begin_failure_count
+
+        writer = MagicMock()
+        with patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
+            _fence_begin("1.1.1", "hash", "docs__repo__voyage-context-3__v1")
+
+        assert fence_begin_failure_count() == 0
+
+    def test_fence_begin_many_failure_increments_by_pair_count(self) -> None:
+        from nexus.doc_indexer import _fence_begin_many, fence_begin_failure_count
+
+        pairs = [("1.1.1", "h1"), ("1.1.2", "h2"), ("1.1.3", "h3")]
+        with patch("nexus.catalog.factory.make_catalog_writer", side_effect=RuntimeError("catalog down")):
+            _fence_begin_many(pairs, "docs__repo__voyage-context-3__v1")  # must not raise
+
+        assert fence_begin_failure_count() == 3
+
+    def test_counter_accumulates_across_multiple_failures(self) -> None:
+        from nexus.doc_indexer import _fence_begin, fence_begin_failure_count
+
+        with patch("nexus.catalog.factory.make_catalog_writer", side_effect=RuntimeError("catalog down")):
+            _fence_begin("1.1.1", "hash", "docs__repo__voyage-context-3__v1")
+            _fence_begin("1.1.2", "hash", "docs__repo__voyage-context-3__v1")
+
+        assert fence_begin_failure_count() == 2
+
+    def test_reset_zeroes_a_nonzero_counter(self) -> None:
+        from nexus.doc_indexer import (
+            _fence_begin,
+            fence_begin_failure_count,
+            reset_fence_begin_failure_count,
+        )
+
+        with patch("nexus.catalog.factory.make_catalog_writer", side_effect=RuntimeError("catalog down")):
+            _fence_begin("1.1.1", "hash", "docs__repo__voyage-context-3__v1")
+        assert fence_begin_failure_count() == 1
+
+        reset_fence_begin_failure_count()
+        assert fence_begin_failure_count() == 0

@@ -411,20 +411,16 @@ class TestHardKillBlastRadius:
     without that approach's timing race against a sleep.
     """
 
-    def test_hard_kill_after_n_files_strands_only_those_in_flight(
-        self, tmp_path: Path, catalog_env: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    @staticmethod
+    def _run_hard_kill_subprocess(
+        repo: Path, kill_after: int, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Shared by both tests in this class: spawn the child, assert
+        the hard-exit fired as designed, return the child's
+        ``CompletedProcess`` for detail on failure."""
         import subprocess
         import sys
 
-        repo = tmp_path / "repo"
-        _init_repo(repo)
-        file_count = 5
-        for i in range(file_count):
-            (repo / f"file{i}.md").write_text(f"# File {i}\n\nContent {i}.\n", encoding="utf-8")
-        _commit(repo)
-
-        kill_after = 2
         monkeypatch.setenv("NX_LOCAL", "1")
         monkeypatch.setenv("NX_INDEX_CONCURRENCY", "1")  # deterministic ordering
         repos_json = repo.parent / "repos.json"
@@ -464,6 +460,20 @@ class TestHardKillBlastRadius:
             f"--- child stdout ---\n{result.stdout}\n"
             f"--- child stderr ---\n{result.stderr}"
         )
+        return result
+
+    def test_hard_kill_after_n_files_strands_only_those_in_flight(
+        self, tmp_path: Path, catalog_env: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        file_count = 5
+        for i in range(file_count):
+            (repo / f"file{i}.md").write_text(f"# File {i}\n\nContent {i}.\n", encoding="utf-8")
+        _commit(repo)
+
+        kill_after = 2
+        self._run_hard_kill_subprocess(repo, kill_after, monkeypatch)
 
         # nexus-hg2dw sequential processing (NX_INDEX_CONCURRENCY=1): each
         # file's begin -> chunk -> embed -> upload -> complete runs to
@@ -502,3 +512,76 @@ class TestHardKillBlastRadius:
             "would fail-stamp the untouched documents) can have run in the "
             f"hard-killed child — found 'failed' entries: {detail}"
         )
+
+    def test_second_normal_run_heals_the_none_state_documents(
+        self, tmp_path: Path, catalog_env: Path, local_t3: T3Database,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """T2 code-review-nexus-hg2dw-52d06c8c5 [24626] finding 1: the
+        documents a hard kill leaves at ``index_state=None`` (never even
+        reached their own fence-begin — see the bounded-blast-radius test
+        above) are NOT covered by nexus-cp46b's fence-aware staleness
+        override at all — that mechanism (``_catalog_hook``'s
+        ``stale_fence_doc_ids`` out-param, threaded into the staleness
+        caches as ``never_fresh``) only forces a doc stale when its
+        REPORTED ``index_state`` is ``'indexing'`` or ``'failed'``; a
+        reported-but-``None`` state is excluded from that set by design
+        (it is the documented "unknown -> fall through" case, memo
+        §3.1/§3.4, also relied on by the ``store_put`` fence-exclusion
+        ruling on this same bead). So this population heals by ORDINARY
+        content-hash staleness, not by any fence-specific repair: since
+        nothing was ever written for them in T3, ``check_staleness``
+        finds no matching chunk on the very next run and correctly
+        concludes "not fresh, must index" — the same path any newly-
+        discovered file takes, fence or no fence. This test is the
+        acceptance proof for that healing path specifically, complementing
+        (not duplicating) ``test_second_normal_run_heals_a_stranded_
+        document`` above, which covers the 'failed'-state (reconciled)
+        population via the SAME staleness mechanism from a different
+        starting state.
+
+        T3 in this suite is a pure in-memory ``InMemoryVectorClient``
+        (process-local), so the killed child's own T3 content does not
+        (and structurally cannot) carry over to this test's own
+        in-process second pass — that is fine: the claim under test is
+        that a None-state document heals via check_staleness on its next
+        run, which holds regardless of what any other document's T3
+        content happens to be. In a real install T3 is the SAME database
+        across runs, so the already-'complete'/'indexing' documents from
+        the killed run would not be redundantly reprocessed there.
+        """
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        file_count = 5
+        for i in range(file_count):
+            (repo / f"file{i}.md").write_text(f"# File {i}\n\nContent {i}.\n", encoding="utf-8")
+        _commit(repo)
+
+        kill_after = 2
+        self._run_hard_kill_subprocess(repo, kill_after, monkeypatch)
+
+        before = list(active_reader().all_documents())
+        none_state_paths = {
+            str(e.file_path) for e in before if getattr(e, "index_state", None) is None
+        }
+        assert none_state_paths, (
+            "test setup sanity: the hard kill must leave at least one "
+            f"None-state document to heal, got {[(str(e.file_path), e.index_state) for e in before]}"
+        )
+        assert len(none_state_paths) == file_count - kill_after
+
+        self._run(repo, local_t3, monkeypatch)  # a normal, non-crashing pass
+
+        after = {str(e.file_path): e for e in active_reader().all_documents()}
+        for path in none_state_paths:
+            healed_state = after[path].index_state
+            assert healed_state == "complete", (
+                f"{path}: a None-state document (never reached its own "
+                f"fence-begin under the hard kill) must reach 'complete' "
+                f"on the very next normal run via ordinary check_staleness "
+                f"content comparison, got {healed_state!r}"
+            )
+
+    @staticmethod
+    def _run(repo: Path, t3: T3Database, monkeypatch: pytest.MonkeyPatch) -> None:
+        _index(repo, t3, monkeypatch)

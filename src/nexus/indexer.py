@@ -1083,14 +1083,26 @@ def _catalog_hook(
     already trusted elsewhere in this function for ``relink_rdr_tumblers``,
     deliberately narrower than the broader ``changed`` flag that also
     fires on a bare head_hash/mtime/collection bump with the file's
-    content untouched). The orchestrator uses this to fence-begin the
-    whole set immediately after registration — closing the window where a
-    run that dies between Pass 1 and its first chunk flush leaves these
-    documents reported-but-NULL (``indexed_at`` bumped by registration,
-    ``index_state`` never touched), indistinguishable from an unfenced
-    producer (the nexus-hg2dw/nexus-b9m7a work-box incident). A doc whose
-    content did NOT change is deliberately excluded — fencing it would
-    clobber a correct 'complete' stamp for a file this run never touches.
+    content untouched).
+
+    ROUND 2 CORRECTION (T2 critique-nexus-hg2dw-36602c67f [24598] finding
+    1, CRITICAL): this set is NOT fence-begun in bulk here or anywhere
+    else right after registration — an earlier version of this fix did
+    that (one round trip per collection, immediately after Pass 1) and it
+    enlarged an UNCATCHABLE exit's (SIGKILL/OOM-kill) blast radius from
+    the original incident's small in-flight batch to the run's entire
+    not-yet-processed file set, since a hard kill never runs
+    ``index_repository``'s ``finally``. The fence now begins PER FILE
+    instead, inside ``prose_indexer.index_prose_file`` /
+    ``code_indexer.index_code_file``, immediately before that file's own
+    chunking starts — this out-param exists purely to SCOPE the exit-time
+    reconciliation (``_reconcile_needs_fence``, called from
+    ``index_repository``'s existing ``finally``, catchable exits only) to
+    exactly the documents Pass 1 determined need checking, without a
+    full-corpus catalog scan. A doc whose content did NOT change is
+    deliberately excluded from this set entirely — including it would let
+    reconciliation clobber a correct 'complete' stamp for a file this run
+    never touches.
     """
     from nexus.catalog.write_priority import await_fair_window  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     file_to_doc_id: dict[Path, str] = {}
@@ -4130,6 +4142,13 @@ def _run_index(
     from nexus.mcp_infra import reset_taxonomy_assign_run_stats  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
 
     reset_taxonomy_assign_run_stats()
+    # nexus-hg2dw round 3 (T2 code-review-nexus-hg2dw-52d06c8c5 [24626]
+    # finding 2): same process-lifetime-global rationale as the three
+    # resets above — zero the fence-begin failure counter so the
+    # end-of-run summary line covers exactly THIS run.
+    from nexus.doc_indexer import reset_fence_begin_failure_count  # noqa: PLC0415 — deferred to avoid circular import (doc_indexer)
+
+    reset_fence_begin_failure_count()
 
     # RDR-103 Phase 3a: registry value preserves the legacy name when
     # the repo was added before the migration; fallback queries the
@@ -5958,6 +5977,28 @@ def _run_index(
     _systemic_extraction_failure = skip_floor_breached(
         _durable_skipped_count, _files_attempted_total,
     )
+
+    # nexus-hg2dw round 3 (T2 code-review-nexus-hg2dw-52d06c8c5 [24626]
+    # finding 2): one run-summary line when the fail-open fence-begin
+    # counter is non-zero, in ADDITION to the existing per-doc WARNING —
+    # a burst of these is a real signal ("is the catalog unreachable for
+    # this whole run?") that a per-file log line alone is easy to miss on
+    # a large run. Read AFTER the batcher's drain above so it covers the
+    # flush-grain begin-many calls too, not just the per-file ones.
+    from nexus.doc_indexer import fence_begin_failure_count  # noqa: PLC0415 — deferred to avoid circular import (doc_indexer)
+
+    _fence_begin_failures = fence_begin_failure_count()
+    if _fence_begin_failures:
+        _log.warning(
+            "index_run_fence_begin_failures_summary",
+            count=_fence_begin_failures,
+        )
+        if on_phase is not None:
+            on_phase(
+                f"NOTE: {_fence_begin_failures} fence-begin failure(s), "
+                f"catalog unreachable? (advisory only — indexing itself "
+                f"was not affected; see logs for per-doc detail)"
+            )
 
     # nexus-7lw6a: final snapshot for the return dict below — read fresh
     # here (rather than reusing the `if _batcher is not None:` block's
