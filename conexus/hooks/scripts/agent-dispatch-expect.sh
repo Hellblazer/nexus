@@ -136,6 +136,11 @@ print("\x1f".join(f.translate(scrub) for f in fields))
 # incidental non-Agent firing would be the noisy branch, not the silent
 # one this fix targets.
 if [[ "$TOOL_NAME" != "Agent" && "$TOOL_NAME" != "Task" ]]; then
+    # The matcher should make this unreachable; if it fires, the payload
+    # shape has drifted and an EXPECT row is being dropped (nexus-mqnkt
+    # critique: the session's first dispatch is exactly where this would
+    # hide). Loud on stderr, never on stdout.
+    echo "agent-dispatch-expect: tool_name '${TOOL_NAME}' is not Agent/Task — EXPECT row NOT written for this dispatch (tool_use_id=${DISPATCH_ID:-<none>})" >&2
     exit 0
 fi
 if [[ -z "$SESSION_ID" ]]; then

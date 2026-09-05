@@ -634,6 +634,25 @@ class TestSkippedWriteIsLoud:
         assert "could not source" in proc.stderr
         assert "expectations.sh" in proc.stderr
 
+    def test_unexpected_tool_name_is_named_on_stderr(self, tmp_path: Path) -> None:
+        proc = _run(_pretooluse(tool_name="Bash"), tmp_path)
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        assert "tool_name 'Bash'" in proc.stderr
+        assert "NOT written" in proc.stderr
+
+    def test_expectations_expect_validation_error_passes_through_to_stderr(
+        self, tmp_path: Path,
+    ) -> None:
+        """A subagent_type outside the agent-type charset makes
+        expectations_expect refuse the row; its ERROR line must reach the
+        hook's stderr instead of being swallowed (the fourth skip path)."""
+        proc = _run(_pretooluse(subagent_type="bad type!"), tmp_path)
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        assert "expectations_expect: ERROR" in proc.stderr
+        assert "invalid name" in proc.stderr
+
     def test_explicit_off_mode_prints_nothing_anywhere(self, tmp_path: Path) -> None:
         """A deliberate NX_ORCH_STOP_GUARD=off opt-out is not a failure —
         no diagnostic is owed, on stdout OR stderr."""
