@@ -96,6 +96,20 @@ def _capability_from_store(*, session: str | None, since: str | None, as_json: b
     resolve/retry mixin) — this is an interactive CLI command, not the
     SessionEnd hot path, so there is no reason to bypass it the way
     ``_print_service_tier_summary``'s single-attempt read does.
+
+    EXIT-CODE PARITY (nexus-gjv9b review fold-in, code-review IMPORTANT
+    3 / critique Significant 5): the transcript-walk reader's own
+    ``CorpusCensus.exit_code`` is non-zero when a run measured *nothing*
+    (``measurable_sessions == 0``) — a whole-run analog of the same
+    UNMEASURABLE-vs-zero contract every other census/dispatch command in
+    this module documents. Zero rows from the store is the identical
+    "measured nothing" case for this filter (a typo'd ``--session``, or a
+    genuinely empty table), so it exits 1 here too — this command
+    previously always exited 0, silently indistinguishable from "checked
+    and confirmed empty" for a caller relying on ``$?``. The JSON payload
+    carries an explicit ``exit_code`` field for the same reason the
+    transcript-walk reader's own ``to_json`` does: a caller parsing JSON
+    should not have to separately capture ``$?`` to learn this.
     """
     import json as _json  # noqa: PLC0415 — stdlib deferred to subcommand scope
 
@@ -111,13 +125,17 @@ def _capability_from_store(*, session: str | None, since: str | None, as_json: b
         click.echo(f"UNAVAILABLE: capability_census read failed: {exc}", nl=True)
         raise SystemExit(1) from exc
 
+    exit_code = 0 if rows else 1
+
     if as_json:
-        click.echo(_json.dumps({"rows": rows}, sort_keys=True))
+        click.echo(_json.dumps({"rows": rows, "exit_code": exit_code}, sort_keys=True))
+        if exit_code:
+            raise SystemExit(exit_code)
         return
 
     if not rows:
         click.echo("No capability_census rows found for the given filter.")
-        return
+        raise SystemExit(exit_code)
 
     lines = []
     for row in rows:

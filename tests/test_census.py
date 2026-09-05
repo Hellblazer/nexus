@@ -509,7 +509,16 @@ def test_cli_from_store_json_mode_is_parseable(monkeypatch: pytest.MonkeyPatch) 
     assert payload["rows"][0]["session_id"] == "sess-3"
 
 
-def test_cli_from_store_no_rows_is_a_clean_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_from_store_no_rows_exits_nonzero_matching_measured_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-gjv9b review fold-in (code-review IMPORTANT 3 / critique
+    Significant 5): zero rows for a filter is the store-backed reader's
+    own "measured nothing" case, the same class the transcript-walk
+    reader's ``CorpusCensus.exit_code`` already refuses to render as
+    success. Renamed from the old ``..._is_a_clean_exit`` — that name and
+    assertion described the exact divergence the reviewers flagged; the
+    row count is unchanged (an empty result), only the verdict on it."""
     monkeypatch.setattr(
         "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
         lambda: _FakeCapabilityCensusStore([]),
@@ -517,8 +526,44 @@ def test_cli_from_store_no_rows_is_a_clean_exit(monkeypatch: pytest.MonkeyPatch)
 
     res = _invoke(["capability", "--from-store", "--session", "sess-nope"])
 
-    assert res.exit_code == 0, res.output
+    assert res.exit_code == 1, res.output
     assert "No capability_census rows" in res.output
+
+
+def test_cli_from_store_no_rows_json_mode_carries_exit_code_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The JSON payload names its own exit code (mirroring why the
+    transcript-walk reader's ``to_json`` does the same) so a caller
+    parsing JSON never has to separately capture ``$?``."""
+    monkeypatch.setattr(
+        "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+        lambda: _FakeCapabilityCensusStore([]),
+    )
+
+    res = _invoke(["capability", "--from-store", "--json"])
+
+    assert res.exit_code == 1, res.output
+    payload = json.loads(res.stdout)
+    assert payload == {"rows": [], "exit_code": 1}
+
+
+def test_cli_from_store_json_mode_with_rows_exits_zero_and_carries_exit_code_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCapabilityCensusStore([{
+        "session_id": "sess-4", "ts": "2026-09-01T00:00:00Z", "blindspot": False,
+        "capabilities": {"skill": 1}, "dispatches": 0, "total_calls": 1,
+    }])
+    monkeypatch.setattr(
+        "nexus.db.t2.http_telemetry_store.HttpTelemetryStore", lambda: fake,
+    )
+
+    res = _invoke(["capability", "--from-store", "--json"])
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["exit_code"] == 0
 
 
 def test_cli_from_store_service_failure_exits_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -531,6 +576,35 @@ def test_cli_from_store_service_failure_exits_nonzero(monkeypatch: pytest.Monkey
 
     assert res.exit_code != 0
     assert "UNAVAILABLE" in res.output
+
+
+def test_cli_from_store_and_transcript_walk_agree_on_the_empty_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path,
+) -> None:
+    """nexus-gjv9b review fold-in (code-review IMPORTANT 3 / critique
+    Significant 5): the reviewer asked for a parity test proving
+    ``--from-store`` and the transcript-walk reader agree on the
+    empty-result exit code. They read fundamentally different substrates
+    (a store row set vs. a transcript directory) so there is no shared
+    seeded fixture that produces "the same data" on both sides -- the
+    ACTIONABLE parity is the shared exit-code CONVENTION the critique
+    named: a scope that measured nothing is never a clean exit, on
+    either reader.
+    """
+    root = tmp_path / "p"
+    root.mkdir()
+    (root / "s.jsonl").write_text("")
+    transcript_walk = _invoke(["capability", "--project-dir", str(root)])
+
+    monkeypatch.setattr(
+        "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+        lambda: _FakeCapabilityCensusStore([]),
+    )
+    from_store = _invoke(["capability", "--from-store", "--session", "sess-nope"])
+
+    assert transcript_walk.exit_code != 0, transcript_walk.output
+    assert from_store.exit_code != 0, from_store.output
+    assert transcript_walk.exit_code == from_store.exit_code == 1
 
 
 def test_cli_registered_on_main() -> None:
