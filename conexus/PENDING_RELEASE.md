@@ -36,3 +36,13 @@ mechanize, it matters enough to ship.
   next `<id>-research-N` sequence in Python and never overwrites an existing
   title. Until this ships, the installed skill still does the list-and-upsert
   itself and can land two adds on the same title.
+- `conexus/hooks/scripts/agent-dispatch-expect.sh` (nexus-mqnkt): a real
+  incident (session 49d1c3ab, 2026-09-01) left a START row with no matching
+  EXPECT row and zero forensic trace — every skip path in this hook exited 0
+  with nothing on stdout OR stderr, so a genuinely dropped write was
+  indistinguishable from the hook never firing. Every skip that represents a
+  write the hook could have made, but did not (source failure, an empty
+  session_id, an `expectations_file` rejection, a swallowed validation error
+  inside `expectations_expect`), now names itself on stderr; stdout is
+  unchanged (still empty on every path — no risk to the dispatch). Until this
+  ships, the installed hook stays fully silent on every skip.

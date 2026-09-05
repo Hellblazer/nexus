@@ -586,6 +586,74 @@ CAPTURED_PAYLOADS = [
 ]
 
 
+class TestSkippedWriteIsLoud:
+    """nexus-mqnkt: session 49d1c3ab (2026-09-01) left a START row with no
+    matching EXPECT row and ZERO forensic trace — every skip path here used
+    to exit 0 with nothing on stdout OR stderr, so a genuinely dropped
+    write was indistinguishable from the hook never firing at all. The
+    write-side investigation (the real ledger, still on disk, read
+    directly: 51 EXPECT rows, all distinct non-empty dispatch_ids, zero
+    duplicate lines — general-purpose showed 19 STARTs against 18 EXPECT
+    rows, and the orphaned START was the session's very first dispatch,
+    03:25:40Z, ~7 hours before the next EXPECT row) could not determine
+    WHICH of this hook's fail-open branches actually fired that day: the
+    hook's own design left no residue to distinguish a mode-gated skip, a
+    malformed payload, an expectations_file rejection, or the harness never
+    invoking the hook at all for the session's first tool call. This class
+    does not claim to reproduce THAT incident — it verifies the concrete,
+    checkable deliverable instead: every skip path that represents a write
+    the hook could have attempted, but did not, now names itself on
+    stderr, so a recurrence is diagnosable rather than invisible. Stdout
+    stays empty on every one of these (unchanged: PreToolUse stdout is
+    parsed by the harness, stderr is not, so this adds no risk of ever
+    blocking a dispatch)."""
+
+    def test_missing_session_id_is_named_on_stderr(self, tmp_path: Path) -> None:
+        proc = _run(_pretooluse(session_id=""), tmp_path)
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        assert "session_id" in proc.stderr
+        assert "NOT written" in proc.stderr
+
+    def test_path_traversal_session_id_is_named_on_stderr(self, tmp_path: Path) -> None:
+        proc = _run(_pretooluse(session_id="../../../etc/pwn"), tmp_path)
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        assert not (tmp_path / "state" / "nexus" / "etc").exists()
+        assert "expectations_file rejected" in proc.stderr
+        assert "../../../etc/pwn" in proc.stderr
+
+    def test_missing_lib_is_named_on_stderr(self, tmp_path: Path) -> None:
+        lone = tmp_path / "lone"
+        lone.mkdir()
+        copy = lone / SCRIPT.name
+        copy.write_bytes(SCRIPT.read_bytes())
+        proc = _run(_pretooluse(), tmp_path, script=copy)
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        assert "could not source" in proc.stderr
+        assert "expectations.sh" in proc.stderr
+
+    def test_explicit_off_mode_prints_nothing_anywhere(self, tmp_path: Path) -> None:
+        """A deliberate NX_ORCH_STOP_GUARD=off opt-out is not a failure —
+        no diagnostic is owed, on stdout OR stderr."""
+        proc = _run(_pretooluse(), tmp_path, mode="off")
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        assert proc.stderr == ""
+
+    def test_successful_write_prints_nothing_on_stderr_either(
+        self, tmp_path: Path
+    ) -> None:
+        """Control: the new diagnostics must be scoped to the skip paths —
+        a real write stays completely silent, both streams."""
+        proc = _run(_pretooluse(), tmp_path)
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        assert proc.stderr == ""
+        assert "\tEXPECT\t" in _expfile(tmp_path).read_text()
+
+
 class TestCapturedPayloads:
     """Replay the real bytes. Everything else in this file is a fixture the
     author wrote; this class is the only part that cannot drift from what the

@@ -40,16 +40,31 @@
 #     since the P1.G default-ON flip (2026-07-17) includes UNSET. Explicit
 #     off opts out. Same gate as subagent-start-stamp.sh.
 #   - FAIL-OPEN ON THE WRITE PATH, absolutely: the ledger is an audit aid,
-#     not a gate. Every failure path exits 0 emitting NOTHING, which the
-#     harness reads as "no decision, proceed". This hook must never emit a
-#     deny envelope and must never be the reason a dispatch does not land.
+#     not a gate. Every failure path exits 0 emitting NOTHING ON STDOUT,
+#     which the harness reads as "no decision, proceed". This hook must
+#     never emit a deny envelope and must never be the reason a dispatch
+#     does not land.
 #   - Idempotent per tool_use_id: plugin hooks.json AND a project
 #     settings.json may both register it; two firings must compose to ONE
 #     row, or the N-of-type deficit count is inflated into nonsense.
-#   - STDOUT-SILENT.
+#   - STDOUT-SILENT, but NOT STDERR-SILENT (nexus-mqnkt). A real incident
+#     (session 49d1c3ab, 2026-09-01) left a START row with no matching
+#     EXPECT row and zero forensic trace anywhere: every skip path here
+#     used to exit 0 with nothing on stdout OR stderr, so a genuinely
+#     dropped write was indistinguishable, after the fact, from the hook
+#     never having been invoked at all. Every skip below that represents a
+#     write this hook COULD have made, but did not, now writes one line to
+#     stderr first — stdout stays empty (the harness contract is
+#     unchanged; PreToolUse stdout is parsed, stderr is not) so this adds
+#     zero risk of ever blocking or altering a dispatch. Visible only under
+#     ``claude --debug`` or a captured hook log, same as
+#     expectations_owes_report's lock-exhaustion warning.
 
 MODE="${NX_ORCH_STOP_GUARD:-block}"
 if [[ "$MODE" != "observe" && "$MODE" != "block" ]]; then
+    # Deliberate, session-scoped opt-out (NX_ORCH_STOP_GUARD=off) — not a
+    # failure, so no diagnostic: a user who turned this off does not need
+    # to be told the ledger is not being written.
     exit 0
 fi
 
@@ -57,7 +72,10 @@ PAYLOAD="$(cat)"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./expectations.sh disable=SC1091
-source "$HERE/expectations.sh" 2>/dev/null || exit 0
+if ! source "$HERE/expectations.sh" 2>/dev/null; then
+    echo "agent-dispatch-expect: could not source $HERE/expectations.sh — EXPECT row NOT written for this dispatch" >&2
+    exit 0
+fi
 
 # run_in_background ABSENT => background. That is this harness's documented
 # Agent-tool default ("Subagents run in the background by default; pass
@@ -109,10 +127,38 @@ print("\x1f".join(f.translate(scrub) for f in fields))
 
 # "Task" is the pre-rename spelling of the same tool; accept both so a
 # harness that still emits it is covered rather than silently unrecorded.
-[[ "$TOOL_NAME" == "Agent" || "$TOOL_NAME" == "Task" ]] || exit 0
-[[ -n "$SESSION_ID" && -n "$SUBAGENT_TYPE" ]] || exit 0
+# NOT diagnosed on stderr: hooks.json's matcher is "Agent|Task" (verified
+# by TestPluginWiring::test_registered_on_agent_pretooluse), so the
+# harness should never invoke this script for any other tool_name in the
+# first place — a mismatch here means either a matcher regression (a real
+# bug, but one the matcher test already catches) or a fully malformed
+# payload (already covered by the diagnostics below). Logging every
+# incidental non-Agent firing would be the noisy branch, not the silent
+# one this fix targets.
+if [[ "$TOOL_NAME" != "Agent" && "$TOOL_NAME" != "Task" ]]; then
+    exit 0
+fi
+if [[ -z "$SESSION_ID" ]]; then
+    echo "agent-dispatch-expect: empty/unparseable session_id — EXPECT row NOT written for this dispatch (tool_use_id=${DISPATCH_ID:-<none>})" >&2
+    exit 0
+fi
+# SUBAGENT_TYPE cannot be empty here: the python parse above defaults an
+# absent/empty subagent_type to "general-purpose" (nexus-a795d), so this
+# branch is dead in practice; kept only as the historical shape of the
+# original guard.
+[[ -n "$SUBAGENT_TYPE" ]] || exit 0
 
-FILE="$(expectations_file "$SESSION_ID" 2>/dev/null)" || exit 0
+FILE="$(expectations_file "$SESSION_ID" 2>/dev/null)"
+if [[ -z "$FILE" ]]; then
+    # nexus-mqnkt: THE candidate this incident points at. expectations_file
+    # fails only on an empty sid (already excluded above) or one outside
+    # its path-safe charset (session ids are framework-assigned UUIDs in
+    # every observed payload, so this should not fire in practice either —
+    # but "should not" is exactly what silently ate a real EXPECT row
+    # once, with nothing to show for it afterward).
+    echo "agent-dispatch-expect: expectations_file rejected session_id '${SESSION_ID}' — EXPECT row NOT written for this dispatch (tool_use_id=${DISPATCH_ID:-<none>}, subagent_type=${SUBAGENT_TYPE})" >&2
+    exit 0
+fi
 
 # Idempotence: one EXPECT row per tool_use_id. Mirrors the START-row guard
 # in subagent-start-stamp.sh, including its TOCTOU lesson (nexus-3h0u6: a
@@ -125,7 +171,12 @@ _expect_if_absent() {
         '$2 == "EXPECT" && $5 == id { found = 1 } END { exit !found }' "$FILE" 2>/dev/null; then
         return 0
     fi
-    expectations_expect "$SESSION_ID" "$SUBAGENT_TYPE" "$DISPATCH_MODE" "$DISPATCH_ID" >/dev/null 2>&1
+    # STDOUT only is suppressed here (expectations_expect never prints on
+    # success) — STDERR passes through, so a validation failure inside it
+    # (bad name charset, bad mode, tab/newline in dispatch_id) is no longer
+    # silently discarded. It was previously ``>/dev/null 2>&1``, which
+    # swallowed both.
+    expectations_expect "$SESSION_ID" "$SUBAGENT_TYPE" "$DISPATCH_MODE" "$DISPATCH_ID" >/dev/null
 }
 
 # A lockdir left behind by a killed hook would otherwise cost EVERY later
