@@ -12,7 +12,7 @@ from nexus.chunk_identity import chunk_id_from_hash as _chunk_id_from_hash
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Final
 
 import structlog
 
@@ -613,6 +613,103 @@ def _repo_owner_document_for(reader, abs_path):
         return None
 
 
+#: :func:`_repo_home_for`'s answer for a worktree-only or temp-dir file: no
+#: durable identity exists for it, so registration is refused outright.
+_REFUSE_EPHEMERAL: Final = "refuse-ephemeral"
+
+
+def _repo_home_for(reader, writer, file_path, content_type: str):
+    """``(owner, rel_path, content_type)`` for a file that belongs to a git
+    repository, or ``None`` when the curator/corpus identity applies.
+
+    nexus-3o4lt (Sam's ruling, 2026-09-04). The doc_indexer family
+    (``nx index rdr``, ``nx index md``, ``nx collection reindex``) resolved a
+    CURATOR owner by corpus name and stored the path it was handed, so a
+    repo file indexed before ``nx index repo`` had walked it got a curator
+    row with an ABSOLUTE path, typed prose. Measured on this install: 231
+    such rows for this repo, 198 of them RDRs, invisible to every
+    owner-scoped reader (canonical RDR resolution, supersedes/related
+    edges, the RDR-201 walk) and reconciled onto by every later
+    ``nx index repo`` run. nexus-tqudo's :func:`_repo_owner_document_for`
+    only converges when a repo-owner row already exists; this decides the
+    identity BEFORE any lookup, so there is nothing to converge.
+
+    A file is a repo file when its main repository (worktrees resolve to
+    the primary) is a real git checkout, ``.git`` present, and the file
+    lies under it. It then registers under that repository's REPO owner,
+    the same identity ``nx index repo`` mints (``ensure_owner_for_repo``
+    keys on repo_hash, so a later repo index finds this row instead of
+    forking), with a repo-relative path, typed ``rdr`` when it lies under
+    one of the repo's configured ``indexing.rdr_paths`` (default
+    ``docs/rdr``), else with the caller's type. PDFs (``paper``) keep the
+    corpus identity: a paper filed inside a repo is a curated corpus
+    document, not a repo document. The ``corpus`` argument no longer
+    selects the owner for a repo file; it is logged so the divergence is
+    visible.
+
+    Best-effort in the probe (a failed repo resolution means "not a repo
+    file"), fail-loud in the write: an owner mint that raises propagates,
+    exactly as the curator ``register_owner`` below always did.
+    """
+    if content_type == "paper":
+        return None
+    try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance
+        from nexus.repo_identity import (  # noqa: PLC0415 — circular-dep avoidance
+            _repo_identity_with_main,
+            canonicalize_worktree_path,
+        )
+
+        p = Path(file_path).resolve()
+        # nexus's own config dir is never a repo document, even when
+        # ~/.config is a dotfiles checkout: ``nx dt index`` stages
+        # DEVONthink content under <catalog>/.dt-content there (critique
+        # [24433] Significant 2).
+        if p.is_relative_to(Path(nexus_config_dir()).resolve()):
+            return None
+        # A file inside a nested agent worktree (<primary>/.claude/worktrees/
+        # <agent>/<rel>) is the primary's file when the primary holds it:
+        # register THAT identity, never a path carrying the worktree
+        # segment (review [24431] Critical: such a row survives the
+        # worktree's removal as a live orphan under the repo owner, the
+        # nexus-u8n4r class). Detected by the marker alone, not the temp-dir
+        # prefixes: a git repo under /tmp (Linux CI's tmp_path) is a repo.
+        mirror = Path(canonicalize_worktree_path(str(p)))
+        if mirror != p:
+            if not mirror.is_file():
+                # No primary identity. The curator branch would register the
+                # absolute worktree path (its u8n4r guard exempts curator
+                # owners, which carry no repo_root): the three
+                # ``.claude/worktrees/agent-*`` relics collapsed under
+                # nexus-53cae were exactly that. Refuse instead.
+                return _REFUSE_EPHEMERAL
+            p = mirror.resolve()
+        probe = p.parent if p.parent != p else p
+        _name, repo_hash, main_repo = _repo_identity_with_main(probe)
+        main_repo = Path(main_repo).resolve()
+        # ``_repo_identity_with_main`` hands back the path itself for a
+        # non-repo directory, so the hash alone says nothing; the checkout
+        # marker does. ``.git`` is a directory in a primary checkout.
+        if not (main_repo / ".git").exists():
+            return None
+        rel = str(p.relative_to(main_repo))
+    except Exception:  # noqa: BLE001 — boundary catch: an unresolvable repo is "not a repo file", never a broken index
+        return None
+    owner = reader.owner_for_repo(repo_hash)
+    if owner is None:
+        owner = writer.ensure_owner_for_repo(main_repo)
+    try:
+        from nexus.config import load_config  # noqa: PLC0415 — circular-dep avoidance
+
+        rdr_paths = load_config(repo_root=main_repo).get("indexing", {}).get("rdr_paths", ["docs/rdr"])
+    except Exception:  # noqa: BLE001 — boundary catch: unreadable config falls back to the default rdr dir
+        rdr_paths = ["docs/rdr"]
+    rel_posix = Path(rel).as_posix()
+    if any(rel_posix == r.strip("/") or rel_posix.startswith(r.strip("/") + "/") for r in rdr_paths):
+        content_type = "rdr"
+    return owner, rel, content_type
+
+
 def _register_or_lookup_doc_id(
     file_path: Path,
     corpus: str,
@@ -697,6 +794,7 @@ def _register_or_lookup_doc_id(
       document's current home is a MOVE, not a re-index.
     """
     from nexus.errors import (  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
+        EphemeralPathRefusedError,
         SourceUriCollectionMismatchError,
         SourceUriNotFoundError,
     )
@@ -747,13 +845,36 @@ def _register_or_lookup_doc_id(
         # from the repo indexer, never via a corpus-name lookup here.
         # nexus-qnp5s: curator_owner_tumbler_by_name() is implemented on
         # both SQLite Catalog and HttpCatalogClient — no raw _db access.
-        owner_t = reader.curator_owner_tumbler_by_name(owner_name)
-        if owner_t is not None:
-            owner = owner_t
+        home = _repo_home_for(reader, writer, file_path, content_type)
+        if home == _REFUSE_EPHEMERAL:
+            # Fail loud, not "": a "" here let index_markdown chunk the file
+            # and _catalog_markdown_hook mint a curator row for the worktree
+            # path anyway, reported as success (critique [24433] Critical).
+            from nexus.mcp_infra import _record_ephemeral_registration_skip  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
+            _record_ephemeral_registration_skip(str(file_path), owner_name, reason="worktree_or_tempdir")
+            raise EphemeralPathRefusedError(
+                f"{file_path} exists only in an agent worktree; the primary checkout "
+                f"has no such file, so it has no durable catalog identity. Refusing to "
+                f"register it. Commit or copy it into the primary checkout and index "
+                f"it from there (nx index repo <primary>, or this command on the "
+                f"primary's path)."
+            )
+        if home is not None:
+            owner, fp, content_type = home
+            if corpus:
+                # The caller named a corpus; the owner is the repo's. Say so
+                # once per registration so the divergence is on the record.
+                _log.info(
+                    "doc_register_repo_owner_over_corpus",
+                    file_path=fp, owner=str(owner), corpus=corpus, content_type=content_type,
+                )
         else:
-            owner = writer.register_owner(owner_name, "curator")
-
-        fp = make_relative(file_path, base_path) if base_path else str(file_path)
+            owner_t = reader.curator_owner_tumbler_by_name(owner_name)
+            if owner_t is not None:
+                owner = owner_t
+            else:
+                owner = writer.register_owner(owner_name, "curator")
+            fp = make_relative(file_path, base_path) if base_path else str(file_path)
 
         # nexus-y8qtj: source_uri-keyed resolution takes priority over the
         # file_path lookup below, and is fail-loud rather than falling
@@ -965,9 +1086,9 @@ def _register_or_lookup_doc_id(
             source_uri=source_uri,
         )
         return str(tumbler)
-    except (SourceUriNotFoundError, SourceUriCollectionMismatchError):
-        # nexus-y8qtj: fail-loud rules propagate — never swallowed by the
-        # best-effort catch-all below.
+    except (SourceUriNotFoundError, SourceUriCollectionMismatchError, EphemeralPathRefusedError):
+        # nexus-y8qtj / nexus-3o4lt: fail-loud rules propagate — never
+        # swallowed by the best-effort catch-all below.
         raise
     except Exception:  # noqa: BLE001 — best-effort/telemetry path; must not crash caller
         # nexus-h9f1w / GH #1350 Fix C: a preflight registration failure meant a

@@ -1773,6 +1773,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         ExtractionQualityError,
         IndexingError,
         IndexRunVerifyRefused,
+        EphemeralPathRefusedError,
         SourceUriCollectionMismatchError,
         SourceUriNotFoundError,
         UnchunkableContentError,
@@ -1786,7 +1787,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             return _index_pdf_raw(*args, **kwargs)
         except CredentialsMissingError as e:
             raise click.ClickException(str(e)) from e
-        except (SourceUriNotFoundError, SourceUriCollectionMismatchError) as e:
+        except (SourceUriNotFoundError, SourceUriCollectionMismatchError, EphemeralPathRefusedError) as e:
             raise click.ClickException(str(e)) from e
         except UnchunkableContentError as e:
             # nexus-1sd0f (round 3): a zero-byte PDF named explicitly on
@@ -2299,6 +2300,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
         ChunkLandingUnverifiedError,
         CredentialsMissingError,
         IndexRunVerifyRefused,
+        EphemeralPathRefusedError,
         SourceUriCollectionMismatchError,
         SourceUriNotFoundError,
         UnchunkableContentError,
@@ -2365,8 +2367,8 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, m
         # GH #336: surface the silent failure visibly. Click maps
         # ClickException to stderr + non-zero exit.
         raise click.ClickException(str(exc)) from exc
-    except (SourceUriNotFoundError, SourceUriCollectionMismatchError) as exc:
-        # nexus-y8qtj: fail-loud identity errors surface the same way.
+    except (SourceUriNotFoundError, SourceUriCollectionMismatchError, EphemeralPathRefusedError) as exc:
+        # nexus-y8qtj / nexus-3o4lt: fail-loud identity errors surface the same way.
         raise click.ClickException(str(exc)) from exc
     except UnchunkableContentError as exc:
         # nexus-rqsh1 round 2: a zero-byte or binary-content file named

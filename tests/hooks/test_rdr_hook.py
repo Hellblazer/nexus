@@ -159,7 +159,10 @@ def test_summary_prints_for_this_repos_real_tree(rdr_hook_module, monkeypatch, c
     m = re.search(r"^RDR: (\d+) documents \(2 closed, 1 accepted\) in docs/rdr but NOT indexed\.$", out, re.M)
     assert m, out
     assert int(m.group(1)) > 200, out
-    assert "Run: nx index rdr" in out
+    assert "Run: nx index repo" in out
+    # nexus-3o4lt: the old remedy minted curator-owner rows with absolute
+    # paths for every RDR; the hook must never recommend it again.
+    assert "nx index rdr" not in out
 
 
 def test_hook_carries_no_writer(rdr_hook_module) -> None:
