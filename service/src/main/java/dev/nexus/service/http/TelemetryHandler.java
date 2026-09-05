@@ -52,6 +52,10 @@ import java.util.Map;
  *                                              end-of-run write of every file skipped this run
  *   GET  /v1/telemetry/index_failures/list     list index failures + exact totals, optionally
  *                                              scoped to one run_id (nexus-nukn3)
+ *   POST /v1/telemetry/index_failures/trim     delete rows by run_id and/or age; the
+ *                                              nx index failures --clear remedy (nexus-nukn3
+ *                                              fold-in, critic finding: an all-time fail-first
+ *                                              check with no clear path is unfixable forever)
  *   POST /v1/telemetry/frecency/upsert         upsert frecency record
  *   GET  /v1/telemetry/frecency/get            get frecency by chunk_id
  *   POST /v1/telemetry/import                  fidelity ETL for all 6 tables
@@ -138,6 +142,7 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/index_failures/record"       -> handleIndexFailureRecord(exchange, tenant, method);
                 case "/index_failures/record_batch"  -> handleIndexFailureRecordBatch(exchange, tenant, method);
                 case "/index_failures/list"         -> handleIndexFailureList(exchange, tenant, method);
+                case "/index_failures/trim"          -> handleIndexFailureTrim(exchange, tenant, method);
                 case "/frecency/upsert"        -> handleFrecencyUpsert(exchange, tenant, method);
                 case "/frecency/get"           -> handleFrecencyGet(exchange, tenant, method);
                 case "/import"                 -> handleImport(exchange, tenant, method);
@@ -576,6 +581,28 @@ public final class TelemetryHandler implements HttpHandler {
         int days  = parseIntParam(params, "days", 0);
         int limit = parseIntParam(params, "limit", 100);
         HttpUtil.send(ex, 200, json(repo.getIndexFailures(tenant, runId, days, limit)));
+    }
+
+    /**
+     * POST /v1/telemetry/index_failures/trim — the {@code nx index failures --clear}
+     * remedy (nexus-nukn3 fold-in, critic Critical finding). Body: {@code run_id}
+     * and/or {@code days}; AT LEAST ONE is required — refusing here (400) is what
+     * keeps an unscoped body from silently clearing a tenant's entire history,
+     * since {@link TelemetryRepository#trimIndexFailures} itself has no opinion
+     * (see that method's own javadoc).
+     */
+    private void handleIndexFailureTrim(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String runId = optStr(body, "run_id");
+        int days = optInt(body, "days", 0);
+        if (runId.isBlank() && days <= 0) {
+            throw new IllegalArgumentException(
+                "index_failures/trim requires run_id and/or days >= 1 -- refusing an "
+                + "unscoped clear of the entire tenant history");
+        }
+        int deleted = repo.trimIndexFailures(tenant, runId, days);
+        HttpUtil.send(ex, 200, json(Map.of("deleted", deleted)));
     }
 
     // ── capability_census (nexus-gjv9b PART 1) ──────────────────────────────────

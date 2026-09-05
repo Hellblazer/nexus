@@ -1401,6 +1401,18 @@ public final class TelemetryRepository {
      */
     public int recordIndexFailuresBatch(String tenant, List<Object[]> rows) {
         if (rows.isEmpty()) return 0;
+        // Code-review minor (nexus-nukn3 fold-in): a short row (fewer than the
+        // 5 positional fields below) previously threw ArrayIndexOutOfBoundsException
+        // from inside the transaction — an unhandled exception the outer handler's
+        // catch-all turns into a 500 rather than a clean 400. Reject up front,
+        // mirroring the other handlers' IllegalArgumentException -> 400 convention.
+        for (var r : rows) {
+            if (r.length < 5) {
+                throw new IllegalArgumentException(
+                    "index_failures row must have 5 fields (run_id, file_path, "
+                    + "error_class, error, occurred_at); got " + r.length);
+            }
+        }
         return tenantScope.withTenant(tenant, ctx -> {
             int count = 0;
             for (var r : rows) {
@@ -1484,6 +1496,37 @@ public final class TelemetryRepository {
             out.put("total", total);
             out.put("oldest_occurred_at", oldest != null ? utcIso(oldest) : "");
             return out;
+        });
+    }
+
+    /**
+     * Delete index_failures rows matching *runId* and/or older than *days* days
+     * (nexus-nukn3 fold-in — the critic's Critical finding: an event-log store
+     * with a fail-first doctor check needs a remedy, mirroring
+     * {@link #expireRelevanceLog}'s age-based reap, generalized with an
+     * OPTIONAL run_id predicate so an operator can retire one adjudicated run
+     * without waiting out the age window). Returns the number of rows deleted.
+     *
+     * <p>Blank {@code runId} AND {@code days <= 0} together match every row for
+     * the tenant — deliberately NOT guarded here (a pure predicate-delete
+     * primitive matching {@link #trimHookFailures}'s shape); the "at least one
+     * predicate" refusal lives at the HTTP boundary
+     * ({@code TelemetryHandler#handleIndexFailureTrim}) and the Python client,
+     * so a malformed request 400s before reaching this method, while a
+     * deliberate full-tenant clear stays possible for an operator who really
+     * wants one (unlike the boundary, this method has no opinion).
+     */
+    public int trimIndexFailures(String tenant, String runId, int days) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = noCondition();
+            if (runId != null && !runId.isBlank()) {
+                cond = cond.and(INDEX_FAILURES.RUN_ID.eq(runId));
+            }
+            if (days > 0) {
+                OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
+                cond = cond.and(INDEX_FAILURES.OCCURRED_AT.lt(cutoff));
+            }
+            return ctx.deleteFrom(INDEX_FAILURES).where(cond).execute();
         });
     }
 

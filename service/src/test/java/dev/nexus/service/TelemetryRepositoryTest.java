@@ -743,6 +743,80 @@ class TelemetryRepositoryTest {
             .extracting(r -> r.get("file_path")).containsExactly("/repo/mine.pdf");
     }
 
+    @Test @Order(60)
+    void indexFailures_recordBatch_rejectsShortRow() {
+        // Code-review minor (nexus-nukn3 fold-in): a malformed row must 400
+        // (IllegalArgumentException), never an ArrayIndexOutOfBoundsException
+        // surfacing as a 500 from inside the transaction.
+        final String tenant = "tel-idxfail-arity-" + System.nanoTime();
+        assertThatThrownBy(() -> repo.recordIndexFailuresBatch(tenant, List.<Object[]>of(
+            new Object[]{"run-1", "/repo/short.pdf", "UnextractableContentError"}
+        ))).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(61)
+    @SuppressWarnings("unchecked")
+    void indexFailures_trim_byRunId_deletesOnlyThatRun() {
+        final String tenant = "tel-idxfail-trim-run-" + System.nanoTime();
+        final String runA = "run-a-" + System.nanoTime();
+        final String runB = "run-b-" + System.nanoTime();
+        repo.recordIndexFailuresBatch(tenant, List.of(
+            new Object[]{runA, "/repo/a1.pdf", "UnextractableContentError", "boom", null},
+            new Object[]{runA, "/repo/a2.pdf", "UnextractableContentError", "boom", null},
+            new Object[]{runB, "/repo/b1.pdf", "UnextractableContentError", "boom", null}
+        ));
+
+        int deleted = repo.trimIndexFailures(tenant, runA, 0);
+
+        assertThat(deleted).isEqualTo(2);
+        var remaining = repo.getIndexFailures(tenant, "", 0, 100);
+        assertThat(remaining.get("total")).isEqualTo(1);
+        assertThat((List<Map<String, Object>>) remaining.get("rows"))
+            .extracting(r -> r.get("run_id")).containsExactly(runB);
+    }
+
+    @Test @Order(62)
+    @SuppressWarnings("unchecked")
+    void indexFailures_trim_byDays_deletesOnlyOlderRows() {
+        final String tenant = "tel-idxfail-trim-days-" + System.nanoTime();
+        String oldTs = OffsetDateTime.now(ZoneOffset.UTC).minusDays(60).toString();
+        String freshTs = OffsetDateTime.now(ZoneOffset.UTC).toString();
+        repo.recordIndexFailure(tenant, "run-old", "/repo/old.pdf",
+            "UnextractableContentError", "boom", oldTs);
+        repo.recordIndexFailure(tenant, "run-fresh", "/repo/fresh.pdf",
+            "UnextractableContentError", "boom", freshTs);
+
+        int deleted = repo.trimIndexFailures(tenant, "", 30);
+
+        assertThat(deleted).isEqualTo(1);
+        var remaining = repo.getIndexFailures(tenant, "", 0, 100);
+        assertThat(remaining.get("total")).isEqualTo(1);
+        assertThat((List<Map<String, Object>>) remaining.get("rows"))
+            .extracting(r -> r.get("file_path")).containsExactly("/repo/fresh.pdf");
+    }
+
+    @Test @Order(63)
+    void indexFailures_trim_combinedRunIdAndDays_bothMustMatch() {
+        // run_id AND days together are ANDed, not ORed -- a row must satisfy
+        // both predicates to be deleted.
+        final String tenant = "tel-idxfail-trim-combo-" + System.nanoTime();
+        String oldTs = OffsetDateTime.now(ZoneOffset.UTC).minusDays(60).toString();
+        String freshTs = OffsetDateTime.now(ZoneOffset.UTC).toString();
+        repo.recordIndexFailure(tenant, "run-x", "/repo/old-x.pdf",
+            "UnextractableContentError", "boom", oldTs);
+        repo.recordIndexFailure(tenant, "run-y", "/repo/old-y.pdf",
+            "UnextractableContentError", "boom", oldTs);
+        repo.recordIndexFailure(tenant, "run-x", "/repo/fresh-x.pdf",
+            "UnextractableContentError", "boom", freshTs);
+
+        // Only run-x's OLD row matches both predicates.
+        int deleted = repo.trimIndexFailures(tenant, "run-x", 30);
+
+        assertThat(deleted).isEqualTo(1);
+        var remaining = repo.getIndexFailures(tenant, "", 0, 100);
+        assertThat(remaining.get("total")).isEqualTo(2);
+    }
+
     // ── frecency ───────────────────────────────────────────────────────────────
 
     @Test @Order(12)
