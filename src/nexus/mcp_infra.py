@@ -445,13 +445,13 @@ def get_collection_counts() -> dict[str, int]:
     ``list_collections()`` itself reports as ``count`` -- the vector
     store's live row count for the collection (chunks, tombstone-filtered;
     see ``HttpVectorClient.list_collections``'s docstring) -- used as a
-    cheap proxy for "does this collection hold enough content to be worth
-    searching by default": a collection with a handful of chunks reads as
-    near-empty by the same measure whether the underlying corpus has one
-    tiny file or one large one nobody indexed yet. A collection named
-    explicitly is unaffected: this proxy only feeds the default
-    prefix-fan-out floor in ``nexus.mcp.core._resolve_corpus_target``, never
-    a hard block on searching a named collection.
+    cheap per-collection health signal for the default corpus fan-out
+    floor in ``nexus.mcp.core._resolve_corpus_target``: a collection is
+    excluded from a bare-prefix fan-out only when it is thin AND a
+    sibling under the same prefix is not, never as a flat per-collection
+    cutoff (a lone thin collection -- e.g. a fresh install's first note --
+    is always kept; see that function's docstring for the full rule). A
+    collection named explicitly is unaffected by any of this.
     """
     _refresh_collections_cache_if_stale()
     return _collections_cache[1]
