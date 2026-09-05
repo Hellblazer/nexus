@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.ChashSqlIdioms;
 import dev.nexus.service.db.StagingPromoteOps;
 import dev.nexus.service.db.StagingPromoteOps.PromotePreconditionException;
 import dev.nexus.service.db.TenantScope;
@@ -1646,6 +1647,126 @@ class StagingPromoteOpsIntegrationTest {
                     + "row — proves the FK is VALIDATEd and enforced")
                 .isInstanceOf(SQLException.class)
                 .satisfies(e -> assertThat(((SQLException) e).getSQLState()).isEqualTo("23503"));
+        }
+    }
+
+    // ── Order 38/39 (nexus-eanej): danglingManifestCountDsl re-keyed to
+    //    (tenant_id, collection, chash) ────────────────────────────────────
+    //
+    // fk_catalog_chunks_chunk (catalog-029-manifest-chunk-fk.xml) now
+    // VALIDATEs the SAME triple this fix adds to the DSL join, which makes a
+    // genuinely-dangling row impossible to COMMIT any more — every write
+    // path is already guarded at the database layer. These two tests seed
+    // the corruption inside ONE transaction with the FK explicitly deferred
+    // (the only way to get such a row to exist at all, even momentarily),
+    // assert against that SAME uncommitted connection/DSLContext, then roll
+    // back — no dangling row is ever persisted past the test.
+
+    /** Defers {@code fk_catalog_chunks_chunk} on {@code conn}'s open transaction —
+     *  the ONLY way a manifest row lacking a same-triple content row can exist even
+     *  transiently, since the constraint otherwise rejects the INSERT immediately.
+     *  Mirrors {@code CatalogRepository#deferManifestChunkFk} exactly (SANCTIONED
+     *  RAW there per catalog-029-3's own comment: SET CONSTRAINTS is PostgreSQL
+     *  transaction-control syntax with no jOOQ typed-DSL form at all). */
+    private static void deferManifestChunkFk(Connection conn) throws SQLException {
+        try (var st = conn.createStatement()) {
+            st.execute("SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED");
+        }
+    }
+
+    @Test
+    @Order(38)
+    void danglingManifestCountDsl_chashResolvesOnlyInAnotherCollection_stillCountedDangling() throws Exception {
+        // THE 2.2x-undercount shape (2,951 reported vs 6,501 actual, 2026-08-11
+        // live census): a manifest row whose chash exists ONLY under a DIFFERENT
+        // collection (same tenant) must still be counted dangling. The pre-fix
+        // chash-only NOT EXISTS treated a match under ANY collection as
+        // resolution — falsify by reverting ChashSqlIdioms.danglingManifestCountDsl's
+        // join to CHASH-only and this assertion goes to 0.
+        String tenant = "t-eanej-collision";
+        String collReal = "knowledge__eanej-real__bge-base-en-v15-768__v1";
+        String collDangling = "knowledge__eanej-dangling__bge-base-en-v15-768__v1";
+        String text = "eanej cross-collection decoy content " + System.nanoTime();
+        byte[] chash = HexFormat.of().parseHex(digestHex(text));
+
+        try (Connection conn = dsConnection()) {
+            conn.setAutoCommit(false);
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
+            deferManifestChunkFk(conn);
+            var ctx = DSL.using(conn, SQLDialect.POSTGRES);
+
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(tenant, collReal)
+               .execute();
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(tenant, collDangling)
+               .execute();
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(tenant, "eanej-doc-1", "eanej doc", collDangling)
+               .execute();
+            // The content lands ONLY in collReal -- the decoy match a chash-only
+            // join would have wrongly resolved the collDangling row against.
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                           CHUNKS.EMBEDDING_768)
+               .values(tenant, collReal, chash, text, zeroVector(768))
+               .execute();
+            // The manifest row names collDangling: no content row exists at
+            // (tenant, collDangling, chash) -- FK-legal here ONLY because the
+            // constraint was deferred above.
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                           CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                           CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+               .values(tenant, "eanej-doc-1", 0, chash, collDangling)
+               .execute();
+
+            assertThat(ChashSqlIdioms.danglingManifestCountDsl(ctx))
+                .as("the manifest row's chash resolves only under a DIFFERENT collection -- "
+                    + "the pre-fix chash-only join would have read this as resolved (0); the "
+                    + "triple-keyed join must still count it as dangling")
+                .isEqualTo(1);
+
+            conn.rollback();  // never commit a genuinely-dangling row
+        }
+    }
+
+    @Test
+    @Order(39)
+    void danglingManifestCountDsl_noMatchAnywhere_isCountedAndWouldAbortFinalize() throws Exception {
+        // The companion in-scope case: a manifest row whose chash resolves
+        // NOWHERE at all (no decoy collection, no decoy tenant) must still be
+        // counted -- this is the count StagingPromoteOps#finalizeTenant step 7
+        // feeds its abort gate with (throws IllegalStateException when nonzero).
+        String tenant = "t-eanej-nodecoy";
+        String coll = "knowledge__eanej-nodecoy__bge-base-en-v15-768__v1";
+        byte[] ghostChash = HexFormat.of().parseHex(
+            digestHex("eanej ghost content resolving nowhere " + System.nanoTime()));
+
+        try (Connection conn = dsConnection()) {
+            conn.setAutoCommit(false);
+            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, tenant, false);
+            deferManifestChunkFk(conn);
+            var ctx = DSL.using(conn, SQLDialect.POSTGRES);
+
+            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
+               .values(tenant, coll)
+               .execute();
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(tenant, "eanej-doc-2", "eanej doc 2", coll)
+               .execute();
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                           CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                           CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+               .values(tenant, "eanej-doc-2", 0, ghostChash, coll)
+               .execute();
+
+            assertThat(ChashSqlIdioms.danglingManifestCountDsl(ctx))
+                .as("no content row exists anywhere for this chash -- must be counted, "
+                    + "the same signal finalizeTenant's abort gate consumes")
+                .isEqualTo(1);
+
+            conn.rollback();
         }
     }
 }

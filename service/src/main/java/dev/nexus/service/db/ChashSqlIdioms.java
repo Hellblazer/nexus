@@ -196,12 +196,43 @@ public final class ChashSqlIdioms {
      * not, full stop — {@link #CHUNK_TABLES} / {@link
      * dev.nexus.service.vectors.DimTables#CHUNKS_TABLE_NAME} is the single
      * authority for that one table name.
+     *
+     * <p><b>Re-keyed to {@code (tenant_id, collection, chash)} (nexus-eanej,
+     * the 2026-08-11 2.2x-undercount fix: 2,951 reported vs 6,501 actual).</b>
+     * The predicate was CHASH-ONLY before this fix — a manifest row's chash
+     * matching {@code nexus.chunks} under ANY tenant/collection read as
+     * resolved, even when no content row exists at the manifest row's OWN
+     * {@code (tenant_id, collection, chash)} triple. Every other detector in
+     * this codebase that answers the same question already keys the full
+     * triple — {@code catalog-025-collection-not-null.xml}'s dangling-row
+     * cleanup, the {@code fk_catalog_chunks_chunk} FK itself
+     * ({@code catalog-029-manifest-chunk-fk.xml}, {@code REFERENCES
+     * nexus.chunks (tenant_id, collection, chash)}), and {@code
+     * gc_quarantine_orphans}'s anti-join — this method now matches that
+     * house pattern instead of being the one chash-only outlier. The {@code
+     * tenant_id} conjunct is defense-in-depth rather than an independently
+     * observable fix under normal access: every known caller runs inside
+     * {@link TenantScope#withTenant}, and both {@code
+     * catalog_document_chunks} and {@code chunks} carry FORCE ROW LEVEL
+     * SECURITY keyed on {@code nexus.tenant} (RDR-191 GATE-2 census, T2
+     * [22383] cell 3's identical reasoning for {@code contentCollapseDelete}:
+     * a cross-tenant chash coincidence is already invisible to a
+     * {@code nexus_svc} (NOBYPASSRLS) session regardless of this predicate)
+     * — but the SQL text should not depend on RLS alone to be correct, and a
+     * future BYPASSRLS caller (an admin/diagnostic path) would otherwise
+     * silently inherit the same undercount. {@code collection} is the
+     * operative half of the fix: RLS carries no per-collection dimension at
+     * all, so a chash landing in a DIFFERENT collection under the SAME
+     * tenant was the actual undercount driver, unprotected by RLS or
+     * anything else.
      */
     public static Integer danglingManifestCountDsl(org.jooq.DSLContext ctx) {
         return ctx.selectCount()
             .from(CATALOG_DOCUMENT_CHUNKS)
             .where(DSL.notExists(ctx.selectOne().from(CHUNKS)
-                    .where(CHUNKS.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))
+                    .where(CHUNKS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID))
+                    .and(CHUNKS.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION))
+                    .and(CHUNKS.CHASH.eq(CATALOG_DOCUMENT_CHUNKS.CHASH))))
             .fetchOne(0, Integer.class);
     }
 
