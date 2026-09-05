@@ -183,6 +183,8 @@ def catalog_garbage(client: CatalogGarbageClient) -> CatalogGarbage:
     try:
         links = client.orphaned_links()
         trash = client.purge_trash(older_than_days=TRASH_MAX_AGE_DAYS, dry_run=True)
+        # Both are reads (the purge is a dry run); callers pass the READ
+        # handle, never the write-only proxy, which refuses orphaned_links.
     except Exception as exc:  # noqa: BLE001 - a doctor check reports, never crashes the run
         return CatalogGarbage(0, 0, 0, error=str(exc))
     return CatalogGarbage(
@@ -199,15 +201,23 @@ class ReclaimReport:
     stranded_chunks: int
 
 
-def reclaim_catalog_garbage(client: CatalogGarbageClient) -> ReclaimReport:
+def reclaim_catalog_garbage(
+    client: CatalogGarbageClient, *, reader: CatalogGarbageClient | None = None,
+) -> ReclaimReport:
     """Delete every orphaned link, then purge trash past the window.
 
     Links first: a tombstoned document's links are what stranded the 61
     found on 2026-09-05, and the purge does not touch links. Raises on an
     engine error; ``--fix`` is an explicit act and must fail loud.
+
+    ``reader`` serves the ``orphaned_links`` READ; it defaults to
+    ``client``. The admin CLI's write-only catalog proxy refuses every
+    name outside its write whitelist, so the CLI passes its read handle
+    here and keeps the writer for ``unlink`` and ``purge_trash`` (the
+    2026-09-05 doctor --fix AttributeError).
     """
     deleted = 0
-    for link in client.orphaned_links():
+    for link in (reader or client).orphaned_links():
         deleted += client.unlink(link["from_tumbler"], link["to_tumbler"], link["link_type"])
     result = client.purge_trash(older_than_days=TRASH_MAX_AGE_DAYS, dry_run=False)
     report = ReclaimReport(

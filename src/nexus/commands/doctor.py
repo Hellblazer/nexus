@@ -1920,11 +1920,13 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         # The garbage sweep's reclaim half (nexus.garbage, Sam 2026-09-05):
         # the main sweep counts catalog litter on every run; this is the
         # one command that removes it. Fails loud on an engine error.
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.commands.catalog import _get_catalog_writer  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.garbage import TRASH_MAX_AGE_DAYS, reclaim_catalog_garbage  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         writer = _get_catalog_writer()
         try:
-            reclaimed = reclaim_catalog_garbage(writer)
+            # The writer refuses reads; the read handle serves orphaned_links.
+            reclaimed = reclaim_catalog_garbage(writer, reader=make_catalog_reader())
         finally:
             writer.close()
         click.echo(

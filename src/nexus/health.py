@@ -2128,21 +2128,17 @@ def _check_garbage() -> list[HealthResult]:
         results.append(HealthResult(label="Local garbage", ok=True, detail="none"))
 
     try:
-        from nexus.commands.catalog import _get_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import
-        writer = _get_catalog_writer()
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+        reader = make_catalog_reader()
     except Exception as exc:  # noqa: BLE001 - report, never crash doctor
         results.append(HealthResult(
             label="Catalog garbage", ok=False, warn=True,
             detail=f"could not open the catalog: {exc}",
         ))
         return results
-    try:
-        garbage = catalog_garbage(writer)
-    finally:
-        try:
-            writer.close()
-        except Exception:  # noqa: BLE001 - close is best-effort on a read path
-            pass
+    # Counting is all reads (the purge is a dry run), so the READ handle
+    # serves it; the write-only proxy refuses ``orphaned_links``.
+    garbage = catalog_garbage(reader)
     if garbage.error:
         results.append(HealthResult(
             label="Catalog garbage", ok=False, warn=True,

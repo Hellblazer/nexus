@@ -167,3 +167,34 @@ def test_lease_clear_also_removes_the_mint_lock(tmp_path: Path) -> None:
     assert not lock.exists()
     assert not list(tmp_path.glob("t1_*")), "a finished session leaves no T1 files"
     clear_t1_session_lease("sess-1", tmp_path)  # idempotent
+
+
+class _WriteOnlyProxy:
+    """The admin CLI's writer shape: whitelisted writes only, every read
+    refused with AttributeError (what doctor --fix hit on 2026-09-05)."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def unlink(self, *a, **k):
+        return self._inner.unlink(*a, **k)
+
+    def purge_trash(self, *a, **k):
+        return self._inner.purge_trash(*a, **k)
+
+    def __getattr__(self, name):
+        raise AttributeError(f"{name!r} is not a catalog write op")
+
+
+class TestReclaimUsesTheReadHandleForReads:
+    def test_reclaim_reads_orphaned_links_through_reader_not_writer(self):
+        inner = _FakeCatalog(_LINKS, _TRASH)
+        writer = _WriteOnlyProxy(inner)
+        r = reclaim_catalog_garbage(writer, reader=inner)
+        assert r.links_deleted == len(_LINKS)
+        assert catalog_garbage(inner).orphaned_links == 0
+
+    def test_reclaim_with_write_only_proxy_and_no_reader_fails_loud(self):
+        writer = _WriteOnlyProxy(_FakeCatalog(_LINKS, _TRASH))
+        with pytest.raises(AttributeError):
+            reclaim_catalog_garbage(writer)
