@@ -1153,178 +1153,20 @@ Every shipped template must be *offerable* — reachable by some question. A tem
 
 ### T1's three scopes and the CLI/MCP split-brain (nexus-aj564)
 
-> Rule of record: JDR-001 (`docs/rdr/joint/JDR-001-t1-three-scopes.md`). This section is the measured explanation behind it.
-
-The T1 session-scoping decision above describes a single session-id-scoped
-T1. In practice three distinct scopes exist simultaneously, and probes on
-2026-08-03 (T2 `nexus/subagent-reliability-findings-2026-08-03`, id 21371;
-homework id 21370) measured them diverging live:
-
-1. **MCP-tool T1** (the `mcp__plugin_conexus_nexus__scratch` tools) is scoped
-   to the session id **frozen into the MCP server process's env at spawn**.
-   Because the MCP server is a long-lived process, this scope survives
-   `/clear` and `/resume` within the same Claude app process — every later
-   harness session in that process keeps writing to the *original* spawn
-   session's scope. It is lost only when the MCP server itself restarts.
-   Agent-tool subagents inherit this scope regardless of nesting depth: a
-   probed sub-subagent (dispatched by a subagent, not by the top-level
-   orchestrator) wrote to and was visible in the same frozen scope as its
-   grandparent. Only depth 1 was directly probed; deeper nesting is inferred
-   rather than measured, but the mechanism (OS-level env inheritance at
-   process spawn, not session-aware routing) does not change with depth, so
-   the same result is expected at any depth.
-2. **`nx` CLI T1** (`nx scratch`) is scoped to the *current transcript
-   session* when a live `t1_session_lease.<sid>` exists under
-   `~/.config/nexus/`. What happens with no live lease now depends on
-   *how* the session id was resolved (nexus-f7xyq, closed, shipped in commit
-   c0568bcd, `src/nexus/db/t1.py:1613-1670`):
-   - An **explicit** session id — `NX_SESSION_ID` or
-     `CLAUDE_CODE_SESSION_ID` set — with no usable lease now **fails loud**,
-     raising `T1ServerNotFoundError`, rather than silently reading another
-     session's data. (`NX_T1_ALLOW_SHARED_FALLBACK=1` is a deliberate,
-     logged escape hatch used by `conexus/hooks/scripts/pre_close_verification_hook.sh`
-     to reach the shared CLI-dedicated scope on purpose.)
-   - A **bare** invocation — neither env var set, including when a session
-     id happens to resolve via the machine-wide `current_session` file —
-     is not making an explicit-session claim, so it still falls through to
-     a shared, CLI-dedicated identity by design; this is intentional
-     continuity for interactive `nx scratch` use, not the bug nexus-f7xyq
-     fixed. A forensic probe that supplies an explicit session id now
-     errors instead of silently returning another session's data; only a
-     bare-invocation probe still reads the shared identity.
-3. **`~/.config/nexus/current_session`** is a machine-wide, last-writer-wins
-   fallback *file* (read by `resolve_active_session_id()`'s tier-4 fallback,
-   not a callable of that name itself). A concurrent, unrelated Claude
-   session can own it at any given instant — it is not a per-conversation
-   value.
-
-**Split-brain, measured:** in the same instant, in the same conversation,
-`nx scratch list` (CLI path) returned 2 entries while the MCP scratch list
-(MCP path) returned 39. The 2 CLI entries were exactly the `review-completed`
-markers — that convention had silently adapted to the split (written via the
-CLI, read via the CLI by the pre-push hook) long before the mechanism behind
-the split was understood.
-
-**Correction of a previously recorded lesson:** "prior-session T1 is never
-searchable" is **true only for the CLI path**. The MCP scope survives
-`/clear` for at most one handoff-watch poll tick (nexus-d76vc, ≤5s — see
-the "Update 2026-08-07" note below; this superseded the original,
-now-inaccurate "for the life of the MCP server process" wording), so
-prior-conversation T1 remains readable via the MCP scratch tools only in
-that brief window immediately after `/clear`, not indefinitely for the
-rest of the app process's life.
-
-The incident that originally produced the false lesson was **not** a scope
-mix-up — both the failed search and the eventual write landed in the *same*
-MCP scope (the failed search even found sibling `sj4a3`-tagged entries
-there). It was a **timing race**: the orchestrator searched T1 while the
-background agent was still running, found nothing yet, and hand-wrote a
-recovery note declaring the write-back lost. The agent's write landed
-moments later, in the same scope the search had already checked (T2
-`nexus/subagent-reliability-findings-2026-08-03` id 21371, Q1/Q3; T2 id
-21373 independently reproduces the same race class). The operative rule is
-therefore **"confirm the agent has actually terminated before declaring a
-write-back lost"** — an idempotent-notification-handling discipline — not
-"check which scope you're reading."
-
-**Practical guidance:**
-
-- `review-completed` markers go through the **`nx` CLI** — that is what
-  `pre_close_verification_hook.sh` (the bead-close review gate) reads.
-  Writing them via the MCP scratch tool alone does not satisfy the hook.
-  (The push-time review-coverage gate that used to read the same markers,
-  `git_add_all_redirects_to_explicit_paths.py`, was deleted 2026-08-22.)
-- Design-of-record and write-back entries stored only via the **MCP scratch
-  tool** die with the MCP process. Anything that must survive an MCP restart
-  or be readable across sessions/processes belongs in T2 (`nx memory put`),
-  not T1.
-- Before declaring an agent's T1 write-back lost: confirm the agent has
-  actually terminated (not just that a search came back empty) — a search
-  that races a still-running agent is expected to find nothing, and that is
-  not evidence of loss.
-
-**Update 2026-08-07 (nexus-d76vc): the MCP scope now follows `/clear`/`/resume`.**
-Item 1 above ("frozen into the MCP server process's env at spawn... survives
-`/clear` and `/resume`") described the mechanism as a *permanent* limitation.
-It no longer is: freeze-at-spawn was the honest response to a missing
-signal — the MCP server samples the session id once because the MCP
-protocol carries no per-request session-id channel, so a long-lived server
-has no way to *learn* that the transcript changed. nexus-d76vc supplies that
-missing signal instead of accepting the freeze:
-
-- **Marker writer** (`nexus.hooks._write_t1_handoff_markers`, invoked from
-  `session_start()`). The conexus SessionStart hook fires on matcher
-  `startup|resume|clear|compact` and already runs `nx hook session-start`
-  (`conexus/hooks/hooks.json`). On `source=clear` or `source=resume` — the
-  two Claude Code SessionStart `source` values where the transcript's
-  session id changes out from under an already-running MCP server —
-  the hook writes `~/.config/nexus/t1_handoff.<mcp_pid>` naming the NEW
-  session id, for every live `nx-mcp`/`nx-mcp-catalog` sibling of the
-  hook's own claude ancestor (`nexus.session.find_mcp_sibling_pids`).
-  `startup` spawns brand-new MCP servers (nothing frozen yet) and
-  `compact` keeps the same session id (no divergence); neither writes a
-  marker.
-- **Watcher** (`nexus.mcp.core._t1_handoff_watch_loop` /
-  `_t1_handoff_tick`), a dedicated poll independent of the existing
-  token-refresh loop (whose interval is hours, far too coarse for a user
-  action expected to take effect promptly). Each tick checks for its own
-  marker; when one is present it re-derives its OWN claude ancestor
-  (never trusting the marker's claimed `claude_pid` alone — the marker's
-  authentication is ancestry-based on BOTH sides, per the rn3wo.1
-  never-share-identity property), validates the claimed session id and
-  the marker's freshness, then RE-LEASES: mint-or-borrow a token for the
-  new session (`nexus.db.t1._lock_guarded_mint_or_borrow`, the same
-  flock-guarded helper the original mint path uses, so a racing sibling
-  MCP converges to one mint), swap `NX_T1_SESSION`/`NX_T1_SESSION_ID`,
-  drop the cached T1 singleton (`nexus.mcp_infra.reset_t1_for_release`)
-  so the next tool call reconstructs against the new scope, and stop
-  refreshing the old lease. A rejected marker (ancestry mismatch, stale,
-  malformed) is logged loudly and **deleted** — never left in place to be
-  silently retried forever.
-- **Ownership semantics (locked design decision).** The pre-`/clear`
-  session's T1 rows are **not** migrated onto the new session id — they
-  strand under the old id and age out via the ordinary T1 TTL sweep.
-  Migrating would silently merge two conversations the user explicitly
-  separated with `/clear`.
-- **Consequence:** MCP-tool T1 and `nx` CLI T1 converge to the SAME scope
-  for a given conversation at all times (modulo the watcher's short poll
-  interval, `_T1_HANDOFF_WATCH_INTERVAL_S`, currently 5s) — item 1 above
-  is now the STEADY STATE between events, not a standing divergence.
-  Subagents need no separate handling (MUST-HOLD 4): an Agent-tool
-  dispatch shares its parent's MCP server *process*, so the re-lease's
-  process-wide state swap (env vars + the mcp_infra singleton) is visible
-  to every tool call in that process — parent conversation or dispatched
-  subagent alike — without any subagent-specific code.
-- **What did NOT change:** the CLI-vs-MCP resolution mechanics in items 2
-  and 3 above, the nexus-f7xyq fail-loud contract for an explicit session
-  id with no usable lease, and the "operator `claude -p` subprocess"
-  scopes documented in `T1 sub-agent contract (RDR-105)` (`AGENTS.md`).
-  This fix closes the ONE specific divergence window item 1 described; it
-  does not touch how a session id is resolved in the first place.
-
-**Update 2026-08-22 (nexus-ggvi0): the handoff layer stays — respawn-on-`/clear` is FALSE.**
-A proposal to collapse T1 session identity onto `CLAUDE_CODE_SESSION_ID`
-alone — deleting the entire nexus-d76vc marker/watcher apparatus above
-(~700 lines) on the premise that Claude Code terminates and respawns MCP
-servers on every `/clear`/`/resume` — was falsified before any spike
-spend, from the live install's own logs on Claude Code 2.1.238:
-`~/.config/nexus/logs/mcp.log` shows `t1_handoff_released` events in
-which the SAME `mcp_pid` releases two DIFFERENT `old_session_id`s hours
-apart. The MCP server process survives session changes; its env-at-spawn
-goes stale; the handoff layer is what keeps its T1 scope current. The
-Claude Code 2.1.163 release-note line about `--resume` therefore means
-newly-spawned servers get the current id at spawn — not that live
-processes refresh. Anyone re-proposing the deletion must first re-prove
-respawn behavior on the then-current Claude Code (the disproof method:
-grep `mcp.log` for `t1_handoff_released` and compare `mcp_pid` across
-`old_session_id`s). Deletability inventory with the ordered 7-guarantee
-list a future re-proposal must test: T2
-`nexus/s1-t1-identity-inventory-2026-08-22` [23344]. Two facts from that
-inventory stand regardless: the lease layer (§2 there) solves token
-sharing, not id resolution, and survives any respawn outcome; and the
-tier-4 `current_session` flat file is already scoped to genuinely
-no-harness callers by construction — it is reached only when neither
-`NX_SESSION_ID` nor `CLAUDE_CODE_SESSION_ID` is set.
+Rule of record, full text, mechanism and measured history: JDR-001
+(`docs/rdr/joint/JDR-001-t1-three-scopes.md`). In brief: T1 is one
+PG-backed store reached through three scopes that exist at once. MCP-tool
+T1 is scoped to the session id leased at MCP-server spawn and moves only
+when the SessionStart hook's `/clear` or `/resume` handoff marker is
+consumed by the MCP lifespan's watcher (nexus-d76vc, one poll tick, old
+rows strand rather than migrate). `nx` CLI T1 follows the current
+transcript session's live lease, fails loud on an explicit session id
+with no lease (nexus-f7xyq), and falls through to a shared CLI identity
+only on a bare invocation. `~/.config/nexus/current_session` is a
+machine-wide last-writer-wins file, never a per-conversation value.
+Consequences: `review-completed` markers go through the CLI, durable
+write-back goes to T2, and an agent's write-back is declared lost only
+after the agent has terminated.
 
 ## Heritage
 

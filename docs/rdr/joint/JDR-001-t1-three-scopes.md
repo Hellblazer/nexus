@@ -38,6 +38,53 @@ to it; prior-conversation T1 is readable through MCP tools only for one
 handoff poll tick after `/clear`, and the old session's rows strand under
 the old id rather than migrating.
 
+## Mechanism of the MCP-scope handoff (nexus-d76vc, 2026-08-07)
+
+The MCP protocol carries no per-request session id, so a long-lived MCP
+server samples the id once at spawn. The handoff supplies the missing
+signal instead of accepting the freeze. The conexus SessionStart hook
+(`nx hook session-start`, matcher `startup|resume|clear|compact`) writes
+`~/.config/nexus/t1_handoff.<mcp_pid>` naming the NEW session id on
+`source=clear` or `source=resume` only, for every live `nx-mcp` /
+`nx-mcp-catalog` sibling of the hook's own claude ancestor
+(`nexus.session.find_mcp_sibling_pids`); `startup` spawns fresh servers
+and `compact` keeps the id, so neither writes one. The MCP lifespan's
+watcher (`nexus.mcp.core._t1_handoff_watch_loop`, its own poll,
+`_T1_HANDOFF_WATCH_INTERVAL_S` = 5s, independent of the hours-scale token
+refresh) re-derives its OWN ancestry rather than trusting the marker,
+validates the id and freshness, then re-leases: mint-or-borrow through
+`nexus.db.t1._lock_guarded_mint_or_borrow`, swap `NX_T1_SESSION` /
+`NX_T1_SESSION_ID`, drop the T1 singleton
+(`nexus.mcp_infra.reset_t1_for_release`), stop refreshing the old lease.
+A rejected marker is logged and deleted, never retried forever. The old
+session's rows are not migrated: `/clear` separated two conversations on
+purpose. Agent-tool subagents need no handling because they share the
+parent's MCP process and see the process-wide swap.
+
+## Standing falsification: respawn-on-`/clear` is FALSE (nexus-ggvi0, 2026-08-22)
+
+A proposal to delete the handoff layer on the premise that Claude Code
+respawns MCP servers on every `/clear` / `/resume` was disproved from the
+live install's `~/.config/nexus/logs/mcp.log`: `t1_handoff_released`
+events show the SAME `mcp_pid` releasing DIFFERENT `old_session_id`s hours
+apart. Anyone re-proposing the deletion must first re-prove respawn on the
+then-current Claude Code by the same grep. Inventory and the seven
+guarantees a re-proposal must test: T2
+`nexus/s1-t1-identity-inventory-2026-08-22` [23344].
+
+## Measured record
+
+Probes of 2026-08-03 (nexus-aj564; T2
+`nexus/subagent-reliability-findings-2026-08-03` [21371], homework
+[21370]): `nx scratch list` returned 2 entries while the MCP scratch list
+returned 39 in the same instant and conversation; the 2 were the
+`review-completed` markers, a convention that had adapted to the split
+before the split was understood. The lesson "prior-session T1 is never
+searchable" was traced to a timing race, not a scope mix-up: the search
+ran before the writing agent had terminated, and the write landed moments
+later in the scope already checked (T2 [21373] reproduces the class).
+Confirm an agent has terminated before declaring its write-back lost.
+
 ## Owners
 
 - RDR-105 (`rdr-105-t1-chroma-architecture-env-passdown.md`): the
@@ -52,9 +99,9 @@ the old id rather than migrating.
 ## Cited by
 
 - `AGENTS.md` § T1 sub-agent contract (RDR-105), the "three T1 scopes"
-  bullet and its corrected lesson.
+  bullet (a summary and this pointer).
 - `docs/architecture.md` § T1's three scopes and the CLI/MCP split-brain
-  (nexus-aj564), the measured record this rule was extracted from.
+  (a summary and this pointer).
 - `conexus/hooks/scripts/pre_close_verification_hook.sh`, whose
   write-side contract is consequence 3.
 
@@ -65,3 +112,8 @@ the old id rather than migrating.
   drifted once (the "for the life of the MCP process" lesson corrected in
   AGENTS.md on nexus-d76vc). This file is now the rule; both keep their
   prose as explanation and cite this number.
+- 2026-09-04: Sam's ruling on the critic's finding [24392] that three
+  full copies drift: AGENTS.md and docs/architecture.md are trimmed to a
+  summary plus this pointer, and the handoff mechanism (nexus-d76vc), the
+  respawn falsification (nexus-ggvi0) and the measured record they carried
+  move here, condensed. This file is the only full text.
