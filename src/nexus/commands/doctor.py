@@ -1785,6 +1785,20 @@ def _run_supplementary_checks() -> None:
     show_default=True,
     help="Retention window for --trim-telemetry (days; minimum 1).",
 )
+@click.option(
+    "--git-hooks-scope",
+    "git_hooks_scope",
+    default=None,
+    type=click.Path(),
+    help="Restrict the git-hooks stanza-drift check (part of the default "
+         "sweep) to repos registered at or under this root; repos "
+         "elsewhere are excluded from the walk instead of being reported. "
+         "The registered-repo catalog is shared machine-wide, not scoped "
+         "to $HOME, so a bare sweep run from an isolated automation "
+         "sandbox otherwise also sees (and can be reddened by) every "
+         "other repo ever indexed on the same machine. Default: unscoped, "
+         "walks every registered repo. nexus-jds59.",
+)
 def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                fix_paths: bool, dry_run: bool, check_schema: bool,
                check_search: bool, check_resources: bool,
@@ -1801,7 +1815,8 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_tier_discipline: bool,
                check_storage_boundary: bool,
                fail_on_violation: bool,
-               phase: str | None) -> None:
+               phase: str | None,
+               git_hooks_scope: str | None) -> None:
     """Verify that all required services and credentials are available."""
     if json_out:
         # nexus-0vycz: --json is honored by the main sweep (no mode flag)
@@ -2049,7 +2064,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
     # ── Health check path — delegates to nexus.health ─────────────────────────
     from nexus.health import run_health_checks, format_health_for_cli, format_health_for_json  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    results, is_local = run_health_checks()
+    results, is_local = run_health_checks(git_hooks_scope=git_hooks_scope)
     output, failed = format_health_for_cli(results, local_mode=is_local)
     if json_out:
         # nexus-0vycz: machine-parseable JSON on stdout only -- no human

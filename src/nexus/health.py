@@ -1620,7 +1620,23 @@ def _check_mcp_entry_points() -> list[HealthResult]:
     return results
 
 
-def _check_git_hooks() -> list[HealthResult]:
+def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]:
+    """Walk registered repos' git hooks for stanza drift.
+
+    ``repo_scope`` (nexus-jds59): the catalog + legacy registry this walk
+    reads from are a SHARED, machine-wide store — not scoped to the
+    caller's ``$HOME``/``NEXUS_CONFIG_DIR``. An automation harness that
+    provisions its own throwaway repo (the release-sandbox shakedown's
+    fixture checkout) still sees every OTHER repo ever registered on the
+    same machine, including the live dev checkout the harness reinstalls
+    from — so a deliberate hold on that repo's hook stanza (e.g. pinned
+    behind an unreleased ``nx`` feature) reds a gate that has nothing to
+    do with it. Passing a root here restricts the walk to repos at or
+    under that root; repos outside it are silently excluded from the
+    result (not even rendered as ``ok``), and the default (``None``)
+    preserves the original walk-every-registered-repo behavior a
+    developer running bare ``nx doctor`` relies on.
+    """
     # nexus-8g79.10 (V2): import from the lower-layer module instead of
     # reaching up into commands/. Use module-attribute access so test
     # monkeypatches on ``nexus._git_hooks_meta.effective_hooks_dir``
@@ -1717,11 +1733,46 @@ def _check_git_hooks() -> list[HealthResult]:
         catalog_repo_roots = set()
         deactivate_capability = "unknown"
 
+    # nexus-jds59: apply the scope filter (if any) BEFORE the "no repos"
+    # branch below, so a scoped walk with nothing in scope reports an
+    # honest "out of scope" reason rather than the unscoped "none
+    # registered at all" message.
+    _scope_root: Path | None = None
+    _excluded_out_of_scope = 0
+    if repo_scope is not None:
+        _scope_root = Path(repo_scope).resolve()
+        _scoped_repos: list[str] = []
+        for repo_str in repos:
+            try:
+                _resolved = Path(repo_str).resolve()
+            except OSError:
+                # Unreadable path component -- treat as out of scope
+                # rather than crashing the filter; the per-repo probe
+                # below already degrades vanished/unreadable roots
+                # honestly for the unscoped walk.
+                _excluded_out_of_scope += 1
+                continue
+            if _resolved == _scope_root or _scope_root in _resolved.parents:
+                _scoped_repos.append(repo_str)
+            else:
+                _excluded_out_of_scope += 1
+        repos = _scoped_repos
+
     if not repos:
-        results.append(HealthResult(
-            label="git hooks", ok=True,
-            detail="no repos registered — run: nx index repo <path>",
-        ))
+        if _scope_root is not None and _excluded_out_of_scope:
+            results.append(HealthResult(
+                label="git hooks", ok=True,
+                detail=(
+                    f"no repos registered under scope {_scope_root} "
+                    f"({_excluded_out_of_scope} registered repo(s) outside "
+                    "scope, skipped)"
+                ),
+            ))
+        else:
+            results.append(HealthResult(
+                label="git hooks", ok=True,
+                detail="no repos registered — run: nx index repo <path>",
+            ))
     else:
         for repo_str in repos:
             repo_path = Path(repo_str)
@@ -6022,8 +6073,13 @@ def _highest_child_seqs(cat: Any) -> dict[str, int]:
     return best
 
 
-def run_health_checks() -> tuple[list[HealthResult], bool]:
+def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[HealthResult], bool]:
     """Run all health checks.
+
+    ``git_hooks_scope``: forwarded to :func:`_check_git_hooks` (nexus-jds59)
+    to restrict the git-hooks stanza-drift walk to repos at or under the
+    given root. ``None`` (default) preserves the original behavior of
+    walking every repo registered on the machine.
 
     Returns (results, is_local_mode).
     """
@@ -6083,7 +6139,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
 
     results.extend(_check_tools())
     results.extend(_check_mcp_entry_points())
-    results.extend(_check_git_hooks())
+    results.extend(_check_git_hooks(repo_scope=git_hooks_scope))
     results.extend(_check_index_log())
     results.extend(_check_orphan_t1_lease())
     results.extend(_check_orphan_t1_handoff())

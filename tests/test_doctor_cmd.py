@@ -458,6 +458,27 @@ def test_doctor_hooks_exception_does_not_propagate(runner):
     assert "git hooks" in result.output
 
 
+def test_doctor_git_hooks_scope_excludes_out_of_scope_repo(runner, tmp_path):
+    """nexus-jds59: ``--git-hooks-scope`` wires through to the CLI. A
+    registered repo outside the given root (the ambient dev-checkout
+    class of repo) is excluded from the walk instead of being reported,
+    while one inside the root is still shown."""
+    reg = MagicMock()
+    in_scope_root = tmp_path / "scope"
+    in_scope_root.mkdir()
+    repo_in_scope = str(in_scope_root / "sandbox-fixture")
+    repo_outside = str(tmp_path / "outside" / "dev-checkout")
+    reg.all.return_value = [repo_in_scope, repo_outside]
+    with tempfile.TemporaryDirectory() as td:
+        result = _invoke(runner, reg, extra_patches=[
+            patch("nexus._git_hooks_meta.effective_hooks_dir",
+                  return_value=Path(td)),
+        ], extra_args=["--git-hooks-scope", str(in_scope_root)])
+    assert result.exit_code == 0, result.output
+    assert repo_in_scope in result.output
+    assert repo_outside not in result.output
+
+
 # ── Index log ───────────────────────────────────────────────────────────────
 
 def test_doctor_index_log_not_created_yet(runner, mock_reg):

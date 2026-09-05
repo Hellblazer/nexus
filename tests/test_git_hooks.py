@@ -461,6 +461,71 @@ class TestDoctorStanzaDrift:
         )
 
 
+# ── doctor git-hooks scope filter (nexus-jds59) ─────────────────────────────
+
+
+class TestDoctorGitHooksScope:
+    """nexus-jds59: an automation harness (the release-sandbox shakedown)
+    can restrict the stanza-drift walk to repos registered under a given
+    root via ``repo_scope``, so an ambient repo elsewhere on the machine
+    — registered through the SAME shared catalog/registry the sandbox's
+    ``nx doctor`` call reads from — is never misattributed to the scoped
+    run. Passing no scope (the default) preserves the pre-existing
+    walk-everything behavior for a developer running bare ``nx doctor``.
+    """
+
+    def _make_repo(self, root: Path, name: str = "repo") -> Path:
+        repo = root / name
+        (repo / ".git" / "hooks").mkdir(parents=True)
+        return repo
+
+    def _seed_registry(self, monkeypatch, cfg_dir: Path, *repos: Path):
+        """RepoRegistry expects ``{repos: {<path>: {...}}}`` JSON shape."""
+        import json
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
+        registry_path = cfg_dir / "repos.json"
+        registry_path.write_text(json.dumps({"repos": {str(r): {} for r in repos}}))
+
+    def test_repo_outside_scope_is_excluded(self, monkeypatch, tmp_path_factory):
+        scope_root = tmp_path_factory.mktemp("scope_root")
+        outside_repo = self._make_repo(tmp_path_factory.mktemp("outside_root"), "dev-checkout")
+        self._seed_registry(monkeypatch, tmp_path_factory.mktemp("nx_config"), outside_repo)
+
+        from nexus.health import _check_git_hooks
+        results = _check_git_hooks(repo_scope=scope_root)
+
+        assert not any(str(outside_repo) in (r.detail or "") for r in results), (
+            f"repo outside scope leaked into results: "
+            f"{[(r.label, r.detail) for r in results]}"
+        )
+
+    def test_repo_inside_scope_is_reported(self, monkeypatch, tmp_path_factory):
+        scope_root = tmp_path_factory.mktemp("scope_root")
+        in_scope_repo = self._make_repo(scope_root, "sandbox-fixture")
+        self._seed_registry(monkeypatch, tmp_path_factory.mktemp("nx_config"), in_scope_repo)
+
+        from nexus.health import _check_git_hooks
+        results = _check_git_hooks(repo_scope=scope_root)
+
+        assert any(str(in_scope_repo) in (r.detail or "") for r in results), (
+            f"repo inside scope missing from results: "
+            f"{[(r.label, r.detail) for r in results]}"
+        )
+
+    def test_no_scope_preserves_walk_everything_default(self, monkeypatch, tmp_path_factory):
+        outside_repo = self._make_repo(tmp_path_factory.mktemp("outside_root"), "dev-checkout")
+        self._seed_registry(monkeypatch, tmp_path_factory.mktemp("nx_config"), outside_repo)
+
+        from nexus.health import _check_git_hooks
+        results = _check_git_hooks()
+
+        assert any(str(outside_repo) in (r.detail or "") for r in results), (
+            f"unscoped call must still report a repo registered anywhere: "
+            f"{[(r.label, r.detail) for r in results]}"
+        )
+
+
 # ── doctor dead-owner rendering (nexus-7kl32 / nexus-9t86i) ────────────────
 
 

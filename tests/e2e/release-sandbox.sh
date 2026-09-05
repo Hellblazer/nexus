@@ -1241,7 +1241,16 @@ case "$MODE" in
         # convention (6xkdu) every other fail-capable step in this arm
         # already uses, so a doctor red produces an explicit verdict line
         # rather than crashing the script.
-        if ! nx doctor 2>&1 | sed 's/^/  /'; then
+        #
+        # nexus-jds59: --git-hooks-scope "$SANDBOX" restricts the
+        # stanza-drift walk (part of the bare sweep above) to repos
+        # registered under this sandbox. The registered-repo catalog is
+        # shared machine-wide, not scoped to $HOME, so an unscoped walk
+        # also sees every other repo ever indexed on this machine —
+        # including the live dev checkout this sandbox reinstalls from,
+        # whose post-commit hook may be deliberately held on an older
+        # stanza. That ambient state has nothing to do with this gate.
+        if ! nx doctor --git-hooks-scope "$SANDBOX" 2>&1 | sed 's/^/  /'; then
             echo "  [FAIL] nx doctor exited non-zero" >&2
             SHAKEDOWN_FAILED+=("10/11 nx doctor")
         fi
@@ -1271,7 +1280,7 @@ case "$MODE" in
         echo "  corpus-integrity instruments (chash conformance, stale index-run"
         echo "  fences, manifest pre-backfill rows) — warn=true by design, so"
         echo "  they never flip bare doctor's exit code; asserting on --json directly:"
-        DOCTOR_JSON_OUT=$(nx doctor --json 2>/dev/null || true)
+        DOCTOR_JSON_OUT=$(nx doctor --json --git-hooks-scope "$SANDBOX" 2>/dev/null || true)
         if [[ -z "$DOCTOR_JSON_OUT" ]]; then
             echo "  [FAIL] nx doctor --json produced no output" >&2
             SHAKEDOWN_FAILED+=("10/11 nx doctor --json (no output)")
