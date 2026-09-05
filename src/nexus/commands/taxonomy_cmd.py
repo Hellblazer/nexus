@@ -17,6 +17,27 @@ from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.db.http_vector_client import VectorServiceError
 
 
+#: nexus-m20mf P3: the key the ``taxonomy`` group callback stashes its
+#: one-per-invocation shared httpx.Client under, inside Click's existing
+#: ``ctx.obj`` dict (``main``'s ``ctx.ensure_object(dict)`` / ``ctx.obj["verbose"]``
+#: in ``src/nexus/cli.py`` — a NEW key in that same dict, never a
+#: replacement of it, so nothing that dict already carries is disturbed).
+_T2_SHARED_CLIENT_CTX_KEY = "_t2_shared_client"
+
+
+def _current_command_shared_client():
+    """Return the current ``nx taxonomy`` invocation's shared ``httpx.Client``,
+    or ``None`` outside a live Click context (direct construction, e.g. from
+    a test or a non-CLI caller) -- ``_T2Database`` below falls back to its
+    pre-existing per-instance-client behavior in that case, so nothing
+    changes for any caller that isn't the ``taxonomy`` group's own
+    subcommands (nexus-m20mf P3, additive)."""
+    ctx = click.get_current_context(silent=True)
+    if ctx is None or not isinstance(ctx.obj, dict):
+        return None
+    return ctx.obj.get(_T2_SHARED_CLIENT_CTX_KEY)
+
+
 def _T2Database(path):
     """Lazy T2Database constructor (avoids module-level import poisoning by test mocks).
 
@@ -30,9 +51,18 @@ def _T2Database(path):
     T2-generated ``topic_id`` inside one lock, which likewise cannot route.
     The reads do not contend on the WAL writer lock; the writes are
     infrequent operator commands, not the automated hot path.
+
+    nexus-m20mf P3: also the single point where every one of those ~17
+    subcommands' ``T2Database`` picks up the ONE shared ``httpx.Client``
+    the ``taxonomy`` group callback built for this command invocation (see
+    ``_current_command_shared_client``) -- 8 domain stores x however many
+    times a subcommand calls this factory, sharing 1 pool instead of 8 (or
+    16, for the two-call subcommands) independent ones. Falls back to
+    ``None`` (T2Database's own pre-existing per-store-client construction)
+    outside a live ``taxonomy`` group invocation.
     """
     from nexus.db.t2 import T2Database  # noqa: PLC0415 - deferred to avoid circular import at module load
-    return T2Database(path)  # boundary-allow: taxonomy CLI factory — read-only subcommands need raw-cursor SELECTs (no WAL writer contention) and discover/rebuild/split interleave chroma-centroid writes keyed on T2-generated topic_ids; neither can cross the daemon RPC (RDR-128 P3 documented-irreducible)
+    return T2Database(path, client=_current_command_shared_client())  # boundary-allow: taxonomy CLI factory — read-only subcommands need raw-cursor SELECTs (no WAL writer contention) and discover/rebuild/split interleave chroma-centroid writes keyed on T2-generated topic_ids; neither can cross the daemon RPC (RDR-128 P3 documented-irreducible)
 
 if TYPE_CHECKING:
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
@@ -328,8 +358,28 @@ def discover_for_collection(
 
 
 @click.group()
-def taxonomy() -> None:
+@click.pass_context
+def taxonomy(ctx: click.Context) -> None:
     """Topic taxonomy — browsable knowledge hierarchy."""
+    # nexus-m20mf P3: one shared httpx.Client for this ENTIRE `nx taxonomy
+    # <subcmd>` process invocation, stashed in ctx.obj (a dict -- ensured,
+    # never replaced, so this coexists with `main`'s own ctx.obj["verbose"]
+    # in src/nexus/cli.py when this group runs under the full `nx` CLI, and
+    # still works standalone when a test invokes `taxonomy` directly via
+    # CliRunner with no parent context at all). Every `_T2Database(...)`
+    # call this invocation makes (up to ~17 subcommands, some calling it
+    # twice) shares this one pool instead of building its own 8 domain-store
+    # clients per call. `ctx.call_on_close` runs at context teardown on
+    # BOTH the success and exception paths (Click's Context is used as a
+    # context manager in BaseCommand.main()), so this is the "closed in a
+    # finally by the owner" contract -- the owner is this group callback,
+    # which built the client, never a subcommand that merely borrows it.
+    from nexus.db.t2._refreshable_client import build_shared_t2_client  # noqa: PLC0415 — deferred to avoid circular import at module load
+
+    ctx.ensure_object(dict)
+    shared_client = build_shared_t2_client()
+    ctx.obj[_T2_SHARED_CLIENT_CTX_KEY] = shared_client
+    ctx.call_on_close(shared_client.close)
 
 
 @taxonomy.command("status")

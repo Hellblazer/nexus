@@ -173,8 +173,29 @@ def _open_catalog_or_none() -> Any:
         return None
 
 
+#: nexus-m20mf P3: mirrors taxonomy_cmd.py's identical mechanism -- the key
+#: the ``index`` group callback stashes its one-per-invocation shared
+#: httpx.Client under, inside Click's existing ``ctx.obj`` dict (a NEW key,
+#: never a replacement of it).
+_T2_SHARED_CLIENT_CTX_KEY = "_t2_shared_client"
+
+
+def _current_index_command_shared_client():
+    """Return the current ``nx index`` invocation's shared ``httpx.Client``,
+    or ``None`` outside a live Click context -- callers building their own
+    ``T2Database`` fall back to the pre-existing per-instance-client
+    behavior in that case (nexus-m20mf P3, additive; see
+    ``taxonomy_cmd._current_command_shared_client`` for the identical
+    mechanism)."""
+    ctx = click.get_current_context(silent=True)
+    if ctx is None or not isinstance(ctx.obj, dict):
+        return None
+    return ctx.obj.get(_T2_SHARED_CLIENT_CTX_KEY)
+
+
 @click.group()
-def index() -> None:
+@click.pass_context
+def index(ctx: click.Context) -> None:
     """Index repositories, PDFs, and Markdown into T3 collections."""
     # RDR-159 P1c (S2 quiesce): suspend ALL indexing while a guided upgrade
     # migration is in flight. Indexing into a half-migrated store would write
@@ -190,6 +211,20 @@ def index() -> None:
             f"{_banner} — nx index is suspended until the upgrade "
             "completes (or fails and is cleared)."
         )
+
+    # nexus-m20mf P3: one shared httpx.Client for this ENTIRE `nx index
+    # <subcmd>` process invocation (repo/pdf/md/rdr/failures), stashed in
+    # ctx.obj -- see taxonomy_cmd.taxonomy's identical mechanism for the
+    # full rationale (dict-key coexistence with main's ctx.obj["verbose"],
+    # ctx.call_on_close firing on both the success and exception paths).
+    # Built AFTER the migration-quiesce guard above so a suspended-index
+    # invocation never bothers constructing a client it will not use.
+    from nexus.db.t2._refreshable_client import build_shared_t2_client  # noqa: PLC0415 — deferred to avoid circular import at module load
+
+    ctx.ensure_object(dict)
+    shared_client = build_shared_t2_client()
+    ctx.obj[_T2_SHARED_CLIENT_CTX_KEY] = shared_client
+    ctx.call_on_close(shared_client.close)
 
 
 @index.command("failures")
@@ -1633,7 +1668,7 @@ def _collections_without_topics(collections: list[str]) -> set[str]:
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
 
     try:
-        with T2Database(default_db_path()) as db:  # boundary-allow: read-only topic-existence probe; no WAL writer contention (RDR-128 P3)
+        with T2Database(default_db_path(), client=_current_index_command_shared_client()) as db:  # boundary-allow: read-only topic-existence probe; no WAL writer contention (RDR-128 P3)
             return {
                 col for col in collections
                 if not db.taxonomy.get_topics_for_collection(col)
@@ -1926,7 +1961,7 @@ def run_collection_postprocessing(
                     f"  Taxonomy: {_n_skipped} unchanged collection(s) skipped "
                     f"(no files written this run)"
                 )
-        with T2Database(default_db_path()) as db:  # boundary-allow: read-only: discover/project compute use a local chroma client; all pure-T2 writes routed via t2_index_write (RDR-151 Phase 3, nexus-uzay8)
+        with T2Database(default_db_path(), client=_current_index_command_shared_client()) as db:  # boundary-allow: read-only: discover/project compute use a local chroma client; all pure-T2 writes routed via t2_index_write (RDR-151 Phase 3, nexus-uzay8)
             for _tax_i, col_name in enumerate(_discover_targets, start=1):
                 _say(f"  [{_tax_i}/{len(_discover_targets)}] Taxonomy: discovering {col_name}...")
                 try:
