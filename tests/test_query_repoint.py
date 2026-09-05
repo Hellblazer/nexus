@@ -149,7 +149,14 @@ def _wire(
 ):
     """Patch all the seams query() calls into."""
     monkeypatch.setattr(core, "_get_t3", lambda: t3)
-    monkeypatch.setattr(core, "_resolve_corpus_target", lambda corpus, _t3: broad_target)
+    # nexus-rbhci: the real _resolve_corpus_target grew a keyword-only
+    # excluded_out param (the fan-out floor's dropped-collection list) —
+    # the no-catalog-params query() path passes it explicitly. **_kw keeps
+    # this fake tolerant of that (and any future keyword-only addition)
+    # without pinning the exact param name here.
+    monkeypatch.setattr(
+        core, "_resolve_corpus_target", lambda corpus, _t3, **_kw: broad_target,
+    )
     monkeypatch.setattr(
         "nexus.db.http_vector_client.is_service_backed", lambda db: service,
     )
