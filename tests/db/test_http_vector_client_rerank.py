@@ -51,7 +51,10 @@ def test_rerank_fields_sent_and_envelope_unpacked(client, monkeypatch):
     assert body["rerank"] is True
     assert body["rerank_top_k"] == 3
     assert rows[0]["rerank_score"] == 0.9
-    assert meta == {"degraded": False, "error": None, "model": "rerank-2.5"}
+    assert meta == {
+        "degraded": False, "error": None, "model": "rerank-2.5",
+        "retry_after_seconds": None,
+    }
 
 
 def test_degraded_envelope_reported(client, monkeypatch):
@@ -68,6 +71,57 @@ def test_degraded_envelope_reported(client, monkeypatch):
     assert meta["degraded"] is True
     assert "HTTP 500" in meta["error"]
     assert rows and "rerank_score" not in rows[0]
+
+
+# ── nexus-n75jg (1vpal critic finding 2): structured retry_after ────────────
+
+
+def test_rate_limited_degrade_reports_retry_after_and_engages_brake(client, monkeypatch):
+    from nexus import rate_brake
+
+    _patch_post(monkeypatch, {
+        "results": [{"id": "a", "content": "x", "distance": 0.2,
+                     "collection": "knowledge__t"}],
+        "rerank_degraded": True,
+        "rerank_error": "Voyage AI is rate limiting the reranker (retry after ~7s): boom",
+        "rerank_retry_after_seconds": 7,
+    }, [])
+    rate_brake.reset_brake()
+
+    meta: dict = {}
+    rows = client.search("q", ["knowledge__t"], rerank=True, rerank_meta_out=meta)
+
+    assert meta["degraded"] is True
+    assert meta["retry_after_seconds"] == 7
+    assert rows and "rerank_score" not in rows[0]
+    # The brake engaged for (at least) the reported retry_after — the next
+    # wait() call blocks rather than being a no-op.
+    brake = rate_brake.get_brake()
+    assert brake._resume_at > brake._clock()  # noqa: SLF001 — asserting the trip actually landed
+    rate_brake.reset_brake()
+
+
+def test_non_rate_limited_degrade_reports_no_retry_after_and_does_not_engage_brake(
+    client, monkeypatch,
+):
+    from nexus import rate_brake
+
+    _patch_post(monkeypatch, {
+        "results": [{"id": "a", "content": "x", "distance": 0.2,
+                     "collection": "knowledge__t"}],
+        "rerank_degraded": True,
+        "rerank_error": "Voyage AI rerank failed: HTTP 500",
+    }, [])
+    rate_brake.reset_brake()
+
+    meta: dict = {}
+    client.search("q", ["knowledge__t"], rerank=True, rerank_meta_out=meta)
+
+    assert meta["degraded"] is True
+    assert meta["retry_after_seconds"] is None
+    brake = rate_brake.get_brake()
+    assert brake._resume_at <= brake._clock()  # noqa: SLF001 — never tripped
+    rate_brake.reset_brake()
 
 
 def test_stale_engine_bare_array_reports_convergence_degrade(client, monkeypatch):

@@ -2252,12 +2252,22 @@ class HttpVectorClient:
         fused rerank stage. The response becomes an object envelope
         ``{"results": [...], "rerank_degraded": ..., ...}``; scored rows carry
         ``rerank_score``. The envelope's degrade state is written into
-        ``rerank_meta_out`` (``{"degraded", "error", "model"}``) — the caller
-        MUST surface a degrade to the user (Gap 2: WARN-only invisibility is
-        the retired defect). An engine predating the fused stage ignores the
-        unknown field and returns a bare array: reported as
+        ``rerank_meta_out`` (``{"degraded", "error", "model", "retry_after_seconds"}``)
+        — the caller MUST surface a degrade to the user (Gap 2: WARN-only
+        invisibility is the retired defect). An engine predating the fused
+        stage ignores the unknown field and returns a bare array: reported as
         ``degraded=True, stale_engine=True`` with the convergence remedy —
         one-engine doctrine, never a refusal.
+
+        ``retry_after_seconds`` (nexus-n75jg, 1vpal critic finding 2) is the
+        engine's structured ``rerank_retry_after_seconds``, present only when
+        the degrade cause was Voyage rate-limiting the reranker — ``None``
+        for every other degrade cause and for a success. When present, this
+        method feeds it straight into the process-wide
+        :class:`~nexus.rate_brake.RateLimitBrake` (source ``"rerank"``) so
+        every other writer in this process paces itself, exactly as a
+        429+Retry-After from a vector/manifest write would — this call
+        itself never retries; the server already served a 200.
         """
         body: dict[str, Any] = {
             "query": query,
@@ -2281,11 +2291,29 @@ class HttpVectorClient:
         if rerank:
             if isinstance(results, dict) and "results" in results:
                 if "rerank_degraded" in results:
+                    retry_after = results.get("rerank_retry_after_seconds")
                     meta = {
                         "degraded": bool(results.get("rerank_degraded")),
                         "error": results.get("rerank_error"),
                         "model": results.get("rerank_model"),
+                        "retry_after_seconds": retry_after,
                     }
+                    if retry_after is not None:
+                        # nexus-n75jg (1vpal critic finding 2): a rate-
+                        # limit-caused rerank degrade now carries a
+                        # STRUCTURED retry_after (the engine's RerankStage
+                        # emits it only for an UpstreamRateLimitedException
+                        # degrade — never for any other degrade cause).
+                        # Feed the shared rate brake so every OTHER writer
+                        # in this process paces itself, exactly as a
+                        # 429+Retry-After from a vector/manifest write
+                        # would (nexus.retry's brake.trip call sites).
+                        # This never retries the search itself — the
+                        # server already served a 200 with distance-order
+                        # rows; the brake trip is purely a signal for
+                        # OTHER callers sharing this process.
+                        from nexus.rate_brake import get_brake  # noqa: PLC0415 — deferred import: leaf module, keeps this otherwise-urllib-only module's load-time graph unchanged
+                        get_brake().trip(float(retry_after), source="rerank")
                 else:
                     # nexus-znwc2: an object envelope WITHOUT the degrade flag
                     # cannot attest rerank ran. The engine's RerankStage emits
@@ -2300,6 +2328,7 @@ class HttpVectorClient:
                             "server reranked; treating results as "
                             "distance-ordered"
                         ),
+                        "retry_after_seconds": None,
                     }
                 results = results["results"]
             else:
@@ -2311,6 +2340,7 @@ class HttpVectorClient:
                         "converges the local engine (managed cloud: server "
                         "upgrade pending)"
                     ),
+                    "retry_after_seconds": None,
                 }
             if rerank_meta_out is not None:
                 rerank_meta_out.update(meta)
