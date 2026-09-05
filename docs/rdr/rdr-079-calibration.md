@@ -1,5 +1,7 @@
 ---
 title: RDR-079 P5 — min_confidence calibration
+id: companion-note
+relates: [RDR-079]
 status: closed
 close_reason: implemented
 type: calibration-artifact
