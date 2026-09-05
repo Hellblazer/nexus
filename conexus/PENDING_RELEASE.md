@@ -31,7 +31,7 @@ mechanize, it matters enough to ship.
 
 ## Awaiting the next release or plugin cut (pinned: v7.30.0)
 
-- `hooks/scripts/rdr_hook.py` (nexus-3o4lt): the SessionStart RDR summary's
+- `conexus/hooks/scripts/rdr_hook.py` (nexus-3o4lt): the SessionStart RDR summary's
   remedy line is `nx index repo <root>`, not `nx index rdr <root>`. The old
   line registered every RDR under the curator owner with an absolute path
   (198 such rows on the work box, invisible to every owner-scoped reader).
