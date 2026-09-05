@@ -487,4 +487,32 @@ class VoyageEmbedderBatchSplitTest {
             logs.stop();
         }
     }
+
+    // ── Bead nexus-s71lr, pass 3: GET /v1/status must show activity for
+    //    cloud installs too (the majority posture, previously always null) ──
+
+    @Test
+    void activitySnapshot_neverEmbeddedIsInactiveWithZeroCounts() {
+        VoyageEmbedder e = embedder("voyage-code-3");
+        EmbedActivitySnapshot snap = e.activitySnapshot();
+        assertThat(snap.active()).isFalse();
+        assertThat(snap.chunksDoneTotal()).isZero();
+        assertThat(snap.queueDepth())
+                .as("no LocalOnnxAdmission-equivalent for the cloud path")
+                .isEqualTo(-1);
+        assertThat(snap.threadWidth()).isEqualTo(-1);
+    }
+
+    @Test
+    void activitySnapshot_reflectsRealActivityAfterAnEmbedCall() {
+        VoyageEmbedder e = embedder("voyage-code-3");
+        e.embed(List.of("a small text"));
+
+        EmbedActivitySnapshot snap = e.activitySnapshot();
+        assertThat(snap.active()).isTrue();
+        assertThat(snap.chunksDoneTotal()).isEqualTo(1);
+        assertThat(snap.subBatchesTotal()).isEqualTo(1);
+        assertThat(snap.lastChunksPerSec()).isGreaterThan(0.0);
+        assertThat(snap.lastActivityAgeMs()).isGreaterThanOrEqualTo(0);
+    }
 }

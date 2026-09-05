@@ -174,6 +174,29 @@ public final class EmbedderRouter implements Embedder {
     }
 
     /**
+     * Bead nexus-s71lr, pass 3 — live embed-activity snapshots for {@code GET
+     * /v1/status}, keyed by each embedder's own {@link Embedder#modelToken()}
+     * (the SAME self-keying {@link #modelEmbedders} already uses, so a key can
+     * never drift from the identity actually dispatched). Iterates {@link
+     * #modelEmbedders} generically — works unchanged for local mode (one
+     * entry, the admission-wrapped bge768) and cloud mode (voyage-code-3 /
+     * voyage-context-3 / voyage-3), because {@link Embedder#activitySnapshot()}
+     * is a default interface method: an embedder that does not track activity
+     * (the MiniLM {@code OnnxEmbedder} fallback, test fakes) is simply absent
+     * from the returned map rather than reported with a fabricated value.
+     */
+    public Map<String, EmbedActivitySnapshot> embedActivitySnapshots() {
+        Map<String, EmbedActivitySnapshot> out = new java.util.LinkedHashMap<>();
+        for (Map.Entry<String, Embedder> e : modelEmbedders.entrySet()) {
+            EmbedActivitySnapshot snap = e.getValue().activitySnapshot();
+            if (snap != null) {
+                out.put(e.getKey(), snap);
+            }
+        }
+        return out;
+    }
+
+    /**
      * Embed texts for a specific collection — picks the correct embedder by prefix.
      *
      * @param collection collection name (four-segment conformant), used for routing

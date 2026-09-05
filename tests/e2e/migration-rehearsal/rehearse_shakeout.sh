@@ -70,6 +70,52 @@
 # SHOULD abort loud.
 set -euo pipefail
 
+# nexus-s71lr: Phase C/D's `nx index repo` calls redirect their whole
+# stdout+stderr into a log file and only tail it (or grep it) AFTER the
+# command returns -- so the client-side heartbeat/eta-ticker lines a stall
+# now prints by default never reach THIS transcript while the command is
+# running, only the log file. Same mechanism as release-sandbox.sh's
+# shakedown mode (which this script has no other coupling to): background
+# a `tail -f` on the step's own log for the run's duration. Accepts more
+# than one log path (Phase D runs two `nx index repo` calls concurrently;
+# plain `tail` natively interleaves multiple files with a filename header
+# on each switch, so one call/one PID covers both).
+#
+# This script has NO pre-existing EXIT/INT/TERM traps to chain -- these are
+# the first ones, not a replacement of anything (confirmed: grep '^trap ' on
+# this file before this change matched nothing). Runs inside a `docker run
+# --rm` container as PID 1 (via run.sh's `--shakeout` invocation) as well as
+# directly on a host for a fast debug loop; either way an interrupted step
+# must not orphan a `tail -f` holding its log open.
+_LIVE_TAIL_PID=""
+
+# Sets _LIVE_TAIL_PID; never call this through `$(...)` (the backgrounded
+# tail inherits the substitution's stdout pipe, so the substitution never
+# sees EOF and the caller hangs -- release-sandbox.sh pass-2 critique,
+# same fix applied here from the start).
+_start_live_log_tail() {
+    local f
+    for f in "$@"; do : > "$f"; done
+    tail -n +1 -f "$@" &
+    _LIVE_TAIL_PID=$!
+}
+
+_stop_live_log_tail() {
+    local tail_pid="$1"
+    kill "$tail_pid" 2>/dev/null || true
+    wait "$tail_pid" 2>/dev/null || true
+    [[ "$_LIVE_TAIL_PID" == "$tail_pid" ]] && _LIVE_TAIL_PID=""
+}
+
+_kill_live_tail() {
+    [[ -n "$_LIVE_TAIL_PID" ]] || return 0
+    kill "$_LIVE_TAIL_PID" 2>/dev/null || true
+    _LIVE_TAIL_PID=""
+}
+trap '_kill_live_tail' EXIT
+trap '_kill_live_tail; exit 130' INT
+trap '_kill_live_tail; exit 143' TERM
+
 FAILS=0
 say()  { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 ok()   { printf '  \033[32mPASS\033[0m %s\n' "$*"; }
@@ -250,7 +296,8 @@ IDX1=/tmp/shakeout-index-1.log
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/index_throughput.sh"
 THROUGHPUT_BASELINES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/index-throughput-baselines.tsv"
 IDX1_T0=$SECONDS
-if nx index repo "$REPO" > "$IDX1" 2>&1; then ok "index run 1 (exit 0)"; else bad "index run 1 failed"; fi
+_start_live_log_tail "$IDX1"; IDX1_TAIL_PID="$_LIVE_TAIL_PID"
+if nx index repo "$REPO" > "$IDX1" 2>&1; then _stop_live_log_tail "$IDX1_TAIL_PID"; ok "index run 1 (exit 0)"; else _stop_live_log_tail "$IDX1_TAIL_PID"; bad "index run 1 failed"; fi
 IDX1_ELAPSED=$((SECONDS - IDX1_T0))
 throughput_engine_shape "$HOME/.config/nexus/logs"
 _tp_rc=0
@@ -274,7 +321,8 @@ printf '\n# touched\n' >> "$REPO/src/mod_1.py"
 printf '\nTouched line.\n' >> "$REPO/docs/doc_1.md"
 ( cd "$REPO" && git add -A && git -c user.email=s@x -c user.name=s commit -qm touch )
 IDX2=/tmp/shakeout-index-2.log
-if nx index repo "$REPO" > "$IDX2" 2>&1; then ok "index run 2 (exit 0)"; else bad "index run 2 failed"; fi
+_start_live_log_tail "$IDX2"; IDX2_TAIL_PID="$_LIVE_TAIL_PID"
+if nx index repo "$REPO" > "$IDX2" 2>&1; then _stop_live_log_tail "$IDX2_TAIL_PID"; ok "index run 2 (exit 0)"; else _stop_live_log_tail "$IDX2_TAIL_PID"; bad "index run 2 failed"; fi
 grep -q "docs_for_chashes_failed" "$IDX2" && bad "staleness-cache failure in run 2" || ok "staleness cache ok in run 2"
 # Incremental assertion: run 2 must process far fewer files than run 1.
 # Skipped files still emit "[n/120] ... skipped" lines — incremental means
@@ -305,6 +353,11 @@ done
 ( cd "$REPO2" && git init -q && git add -A && git -c user.email=s@x -c user.name=s commit -qm seed )
 
 IDXA=/tmp/shakeout-load-a.log; IDXB=/tmp/shakeout-load-b.log
+# nexus-s71lr: one `tail -f` on BOTH logs -- plain tail interleaves multiple
+# files, printing a `==> file <==` header on each switch, so this single
+# backgrounded process (one PID, same _start_live_log_tail/_LIVE_TAIL_PID
+# shape as the single-file Phase C calls above) covers both concurrent runs.
+_start_live_log_tail "$IDXA" "$IDXB"; LOAD_TAIL_PID="$_LIVE_TAIL_PID"
 ( nx index repo "$REPO" --force > "$IDXA" 2>&1 ) &
 PA=$!
 ( nx index repo "$REPO2" > "$IDXB" 2>&1 ) &
@@ -334,6 +387,7 @@ census_concurrent_store_puts 10 "/tmp/load-put"
 # branch instead.
 RA=0; wait "$PA" || RA=$?
 RB=0; wait "$PB" || RB=$?
+_stop_live_log_tail "$LOAD_TAIL_PID"
 [ "$RA" = 0 ] && ok "parallel index A (exit 0)" || bad "parallel index A failed"
 [ "$RB" = 0 ] && ok "parallel index B (exit 0)" || bad "parallel index B failed"
 if [ "$STORE_FAILS" = 0 ]; then

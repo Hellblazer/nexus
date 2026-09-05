@@ -126,35 +126,54 @@ def put_cmd(
         from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
         _fence_begin(catalog_doc_id, content_hash, col_name)
 
+    # nexus-s71lr, deliverable 3 (named literally: "nx store put"): a single
+    # document is still ONE embed call, and a large document's embed can run
+    # a minute+ with zero progress signal at all -- worse than the per-file
+    # loops (not even a start/end line). Same _PhaseHeartbeat mechanism as
+    # `nx index rdr`/`nx index pdf --dir`/`nx store import`: ticks every 5s
+    # for as long as db.put() is in flight. arm() sits immediately before the
+    # try/finally that guards it (code-review-expert finding d), nothing
+    # risky in between.
+    from nexus.commands.index import _PhaseHeartbeat  # noqa: PLC0415 — deferred cross-module import; avoids a hard import-time coupling between two independently-loadable command modules
+    file_heartbeat = _PhaseHeartbeat(
+        is_tty=sys.stdout.isatty(),
+        echo=lambda msg, nl: click.echo(msg, nl=nl, err=True),
+        interval=5.0,
+        prefix="embed",
+    )
+    file_heartbeat.arm(f"storing {title or source}")
     # nexus-b6enc C2: the catalog row is registered BEFORE db.put — on a
     # put failure, delete the row minted IN THIS CALL (never a
     # pre-existing dedup target) so no ghost row survives, then surface
     # the original error. The compensation never raises.
     try:
-        doc_id = db.put(
-            collection=col_name,
-            content=content,
-            title=title,
-            tags=tags,
-            category=category,
-            session_id=session_id,
-            source_agent=agent,
-            ttl_days=ttl_days,
-            catalog_doc_id=catalog_doc_id,
-        )
-    except Exception as put_exc:
-        # nexus-cotmr: mirrors MCP F2's dedup-hit-then-put-failure fix —
-        # stamp 'failed' unconditionally so the fence does not wedge at
-        # 'indexing' with only the 6h doctor sweep as signal. _fence_fail
-        # never raises, so the rollback + re-raise below are unaffected.
-        if catalog_doc_id:
-            from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
-            _fence_fail(catalog_doc_id, str(put_exc))
-        if catalog_doc_id and catalog_row_minted:
-            _rollback_minted_catalog_entry(
-                catalog_doc_id, original_error=str(put_exc),
+        try:
+            doc_id = db.put(
+                collection=col_name,
+                content=content,
+                title=title,
+                tags=tags,
+                category=category,
+                session_id=session_id,
+                source_agent=agent,
+                ttl_days=ttl_days,
+                catalog_doc_id=catalog_doc_id,
             )
-        raise
+        except Exception as put_exc:
+            # nexus-cotmr: mirrors MCP F2's dedup-hit-then-put-failure fix —
+            # stamp 'failed' unconditionally so the fence does not wedge at
+            # 'indexing' with only the 6h doctor sweep as signal. _fence_fail
+            # never raises, so the rollback + re-raise below are unaffected.
+            if catalog_doc_id:
+                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+                _fence_fail(catalog_doc_id, str(put_exc))
+            if catalog_doc_id and catalog_row_minted:
+                _rollback_minted_catalog_entry(
+                    catalog_doc_id, original_error=str(put_exc),
+                )
+            raise
+    finally:
+        file_heartbeat.disarm()
 
     # nexus-b6enc C3: manifest leg off the swallowing fire_batch chain —
     # direct write + verify; failure becomes an explicit non-"Stored:"

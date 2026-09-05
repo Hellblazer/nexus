@@ -311,6 +311,7 @@ public final class Bge768Embedder implements Embedder {
      * engine still embedding, or has it hung?" without tailing logs. Public: the
      * status handler lives in a different package.
      */
+    @Override
     public EmbedActivitySnapshot activitySnapshot() {
         LocalOnnxAdmission gate = admissionGate;
         int queueDepth  = gate != null ? gate.queueLength() : -1;

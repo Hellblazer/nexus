@@ -169,6 +169,16 @@ public final class CceEmbedder implements Embedder {
     private static final long PROGRESS_LOG_INTERVAL_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
     private final EmbedProgressGate progressGate = new EmbedProgressGate(PROGRESS_LOG_INTERVAL_NANOS);
 
+    /**
+     * Bead nexus-s71lr, pass 3: {@code GET /v1/status}'s {@code
+     * local_embed_activity} was null for every cloud install — this class
+     * now feeds the SAME {@link EmbedActivityTracker} mechanism {@link
+     * Bge768Embedder} does. {@code queue_depth}/{@code thread_width} stay
+     * -1 always here (no {@code LocalOnnxAdmission}-equivalent for cloud).
+     */
+    private static final long ACTIVE_WINDOW_NANOS = 2 * PROGRESS_LOG_INTERVAL_NANOS;
+    private final EmbedActivityTracker activityTracker = new EmbedActivityTracker(ACTIVE_WINDOW_NANOS);
+
     /** Terminal-failure vocabulary handed to {@link #retryLoop} — CCE has no
      *  special statuses beyond the loop's shared arms. */
     private static final VoyageRetryLoop.Failures CCE_FAILURES = new VoyageRetryLoop.Failures() {
@@ -257,6 +267,14 @@ public final class CceEmbedder implements Embedder {
     @Override
     public String modelToken() {
         return "voyage-context-3";
+    }
+
+    /**
+     * Bead nexus-s71lr, pass 3 — see {@link #activityTracker}'s javadoc.
+     */
+    @Override
+    public EmbedActivitySnapshot activitySnapshot() {
+        return activityTracker.snapshot(System.nanoTime(), -1, -1);
     }
 
     /**
@@ -407,6 +425,13 @@ public final class CceEmbedder implements Embedder {
             }
             int chunksDone = i + 1;
             long nowNanos = System.nanoTime();
+            double elapsedSecForTracker = (nowNanos - callStartNanos) / 1_000_000_000.0;
+            double chunksPerSecForTracker = elapsedSecForTracker > 0.0 ? chunksDone / elapsedSecForTracker : 0.0;
+            // Bead nexus-s71lr, pass 3: update the wire-visible activity counters on
+            // EVERY completed text, unconditionally — independent of the log line's
+            // own throttling below.
+            activityTracker.record(1, chunksPerSecForTracker, nowNanos);
+
             if (progressGate.shouldLog(nowNanos)) {
                 double elapsedSec = (nowNanos - callStartNanos) / 1_000_000_000.0;
                 double chunksPerSec = elapsedSec > 0.0 ? chunksDone / elapsedSec : 0.0;

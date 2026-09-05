@@ -623,4 +623,33 @@ class CceEmbedderParallelTest {
             logs.stop();
         }
     }
+
+    // ── Bead nexus-s71lr, pass 3: GET /v1/status must show activity for
+    //    cloud installs too (the majority posture, previously always null) ──
+
+    @Test
+    void activitySnapshot_neverEmbeddedIsInactiveWithZeroCounts() {
+        try (CceEmbedder cce = embedder(4)) {
+            EmbedActivitySnapshot snap = cce.activitySnapshot();
+            assertThat(snap.active()).isFalse();
+            assertThat(snap.chunksDoneTotal()).isZero();
+            assertThat(snap.queueDepth())
+                    .as("no LocalOnnxAdmission-equivalent for the cloud path")
+                    .isEqualTo(-1);
+            assertThat(snap.threadWidth()).isEqualTo(-1);
+        }
+    }
+
+    @Test
+    void activitySnapshot_reflectsRealActivityAfterAnEmbedCall() {
+        try (CceEmbedder cce = embedder(4)) {
+            cce.embed(List.of("alpha chunk", "beta chunk"));
+
+            EmbedActivitySnapshot snap = cce.activitySnapshot();
+            assertThat(snap.active()).isTrue();
+            assertThat(snap.chunksDoneTotal()).isEqualTo(2);
+            assertThat(snap.subBatchesTotal()).isEqualTo(2);
+            assertThat(snap.lastActivityAgeMs()).isGreaterThanOrEqualTo(0);
+        }
+    }
 }

@@ -231,6 +231,20 @@ public final class VoyageEmbedder implements Embedder {
     private final EmbedProgressGate progressGate = new EmbedProgressGate(PROGRESS_LOG_INTERVAL_NANOS);
 
     /**
+     * Bead nexus-s71lr, pass 3: {@code GET /v1/status}'s {@code
+     * local_embed_activity} was null for every cloud install (the majority
+     * posture) — this class now feeds the SAME {@link EmbedActivityTracker}
+     * mechanism {@link Bge768Embedder} does, surfaced via {@link
+     * #activitySnapshot()} and aggregated across embedders by {@link
+     * EmbedderRouter#embedActivitySnapshots()}. {@code queue_depth}/{@code
+     * thread_width} stay -1 always here — there is no {@code
+     * LocalOnnxAdmission}-equivalent concept for the cloud path (concurrency
+     * is bounded by Voyage's own rate limits, not a local semaphore).
+     */
+    private static final long ACTIVE_WINDOW_NANOS = 2 * PROGRESS_LOG_INTERVAL_NANOS;
+    private final EmbedActivityTracker activityTracker = new EmbedActivityTracker(ACTIVE_WINDOW_NANOS);
+
+    /**
      * Non-vacuity test instrument (RDR-195, mirrors {@link Bge768Embedder#onnxInvocationCount}):
      * counts every REAL Voyage POST this instance has sent (including internal 429/5xx
      * retries within a single {@link #callApi} call), since construction or the last
@@ -302,6 +316,14 @@ public final class VoyageEmbedder implements Embedder {
     @Override
     public String modelToken() {
         return model;
+    }
+
+    /**
+     * Bead nexus-s71lr, pass 3 — see {@link #activityTracker}'s javadoc.
+     */
+    @Override
+    public EmbedActivitySnapshot activitySnapshot() {
+        return activityTracker.snapshot(System.nanoTime(), -1, -1);
     }
 
     @Override
@@ -406,6 +428,13 @@ public final class VoyageEmbedder implements Embedder {
             chunksDone += batch.size();
 
             long nowNanos = System.nanoTime();
+            double elapsedSecForTracker = (nowNanos - callStartNanos) / 1_000_000_000.0;
+            double chunksPerSecForTracker = elapsedSecForTracker > 0.0 ? chunksDone / elapsedSecForTracker : 0.0;
+            // Bead nexus-s71lr, pass 3: update the wire-visible activity counters on
+            // EVERY planned batch, unconditionally — GET /v1/status must reflect true
+            // current state regardless of how often the log line below fires.
+            activityTracker.record(batch.size(), chunksPerSecForTracker, nowNanos);
+
             if (progressGate.shouldLog(nowNanos)) {
                 double elapsedSec = (nowNanos - callStartNanos) / 1_000_000_000.0;
                 double chunksPerSec = elapsedSec > 0.0 ? chunksDone / elapsedSec : 0.0;

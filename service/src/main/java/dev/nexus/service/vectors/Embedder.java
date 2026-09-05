@@ -61,6 +61,19 @@ public interface Embedder extends AutoCloseable {
         return "unknown";
     }
 
+    /**
+     * Bead nexus-s71lr, pass 3 — live embed-activity snapshot for {@code GET
+     * /v1/status} ({@code dev.nexus.service.http.StatusHandler} via {@code
+     * EmbedderRouter#embedActivitySnapshots()}). Default {@code null} — most
+     * implementations (test fakes) do not track this; only the production
+     * embedders that opted in ({@link Bge768Embedder},
+     * {@link VoyageEmbedder}, {@link CceEmbedder}) override it. {@code null}
+     * means "not tracked", never a fabricated zero-activity reading.
+     */
+    default EmbedActivitySnapshot activitySnapshot() {
+        return null;
+    }
+
     @Override
     default void close() {}
 }

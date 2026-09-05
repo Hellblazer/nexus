@@ -60,6 +60,7 @@ class StatusHandlerTest {
         JsonNode body = get();
         assertThat(body.get("embedding_mode").asText()).isEqualTo("unknown");
         assertThat(body.get("local_embed_activity").isNull()).isTrue();
+        assertThat(body.get("embedder_activity").isEmpty()).isTrue();
     }
 
     @Test
@@ -77,6 +78,40 @@ class StatusHandlerTest {
         JsonNode body = get();
         assertThat(body.get("embedding_mode").asText()).isEqualTo("onnx-local");
         assertThat(body.get("local_embed_activity").isNull()).isTrue();
+        // The fake embedder above does not override activitySnapshot() -> the
+        // interface default (null) -> absent from the map, not fabricated.
+        assertThat(body.get("embedder_activity").isEmpty()).isTrue();
+    }
+
+    @Test
+    void embedderActivity_populatesFromRouterWhenAnEmbedderTracksIt() throws Exception {
+        // Bead nexus-s71lr pass 3: the majority-posture fix -- cloud embedders
+        // (VoyageEmbedder/CceEmbedder) now report through EmbedderRouter's
+        // generic modelEmbedders map, not just the local-mode direct supplier.
+        // Simulated here with a fake Embedder overriding activitySnapshot(),
+        // since a real VoyageEmbedder needs network; the integration proof
+        // that VoyageEmbedder/CceEmbedder's OWN activitySnapshot() reads their
+        // real tracker lives in VoyageEmbedderBatchSplitTest/
+        // CceEmbedderParallelTest.
+        EmbedActivitySnapshot fake = new EmbedActivitySnapshot(
+                true, 42L, 7L, 3.5, 100L, -1, -1);
+        var trackedEmbedder = new dev.nexus.service.vectors.Embedder() {
+            @Override public String modelToken() { return "voyage-code-3"; }
+            @Override public List<float[]> embed(List<String> texts) { return List.of(); }
+            @Override public EmbedActivitySnapshot activitySnapshot() { return fake; }
+        };
+        var router = new EmbedderRouter(trackedEmbedder, "document");
+        start(new StatusHandler(router));
+
+        JsonNode body = get();
+        // local_embed_activity is unaffected -- no supplier was wired for it.
+        assertThat(body.get("local_embed_activity").isNull()).isTrue();
+        JsonNode perEmbedder = body.get("embedder_activity").get("voyage-code-3");
+        assertThat(perEmbedder).isNotNull();
+        assertThat(perEmbedder.get("active").asBoolean()).isTrue();
+        assertThat(perEmbedder.get("chunks_done_total").asLong()).isEqualTo(42L);
+        assertThat(perEmbedder.get("queue_depth").asInt()).isEqualTo(-1);
+        assertThat(perEmbedder.get("thread_width").asInt()).isEqualTo(-1);
     }
 
     @Test

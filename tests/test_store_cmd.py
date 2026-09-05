@@ -158,6 +158,81 @@ def test_store_put_invalid_ttl_shows_error(runner, mock_store, tmp_path):
     assert "5z" in result.output
 
 
+# ── nx store put in-loop heartbeat, always on (nexus-s71lr pass 3) ──────────
+#
+# Deliverable 3 names `nx store put` literally: a single document is still
+# ONE embed call, and a large document's embed can run a minute+ with zero
+# progress signal at all. Same `_PhaseHeartbeat` mechanism as
+# `nx index rdr` / `nx index pdf --dir` / `nx store import`.
+
+
+def test_store_put_heartbeat_ticks_during_a_slow_embed(runner, mock_store, tmp_path, monkeypatch):
+    import time
+    import nexus.commands.index as index_mod
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
+
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+    # No catalog_doc_id -> the manifest-write path (which needs a live engine,
+    # unavailable in this unit-test environment) is skipped entirely; the
+    # heartbeat wraps db.put() regardless of whether catalog registration ran.
+    monkeypatch.setattr("nexus.commands.store._catalog_store_hook_tracked", lambda **kw: ("", False))
+
+    src = tmp_path / "big.md"
+    src.write_text("a large document")
+
+    def _slow_put(**kwargs):
+        time.sleep(0.09)  # several 0.02s intervals elapse with nothing done
+        return "doc-id-slow"
+
+    mock_store.put.side_effect = _slow_put
+    result = runner.invoke(main, ["store", "put", str(src)])
+
+    assert result.exit_code == 0, result.output
+    assert "[embed]" in result.output
+    assert "still running" in result.output
+    assert "elapsed)" in result.output
+
+
+def test_store_put_heartbeat_silent_on_a_fast_put(runner, mock_store, tmp_path, monkeypatch):
+    monkeypatch.setattr("nexus.commands.store._catalog_store_hook_tracked", lambda **kw: ("", False))
+
+    src = tmp_path / "small.md"
+    src.write_text("small content")
+
+    mock_store.put.return_value = "doc-id-fast"
+    result = runner.invoke(main, ["store", "put", str(src)])
+
+    assert result.exit_code == 0, result.output
+    assert "[embed]" not in result.output
+    assert "still running" not in result.output
+
+
+def test_store_put_heartbeat_disarmed_on_exception(runner, mock_store, tmp_path, monkeypatch):
+    import threading
+    import time
+    import nexus.commands.index as index_mod
+
+    class _FastPhaseHeartbeat(index_mod._PhaseHeartbeat):
+        def __init__(self, *, is_tty, echo, interval=None, prefix="post"):
+            super().__init__(is_tty=is_tty, echo=echo, interval=0.02, prefix=prefix)
+
+    monkeypatch.setattr(index_mod, "_PhaseHeartbeat", _FastPhaseHeartbeat)
+    monkeypatch.setattr("nexus.commands.store._catalog_store_hook_tracked", lambda **kw: ("", False))
+
+    src = tmp_path / "boom.md"
+    src.write_text("content that triggers a put failure")
+
+    mock_store.put.side_effect = RuntimeError("boom")
+    result = runner.invoke(main, ["store", "put", str(src)])
+
+    assert result.exit_code != 0
+    time.sleep(0.05)
+    assert not any(t.name == "nx-phase-heartbeat" for t in threading.enumerate())
+
+
 # ── nx store list ────────────────────────────────────────────────────────────
 
 def test_store_list_empty_collection(runner, mock_store):

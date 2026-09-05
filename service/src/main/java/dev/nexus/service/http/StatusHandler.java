@@ -8,6 +8,7 @@ import dev.nexus.service.vectors.EmbedActivitySnapshot;
 import dev.nexus.service.vectors.EmbedderRouter;
 
 import java.io.IOException;
+import java.util.Map;
 import java.util.function.Supplier;
 
 /**
@@ -26,15 +27,28 @@ import java.util.function.Supplier;
  * <pre>{"embedding_mode":"onnx-local",
  *  "local_embed_activity":{"active":true,"chunks_done_total":1024,
  *    "sub_batches_total":64,"last_chunks_per_sec":7.7,
- *    "last_activity_age_ms":230,"queue_depth":0,"thread_width":4}}</pre>
+ *    "last_activity_age_ms":230,"queue_depth":0,"thread_width":4},
+ *  "embedder_activity":{"bge-base-en-v15-768":{...same shape...}}}</pre>
  *
  * <p>{@code embedding_mode} mirrors {@code /version}'s field (via the SAME
  * {@link EmbedderRouter#modeName()}) so a caller does not need a second probe
- * to know which posture it is reading. {@code local_embed_activity} is
- * {@code null} in cloud/voyage mode (nexus-s71lr, code-review-expert pass 2
- * finding a, only ADDS a cloud-mode progress LOG line — the wire counters
- * themselves stay scoped to the local bge path this deliverable named) or when
- * no local embedder is wired for any other reason — never a fabricated value.
+ * to know which posture it is reading.
+ *
+ * <p>{@code local_embed_activity} is the ORIGINAL (deliverable 2) field:
+ * {@code null} in cloud/voyage mode or when no local admission-gate-wired
+ * embedder is supplied — never a fabricated value. Kept unchanged for any
+ * caller already reading it.
+ *
+ * <p>{@code embedder_activity} (bead nexus-s71lr pass 3, ADDITIVE — see the
+ * updated docs/wire-contract-pending.md entry) is a map keyed by each
+ * embedder's own {@link dev.nexus.service.vectors.Embedder#modelToken()},
+ * covering EVERY embedder {@code embedderRouter} dispatches to — local mode's
+ * bge768 (redundant with {@code local_embed_activity} but included for
+ * uniformity) AND, the majority posture this pass closes, cloud mode's
+ * voyage-code-3 / voyage-context-3 / voyage-3. An embedder that does not
+ * track activity (the MiniLM ONNX fallback, test fakes) is simply absent
+ * from the map, never reported with a fabricated value. Empty {@code {}}
+ * when {@code embedderRouter} is null or reports nothing.
  */
 public final class StatusHandler implements HttpHandler {
 
@@ -48,14 +62,19 @@ public final class StatusHandler implements HttpHandler {
     /**
      * @param embedderRouter             the doc-side router; supplies {@code
      *                                    embedding_mode} exactly like {@link
-     *                                    VersionHandler}. Null -> "unknown".
+     *                                    VersionHandler}, and (pass 3) {@code
+     *                                    embedder_activity} via {@link
+     *                                    EmbedderRouter#embedActivitySnapshots()}.
+     *                                    Null -> "unknown" mode, empty activity map.
      * @param localEmbedActivitySupplier reads the live snapshot from the
      *                                    process's {@code Bge768Embedder}
-     *                                    (local mode only). Null in cloud/
-     *                                    voyage mode, where there is no local
-     *                                    embedder to read from -> {@code
-     *                                    local_embed_activity} is omitted as
-     *                                    JSON {@code null}, never fabricated.
+     *                                    (local mode only) for the ORIGINAL
+     *                                    {@code local_embed_activity} field.
+     *                                    Null in cloud/voyage mode, where there
+     *                                    is no local embedder to read from ->
+     *                                    {@code local_embed_activity} is
+     *                                    omitted as JSON {@code null}, never
+     *                                    fabricated.
      */
     public StatusHandler(
             EmbedderRouter embedderRouter,
@@ -70,26 +89,44 @@ public final class StatusHandler implements HttpHandler {
             HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}");
             return;
         }
-        StringBuilder body = new StringBuilder(256);
+        StringBuilder body = new StringBuilder(384);
         body.append("{\"embedding_mode\":")
             .append(HttpUtil.jsonString(embedderRouter != null ? embedderRouter.modeName() : "unknown"));
 
         EmbedActivitySnapshot snap = localEmbedActivitySupplier != null
                 ? localEmbedActivitySupplier.get() : null;
+        body.append(",\"local_embed_activity\":");
         if (snap != null) {
-            body.append(",\"local_embed_activity\":{")
-                .append("\"active\":").append(snap.active())
-                .append(",\"chunks_done_total\":").append(snap.chunksDoneTotal())
-                .append(",\"sub_batches_total\":").append(snap.subBatchesTotal())
-                .append(",\"last_chunks_per_sec\":").append(snap.lastChunksPerSec())
-                .append(",\"last_activity_age_ms\":").append(snap.lastActivityAgeMs())
-                .append(",\"queue_depth\":").append(snap.queueDepth())
-                .append(",\"thread_width\":").append(snap.threadWidth())
-                .append('}');
+            appendSnapshot(body, snap);
         } else {
-            body.append(",\"local_embed_activity\":null");
+            body.append("null");
+        }
+
+        body.append(",\"embedder_activity\":{");
+        Map<String, EmbedActivitySnapshot> perEmbedder = embedderRouter != null
+                ? embedderRouter.embedActivitySnapshots() : Map.of();
+        boolean first = true;
+        for (Map.Entry<String, EmbedActivitySnapshot> e : perEmbedder.entrySet()) {
+            if (!first) body.append(',');
+            first = false;
+            body.append(HttpUtil.jsonString(e.getKey())).append(':');
+            appendSnapshot(body, e.getValue());
         }
         body.append('}');
+
+        body.append('}');
         HttpUtil.send(exchange, 200, body.toString());
+    }
+
+    private static void appendSnapshot(StringBuilder body, EmbedActivitySnapshot snap) {
+        body.append('{')
+            .append("\"active\":").append(snap.active())
+            .append(",\"chunks_done_total\":").append(snap.chunksDoneTotal())
+            .append(",\"sub_batches_total\":").append(snap.subBatchesTotal())
+            .append(",\"last_chunks_per_sec\":").append(snap.lastChunksPerSec())
+            .append(",\"last_activity_age_ms\":").append(snap.lastActivityAgeMs())
+            .append(",\"queue_depth\":").append(snap.queueDepth())
+            .append(",\"thread_width\":").append(snap.threadWidth())
+            .append('}');
     }
 }
