@@ -2094,6 +2094,77 @@ def _check_orphan_t1_lease() -> list[HealthResult]:
     return [HealthResult(label="T1 sessions", ok=True, detail="; ".join(parts))]
 
 
+def _check_garbage() -> list[HealthResult]:
+    """The garbage sweep (:mod:`nexus.garbage`, Sam 2026-09-05).
+
+    Local litter (stale mint locks, rotated logs past 14 days, operator
+    dispatch dumps past 7) is reaped here on every run, the same way the
+    T1 lease and handoff-marker reapers above behave. Catalog litter
+    (orphaned links, tombstones past the one-day window) is COUNTED here
+    and reclaimed only by ``nx doctor --fix``, since each reclaim is an
+    engine write. A non-zero catalog count is a warning that names the
+    command; an unreachable engine is a warning too, never a clean row
+    (nexus-moht0: a sweep that could not look is not a pass).
+    """
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.garbage import catalog_garbage, sweep_local_garbage  # noqa: PLC0415 — deferred to avoid circular import
+
+    results: list[HealthResult] = []
+    report = sweep_local_garbage(nexus_config_dir())
+    if report.failed_count:
+        results.append(HealthResult(
+            label="Local garbage",
+            ok=False, warn=True,
+            detail=(
+                f"reaped {report.removed_count}, could not remove "
+                f"{report.failed_count}: "
+                + ", ".join(f"{k}={len(v)}" for k, v in report.failed.items())
+            ),
+        ))
+    elif report.removed_count:
+        results.append(HealthResult(
+            label="Local garbage", ok=True,
+            detail="reaped " + ", ".join(f"{len(v)} {k}" for k, v in report.removed.items()),
+        ))
+    else:
+        results.append(HealthResult(label="Local garbage", ok=True, detail="none"))
+
+    try:
+        from nexus.commands.catalog import _get_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import
+        writer = _get_catalog_writer()
+    except Exception as exc:  # noqa: BLE001 - report, never crash doctor
+        results.append(HealthResult(
+            label="Catalog garbage", ok=False, warn=True,
+            detail=f"could not open the catalog: {exc}",
+        ))
+        return results
+    try:
+        garbage = catalog_garbage(writer)
+    finally:
+        try:
+            writer.close()
+        except Exception:  # noqa: BLE001 - close is best-effort on a read path
+            pass
+    if garbage.error:
+        results.append(HealthResult(
+            label="Catalog garbage", ok=False, warn=True,
+            detail=f"could not count: {garbage.error}",
+        ))
+    elif garbage.total:
+        results.append(HealthResult(
+            label="Catalog garbage", ok=False, warn=True,
+            detail=(
+                f"{garbage.orphaned_links} orphaned link(s), "
+                f"{garbage.trash_documents} tombstoned document(s) and "
+                f"{garbage.stranded_chunks} stranded chunk(s) past 1 day"
+            ),
+            fix_suggestions=["nx doctor --fix"],
+        ))
+    else:
+        results.append(HealthResult(label="Catalog garbage", ok=True, detail="none"))
+    return results
+
+
 def _check_orphan_t1_handoff() -> list[HealthResult]:
     """Reap orphaned T1 session-handoff markers (nexus-9l147).
 
@@ -6143,6 +6214,7 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     results.extend(_check_index_log())
     results.extend(_check_orphan_t1_lease())
     results.extend(_check_orphan_t1_handoff())
+    results.extend(_check_garbage())
     results.extend(_check_orphan_checkpoints())
     results.extend(_check_orphan_pipelines())
     results.extend(_check_mineru_server())

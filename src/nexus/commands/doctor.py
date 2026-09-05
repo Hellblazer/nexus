@@ -1561,7 +1561,8 @@ def _run_supplementary_checks() -> None:
     "--fix",
     is_flag=True,
     default=False,
-    help="Apply HNSW ef tuning to all local collections (local mode only).",
+    help="Reclaim catalog garbage (orphaned links, tombstones past 1 day); "
+         "then HNSW ef tuning on local collections (local mode only).",
 )
 @click.option(
     "--fix-paths",
@@ -1916,6 +1917,21 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if fix:
+        # The garbage sweep's reclaim half (nexus.garbage, Sam 2026-09-05):
+        # the main sweep counts catalog litter on every run; this is the
+        # one command that removes it. Fails loud on an engine error.
+        from nexus.commands.catalog import _get_catalog_writer  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.garbage import TRASH_MAX_AGE_DAYS, reclaim_catalog_garbage  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        writer = _get_catalog_writer()
+        try:
+            reclaimed = reclaim_catalog_garbage(writer)
+        finally:
+            writer.close()
+        click.echo(
+            f"Catalog garbage reclaimed: {reclaimed.links_deleted} orphaned link(s), "
+            f"{reclaimed.trash_documents} tombstoned document(s), "
+            f"{reclaimed.stranded_chunks} stranded chunk(s) (older than {TRASH_MAX_AGE_DAYS} day)."
+        )
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db.t3 import apply_hnsw_ef  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
