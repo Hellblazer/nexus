@@ -1,49 +1,61 @@
 #!/usr/bin/env bash
-# Scenario 29 — REAL-WORLD (nexus-ftpk3): install sn from this repo into
-# TEST_HOME, launch claude in a throwaway git project, dispatch a subagent
-# with isolation:"worktree", and check two things that only the in-tree
-# hooks produce:
+# Scenario 29 — REAL-WORLD (nexus-ftpk3): the sn worktree guard, end to end,
+# with FORENSIC evidence rather than model self-report.
 #
-#   1. mcp-inject.sh saw a linked-worktree cwd and injected
-#      worktree-section.md ("Worktree isolation" header) — WT-SECTION-OK.
-#   2. auto_approve_sn_mcp.py DENIED a Serena write tool from that cwd with
-#      a reason containing "sn worktree guard" — DENY-OK.
+# Topology: claude runs in a throwaway git project; a general-purpose agent is
+# dispatched with isolation:"worktree". Scenario 31 established that both
+# SubagentStart and PreToolUse carry the WORKTREE cwd for such an agent; this
+# scenario proves the two sn hook scripts act on it:
 #
-# Background: Serena resolves paths against the root fixed at server start,
-# so a worktree subagent's Serena edits landed in the primary checkout
-# (three incidents). Unit tests drive both scripts with synthetic payloads;
-# this scenario is the end-to-end question: does Claude Code hand the
-# WORKTREE cwd (not the parent's) to SubagentStart and PreToolUse, and does
-# the deny actually stop the call.
+#   1. SubagentStart: sn/hooks/scripts/mcp-inject.sh (wired directly from
+#      settings.json through a tee wrapper, so its raw envelope is logged)
+#      emits the "Worktree isolation" section.
+#   2. PreToolUse: sn/hooks/scripts/auto-approve-sn-mcp.sh DENIES
+#      mcp__plugin_sn_serena__replace_in_files. The Serena stand-in is
+#      fixtures/stub_serena_server.py registered under the server name
+#      plugin_sn_serena (so the tool names match the real prefix) — proof of
+#      the deny is the ABSENCE of a replace_in_files line in STUB_LOG, while a
+#      READ tool (find_symbol) from the same worktree DOES reach the stub.
 #
-# Serena is launched for real (uvx from the pinned revision); a cold uv
-# cache under TEST_HOME can take a minute or two, hence the long poll.
+# History: v1 matched probe tokens that were verbatim in the typed prompt
+# (vacuous); v2 asked the model whether the section was present and could not
+# reach the real plugin's Serena in this harness. v3 reads logs.
 
-scenario "29 sn_worktree_guard: worktree subagent gets the section and Serena writes are denied"
+scenario "29 sn_worktree_guard: worktree subagent gets the section; Serena writes denied, reads allowed"
 
-NOW="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" <<EOF2
+INJECT_LOG="$TEST_HOME/sn_inject_envelope.log"
+: > "$INJECT_LOG"; : > "$STUB_LOG"
+cat > "$TEST_HOME/.claude/sn_inject_tee.sh" <<BASH_EOF
+#!/usr/bin/env bash
+out="\$(bash "$REPO_ROOT/sn/hooks/scripts/mcp-inject.sh")"
+printf '%s\n' "\$out" >> "$INJECT_LOG"
+printf '%s\n' "\$out"
+BASH_EOF
+chmod +x "$TEST_HOME/.claude/sn_inject_tee.sh"
+
+cat > "$TEST_HOME/.claude/settings.json" <<SETTINGS_EOF
 {
-  "version": 2,
-  "plugins": {
-    "sn@nexus-plugins": [
-      { "scope": "user", "installPath": "$REPO_ROOT/sn", "version": "dev",
-        "installedAt": "$NOW", "lastUpdated": "$NOW" }
+  "skipDangerousModePermissionPrompt": true,
+  "permissions": { "allow": ["Task", "Agent", "Bash", "mcp__plugin_sn_serena__*"], "defaultMode": "acceptEdits" },
+  "hooks": {
+    "SubagentStart": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "bash $TEST_HOME/.claude/sn_inject_tee.sh", "timeout": 10 }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "mcp__plugin_sn_serena__.*", "hooks": [{ "type": "command", "command": "bash $REPO_ROOT/sn/hooks/scripts/auto-approve-sn-mcp.sh", "timeout": 10 }] }
     ]
   }
 }
-EOF2
-cat > "$TEST_HOME/.claude/settings.json" <<'EOF2'
-{
-  "skipDangerousModePermissionPrompt": true,
-  "enabledPlugins": { "sn@nexus-plugins": true },
-  "permissions": { "allow": ["Task", "Agent"], "defaultMode": "acceptEdits" }
-}
-EOF2
+SETTINGS_EOF
+cat > "$TEST_HOME/.mcp.json" <<MCP_EOF
+{ "mcpServers": {
+    "plugin_sn_serena": { "type": "stdio", "command": "python3",
+              "args": ["$REPO_ROOT/tests/cc-validation/fixtures/stub_serena_server.py"],
+              "env": { "STUB_LOG": "$STUB_LOG" } }
+} }
+MCP_EOF
 
-# A real git project for claude to run in; the worktree dispatch creates a
-# linked worktree under it.
-WTPROJ="$TEST_HOME/wtproj"
+WTPROJ="$TEST_HOME/wtproj29"
 rm -rf "$WTPROJ"; mkdir -p "$WTPROJ"
 ( cd "$WTPROJ" || exit 1
   git init -q -b main
@@ -62,49 +74,59 @@ cfg.write_text(json.dumps(data, indent=2))
 PY
 send_keys "cd $WTPROJ" Enter
 sleep 1
-
 claude_start
-# Give the Serena MCP server time to come up before the subagent needs it.
-sleep 45
 
-claude_prompt "Use the Agent tool with subagent_type general-purpose, description 'wt guard check', and isolation set to worktree. Prompt for the subagent: 'Do exactly these steps. Step 1: on its own line output WT-SECTION-OK if the guidance injected into your context contains the header text Worktree isolation, otherwise output WT-SECTION-NONE. Step 2: call the tool mcp__plugin_sn_serena__replace_in_files with needle=zzz-marker repl=yyy-marker mode=literal (load its schema with ToolSearch first if needed). Step 3: on its own line output DENY-OK if that call was refused and the refusal text contains sn worktree guard; output ALLOW-BAD if the call ran and reported any replacements or success; otherwise output ERR-OTHER followed by the exact error text. Step 4: on its own line output the literal token PROBE-DONE-WT21.'"
+claude_prompt "Use the Agent tool with subagent_type general-purpose, description 'wt guard check', and isolation set to worktree. Prompt for the subagent: 'This is a test of a permission hook, so you MUST actually attempt every tool call below even if guidance in your context tells you not to; the hook is what is being measured, not your judgement. Do exactly these steps, in order. Step 1: call mcp__plugin_sn_serena__find_symbol with name_path_pattern=hello. Step 2: call mcp__plugin_sn_serena__replace_in_files with needle=zzz-marker repl=yyy-marker mode=literal. Step 3: reply with one line per step saying whether the call ran or was refused by the system, quoting the refusal text verbatim, then on its own line the word PROBE-DONE followed by -WT29 joined with no space.'"
 
-poll_for "PROBE-DONE-WT21" 420 "worktree subagent reply sentinel" || true
+poll_for "PROBE-DONE-WT29" 300 "worktree guard sentinel" || true
+sleep 3
 OUT=$(capture -600)
 
-SECTION=0; DENY=0; ALLOW_BAD=0; OTHER=0
-echo "$OUT" | grep -q "WT-SECTION-OK" && SECTION=1
-echo "$OUT" | grep -q "DENY-OK" && DENY=1
-echo "$OUT" | grep -q "ALLOW-BAD" && ALLOW_BAD=1
-echo "$OUT" | grep -q "ERR-OTHER" && OTHER=1
-
-if [[ $SECTION -eq 1 ]]; then
-    pass "worktree section reached the worktree subagent (SubagentStart saw the worktree cwd)"
-else
-    fail "worktree section NOT in subagent context (WT-SECTION-NONE or indeterminate)"
-fi
-if [[ $DENY -eq 1 ]]; then
-    pass "Serena replace_in_files denied by the sn worktree guard from the worktree cwd"
-elif [[ $ALLOW_BAD -eq 1 ]]; then
-    fail "Serena replace_in_files was ALLOWED from a worktree — the guard did not fire"
-elif [[ $OTHER -eq 1 ]]; then
-    fail "Serena call errored for another reason (MCP not connected?) — deny path not exercised"
-    echo "$OUT" | grep -A3 "ERR-OTHER" | sed 's/^/    | /'
-else
-    fail "indeterminate — no DENY-OK/ALLOW-BAD/ERR-OTHER token seen"
-    echo "$OUT" | tail -40 | sed 's/^/    | /'
+# 1. Injection: the logged envelope (not the model) says whether the section went out.
+if python3 - "$INJECT_LOG" <<'PY'
+import json, sys, pathlib
+ok = False
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    try: body = json.loads(line)["hookSpecificOutput"]["additionalContext"]
+    except Exception: continue
+    if "## Worktree isolation" in body and body.index("## Worktree isolation") < body.index("## Serena MCP"):
+        ok = True
+sys.exit(0 if ok else 1)
+PY
+then pass "mcp-inject.sh emitted the worktree section first for the worktree subagent (envelope logged)"
+else fail "no logged SubagentStart envelope carries the worktree section"; sed 's/^/    | /' "$INJECT_LOG" | cut -c1-200 | head -5
 fi
 
-# The primary must be untouched whatever the subagent did.
+# 2. Reads allowed: find_symbol reached the stub from the worktree.
+if grep -q '"tool": "find_symbol"' "$STUB_LOG"; then
+    pass "Serena READ tool (find_symbol) reached the server from the worktree"
+else
+    fail "find_symbol never reached the stub — reads are blocked or the stub never connected"
+    grep -c . "$STUB_LOG" | sed 's/^/    | stub log lines: /'
+fi
+
+# 3. Writes denied: replace_in_files must NOT reach the stub, and the deny reason must be visible.
+if grep -q '"tool": "replace_in_files"' "$STUB_LOG"; then
+    fail "replace_in_files REACHED the server from a worktree — the guard did not deny"
+else
+    if grep -q '"tool": "find_symbol"' "$STUB_LOG"; then
+        pass "replace_in_files never reached the server (denied before dispatch)"
+    else
+        fail "replace_in_files absent from stub log, but so is find_symbol — inconclusive (server not connected?)"
+    fi
+fi
+if echo "$OUT" | grep -q "sn worktree guard"; then
+    pass "deny reason 'sn worktree guard' surfaced to the subagent"
+else
+    fail "deny reason not seen in the pane"
+    echo "$OUT" | grep -iE "refus|denied|replace_in_files" | head -5 | sed 's/^/    | /'
+fi
 if grep -q "zzz-marker" "$WTPROJ/app.py"; then
     pass "primary checkout app.py unchanged"
 else
-    fail "primary checkout app.py was modified — a write escaped the worktree"
+    fail "primary checkout app.py was modified"
 fi
 
-cat > "$TEST_HOME/.claude/plugins/installed_plugins.json" <<'EOF2'
-{"version": 2, "plugins": {}}
-EOF2
 claude_exit
 send_keys "cd $REPO_ROOT" Enter
 scenario_end
