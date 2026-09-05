@@ -3,6 +3,7 @@ package dev.nexus.service.db;
 import dev.nexus.service.jooq.nexus.tables.records.FrecencyRecord;
 import dev.nexus.service.jooq.nexus.tables.records.RelevanceLogRecord;
 import org.jooq.DSLContext;
+import org.jooq.JSONB;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -2291,7 +2292,7 @@ public final class TelemetryRepository {
                 .set(CAPABILITY_CENSUS.CAP_OTHER, field(name("excluded", "cap_other"), Integer.class))
                 .set(CAPABILITY_CENSUS.DISPATCHES, field(name("excluded", "dispatches"), Integer.class))
                 .set(CAPABILITY_CENSUS.TOTAL_CALLS, field(name("excluded", "total_calls"), Integer.class))
-                .set(CAPABILITY_CENSUS.CAPABILITIES_BY_SCOPE, field(name("excluded", "capabilities_by_scope"), org.jooq.JSONB.class))
+                .set(CAPABILITY_CENSUS.CAPABILITIES_BY_SCOPE, field(name("excluded", "capabilities_by_scope"), JSONB.class))
                 .execute();
             return null;
         });
@@ -2368,7 +2369,7 @@ public final class TelemetryRepository {
      * stored text is somehow unparseable -- never a thrown exception on a
      * READ path (nexus-gjv9b PART 3 prerequisite).
      */
-    private static Map<String, Object> parseCapabilitiesByScope(org.jooq.JSONB raw) {
+    private static Map<String, Object> parseCapabilitiesByScope(JSONB raw) {
         if (raw == null) {
             return null;
         }
