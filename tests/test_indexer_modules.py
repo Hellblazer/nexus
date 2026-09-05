@@ -296,6 +296,55 @@ def test_index_code_file_happy_path_new_file(tmp_path, make_ctx):
     assert len(call_kwargs["ids"]) == result
 
 
+def test_index_code_file_stamps_import_only_chunk_section_type(tmp_path, make_ctx):
+    """RDR-200 Phase 1c evidence hygiene (nexus-4jj40 Sam's decision 3):
+    a chunk consisting only of an import statement gets
+    ``section_type="imports"`` end to end through ``index_code_file`` --
+    not just at the ``_is_import_only_chunk`` classifier level."""
+    from nexus.code_indexer import index_code_file
+
+    py_file = tmp_path / "header_only.py"
+    py_file.write_text("import os\n")
+
+    mock_db = MagicMock()
+
+    def fake_embed_fn(texts):
+        return [[0.1] * 128 for _ in texts]
+
+    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn,
+                   git_meta={"git_project_name": "test"})
+
+    result = index_code_file(ctx, py_file)
+
+    assert result == 1
+    call_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
+    assert call_kwargs["metadatas"][0]["section_type"] == "imports"
+
+
+def test_index_code_file_mixed_chunk_not_stamped_imports(tmp_path, make_ctx):
+    """A chunk that mixes an import statement with real code (a function
+    definition the import precedes, so the function does not fully
+    enclose the chunk) must NOT be classified as import-only."""
+    from nexus.code_indexer import index_code_file
+
+    py_file = tmp_path / "mixed.py"
+    py_file.write_text("import os\n\n\ndef foo():\n    return os.getcwd()\n")
+
+    mock_db = MagicMock()
+
+    def fake_embed_fn(texts):
+        return [[0.1] * 128 for _ in texts]
+
+    ctx = make_ctx(col=_real_col(), db=mock_db, embed_fn=fake_embed_fn,
+                   git_meta={"git_project_name": "test"})
+
+    result = index_code_file(ctx, py_file)
+
+    assert result == 1
+    call_kwargs = mock_db.upsert_chunks_with_embeddings.call_args[1]
+    assert call_kwargs["metadatas"][0]["section_type"] != "imports"
+
+
 # ── index_prose_file ─────────────────────────────────────────────────────────
 
 def test_index_prose_file_skips_current_file(tmp_path, make_ctx):

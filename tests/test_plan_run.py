@@ -2726,6 +2726,213 @@ class TestNonEvidentiaryStamp:
         assert json.loads(args["items"]) == ["passage one", "passage two"]
 
 
+class TestImportOnlySectionTypeExclusion:
+    """RDR-200 Phase 1c evidence hygiene (nexus-4jj40 Sam's decision 3):
+    a chunk consisting only of a package/module declaration plus import
+    statements (``section_type="imports"``, stamped at index time by
+    ``nexus.code_indexer._is_import_only_chunk``) is structural, not
+    evidentiary -- this is the fix for the bead's own defect (4), the
+    Delos Java header/import noise filling paper-question evidence
+    slots. ``store_get_many``'s ``section_types`` field rides the SAME
+    fetch that already resolves ``contents`` (zero extra round trips)
+    and drives exclusion on BOTH hydration paths, exactly mirroring
+    ``TestNonEvidentiaryStamp``'s document-level stamp.
+    """
+
+    # ── _import_only_ids_from_hydrated unit tests ────────────────────────
+
+    def test_import_only_ids_from_hydrated_true_when_stamped(self) -> None:
+        from nexus.plans.runner import _import_only_ids_from_hydrated
+
+        hydrated = {"contents": ["x", "y"], "section_types": ["imports", ""]}
+        assert _import_only_ids_from_hydrated(hydrated, ["a", "b"]) == {"a"}
+
+    def test_import_only_ids_from_hydrated_empty_when_absent(self) -> None:
+        from nexus.plans.runner import _import_only_ids_from_hydrated
+
+        hydrated = {"contents": ["x", "y"], "section_types": ["method", ""]}
+        assert _import_only_ids_from_hydrated(hydrated, ["a", "b"]) == set()
+
+    def test_import_only_ids_from_hydrated_degrades_on_malformed_input(self) -> None:
+        """Never raises, never excludes what it cannot classify: a
+        non-dict payload, a missing ``section_types`` key (the
+        pre-nexus-4jj40 shape), and a malformed (non-list)
+        ``section_types`` all degrade to an empty set."""
+        from nexus.plans.runner import _import_only_ids_from_hydrated
+
+        assert _import_only_ids_from_hydrated("not a dict", ["a"]) == set()
+        assert _import_only_ids_from_hydrated({"contents": ["x"]}, ["a"]) == set()
+        assert _import_only_ids_from_hydrated(
+            {"contents": ["x"], "section_types": "not a list"}, ["a"],
+        ) == set()
+
+    # ── Chash-shaped hydration (plain search() results) ──────────────────
+
+    def test_chash_hydration_drops_import_only_keeps_real_code(self) -> None:
+        """A Java package/import header chunk is excluded from evidence
+        assembly while a genuine method chunk from the SAME batch
+        survives."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        chash_header, chash_real = "a" * 64, "b" * 64
+        fake_hydrated = {
+            "contents": [
+                "package com.example;\nimport java.util.List;",
+                "public void realMethod() {}",
+            ],
+            "missing": [],
+            "section_types": ["imports", "method"],
+        }
+        with patch(
+            "nexus.mcp_infra.get_catalog",
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            _, args = _hydrate_operator_args(
+                "rank", {"ids": [chash_header, chash_real]},
+            )
+        assert json.loads(args["items"]) == ["public void realMethod() {}"]
+
+    def test_chash_hydration_keeps_candidates_when_no_section_type_stamped(
+        self,
+    ) -> None:
+        """Ordinary content with no ``section_type`` metadata at all
+        (empty string, same as a missing stamp) is never excluded."""
+        from unittest.mock import patch
+
+        from nexus.plans.runner import _hydrate_operator_args
+
+        chash_a, chash_b = "a" * 64, "b" * 64
+        fake_hydrated = {
+            "contents": ["passage one", "passage two"],
+            "missing": [],
+            "section_types": ["", ""],
+        }
+        with patch(
+            "nexus.mcp_infra.get_catalog",
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            _, args = _hydrate_operator_args(
+                "rank", {"ids": [chash_a, chash_b]},
+            )
+        assert json.loads(args["items"]) == ["passage one", "passage two"]
+
+    def test_plain_search_step_is_not_routed_through_operator_hydration(
+        self,
+    ) -> None:
+        """The exclusion is scoped to the operator auto-hydration branch
+        only -- a tool outside ``_OPERATOR_RESOLVED_TOOLS`` (e.g. a bare
+        "search" step) never enters this branch, so its ids/args pass
+        through completely unchanged. This is the "plain search with no
+        filter still returns it" contract."""
+        from nexus.plans.runner import _hydrate_operator_args
+
+        tool, args = _hydrate_operator_args(
+            "search", {"ids": ["a" * 64], "query": "foo"},
+        )
+        assert tool == "search"
+        assert args == {"ids": ["a" * 64], "query": "foo"}
+
+    # ── Tumbler-shaped hydration (document-level results) ─────────────────
+
+    def test_tumbler_hydration_drops_import_only_chunk_from_reassembled_doc(
+        self,
+    ) -> None:
+        """A document's reassembled content skips its import-only chunk
+        (position 0) and keeps the real chunk (position 1) -- both
+        hydration paths honour the same stamp."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.catalog.types import ManifestRow
+        from nexus.plans.runner import _hydrate_tumbler_ids
+
+        manifests = {
+            "1.1.5": [
+                ManifestRow(position=0, chash="a" * 64,
+                            collection="code__x__voyage-code-3__v1"),
+                ManifestRow(position=1, chash="b" * 64,
+                            collection="code__x__voyage-code-3__v1"),
+            ],
+        }
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
+        fake_hydrated = {
+            "contents": [
+                "package com.example;\nimport java.util.List;",
+                "public void realMethod() {}",
+            ],
+            "missing": [],
+            "section_types": ["imports", "method"],
+        }
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            result = _hydrate_tumbler_ids(["1.1.5"])
+        assert result["contents"] == ["public void realMethod() {}"]
+        assert result["missing"] == []
+
+    def test_tumbler_hydration_doc_with_only_import_chunks_reports_missing(
+        self,
+    ) -> None:
+        """A document whose ONLY chunk is import-only hydrates to empty
+        content and is reported missing, same as any other document
+        that hydrates to nothing usable."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.catalog.types import ManifestRow
+        from nexus.plans.runner import _hydrate_tumbler_ids
+
+        manifests = {
+            "1.1.5": [ManifestRow(position=0, chash="a" * 64,
+                                   collection="code__x__voyage-code-3__v1")],
+        }
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
+        fake_hydrated = {
+            "contents": ["package com.example;\nimport java.util.List;"],
+            "missing": [],
+            "section_types": ["imports"],
+        }
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            result = _hydrate_tumbler_ids(["1.1.5"])
+        assert result["contents"] == [""]
+        assert result["missing"] == ["1.1.5"]
+
+    def test_tumbler_hydration_missing_section_types_degrades_safely(self) -> None:
+        """An older cached / test-double hydration result carrying no
+        ``section_types`` key at all (the pre-nexus-4jj40 shape) must
+        not crash or wrongly exclude anything."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.catalog.types import ManifestRow
+        from nexus.plans.runner import _hydrate_tumbler_ids
+
+        manifests = {
+            "1.1.5": [ManifestRow(position=0, chash="a" * 64,
+                                   collection="code__x__voyage-code-3__v1")],
+        }
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
+        fake_hydrated = {"contents": ["some content"], "missing": []}
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            result = _hydrate_tumbler_ids(["1.1.5"])
+        assert result["contents"] == ["some content"]
+        assert result["missing"] == []
+
+
 @pytest.mark.asyncio
 async def test_bundle_path_strips_truncation_marker_before_composition(monkeypatch) -> None:
     """RDR-093 Phase 1+2 review observation: the bundle-path strip

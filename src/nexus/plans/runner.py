@@ -1483,11 +1483,28 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
         ids=flat_ids, collections=flat_collections, structured=True,
     )
     chunk_contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
+    # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, Sam's decision 3):
+    # ``section_types`` rides the SAME store_get_many call above -- no
+    # extra round trip. A package/import-only chunk (``section_type ==
+    # "imports"``, stamped at index time by
+    # ``nexus.code_indexer._is_import_only_chunk``) is structural, not
+    # evidentiary; drop it from the reassembled document exactly like an
+    # empty content string already is below. Missing/malformed
+    # ``section_types`` (an older cached hydration shape, a test double
+    # stubbing only ``contents``) degrades to "" per position -- never
+    # excludes a chunk it cannot classify.
+    chunk_section_types = (
+        hydrated.get("section_types", []) if isinstance(hydrated, dict) else []
+    )
 
     per_doc: dict[str, list[str]] = {doc_id: [] for doc_id in tumbler_ids}
-    for doc_id, content in zip(owner, chunk_contents):
-        if content:
-            per_doc[doc_id].append(content)
+    for i, (doc_id, content) in enumerate(zip(owner, chunk_contents)):
+        if not content:
+            continue
+        section_type = chunk_section_types[i] if i < len(chunk_section_types) else ""
+        if section_type == "imports":
+            continue
+        per_doc[doc_id].append(content)
 
     contents = ["\n\n".join(per_doc[doc_id]) for doc_id in tumbler_ids]
     missing = [doc_id for doc_id in tumbler_ids if not per_doc[doc_id]]
@@ -1589,6 +1606,41 @@ def _resolve_non_evidentiary_chashes(chashes: list[str]) -> set[str]:
         # contains keys docs_for_chashes itself returned with at
         # least one doc_id, never an empty list.
         if docs and all(doc_id in non_evidentiary_doc_ids for doc_id in docs)
+    }
+
+
+def _import_only_ids_from_hydrated(
+    hydrated: Any, id_list: list[Any],
+) -> set[str]:
+    """Return the subset of *id_list* whose hydrated chunk carries the
+    import-only ``section_type`` stamp (RDR-200 Phase 1c evidence
+    hygiene, nexus-4jj40 Sam's decision 3): a chunk consisting only of a
+    package/module declaration plus import statements
+    (``nexus.code_indexer._is_import_only_chunk``, index time) is
+    structural, not evidentiary -- near-identical header boilerplate
+    embeds close together across unrelated, self-indexed repos and
+    crowds out real matches.
+
+    ``section_types`` rides the SAME ``store_get_many`` fetch *hydrated*
+    already came from (see that function's ``structured=True`` return) --
+    zero extra round trips, unlike :func:`_resolve_non_evidentiary_chashes`
+    which needs its own catalog lookups because the non_evidentiary stamp
+    lives on the catalog Document, not the T3 chunk.
+
+    Degrades to an empty set for anything it cannot classify: a
+    non-dict *hydrated* (a raw string, an error payload), a missing or
+    malformed ``section_types`` list (an older cached hydration shape, a
+    test double stubbing only ``contents``/``missing``) -- never raises,
+    never excludes a chash it cannot classify.
+    """
+    if not isinstance(hydrated, dict):
+        return set()
+    section_types = hydrated.get("section_types")
+    if not isinstance(section_types, list):
+        return set()
+    return {
+        str(doc_id) for doc_id, st in zip(id_list, section_types)
+        if st == "imports"
     }
 
 
@@ -1709,6 +1761,11 @@ def _hydrate_operator_args(
             excluded_ids = _resolve_non_evidentiary_chashes(
                 [str(i) for i in id_list_raw],
             )
+            # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, Sam's
+            # decision 3): import-only chunks, resolved from the
+            # section_types the store_get_many call above already
+            # fetched -- no extra round trip.
+            excluded_ids |= _import_only_ids_from_hydrated(hydrated, id_list_raw)
         contents_raw = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
         if excluded_ids:
             contents = [

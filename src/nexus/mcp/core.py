@@ -4278,12 +4278,17 @@ def store_get_many(
         max_chars_per_doc: Per-document truncation cap (default 4 KB). A cut
             body ends in an ellipsis plus ``display_truncation_marker(cap)``
             so a reader never mistakes the cut for a defect (nexus-lugwx).
-        structured: Return ``{contents, missing}`` dict when True. When
-            False (default), returns a human-readable string: a
-            ``Hydrated N/M docs`` header, each found document's content
-            under an ``[id]`` line (respecting ``max_chars_per_doc`` and
-            its truncation marker), and a trailing ``Missing: ...`` line
-            naming any unresolved ids.
+        structured: Return ``{contents, missing, section_types}`` dict when
+            True. ``section_types`` is aligned 1:1 with ``contents``/the
+            input id list -- each entry is the hydrated chunk's
+            ``section_type`` metadata (e.g. ``"imports"`` for an
+            import/package-only chunk, RDR-200 Phase 1c nexus-4jj40) or
+            ``""`` for a missing id or a chunk with no ``section_type``
+            stamped. When False (default), returns a human-readable
+            string: a ``Hydrated N/M docs`` header, each found document's
+            content under an ``[id]`` line (respecting
+            ``max_chars_per_doc`` and its truncation marker), and a
+            trailing ``Missing: ...`` line naming any unresolved ids.
         limit_per_source: Cap input IDs before hydration (RDR-097 P1.0).
             - ``None`` (default): no truncation; preserves prior behavior.
             - ``int``: truncate ``ids`` to first N entries. With
@@ -4466,10 +4471,21 @@ def store_get_many(
                         still_remaining.append(idx)
                 remaining_idxs = still_remaining
 
+        # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, Sam's decision
+        # 3): ``section_types`` rides along on the SAME per-id/broadcast
+        # fetch that already resolves ``contents`` -- ``entry`` already
+        # carries the chunk's full T3 metadata (``_batched_get_by_ids``
+        # merges it in), so this is zero extra round trips. Aligned 1:1
+        # with ``contents``/``missing``; "" for a missing id or a chunk
+        # whose metadata carries no ``section_type`` at all. Populated
+        # unconditionally (not gated on `structured`) so callers cannot
+        # observe stale data by mixing modes.
+        section_types: list[str] = []
         for doc_id, entry in zip(id_list, entries):
             if entry is None:
                 missing.append(doc_id)
                 contents.append("")
+                section_types.append("")
                 continue
 
             body = str(entry.get("content") or "")
@@ -4483,9 +4499,13 @@ def store_get_many(
                     + display_truncation_marker(max_chars_per_doc)
                 )
             contents.append(body)
+            section_types.append(str(entry.get("section_type") or ""))
 
         if structured:
-            return {"contents": contents, "missing": missing}
+            return {
+                "contents": contents, "missing": missing,
+                "section_types": section_types,
+            }
 
         # nexus-z4j8d: the human-readable mode of a HYDRATION tool must
         # render the hydrated content, not just a count -- pre-fix this

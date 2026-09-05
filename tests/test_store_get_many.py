@@ -778,4 +778,75 @@ class TestStoreGetManyHumanReadableRendersContent:
             result = store_get_many(ids=["doc-1"], collections="knowledge", structured=False)
 
         assert "small body" in result
+
+
+class TestStoreGetManySectionTypes:
+    """RDR-200 Phase 1c evidence hygiene (nexus-4jj40 Sam's decision 3):
+    ``structured=True`` also returns ``section_types``, aligned 1:1 with
+    ``contents``/the input id list, sourced from the SAME per-id fetch
+    that already resolves content -- no extra round trip. This is the
+    field ``nexus.plans.runner``'s evidence-hydration exclusion reads to
+    drop an import/package-only chunk (``section_type="imports"``)."""
+
+    def test_section_types_aligned_with_contents(self):
+        from nexus.mcp.core import store_get_many
+
+        ids = ["doc-1", "doc-2"]
+        found = {
+            "doc-1": {"content": "package foo;\nimport bar;", "section_type": "imports"},
+            "doc-2": {"content": "public void realMethod() {}", "section_type": "method"},
+        }
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=ids, collections="knowledge", structured=True)
+
+        assert result["contents"] == [
+            "package foo;\nimport bar;", "public void realMethod() {}",
+        ]
+        assert result["section_types"] == ["imports", "method"]
+
+    def test_section_types_empty_string_for_missing_id(self):
+        from nexus.mcp.core import store_get_many
+
+        ids = ["exists-1", "missing-1"]
+        found = {"exists-1": {"content": "real body", "section_type": "method"}}
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=ids, collections="knowledge", structured=True)
+
+        assert result["contents"] == ["real body", ""]
+        assert result["missing"] == ["missing-1"]
+        assert result["section_types"] == ["method", ""]
+
+    def test_section_types_empty_string_when_no_section_type_metadata(self):
+        """A chunk with no ``section_type`` stamped at all (the common
+        case for most code/prose) reports "" -- never None, never a
+        missing list index."""
+        from nexus.mcp.core import store_get_many
+
+        found = {"doc-1": {"content": "some body"}}
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=["doc-1"], collections="knowledge", structured=True)
+
+        assert result["section_types"] == [""]
+
+    def test_human_readable_mode_unaffected_by_section_types(self):
+        """``structured=False`` keeps rendering only content -- adding
+        ``section_types`` to the structured shape must not leak into or
+        change the human-readable string mode."""
+        from nexus.mcp.core import store_get_many
+
+        found = {"doc-1": {"content": "alpha body", "section_type": "imports"}}
+        mock_t3, _ = _make_stub_t3({"*": found})
+
+        with patch("nexus.mcp.core._get_t3", return_value=mock_t3):
+            result = store_get_many(ids=["doc-1"], collections="knowledge", structured=False)
+
+        assert isinstance(result, str)
+        assert "alpha body" in result
+        assert "section_type" not in result
         assert "result capped at" not in result

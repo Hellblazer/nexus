@@ -108,3 +108,169 @@ def test_extract_context_decorated_python_function() -> None:
     assert result == ("MyService", "process"), (
         f"Decorated method name not extracted: got {result!r}"
     )
+
+
+# ── _is_import_only_chunk (RDR-200 Phase 1c evidence hygiene, nexus-4jj40) ──────
+#
+# A chunk consisting only of a package/module declaration plus import
+# statements is structural, not evidentiary -- near-identical header
+# boilerplate crowds out real matches in cross-repo semantic search. This
+# classification is per CHUNK CONTENT only: no path markers, no category
+# rules (the two approaches this bead already tried and reverted).
+
+from nexus.code_indexer import _is_import_only_chunk  # noqa: E402
+
+
+def test_import_only_chunk_java_header() -> None:
+    """Java: package + import declarations only -> import-only."""
+    source = b"""package com.example.foo;
+
+import java.util.List;
+import static java.util.Map.Entry;
+
+public class Foo {
+    void bar() {}
+}
+"""
+    # lines 0-3 (0-indexed): package_declaration, blank, import, import static
+    assert _is_import_only_chunk(source, "java", 0, 3) is True
+
+
+def test_import_only_chunk_java_mixed_is_not_import_only() -> None:
+    """Java: a chunk that also covers the class declaration is mixed."""
+    source = b"""package com.example.foo;
+
+import java.util.List;
+
+public class Foo {
+    void bar() {}
+}
+"""
+    # lines 0-6: package + import + the whole class declaration
+    assert _is_import_only_chunk(source, "java", 0, 6) is False
+
+
+def test_import_only_chunk_python_header() -> None:
+    """Python: __future__ import, import, from-import only -> import-only."""
+    source = b"""from __future__ import annotations
+import os
+from typing import Any
+
+
+def foo():
+    pass
+"""
+    # lines 0-2: future_import_statement, import_statement, import_from_statement
+    assert _is_import_only_chunk(source, "python", 0, 2) is True
+
+
+def test_import_only_chunk_python_mixed_is_not_import_only() -> None:
+    """Python: a chunk that also covers the function definition is mixed."""
+    source = b"""from __future__ import annotations
+import os
+
+
+def foo():
+    pass
+"""
+    assert _is_import_only_chunk(source, "python", 0, 4) is False
+
+
+def test_import_only_chunk_typescript_header() -> None:
+    """TypeScript: import statements only -> import-only."""
+    source = b"""import { foo } from "./foo";
+import type { Bar } from "./bar";
+
+export function baz() {}
+"""
+    assert _is_import_only_chunk(source, "typescript", 0, 1) is True
+
+
+def test_import_only_chunk_typescript_mixed_is_not_import_only() -> None:
+    """TypeScript: a chunk that also covers the exported function is mixed."""
+    source = b"""import { foo } from "./foo";
+
+export function baz() {}
+"""
+    assert _is_import_only_chunk(source, "typescript", 0, 2) is False
+
+
+def test_import_only_chunk_unsupported_language_never_classified() -> None:
+    """A language absent from ``_IMPORT_NODE_TYPES`` is never import-only,
+    matching ``_extract_context``'s fail-conservative design -- an
+    unlisted language's chunks are left alone rather than guessed at."""
+    assert _is_import_only_chunk(b"use foo;\n", "cobol", 0, 0) is False
+
+
+def test_import_only_chunk_no_overlapping_node_is_not_import_only() -> None:
+    """A chunk range with no overlapping top-level node (e.g. past the end
+    of the file) is never classified as import-only -- there is nothing to
+    classify, so this must not vacuously return True."""
+    source = b"import os\n"
+    assert _is_import_only_chunk(source, "python", 100, 200) is False
+
+
+def test_import_only_chunk_csharp_header() -> None:
+    """C#: using directives only -> import-only."""
+    source = b"""using System;
+using System.Collections.Generic;
+
+namespace Foo {
+    class Bar {}
+}
+"""
+    # lines 0-1 (0-indexed): using_directive, using_directive
+    assert _is_import_only_chunk(source, "c_sharp", 0, 1) is True
+
+
+def test_import_only_chunk_csharp_mixed_is_not_import_only() -> None:
+    """C#: a chunk that also covers the namespace/class is mixed."""
+    source = b"""using System;
+using System.Collections.Generic;
+
+namespace Foo {
+    class Bar {}
+}
+"""
+    assert _is_import_only_chunk(source, "c_sharp", 0, 5) is False
+
+
+def test_import_only_chunk_kotlin_header() -> None:
+    """Kotlin: package header + import list only -> import-only."""
+    source = b"""package com.example
+
+import java.util.List
+
+class Foo {}
+"""
+    # lines 0-2 (0-indexed): package_header, blank, import_list
+    assert _is_import_only_chunk(source, "kotlin", 0, 2) is True
+
+
+def test_import_only_chunk_kotlin_mixed_is_not_import_only() -> None:
+    """Kotlin: a chunk that also covers the class declaration is mixed."""
+    source = b"""package com.example
+
+import java.util.List
+
+class Foo {}
+"""
+    assert _is_import_only_chunk(source, "kotlin", 0, 4) is False
+
+
+def test_import_only_chunk_rust_header() -> None:
+    """Rust: a use declaration alone -> import-only."""
+    source = b"""use std::collections::HashMap;
+
+fn main() {}
+"""
+    assert _is_import_only_chunk(source, "rust", 0, 0) is True
+
+
+def test_import_only_chunk_rust_mixed_is_not_import_only() -> None:
+    """Rust: a chunk that also covers the function item is mixed."""
+    source = b"""use std::collections::HashMap;
+
+fn main() {}
+"""
+    assert _is_import_only_chunk(source, "rust", 0, 2) is False

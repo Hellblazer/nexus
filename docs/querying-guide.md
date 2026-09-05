@@ -193,6 +193,16 @@ Markdown chunks carry `section_type` metadata (abstract, introduction, methods, 
 nx search "caching strategy" --where section_type!=references
 ```
 
+Code chunks carry `section_type` too, set by the AST chunker at index time (`class`, `method`, or empty for module-level content). A chunk that is nothing but a file's package/module declaration plus its import statements (`section_type="imports"`, RDR-200 Phase 1c evidence hygiene, nexus-4jj40) is structural, not evidentiary: near-identical header boilerplate (Java `package`+`import`, Python `import` blocks, TS/JS `import` blocks, Go `import` blocks, and the grammar equivalents for other registered languages) embeds close together across unrelated, self-indexed repos and crowds out real matches in cross-corpus semantic search. Filter it out explicitly the same way as `references`:
+
+```bash
+nx search "connection pooling" --where section_type!=imports
+```
+
+A bare `nx search`/`nx query` call never filters `imports` automatically; add the `--where` filter yourself when you want it excluded. Only `nx_answer`'s plan-driven evidence-hydration path excludes an `imports`-stamped chunk on its own, for the operator auto-hydration steps inside a plan (`rank`, `compare`, `summarize`, ...), on both the chash-shaped (`store_get_many`) and tumbler-shaped (catalog manifest) hydration paths.
+
+This is a per-chunk classification, based only on the chunk's own AST content, never a path prefix or a file/owner category. It is unrelated to the document-level `non_evidentiary` catalog stamp (`nx catalog update --meta '{"non_evidentiary": true}'`), which marks a whole DOCUMENT (e.g. a test-fixture file) as non-evidentiary and is honoured by the same evidence-hydration paths. `section_type="imports"` marks individual CHUNKS regardless of which document they belong to.
+
 ### Corpus-specific over-fetch
 
 Knowledge, docs, and RDR collections fetch 4x the requested result count before filtering (vs 2x for code), compensating for higher noise in prose collections.

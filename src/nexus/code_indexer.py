@@ -6,8 +6,9 @@ Extracted from indexer.py (RDR-032).  Public API::
 
     index_code_file(ctx: IndexContext, file_path: Path) -> int
 
-The module owns _extract_context (AST context extraction) and the associated
-language tables (_COMMENT_CHARS, DEFINITION_TYPES).
+The module owns _extract_context (AST context extraction), _is_import_only_chunk
+(RDR-200 Phase 1c import/package header classification), and the associated
+language tables (_COMMENT_CHARS, DEFINITION_TYPES, _IMPORT_NODE_TYPES).
 """
 from __future__ import annotations
 
@@ -307,6 +308,84 @@ def _extract_context(
     return (class_name, method_name)
 
 
+# Tree-sitter node types that represent a package/module declaration or an
+# import statement -- the structural, non-evidentiary header of a source
+# file (RDR-200 Phase 1c evidence hygiene, nexus-4jj40 Sam's decision 3).
+# Near-identical header boilerplate (Java package+imports, Python import
+# blocks, TS/JS import blocks, Go import blocks, ...) embeds close together
+# across unrelated, self-indexed repos and crowds out real evidentiary
+# matches in cross-corpus semantic search. Only languages where the grammar
+# names these node types explicitly are listed (verified empirically against
+# tree-sitter-language-pack, not guessed) -- an unlisted language's chunks
+# are never classified as import-only, matching ``_extract_context``'s
+# fail-conservative "when unclassifiable, leave it alone" design. This is a
+# per-CHUNK content rule, never a path or category rule -- the two
+# approaches RDR-200 Phase 1c already tried and reverted (see
+# ``nexus.plans.runner``'s non_evidentiary docstring history).
+_IMPORT_NODE_TYPES: dict[str, frozenset[str]] = {
+    "java": frozenset({"package_declaration", "import_declaration"}),
+    "python": frozenset({
+        "import_statement", "import_from_statement", "future_import_statement",
+    }),
+    "javascript": frozenset({"import_statement"}),
+    "typescript": frozenset({"import_statement"}),
+    "tsx": frozenset({"import_statement"}),
+    "go": frozenset({"package_clause", "import_declaration"}),
+    "c_sharp": frozenset({"using_directive"}),
+    "kotlin": frozenset({"package_header", "import_list", "import_header"}),
+    "rust": frozenset({"use_declaration"}),
+    "cpp": frozenset({"preproc_include"}),
+    "c": frozenset({"preproc_include"}),
+    "scala": frozenset({"package_clause", "import_declaration"}),
+}
+
+
+def _is_import_only_chunk(
+    source: bytes,
+    language: str,
+    chunk_start_0idx: int,
+    chunk_end_0idx: int,
+) -> bool:
+    """True when every top-level node overlapping the chunk's line range is
+    a package/module declaration or import statement.
+
+    Only top-level (direct root children) nodes are examined: import and
+    package statements are never nested inside a method or class body, so
+    a chunk fully enclosed by one (``_extract_context`` already returns a
+    non-empty ``class_ctx``/``method_ctx`` for it) can never satisfy this
+    by construction -- callers should skip the call entirely in that case.
+
+    Returns ``False`` (never import-only) for: a language absent from
+    ``_IMPORT_NODE_TYPES``, a parser/parse failure, an empty overlap (no
+    top-level node touches the chunk range at all), or a chunk that mixes
+    header statements with ANY other top-level content (a docstring, a
+    constant, a class) -- classification is per chunk content, never per
+    path or owner.
+    """
+    header_types = _IMPORT_NODE_TYPES.get(language)
+    if not header_types:
+        return False
+
+    try:
+        from tree_sitter_language_pack import get_parser  # lazy import  # noqa: PLC0415 (deferred import; rare/branch-local path or circular-dep / startup-cost avoidance)
+        # tree-sitter-language-pack uses "csharp" not "c_sharp" (mirrors
+        # nexus.chunker._make_code_splitter's own translation).
+        parser_name = "csharp" if language == "c_sharp" else language
+        parser = get_parser(parser_name)
+        tree = parser.parse(source)
+    except Exception as exc:  # noqa: BLE001 (best-effort; error surfaced via log, must not crash caller)
+        _log.debug("import_only_check_parse_failed", language=language, error=str(exc))
+        return False
+
+    overlapping = [
+        node for node in tree.root_node.children
+        if not (node.end_point[0] < chunk_start_0idx or node.start_point[0] > chunk_end_0idx)
+    ]
+    if not overlapping:
+        return False
+    return all(node.type in header_types for node in overlapping)
+
+
 def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     """Index a single code file into the code__ collection.
 
@@ -416,6 +495,17 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
         section_chain = [s for s in (class_ctx, method_ctx) if s]
         section_title = " > ".join(section_chain)
         section_type = "method" if method_ctx else ("class" if class_ctx else "")
+        # RDR-200 Phase 1c evidence hygiene (nexus-4jj40 Sam's decision 3):
+        # a chunk not already inside a method/class body may still be
+        # nothing but the file's package/import header -- structural, not
+        # evidentiary. Only checked when section_type is still empty: a
+        # chunk fully enclosed by a method or class can never be
+        # import-only (see ``_is_import_only_chunk``'s docstring), so this
+        # skips the extra parse for the common method/class case.
+        if not section_type and _is_import_only_chunk(
+            source_bytes, language, chunk["line_start"] - 1, chunk["line_end"] - 1
+        ):
+            section_type = "imports"
         # RDR-101 Phase 5c (nexus-o6aa.13) dropped corpus, store_type,
         # git_meta from the chunk schema. Title kept (find_ids_by_title
         # is load-bearing for nx store / MCP store_get). RDR-108 Phase 3
