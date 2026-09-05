@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# This gate deliberately WRITES to the operator's live store through the public
+# edge (leg E, the shell-substitution T2 write) from a dev checkout: the
+# nexus-a2qhz production-write guard needs the reason-bearing opt-in.
+export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV write through the public edge (nexus-a2qhz)"
 # nexus-bwulw: CLOUD CLIENT-PATH GATE — assert the engine's pinned HTTP
 # contracts survive the PUBLIC edge, as seen by real client code.
 #

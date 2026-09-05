@@ -4,6 +4,16 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.32.0] - 2026-09-05
+
+- Plugin version aligned with conexus 7.32.0.
+- sn: Serena write tools are denied inside linked git worktrees and worktree
+  agents get a native-LSP section (nexus-ftpk3).
+- conexus: the routing hook writes routing events to the engine (lease-file
+  discovery, cause-metered drops, 404 while the engine is behind is benign)
+  (nexus-gjv9b); agent-dispatch-expect.sh reports every dropped write on
+  stderr (nexus-mqnkt); rdr-research add step shells out (nexus-zu1q0).
+
 ## [7.31.0] - 2026-09-05
 
 Advancing `source.ref` to `v7.31.0` is what makes the change below live; it

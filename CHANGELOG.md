@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.32.0] - 2026-09-05
+
 ### Removed
 
 - The per-commit reviewer (`nx review commit` / `nx review show`, the
@@ -38,6 +40,48 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Read/Grep/Bash either.
 - `nx catalog purge-trash` defaults to a one-day window, not thirty.
 - The per-session T1 mint lock file is removed with the lease at session end.
+
+### Added (2026-09-05 burn-down, paired with engine-service-v0.1.104)
+
+- Durable per-file index failures (nexus-nukn3): `nx index repo` records each
+  skipped file in the engine (`nexus.index_failures`), `nx index failures`
+  lists them, `--clear` retires them by run or age (with `--dry-run`),
+  `--acknowledge` / `--acks` / `--unacknowledge` mark a known permanent
+  failure so `nx doctor --check-index-failures` gates on the latest run's
+  unacknowledged failures only.
+- Capability census and routing events move from JSONL files to engine
+  tables (nexus-gjv9b): `nx census capability --from-store`,
+  `nx hook routing-stats --from-store`, retention via
+  `nx doctor --trim-telemetry`, the routing hook discovers the engine from
+  the lease file and meters drops by cause.
+- Production-write guard (nexus-a2qhz): a process whose nexus package
+  resolves from a dev checkout refuses HTTP writes unless
+  `NX_ALLOW_PROD_WRITE` names a reason. Reads are unaffected; the installed
+  tool never trips it.
+- `nx dt index --force` (nexus-gup3b); the skip message had named a flag
+  that did not exist.
+- `nx index repo --re-embed` (nexus-4jj40): `--force` alone re-chunks and
+  refreshes chunk metadata without re-embedding unchanged chunks.
+- Per-document `non_evidentiary` catalog stamp and an index-time
+  `section_type=imports` stamp on package/import header chunks, both
+  honoured by nx_answer evidence assembly (nexus-4jj40).
+- `GET /v1/status` embed activity and live progress lines on every indexing
+  path (nexus-s71lr); `nx doctor --check-engine-activity`.
+
+### Fixed (2026-09-05)
+
+- Bulk upserts no longer re-POST an identical body on a bare read timeout;
+  the refusal is contained per file (nexus-8hdg9 phase 1).
+- The index-run fence begins per file before chunking and reconciles at exit,
+  so a run that dies before its first flush no longer leaves documents
+  stamped but unfenced (nexus-hg2dw).
+- `query()` resolves a collection prefix the same way `search()` does;
+  `store_get_many` renders content in human mode, capped (nexus-z4j8d).
+- MCP `store_put` refuses a chunk over the 16,384-byte quota before the
+  catalog mint (nexus-xzyr3); nine oversized notes had been admitted.
+- A bare-prefix fan-out drops a collection under 3 chunks only beside a
+  healthy sibling and names the exclusion in the result (nexus-rbhci).
+- Release-sandbox smoke runs in CI on plugin-surface PRs (nexus-98gpl).
 
 ## [7.31.0] - 2026-09-05
 

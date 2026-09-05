@@ -2475,6 +2475,16 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
 })
 
 _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
+    # 2026-09-05 release 7.32.0 preflight: these name Voyage models as LABELS
+    # (engine-status line formatting, the dead pipeline-version stub, the
+    # cross-model calibration table) and never embed; no cloud substrate.
+    "tests/test_http_engine_status.py::test_format_engine_activity_line_cloud_mode_falls_back_to_embedder_activity",
+    "tests/test_http_engine_status.py::test_format_engine_activity_line_picks_the_busiest_embedder_and_names_the_rest",
+    "tests/test_pipeline_version.py::TestServiceCollectionStubDeadSignal::test_check_pipeline_staleness_is_always_false",
+    "tests/test_pipeline_version.py::TestServiceCollectionStubDeadSignal::test_get_collection_pipeline_version_is_always_none",
+    "tests/test_pipeline_version.py::TestServiceCollectionStubDeadSignal::test_stamp_collection_version_is_a_silent_noop",
+    "tests/test_scoring.py::test_resolve_calibration_factors_is_noop_for_legacy_names_in_local_mode",
+    "tests/test_scoring.py::test_resolve_calibration_factors_still_activates_for_legacy_names_local_mode_voyage_opt_in",
     # Reserved for individual mixed-file exclusions. Format:
     # "tests/test_file.py::test_func"  (no parametrize suffix).
     #
